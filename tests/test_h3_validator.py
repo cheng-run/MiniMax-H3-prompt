@@ -1,0 +1,174 @@
+"""h3_validator 单元测试。
+
+合法基准取自官方规范（base-en.txt Case 1、ref-en.txt 完整示例结构）；
+违规样例为针对性构造。
+"""
+import pytest
+
+from minimax_h3_prompt.tools.h3_validator import (
+    validate_base,
+    validate_prompt,
+    validate_ref,
+)
+
+REF_META = [
+    (1, "白发仙师", "白发老妪，玄色长袍，手持拂尘"),
+    (2, "青衫青年", "束发青年，青色长衫，腰悬长剑"),
+    (3, "竹林", "雾气弥漫的竹林小径"),
+]
+
+VALID_BASE_T2VA = """integrated_multimodal_description: [Shot 1] Live-action, cinematic, a medium-wide shot frames a baker opening the shutters of a small street bakery before sunrise. The camera pushes in with small amplitude at slow speed as the middle-aged baker with a calm, slightly raspy voice (S1) places a fresh loaf on the wooden counter and says: <d>[English] First batch of the morning.</d> [Shot 2] At 00:05.000, the camera cuts to a close-up of steam rising from the sliced bread while the baker's final words carry over from the previous shot.
+
+overall_soundscape: Wooden shutters scrape open over a quiet street as trays clink softly inside the bakery. The doorbell rings once, followed by light footsteps and the crisp sound of bread being sliced.
+
+non_diegetic_music: A soft acoustic-guitar pattern at a moderate tempo, joined by sparse upright-bass notes and a gentle fade at the end.
+"""
+
+VALID_REF = """subject_definitions:
+<Subject 1> is the white-haired old woman in <Picture 1>, in a dark robe holding a horsetail whisk.
+<Subject 2> is the young man in <Picture 2>, in a green robe with a sword at his waist.
+<Subject 3> is the misty bamboo forest in <Picture 3>.
+
+summary:
+[reference generation] The target video shows <Subject 2> arriving at <Subject 3> and bowing to <Subject 1>.
+
+retention_analysis:
+<Subject 1> (appears in [Shot 1], [Shot 2]): fully_preserved - the dark robe, white hair and whisk are retained.
+<Subject 2> (appears in [Shot 1], [Shot 2]): fully_preserved - the green robe and sword are retained.
+<Subject 3> (appears in [Shot 1]): partially_preserved - the mist and bamboo are retained.
+
+detailed_description:
+The target video is in a cinematic wuxia style with soft misty lighting.
+[Shot 1] A wide shot frames <Subject 3>, the misty bamboo forest in <Picture 3>, with <Subject 1>, the white-haired old woman in the dark robe from <Picture 1>, standing at the center raising one hand slowly. <Subject 2>, the green-robed young man from <Picture 2>, descends from the sky and lands, tucks his sword, then bows deeply to <Subject 1> with both hands clasped. <Subject 1> (S1) says in a calm aged voice: <d>[Chinese] Rise.</d>
+[Shot 2] At 00:04.000, the camera cuts to a close-up of <Subject 1>'s hand gesturing upward, and <Subject 2> (S2) straightens and looks up, bamboo leaves swaying behind them.
+
+overall_soundscape:
+Low bamboo rustling and distant mountain wind continue throughout the scene, with the soft thud of boots landing on moss.
+
+non_diegetic_music:
+A sparse guzheng pattern at a slow tempo with sustained low strings, fading out at the end.
+"""
+
+
+def errors_of(issues):
+    return [i.code for i in issues if i.severity == "error"]
+
+
+def codes(issues):
+    return [i.code for i in issues]
+
+
+def base_prompt(body: str) -> str:
+    """把镜头正文包成合法 base 三段式结构（便于聚焦镜头检查）。"""
+    return (f"integrated_multimodal_description: {body}\n\n"
+            f"overall_soundscape: N/A\n\n"
+            f"non_diegetic_music: N/A")
+
+
+class TestValidFixtures:
+    def test_valid_base_t2va(self):
+        issues = validate_base(VALID_BASE_T2VA, duration=8.0, variant="T2VA")
+        assert errors_of(issues) == []
+
+    def test_valid_ref(self):
+        issues = validate_ref(VALID_REF, duration=6.0, ref_meta=REF_META)
+        assert errors_of(issues) == []
+
+
+class TestShots:
+    def test_first_shot_timestamp(self):
+        text = "integrated_multimodal_description: [Shot 1] At 00:01.000 a cat jumps.\n\noverall_soundscape: N/A\n\nnon_diegetic_music: N/A"
+        issues = validate_base(text, variant="T2VA")
+        assert "FIRST_SHOT_TIMESTAMP" in errors_of(issues)
+
+    def test_timestamp_order(self):
+        text = base_prompt("[Shot 1] opening.\n[Shot 2] At 00:03.000 middle.\n[Shot 3] At 00:01.000 earlier.")
+        issues = validate_base(text, duration=8.0)
+        assert "TIMESTAMP_ORDER" in errors_of(issues)
+
+    def test_timestamp_over_duration(self):
+        text = base_prompt("[Shot 1] opening.\n[Shot 2] At 00:06.000 too late.")
+        issues = validate_base(text, duration=5.0)
+        assert "TIMESTAMP_OVER_DURATION" in errors_of(issues)
+
+    def test_shot_no_timestamp(self):
+        text = base_prompt("[Shot 1] opening.\n[Shot 2] cut.")
+        issues = validate_base(text, duration=5.0)
+        assert "SHOT_NO_TIMESTAMP" in errors_of(issues)
+
+
+class TestDialogues:
+    def test_dialog_unbalanced(self):
+        text = "integrated_multimodal_description: [Shot 1] She says: <d>[English] Hi\n\noverall_soundscape: N/A\n\nnon_diegetic_music: N/A"
+        issues = validate_base(text)
+        assert "DIALOG_UNBALANCED" in errors_of(issues)
+
+
+class TestSections:
+    def test_ref_section_order(self):
+        text = (
+            "retention_analysis: x\n\nsummary: [reference generation] x\n\nsubject_definitions: x\n\n"
+            "detailed_description: x\n\noverall_soundscape: x\n\nnon_diegetic_music: x"
+        )
+        issues = validate_ref(text)
+        assert "REF_SECTION_ORDER" in errors_of(issues)
+
+    def test_ref_section_missing(self):
+        text = "subject_definitions: x\n\ndetailed_description: x"
+        issues = validate_ref(text)
+        assert "REF_SECTION_MISSING" in errors_of(issues)
+
+    def test_summary_no_tasktype(self):
+        text = VALID_REF.replace("summary:\n[reference generation]", "summary:\nThe target")
+        issues = validate_ref(text, duration=6.0, ref_meta=REF_META)
+        assert "SUMMARY_NO_TASKTYPE" in errors_of(issues)
+
+
+class TestLabels:
+    def test_picture_gap(self):
+        text = (
+            "subject_definitions:\n<Subject 1> is <Picture 2>.\n\nsummary:\n[reference generation] t.\n\n"
+            "retention_analysis:\n<Subject 1>: fully_preserved - ok.\n\ndetailed_description:\n"
+            "[Shot 1] The <Subject 1> in <Picture 2> moves.\n\noverall_soundscape: N/A\n\nnon_diegetic_music: N/A"
+        )
+        issues = validate_ref(text)
+        assert "LABEL_GAP_PICTURE" in errors_of(issues)
+
+    def test_picture_unused(self):
+        ref_meta = REF_META + [(4, "第四张", "未被引用")]
+        issues = validate_ref(VALID_REF, duration=6.0, ref_meta=ref_meta)
+        assert "PICTURE_UNUSED" in errors_of(issues)
+
+    def test_picture_undefined(self):
+        text = VALID_REF.replace("<Picture 3>", "<Picture 5>")
+        issues = validate_ref(text, duration=6.0, ref_meta=REF_META)
+        assert "PICTURE_UNDEFINED" in errors_of(issues)
+
+
+class TestVariants:
+    def test_i2va_missing_instruction(self):
+        text = "integrated_multimodal_description: [Shot 1] ...\n\noverall_soundscape: N/A\n\nnon_diegetic_music: N/A"
+        issues = validate_base(text, variant="I2VA")
+        assert "MISSING_ALIGN_INSTRUCTION" in errors_of(issues)
+
+    def test_t2va_no_instruction_needed(self):
+        text = "integrated_multimodal_description: [Shot 1] ...\n\noverall_soundscape: N/A\n\nnon_diegetic_music: N/A"
+        issues = validate_base(text, variant="T2VA")
+        assert "MISSING_ALIGN_INSTRUCTION" not in errors_of(issues)
+
+
+class TestSpeakers:
+    def test_speaker_order_warning(self):
+        text = "integrated_multimodal_description: [Shot 1] A man (S2) says: <d>[English] Hi.</d> Then (S1) answers.\n\noverall_soundscape: N/A\n\nnon_diegetic_music: N/A"
+        issues = validate_base(text)
+        assert "SPEAKER_ORDER" in codes(issues)
+
+
+class TestDispatch:
+    def test_validate_prompt_ref(self):
+        issues = validate_prompt(VALID_REF, "ref", duration=6.0, ref_meta=REF_META)
+        assert errors_of(issues) == []
+
+    def test_validate_prompt_base(self):
+        issues = validate_prompt(VALID_BASE_T2VA, "base", duration=8.0, variant="T2VA")
+        assert errors_of(issues) == []

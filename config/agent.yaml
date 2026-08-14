@@ -1,0 +1,20 @@
+# MiniMax-H3 多智能体提示词生成系统 — 管线配置
+pipeline:
+  default_duration: 5        # 单段视频默认时长（秒），H3 常见单片段
+  max_qa_iterations: 2       # 质检回退最大轮数
+  roundtable_max_rounds: 2   # 圆桌讨论最大轮数
+  output_path: output/final_prompt.txt
+  save_stages: true          # 每个角色/阶段的产物落盘 output/stages/
+  stages_path: output/stages
+
+# token 费用估算单价（元 / 百万 token），用于交互界面展示成本，可按实际改
+cost:
+  price_per_m_input: 0.5
+  price_per_m_output: 1.5
+
+# 可选：全局模型名覆盖（优先级低于 .env 的 *_MODEL）
+# model: ""
+
+defaults:
+  style: "Cinematic"
+  language: "Chinese"

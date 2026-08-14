@@ -1,0 +1,30 @@
+[project]
+name = "minimax-h3-prompt"
+version = "0.1.0"
+description = "MiniMax-H3 多智能体提示词生成系统：LangGraph+LangChain+deepagents 编排电影制作+AIGC 双流程，产出官方规范 H3 提示词"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "deepagents>=0.7.6",
+    "langchain>=1.3.15",
+    "langchain-anthropic>=1.5.6",
+    "langchain-openai>=1.5.0",
+    "langgraph>=1.2.11",
+    "pillow>=12.3.0",
+    "python-dotenv>=1.2.2",
+    "pyyaml>=6.0.3",
+    "questionary>=2.1.1",
+    "typer>=0.27.1",
+]
+
+[project.scripts]
+minimax-h3-prompt = "minimax_h3_prompt.main:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

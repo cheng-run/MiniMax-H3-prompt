@@ -1,0 +1,20 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets（API key 一律从 .env 读取，绝不入库）
+.env
+.env.local
+
+# Windows Zone Identifier 残留（同步 .env 时产生）
+*.Zone.Identifier
+
+# 运行产物
+output/
