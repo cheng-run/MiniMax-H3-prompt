@@ -12,7 +12,27 @@ cost:
   price_per_m_input: 0.5
   price_per_m_output: 1.5
 
-# 可选：全局模型名覆盖（优先级低于 .env 的 *_MODEL）
+# 模型配置：只放非敏感项，API key 仍放项目根 .env。
+# 旧的 provider-specific *_MODEL / *_BASE_URL 环境变量仍可覆盖这里的值。
+models:
+  primary:
+    # provider: deepseek
+    # model: deepseek-v4-flash
+    # base_url: https://api.deepseek.com/v1
+    # api_key_env: DEEPSEEK_API_KEY
+
+    provider: dashscope
+    model: qwen3.7-plus
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: DASHSCOPE_API_KEY
+    
+  vision:
+    provider: dashscope
+    model: qwen3.7-plus
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: DASHSCOPE_API_KEY
+
+# 旧字段：仅在新模型配置和兼容环境变量都未提供模型名时作为 fallback。
 # model: ""
 
 defaults:

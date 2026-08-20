@@ -7,26 +7,24 @@ from __future__ import annotations
 
 import base64
 import io
-import os
 from pathlib import Path
 
-from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 from PIL import Image
 
-from ..config import PROJECT_ROOT
-
-load_dotenv(PROJECT_ROOT / ".env")  # 独立调用时也确保 .env 已加载
+from ..config import config
 
 
 def _build_vision_model() -> ChatOpenAI:
-    key = os.getenv("DASHSCOPE_API_KEY")
-    if not key:
-        raise RuntimeError("缺失 DASHSCOPE_API_KEY：参考图审核需要阿里云 DashScope 视觉模型")
-    model = os.getenv("DASHSCOPE_MODEL") or os.getenv("DASHSCOPE_MODEL_NAME") or "qwen3.7-plus"
-    base_url = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-    return ChatOpenAI(model=model, api_key=key, base_url=base_url)
+    settings = config.vision_model
+    try:
+        key = config.resolve_api_key(settings)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"缺失 {settings.api_key_env}：参考图审核需要 {settings.provider} 视觉模型"
+        ) from exc
+    return ChatOpenAI(model=settings.model, api_key=key, base_url=settings.base_url)
 
 
 def _downscale_to_jpeg(path: Path, max_side: int = 1024) -> str:

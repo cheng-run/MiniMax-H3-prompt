@@ -1,4 +1,6 @@
-# cd /home/xos_ubuntu/Projects/python/MiniMax-H3-prompt
+# Windows PowerShell
+# Set-Location D:\项目\MiniMax-H3-prompt
+# uv sync
 # uv run minimax-h3-prompt
 
 # MiniMax-H3 多智能体提示词生成系统
@@ -40,24 +42,33 @@ uv run pytest tests/             # 单测（29 个）
 - **中间产物落盘**：每个阶段的产物写 `output/stages/<节点>.txt`，跑完可翻看每一步。
 - **token/费用统计**：按角色累计 input/output token，按 `config/agent.yaml` 的 `cost` 单价估算费用（DeepSeek 估算价，可改）。
 
-### LLM 后端（API key 一律从项目根 `.env` 读）
+### LLM 后端与统一配置
 
-`.env` 已被 gitignore，绝不入库；参考 `.env.example`。未设 `LLM_PROVIDER` 时自动探测：
+模型的 provider、名称和 base URL 统一配置在 `config/agent.yaml` 的 `models.primary`（主文本模型）与 `models.vision`（参考图视觉模型）中；API key 仍只放项目根 `.env`，不会写入 YAML 或入库。当前默认配置为 DeepSeek 主模型和 DashScope `qwen3.7-plus` 视觉模型：
+
+```yaml
+models:
+  primary:
+    provider: deepseek
+    model: deepseek-v4-flash
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+  vision:
+    provider: dashscope
+    model: qwen3.7-plus
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: DASHSCOPE_API_KEY
+```
+
+`.env` 示例：
 
 ```env
-# deepseek（若 .env 有 DEEPSEEK_API_KEY 会自动选它）
 LLM_PROVIDER=deepseek
 DEEPSEEK_API_KEY=xxx
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-v4-flash
-
-# 或 anthropic 兼容端点（当前会话若由 cc-switch 注入也能直接用）
-# LLM_PROVIDER=anthropic
-# ANTHROPIC_API_KEY=xxx
-# ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
-
-# 也支持 openai / dashscope（阿里百炼）
+DASHSCOPE_API_KEY=xxx
 ```
+
+`LLM_PROVIDER`、各 provider 的 `*_MODEL`/`*_MODEL_NAME`/`*_BASE_URL` 仍作为旧配置兼容覆盖项；未设置时才使用 `agent.yaml` 的值。不要把真实 key 写进仓库。
 
 ## brief 格式
 
@@ -74,7 +85,7 @@ DEEPSEEK_MODEL=deepseek-v4-flash
 
 ## 参考图          # 张数随输入：首帧/尾帧=1张；首尾帧=2张（Picture1=首帧 Picture2=尾帧）；多参考=N张（角色/场景）
                   # 格式：Picture N: 名称 — 描述  (图片路径)；有路径 → 运行前用 qwen3.7-plus 读图自动出描述，人工确认后进管线
-- Picture 1: 首帧 — 白发仙师在竹林缓抬手  (/mnt/d/Comfyui/ComfyUI/output/图片/你的图.png)
+- Picture 1: 首帧 — 白发仙师在竹林缓抬手  (D:\Comfyui\ComfyUI\output\图片\你的图.png)
 - Picture 2: 尾帧 — 青衫青年落地向仙师行礼
 
 ## 草稿提示词      # 可选；写了即进入 polish（润色）流程
@@ -82,7 +93,7 @@ DEEPSEEK_MODEL=deepseek-v4-flash
 
 命令行：`--model fl2va|ref2va|i2va|l2va` 覆盖（或旧写法 `--mode/--variant`）；`--polish` 润色；`--dry-run` 只解析。最终提示词粘到你工作流的 `PrimitiveStringMultiline` 节点（纯净文本）。
 
-> **参考图审核**：brief 参考图行末尾填图片路径（WSL 下 D 盘 = `/mnt/d/...`），运行前会用阿里云 `qwen3.7-plus`（多模态，走你 `.env` 的 `DASHSCOPE_API_KEY`）自动读图生成准确描述 → 菜单里你确认/修改后才进管线。图片自动压缩（≤1024px）避免大图超限。
+> **参考图审核**：在 Windows 下，brief 参考图行末尾填写本机图片路径（例如 `D:\Comfyui\ComfyUI\output\图片\你的图.png`）；在 WSL 下才使用 `/mnt/d/...` 路径。运行前会用阿里云 `qwen3.7-plus`（多模态，读取 `.env` 中的 `DASHSCOPE_API_KEY`）自动读图生成准确描述 → 菜单里你确认/修改后才进管线。图片自动压缩（≤1024px）避免大图超限。
 
 ## 架构
 
@@ -137,7 +148,7 @@ START → [制片] → [导演] → [创意会·圆桌] → [编剧] → [美术
 ```
 src/minimax_h3_prompt/
 ├── main.py              # CLI
-├── config.py            # YAML + .env（load_dotenv）
+├── config.py            # YAML + `.env` 统一配置（API key 仅从 `.env` 读取）
 ├── model_factory.py     # LLM 后端工厂（自动探测）
 ├── brief_parser.py      # brief 解析
 ├── references/          # H3 官方规范（唯一格式依据）

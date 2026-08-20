@@ -1,6 +1,8 @@
-"""全局配置：读项目根 `config/agent.yaml` + `.env`（API key 一律从 .env 读取）。"""
+"""全局配置：读项目根 `config/agent.yaml` + `.env`。"""
 from __future__ import annotations
 
+import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -12,13 +14,57 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = PROJECT_ROOT / "config" / "agent.yaml"
 
 
+@dataclass(frozen=True)
+class ModelSettings:
+    """模型的非敏感配置；API key 只在真正构造模型时从环境变量解析。"""
+
+    provider: str
+    model: str
+    base_url: str | None
+    api_key_env: str
+    purpose: str
+
+
 def _load_yaml(path: Path) -> dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
 
+def _env(*names: str) -> str:
+    """返回第一个非空环境变量。"""
+    for name in names:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _detect_provider() -> str:
+    if _env("DEEPSEEK_API_KEY"):
+        return "deepseek"
+    if _env("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        return "anthropic"
+    if _env("OPENAI_API_KEY"):
+        return "openai"
+    if _env("DASHSCOPE_API_KEY"):
+        return "dashscope"
+    return "deepseek"
+
+
+_DEFAULTS = {
+    "deepseek": ("deepseek-chat", "https://api.deepseek.com/v1", "DEEPSEEK_API_KEY"),
+    "anthropic": ("deepseek-v4-flash", None, "ANTHROPIC_API_KEY"),
+    "openai": ("gpt-4o", None, "OPENAI_API_KEY"),
+    "dashscope": (
+        "qwen3.7-max",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "DASHSCOPE_API_KEY",
+    ),
+}
+
+
 class Config:
-    """应用级配置。字段只读，导入即加载。"""
+    """应用级配置。字段只读（兼容既有运行时对 save_stages 的测试修改）。"""
 
     def __init__(self) -> None:
         load_dotenv(PROJECT_ROOT / ".env")
@@ -40,8 +86,54 @@ class Config:
 
         self.default_style: str = defaults.get("style", "Cinematic")
         self.default_language: str = defaults.get("language", "Chinese")
-        # 可选：YAML 里覆盖模型名；优先级低于 .env 的 *_MODEL
+        # 旧字段保留作为最低优先级的模型名 fallback。
         self.model_override: str = (self.raw.get("model") or "").strip()
+
+        models = self.raw.get("models", {}) or {}
+        self.primary_model = self._build_primary_settings(
+            models.get("primary", {}) or {}, self.model_override
+        )
+        self.vision_model = self._build_vision_settings(models.get("vision", {}) or {})
+
+    @staticmethod
+    def _build_primary_settings(raw: dict[str, Any], legacy_model: str = "") -> ModelSettings:
+        provider = _env("LLM_PROVIDER").lower() or str(raw.get("provider") or _detect_provider()).strip().lower()
+        default_model, default_base_url, default_key_env = _DEFAULTS.get(
+            provider, ("", None, f"{provider.upper()}_API_KEY")
+        )
+        model = _env(
+            f"{provider.upper()}_MODEL",
+            f"{provider.upper()}_MODEL_NAME",
+        ) or str(raw.get("model") or "").strip() or legacy_model or default_model
+        base_url = _env(f"{provider.upper()}_BASE_URL") or str(raw.get("base_url") or "").strip() or default_base_url
+        if provider == "deepseek" and base_url == "https://api.deepseek.com":
+            base_url = "https://api.deepseek.com/v1"
+        key_env = str(raw.get("api_key_env") or default_key_env).strip()
+        # 显式 LLM_PROVIDER 切换后，不应继续使用 YAML 中旧 provider 的默认 key 名。
+        yaml_provider = str(raw.get("provider") or "").strip().lower()
+        if yaml_provider and provider != yaml_provider and key_env == _DEFAULTS.get(yaml_provider, ("", None, key_env))[2]:
+            key_env = default_key_env
+        return ModelSettings(provider, model, base_url or None, key_env, "主模型")
+
+    @staticmethod
+    def _build_vision_settings(raw: dict[str, Any]) -> ModelSettings:
+        provider = str(raw.get("provider") or "dashscope").strip().lower()
+        default_model, default_base_url, default_key_env = _DEFAULTS["dashscope"]
+        model = _env("DASHSCOPE_MODEL", "DASHSCOPE_MODEL_NAME") or str(raw.get("model") or "").strip() or "qwen3.7-plus"
+        base_url = _env("DASHSCOPE_BASE_URL") or str(raw.get("base_url") or "").strip() or default_base_url
+        key_env = str(raw.get("api_key_env") or default_key_env).strip()
+        return ModelSettings(provider, model, base_url or None, key_env, "视觉模型")
+
+    def resolve_api_key(self, settings: ModelSettings) -> str:
+        """从已加载的 `.env` 环境中读取 key；绝不从 YAML 读取 key 值。"""
+        key = _env(settings.api_key_env)
+        if settings.provider == "anthropic" and not key and settings.api_key_env == "ANTHROPIC_API_KEY":
+            key = _env("ANTHROPIC_AUTH_TOKEN")
+        if not key:
+            raise ValueError(
+                f"缺失 {settings.api_key_env}：请在项目根 .env 中配置（{settings.purpose}）"
+            )
+        return key
 
 
 config = Config()
