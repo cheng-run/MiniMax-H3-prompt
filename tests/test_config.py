@@ -30,9 +30,9 @@ def config_without_env(monkeypatch):
 
 def test_loads_primary_and_vision_from_yaml(config_without_env):
     cfg = config_without_env()
-    assert cfg.primary_model.provider == "deepseek"
-    assert cfg.primary_model.model == "deepseek-v4-flash"
-    assert cfg.primary_model.base_url == "https://api.deepseek.com/v1"
+    assert cfg.primary_model.provider == "dashscope"
+    assert cfg.primary_model.model == "qwen3.7-plus"
+    assert cfg.primary_model.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
     assert cfg.vision_model.provider == "dashscope"
     assert cfg.vision_model.model == "qwen3.7-plus"
     assert cfg.vision_model.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -40,18 +40,17 @@ def test_loads_primary_and_vision_from_yaml(config_without_env):
 
 def test_api_keys_are_resolved_from_environment(config_without_env, monkeypatch):
     cfg = config_without_env()
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-primary-secret")
-    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-vision-secret")
-    assert cfg.resolve_api_key(cfg.primary_model) == "test-primary-secret"
-    assert cfg.resolve_api_key(cfg.vision_model) == "test-vision-secret"
-    assert "test-primary-secret" not in repr(cfg.primary_model)
-    assert "test-vision-secret" not in repr(cfg.vision_model)
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-secret")
+    assert cfg.resolve_api_key(cfg.primary_model) == "test-secret"
+    assert cfg.resolve_api_key(cfg.vision_model) == "test-secret"
+    assert "test-secret" not in repr(cfg.primary_model)
+    assert "test-secret" not in repr(cfg.vision_model)
     assert "api_key" not in cfg.raw.get("models", {}).get("primary", {})
 
 
 def test_missing_key_names_environment_variable(config_without_env):
     cfg = config_without_env()
-    with pytest.raises(ValueError, match="DEEPSEEK_API_KEY"):
+    with pytest.raises(ValueError, match="DASHSCOPE_API_KEY"):
         cfg.resolve_api_key(cfg.primary_model)
 
 
