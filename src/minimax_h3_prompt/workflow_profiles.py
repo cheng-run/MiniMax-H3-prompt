@@ -237,6 +237,9 @@ class WorkflowNode:
     outputs: tuple[str, ...] = field(default_factory=tuple)
     widgets: tuple[Any, ...] = field(default_factory=tuple)
     class_type: str = ""
+    input_links: tuple[Any, ...] = field(default_factory=tuple)
+    output_links: tuple[Any, ...] = field(default_factory=tuple)
+    mode: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return _jsonable(self.__dict__)
@@ -250,6 +253,11 @@ class WorkflowInspection:
     nodes: tuple[WorkflowNode, ...]
     links: tuple[Any, ...] = field(default_factory=tuple)
     errors: tuple[str, ...] = field(default_factory=tuple)
+    raw: Any = field(default=None, repr=False, compare=False)
+    subgraphs: tuple[str, ...] = field(default_factory=tuple)
+    model_references: tuple[str, ...] = field(default_factory=tuple)
+    custom_node_types: tuple[str, ...] = field(default_factory=tuple)
+    disabled_nodes: tuple[str, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict[str, Any]:
         return _jsonable({
@@ -262,6 +270,19 @@ class WorkflowInspection:
     def node(self, node_id: str) -> WorkflowNode | None:
         return next((n for n in self.nodes if n.node_id == str(node_id)), None)
 
+    def link_edges(self) -> tuple[tuple[str, str], ...]:
+        edges: list[tuple[str, str]] = []
+        if self.workflow_format == "ui":
+            for link in self.links:
+                if isinstance(link, (list, tuple)) and len(link) >= 5:
+                    edges.append((str(link[1]), str(link[3])))
+        elif isinstance(self.raw, dict):
+            for node_id, value in self.raw.items():
+                for reference in (value.get("inputs", {}) or {}).values():
+                    if isinstance(reference, list) and len(reference) >= 2 and isinstance(reference[0], (str, int)):
+                        edges.append((str(reference[0]), str(node_id)))
+        return tuple(edges)
+
 
 def _is_api_workflow(raw: Any) -> bool:
     return bool(isinstance(raw, dict) and raw and all(
@@ -270,15 +291,52 @@ def _is_api_workflow(raw: Any) -> bool:
     ))
 
 
+def _collect_model_references(value: Any) -> set[str]:
+    found: set[str] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(item, str) and any(token in str(key).lower() for token in ("model", "ckpt", "lora", "vae", "clip", "unet")):
+                if not item.startswith("$"):
+                    found.add(item)
+            found.update(_collect_model_references(item))
+    elif isinstance(value, list):
+        for item in value:
+            found.update(_collect_model_references(item))
+    return found
+
+
+def _collect_subgraphs(raw: Any) -> tuple[str, ...]:
+    if not isinstance(raw, dict):
+        return ()
+    definitions = raw.get("definitions")
+    if not isinstance(definitions, dict):
+        return ()
+    subgraphs = definitions.get("subgraphs", [])
+    if not isinstance(subgraphs, list):
+        return ()
+    return tuple(str(item.get("id", item.get("name", index))) for index, item in enumerate(subgraphs) if isinstance(item, dict))
+
+
+def _collect_custom_node_types(nodes: tuple[WorkflowNode, ...]) -> tuple[str, ...]:
+    core_prefixes = ("Checkpoint", "CLIP", "Empty", "KSampler", "VAEDecode", "Save", "Load", "VAE", "UNET", "Lora", "RandomNoise", "Basic", "Sampler", "CreateVideo")
+    return tuple(sorted({node.node_type for node in nodes if node.node_type and not node.node_type.startswith(core_prefixes)}))
+
+
 def _node_from_ui(raw: dict[str, Any]) -> WorkflowNode:
-    inputs = tuple(str(x.get("name", "")) for x in raw.get("inputs", []) if isinstance(x, dict))
-    outputs = tuple(str(x.get("name", "")) for x in raw.get("outputs", []) if isinstance(x, dict))
+    raw_inputs = tuple(x for x in raw.get("inputs", []) if isinstance(x, dict))
+    raw_outputs = tuple(x for x in raw.get("outputs", []) if isinstance(x, dict))
+    inputs = tuple(str(x.get("name", "")) for x in raw_inputs)
+    outputs = tuple(str(x.get("name", "")) for x in raw_outputs)
+    input_links = tuple(x.get("link") for x in raw_inputs)
+    output_links = tuple(x.get("links") for x in raw_outputs)
     props = raw.get("properties", {}) or {}
     title = str(props.get("Node name for S&R", props.get("title", "")))
     return WorkflowNode(
         node_id=str(raw.get("id", "")), node_type=str(raw.get("type", "")),
         title=title, inputs=inputs, outputs=outputs,
         widgets=_tuple(raw.get("widgets_values", [])),
+        input_links=input_links, output_links=output_links,
+        mode=int(raw.get("mode", 0) or 0),
     )
 
 
@@ -309,14 +367,33 @@ def inspect_workflow(path: str | Path) -> WorkflowInspection:
     else:
         errors.append("顶层结构不是 ComfyUI UI 或 API 工作流")
         nodes, links, fmt = (), (), "unknown"
-    return WorkflowInspection(str(file_path), sha256_file(file_path), fmt, nodes, links, tuple(errors))
+    disabled = tuple(node.node_id for node in nodes if node.mode not in (0,))
+    return WorkflowInspection(
+        str(file_path), sha256_file(file_path), fmt, nodes, links, tuple(errors), raw,
+        _collect_subgraphs(raw), tuple(sorted(_collect_model_references(raw))),
+        _collect_custom_node_types(nodes), disabled,
+    )
 
 
-def validate_profile(profile: WorkflowProfile, inspection: WorkflowInspection) -> list[str]:
-    """对 Profile 声明的静态契约进行检查，返回可展示的错误列表。"""
+def validate_profile(
+    profile: WorkflowProfile,
+    inspection: WorkflowInspection,
+    *,
+    strict_dependencies: bool = False,
+) -> list[str]:
+    """对 Profile 声明的静态契约进行检查，返回可展示的错误列表。
+
+    ``strict_dependencies`` 用于把模型/custom node/subgraph 风险升级为错误；
+    默认只校验 Profile 的节点与连接契约，避免把环境依赖误报成 JSON 结构错误。
+    """
     errors = list(inspection.errors)
+    node_ids = {node.node_id for node in inspection.nodes}
     if profile.workflow_sha256 and profile.workflow_sha256 != inspection.sha256:
         errors.append("WORKFLOW_HASH_MISMATCH: 工作流原始文件哈希已变化")
+    if profile.absolute_workflow_path:
+        expected_path = Path(profile.absolute_workflow_path)
+        if Path(inspection.path).resolve() != expected_path.resolve():
+            errors.append("WORKFLOW_PATH_MISMATCH: Profile 路径与实际核验文件不一致")
     if profile.workflow_format and profile.workflow_format != inspection.workflow_format:
         errors.append("WORKFLOW_FORMAT_MISMATCH: 工作流格式声明不一致")
     for node_id, label in ((profile.prompt_node_id, "prompt"), (profile.generation_node_id, "generation")):
@@ -340,6 +417,55 @@ def validate_profile(profile: WorkflowProfile, inspection: WorkflowInspection) -
             errors.append(f"OUTPUT_NODE_MISSING: 输出节点 {output.node_id} 不存在")
         elif output.node_type and node.node_type != output.node_type:
             errors.append(f"OUTPUT_TYPE_MISMATCH: 输出节点 {output.node_id} 类型不一致")
+
+    if inspection.workflow_format == "ui":
+        links_by_id = {str(link[0]): link for link in inspection.links if isinstance(link, (list, tuple)) and len(link) >= 6}
+        for link_id, link in links_by_id.items():
+            source_id, source_slot, target_id, target_slot = str(link[1]), int(link[2]), str(link[3]), int(link[4])
+            if source_id not in node_ids:
+                errors.append(f"LINK_SOURCE_MISSING: link {link_id} 的源节点不存在")
+            if target_id not in node_ids:
+                errors.append(f"LINK_TARGET_MISSING: link {link_id} 的目标节点不存在")
+            target = inspection.node(target_id)
+            if target and (target_slot < 0 or target_slot >= len(target.inputs)):
+                errors.append(f"LINK_TARGET_SLOT_INVALID: link {link_id} 的目标 input slot 不存在")
+            source = inspection.node(source_id)
+            if source and (source_slot < 0 or source_slot >= len(source.outputs)):
+                errors.append(f"LINK_SOURCE_SLOT_INVALID: link {link_id} 的源 output slot 不存在")
+        for node in inspection.nodes:
+            for link in node.input_links:
+                if link is not None and str(link) not in links_by_id:
+                    errors.append(f"INPUT_LINK_MISSING: 节点 {node.node_id} 引用了不存在的 link {link}")
+            for link_ids in node.output_links:
+                for link in (link_ids or ()):
+                    if str(link) not in links_by_id:
+                        errors.append(f"OUTPUT_LINK_MISSING: 节点 {node.node_id} 引用了不存在的 link {link}")
+            if node.mode not in (0,):
+                errors.append(f"NODE_DISABLED_OR_SPECIAL_MODE: 节点 {node.node_id} mode={node.mode}")
+
+    if strict_dependencies:
+        if inspection.subgraphs:
+            errors.append(f"SUBGRAPH_PRESENT: 发现 {len(inspection.subgraphs)} 个 subgraph，需独立展开核验")
+        if inspection.model_references:
+            errors.append(f"MODEL_DEPENDENCIES_DECLARED: 发现 {len(inspection.model_references)} 个模型依赖，需在目标 ComfyUI 环境核对")
+        if inspection.custom_node_types:
+            errors.append(f"CUSTOM_NODES_DECLARED: 发现 custom node 类型：{', '.join(inspection.custom_node_types)}")
+        if inspection.disabled_nodes:
+            errors.append(f"DISABLED_NODES_PRESENT: 发现非默认 mode 节点：{', '.join(inspection.disabled_nodes)}")
+
+    edges = inspection.link_edges()
+    if profile.generation_node_id and profile.outputs:
+        reachable = {profile.generation_node_id}
+        changed = True
+        while changed:
+            changed = False
+            for source, target in edges:
+                if source in reachable and target not in reachable:
+                    reachable.add(target)
+                    changed = True
+        for output in profile.outputs:
+            if output.node_id not in reachable:
+                errors.append(f"OUTPUT_UNREACHABLE: 输出节点 {output.node_id} 不可从生成节点到达")
     return errors
 
 

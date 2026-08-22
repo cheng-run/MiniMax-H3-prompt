@@ -31,6 +31,7 @@ _LINEAR_CHAIN = [
     "director",
     "creative_rt",
     "screenwriter",
+    "parallel_designers",  # character ‖ background ‖ prop designers
     "art_director",
     "storyboard",
     "parallel_decisions",  # shot_rt ‖ identity_rt
@@ -41,7 +42,10 @@ _LINEAR_CHAIN = [
 ]
 
 # 已折叠进并行组合节点、不再作为独立图节点的角色节点
-_FOLDED_NODES = {"cinematographer", "reference_consistency", "sound_designer", "composer"}
+_FOLDED_NODES = {
+    "cinematographer", "reference_consistency", "sound_designer", "composer",
+    "character_designer", "background_designer", "prop_designer",
+}
 
 
 def build_pipeline_graph(model, brief: Brief, config: Config):
@@ -58,6 +62,9 @@ def build_pipeline_graph(model, brief: Brief, config: Config):
         if name not in _FOLDED_NODES:
             g.add_node(name, fn)
     g.add_node("creative_rt", make_creative_rt_node(creative_rt, model, brief))
+    g.add_node("parallel_designers", make_parallel(
+        nodes["character_designer"], nodes["background_designer"], nodes["prop_designer"],
+    ))
     g.add_node("parallel_decisions", make_parallel(
         make_shot_rt_node(shot_rt, model, brief),
         make_identity_rt_node(identity_rt, model, brief),

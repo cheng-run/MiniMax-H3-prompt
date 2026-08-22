@@ -5,7 +5,7 @@
 
 # MiniMax-H3 多智能体提示词生成系统
 
-为 **MiniMax-H3** 生成高质量视频提示词的多智能体系统。用一个模仿**电影制作 + AIGC 双流程**的 12 角色流水线，把一段创意 brief 打磨成符合 MiniMax 官方规范（`h3-prompt-writing`）的提示词，复制粘贴即可出片。
+为 **MiniMax-H3** 生成高质量视频提示词的多智能体系统。用一个模仿**电影制作 + AIGC 双流程**的 15 角色流水线，把一段创意 brief 打磨成符合 MiniMax 官方规范（`h3-prompt-writing`）的提示词，复制粘贴即可出片。
 
 - 技术栈：**LangChain（`create_agent`）+ LangGraph（StateGraph 管线 + 有界圆桌子图）**
 - 输出双模式：**Ref2VA 全参考六段式** + **基础模式**（T2VA / I2VA / FL2VA / L2VA）三段式
@@ -15,7 +15,7 @@
 
 | 项 | 状态 |
 |---|---|
-| 12 角色 agent 装配 | ✅ `create_agent` 构建通过 |
+| 15 角色 agent 装配 | ✅ `create_agent` 构建通过 |
 | LangGraph 管线编译 | ✅ 14 节点线性 DAG + 3 圆桌子图，桩模型验证每节点仅执行 1 次 |
 | H3 校验器单测 | ✅ 18 个用例全绿 |
 | T2VA 端到端 | ✅ 实测通过：耗时 ~342s，产出 3542 字符完整三段式提示词，**终检 0 错误** |
@@ -97,14 +97,17 @@ DASHSCOPE_API_KEY=xxx
 
 ## 架构
 
-### 12 角色（电影班底 + AIGC 特色）
+### 15 角色（电影班底 + AIGC 特色）
 
 | 阶段 | 角色 | 产出物 |
 |---|---|---|
 | 前期 | 制片 Producer | 制作计划（模式/时长/风格/任务类型） |
 | 前期 | 导演 Director | 导演阐述（情绪基调/视觉风格/节奏） |
 | 编剧 | 编剧 Screenwriter | 分场剧本（对白保留原文） |
-| 美术 | 美术指导 Art Director | 角色造型卡/场景/色彩/美术风格 |
+| 美术 | 美术指导 Art Director | 统筹人物/背景/道具设计，裁决冲突并锁定统一美术约束 |
+| 美术 | 人物形象设计师 Character Designer | 与剧情绑定的人物外观锚点、状态与连续性素材 |
+| 美术 | 背景设计师 Background Designer | 与剧情绑定的场景空间、环境状态与连续性素材 |
+| 美术 | 道具设计师 Prop Designer | 与剧情绑定的关键道具外观、用途与连续性素材 |
 | 视觉 | 分镜师 Storyboard | `[Shot N]` 镜头表（景别/机位/切点） |
 | 视觉 | 摄影指导 Cinematographer | 每镜画面细化（英文，供最终提示词正文） |
 | 声音 | 声音设计师 Sound Designer | 对白表 `(Sx)`/`<d>[语言]` + 环境声 |
@@ -117,14 +120,15 @@ DASHSCOPE_API_KEY=xxx
 ### 管线（LangGraph 线性链 + 组合节点内并发 + 3 有界圆桌）
 
 ```
-START → [制片] → [导演] → [创意会·圆桌] → [编剧] → [美术指导] → [分镜]
+START → [制片] → [导演] → [创意会·圆桌] → [编剧]
+     → [并行生图设计：人物‖背景‖道具] → [美术指导统筹] → [分镜]
      → [并行决策：镜头评审会‖一致性对齐会]
      → [并行视觉：摄影指导‖参考资产与一致性](ref)
      → [并行声音：声音设计‖配乐师]
      → [提示词工程师] → [组装器/终检] → END
 ```
 
-**3 个有界圆桌**（LangGraph 子图）：创意会（制片+导演+编剧）、镜头评审会（分镜+摄影+可生成性审查）、一致性对齐会（美术+参考资产，仅 ref 模式）。参与角色以"讨论 persona"互相发言 ≤2 轮，主持人收束成锁定决策——既拿到多 agent 协商的质量红利，又锁死成本与不收敛风险。
+**4 个美术角色**先以原始剧情 + 导演方向 + 分场剧本为共同约束：人物形象设计师、背景设计师、道具设计师并行编写生图设计素材，美术指导负责统筹和冲突裁决。三类素材最终由提示词工程师转化为 H3 官方格式，不改变 base/ref 的输出协议。
 
 **质检精修在 Python 层做有界循环**：确定性校验驱动 → 有 error 级问题则 `qa` 角色给建议、`prompt_engineer` 重出，最多 `max_qa_iterations`（默认 2）轮。`h3_validator` 规则校验是硬门槛，无论 agent 怎么讨论都要过。
 
@@ -152,7 +156,7 @@ src/minimax_h3_prompt/
 ├── model_factory.py     # LLM 后端工厂（自动探测）
 ├── brief_parser.py      # brief 解析
 ├── references/          # H3 官方规范（唯一格式依据）
-├── prompts/             # 12 个角色 system prompt
+├── prompts/             # 15 个角色 system prompt
 ├── agents/              # create_agent 装配 + run_agent
 ├── graph/               # state / roundtable / nodes / pipeline
 ├── tools/               # h3_validator + ref_metadata

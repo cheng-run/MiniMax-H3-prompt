@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 
@@ -22,11 +23,34 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--variant", choices=["T2VA", "I2VA", "FL2VA", "L2VA"], default=None, help="base 模式变体（旧写法）")
     parser.add_argument("--polish", action="store_true", help="polish 模式：润色 brief 中已有的草稿提示词")
     parser.add_argument("--dry-run", action="store_true", help="只解析 brief 不跑 LLM 管线（自检用）")
+
+    project = parser.add_subparsers(dest="command")
+    project_parser = project.add_parser("project", help="管理长视频项目文档（离线，不调用模型）")
+    project_parser.add_argument("--root", default=r"D:\笔记\Assets", help="Assets 根目录")
+    project_commands = project_parser.add_subparsers(dest="project_command", required=True)
+
+    init_parser = project_commands.add_parser("init", help="初始化项目文档")
+    init_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    init_parser.add_argument("--topic-id", required=True, help="主题 ID")
+    init_parser.add_argument("--project-id", required=True, help="项目 ID")
+    init_parser.add_argument("--title", required=True, help="项目标题")
+    init_parser.add_argument("--duration", type=float, default=60.0, help="项目时长（秒）")
+    init_parser.add_argument("--variant", choices=["T2VA", "I2VA", "FL2VA", "L2VA"], default="FL2VA")
+    init_parser.add_argument("--global-style", default="", help="全局视觉风格")
+
+    for name, help_text in (("validate", "校验项目文档"), ("show", "展示项目摘要")):
+        command_parser = project_commands.add_parser(name, help=help_text)
+        command_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+        command_parser.add_argument("--topic-id", required=True, help="主题 ID")
+        command_parser.add_argument("--project-id", required=True, help="项目 ID")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    if args.command == "project":
+        return _run_project_command(args)
 
     if not args.brief:
         # 统一入口：无 --brief → 交互菜单
@@ -39,6 +63,36 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     return _run_cli(args)
+
+
+def _run_project_command(args: argparse.Namespace) -> int:
+    """执行离线项目命令；不调用 LLM、ComfyUI 或 output 扫描。"""
+    from .project_store import ProjectStore
+
+    store = ProjectStore(getattr(args, "root", r"D:\笔记\Assets"))
+    if args.project_command == "init":
+        document = store.init_project(
+            args.topic_id,
+            args.project_id,
+            args.title,
+            duration_seconds=args.duration,
+            variant=args.variant,
+            global_style=args.global_style,
+        )
+        print(json.dumps({"directory": str(document.directory), "project_id": document.project_id}, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.project_command == "validate":
+        issues = store.validate(args.topic_id, args.project_id)
+        for issue in issues:
+            print(f"[{issue.severity}] {issue.code}: {issue.message}")
+        return 1 if any(issue.severity == "error" for issue in issues) else 0
+
+    if args.project_command == "show":
+        print(json.dumps(store.show(args.topic_id, args.project_id), ensure_ascii=False, indent=2))
+        return 0
+
+    raise ValueError(f"未知项目命令：{args.project_command}")
 
 
 def _run_cli(args: argparse.Namespace) -> int:

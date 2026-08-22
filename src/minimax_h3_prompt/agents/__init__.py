@@ -22,12 +22,15 @@ from ..tools.ref_metadata import format_ref_meta, to_tuple
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
-# 12 个角色，覆盖电影制作 + AIGC 双流程
+# 15 个角色，覆盖电影制作 + AIGC 双流程
 ROLE_KEYS = [
     "producer",
     "director",
     "screenwriter",
     "art_director",
+    "character_designer",
+    "background_designer",
+    "prop_designer",
     "storyboard",
     "cinematographer",
     "sound_designer",
@@ -44,6 +47,9 @@ TOOL_ROLES = {"feasibility_reviewer", "prompt_engineer", "qa"}
 REF_TOOL_ROLES = {
     "producer",
     "art_director",
+    "character_designer",
+    "background_designer",
+    "prop_designer",
     "reference_consistency",
     "feasibility_reviewer",
     "prompt_engineer",
@@ -91,7 +97,7 @@ def build_role_agents(
     duration: float,
     variant: str,
 ) -> dict[str, object]:
-    """构建 12 个角色 agent。返回 {role_key: agent}。"""
+    """构建 15 个角色 agent。返回 {role_key: agent}。"""
     agents: dict[str, object] = {}
     for role in ROLE_KEYS:
         tools = _make_tools(refs, mode, duration, variant, role)

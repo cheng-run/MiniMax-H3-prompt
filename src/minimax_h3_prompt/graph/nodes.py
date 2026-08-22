@@ -58,12 +58,41 @@ def _make_screenwriter_node(agents: dict) -> Callable:
     return node
 
 
+def _design_context(state: PipelineState, brief: Brief) -> str:
+    """为三类生图设计师提供同一份剧情约束，避免脱离故事自由发挥。"""
+    refs = format_ref_meta(brief.refs) if brief.refs else "（无）"
+    return _ctx(
+        原始剧情=brief.plot,
+        导演阐述=state.get("director_brief", ""),
+        创意锁定=state.get("creative_lock", ""),
+        分场剧本=state.get("script", ""),
+        风格=brief.style,
+        参考资产=refs if brief_uses_refs(brief) else "",
+    )
+
+
+def _make_design_node(agents: dict, role: str, output_field: str, label: str) -> Callable:
+    def node(state: PipelineState) -> dict:
+        brief: Brief = state["brief"]
+        msg = f"请完成{label}，必须严格契合视频剧情：\n{_design_context(state, brief)}"
+        return {output_field: run_agent(agents[role], msg)}
+    return node
+
+
 def _make_art_director_node(agents: dict) -> Callable:
     def node(state: PipelineState) -> dict:
         brief: Brief = state["brief"]
         refs = format_ref_meta(brief.refs) if brief.refs else "（无）"
-        msg = "请给出美术设计：\n" + _ctx(分场剧本=state.get("script", ""),
-                                         参考资产=refs if brief_uses_refs(brief) else "")
+        msg = "请统筹并裁决最终美术设计：\n" + _ctx(
+            原始剧情=brief.plot,
+            导演阐述=state.get("director_brief", ""),
+            创意锁定=state.get("creative_lock", ""),
+            分场剧本=state.get("script", ""),
+            人物设计=state.get("character_design", ""),
+            背景设计=state.get("background_design", ""),
+            道具设计=state.get("prop_design", ""),
+            参考资产=refs if brief_uses_refs(brief) else "",
+        )
         return {"art_design": run_agent(agents["art_director"], msg)}
     return node
 
@@ -76,6 +105,9 @@ def _make_storyboard_node(agents: dict) -> Callable:
             "请给出分镜镜头表（时长 "
             + f"{brief.duration}s）：\n"
             + _ctx(分场剧本=state.get("script", ""), 美术设计=state.get("art_design", ""),
+                   人物设计=state.get("character_design", ""),
+                   背景设计=state.get("background_design", ""),
+                   道具设计=state.get("prop_design", ""),
                    上一轮质检问题=issues)
         )
         return {"shot_table": run_agent(agents["storyboard"], msg)}
@@ -113,7 +145,10 @@ def _make_reference_consistency_node(agents: dict) -> Callable:
             return {"subject_defs": ""}  # base 模式不需要 subject 定义，跳过
         refs = format_ref_meta(brief.refs) if brief.refs else "（无）"
         msg = "请给出 subject_definitions 与 retention_analysis 素材：\n" + _ctx(
-            参考资产=refs, 美术设计=state.get("art_design", ""), 一致性锁定=state.get("identity_lock", ""),
+            参考资产=refs, 美术设计=state.get("art_design", ""),
+            人物设计=state.get("character_design", ""),
+            背景设计=state.get("background_design", ""),
+            道具设计=state.get("prop_design", ""), 一致性锁定=state.get("identity_lock", ""),
         )
         return {"subject_defs": run_agent(agents["reference_consistency"], msg)}
     return node
@@ -148,6 +183,10 @@ def _make_prompt_engineer_node(agents: dict) -> Callable:
         if minimal:
             return head + "\n" + _ctx(
                 镜头表=state.get("shot_table", ""),
+                统筹美术设计=state.get("art_design", ""),
+                人物设计=state.get("character_design", ""),
+                背景设计=state.get("background_design", ""),
+                道具设计=state.get("prop_design", ""),
                 画面细化=state.get("visual_design", ""),
                 对白与环境声=state.get("sound_design", ""),
                 配乐=state.get("music", ""),
@@ -155,6 +194,10 @@ def _make_prompt_engineer_node(agents: dict) -> Callable:
         return head + "\n" + _ctx(
             镜头表=state.get("shot_table", ""),
             镜头评审锁定=state.get("shot_review_lock", ""),
+            统筹美术设计=state.get("art_design", ""),
+            人物设计=state.get("character_design", ""),
+            背景设计=state.get("background_design", ""),
+            道具设计=state.get("prop_design", ""),
             画面细化=state.get("visual_design", ""),
             对白与环境声=state.get("sound_design", ""),
             配乐=state.get("music", ""),
@@ -197,6 +240,9 @@ def make_nodes(agents: dict, model, brief: Brief, config: Config) -> dict[str, C
         "producer": _make_producer_node(agents),
         "director": _make_director_node(agents),
         "screenwriter": _make_screenwriter_node(agents),
+        "character_designer": _make_design_node(agents, "character_designer", "character_design", "人物形象设计"),
+        "background_designer": _make_design_node(agents, "background_designer", "background_design", "背景设计"),
+        "prop_designer": _make_design_node(agents, "prop_designer", "prop_design", "道具设计"),
         "art_director": _make_art_director_node(agents),
         "storyboard": _make_storyboard_node(agents),
         "cinematographer": _make_cinematographer_node(agents),
@@ -229,7 +275,10 @@ def make_identity_rt_node(rt, model, brief) -> Callable:
     refs = format_ref_meta(brief.refs) if brief.refs else "（无）"
     return _make_roundtable_node(
         rt, "identity_lock", "锁定角色/场景身份定义与 <Picture N> 映射",
-        lambda s: _ctx(美术设计=s.get("art_design", ""), 参考资产=refs))
+        lambda s: _ctx(统筹美术设计=s.get("art_design", ""),
+                       人物设计=s.get("character_design", ""),
+                       背景设计=s.get("background_design", ""),
+                       道具设计=s.get("prop_design", ""), 参考资产=refs))
 
 
 def make_parallel(*nodes: Callable[[PipelineState], dict]) -> Callable[[PipelineState], dict]:

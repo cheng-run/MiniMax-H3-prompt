@@ -1,0 +1,48 @@
+{
+  "profile_id": "h3_ref2va_v2",
+  "display_name": "MiniMax-H3 Ref2VA 多参考视频",
+  "purpose": "使用 MiniMax-H3 Ref2VA 工作流和多种图像/视频/音频参考生成视频片段候选；实际启用槽位必须按任务显式绑定。",
+  "model_family": "MiniMax-H3",
+  "input_mode": "ref2va",
+  "workflow_path": "001-JZL基础工作流/15-MiniMaxH3/63-MiniMax-H3+ref2va+多参生音视频+V2+工作流.json",
+  "workflow_sha256": "f5e208983224dc31187a6a8028c7b96aa935a85d12fbd1fce3eaaafe26ccf383",
+  "profile_version": "2",
+  "schema_version": "1",
+  "status": "candidate",
+  "evidence_level": "runtime_pending",
+  "workflow_format": "ui",
+  "prompt_node_id": "209",
+  "prompt_node_type": "PrimitiveStringMultiline",
+  "prompt_input": "value",
+  "generation_node_id": "167",
+  "generation_node_type": "MiniMaxH3ReferenceToVideo",
+  "slots": [
+    {"slot_id": "ref_image_0", "node_id": "195", "input_name": "image", "semantic": "参考图槽 ref_images.ref_image_0；工作流示例为人物/角色图，具体语义需任务声明", "data_type": "IMAGE", "required": false, "order": 1, "confirmed": false, "connection": "195.IMAGE → 167.ref_images.ref_image_0"},
+    {"slot_id": "ref_image_1", "node_id": "194", "input_name": "image", "semantic": "参考图槽 ref_images.ref_image_1；工作流示例为人物/角色图，具体语义需任务声明", "data_type": "IMAGE", "required": false, "order": 2, "confirmed": false, "connection": "194.IMAGE → 167.ref_images.ref_image_1"},
+    {"slot_id": "ref_image_2", "node_id": "214", "input_name": "image", "semantic": "参考图槽 ref_images.ref_image_2，经过 XB_BatchImages；具体语义需任务声明", "data_type": "IMAGE", "required": false, "order": 3, "confirmed": false, "connection": "214.IMAGE → 224 → 167.ref_images.ref_image_2"},
+    {"slot_id": "ref_image_3", "node_id": "213", "input_name": "image", "semantic": "参考图槽 ref_images.ref_image_3；具体语义需任务声明", "data_type": "IMAGE", "required": false, "order": 4, "confirmed": false, "connection": "213.IMAGE → 167.ref_images.ref_image_3"},
+    {"slot_id": "ref_video_0", "node_id": "167", "input_name": "ref_videos.ref_video_0", "semantic": "可选视频参考，经 XB_VideoLoader 连接", "data_type": "VIDEO", "required": false, "order": 1, "confirmed": false, "connection": "219.IMAGE → 167.ref_videos.ref_video_0"},
+    {"slot_id": "ref_video_audio_0", "node_id": "167", "input_name": "ref_video_audios.ref_video_audio_0", "semantic": "可选视频参考音频", "data_type": "AUDIO", "required": false, "order": 1, "confirmed": false, "connection": "219.AUDIO → 167.ref_video_audios.ref_video_audio_0"},
+    {"slot_id": "ref_audio_0", "node_id": "217", "input_name": "audio", "semantic": "可选独立音频参考", "data_type": "AUDIO", "required": false, "order": 1, "confirmed": false, "connection": "217.AUDIO → 167.ref_audios.ref_audio_0"},
+    {"slot_id": "ref_audio_1", "node_id": "218", "input_name": "audio", "semantic": "可选独立音频参考", "data_type": "AUDIO", "required": false, "order": 2, "confirmed": false, "connection": "218.AUDIO → 167.ref_audios.ref_audio_1"}
+  ],
+  "outputs": [
+    {"node_id": "237", "node_type": "VHS_VideoCombine", "output_type": "video", "prefix": "由 VHS_VideoCombine 节点配置", "format": "video/h264-mp4"}
+  ],
+  "model_files": [
+    "由节点 236 的实际 widgets_values 声明，包含 H3 model、CLIP、video/audio VAE 与 LoRA 依赖"
+  ],
+  "custom_nodes": ["MiniMaxH3ReferenceToVideo", "XB_llamaInstruct", "XB_llamaModelLoader", "XB_llamaMiniMaxRef2va", "XB_HailuoH3VideoParams", "XB_VideoLoader", "XB_BatchImages", "VAEDecodeAudio", "VHS_VideoCombine"],
+  "defaults": {"width": 1344, "height": 768, "length": 124, "duration_seconds": 5, "fps": 24, "steps": 4, "ref_image_size": "未连接", "prompt_source": "209 → 229.XB_llamaInstruct → 167.prompt"},
+  "manual_steps": [
+    "将 H3 Ref2VA 提示词输入到节点 209 的 value，确认节点 229 的提示词辅助链状态。",
+    "按 Task Package 显式绑定参考图编号、视频槽和音频槽；未使用的槽位保持为空。",
+    "逐项核对节点 167 的 ref_images、ref_videos、ref_video_audios 和 ref_audios 连接，不得只按 LoadImage 数量猜测。",
+    "执行后从节点 237 的 VHS_VideoCombine 输出确认 MP4 和音频结果。"
+  ],
+  "risks": [
+    "工作流同时包含图像、视频、视频音频和独立音频参考，且存在 bypass/muter 影响，必须逐任务确认。",
+    "节点 236 的模型依赖需要进一步从原始 JSON 精确整理并核对实际文件。",
+    "尚未进行真实执行和视觉/听觉验收，不能标记为 verified 或 approved。"
+  ]
+}

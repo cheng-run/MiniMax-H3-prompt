@@ -22,7 +22,10 @@ class PipelineState(TypedDict, total=False):
     director_brief: str  # 导演
     creative_lock: str  # 创意会（圆桌 1）锁定
     script: str  # 编剧
-    art_design: str  # 美术指导
+    character_design: str  # 人物形象设计师
+    background_design: str  # 背景设计师
+    prop_design: str  # 道具设计师
+    art_design: str  # 美术指导统筹结果
     identity_lock: str  # 一致性对齐会（圆桌 3）锁定
 
     # 视觉（分镜 → 并行决策 → 并行制作）
