@@ -203,10 +203,12 @@ def create_topic_template(root: str | Path = r"D:\笔记\Assets") -> Path:
     if not template_readme.exists():
         template_readme.write_text(
             "# 长视频主题模板\n\n"
-            "复制本目录并改名为 topic_id 后使用。\n\n"
+            "复制本目录并改名为 topic_id 后使用；不要把 `_template` 本身当作正式主题。\n\n"
+            "本资产库的 `inbox/` 位于 Assets 根目录，用于接收已关联任务的 ComfyUI output；审核后再按主题归档到 `projects/` 或 `shared/`。\n"
+            "本主题目录只保留 `projects/`、`shared/`、`catalog/` 和 `schemas/`。\n\n"
             "资产 ID：`C01` 人物、`S01` 场景、`P01` 道具、`E01` 背景元素。\n"
             "生成 ID：`C01-G001`；版本：`C01-v001`。\n"
-            "流程：`inbox → projects/shared`，必须经过人工审核；candidate 不等于 approved。\n",
+            "流程：`Assets/inbox → <topic_id>/projects|shared`，必须经过人工审核；candidate 不等于 approved。\n",
             encoding="utf-8",
         )
     return root_path

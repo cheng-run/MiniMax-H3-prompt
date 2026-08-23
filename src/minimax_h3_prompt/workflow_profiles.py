@@ -218,6 +218,29 @@ class WorkflowProfile:
         })
         return WorkflowProfile(**data)
 
+    def record_verification(
+        self,
+        record: dict,
+        *,
+        status: ProfileStatus | None = None,
+        evidence_level: EvidenceLevel | None = None,
+    ) -> WorkflowProfile:
+        """追加一条核验/验收记录，可选同时升级状态；返回新 Profile。
+
+        ``record`` 追加到 ``verification_records``；``status`` 缺省时只追加记录不改变状态。
+        状态升级复用 ``with_status``，approved 仍必须绑定 ``visual_approved`` 证据。
+        """
+        data = self.to_dict()
+        data.update({
+            "slots": self.slots,
+            "outputs": self.outputs,
+            "verification_records": self.verification_records + (dict(record),),
+        })
+        updated = WorkflowProfile(**data)
+        if status is None:
+            return updated
+        return updated.with_status(status, evidence_level)
+
 
 def sha256_file(path: str | Path) -> str:
     """按原始字节计算 SHA-256，不重新序列化 JSON。"""

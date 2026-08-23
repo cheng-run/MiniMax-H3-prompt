@@ -17,8 +17,8 @@ ReviewKind = Literal["static", "manual", "visual", "audio"]
 
 _ASSET_ID = re.compile(r"^[CSP E]\d{2}$".replace(" ", ""))
 _SHOT_ID = re.compile(r"^SH\d{3}$")
-_VERSION_ID = re.compile(r"^[A-Z]+\d{2}-v\d{3}$")
-_GENERATION_ID = re.compile(r"^[A-Z]+\d{2}-G\d{3}$")
+_VERSION_ID = re.compile(r"^(?:[A-Z]+\d{2}|SH\d{3})-v\d{3}$")
+_GENERATION_ID = re.compile(r"^(?:[A-Z]+\d{2}|SH\d{3})-G\d{3}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -358,7 +358,20 @@ class ShotPlan:
 
     def validate(self) -> list[str]:
         errors: list[str] = []
+        shot_ids = [shot.shot_id for shot in self.shots]
+        duplicate_ids = sorted({shot_id for shot_id in shot_ids if shot_ids.count(shot_id) > 1})
+        for shot_id in duplicate_ids:
+            errors.append(f"DUPLICATE_SHOT_ID: 镜头 ID 重复：{shot_id}")
+        shot_numbers = [shot.shot_number for shot in self.shots]
+        duplicate_numbers = sorted({number for number in shot_numbers if shot_numbers.count(number) > 1})
+        for number in duplicate_numbers:
+            errors.append(f"DUPLICATE_SHOT_NUMBER: 镜头编号重复：{number}")
         for index, shot in enumerate(self.shots):
+            expected_number = index + 1
+            if shot.shot_number != expected_number:
+                errors.append(
+                    f"SHOT_NUMBER_ORDER: {shot.shot_id} 的镜头编号应为 {expected_number}，实际为 {shot.shot_number}"
+                )
             previous = self.shots[index - 1] if index else None
             errors.extend(f"{shot.shot_id}: {error}" for error in shot.validate(previous))
         if sum(shot.duration_seconds for shot in self.shots) > self.duration_seconds + 1e-9:

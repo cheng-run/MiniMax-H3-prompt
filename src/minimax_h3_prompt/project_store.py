@@ -166,6 +166,85 @@ class ProjectStore:
             )
         return document
 
+    def save_project(
+        self,
+        document: ProjectDocument,
+        *,
+        overwrite: bool = False,
+    ) -> ProjectDocument:
+        """显式保存完整项目文档；不调用外部服务，也不推进审核状态。"""
+        _validate_project_id(document.project_id)
+        expected_directory = self.project_directory(document.topic_id, document.project_id).resolve()
+        if document.directory.resolve() != expected_directory:
+            raise ValueError("ProjectDocument.directory 与项目身份不一致")
+        if document.bible.topic_id != document.topic_id or document.bible.project_id != document.project_id:
+            raise ValueError("ProjectBible 的 topic_id/project_id 与项目不一致")
+        if document.registry.topic_id != document.topic_id or document.registry.project_id != document.project_id:
+            raise ValueError("AssetRegistry 的 topic_id/project_id 与项目不一致")
+        if document.shot_plan.project_id != document.project_id:
+            raise ValueError("ShotPlan 的 project_id 与项目不一致")
+        shot_errors = document.shot_plan.validate()
+        if shot_errors:
+            raise ValueError("ShotPlan 不能保存：" + "; ".join(shot_errors))
+
+        document.directory.mkdir(parents=True, exist_ok=True)
+        _write_json(document.bible_path, document.bible.to_dict(), overwrite=overwrite)
+        _write_json(document.registry_path, document.registry.to_dict(), overwrite=overwrite)
+        _write_json(document.shot_plan_path, document.shot_plan.to_dict(), overwrite=overwrite)
+        _write_json(
+            document.project_path,
+            {
+                "schema_version": "project_document.v1",
+                "topic_id": document.topic_id,
+                "project_id": document.project_id,
+                "title": document.bible.title,
+                "duration_seconds": document.shot_plan.duration_seconds,
+                "variant": document.shot_plan.variant,
+                "status": "draft",
+            },
+            overwrite=overwrite,
+        )
+        return document
+
+    def update_bible(
+        self,
+        topic_id: str,
+        project_id: str,
+        bible: ProjectBible,
+        *,
+        overwrite: bool = False,
+    ) -> ProjectDocument:
+        """替换 Bible，其他项目文档保持不变。"""
+        current = self.load_project(topic_id, project_id)
+        updated = ProjectDocument(topic_id, project_id, current.directory, bible, current.registry, current.shot_plan)
+        return self.save_project(updated, overwrite=overwrite)
+
+    def update_registry(
+        self,
+        topic_id: str,
+        project_id: str,
+        registry: AssetRegistry,
+        *,
+        overwrite: bool = False,
+    ) -> ProjectDocument:
+        """替换 AssetRegistry，其他项目文档保持不变。"""
+        current = self.load_project(topic_id, project_id)
+        updated = ProjectDocument(topic_id, project_id, current.directory, current.bible, registry, current.shot_plan)
+        return self.save_project(updated, overwrite=overwrite)
+
+    def update_shot_plan(
+        self,
+        topic_id: str,
+        project_id: str,
+        shot_plan: ShotPlan,
+        *,
+        overwrite: bool = False,
+    ) -> ProjectDocument:
+        """替换 ShotPlan，其他项目文档保持不变。"""
+        current = self.load_project(topic_id, project_id)
+        updated = ProjectDocument(topic_id, project_id, current.directory, current.bible, current.registry, shot_plan)
+        return self.save_project(updated, overwrite=overwrite)
+
     def load_project(self, topic_id: str, project_id: str) -> ProjectDocument:
         directory = self.project_directory(topic_id, project_id)
         if not directory.is_dir():

@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,6 +44,47 @@ def build_parser() -> argparse.ArgumentParser:
         command_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
         command_parser.add_argument("--topic-id", required=True, help="主题 ID")
         command_parser.add_argument("--project-id", required=True, help="项目 ID")
+
+    plan_parser = project_commands.add_parser("plan", help="生成镜头的人工 ComfyUI 执行指引（只读）")
+    plan_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    plan_parser.add_argument("--topic-id", required=True, help="主题 ID")
+    plan_parser.add_argument("--project-id", required=True, help="项目 ID")
+    plan_parser.add_argument("--shot", required=True, help="镜头 ID（如 SH001）")
+    plan_parser.add_argument("--workflow-root", default=r"D:\Comfyui\ComfyUI\user\default\workflows", help="ComfyUI 工作流根目录")
+    plan_parser.add_argument("--out", default=None, help="把指引写到文件（默认打印到 stdout）")
+
+    import_parser = project_commands.add_parser("import-output", help="导入人工 ComfyUI 执行输出并标记任务 executed")
+    import_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    import_parser.add_argument("--topic-id", required=True, help="主题 ID")
+    import_parser.add_argument("--project-id", required=True, help="项目 ID")
+    import_parser.add_argument("generation", help="generation_id（如 SH001-G001）")
+    import_parser.add_argument("source", help="ComfyUI output 源文件路径")
+
+    review_parser = project_commands.add_parser("review", help="人工视觉/听觉验收资产或镜头")
+    review_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    review_parser.add_argument("--topic-id", required=True, help="主题 ID")
+    review_parser.add_argument("--project-id", required=True, help="项目 ID")
+    review_parser.add_argument("--entity", required=True, help="验收实体 ID（C01/S01/P01 资产或 SH001 镜头）")
+    review_parser.add_argument("--kind", choices=["visual", "audio"], required=True, help="视觉或听觉验收")
+    review_parser.add_argument("--outcome", choices=["approved", "rejected"], required=True, help="验收结论")
+    review_parser.add_argument("--reviewer", default="", help="验收人标识")
+
+    verify_parser = project_commands.add_parser("verify", help="一键检查执行资格闸门（只读）")
+    verify_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    verify_parser.add_argument("--topic-id", required=True, help="主题 ID")
+    verify_parser.add_argument("--project-id", required=True, help="项目 ID")
+    verify_parser.add_argument("--shot", default=None, help="只检查指定镜头（默认全部）")
+    verify_parser.add_argument("--workflow-root", default=r"D:\Comfyui\ComfyUI\user\default\workflows", help="ComfyUI 工作流根目录")
+
+    profile_parser = project_commands.add_parser("profile", help="Profile 状态升级（verified/approved，写 docs/profiles）")
+    profile_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    profile_parser.add_argument("--topic-id", required=True, help="主题 ID")
+    profile_parser.add_argument("--project-id", required=True, help="项目 ID")
+    profile_parser.add_argument("--profile", required=True, help="Profile ID（如 h3_fl2va_v2）")
+    profile_parser.add_argument("--status", choices=["verified", "approved"], required=True, help="升级目标状态")
+    profile_parser.add_argument("--reviewer", default="", help="验收人标识")
+    profile_parser.add_argument("--note", default="", help="附加说明")
+    profile_parser.add_argument("--generation", default="", help="关联的 generation_id（approved 时需要）")
     return parser
 
 
@@ -90,6 +132,55 @@ def _run_project_command(args: argparse.Namespace) -> int:
 
     if args.project_command == "show":
         print(json.dumps(store.show(args.topic_id, args.project_id), ensure_ascii=False, indent=2))
+        return 0
+
+    from .execution import (
+        apply_review,
+        build_execution_card,
+        check_executability,
+        import_generation,
+        promote_profile,
+        render_card,
+    )
+
+    topic, project = args.topic_id, args.project_id
+    if args.project_command == "plan":
+        card = build_execution_card(
+            store, topic, project, args.shot, workflow_root=Path(args.workflow_root)
+        )
+        markdown = render_card(card)
+        if args.out:
+            Path(args.out).write_text(markdown, encoding="utf-8")
+            print(f"执行指引已写入: {args.out}")
+        else:
+            print(markdown)
+        return 0
+
+    if args.project_command == "import-output":
+        result = import_generation(store, topic, project, args.generation, args.source)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.project_command == "review":
+        result = apply_review(store, topic, project, args.entity, args.kind, args.outcome, reviewer=args.reviewer)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.project_command == "verify":
+        result = check_executability(
+            store, topic, project, shot_id=args.shot, workflow_root=Path(args.workflow_root)
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        shots_ok = all(shot["can_execute"] for shot in result["shots"])
+        documents_ok = not any(issue["severity"] == "error" for issue in result["document_issues"])
+        return 0 if shots_ok and documents_ok else 1
+
+    if args.project_command == "profile":
+        result = promote_profile(
+            store, topic, project, args.profile, args.status,
+            reviewer=args.reviewer, note=args.note, generation_id=args.generation,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
     raise ValueError(f"未知项目命令：{args.project_command}")

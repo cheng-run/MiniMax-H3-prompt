@@ -3,7 +3,53 @@ import json
 
 import pytest
 
+from minimax_h3_prompt.project_models import AssetRecord, AssetRegistry, ProjectBible, Shot, ShotPlan
 from minimax_h3_prompt.project_store import ProjectStore
+
+
+def test_save_and_incremental_updates_preserve_other_documents(tmp_path):
+    store = ProjectStore(tmp_path / "Assets")
+    document = store.init_project("topic", "project", "Title")
+
+    updated_bible = ProjectBible("project", "topic", "New title", global_style="noir")
+    saved = store.update_bible("topic", "project", updated_bible, overwrite=True)
+    assert saved.bible.title == "New title"
+    assert saved.registry == document.registry
+    assert saved.shot_plan == document.shot_plan
+
+    registry = AssetRegistry("topic", "project", (AssetRecord("C01", "character", "主角"),))
+    saved = store.update_registry("topic", "project", registry, overwrite=True)
+    assert saved.registry == registry
+    assert saved.bible.title == "New title"
+
+    shot = Shot("SH001", 1, 4, "起点", "动作", "终点")
+    plan = ShotPlan("project-shots", "project", "FL2VA", 60, (shot,))
+    saved = store.update_shot_plan("topic", "project", plan, overwrite=True)
+    assert saved.shot_plan == plan
+    assert store.load_project("topic", "project").bible.title == "New title"
+
+
+def test_save_is_idempotent_and_requires_explicit_overwrite(tmp_path):
+    store = ProjectStore(tmp_path / "Assets")
+    document = store.init_project("topic", "project", "Title")
+    assert store.save_project(document) == document
+    changed = ProjectBible("project", "topic", "Changed")
+    with pytest.raises(FileExistsError):
+        store.save_project(type(document)(document.topic_id, document.project_id, document.directory, changed, document.registry, document.shot_plan))
+    store.save_project(type(document)(document.topic_id, document.project_id, document.directory, changed, document.registry, document.shot_plan), overwrite=True)
+    assert store.load_project("topic", "project").bible.title == "Changed"
+
+
+def test_save_rejects_identity_and_path_mismatch(tmp_path):
+    store = ProjectStore(tmp_path / "Assets")
+    document = store.init_project("topic", "project", "Title")
+    wrong_bible = ProjectBible("other", "topic", "Wrong")
+    with pytest.raises(ValueError, match="项目不一致"):
+        store.save_project(type(document)(document.topic_id, document.project_id, document.directory, wrong_bible, document.registry, document.shot_plan), overwrite=True)
+
+    outside = type(document)(document.topic_id, document.project_id, tmp_path / "outside", document.bible, document.registry, document.shot_plan)
+    with pytest.raises(ValueError, match="directory|目录"):
+        store.save_project(outside, overwrite=True)
 
 
 def test_init_load_roundtrip_and_show(tmp_path):

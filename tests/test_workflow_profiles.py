@@ -43,6 +43,24 @@ def test_profile_roundtrip_and_status_guard():
     assert verified.status == "verified"
 
 
+def test_record_verification_appends_and_guards():
+    p = profile()
+
+    recorded = p.record_verification({"type": "static_verified", "errors": []})
+    assert len(recorded.verification_records) == 1
+    assert recorded.status == "candidate"  # 只追加记录，不升级状态
+
+    upgraded = p.record_verification(
+        {"type": "static_verified", "errors": []}, status="verified", evidence_level="static_verified"
+    )
+    assert upgraded.status == "verified"
+    assert upgraded.evidence_level == "static_verified"
+    assert len(upgraded.verification_records) == 1
+
+    with pytest.raises(ValueError, match="visual_approved"):
+        p.record_verification({"type": "x"}, status="approved")
+
+
 def test_inspect_ui_workflow_and_validate(tmp_path):
     path = tmp_path / "workflow.json"
     path.write_text(
@@ -171,6 +189,10 @@ PROFILE_IDS = (
 )
 
 
+# 已通过真实 ComfyUI 运行与静态核验升级的 Profile；其余首批 Profile 仍保持 candidate/runtime_pending
+VERIFIED_PROFILE_IDS = {"h3_fl2va_v2"}
+
+
 @pytest.mark.parametrize("profile_id", PROFILE_IDS)
 def test_first_batch_profiles_are_readable_and_candidate(profile_id):
     from minimax_h3_prompt.workflow_profiles import load_profile
@@ -178,9 +200,14 @@ def test_first_batch_profiles_are_readable_and_candidate(profile_id):
     loaded = load_profile(PROFILE_DIR / f"{profile_id}.json")
     assert loaded.profile_id == profile_id
     assert loaded.workflow_format == "ui"
-    assert loaded.status == "candidate"
-    assert loaded.evidence_level == "runtime_pending"
     assert loaded.workflow_sha256 and len(loaded.workflow_sha256) == 64
+    if profile_id in VERIFIED_PROFILE_IDS:
+        assert loaded.status == "verified"
+        assert loaded.evidence_level == "static_verified"
+        assert loaded.verification_records
+    else:
+        assert loaded.status == "candidate"
+        assert loaded.evidence_level == "runtime_pending"
     with pytest.raises(ValueError, match="visual_approved"):
         loaded.with_status("approved")
 

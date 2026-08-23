@@ -1,6 +1,8 @@
 """CLI 入口测试。"""
 import json
 
+import pytest
+
 from minimax_h3_prompt.main import main
 
 
@@ -48,3 +50,97 @@ def test_project_cli_validation_returns_error_for_malformed_document(tmp_path, c
         "--topic-id", "topic", "--project-id", "project",
     ]) == 1
     assert "PROJECT_DOCUMENT_INVALID" in capsys.readouterr().out
+
+
+def _patch_execution(monkeypatch):
+    """把 execution 新命令函数替换为记录调用的桩，验证 CLI 分发与退出码。"""
+    import minimax_h3_prompt.execution as ex
+
+    calls: dict = {"args": None}
+
+    def fake_plan(store, topic, project, shot, *, workflow_root=None):
+        calls["args"] = ("plan", topic, project, shot)
+        return {
+            "shot_id": shot, "prompt": "P", "generation_id": "SH001-G001",
+            "prompt_node": {"node_id": "187", "input": "value"}, "input_slots": [],
+            "output_node": {"node_id": "168", "node_type": "VHS_VideoCombine"}, "expected": {},
+            "workflow_path": "wf", "workflow_sha256": "h",
+            "profile": {"id": "p", "status": "candidate", "evidence_level": "runtime_pending"},
+            "manual_steps": [], "notes": [], "blockers": [],
+            "topic_id": topic, "project_id": project, "output_prefix": "",
+        }
+
+    def fake_render(card):
+        return f"# {card['shot_id']} 指引"
+
+    def fake_import_generation(store, topic, project, generation, source, *, inbox_root=None):
+        calls["args"] = ("import-output", topic, project, generation, str(source))
+        return {"generation_id": generation, "shot_id": "SH001", "task_status": "executed", "asset": {}}
+
+    def fake_review(store, topic, project, entity, kind, outcome, *, reviewer=""):
+        calls["args"] = ("review", topic, project, entity, kind, outcome, reviewer)
+        return {"entity_type": "asset", "entity_id": entity, "status": "approved"}
+
+    def fake_check(store, topic, project, *, shot_id=None, workflow_root=None):
+        calls["args"] = ("verify", topic, project, shot_id)
+        return {
+            "topic_id": topic, "project_id": project, "document_issues": [],
+            "shots": [{"shot_id": "SH001", "can_execute": False, "issues": [], "input_gaps": []}],
+        }
+
+    def fake_promote(store, topic, project, profile, status, *, reviewer="", note="", generation_id=""):
+        calls["args"] = ("profile", topic, project, profile, status, generation_id)
+        return {"profile_id": profile, "status": status, "evidence_level": "static_verified", "verification_records": []}
+
+    monkeypatch.setattr(ex, "build_execution_card", fake_plan)
+    monkeypatch.setattr(ex, "render_card", fake_render)
+    monkeypatch.setattr(ex, "import_generation", fake_import_generation)
+    monkeypatch.setattr(ex, "apply_review", fake_review)
+    monkeypatch.setattr(ex, "check_executability", fake_check)
+    monkeypatch.setattr(ex, "promote_profile", fake_promote)
+    return calls
+
+
+def test_project_cli_new_commands_dispatch(tmp_path, monkeypatch, capsys):
+    calls = _patch_execution(monkeypatch)
+    root = str(tmp_path / "Assets")
+
+    # plan：操作卡打印到 stdout，退出码 0
+    assert main([
+        "project", "--root", root, "plan",
+        "--topic-id", "topic", "--project-id", "project", "--shot", "SH001",
+        "--workflow-root", str(tmp_path),
+    ]) == 0
+    assert "# SH001 指引" in capsys.readouterr().out
+    assert calls["args"] == ("plan", "topic", "project", "SH001")
+
+    # import-output：位置参数 generation + source
+    assert main([
+        "project", "--root", root, "import-output",
+        "--topic-id", "topic", "--project-id", "project",
+        "SH001-G001", "D:/x/output/clip.mp4",
+    ]) == 0
+    assert calls["args"] == ("import-output", "topic", "project", "SH001-G001", "D:/x/output/clip.mp4")
+
+    # review：参数原样传入
+    assert main([
+        "project", "--root", root, "review",
+        "--topic-id", "topic", "--project-id", "project",
+        "--entity", "C01", "--kind", "visual", "--outcome", "approved", "--reviewer", "me",
+    ]) == 0
+    assert calls["args"] == ("review", "topic", "project", "C01", "visual", "approved", "me")
+
+    # verify：can_execute=False → 退出码 1
+    assert main([
+        "project", "--root", root, "verify",
+        "--topic-id", "topic", "--project-id", "project", "--shot", "SH001",
+    ]) == 1
+    assert calls["args"] == ("verify", "topic", "project", "SH001")
+
+    # profile：升级状态
+    assert main([
+        "project", "--root", root, "profile",
+        "--topic-id", "topic", "--project-id", "project",
+        "--profile", "h3_fl2va_v2", "--status", "verified",
+    ]) == 0
+    assert calls["args"] == ("profile", "topic", "project", "h3_fl2va_v2", "verified", "")

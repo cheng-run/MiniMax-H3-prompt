@@ -58,7 +58,21 @@ def test_shot_requires_previous_end_state_derivation():
     assert any("START_STATE_NOT_DERIVED" in error for error in ShotPlan("p", "project-001", "fl2va", 8, (first, invalid)).validate())
 
 
-def test_shot_plan_lock_requires_approved_shots():
+def test_shot_plan_rejects_duplicate_ids_numbers_and_order():
+    first = Shot("SH001", 1, 2, "起点", "动作", "终点")
+    duplicate_id = Shot("SH001", 2, 2, "终点", "动作", "结束")
+    errors = ShotPlan("p", "project-001", "fl2va", 4, (first, duplicate_id)).validate()
+    assert any(error.startswith("DUPLICATE_SHOT_ID") for error in errors)
+
+    duplicate_number = Shot("SH002", 1, 2, "终点", "动作", "结束")
+    errors = ShotPlan("p", "project-001", "fl2va", 4, (first, duplicate_number)).validate()
+    assert any(error.startswith("DUPLICATE_SHOT_NUMBER") for error in errors)
+
+    out_of_order = Shot("SH002", 3, 2, "终点", "动作", "结束", previous_shot_id="SH001", start_state_derived_from="SH001")
+    errors = ShotPlan("p", "project-001", "fl2va", 4, (first, out_of_order)).validate()
+    assert any(error.startswith("SHOT_NUMBER_ORDER") for error in errors)
+
+
     shot = Shot("SH001", 1, 4, "起点", "动作", "终点")
     with pytest.raises(ValueError, match="approved"):
         ShotPlan("p", "project-001", "fl2va", 4, (shot,)).lock()

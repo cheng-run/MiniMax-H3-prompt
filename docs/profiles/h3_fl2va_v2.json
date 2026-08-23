@@ -8,8 +8,8 @@
   "workflow_sha256": "7462d774eb0e755421b68ab9aefcbfde2dccb6b6c3c0eb1212e7c1a7e7cc6362",
   "profile_version": "2",
   "schema_version": "1",
-  "status": "candidate",
-  "evidence_level": "runtime_pending",
+  "status": "verified",
+  "evidence_level": "static_verified",
   "workflow_format": "ui",
   "prompt_node_id": "187",
   "prompt_node_type": "PrimitiveStringMultiline",
@@ -17,11 +17,37 @@
   "generation_node_id": "133",
   "generation_node_type": "MiniMaxH3ImageToVideo",
   "slots": [
-    {"slot_id": "first_frame", "node_id": "114", "input_name": "image", "semantic": "首帧图，连接到 MiniMaxH3ImageToVideo.first_frame", "data_type": "IMAGE", "required": false, "order": 1, "confirmed": false, "connection": "114.IMAGE → 133.first_frame"},
-    {"slot_id": "last_frame", "node_id": "177", "input_name": "image", "semantic": "尾帧图，连接到 MiniMaxH3ImageToVideo.last_frame", "data_type": "IMAGE", "required": false, "order": 2, "confirmed": false, "connection": "177.IMAGE → 133.last_frame"}
+    {
+      "slot_id": "first_frame",
+      "node_id": "114",
+      "input_name": "image",
+      "semantic": "首帧图，连接到 MiniMaxH3ImageToVideo.first_frame",
+      "data_type": "IMAGE",
+      "required": false,
+      "order": 1,
+      "confirmed": false,
+      "connection": "114.IMAGE → 133.first_frame"
+    },
+    {
+      "slot_id": "last_frame",
+      "node_id": "177",
+      "input_name": "image",
+      "semantic": "尾帧图，连接到 MiniMaxH3ImageToVideo.last_frame",
+      "data_type": "IMAGE",
+      "required": false,
+      "order": 2,
+      "confirmed": false,
+      "connection": "177.IMAGE → 133.last_frame"
+    }
   ],
   "outputs": [
-    {"node_id": "168", "node_type": "VHS_VideoCombine", "output_type": "video", "prefix": "由 VHS_VideoCombine 节点配置", "format": "video/h264-mp4"}
+    {
+      "node_id": "168",
+      "node_type": "VHS_VideoCombine",
+      "output_type": "video",
+      "prefix": "由 VHS_VideoCombine 节点配置",
+      "format": "video/h264-mp4"
+    }
   ],
   "model_files": [
     "MiniMax-H3/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
@@ -30,8 +56,25 @@
     "MiniMax-H3/minimax_h3_video_vae_fp16.safetensors",
     "MiniMax-H3/minimax_h3_audio_vae_fp32.safetensors"
   ],
-  "custom_nodes": ["MiniMaxH3ImageToVideo", "XB_llamaInstruct", "XB_llamaModelLoader", "XB_llamaMiniMaxPreset", "XB_HailuoH3VideoParams", "SamplerCustomAdvanced", "VAEDecodeAudio", "VHS_VideoCombine"],
-  "defaults": {"width": 1344, "height": 768, "length": 56, "duration_seconds": 5, "fps": 24, "steps": 4, "prompt_source": "187 → 186.XB_llamaInstruct → 133.prompt"},
+  "custom_nodes": [
+    "MiniMaxH3ImageToVideo",
+    "XB_llamaInstruct",
+    "XB_llamaModelLoader",
+    "XB_llamaMiniMaxPreset",
+    "XB_HailuoH3VideoParams",
+    "SamplerCustomAdvanced",
+    "VAEDecodeAudio",
+    "VHS_VideoCombine"
+  ],
+  "defaults": {
+    "width": 1344,
+    "height": 768,
+    "length": 56,
+    "duration_seconds": 5,
+    "fps": 24,
+    "steps": 4,
+    "prompt_source": "187 → 186.XB_llamaInstruct → 133.prompt"
+  },
   "manual_steps": [
     "将可直接粘贴的 H3 提示词输入到节点 187 的 value；确认节点 186 生成链是否仍需启用。",
     "需要首帧时上传节点 114，需要尾帧时上传节点 177；首尾帧都使用时分别绑定，不交换顺序。",
@@ -44,5 +87,19 @@
     "工作流包含本地 Qwen/llama 提示词生成链，默认不等同于项目 DashScope 模型配置。",
     "模型文件和 custom node 尚未与目标 ComfyUI 环境核对。",
     "尚未进行真实执行和视觉/听觉验收，不能标记为 verified 或 approved。"
-  ]
+  ],
+  "verification_records": [
+    {
+      "type": "static_verified",
+      "workflow_sha256": "7462d774eb0e755421b68ab9aefcbfde2dccb6b6c3c0eb1212e7c1a7e7cc6362",
+      "errors": [
+        "NODE_DISABLED_OR_SPECIAL_MODE: 节点 114 mode=4",
+        "NODE_DISABLED_OR_SPECIAL_MODE: 节点 177 mode=4"
+      ],
+      "reviewer": "user",
+      "note": "T2VA smoke run succeeded on workflow 62"
+    }
+  ],
+  "parent_profile_id": "",
+  "absolute_workflow_path": ""
 }
