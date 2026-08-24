@@ -1,14 +1,14 @@
 # Windows PowerShell
 # Set-Location D:\项目\MiniMax-H3-prompt
 # uv sync
-# uv run minimax-h3-prompt
+# uv run launch.py
 
 # MiniMax-H3 多智能体提示词生成系统
 
 为 **MiniMax-H3** 生成高质量视频提示词的多智能体系统。用一个模仿**电影制作 + AIGC 双流程**的 15 角色流水线，把一段创意 brief 打磨成符合 MiniMax 官方规范（`h3-prompt-writing`）的提示词，复制粘贴即可出片。
 
 - 技术栈：**LangChain（`create_agent`）+ LangGraph（StateGraph 管线 + 有界圆桌子图）**
-- 输出双模式：**Ref2VA 全参考六段式** + **基础模式**（T2VA / I2VA / FL2VA / L2VA）三段式
+- 输出流程：**主题 → 剧本 → FL2VA 融合首帧/尾帧提示词 → 视频提示词**；人物、道具、场景统一融入首尾帧
 - 格式唯一依据：仓库内 `references/` 的官方规范文档（`base-en.txt` / `ref-en.txt`）
 
 ## ✅ 当前状态（2026-08-14）
@@ -25,17 +25,19 @@
 
 ## 快速开始
 
-```bash
-uv sync                          # 安装依赖
-uv run minimax-h3-prompt         # 统一入口：交互菜单（选出片方式/brief/参数，实时进度）
-uv run minimax-h3-prompt --brief examples/brief_t2va.md   # 非交互快路径（脚本用）
-uv run minimax-h3-prompt --brief your.md --dry-run        # 只解析 brief，不跑 LLM
-uv run pytest tests/             # 单测（29 个）
+```powershell
+uv sync
+uv run launch.py                         # 唯一入口：输入主题并生成 FL2VA 产物
+uv run launch.py --brief examples/brief_fl2va.md
+uv run launch.py --brief your.md --dry-run
+uv run python -m pytest tests -q
 ```
+
+项目不再提供 `uv run minimax-h3-prompt`、`python -m minimax_h3_prompt` 或其他独立启动命令；包内 `main()` 仅由 [launch.py](launch.py) 调用。
 
 ## 交互与观测（不黑箱）
 
-`uv run minimax-h3-prompt` 进交互菜单：**① 纯文字出片 ② 多参考图出片 ③ 润色草稿 ④ 仅解析自检 ⑤ 退出** → 选 brief（examples 列表或自定义路径）→ 参数（变体/时长/风格/语言，回车用默认）→ 确认后开跑。
+`uv run launch.py` 是唯一入口：输入视频主题后自动生成剧本、融合首帧提示词、融合尾帧提示词和 FL2VA 视频提示词。运行期间显示每个角色和阶段的实时进度。
 
 运行期间：
 - **实时进度面板**：每个角色/圆桌一行（状态 ✓/运行中、耗时、产出长度），顶部累计耗时与 token 费用。

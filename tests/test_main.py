@@ -65,8 +65,19 @@ def test_project_cli_generate_and_show_prompts(tmp_path, monkeypatch, capsys):
 
     def fake_structured(brief, config, *, generation_id, topic_id, project_id):
         return result_from_state({
-            "script": "剧本", "final_prompt": "视频", "character_design": "人物",
-            "prop_design": "道具", "background_design": "场景",
+            "script": "剧本", "final_prompt": "视频",
+            "fl2va_prompt_bundle": {
+                "scene_anchor": "rainy night street corner",
+                "first": {
+                    "zimage": {"positive_prompt": "A person stands at a rainy night street corner."},
+                    "flux2": {"positive_prompt": "Flux.2 view of the same rainy night street corner."},
+                },
+                "last": {
+                    "zimage": {"positive_prompt": "The same person lowers an envelope at the same rainy night street corner."},
+                    "flux2": {"positive_prompt": "Flux.2 view of the same person lowering an envelope at the same street corner."},
+                },
+                "continuity_constraints": ["Keep the same person, envelope, street corner, rain, and lighting."],
+            },
         }, brief, generation_id=generation_id, topic_id=topic_id, project_id=project_id)
 
     monkeypatch.setattr(pipeline, "run_pipeline_structured", fake_structured)
@@ -79,10 +90,10 @@ def test_project_cli_generate_and_show_prompts(tmp_path, monkeypatch, capsys):
 
     assert main([
         "project", "--root", str(root), "show-prompts", "--topic-id", "topic",
-        "--project-id", "project", "--generation", "GEN001", "--kind", "video", "--raw",
+        "--project-id", "project", "--generation", "GEN001", "--kind", "first-frame", "--raw",
     ]) == 0
     shown = json.loads(capsys.readouterr().out)
-    assert shown["artifacts"] == {"video": "视频"}
+    assert "rainy night street corner" in shown["artifacts"]["first-frame"]
 
 
 def test_project_cli_generate_dry_run_does_not_call_pipeline(tmp_path, monkeypatch, capsys):

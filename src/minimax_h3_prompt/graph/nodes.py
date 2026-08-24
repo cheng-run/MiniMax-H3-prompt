@@ -169,6 +169,9 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
         return {"fl2va_prompt_bundle": bundle}
 
     return node
+
+
+def _make_art_director_node(agents: dict) -> Callable:
     def node(state: PipelineState) -> dict:
         brief: Brief = state["brief"]
         refs = format_ref_meta(brief.refs) if brief.refs else "（无）"

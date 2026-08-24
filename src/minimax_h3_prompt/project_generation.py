@@ -37,12 +37,15 @@ def create_video_from_topic(
     duration: float | None = None,
     style: str | None = None,
     language: str | None = None,
-    variant: str = "T2VA",
+    variant: str = "FL2VA",
 ) -> tuple[GenerationResult, Path]:
     """由主题自动创建项目并保存生成产物，不执行任何外部媒体工作流。"""
     if not topic or not topic.strip():
         raise ValueError("视频主题不能为空")
     topic = topic.strip()
+    variant = variant.upper()
+    if variant != "FL2VA":
+        raise ValueError("主题单入口只支持 FL2VA 首尾帧流程")
     store = ProjectStore(root)
     topic_id = _topic_id(topic)
     project_id = _next_project_id(store, topic_id)

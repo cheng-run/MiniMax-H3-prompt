@@ -17,9 +17,6 @@ dependencies = [
     "typer>=0.27.1",
 ]
 
-[project.scripts]
-minimax-h3-prompt = "minimax_h3_prompt.main:main"
-
 [build-system]
 requires = ["uv_build>=0.12.3,<0.13.0"]
 build-backend = "uv_build"

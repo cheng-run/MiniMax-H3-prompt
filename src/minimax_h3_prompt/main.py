@@ -1,27 +1,24 @@
-"""CLI 入口：无参数进交互菜单；带参数走非交互快路径。
+"""由 ``launch.py`` 调用的 CLI 实现；项目唯一启动入口是 ``uv run launch.py``。
 
-统一入口：
-  uv run minimax-h3-prompt             → 交互菜单（选择出片方式 / brief / 参数）
-  uv run minimax-h3-prompt --brief …   → 非交互快路径（脚本 / 自动化用）
+``main()`` 保留为内部可测试函数，不作为独立命令注册。
 """
 from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="minimax-h3-prompt",
+        prog="launch.py",
         description="MiniMax-H3 多智能体提示词生成系统",
     )
     parser.add_argument("--brief", default=None, help="brief 文件路径（不填则进交互菜单）")
-    parser.add_argument("--model", choices=["fl2va", "ref2va", "t2va", "i2va", "l2va"], default=None,
-                        help="出片模型（fl2va=工作流62首尾帧 / ref2va=工作流63多参考）")
-    parser.add_argument("--mode", choices=["ref", "base"], default=None, help="覆盖 brief 中的模式（旧写法）")
-    parser.add_argument("--variant", choices=["T2VA", "I2VA", "FL2VA", "L2VA"], default=None, help="base 模式变体（旧写法）")
+    parser.add_argument("--model", choices=["fl2va"], default=None,
+                        help="出片模型（当前产品流程固定使用 FL2VA 首尾帧）")
+    parser.add_argument("--mode", choices=["base"], default=None, help="当前产品固定使用 base/FL2VA")
+    parser.add_argument("--variant", choices=["FL2VA"], default=None, help="当前产品固定使用 FL2VA 首尾帧")
     parser.add_argument("--polish", action="store_true", help="polish 模式：润色 brief 中已有的草稿提示词")
     parser.add_argument("--dry-run", action="store_true", help="只解析 brief 不跑 LLM 管线（自检用）")
 
@@ -32,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     create_parser.add_argument("--duration", type=float, default=None, help="视频时长（秒，默认使用配置）")
     create_parser.add_argument("--style", default=None, help="视觉风格（默认使用配置）")
     create_parser.add_argument("--language", default=None, help="提示词语言（默认使用配置）")
-    create_parser.add_argument("--variant", choices=["T2VA", "I2VA", "FL2VA", "L2VA"], default="T2VA")
+    create_parser.add_argument("--variant", choices=["FL2VA"], default="FL2VA")
 
     project_parser = project.add_parser("project", help="管理长视频项目文档（离线，不调用模型）")
     project_parser.add_argument("--root", default=r"D:\笔记\Assets", help="Assets 根目录")
@@ -44,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--project-id", required=True, help="项目 ID")
     init_parser.add_argument("--title", required=True, help="项目标题")
     init_parser.add_argument("--duration", type=float, default=60.0, help="项目时长（秒）")
-    init_parser.add_argument("--variant", choices=["T2VA", "I2VA", "FL2VA", "L2VA"], default="FL2VA")
+    init_parser.add_argument("--variant", choices=["FL2VA"], default="FL2VA")
     init_parser.add_argument("--global-style", default="", help="全局视觉风格")
 
     for name, help_text in (("validate", "校验项目文档"), ("show", "展示项目摘要")):
@@ -100,9 +97,9 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("--project-id", required=True, help="项目 ID")
     generate_parser.add_argument("--brief", required=True, help="brief 文件路径")
     generate_parser.add_argument("--generation-id", default=None, help="指定生成 ID（默认自动分配）")
-    generate_parser.add_argument("--model", choices=["fl2va", "ref2va", "t2va", "i2va", "l2va"], default=None)
-    generate_parser.add_argument("--mode", choices=["ref", "base"], default=None)
-    generate_parser.add_argument("--variant", choices=["T2VA", "I2VA", "FL2VA", "L2VA"], default=None)
+    generate_parser.add_argument("--model", choices=["fl2va"], default=None)
+    generate_parser.add_argument("--mode", choices=["base"], default=None)
+    generate_parser.add_argument("--variant", choices=["FL2VA"], default=None)
     generate_parser.add_argument("--dry-run", action="store_true", help="只解析 brief，不调用模型或落盘")
     generate_parser.add_argument("--overwrite", action="store_true", help="允许覆盖同一 generation_id")
 
@@ -111,7 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
     show_parser.add_argument("--topic-id", required=True, help="主题 ID")
     show_parser.add_argument("--project-id", required=True, help="项目 ID")
     show_parser.add_argument("--generation", required=True, help="generation_id")
-    show_parser.add_argument("--kind", choices=["script", "video", "character", "prop", "scene", "fl2va", "first-frame", "last-frame"], default=None)
+    show_parser.add_argument("--kind", choices=["script", "video", "fl2va", "first-frame", "last-frame"], default=None)
     show_parser.add_argument("--raw", action="store_true", help="输出正文，供手动复制")
     return parser
 
@@ -139,6 +136,24 @@ def _create_video_with_progress(topic: str, config, **kwargs):
         reporter.unsubscribe(_topic_progress)
 
 
+def _print_generation_result(result, directory) -> None:
+    print(f"\n项目已创建：{result.project_id}")
+    print(f"生成结果目录：{directory}")
+    print("\n剧本：\n" + result.script)
+    if result.fl2va_prompt_bundle is not None:
+        from .generation import render_fl2va_frame_markdown
+        print(f"\n{'=' * 20} FL2VA 首帧提示词 {'=' * 20}\n{render_fl2va_frame_markdown(result, 'first')}")
+        print(f"\n{'=' * 20} FL2VA 尾帧提示词 {'=' * 20}\n{render_fl2va_frame_markdown(result, 'last')}")
+        print(f"\nFL2VA 汇总文件：{directory / 'fl2va-prompt.md'}")
+        print(f"首帧文件：{directory / 'first-frame-prompt.md'}")
+        print(f"尾帧文件：{directory / 'last-frame-prompt.md'}")
+        print("请将首帧/尾帧图片人工绑定到 FL2VA 的 first_frame/last_frame 输入槽；项目不会自动运行 ComfyUI。")
+    else:
+        for kind, label in (("character", "人物提示词"), ("prop", "道具提示词"), ("scene", "场景提示词"), ("video", "视频剧情提示词")):
+            print(f"\n{'=' * 20} {label} {'=' * 20}\n{result.artifact(kind).content}")
+    print("\n以上内容已保存；请手动复制到对应模型并自行审查生成结果。")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -151,19 +166,7 @@ def main(argv: list[str] | None = None) -> int:
             args.topic, config, root=args.root, duration=args.duration,
             style=args.style, language=args.language, variant=args.variant,
         )
-        print(f"\n项目已创建：{result.project_id}")
-        print(f"生成结果目录：{directory}")
-        print("\n剧本：\n" + result.script)
-        for kind, label in (("character", "人物提示词"), ("prop", "道具提示词"), ("scene", "场景提示词"), ("video", "视频剧情提示词")):
-            print(f"\n{'=' * 20} {label} {'=' * 20}\n{result.artifact(kind).content}")
-        if result.fl2va_prompt_bundle is not None:
-            from .generation import render_fl2va_frame_markdown
-            print(f"\n{'=' * 20} FL2VA 首帧提示词 {'=' * 20}\n{render_fl2va_frame_markdown(result, 'first')}")
-            print(f"\n{'=' * 20} FL2VA 尾帧提示词 {'=' * 20}\n{render_fl2va_frame_markdown(result, 'last')}")
-            print(f"\n首帧文件：{directory / 'first-frame-prompt.md'}")
-            print(f"尾帧文件：{directory / 'last-frame-prompt.md'}")
-            print("请将生成的首帧/尾帧图片人工绑定到 FL2VA 的 first_frame/last_frame 输入槽；项目不会自动运行 ComfyUI。")
-        print("\n以上内容已保存；请手动复制到对应模型并自行审查生成结果。")
+        _print_generation_result(result, directory)
         return 0
 
     if args.command == "project":
@@ -179,13 +182,8 @@ def main(argv: list[str] | None = None) -> int:
             if not topic:
                 print("视频主题不能为空。")
                 return 1
-            result, directory = _create_video_with_progress(topic, config)
-            print(f"\n项目已创建：{result.project_id}")
-            print(f"生成结果目录：{directory}")
-            print("\n剧本：\n" + result.script)
-            for kind, label in (("character", "人物提示词"), ("prop", "道具提示词"), ("scene", "场景提示词"), ("video", "视频剧情提示词")):
-                print(f"\n{'=' * 20} {label} {'=' * 20}\n{result.artifact(kind).content}")
-            print("\n以上内容已保存；请手动复制到对应模型并自行审查生成结果。")
+            result, directory = _create_video_with_progress(topic, config, variant="FL2VA")
+            _print_generation_result(result, directory)
         except (KeyboardInterrupt, EOFError):
             print("\n已取消。")
             return 1
@@ -226,16 +224,15 @@ def _run_project_command(args: argparse.Namespace) -> int:
         from .graph.pipeline import run_pipeline_structured
 
         brief = parse_brief(args.brief)
-        if args.model:
-            if args.model == "ref2va":
-                brief.mode = "ref"
-            else:
-                brief.mode = "base"
-                brief.variant = args.model.upper()
-        if args.mode:
-            brief.mode = args.mode
-        if args.variant:
-            brief.variant = args.variant
+        # 产品主流程固定为 base/FL2VA：人物、道具、场景融合进首尾帧。
+        brief.mode = "base"
+        brief.variant = "FL2VA"
+        if args.model and args.model != "fl2va":
+            raise ValueError("当前产品只支持 FL2VA")
+        if args.mode and args.mode != "base":
+            raise ValueError("当前产品只支持 base/FL2VA")
+        if args.variant and args.variant != "FL2VA":
+            raise ValueError("当前产品只支持 FL2VA")
         if args.dry_run:
             print(json.dumps({"topic_id": args.topic_id, "project_id": args.project_id, "brief": {"mode": brief.mode, "variant": brief.variant, "duration": brief.duration, "style": brief.style, "language": brief.language, "plot": brief.plot}, "dry_run": True}, ensure_ascii=False, indent=2))
             return 0
@@ -247,9 +244,10 @@ def _run_project_command(args: argparse.Namespace) -> int:
             topic_id=args.topic_id, project_id=args.project_id,
         )
         directory = store.save_generation_result(args.topic_id, args.project_id, result, overwrite=args.overwrite)
-        names = ["script.md", "video-prompt.md", "character-prompt.md", "prop-prompt.md", "scene-prompt.md"]
         if result.fl2va_prompt_bundle is not None:
-            names.extend(["fl2va-prompt.md", "first-frame-prompt.md", "last-frame-prompt.md"])
+            names = ["script.md", "video-prompt.md", "fl2va-prompt.md", "first-frame-prompt.md", "last-frame-prompt.md"]
+        else:
+            names = ["script.md", "video-prompt.md", "character-prompt.md", "prop-prompt.md", "scene-prompt.md"]
         print(json.dumps({"generation_id": generation_id, "directory": str(directory), "artifacts": [str(directory / name) for name in names]}, ensure_ascii=False, indent=2))
         return 0
 
@@ -315,16 +313,15 @@ def _run_cli(args: argparse.Namespace) -> int:
     from .config import config
 
     brief = parse_brief(args.brief)
-    if args.model:  # 模型优先（fl2va → base/FL2VA；ref2va → ref）
-        if args.model == "ref2va":
-            brief.mode = "ref"
-        else:
-            brief.mode = "base"
-            brief.variant = args.model.upper()
-    if args.mode:
-        brief.mode = args.mode
-    if args.variant:
-        brief.variant = args.variant
+    # 产品主流程固定为 base/FL2VA，不再生成 T2VA 或独立人物/道具/场景结果。
+    brief.mode = "base"
+    brief.variant = "FL2VA"
+    if args.model and args.model != "fl2va":
+        raise ValueError("当前产品只支持 FL2VA")
+    if args.mode and args.mode != "base":
+        raise ValueError("当前产品只支持 base/FL2VA")
+    if args.variant and args.variant != "FL2VA":
+        raise ValueError("当前产品只支持 FL2VA")
     if args.polish and not brief.draft:
         print("[提示] --polish 需要 brief 里有「草稿提示词」段落；当前没有草稿，按全流程生成。")
 
@@ -351,7 +348,3 @@ def _run_cli(args: argparse.Namespace) -> int:
     print("=" * 60)
     print(final_prompt)
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

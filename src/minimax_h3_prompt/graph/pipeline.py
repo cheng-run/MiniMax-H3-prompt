@@ -33,7 +33,6 @@ _LINEAR_CHAIN = [
     "screenwriter",
     "parallel_designers",  # character ‖ background ‖ prop designers
     "art_director",
-    "parallel_image_prompts",  # character/prop/scene → Z-Image + Flux.2
     "storyboard",
     "parallel_decisions",  # shot_rt ‖ identity_rt
     "parallel_visual",     # cinematographer ‖ reference_consistency
@@ -67,9 +66,6 @@ def build_pipeline_graph(model, brief: Brief, config: Config):
     g.add_node("creative_rt", make_creative_rt_node(creative_rt, model, brief))
     g.add_node("parallel_designers", make_parallel(
         nodes["character_designer"], nodes["background_designer"], nodes["prop_designer"],
-    ))
-    g.add_node("parallel_image_prompts", make_parallel(
-        nodes["image_prompt_character"], nodes["image_prompt_prop"], nodes["image_prompt_scene"],
     ))
     g.add_node("parallel_decisions", make_parallel(
         make_shot_rt_node(shot_rt, model, brief),

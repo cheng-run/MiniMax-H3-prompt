@@ -303,7 +303,7 @@ class ProjectStore:
         *,
         overwrite: bool = False,
     ) -> Path:
-        """保存剧本与四类提示词；不修改资产状态，也不调用外部服务。"""
+        """保存剧本、视频提示词和 FL2VA 首尾帧产物；不修改资产状态，也不调用外部服务。"""
         if result.topic_id != topic_id or result.project_id != project_id:
             raise ValueError("GenerationResult 的 topic_id/project_id 与项目不一致")
         self.load_project(topic_id, project_id)
@@ -369,9 +369,13 @@ class ProjectStore:
 
     def show_generation(self, topic_id: str, project_id: str, generation_id: str, *, kind: str | None = None, raw: bool = False) -> dict[str, Any]:
         result = self.load_generation_result(topic_id, project_id, generation_id)
-        legacy_kinds = ["script", "video", "character", "prop", "scene"]
-        frame_kinds = ["fl2va", "first-frame", "last-frame"] if result.fl2va_prompt_bundle else []
-        kinds = [kind] if kind else legacy_kinds + frame_kinds
+        if result.fl2va_prompt_bundle is not None:
+            legacy_kinds = ["script", "video", "fl2va", "first-frame", "last-frame"]
+            frame_kinds = ["fl2va", "first-frame", "last-frame"]
+        else:
+            legacy_kinds = ["script", "video", "character", "prop", "scene"]
+            frame_kinds = []
+        kinds = [kind] if kind else legacy_kinds
         output: dict[str, Any] = {
             "generation_id": generation_id,
             "topic_id": topic_id,

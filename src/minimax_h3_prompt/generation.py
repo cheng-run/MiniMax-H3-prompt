@@ -433,11 +433,17 @@ class GenerationResult:
         if self.duration <= 0:
             raise ValueError("duration 必须大于 0")
         kinds = [artifact.kind for artifact in self.artifacts]
-        missing = [kind for kind in _PROMPT_KINDS if kind != "script" and kind not in kinds]
-        if "script" in kinds or missing:
-            raise ValueError("GenerationResult 的 artifacts 只能保存四类提示词，且不能重复或缺失")
-        if len(kinds) != len(set(kinds)):
-            raise ValueError("GenerationResult 不允许重复提示词类型")
+        if self.variant.upper() == "FL2VA":
+            if self.fl2va_prompt_bundle is None:
+                raise ValueError("FL2VA GenerationResult 必须包含首尾帧提示词")
+            if kinds != ["video"]:
+                raise ValueError("FL2VA GenerationResult 只保存 video artifact；人物、道具、场景必须融合到首尾帧")
+        else:
+            missing = [kind for kind in _PROMPT_KINDS if kind != "script" and kind not in kinds]
+            if "script" in kinds or missing:
+                raise ValueError("GenerationResult 的 artifacts 只能保存四类提示词，且不能重复或缺失")
+            if len(kinds) != len(set(kinds)):
+                raise ValueError("GenerationResult 不允许重复提示词类型")
         for artifact in self.artifacts:
             if not _SHA256.fullmatch(artifact.sha256):
                 raise ValueError("提示词产物必须带有效 SHA-256")
@@ -530,27 +536,45 @@ def result_from_state(
         "prop": state.get("prop_design", ""),
         "scene": state.get("background_design", ""),
     }
-    missing = [kind for kind, content in values.items() if not str(content).strip()]
-    if missing:
-        raise ValueError("管线缺少结构化产物：" + ", ".join(missing))
-    artifacts = tuple(
-        PromptArtifact(
-            artifact_id=f"{generation_id}-{kind}",
-            kind=kind,
-            content=str(values[kind]),
-            source_stage={"video": "final_prompt", "character": "character_design", "prop": "prop_design", "scene": "background_design"}[kind],
-            created_at=_now(),
-        )
-        for kind in ("video", "character", "prop", "scene")
-    )
-    image_bundle = None
     if brief.variant.upper() == "FL2VA":
+        required = {"script": values["script"], "video": values["video"]}
+        missing = [kind for kind, content in required.items() if not str(content).strip()]
+        if missing:
+            raise ValueError("管线缺少结构化产物：" + ", ".join(missing))
         raw_bundle = state.get("fl2va_prompt_bundle")
         if not isinstance(raw_bundle, dict):
             raise ValueError("管线缺少 FL2VA 首尾帧提示词")
         image_bundle = fl2va_bundle_from_dict(raw_bundle, brief)
-    elif isinstance(state.get("fl2va_prompt_bundle"), dict):
-        image_bundle = FL2VAPromptBundle.from_dict(state["fl2va_prompt_bundle"])
+        artifacts = (
+            PromptArtifact(
+                artifact_id=f"{generation_id}-video",
+                kind="video",
+                content=str(values["video"]),
+                source_stage="final_prompt",
+                created_at=_now(),
+            ),
+        )
+        image_prompts: tuple[ImagePromptVariant, ...] = ()
+    else:
+        missing = [kind for kind, content in values.items() if not str(content).strip()]
+        if missing:
+            raise ValueError("管线缺少结构化产物：" + ", ".join(missing))
+        artifacts = tuple(
+            PromptArtifact(
+                artifact_id=f"{generation_id}-{kind}",
+                kind=kind,
+                content=str(values[kind]),
+                source_stage={"video": "final_prompt", "character": "character_design", "prop": "prop_design", "scene": "background_design"}[kind],
+                created_at=_now(),
+            )
+            for kind in ("video", "character", "prop", "scene")
+        )
+        image_bundle = (
+            FL2VAPromptBundle.from_dict(state["fl2va_prompt_bundle"])
+            if isinstance(state.get("fl2va_prompt_bundle"), dict)
+            else None
+        )
+        image_prompts = image_prompt_variants(state, brief)
 
     return GenerationResult(
         generation_id=generation_id,
@@ -564,7 +588,7 @@ def result_from_state(
         style=brief.style,
         language=brief.language,
         brief_snapshot=brief_snapshot(brief),
-        image_prompts=image_prompt_variants(state, brief),
+        image_prompts=image_prompts,
         fl2va_prompt_bundle=image_bundle,
         created_at=_now(),
         schema_version="generation_result.v2" if image_bundle is not None else "generation_result.v1",
@@ -684,21 +708,22 @@ def render_fl2va_markdown(result: GenerationResult) -> str:
     ]
     return "\n".join(parts).rstrip() + "\n"
 def render_generation(result: GenerationResult) -> dict[str, str]:
-    """返回旧五类产物，并在 FL2VA 结果中附加首尾帧文件内容。"""
-    rendered = {
+    """返回当前生成模式的可复制产物；FL2VA 只输出融合首尾帧。"""
+    if result.fl2va_prompt_bundle is not None:
+        return {
+            "script": result.script,
+            "video": result.artifact("video").content,
+            "fl2va": render_fl2va_markdown(result),
+            "first-frame": render_fl2va_frame_markdown(result, "first"),
+            "last-frame": render_fl2va_frame_markdown(result, "last"),
+        }
+    return {
         "script": result.script,
         "video": result.artifact("video").content,
         "character": render_image_prompt_markdown(result, "character"),
         "prop": render_image_prompt_markdown(result, "prop"),
         "scene": render_image_prompt_markdown(result, "scene"),
     }
-    if result.fl2va_prompt_bundle is not None:
-        rendered.update({
-            "fl2va": render_fl2va_markdown(result),
-            "first-frame": render_fl2va_frame_markdown(result, "first"),
-            "last-frame": render_fl2va_frame_markdown(result, "last"),
-        })
-    return rendered
 
 
 __all__ = [
