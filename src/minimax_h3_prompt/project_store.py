@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .asset_store import AssetStore
+from .generation import GenerationResult, generation_directory, render_generation
 from .project_models import AssetRegistry, ProjectBible, ShotPlan
 
 _PROJECT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
@@ -294,6 +295,111 @@ class ProjectStore:
             issues.append(ProjectIssue("SHOT_PLAN_NOT_LOCKED", "ShotPlan 尚未锁定", "warning"))
         return issues
 
+    def save_generation_result(
+        self,
+        topic_id: str,
+        project_id: str,
+        result: GenerationResult,
+        *,
+        overwrite: bool = False,
+    ) -> Path:
+        """保存剧本与四类提示词；不修改资产状态，也不调用外部服务。"""
+        if result.topic_id != topic_id or result.project_id != project_id:
+            raise ValueError("GenerationResult 的 topic_id/project_id 与项目不一致")
+        self.load_project(topic_id, project_id)
+        directory = generation_directory(self.project_directory(topic_id, project_id), result.generation_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        _write_json(directory / "generation.json", result.to_dict(), overwrite=overwrite)
+        if result.fl2va_prompt_bundle is not None:
+            _write_json(
+                directory / "fl2va-prompt.json",
+                result.fl2va_prompt_bundle.to_dict(),
+                overwrite=overwrite,
+            )
+        files = render_generation(result)
+        names = {
+            "script": "script.md", "video": "video-prompt.md",
+            "character": "character-prompt.md", "prop": "prop-prompt.md", "scene": "scene-prompt.md",
+            "fl2va": "fl2va-prompt.md", "first-frame": "first-frame-prompt.md", "last-frame": "last-frame-prompt.md",
+        }
+        for kind, content in files.items():
+            path = directory / names[kind]
+            text = content.rstrip("\n") + "\n"
+            if path.exists() and not overwrite and path.read_text(encoding="utf-8") != text:
+                raise FileExistsError(f"目标已存在且内容不同：{path}")
+            if not path.exists() or overwrite:
+                path.write_text(text, encoding="utf-8")
+        index_path = self.project_directory(topic_id, project_id) / "prompt-artifacts.json"
+        index = {"schema_version": "prompt_artifacts.v1", "generations": []}
+        if index_path.exists():
+            index = _read_mapping(index_path)
+        entries = [entry for entry in index.get("generations", []) if entry.get("generation_id") != result.generation_id]
+        entries.append({"generation_id": result.generation_id, "created_at": result.created_at, "directory": str(directory), "artifacts": [artifact.to_dict() for artifact in result.artifacts]})
+        _write_json(index_path, {"schema_version": "prompt_artifacts.v1", "generations": entries}, overwrite=True)
+        return directory
+
+    def load_generation_result(self, topic_id: str, project_id: str, generation_id: str) -> GenerationResult:
+        self.load_project(topic_id, project_id)
+        directory = generation_directory(self.project_directory(topic_id, project_id), generation_id)
+        result = GenerationResult.from_dict(_read_mapping(directory / "generation.json"))
+        if result.topic_id != topic_id or result.project_id != project_id:
+            raise ValueError("GenerationResult 的身份与项目目录不一致")
+        bundle_path = directory / "fl2va-prompt.json"
+        if result.fl2va_prompt_bundle is not None:
+            if not bundle_path.is_file():
+                raise ValueError("FL2VA 提示词 JSON 缺失：fl2va-prompt.json")
+            if _read_mapping(bundle_path) != result.fl2va_prompt_bundle.to_dict():
+                raise ValueError("FL2VA 提示词 JSON 与 generation.json 不一致")
+        files = render_generation(result)
+        names = {
+            "script": "script.md", "video": "video-prompt.md",
+            "character": "character-prompt.md", "prop": "prop-prompt.md", "scene": "scene-prompt.md",
+            "fl2va": "fl2va-prompt.md", "first-frame": "first-frame-prompt.md", "last-frame": "last-frame-prompt.md",
+        }
+        for kind, content in files.items():
+            actual = (directory / names[kind]).read_text(encoding="utf-8").rstrip("\n")
+            if actual != content.rstrip("\n"):
+                raise ValueError(f"生成产物正文不一致：{names[kind]}")
+        return result
+
+    def list_generation_results(self, topic_id: str, project_id: str) -> list[dict[str, Any]]:
+        self.load_project(topic_id, project_id)
+        path = self.project_directory(topic_id, project_id) / "prompt-artifacts.json"
+        return list(_read_mapping(path).get("generations", [])) if path.exists() else []
+
+    def show_generation(self, topic_id: str, project_id: str, generation_id: str, *, kind: str | None = None, raw: bool = False) -> dict[str, Any]:
+        result = self.load_generation_result(topic_id, project_id, generation_id)
+        legacy_kinds = ["script", "video", "character", "prop", "scene"]
+        frame_kinds = ["fl2va", "first-frame", "last-frame"] if result.fl2va_prompt_bundle else []
+        kinds = [kind] if kind else legacy_kinds + frame_kinds
+        output: dict[str, Any] = {
+            "generation_id": generation_id,
+            "topic_id": topic_id,
+            "project_id": project_id,
+            "directory": str(generation_directory(self.project_directory(topic_id, project_id), generation_id)),
+            "artifacts": {},
+        }
+        rendered = render_generation(result)
+        for item in kinds:
+            if item in frame_kinds:
+                if item not in rendered:
+                    raise KeyError(f"生成结果中不存在提示词类型：{item}")
+                output["artifacts"][item] = (
+                    rendered[item]
+                    if raw else {"source": "fl2va_prompt_bundle", "file": {
+                        "fl2va": "fl2va-prompt.md", "first-frame": "first-frame-prompt.md",
+                        "last-frame": "last-frame-prompt.md",
+                    }[item]}
+                )
+                continue
+            artifact = result.artifact(item)
+            output["artifacts"][item] = artifact.content if raw else {
+                "artifact_id": artifact.artifact_id,
+                "sha256": artifact.sha256,
+                "source_stage": artifact.source_stage,
+            }
+        return output
+
     def show(self, topic_id: str, project_id: str) -> dict[str, Any]:
         """返回不含任何秘密的项目摘要。"""
         document = self.load_project(topic_id, project_id)
@@ -312,6 +418,7 @@ class ProjectStore:
                 "shot_plan": document.shot_plan.status,
             },
         }
+
 
 
 def _read_mapping(path: Path) -> dict[str, Any]:

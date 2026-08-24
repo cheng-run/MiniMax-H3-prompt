@@ -1,6 +1,7 @@
 """LangGraph 节点工厂：把角色 agent 包装成节点，构造各节点所需的用户消息。"""
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
@@ -9,6 +10,7 @@ from langgraph.graph.state import CompiledStateGraph
 from ..agents import run_agent
 from ..brief_parser import Brief, brief_uses_refs
 from ..config import Config
+from ..generation import fl2va_bundle_from_dict
 from ..tools.h3_validator import validate_prompt
 from ..tools.ref_metadata import format_ref_meta
 from .state import PipelineState
@@ -79,7 +81,94 @@ def _make_design_node(agents: dict, role: str, output_field: str, label: str) ->
     return node
 
 
-def _make_art_director_node(agents: dict) -> Callable:
+def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_field: str) -> Callable:
+    """把模型无关设计资料翻译为 Z-Image/Flux.2 双版本提示词。"""
+    def node(state: PipelineState) -> dict:
+        brief: Brief = state["brief"]
+        message = (
+            f"请为{kind}生成 Z-Image 和 Flux.2 两个可直接复制的生图提示词。只输出 JSON。\n"
+            + _ctx(
+                原始剧情=brief.plot,
+                分场剧本=state.get("script", ""),
+                对应设计=state.get(design_field, ""),
+                美术统筹=state.get("art_design", ""),
+                视觉风格=brief.style,
+                语言=brief.language,
+            )
+        )
+        raw = run_agent(agents["image_prompt_engineer"], message)
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            repair = run_agent(agents["image_prompt_engineer"], f"把以下内容转换为严格 JSON，不要 markdown：\n{raw}")
+            try:
+                parsed = json.loads(repair)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{kind} 生图提示词不是有效 JSON") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError(f"{kind} 生图提示词 JSON 顶层必须是对象")
+        return {output_field: parsed}
+    return node
+
+
+def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
+    """把完整镜头上下文转换为 FL2VA 融合首帧/尾帧提示词。"""
+    def parse_bundle(raw: str, brief: Brief) -> dict:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            repair = run_agent(
+                agents["frame_prompt_engineer"],
+                f"把以下内容转换为严格 JSON，不要 markdown，必须保留 first、last、scene_anchor 和 continuity_constraints：\n{raw}",
+            )
+            try:
+                parsed = json.loads(repair)
+            except json.JSONDecodeError as exc:
+                raise ValueError("FL2VA 首尾帧提示词不是有效 JSON") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("FL2VA 首尾帧提示词 JSON 顶层必须是对象")
+        bundle = fl2va_bundle_from_dict(parsed, brief)
+        return bundle.to_dict()
+
+    def node(state: PipelineState) -> dict:
+        brief: Brief = state["brief"]
+        if brief.variant.upper() != "FL2VA":
+            return {}
+        message = (
+            "请为这一段 FL2VA 视频生成融合的首帧和尾帧静态生图提示词。"
+            "人物、道具和场景必须同时出现在每一张关键帧中；主题地点是硬约束。只输出 JSON。\n"
+            + _ctx(
+                原始主题=brief.plot,
+                时长=f"{brief.duration}s",
+                视觉风格=brief.style,
+                语言=brief.language,
+                分场剧本=state.get("script", ""),
+                人物设计=state.get("character_design", ""),
+                道具设计=state.get("prop_design", ""),
+                背景设计=state.get("background_design", ""),
+                美术统筹=state.get("art_design", ""),
+                分镜表=state.get("shot_table", ""),
+                镜头评审锁定=state.get("shot_review_lock", ""),
+                画面细化=state.get("visual_design", ""),
+                身份一致性锁定=state.get("identity_lock", ""),
+            )
+        )
+        raw = run_agent(agents["frame_prompt_engineer"], message)
+        try:
+            bundle = parse_bundle(raw, brief)
+        except ValueError as first_error:
+            repair = run_agent(
+                agents["frame_prompt_engineer"],
+                f"重写以下 FL2VA JSON，使其通过主题地点和首尾帧连续性校验。不要 markdown。\n"
+                f"主题：{brief.plot}\n错误：{first_error}\n原始结果：{raw}",
+            )
+            try:
+                bundle = parse_bundle(repair, brief)
+            except ValueError as exc:
+                raise ValueError(f"FL2VA 首尾帧提示词生成失败：{exc}") from exc
+        return {"fl2va_prompt_bundle": bundle}
+
+    return node
     def node(state: PipelineState) -> dict:
         brief: Brief = state["brief"]
         refs = format_ref_meta(brief.refs) if brief.refs else "（无）"
@@ -243,6 +332,10 @@ def make_nodes(agents: dict, model, brief: Brief, config: Config) -> dict[str, C
         "character_designer": _make_design_node(agents, "character_designer", "character_design", "人物形象设计"),
         "background_designer": _make_design_node(agents, "background_designer", "background_design", "背景设计"),
         "prop_designer": _make_design_node(agents, "prop_designer", "prop_design", "道具设计"),
+        "image_prompt_character": _make_image_prompt_node(agents, "人物", "character_design", "character_image_prompts"),
+        "image_prompt_prop": _make_image_prompt_node(agents, "道具", "prop_design", "prop_image_prompts"),
+        "image_prompt_scene": _make_image_prompt_node(agents, "场景", "background_design", "scene_image_prompts"),
+        "fl2va_frame_prompts": _make_fl2va_frame_prompt_node(agents),
         "art_director": _make_art_director_node(agents),
         "storyboard": _make_storyboard_node(agents),
         "cinematographer": _make_cinematographer_node(agents),

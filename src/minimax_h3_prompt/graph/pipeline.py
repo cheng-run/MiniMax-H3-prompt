@@ -33,9 +33,11 @@ _LINEAR_CHAIN = [
     "screenwriter",
     "parallel_designers",  # character ‖ background ‖ prop designers
     "art_director",
+    "parallel_image_prompts",  # character/prop/scene → Z-Image + Flux.2
     "storyboard",
     "parallel_decisions",  # shot_rt ‖ identity_rt
     "parallel_visual",     # cinematographer ‖ reference_consistency
+    "fl2va_frame_prompts",  # FL2VA 首帧/尾帧融合生图提示词
     "parallel_sound",      # sound_designer ‖ composer
     "prompt_engineer",
     "finalize",
@@ -45,6 +47,7 @@ _LINEAR_CHAIN = [
 _FOLDED_NODES = {
     "cinematographer", "reference_consistency", "sound_designer", "composer",
     "character_designer", "background_designer", "prop_designer",
+    "image_prompt_character", "image_prompt_prop", "image_prompt_scene",
 }
 
 
@@ -65,6 +68,9 @@ def build_pipeline_graph(model, brief: Brief, config: Config):
     g.add_node("parallel_designers", make_parallel(
         nodes["character_designer"], nodes["background_designer"], nodes["prop_designer"],
     ))
+    g.add_node("parallel_image_prompts", make_parallel(
+        nodes["image_prompt_character"], nodes["image_prompt_prop"], nodes["image_prompt_scene"],
+    ))
     g.add_node("parallel_decisions", make_parallel(
         make_shot_rt_node(shot_rt, model, brief),
         make_identity_rt_node(identity_rt, model, brief),
@@ -83,11 +89,8 @@ def build_pipeline_graph(model, brief: Brief, config: Config):
     return g.compile(), agents
 
 
-def run_pipeline(brief: Brief, config: Config) -> str:
-    """端到端跑一遍，返回最终 H3 提示词。
-
-    流式驱动图（每个节点完成后落盘产物），并把 token 计量/进度事件交给观测组件。
-    """
+def _execute_pipeline(brief: Brief, config: Config) -> tuple[dict, object]:
+    """执行完整管线并返回最终 state 与 brief；项目层不应直接进入图内部。"""
     from ..model_factory import build_chat_model
 
     model = build_chat_model()
@@ -138,4 +141,29 @@ def run_pipeline(brief: Brief, config: Config) -> str:
         stage_saver.save(f"qa_refine_{i}", {"质检建议": review, "重出提示词": prompt})
 
     prompt, _ = assemble_and_repair(prompt, brief.mode, brief.variant)
-    return prompt
+    state["final_prompt"] = prompt
+    return state, brief
+
+
+def run_pipeline_structured(
+    brief: Brief,
+    config: Config,
+    *,
+    generation_id: str = "GEN001",
+    topic_id: str = "",
+    project_id: str = "",
+):
+    """运行管线并返回剧本、三类生图提示词和视频 H3 提示词。"""
+    from ..generation import result_from_state
+
+    state, brief = _execute_pipeline(brief, config)
+    return result_from_state(
+        state, brief, generation_id=generation_id,
+        topic_id=topic_id, project_id=project_id,
+    )
+
+
+def run_pipeline(brief: Brief, config: Config) -> str:
+    """端到端跑一遍，保持旧接口并只返回最终 H3 提示词。"""
+    state, _ = _execute_pipeline(brief, config)
+    return str(state.get("final_prompt", ""))

@@ -26,12 +26,17 @@ class PipelineState(TypedDict, total=False):
     background_design: str  # 背景设计师
     prop_design: str  # 道具设计师
     art_design: str  # 美术指导统筹结果
+    character_image_prompts: dict  # Z-Image/Flux.2 人物提示词
+    prop_image_prompts: dict  # Z-Image/Flux.2 道具提示词
+    scene_image_prompts: dict  # Z-Image/Flux.2 场景提示词
     identity_lock: str  # 一致性对齐会（圆桌 3）锁定
 
     # 视觉（分镜 → 并行决策 → 并行制作）
     shot_table: str  # 分镜
     shot_review_lock: str  # 镜头评审会（圆桌 2）锁定
     visual_design: str  # 摄影指导
+    fl2va_prompt_bundle: dict  # FL2VA 融合首帧/尾帧提示词
+    fl2va_prompt_issues: list[str]  # FL2VA 确定性校验问题
     subject_defs: str  # 参考资产与一致性（subject_definitions 素材）
 
     # 声音（并行）

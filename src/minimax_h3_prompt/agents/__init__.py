@@ -31,6 +31,8 @@ ROLE_KEYS = [
     "character_designer",
     "background_designer",
     "prop_designer",
+    "image_prompt_engineer",
+    "frame_prompt_engineer",
     "storyboard",
     "cinematographer",
     "sound_designer",

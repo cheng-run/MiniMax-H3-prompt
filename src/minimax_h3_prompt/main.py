@@ -26,6 +26,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true", help="只解析 brief 不跑 LLM 管线（自检用）")
 
     project = parser.add_subparsers(dest="command")
+    create_parser = project.add_parser("create-video", help="输入主题，自动生成剧本与视频/关键帧提示词")
+    create_parser.add_argument("--topic", required=True, help="视频主题")
+    create_parser.add_argument("--root", default=r"D:\\笔记\\Assets", help="Assets 根目录")
+    create_parser.add_argument("--duration", type=float, default=None, help="视频时长（秒，默认使用配置）")
+    create_parser.add_argument("--style", default=None, help="视觉风格（默认使用配置）")
+    create_parser.add_argument("--language", default=None, help="提示词语言（默认使用配置）")
+    create_parser.add_argument("--variant", choices=["T2VA", "I2VA", "FL2VA", "L2VA"], default="T2VA")
+
     project_parser = project.add_parser("project", help="管理长视频项目文档（离线，不调用模型）")
     project_parser.add_argument("--root", default=r"D:\笔记\Assets", help="Assets 根目录")
     project_commands = project_parser.add_subparsers(dest="project_command", required=True)
@@ -85,23 +93,102 @@ def build_parser() -> argparse.ArgumentParser:
     profile_parser.add_argument("--reviewer", default="", help="验收人标识")
     profile_parser.add_argument("--note", default="", help="附加说明")
     profile_parser.add_argument("--generation", default="", help="关联的 generation_id（approved 时需要）")
+
+    generate_parser = project_commands.add_parser("generate-prompts", help="从 brief 生成剧本与视频/关键帧提示词并保存到项目")
+    generate_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    generate_parser.add_argument("--topic-id", required=True, help="主题 ID")
+    generate_parser.add_argument("--project-id", required=True, help="项目 ID")
+    generate_parser.add_argument("--brief", required=True, help="brief 文件路径")
+    generate_parser.add_argument("--generation-id", default=None, help="指定生成 ID（默认自动分配）")
+    generate_parser.add_argument("--model", choices=["fl2va", "ref2va", "t2va", "i2va", "l2va"], default=None)
+    generate_parser.add_argument("--mode", choices=["ref", "base"], default=None)
+    generate_parser.add_argument("--variant", choices=["T2VA", "I2VA", "FL2VA", "L2VA"], default=None)
+    generate_parser.add_argument("--dry-run", action="store_true", help="只解析 brief，不调用模型或落盘")
+    generate_parser.add_argument("--overwrite", action="store_true", help="允许覆盖同一 generation_id")
+
+    show_parser = project_commands.add_parser("show-prompts", help="查看项目中的剧本与提示词")
+    show_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    show_parser.add_argument("--topic-id", required=True, help="主题 ID")
+    show_parser.add_argument("--project-id", required=True, help="项目 ID")
+    show_parser.add_argument("--generation", required=True, help="generation_id")
+    show_parser.add_argument("--kind", choices=["script", "video", "character", "prop", "scene", "fl2va", "first-frame", "last-frame"], default=None)
+    show_parser.add_argument("--raw", action="store_true", help="输出正文，供手动复制")
     return parser
+
+
+def _topic_progress(event: dict) -> None:
+    """把主题单入口的模型调用进度显示给最终用户。"""
+    event_type = event.get("type")
+    role = event.get("role", "模型")
+    if event_type == "agent_start":
+        print(f"[进行中] {role} 正在处理……", flush=True)
+    elif event_type == "agent_done":
+        duration = event.get("duration", 0.0)
+        print(f"[完成] {role}（{duration:.1f}s）", flush=True)
+
+
+def _create_video_with_progress(topic: str, config, **kwargs):
+    """运行主题生成，并确保异常或中断时解除进度订阅。"""
+    from .observability import reporter
+    from .project_generation import create_video_from_topic
+
+    reporter.subscribe(_topic_progress)
+    try:
+        return create_video_from_topic(topic, config, **kwargs)
+    finally:
+        reporter.unsubscribe(_topic_progress)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
+    if args.command == "create-video":
+        from .config import config
+        from .generation import render_generation
+        from .project_generation import create_video_from_topic
+
+        result, directory = _create_video_with_progress(
+            args.topic, config, root=args.root, duration=args.duration,
+            style=args.style, language=args.language, variant=args.variant,
+        )
+        print(f"\n项目已创建：{result.project_id}")
+        print(f"生成结果目录：{directory}")
+        print("\n剧本：\n" + result.script)
+        for kind, label in (("character", "人物提示词"), ("prop", "道具提示词"), ("scene", "场景提示词"), ("video", "视频剧情提示词")):
+            print(f"\n{'=' * 20} {label} {'=' * 20}\n{result.artifact(kind).content}")
+        if result.fl2va_prompt_bundle is not None:
+            from .generation import render_fl2va_frame_markdown
+            print(f"\n{'=' * 20} FL2VA 首帧提示词 {'=' * 20}\n{render_fl2va_frame_markdown(result, 'first')}")
+            print(f"\n{'=' * 20} FL2VA 尾帧提示词 {'=' * 20}\n{render_fl2va_frame_markdown(result, 'last')}")
+            print(f"\n首帧文件：{directory / 'first-frame-prompt.md'}")
+            print(f"尾帧文件：{directory / 'last-frame-prompt.md'}")
+            print("请将生成的首帧/尾帧图片人工绑定到 FL2VA 的 first_frame/last_frame 输入槽；项目不会自动运行 ComfyUI。")
+        print("\n以上内容已保存；请手动复制到对应模型并自行审查生成结果。")
+        return 0
+
     if args.command == "project":
         return _run_project_command(args)
 
     if not args.brief:
-        # 统一入口：无 --brief → 交互菜单
-        from .ui.menu import run_interactive
+        # 面向最终用户的单入口：只输入主题，项目自动完成其余生产步骤。
+        from .config import config
+        from .project_generation import create_video_from_topic
 
         try:
-            run_interactive()
+            topic = input("请输入视频主题：\n> ").strip()
+            if not topic:
+                print("视频主题不能为空。")
+                return 1
+            result, directory = _create_video_with_progress(topic, config)
+            print(f"\n项目已创建：{result.project_id}")
+            print(f"生成结果目录：{directory}")
+            print("\n剧本：\n" + result.script)
+            for kind, label in (("character", "人物提示词"), ("prop", "道具提示词"), ("scene", "场景提示词"), ("video", "视频剧情提示词")):
+                print(f"\n{'=' * 20} {label} {'=' * 20}\n{result.artifact(kind).content}")
+            print("\n以上内容已保存；请手动复制到对应模型并自行审查生成结果。")
         except (KeyboardInterrupt, EOFError):
-            print("\n再见 👋")
+            print("\n已取消。")
+            return 1
         return 0
 
     return _run_cli(args)
@@ -132,6 +219,42 @@ def _run_project_command(args: argparse.Namespace) -> int:
 
     if args.project_command == "show":
         print(json.dumps(store.show(args.topic_id, args.project_id), ensure_ascii=False, indent=2))
+        return 0
+
+    if args.project_command == "generate-prompts":
+        from .brief_parser import parse_brief
+        from .graph.pipeline import run_pipeline_structured
+
+        brief = parse_brief(args.brief)
+        if args.model:
+            if args.model == "ref2va":
+                brief.mode = "ref"
+            else:
+                brief.mode = "base"
+                brief.variant = args.model.upper()
+        if args.mode:
+            brief.mode = args.mode
+        if args.variant:
+            brief.variant = args.variant
+        if args.dry_run:
+            print(json.dumps({"topic_id": args.topic_id, "project_id": args.project_id, "brief": {"mode": brief.mode, "variant": brief.variant, "duration": brief.duration, "style": brief.style, "language": brief.language, "plot": brief.plot}, "dry_run": True}, ensure_ascii=False, indent=2))
+            return 0
+        from .config import config
+        existing = store.list_generation_results(args.topic_id, args.project_id)
+        generation_id = args.generation_id or f"GEN{len(existing) + 1:03d}"
+        result = run_pipeline_structured(
+            brief, config, generation_id=generation_id,
+            topic_id=args.topic_id, project_id=args.project_id,
+        )
+        directory = store.save_generation_result(args.topic_id, args.project_id, result, overwrite=args.overwrite)
+        names = ["script.md", "video-prompt.md", "character-prompt.md", "prop-prompt.md", "scene-prompt.md"]
+        if result.fl2va_prompt_bundle is not None:
+            names.extend(["fl2va-prompt.md", "first-frame-prompt.md", "last-frame-prompt.md"])
+        print(json.dumps({"generation_id": generation_id, "directory": str(directory), "artifacts": [str(directory / name) for name in names]}, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.project_command == "show-prompts":
+        print(json.dumps(store.show_generation(args.topic_id, args.project_id, args.generation, kind=args.kind, raw=args.raw), ensure_ascii=False, indent=2))
         return 0
 
     from .execution import (

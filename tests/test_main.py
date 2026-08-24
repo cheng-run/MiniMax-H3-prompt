@@ -50,6 +50,57 @@ def test_project_cli_validation_returns_error_for_malformed_document(tmp_path, c
         "--topic-id", "topic", "--project-id", "project",
     ]) == 1
     assert "PROJECT_DOCUMENT_INVALID" in capsys.readouterr().out
+def test_project_cli_generate_and_show_prompts(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "Assets"
+    brief_path = tmp_path / "brief.md"
+    brief_path.write_text("## 剧情\n雨夜街角收到旧信。\n", encoding="utf-8")
+    assert main([
+        "project", "--root", str(root), "init", "--topic-id", "topic",
+        "--project-id", "project", "--title", "Title",
+    ]) == 0
+    capsys.readouterr()
+
+    from minimax_h3_prompt.generation import result_from_state
+    from minimax_h3_prompt.graph import pipeline
+
+    def fake_structured(brief, config, *, generation_id, topic_id, project_id):
+        return result_from_state({
+            "script": "剧本", "final_prompt": "视频", "character_design": "人物",
+            "prop_design": "道具", "background_design": "场景",
+        }, brief, generation_id=generation_id, topic_id=topic_id, project_id=project_id)
+
+    monkeypatch.setattr(pipeline, "run_pipeline_structured", fake_structured)
+    assert main([
+        "project", "--root", str(root), "generate-prompts", "--topic-id", "topic",
+        "--project-id", "project", "--brief", str(brief_path), "--generation-id", "GEN001",
+    ]) == 0
+    generated = json.loads(capsys.readouterr().out)
+    assert generated["generation_id"] == "GEN001"
+
+    assert main([
+        "project", "--root", str(root), "show-prompts", "--topic-id", "topic",
+        "--project-id", "project", "--generation", "GEN001", "--kind", "video", "--raw",
+    ]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["artifacts"] == {"video": "视频"}
+
+
+def test_project_cli_generate_dry_run_does_not_call_pipeline(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "Assets"
+    brief_path = tmp_path / "brief.md"
+    brief_path.write_text("## 剧情\n主题。\n", encoding="utf-8")
+    assert main([
+        "project", "--root", str(root), "init", "--topic-id", "topic",
+        "--project-id", "project", "--title", "Title",
+    ]) == 0
+    capsys.readouterr()
+    from minimax_h3_prompt.graph import pipeline
+    monkeypatch.setattr(pipeline, "run_pipeline_structured", lambda *a, **k: pytest.fail("dry-run 不应调用管线"))
+    assert main([
+        "project", "--root", str(root), "generate-prompts", "--topic-id", "topic",
+        "--project-id", "project", "--brief", str(brief_path), "--dry-run",
+    ]) == 0
+    assert json.loads(capsys.readouterr().out)["dry_run"] is True
 
 
 def _patch_execution(monkeypatch):
