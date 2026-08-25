@@ -173,21 +173,15 @@ def main(argv: list[str] | None = None) -> int:
         return _run_project_command(args)
 
     if not args.brief:
-        # 面向最终用户的单入口：只输入主题，项目自动完成其余生产步骤。
+        # 面向最终用户的两阶段向导：先生图提示词 → 人工生图 → 提交图片 → 视频提示词。
         from .config import config
-        from .project_generation import create_video_from_topic
+        from .ui.wizard import run_wizard
 
         try:
-            topic = input("请输入视频主题：\n> ").strip()
-            if not topic:
-                print("视频主题不能为空。")
-                return 1
-            result, directory = _create_video_with_progress(topic, config, variant="FL2VA")
-            _print_generation_result(result, directory)
+            return run_wizard(config)
         except (KeyboardInterrupt, EOFError):
             print("\n已取消。")
             return 1
-        return 0
 
     return _run_cli(args)
 
@@ -239,9 +233,22 @@ def _run_project_command(args: argparse.Namespace) -> int:
         from .config import config
         existing = store.list_generation_results(args.topic_id, args.project_id)
         generation_id = args.generation_id or f"GEN{len(existing) + 1:03d}"
+        # brief 参考图行带 (图片路径) 时：先读图，真实画面描述注入管线（阶段 2 锚定）。
+        frame_descriptions = []
+        if any(ref.path for ref in brief.refs):
+            try:
+                audits = audit_frame_images(brief.refs, brief.variant)
+                frame_descriptions = [a.to_dict() for a in audits]
+                if frame_descriptions:
+                    print(f"[读图] 已读取 {len(frame_descriptions)} 张关键帧图片（qwen3.7-plus）。")
+            except FileNotFoundError as exc:
+                print(f"[警告] 关键帧图片读取失败，回退生图提示词锚定：{exc}")
+            except Exception as exc:  # noqa: BLE001 - 读图失败不阻塞生成
+                print(f"[警告] 读图服务异常，回退生图提示词锚定：{exc}")
         result = run_pipeline_structured(
             brief, config, generation_id=generation_id,
             topic_id=args.topic_id, project_id=args.project_id,
+            frame_descriptions=frame_descriptions,
         )
         directory = store.save_generation_result(args.topic_id, args.project_id, result, overwrite=args.overwrite)
         if result.fl2va_prompt_bundle is not None:

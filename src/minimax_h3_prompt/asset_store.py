@@ -14,7 +14,9 @@ from .project_models import AssetRecord
 from .task_package import TaskPackage
 
 
-_TOPIC_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+# topic_id 允许中文等 Unicode 词字符（主题摘要命名，如 `雨夜旧信-a3f2b1c0`）；
+# asset/generation/version 保持 ASCII 严格格式。
+_TOPIC_ID = re.compile(r"^[\w][\w-]{0,63}$", re.UNICODE)
 _PROJECT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _ASSET_ID = re.compile(r"^[CSPE]\d{2}$")
 _GENERATION_ID = re.compile(r"^(?:[CSPE]\d{2}|SH\d{3})-G\d{3}$")

@@ -6,7 +6,11 @@ output 猜测归属，也不把任何结果伪装成正式资产。
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import shutil
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +45,79 @@ def _load_task_for_shot(store: ProjectStore, topic_id: str, project_id: str, sho
         return TaskPackage.load(shot.task_package_path)
     document = store.load_project(topic_id, project_id)
     return TaskPackage.load(document.directory / "tasks" / shot.generation_id)
+
+
+# ---------------------------------------------------------------------------
+# 帧图片入库：两阶段向导的关键帧复制与追溯
+# ---------------------------------------------------------------------------
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def copy_frame_image(
+    source: str | Path,
+    *,
+    topic_id: str,
+    generation_id: str,
+    role: str,
+    assets_root: str | Path | None = None,
+) -> dict[str, Any]:
+    """把一张关键帧图片（first/last）显式复制进资产库 inbox 并写 source.json。
+
+    只复制不移动、不修改 ComfyUI output 原始文件；同哈希副本已存在时跳过复制。
+    返回 dict（含 source/target/sha256/width/height/role），供 session-state 追溯。
+    """
+    if role not in ("first", "last"):
+        raise ValueError(f"帧角色必须是 first 或 last：{role}")
+    src = Path(source).resolve()
+    if not src.is_file():
+        raise FileNotFoundError(src)
+    info = inspect_asset(src)
+    digest = str(info["sha256"])
+    root = (Path(assets_root) if assets_root else store_root_default()) / "inbox" / topic_id / generation_id / "frames"
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / f"{role}{src.suffix.lower()}"
+    if not target.exists() or _file_sha256(target) != digest:
+        shutil.copy2(src, target)
+    record = {
+        "role": role,
+        "generation_id": generation_id,
+        "source_path": str(src),
+        "target_path": str(target),
+        "sha256": digest,
+        "size": int(info["size"]),
+        "mime_type": str(info["mime_type"]),
+        "width": info.get("width"),
+        "height": info.get("height"),
+        "copied_at": _now_iso(),
+    }
+    source_file = root / "source.json"
+    existing: dict[str, Any] = {}
+    if source_file.exists():
+        try:
+            existing = json.loads(source_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+    frames = {item.get("role"): item for item in existing.get("frames", [])}
+    frames[role] = record
+    merged = {"schema_version": "frame-import.v1", "topic_id": topic_id,
+              "generation_id": generation_id, "frames": list(frames.values())}
+    source_file.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+    return record
+
+
+def store_root_default() -> Path:
+    """Assets 根目录默认值（与 ProjectStore 一致）。"""
+    return Path(r"D:\笔记\Assets")
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 # ---------------------------------------------------------------------------

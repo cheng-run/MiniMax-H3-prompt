@@ -63,7 +63,8 @@ def test_project_cli_generate_and_show_prompts(tmp_path, monkeypatch, capsys):
     from minimax_h3_prompt.generation import result_from_state
     from minimax_h3_prompt.graph import pipeline
 
-    def fake_structured(brief, config, *, generation_id, topic_id, project_id):
+    def fake_structured(brief, config, *, generation_id, topic_id, project_id, frame_descriptions=None):
+        assert frame_descriptions == []
         return result_from_state({
             "script": "剧本", "final_prompt": "视频",
             "fl2va_prompt_bundle": {

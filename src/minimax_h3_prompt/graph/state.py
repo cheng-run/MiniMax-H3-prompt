@@ -37,6 +37,8 @@ class PipelineState(TypedDict, total=False):
     visual_design: str  # 摄影指导
     fl2va_prompt_bundle: dict  # FL2VA 融合首帧/尾帧提示词
     fl2va_prompt_issues: list[str]  # FL2VA 确定性校验问题
+    fl2va_frame_descriptions: list[dict]  # 真实首尾帧图片的 qwen3.7-plus 读图描述（阶段 2 注入）
+    frame_images: list[dict]  # 已入库关键帧图片追溯记录（copy_frame_image 结果）
     subject_defs: str  # 参考资产与一致性（subject_definitions 素材）
 
     # 声音（并行）

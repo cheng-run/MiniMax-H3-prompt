@@ -41,18 +41,22 @@ def _downscale_to_jpeg(path: Path, max_side: int = 1024) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
-def describe_image(path: str | Path) -> str:
-    """用视觉模型描述一张参考图（角色/场景外观），供人工确认。"""
+def describe_image(path: str | Path, instruction: str | None = None) -> str:
+    """用视觉模型描述一张参考图（角色/场景外观），供人工确认。
+
+    instruction 可覆盖默认读图提示词（frame_auditor 用它定制首帧/尾帧描述）。
+    """
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"参考图不存在：{p}")
     model = _build_vision_model()
+    text = instruction or (
+        "请详细描述这张参考图的内容，用于 AI 视频的角色一致性绑定。\n"
+        "重点：人物（性别/年龄/发型/服装颜色与款式/配饰/姿态）、场景（环境/光线/色调）、画面构图。\n"
+        "只描述图中真实可见的内容，不要臆测或脑补不存在的细节。用中文输出，2-4 句话。"
+    )
     msg = HumanMessage(content=[
-        {"type": "text", "text": (
-            "请详细描述这张参考图的内容，用于 AI 视频的角色一致性绑定。\n"
-            "重点：人物（性别/年龄/发型/服装颜色与款式/配饰/姿态）、场景（环境/光线/色调）、画面构图。\n"
-            "只描述图中真实可见的内容，不要臆测或脑补不存在的细节。用中文输出，2-4 句话。"
-        )},
+        {"type": "text", "text": text},
         {"type": "image_url", "image_url": {"url": _downscale_to_jpeg(p)}},
     ])
     resp = model.invoke([msg])

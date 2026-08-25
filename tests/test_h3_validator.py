@@ -157,6 +157,68 @@ class TestVariants:
         assert "MISSING_ALIGN_INSTRUCTION" not in errors_of(issues)
 
 
+class TestAlignInstruction:
+    """帧变体首行指令必须逐字符符合官方模板（base-en.txt 2.1 / Case 3）。"""
+
+    FL2VA_OK = (
+        "How the reference pictures align with the target video — Picture 1 (from Shot 1) "
+        "aligns with the 0.00-second mark of the target video; Picture 2 (from Shot 1) "
+        "aligns with the 5.00-second mark of the target video.\n\n"
+        "integrated_multimodal_description: [Shot 1] Live-action, cinematic, a cyclist begins "
+        "in the position established by Picture 1.\n\n"
+        "overall_soundscape: Rain falls steadily on the pavement.\n\nnon_diegetic_music: N/A"
+    )
+
+    def test_official_fl2va_case3_passes(self):
+        issues = validate_base(self.FL2VA_OK, duration=5.0, variant="FL2VA")
+        assert errors_of(issues) == []
+
+    def test_wrong_template_is_error(self):
+        # 用 I2VA 模板冒充 FL2VA 首行（历史真实产出犯过的错）
+        text = self.FL2VA_OK.replace(
+            "How the reference pictures align with the target video — Picture 1 (from Shot 1) "
+            "aligns with the 0.00-second mark of the target video; Picture 2 (from Shot 1) "
+            "aligns with the 5.00-second mark of the target video.",
+            "For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.",
+        )
+        issues = validate_base(text, duration=5.0, variant="FL2VA")
+        assert "ALIGN_INSTRUCTION_FORMAT" in errors_of(issues)
+
+    def test_time_mismatch_is_error(self):
+        text = self.FL2VA_OK.replace("the 5.00-second mark", "the 8.00-second mark")
+        issues = validate_base(text, duration=5.0, variant="FL2VA")
+        assert "ALIGN_TIME_MISMATCH" in errors_of(issues)
+
+    def test_last_shot_mismatch_is_error(self):
+        text = self.FL2VA_OK.replace(
+            "[Shot 1] Live-action",
+            "[Shot 1] opening. [Shot 2] At 00:03.000, the camera cuts to a close-up.",
+        ).replace("(from Shot 1) aligns", "(from Shot 9) aligns")
+        issues = validate_base(text, duration=5.0, variant="FL2VA")
+        assert "ALIGN_LAST_SHOT_MISMATCH" in errors_of(issues)
+        assert "FL2VA_MULTI_SHOT" in codes(issues)
+
+    def test_i2va_first_shot_must_be_one(self):
+        text = (
+            "For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 2]) is fully referenced.\n\n"
+            "integrated_multimodal_description: [Shot 1] opening. [Shot 2] At 00:02.000, cut.\n\n"
+            "overall_soundscape: N/A\n\nnon_diegetic_music: N/A"
+        )
+        issues = validate_base(text, duration=5.0, variant="I2VA")
+        assert "ALIGN_FIRST_SHOT_MISMATCH" in errors_of(issues)
+
+    def test_blank_line_after_instruction_warns(self):
+        text = (
+            "How the reference pictures align with the target video — Picture 1 (from Shot 1) "
+            "aligns with the 0.00-second mark of the target video; Picture 2 (from Shot 1) "
+            "aligns with the 5.00-second mark of the target video.\n"
+            "integrated_multimodal_description: [Shot 1] x\n\n"
+            "overall_soundscape: N/A\n\nnon_diegetic_music: N/A"
+        )
+        issues = validate_base(text, duration=5.0, variant="FL2VA")
+        assert "ALIGN_BLANK_LINE_MISSING" in codes(issues)
+
+
 class TestSpeakers:
     def test_speaker_order_warning(self):
         text = "integrated_multimodal_description: [Shot 1] A man (S2) says: <d>[English] Hi.</d> Then (S1) answers.\n\noverall_soundscape: N/A\n\nnon_diegetic_music: N/A"

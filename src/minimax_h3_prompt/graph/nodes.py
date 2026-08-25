@@ -45,16 +45,22 @@ def _make_producer_node(agents: dict) -> Callable:
 
 def _make_director_node(agents: dict) -> Callable:
     def node(state: PipelineState) -> dict:
-        msg = f"请给出导演阐述：\n{_ctx(制作计划=state.get('production_plan', ''))}"
+        brief: Brief = state["brief"]
+        msg = f"请给出导演阐述：\n{_ctx(原始剧情=brief.plot, 制作计划=state.get('production_plan', ''))}"
         return {"director_brief": run_agent(agents["director"], msg)}
     return node
 
 
 def _make_screenwriter_node(agents: dict) -> Callable:
     def node(state: PipelineState) -> dict:
+        brief: Brief = state["brief"]
         msg = (
             "请写出分场剧本：\n"
-            + _ctx(导演阐述=state.get("director_brief", ""), 创意锁定=state.get("creative_lock", ""))
+            + _ctx(
+                原始剧情=brief.plot,
+                导演阐述=state.get("director_brief", ""),
+                创意锁定=state.get("creative_lock", ""),
+            )
         )
         return {"script": run_agent(agents["screenwriter"], msg)}
     return node
@@ -196,7 +202,8 @@ def _make_storyboard_node(agents: dict) -> Callable:
         msg = (
             "请给出分镜镜头表（时长 "
             + f"{brief.duration}s）：\n"
-            + _ctx(分场剧本=state.get("script", ""), 美术设计=state.get("art_design", ""),
+            + _ctx(原始剧情=brief.plot,
+                   分场剧本=state.get("script", ""), 美术设计=state.get("art_design", ""),
                    人物设计=state.get("character_design", ""),
                    背景设计=state.get("background_design", ""),
                    道具设计=state.get("prop_design", ""),
@@ -222,7 +229,9 @@ def _make_roundtable_node(rt: CompiledStateGraph, lock_field: str, topic: str,
 
 def _make_cinematographer_node(agents: dict) -> Callable:
     def node(state: PipelineState) -> dict:
+        brief: Brief = state["brief"]
         msg = "请细化每个镜头的画面描述：\n" + _ctx(
+            原始剧情=brief.plot,
             镜头表=state.get("shot_table", ""),
             镜头评审锁定=state.get("shot_review_lock", ""),
         )
@@ -265,15 +274,78 @@ def _make_composer_node(agents: dict) -> Callable:
     return node
 
 
+def _fl2va_frame_context(state: PipelineState) -> str:
+    """渲染首尾帧锚定上下文：真实图片描述优先，生图提示词降级为补充。
+
+    - state["fl2va_frame_descriptions"] 非空 → 用 qwen3.7-plus 读出的真实画面描述
+      作为主锚定（「视频第一帧实际画面是……」），并附生图提示词作对照；
+    - 否则回退到 fl2va_prompt_bundle 里的首尾帧生图提示词（阶段 1 计划画面）。
+    """
+    lines: list[str] = []
+    raw = state.get("fl2va_prompt_bundle")
+    bundle = raw if isinstance(raw, dict) else {}
+    if str(bundle.get("scene_anchor", "")).strip():
+        lines.append(f"场景锚点（视频全程不得离开）：{str(bundle['scene_anchor']).strip()}")
+
+    def _planned_prompt(frame_key: str) -> str:
+        rows = bundle.get(frame_key)
+        if not isinstance(rows, list):
+            return ""
+        row = next((r for r in rows if isinstance(r, dict) and r.get("model_family") == "zimage"), None)
+        if row is None:
+            row = next((r for r in rows if isinstance(r, dict)), None)
+        return str(row.get("positive_prompt", "")).strip() if row else ""
+
+    audits = state.get("fl2va_frame_descriptions") or []
+    role_labels = {"first": "视频第一帧实际画面", "last": "视频最后一帧实际画面"}
+    real_by_role = {a.get("role"): a for a in audits if isinstance(a, dict)}
+    has_real = bool(real_by_role)
+
+    if has_real:
+        for role in ("first", "last"):
+            audit = real_by_role.get(role)
+            planned = _planned_prompt(role)
+            if audit and str(audit.get("description", "")).strip():
+                lines.append(f"{role_labels[role]}：{str(audit['description']).strip()}")
+            elif planned:
+                lines.append(f"{'视频第一帧' if role == 'first' else '视频最后一帧'}计划画面（未提供实际图片，以此为准）：{planned}")
+        if lines:
+            lines.insert(1, "【注意】以下为关键帧图片的实际画面描述，正文锚定以它为准；生图提示词仅作对照参考。"
+                         if any(_planned_prompt(r) for r in ("first", "last")) else
+                         "【注意】以下为关键帧图片的实际画面描述，正文锚定以它为准。")
+        return "\n".join(lines)
+
+    # 回退：无真实图片描述，用阶段 1 生图提示词作为计划锚定
+    for frame_key, label in (("first", "首帧（视频 0.00s 的画面，正文必须以此为开场状态）"),
+                             ("last", "尾帧（视频结束时的画面，正文必须落到此状态）")):
+        planned = _planned_prompt(frame_key)
+        if planned:
+            lines.append(f"{label}：{planned}")
+    return "\n".join(lines)
+
+
 def _make_prompt_engineer_node(agents: dict) -> Callable:
     def _msg(state: PipelineState, brief: Brief, minimal: bool = False) -> str:
+        style_note = f"风格 {brief.style}" if brief.style else "风格由 AI 根据主题确定"
         head = (
             f"请按官方规范组装最终 H3 提示词（模式 {brief.mode}"
             + (f"，变体 {brief.variant}" if brief.mode == "base" else "")
-            + f"，时长 {brief.duration}s，风格 {brief.style} / 语言 {brief.language}）。"
+            + f"，时长 {brief.duration}s，{style_note} / 语言 {brief.language}）。"
+            "【最高优先级】用户原始主题如下，人物、地点、动作必须完全忠于它，"
+            "禁止引入主题中没有的新地点、新事件或新人物。\n"
+            + _ctx(用户原始主题=brief.plot)
         )
+        variant = str(brief.variant).upper()
+        fl2va_ctx = _fl2va_frame_context(state) if variant in ("FL2VA", "I2VA", "L2VA") else ""
+        anchor_rule = {
+            "FL2VA": "FL2VA 正文必须以首帧画面开场、经过连续变化、最终落到尾帧画面；保持同一地点/人物/服装/道具，单连续镜头。",
+            "I2VA": "I2VA 正文必须从首帧画面出发向前发展，保持人物身份/服装/构图一致。",
+            "L2VA": "L2VA 正文先推断合理的开场状态，逐步收敛，最终精确落到尾帧画面。",
+        }.get(variant, "")
         if minimal:
             return head + "\n" + _ctx(
+                关键帧锚定=fl2va_ctx,
+                锚定规则=anchor_rule,
                 镜头表=state.get("shot_table", ""),
                 统筹美术设计=state.get("art_design", ""),
                 人物设计=state.get("character_design", ""),
@@ -284,6 +356,8 @@ def _make_prompt_engineer_node(agents: dict) -> Callable:
                 配乐=state.get("music", ""),
             )
         return head + "\n" + _ctx(
+            关键帧锚定=fl2va_ctx,
+            锚定规则=anchor_rule,
             镜头表=state.get("shot_table", ""),
             镜头评审锁定=state.get("shot_review_lock", ""),
             统筹美术设计=state.get("art_design", ""),
@@ -311,12 +385,22 @@ def _make_prompt_engineer_node(agents: dict) -> Callable:
 def _make_finalize_node(config: Config) -> Callable:
     def node(state: PipelineState) -> dict:
         from ..output.assembler import assemble_and_repair
+        from ..tools.theme_guard import theme_fidelity_issues
 
         brief: Brief = state["brief"]
         repaired, report = assemble_and_repair(state.get("final_prompt", ""), brief.mode, brief.variant)
         issues = validate_prompt(
             repaired, brief.mode, duration=brief.duration, variant=brief.variant, ref_meta=state.get("ref_meta")
         )
+        extra = state.get("fl2va_prompt_bundle")
+        groups = ()
+        if isinstance(extra, dict):
+            groups = tuple(
+                tuple(str(term) for term in group)
+                for group in extra.get("required_scene_terms", [])
+                if group
+            )
+        issues += theme_fidelity_issues(repaired, plot=brief.plot, mode=brief.mode, extra_groups=groups)
         return {"final_prompt": repaired, "final_report": report + "\n" + format_issues_text(issues)}
     return node
 
@@ -355,13 +439,15 @@ def make_nodes(agents: dict, model, brief: Brief, config: Config) -> dict[str, C
 def make_creative_rt_node(rt, model, brief) -> Callable:
     return _make_roundtable_node(
         rt, "creative_lock", "锁定创意方向、情绪基调、任务类型与叙事节奏",
-        lambda s: _ctx(制作计划=s.get("production_plan", ""), 导演阐述=s.get("director_brief", "")))
+        lambda s: _ctx(原始剧情=brief.plot,
+                       制作计划=s.get("production_plan", ""), 导演阐述=s.get("director_brief", "")))
 
 
 def make_shot_rt_node(rt, model, brief) -> Callable:
     return _make_roundtable_node(
         rt, "shot_review_lock", "评审镜头表的可生成性并锁定镜头方案",
-        lambda s: _ctx(镜头表=s.get("shot_table", ""), 美术设计=s.get("art_design", ""),
+        lambda s: _ctx(原始剧情=brief.plot,
+                       镜头表=s.get("shot_table", ""), 美术设计=s.get("art_design", ""),
                        时长=f"{s['duration']}s"))
 
 

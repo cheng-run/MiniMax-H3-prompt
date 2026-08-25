@@ -10,6 +10,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 from .brief_parser import Brief
+from .tools.theme_guard import (
+    _CONFLICTING_OUTDOOR_TERMS,
+    contains_unqualified_conflict as _contains_unqualified_conflict,
+    scene_requirement_groups,
+)
 
 PromptKind = Literal["script", "video", "character", "prop", "scene"]
 _FRAME_MODELS = ("zimage", "flux2")
@@ -21,26 +26,6 @@ _IMAGE_PROFILE_DEFAULTS = {
     "zimage": ("zimage_t2i_v1", "10", 640, 1280, "candidate"),
     "flux2": ("flux2_t2i_v1", "118", 1024, 1024, "candidate"),
 }
-
-_SCENE_REQUIREMENT_MAP = (
-    (("酒馆", "酒吧", "客栈", "tavern", "inn", "alehouse"), ("tavern", "inn", "alehouse")),
-    (("室内", "屋内", "室内场景", "indoor", "interior"), ("indoor", "interior", "inside")),
-    (("森林", "树林", "forest", "woodland"), ("forest", "woodland")),
-    (("街道", "街上", "street", "road"), ("street", "road")),
-    (("海边", "海滩", "beach", "seaside", "coast"), ("beach", "seaside", "coast")),
-)
-
-_CONFLICTING_OUTDOOR_TERMS = ("forest clearing", "open field", "wilderness", "outdoor camp")
-
-
-def scene_requirement_groups(plot: str) -> tuple[tuple[str, ...], ...]:
-    """从主题提取少量可确定校验的地点约束；未知地点不臆测。"""
-    text = str(plot or "").lower()
-    groups: list[tuple[str, ...]] = []
-    for source_terms, required_terms in _SCENE_REQUIREMENT_MAP:
-        if any(term.lower() in text for term in source_terms):
-            groups.append(required_terms)
-    return tuple(groups)
 
 
 def _now() -> str:
@@ -328,19 +313,6 @@ class FL2VAPromptBundle:
             "required_scene_terms": [list(group) for group in self.required_scene_terms],
             "schema_version": self.schema_version,
         }
-
-
-def _contains_unqualified_conflict(text: str, term: str) -> bool:
-    lower = text.lower()
-    start = 0
-    while True:
-        index = lower.find(term, start)
-        if index < 0:
-            return False
-        context = lower[max(0, index - 60): index + len(term) + 60]
-        if not any(marker in context for marker in ("window", "through", "outside", "beyond", "seen from")):
-            return True
-        start = index + len(term)
 
 
 def validate_fl2va_bundle(

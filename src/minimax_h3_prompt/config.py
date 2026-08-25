@@ -86,6 +86,8 @@ class Config:
 
         self.default_style: str = defaults.get("style", "Cinematic")
         self.default_language: str = defaults.get("language", "Chinese")
+        # 资产库根目录（两阶段向导的会话落盘与帧图入库位置）。
+        self.assets_root: str = str(defaults.get("assets_root", r"D:\笔记\Assets"))
         # 旧字段保留作为最低优先级的模型名 fallback。
         self.model_override: str = (self.raw.get("model") or "").strip()
 

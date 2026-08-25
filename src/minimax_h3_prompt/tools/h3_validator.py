@@ -48,6 +48,82 @@ RETENTION_MARKERS = (
     "reference",
 )
 
+# 帧变体首行对齐指令：官方模板逐字符固定（base-en.txt 2.1）
+ALIGN_TEMPLATES = {
+    "I2VA": "For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.",
+    "FL2VA": "How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the 0.00-second mark of the target video; Picture 2 (from Shot N) aligns with the S.SS-second mark of the target video.",
+    "L2VA": "How the reference pictures align with the target video — <Picture 1> (from [Shot N]) aligns with the S.SS-second mark of the target video.",
+}
+_I2VA_INSTRUCTION_RE = re.compile(
+    r"^For the target video, at 0\.00 seconds into the target video, "
+    r"<Picture 1> \(from \[Shot (\d+)\]\) is fully referenced\.$"
+)
+_FL2VA_INSTRUCTION_RE = re.compile(
+    r"^How the reference pictures align with the target video — "
+    r"Picture 1 \(from Shot (\d+)\) aligns with the 0\.00-second mark of the target video; "
+    r"Picture 2 \(from Shot (\d+)\) aligns with the (\d+)\.(\d{2})-second mark of the target video\.$"
+)
+_L2VA_INSTRUCTION_RE = re.compile(
+    r"^How the reference pictures align with the target video — "
+    r"<Picture 1> \(from \[Shot (\d+)\]\) aligns with the (\d+)\.(\d{2})-second mark of the target video\.$"
+)
+
+
+def _check_align_instruction(text: str, first_line: str, body: str, variant: str,
+                             duration: float | None, issues: list[ValidationIssue]) -> None:
+    """帧变体首行指令：模板逐字符一致、S.SS=时长两位小数、N=最终镜头、后跟一个空行。"""
+    stripped = first_line.strip()
+    matched = False
+    if variant == "I2VA":
+        m = _I2VA_INSTRUCTION_RE.match(stripped)
+        if m:
+            matched = True
+            if int(m.group(1)) != 1:
+                issues.append(ValidationIssue("error", "ALIGN_FIRST_SHOT_MISMATCH",
+                                              f"I2VA 首行应为 (from [Shot 1])，实际 (from [Shot {m.group(1)}])"))
+    elif variant == "FL2VA":
+        m = _FL2VA_INSTRUCTION_RE.match(stripped)
+        if m:
+            matched = True
+            first_shot, last_shot = int(m.group(1)), int(m.group(2))
+            seconds = int(m.group(3)) + int(m.group(4)) / 100.0
+            if first_shot != 1:
+                issues.append(ValidationIssue("error", "ALIGN_FIRST_SHOT_MISMATCH",
+                                              f"FL2VA 首帧应 from Shot 1，实际 Shot {first_shot}"))
+            shot_nums = [int(n) for n in re.findall(r"\[Shot\s+(\d+)\]", body)]
+            if shot_nums and last_shot != max(shot_nums):
+                issues.append(ValidationIssue("error", "ALIGN_LAST_SHOT_MISMATCH",
+                                              f"FL2VA 尾帧应对齐最终镜头 [Shot {max(shot_nums)}]，实际写 Shot {last_shot}（见 base-en.txt 2.1/3.2）"))
+            if duration is not None and abs(seconds - duration) > 0.011:
+                issues.append(ValidationIssue("error", "ALIGN_TIME_MISMATCH",
+                                              f"FL2VA 尾帧对齐秒数应为时长两位小数 {duration:.2f}，实际 {seconds:.2f}"))
+            if len(set(shot_nums)) > 1:
+                issues.append(ValidationIssue("warning", "FL2VA_MULTI_SHOT",
+                                              "官方规范建议 FL2VA 用单镜头连续插值；多镜头仅限用户明确指定时（base-en.txt 3.2）"))
+    elif variant == "L2VA":
+        m = _L2VA_INSTRUCTION_RE.match(stripped)
+        if m:
+            matched = True
+            last_shot = int(m.group(1))
+            seconds = int(m.group(2)) + int(m.group(3)) / 100.0
+            shot_nums = [int(n) for n in re.findall(r"\[Shot\s+(\d+)\]", body)]
+            if shot_nums and last_shot != max(shot_nums):
+                issues.append(ValidationIssue("error", "ALIGN_LAST_SHOT_MISMATCH",
+                                              f"L2VA 尾帧应对齐最终镜头 [Shot {max(shot_nums)}]，实际写 Shot {last_shot}"))
+            if duration is not None and abs(seconds - duration) > 0.011:
+                issues.append(ValidationIssue("error", "ALIGN_TIME_MISMATCH",
+                                              f"L2VA 尾帧对齐秒数应为时长两位小数 {duration:.2f}，实际 {seconds:.2f}"))
+    if not matched:
+        issues.append(ValidationIssue("error", "ALIGN_INSTRUCTION_FORMAT",
+                                      f"{variant} 首行对齐指令与官方模板不一致，必须逐字符按：{ALIGN_TEMPLATES[variant]}"))
+
+    # 指令是第一行，之后必须有一个空行再接核心字段（base-en.txt 2.1）
+    lines = text.splitlines()
+    first_idx = next((i for i, l in enumerate(lines) if l.strip()), 0)
+    if first_idx + 1 < len(lines) and lines[first_idx + 1].strip():
+        issues.append(ValidationIssue("warning", "ALIGN_BLANK_LINE_MISSING",
+                                      "对齐指令后应空一行再接核心字段"))
+
 
 @dataclass
 class ValidationIssue:
@@ -203,6 +279,7 @@ def validate_base(text: str, duration: float | None = None, variant: str = "T2VA
            and "For the target video" not in first_nonempty:
             issues.append(ValidationIssue("error", "MISSING_ALIGN_INSTRUCTION",
                                           f"{variant} 模式首行必须有图片对齐指令（见 base-en.txt 2.1）"))
+        _check_align_instruction(text, first_nonempty, body, variant, duration, issues)
 
     soundscape, _ = sections.get("overall_soundscape", ("", 0))
     music, _ = sections.get("non_diegetic_music", ("", 0))

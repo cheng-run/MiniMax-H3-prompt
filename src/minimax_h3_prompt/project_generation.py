@@ -2,17 +2,24 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 
-from .brief_parser import Brief
+from .brief_parser import Brief, RefItem
 from .config import Config
 from .generation import GenerationResult
 from .graph.pipeline import run_pipeline_structured
 from .project_store import ProjectStore
 
 
-def _topic_id(topic: str) -> str:
-    return "topic-" + hashlib.sha256(topic.strip().encode("utf-8")).hexdigest()[:12]
+_SLUG_KEEP_RE = re.compile(r"[^\w-]+", re.UNICODE)
+
+
+def topic_slug(topic: str) -> str:
+    """主题摘要命名：可读前缀 + 哈希后缀，如 `雨夜旧信-a3f2b1c0`（可读且唯一）。"""
+    text = _SLUG_KEEP_RE.sub("-", topic.strip()).strip("-")
+    text = re.sub(r"-{2,}", "-", text)[:20].strip("-") or "topic"
+    return f"{text}-{hashlib.sha256(topic.strip().encode('utf-8')).hexdigest()[:8]}"
 
 
 def _next_project_id(store: ProjectStore, topic_id: str) -> str:
@@ -38,6 +45,7 @@ def create_video_from_topic(
     style: str | None = None,
     language: str | None = None,
     variant: str = "FL2VA",
+    refs: list[RefItem] | tuple[RefItem, ...] = (),
 ) -> tuple[GenerationResult, Path]:
     """由主题自动创建项目并保存生成产物，不执行任何外部媒体工作流。"""
     if not topic or not topic.strip():
@@ -47,10 +55,10 @@ def create_video_from_topic(
     if variant != "FL2VA":
         raise ValueError("主题单入口只支持 FL2VA 首尾帧流程")
     store = ProjectStore(root)
-    topic_id = _topic_id(topic)
-    project_id = _next_project_id(store, topic_id)
+    resolved_topic_id = topic_slug(topic)
+    project_id = _next_project_id(store, resolved_topic_id)
     store.init_project(
-        topic_id,
+        resolved_topic_id,
         project_id,
         topic[:120],
         duration_seconds=duration or config.default_duration,
@@ -65,16 +73,17 @@ def create_video_from_topic(
         language=language or config.default_language,
         plot=topic,
         raw=topic,
+        refs=list(refs),
     )
     result = run_pipeline_structured(
         brief,
         config,
         generation_id="GEN001",
-        topic_id=topic_id,
+        topic_id=resolved_topic_id,
         project_id=project_id,
     )
-    directory = store.save_generation_result(topic_id, project_id, result)
+    directory = store.save_generation_result(resolved_topic_id, project_id, result)
     return result, directory
 
 
-__all__ = ["create_video_from_topic"]
+__all__ = ["create_video_from_topic", "topic_slug"]
