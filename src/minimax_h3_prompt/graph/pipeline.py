@@ -130,9 +130,10 @@ def _build_stage_graph(model, brief: Brief, config: Config, chain: list[str]):
     return build_pipeline_graph(model, brief, config, stage=stage)[0]
 
 
-def run_stage1(brief: Brief, config: Config) -> tuple[dict, object, object]:
+def run_stage1(brief: Brief, config: Config, *, on_node=None) -> tuple[dict, object, object]:
     """阶段 1：创意/设计/分镜/首尾帧生图提示词/声音。返回 (state, model, agents)。
 
+    on_node：可选回调，每个图节点跑完（有产出）时以节点名调用，供 UI 报进度。
     不组装视频正文；state 可经 session_store 落盘后中断，由 run_stage2 续跑。
     """
     from ..model_factory import build_chat_model
@@ -157,11 +158,16 @@ def run_stage1(brief: Brief, config: Config) -> tuple[dict, object, object]:
             if update:
                 state.update(update)
                 stage_saver.save(node_name, update)
+                if on_node is not None:
+                    on_node(node_name)
     return state, model, agents
 
 
-def run_stage2(state: dict, brief: Brief, config: Config, *, model=None) -> tuple[dict, str]:
-    """阶段 2：注入真实帧描述后组装视频正文 + 有界 QA/theme_guard 精修。返回 (state, 最终提示词)。"""
+def run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_node=None) -> tuple[dict, str]:
+    """阶段 2：注入真实帧描述后组装视频正文 + 有界 QA/theme_guard 精修。返回 (state, 最终提示词)。
+
+    on_node：可选回调，每个图节点跑完（有产出）时以节点名调用，供 UI 报进度。
+    """
     from ..model_factory import build_chat_model
 
     model = model or build_chat_model()
@@ -183,6 +189,8 @@ def run_stage2(state: dict, brief: Brief, config: Config, *, model=None) -> tupl
             if update:
                 merged.update(update)
                 stage_saver.save(node_name, update)
+                if on_node is not None:
+                    on_node(node_name)
 
     prompt = merged.get("final_prompt", "")
 

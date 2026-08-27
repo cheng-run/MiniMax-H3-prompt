@@ -281,3 +281,210 @@ def test_topic_slug_handles_symbols():
 
     slug = topic_slug("!!!///###")
     assert slug.startswith("topic-")
+
+
+# ---------------------------------------------------------------------------
+# 交互控制流：stdin 排水 / 阶段 2 门禁 / 跳过二次确认（全部 mock，不碰真实键盘）
+# ---------------------------------------------------------------------------
+
+import builtins  # noqa: E402
+import sys  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+import minimax_h3_prompt.ui.wizard as wizard_module  # noqa: E402
+
+
+def _scripted_inputs(monkeypatch, prompts_seen, answers):
+    """把 builtins.input 换成脚本应答器；记录每个提问并按序作答。"""
+    queue = iter(answers)
+
+    def fake_input(prompt=""):
+        prompts_seen.append(prompt)
+        try:
+            return next(queue)
+        except StopIteration:
+            raise AssertionError(f"输入序列耗尽，多出的提问：{prompt!r}")
+
+    monkeypatch.setattr(builtins, "input", fake_input)
+
+
+def _fake_config(monkeypatch, tmp_path):
+    from minimax_h3_prompt.config import Config
+
+    config = Config()
+    monkeypatch.setattr(config, "assets_root", str(tmp_path))
+    return config
+
+
+def _fake_tty(monkeypatch):
+    """让向导以为在交互终端运行；同时用假 msvcrt 保证不碰真实键盘。"""
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setitem(sys.modules, "msvcrt", SimpleNamespace(kbhit=lambda: False, getwch=lambda: "\r"))
+
+
+def _stage1_state():
+    state = _stage_state()
+    state.setdefault("fl2va_frame_descriptions", [])
+    return state
+
+
+def _patch_run_stage1(monkeypatch):
+    calls = []
+
+    def fake_run_stage1(brief, config, *, on_node=None):
+        calls.append(True)
+        if on_node is not None:
+            on_node("producer")
+        return _stage1_state(), object(), object()
+
+    monkeypatch.setattr(wizard_module, "run_stage1", fake_run_stage1)
+    return calls
+
+
+def _patch_run_stage2(monkeypatch):
+    calls = []
+
+    def fake_run_stage2(state, brief, config, **kwargs):
+        calls.append({"variant": brief.variant})
+        return dict(state), "# 最终视频提示词"
+
+    monkeypatch.setattr(wizard_module, "run_stage2", fake_run_stage2)
+    return calls
+
+
+def test_drain_stdin_noop_when_not_tty(monkeypatch):
+    """非 tty（pytest/管道）下排水必须为 noop——绝不触碰键盘缓冲。"""
+    consumed = []
+    fake_msvcrt = SimpleNamespace(
+        kbhit=lambda: True,
+        getwch=lambda: consumed.append("k") or "\r",
+    )
+    monkeypatch.setattr(wizard_module.sys, "stdin", SimpleNamespace(isatty=lambda: False))
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    wizard_module._drain_stdin()
+    assert consumed == []
+
+
+def test_drain_stdin_consumes_buffered_keys(monkeypatch):
+    """tty 下排空缓冲按键后停止。"""
+    buffered = ["\r", "\n", "x"]
+    fake_msvcrt = SimpleNamespace(
+        kbhit=lambda: bool(buffered),
+        getwch=buffered.pop,
+    )
+    monkeypatch.setattr(wizard_module.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    wizard_module._drain_stdin()
+    assert buffered == []
+
+
+def test_drain_stdin_survives_missing_msvcrt(monkeypatch):
+    """msvcrt 导入失败（POSIX）时走 termios 兜底且不抛异常。"""
+    monkeypatch.setattr(wizard_module.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setitem(sys.modules, "msvcrt", None)  # None ⇒ import 抛 ImportError
+    monkeypatch.setitem(sys.modules, "termios", None)  # 同样缺失时静默放弃
+    wizard_module._drain_stdin()  # 不应抛异常
+
+
+def test_ask_optional_path_requires_double_confirm_to_skip(monkeypatch, capsys):
+    seen: list[str] = []
+    # 路径为空 → 警告 → 确认跳过输 y ⇒ 返回空串
+    _scripted_inputs(monkeypatch, seen, ["", "y"])
+    assert wizard_module._ask_optional_path("首帧") == ""
+    assert "[警告]" in capsys.readouterr().out
+    assert any("回车=跳过" in p for p in seen)
+
+    # 路径为空 → 确认跳过输 n ⇒ 重新询问，第二次给真实路径
+    seen.clear()
+    _scripted_inputs(monkeypatch, seen, ["", "n", r"D:\frames\first.png"])
+    assert wizard_module._ask_optional_path("首帧") == r"D:\frames\first.png"
+    assert sum(1 for p in seen if "回车=跳过" in p) == 2
+
+
+def test_full_wizard_gate_default_exits_before_stage2(monkeypatch, tmp_path, capsys):
+    """阶段 1 完成 → 门禁处直接回车（默认否）⇒ 退出码 0 且不进阶段 2。"""
+    _fake_tty(monkeypatch)
+    config = _fake_config(monkeypatch, tmp_path)
+    stage1_calls = _patch_run_stage1(monkeypatch)
+    stage2_calls = _patch_run_stage2(monkeypatch)
+    seen: list[str] = []
+    _scripted_inputs(monkeypatch, seen, ["酒馆短剧", "", "", "", ""])  # 主题、时长、风格、审阅默认、门禁默认
+
+    code = wizard_module.run_wizard(config)
+
+    assert code == 0
+    assert stage1_calls == [True]
+    assert stage2_calls == []
+    joined = "\n".join(seen)
+    assert "对生图提示词有修改意见？ [y/N]: " in joined
+    assert "是否立即继续阶段 2" in joined
+    assert not any("首帧图片路径" in p for p in seen), "不应出现阶段 2 的路径提问"
+
+
+def test_full_wizard_gate_yes_runs_phase2_with_skip_confirms(monkeypatch, tmp_path):
+    """门禁答 y 进阶段 2；首尾帧双跳过需二次确认，最终降级 T2VA 并写出提示词。"""
+    _fake_tty(monkeypatch)
+    config = _fake_config(monkeypatch, tmp_path)
+    _patch_run_stage1(monkeypatch)
+    stage2_calls = _patch_run_stage2(monkeypatch)
+    seen: list[str] = []
+    # 主题、时长、风格、审阅默认、门禁 y、首帧空+确认 y、尾帧空+确认 y
+    _scripted_inputs(monkeypatch, seen, ["酒馆短剧", "", "", "", "y", "", "y", "", "y"])
+
+    code = wizard_module.run_wizard(config)
+
+    assert code == 0
+    assert len(stage2_calls) == 1
+    assert stage2_calls[0]["variant"] == "T2VA"
+    video_files = list(tmp_path.rglob("video-prompt.md"))
+    assert len(video_files) == 1
+    assert "# 最终视频提示词" in video_files[0].read_text(encoding="utf-8")
+    joined = "\n".join(seen)
+    assert "确认跳过首帧？" in joined and "确认跳过尾帧？" in joined
+
+
+def test_regenerate_error_unsubscribes_progress_listener(monkeypatch, tmp_path):
+    """重生成中途抛异常也必须解除进度订阅（try/finally 对称）。"""
+    from minimax_h3_prompt.observability import reporter
+    from minimax_h3_prompt.ui.progress import TextProgress
+
+    _fake_tty(monkeypatch)
+    config = _fake_config(monkeypatch, tmp_path)
+    _patch_run_stage1(monkeypatch)
+
+    def boom(state):
+        raise RuntimeError("模型故障")
+
+    import minimax_h3_prompt.graph.nodes as nodes_mod
+
+    monkeypatch.setattr(
+        nodes_mod, "make_nodes",
+        lambda *a, **k: {"fl2va_frame_prompts": boom},
+    )
+
+    seen: list[str] = []
+    _scripted_inputs(monkeypatch, seen, ["酒馆短剧", "", "", "y", "1", "更多火光"])
+
+    before = list(reporter._subscribers)
+    with pytest.raises(RuntimeError):
+        wizard_module.run_wizard(config)
+    after = list(reporter._subscribers)
+
+    assert after == before, "异常退出后 reporter 不得残留向导订阅"
+
+
+def test_text_progress_lines_with_stripped_role_prefix(capsys):
+    """TextProgress 输出开始/完成行：带耗时与累计时间，且剥掉 role_ 前缀。"""
+    from minimax_h3_prompt.ui.progress import TextProgress
+
+    tick = iter([100.0, 142.0])
+    listener = TextProgress(clock=lambda: next(tick))
+
+    listener({"type": "agent_start", "role": "role_producer"})
+    listener({"type": "agent_done", "role": "role_producer", "duration": 38.2})
+    listener({"type": "other_event"})  # 无关事件被忽略
+
+    out = capsys.readouterr().out
+    assert "▶ producer 正在处理……" in out
+    assert "✓ producer 完成（38.2s | 累计 0:42）" in out
+    assert "role_" not in out

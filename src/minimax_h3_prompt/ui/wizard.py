@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import sys
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from ..brief_parser import Brief, RefItem
@@ -24,6 +26,7 @@ from ..session_store import (
     load_session,
     save_session,
 )
+from .progress import TextProgress
 
 
 def resolve_effective_variant(have_first: bool, have_last: bool) -> str:
@@ -37,7 +40,35 @@ def resolve_effective_variant(have_first: bool, have_last: bool) -> str:
     return "T2VA"
 
 
+def _drain_stdin() -> None:
+    """排空控制台输入缓冲里滞留的按键（生成期间误敲的回车等）。
+
+    生成阶段是长阻塞，用户此时敲的键会滞留在行缓冲里，结束后被第一个
+    input() 吞掉造成"跳问"。仅在真实交互终端生效；pytest/管道 stdin
+    直接跳过，绝不触碰键盘缓冲。
+    """
+    try:
+        if not sys.stdin.isatty():
+            return
+    except (ValueError, OSError):
+        return
+    try:
+        import msvcrt  # 仅 Windows
+
+        while msvcrt.kbhit():
+            msvcrt.getwch()
+    except ImportError:
+        try:
+            import termios
+
+            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+        except Exception:
+            pass  # 宁可不排也不崩
+
+
 def _prompt(text: str) -> str:
+    # 每次提问前先排水：清掉阻塞期间滞留的旧按键，提示出现后的新输入不受影响。
+    _drain_stdin()
     return input(text).strip()
 
 
@@ -46,11 +77,53 @@ def _confirm(text: str, default: bool = True) -> bool:
     while True:
         raw = _prompt(text + suffix).lower()
         if not raw:
+            print(f"[提示] 未输入，按默认 {'是' if default else '否'} 处理。")
             return default
         if raw in ("y", "yes"):
             return True
         if raw in ("n", "no"):
             return False
+
+
+# LangGraph 节点名 → 用户可读环节名（用于节点级进度）。
+_NODE_LABELS = {
+    "producer": "制作人",
+    "director": "导演",
+    "creative_rt": "创意圆桌",
+    "screenwriter": "编剧",
+    "parallel_designers": "人物/场景/道具设计",
+    "art_director": "美术指导",
+    "storyboard": "分镜设计",
+    "parallel_decisions": "镜头/身份决策",
+    "parallel_visual": "摄影与一致性校验",
+    "fl2va_frame_prompts": "首尾帧生图提示词",
+    "parallel_sound": "声音设计与配乐",
+    "prompt_engineer": "视频提示词组装",
+    "finalize": "终检收尾",
+}
+
+
+def _report_node(node_name: str) -> None:
+    label = _NODE_LABELS.get(node_name, node_name)
+    print(f"—— 环节：{label} ——", flush=True)
+
+
+@contextmanager
+def _progress_scope(title: str):
+    """订阅事件总线，把各角色进度实时打到终端；退出（含异常）必解绑并报总用时。"""
+    from ..observability import reporter
+
+    listener = TextProgress()
+    start = time.time()
+    print(f"\n{title}", flush=True)
+    reporter.subscribe(listener)
+    try:
+        yield
+    finally:
+        reporter.unsubscribe(listener)
+        _drain_stdin()
+        m, s = divmod(int(time.time() - start), 60)
+        print(f"[完成] 本段用时 {m} 分 {s:02d} 秒。\n", flush=True)
 
 
 def run_wizard(config: Config) -> int:
@@ -59,10 +132,19 @@ def run_wizard(config: Config) -> int:
         raise SystemExit("向导需要交互终端运行；脚本场景请用 --brief 快路径。")
 
     session = _offer_resume(config)
+    resumed = session is not None
     if session is None:
         session = _phase1_new(config)
         if session is None:
             return 1
+    # 显式门禁：阶段 1 刚完成时不直通阶段 2（用户需先去 ComfyUI 出图）；
+    # 续接路径不加门禁——主动选续接就是要进阶段 2。
+    if not resumed and not _confirm(
+        "是否立即继续阶段 2 提交关键帧图片？（通常需先复制生图提示词到 ComfyUI 出图）",
+        default=False,
+    ):
+        print("已暂停。生成好图片后重新运行 `uv run launch.py` 选择续接即可进入阶段 2。")
+        return 0
     return _phase2_collect_and_finish(config, session)
 
 
@@ -132,8 +214,9 @@ def _phase1_new(config: Config) -> SessionState | None:
     )
     generation_dir = document.directory / "generations" / "GEN001"
 
-    print("\n[阶段 1] 正在生成剧本、设计与首尾帧生图提示词……")
-    state, model, agents = run_stage1(brief, config)
+    with _progress_scope("[阶段 1] 正在生成剧本、设计与首尾帧生图提示词……（预计几分钟，期间无需输入）"):
+        state, model, agents = run_stage1(brief, config, on_node=_report_node)
+    _drain_stdin()
     bundle = state.get("fl2va_prompt_bundle") or {}
     state.setdefault("fl2va_frame_descriptions", [])
     state.setdefault("frame_images", [])
@@ -159,11 +242,13 @@ def _phase1_new(config: Config) -> SessionState | None:
         # 复用节点函数重出首尾帧；把意见注入其上下文最直接的方式是临时改写 plot 追加约束
         brief_retry = Brief(**{**brief.__dict__, "plot": f"{brief.plot}\n（用户修改意见：{feedback}）"})
         updated["brief"] = brief_retry
-        update = frame_node(updated)
+        with _progress_scope("[重新生成] 正在按您的意见重出首尾帧生图提示词……（请稍候，期间无需输入）"):
+            update = frame_node(updated)
         updated.update(update)
         state.clear()
         state.update(updated)
         save_session(generation_dir, brief_retry, state, status=STATUS_AWAITING_FRAMES)
+        print("[已更新] 请查看下方新版本的提示词。")
 
     print("\n阶段 1 完成。请复制上面的生图提示词到 ComfyUI（Z-Image/Flux.2）生成图片。")
     print("可以关闭本窗口；生成好图片后重新运行 `uv run launch.py` 选择续接即可进入阶段 2。")
@@ -226,15 +311,27 @@ def render_fl2va_frame_markdown_from_bundle(bundle, frame: str) -> str:
 # 阶段 2
 # ---------------------------------------------------------------------------
 
+def _ask_optional_path(label: str) -> str:
+    """询问可选的图片路径；空=跳过，但需二次确认，防止误触静默降级 T2VA。"""
+    while True:
+        raw = _prompt(f"{label}图片路径（回车=跳过）：")
+        if raw:
+            return raw
+        print(f"[警告] 未提供{label}将影响变体（可能降级为纯文字 T2VA，视频没有画面参考）。")
+        if _confirm(f"确认跳过{label}？", default=False):
+            return ""
+        # 不确认则重新询问
+
+
 def _collect_frame_paths(variant: str) -> tuple[str, str]:
-    """收集首/尾帧路径；空=跳过。返回 (first_path, last_path)。"""
+    """收集首/尾帧路径；空=跳过（需二次确认）。返回 (first_path, last_path)。"""
     need_first = any(p == (1, "first") for p in _required_frames(variant))
     need_last = any(p == (2, "last") for p in _required_frames(variant))
     first = last = ""
     if need_first or variant.upper() == "FL2VA":
-        first = _prompt("首帧图片路径（回车=跳过）：")
+        first = _ask_optional_path("首帧")
     if need_last or variant.upper() == "FL2VA":
-        last = _prompt("尾帧图片路径（回车=跳过）：")
+        last = _ask_optional_path("尾帧")
     return first, last
 
 
@@ -306,8 +403,11 @@ def _phase2_collect_and_finish(config: Config, session: SessionState) -> int:
             )
             frame_records.append(record)
             refs.append(RefItem(picture=2, name="尾帧", description="", path=str(last_path)))
-        print("正在用 qwen3.7-plus 读取关键帧图片……")
-        audits = audit_frame_images(refs, brief.variant)
+        def report_frame(frame_role: str) -> None:
+            print(f"正在读取{frame_role}的实际画面……", flush=True)
+
+        with _progress_scope("qwen3.7-plus 正在读取关键帧实际画面……"):
+            audits = audit_frame_images(refs, brief.variant, on_frame=report_frame)
         descriptions = [a.to_dict() for a in audits]
         for audit in audits:
             label = "第一帧" if audit.role == "first" else "最后一帧"
@@ -316,8 +416,9 @@ def _phase2_collect_and_finish(config: Config, session: SessionState) -> int:
     state["fl2va_frame_descriptions"] = descriptions
     state["frame_images"] = frame_records
 
-    print("\n正在组装最终视频提示词……")
-    final_state, prompt = run_stage2(state, brief, config)
+    with _progress_scope("[阶段 2] 正在组装最终视频提示词并进行质检精修……（预计几分钟，期间无需输入）"):
+        final_state, prompt = run_stage2(state, brief, config, on_node=_report_node)
+    _drain_stdin()
     save_session(generation_dir, brief, final_state, status=STATUS_COMPLETED)
     if downgraded:
         session_downgraded = downgraded

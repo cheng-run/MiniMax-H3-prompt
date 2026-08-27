@@ -58,10 +58,12 @@ def audit_frame_images(
     variant: str,
     *,
     describe=None,
+    on_frame=None,
 ) -> list[FrameAudit]:
     """读取该变体所需的关键帧图片。
 
     describe 可注入 mock 测试；默认用 reference_auditor.describe_image（qwen3.7-plus）。
+    on_frame：可选回调，每张帧图开始读前以帧位标签（如"视频的第一帧"）调用，供 UI 报进度。
     - 对应帧位的 ref 没有 path：跳过该帧（回退生图提示词锚定）；
     - path 指向不存在的文件：FileNotFoundError（显式失败）；
     - 单张读图异常：捕获并跳过该帧，其余继续。
@@ -79,6 +81,8 @@ def audit_frame_images(
         if not path.is_file():
             raise FileNotFoundError(f"{_ROLE_LABELS[role]}图片不存在：{path}")
         try:
+            if on_frame is not None:
+                on_frame(_ROLE_LABELS[role])
             description = str(describe_fn(path, _frame_prompt(role))).strip()
         except Exception:  # noqa: BLE001 - 单帧失败降级，不阻塞管线
             continue

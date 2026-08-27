@@ -19,8 +19,38 @@ from rich.text import Text
 from ..observability import reporter, token_meter
 
 
-def _label(role: str) -> str:
+def role_label(role: str) -> str:
+    """剥掉 agent name 的 role_ 前缀，得到用户可读的角色名。"""
     return role.removeprefix("role_") if role.startswith("role_") else role
+
+
+def fmt_clock(seconds: float) -> str:
+    """秒数 → m:ss。"""
+    m, s = divmod(int(seconds), 60)
+    return f"{m}:{s:02d}"
+
+
+class TextProgress:
+    """文本行进度监听器：每个角色开始/完成时打一行带耗时的进度。
+
+    与 LiveProgress（rich Live 面板）不同：普通 print 行持久留在终端、
+    之后可直接接 input() 交互，适合向导等纯交互场景。
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.time) -> None:
+        self._clock = clock
+        self._t0 = clock()
+
+    def __call__(self, event: dict) -> None:
+        t = event.get("type")
+        if t not in ("agent_start", "agent_done"):
+            return
+        name = role_label(str(event.get("role", "模型")))
+        if t == "agent_start":
+            print(f"  ▶ {name} 正在处理……", flush=True)
+        else:
+            duration = float(event.get("duration", 0))
+            print(f"  ✓ {name} 完成（{duration:.1f}s | 累计 {fmt_clock(self._clock() - self._t0)}）", flush=True)
 
 
 class LiveProgress:
@@ -63,10 +93,10 @@ class LiveProgress:
         for role, row in snapshot:
             st = Text(row["status"])
             st.style = "green" if row["status"] == "✓" else ("yellow" if row["status"] == "运行中" else "dim")
-            table.add_row(_label(role), st, f"{row['duration']}s", str(row["out_len"]))
+            table.add_row(role_label(role), st, f"{row['duration']}s", str(row["out_len"]))
         meter = token_meter.format()
         return Panel(
-            Group(table, Text(f"\n⏱ {time.time() - self._t0:.0f}s | {meter}")),
+            Group(table, Text(f"\n⏱ {fmt_clock(time.time() - self._t0)} | {meter}")),
             title=self._title,
             border_style="cyan",
         )

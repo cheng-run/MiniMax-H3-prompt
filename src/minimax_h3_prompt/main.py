@@ -116,7 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
 def _topic_progress(event: dict) -> None:
     """把主题单入口的模型调用进度显示给最终用户。"""
     event_type = event.get("type")
-    role = event.get("role", "模型")
+    role = str(event.get("role", "模型")).removeprefix("role_")
     if event_type == "agent_start":
         print(f"[进行中] {role} 正在处理……", flush=True)
     elif event_type == "agent_done":
