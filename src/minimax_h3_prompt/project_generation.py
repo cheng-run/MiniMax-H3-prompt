@@ -52,8 +52,6 @@ def create_video_from_topic(
         raise ValueError("视频主题不能为空")
     topic = topic.strip()
     variant = variant.upper()
-    if variant != "FL2VA":
-        raise ValueError("主题单入口只支持 FL2VA 首尾帧流程")
     store = ProjectStore(root)
     resolved_topic_id = topic_slug(topic)
     project_id = _next_project_id(store, resolved_topic_id)

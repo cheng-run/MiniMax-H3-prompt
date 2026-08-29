@@ -9,7 +9,7 @@ from __future__ import annotations
 from langgraph.graph import END, START, StateGraph
 
 from ..agents import build_role_agents, run_agent
-from ..brief_parser import Brief
+from ..brief_parser import FRAME_VARIANTS, Brief
 from ..config import Config
 from ..observability import stage_saver, token_meter
 from ..output.assembler import assemble_and_repair
@@ -28,7 +28,7 @@ from .state import PipelineState
 
 
 def _theme_repair_injection(state: dict, brief: Brief) -> str:
-    """把主题约束与首尾帧锚定渲染成 QA/修复消息里的回锚指令；无约束时返回空。"""
+    """把主题约束与关键帧锚定渲染成 QA/修复消息里的回锚指令；无约束时返回空。"""
     bundle = state.get("fl2va_prompt_bundle")
     extra = tuple(
         tuple(str(term) for term in group)
@@ -37,11 +37,14 @@ def _theme_repair_injection(state: dict, brief: Brief) -> str:
     )
     req = theme_requirements_text(brief.plot, extra)
     anchor = str((bundle or {}).get("scene_anchor", "")).strip()
+    variant = str(brief.variant).upper()
     lines = ["【主题忠实度要求】正文必须完全忠于用户原始主题，人物/地点/动作不得偏离。"]
     if req:
         lines.append(req)
-    if anchor and str(brief.variant).upper() == "FL2VA":
-        lines.append(f"FL2VA 场景锚点（正文全程不得离开）：{anchor}")
+    if anchor and variant in FRAME_VARIANTS:
+        lines.append(f"{variant} 场景锚点（正文全程不得离开）：{anchor}")
+    lines.append("【禁止无中生有】正文与画面中的每个细节必须可溯源到用户原始主题/分场剧本/镜头表/关键帧；"
+                 "不得新增主题中不存在的主体、地点或道具。")
     return "\n".join(lines)
 
 # 线性执行顺序（独立子任务在组合节点内并发，整图保持线性、每个节点恰好一次）
@@ -160,7 +163,36 @@ def run_stage1(brief: Brief, config: Config, *, on_node=None) -> tuple[dict, obj
                 stage_saver.save(node_name, update)
                 if on_node is not None:
                     on_node(node_name)
+    if config.common_sense_qa:
+        state = _stage1_frame_qa_loop(state, brief, agents, model, config)
     return state, model, agents
+
+
+def _stage1_frame_qa_loop(state: dict, brief: Brief, agents, model, config: Config) -> dict:
+    """生图提示词有界常识 QA：发现 error 级问题注入 frame_prompt_issues 重生成，最多 max_qa_iterations 轮。"""
+    from ..tools.frame_sanity import frame_common_sense_issues
+    from ..tools.h3_validator import format_issues
+    from .nodes import make_nodes
+
+    for i in range(config.max_qa_iterations):
+        bundle_dict = state.get("fl2va_prompt_bundle")
+        if not isinstance(bundle_dict, dict):
+            break
+        issues = frame_common_sense_issues(bundle_dict, brief, agents)
+        errors = [it for it in issues if it.severity == "error"]
+        if not errors:
+            break
+        state["frame_prompt_issues"] = [it.message for it in errors]
+        nodes = make_nodes(agents, model, brief, config)
+        update = nodes["fl2va_frame_prompts"](state)
+        state.pop("frame_prompt_issues", None)
+        if isinstance(update, dict):
+            state.update(update)
+        stage_saver.save(f"frame_qa_{i}", {
+            "常识问题": format_issues(errors),
+            "重出提示词": state.get("fl2va_prompt_bundle"),
+        })
+    return state
 
 
 def run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_node=None) -> tuple[dict, str]:
@@ -205,6 +237,10 @@ def run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_node
             extra_groups=(merged.get("fl2va_prompt_bundle") or {}).get("required_scene_terms", []),
         )
         issues = issues + theme_issues
+        if config.common_sense_qa:
+            from ..tools.frame_sanity import prompt_common_sense_issues
+
+            issues = issues + prompt_common_sense_issues(prompt, brief, agents)
         errors = [i for i in issues if i.severity == "error"]
         if not errors:
             break

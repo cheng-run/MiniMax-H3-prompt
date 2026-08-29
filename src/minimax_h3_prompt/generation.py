@@ -41,6 +41,21 @@ def _require_text(value: str, label: str) -> None:
         raise ValueError(f"{label} 不能为空")
 
 
+def _infer_frame_variant(first: tuple, last: tuple) -> str:
+    """从关键帧存在性推断变体：双帧→FL2VA、仅首帧→I2VA、仅尾帧→L2VA、无帧→FL2VA（保持报缺失错误）。"""
+    if first and last:
+        return "FL2VA"
+    if first:
+        return "I2VA"
+    if last:
+        return "L2VA"
+    return "FL2VA"
+
+
+def _variant_frame_names(variant: str) -> tuple[str, ...]:
+    return {"FL2VA": ("first", "last"), "I2VA": ("first",), "L2VA": ("last",)}[str(variant).upper()]
+
+
 @dataclass(frozen=True)
 class PromptArtifact:
     """一份供用户查看、复制的剧本或提示词文本；不是媒体资产。"""
@@ -240,19 +255,21 @@ class FL2VAPromptBundle:
 
     def __post_init__(self) -> None:
         _require_text(self.scene_anchor, "FL2VA scene_anchor")
-        if not self.first or not self.last:
+        variant = _infer_frame_variant(self.first, self.last)
+        if variant == "FL2VA" and (not self.first or not self.last):
             raise ValueError("FL2VA 必须同时包含首帧和尾帧提示词")
-        for frame_name, rows in (("first", self.first), ("last", self.last)):
+        for frame_name in _variant_frame_names(variant):
+            rows = getattr(self, frame_name)
             models = {row.model_family for row in rows}
             if len(models) != len(rows):
-                raise ValueError(f"FL2VA {frame_name} 帧不能重复同一生图模型")
+                raise ValueError(f"{variant} {frame_name} 帧不能重复同一生图模型")
             if any(row.frame != frame_name for row in rows):
-                raise ValueError(f"FL2VA {frame_name} 帧包含错误的 frame 标识")
+                raise ValueError(f"{variant} {frame_name} 帧包含错误的 frame 标识")
             if any(not row.scene_anchor for row in rows):
-                raise ValueError(f"FL2VA {frame_name} 帧缺少场景锚点")
-        if self.profile_id != "h3_fl2va_v2":
+                raise ValueError(f"{variant} {frame_name} 帧缺少场景锚点")
+        if variant == "FL2VA" and self.profile_id != "h3_fl2va_v2":
             raise ValueError(f"FL2VA Profile 无效：{self.profile_id}")
-        if not self.first_frame_slot_id or not self.last_frame_slot_id:
+        if variant == "FL2VA" and (not self.first_frame_slot_id or not self.last_frame_slot_id):
             raise ValueError("FL2VA 首尾帧输入槽不能为空")
 
     @classmethod
@@ -282,12 +299,16 @@ class FL2VAPromptBundle:
                 if isinstance(item, dict)
             )
 
+        first = parse_frame("first")
+        last = parse_frame("last")
+        variant = _infer_frame_variant(first, last)
+        profile_default = "h3_fl2va_v2" if variant == "FL2VA" else ""
         return cls(
             scene_anchor=str(raw.get("scene_anchor", "")),
-            first=parse_frame("first"),
-            last=parse_frame("last"),
+            first=first,
+            last=last,
             continuity_constraints=tuple(str(x) for x in raw.get("continuity_constraints", [])),
-            profile_id=str(raw.get("profile_id", "h3_fl2va_v2")),
+            profile_id=str(raw.get("profile_id") or profile_default),
             prompt_node_id=str(raw.get("prompt_node_id", "187")),
             prompt_input=str(raw.get("prompt_input", "value")),
             first_frame_slot_id=str(raw.get("first_frame_slot_id", "first_frame")),
@@ -319,17 +340,20 @@ def validate_fl2va_bundle(
     bundle: FL2VAPromptBundle,
     *,
     duration: float | None = None,
+    variant: str | None = None,
 ) -> list[str]:
-    """返回 FL2VA 首尾帧的确定性问题，不调用模型或外部服务。"""
+    """返回该变体关键帧提示词的确定性问题，不调用模型或外部服务。"""
+    variant = str(variant or _infer_frame_variant(bundle.first, bundle.last)).upper()
     issues: list[str] = []
-    if bundle.first_frame_slot_id != "first_frame" or bundle.last_frame_slot_id != "last_frame":
-        issues.append("FL2VA_FRAME_SLOT_MISMATCH")
+    if variant == "FL2VA":
+        if bundle.first_frame_slot_id != "first_frame" or bundle.last_frame_slot_id != "last_frame":
+            issues.append("FL2VA_FRAME_SLOT_MISMATCH")
     if bundle.prompt_node_id != "187":
         issues.append("FL2VA_PROMPT_NODE_MISMATCH")
     if not bundle.continuity_constraints:
         issues.append("FL2VA_CONTINUITY_MISSING")
-    for frame_name, rows in (("first", bundle.first), ("last", bundle.last)):
-        for row in rows:
+    for frame_name in _variant_frame_names(variant):
+        for row in getattr(bundle, frame_name):
             if row.scene_anchor != bundle.scene_anchor:
                 issues.append(f"FL2VA_{frame_name.upper()}_ANCHOR_MISMATCH")
             if not row.positive_prompt.strip():
@@ -370,7 +394,9 @@ def fl2va_bundle_from_dict(raw: dict[str, Any], brief: Brief) -> FL2VAPromptBund
                 frame_value[model_family] = item_value
         enriched[frame_name] = frame_value
     bundle = FL2VAPromptBundle.from_dict(enriched)
-    issues = validate_fl2va_bundle(bundle, duration=brief.duration)
+    if str(brief.variant).upper() == "FL2VA" and (not bundle.first or not bundle.last):
+        raise ValueError("FL2VA 必须同时包含首帧和尾帧提示词")
+    issues = validate_fl2va_bundle(bundle, duration=brief.duration, variant=brief.variant)
     if issues:
         raise ValueError("FL2VA 首尾帧提示词校验失败：" + ", ".join(issues))
     return bundle
@@ -632,15 +658,20 @@ def render_fl2va_frame_markdown(result: GenerationResult, frame: str) -> str:
         raise KeyError("生成结果中不存在 FL2VA 首尾帧提示词")
     if frame not in {"first", "last"}:
         raise ValueError(f"FL2VA 帧类型无效：{frame}")
-    rows = result.fl2va_prompt_bundle.first if frame == "first" else result.fl2va_prompt_bundle.last
+    bundle = result.fl2va_prompt_bundle
+    rows = bundle.first if frame == "first" else bundle.last
     title = "首帧" if frame == "first" else "尾帧"
+    variant = str(result.variant).upper()
+    if not rows:
+        return f"# {variant} {title}生图提示词\n\n（{variant} 变体未生成{title}提示词）\n"
     parts = [
-        f"# FL2VA {title}生图提示词", "",
+        f"# {variant} {title}生图提示词", "",
         "人物、道具和场景已经融合在同一张关键帧画面中。请选择对应模型版本复制。", "",
-        f"- 场景锚点：{result.fl2va_prompt_bundle.scene_anchor}",
-        f"- FL2VA 视频 Profile：`{result.fl2va_prompt_bundle.profile_id}`",
-        f"- 视频提示词节点：`{result.fl2va_prompt_bundle.prompt_node_id}`", "",
+        f"- 场景锚点：{bundle.scene_anchor}",
+        f"- {variant} 视频 Profile：`{bundle.profile_id}`",
+        f"- 视频提示词节点：`{bundle.prompt_node_id}`", "",
     ]
+    slot_id = bundle.first_frame_slot_id if frame == "first" else bundle.last_frame_slot_id
     for item in rows:
         model_title = "Z-Image" if item.model_family == "zimage" else "Flux.2"
         parts.extend([
@@ -648,7 +679,7 @@ def render_fl2va_frame_markdown(result: GenerationResult, frame: str) -> str:
             f"- 静态图 Workflow Profile：`{item.profile_id}`（状态：{item.profile_status}）",
             f"- 主提示词节点：`{item.prompt_node_id}`",
             f"- 推荐尺寸：`{item.width} × {item.height}`",
-            f"- FL2VA 输入槽：`{result.fl2va_prompt_bundle.first_frame_slot_id if frame == 'first' else result.fl2va_prompt_bundle.last_frame_slot_id}`", "",
+            f"- {variant} 输入槽：`{slot_id}`", "",
             "### Positive Prompt", "", item.positive_prompt, "",
         ])
         if item.negative_prompt:
@@ -659,25 +690,50 @@ def render_fl2va_frame_markdown(result: GenerationResult, frame: str) -> str:
 
 
 def render_fl2va_markdown(result: GenerationResult) -> str:
-    """渲染 FL2VA 首尾帧与连续性约束摘要。"""
+    """渲染关键帧生图提示词与连续性约束摘要（FL2VA 保持原输出不变）。"""
     if result.fl2va_prompt_bundle is None:
         raise KeyError("生成结果中不存在 FL2VA 首尾帧提示词")
     bundle = result.fl2va_prompt_bundle
+    variant = str(result.variant).upper()
+    if variant == "FL2VA":
+        parts = [
+            "# FL2VA 融合首尾帧提示词", "",
+            "首帧和尾帧均把人物、道具和场景融合在同一画面中；视频提示词描述两帧之间的连续变化。", "",
+            f"- 场景锚点：{bundle.scene_anchor}",
+            f"- 视频 Profile：`{bundle.profile_id}`",
+            f"- 视频提示词节点：`{bundle.prompt_node_id}`（输入：`{bundle.prompt_input}`）",
+            f"- 首帧输入槽：`{bundle.first_frame_slot_id}`",
+            f"- 尾帧输入槽：`{bundle.last_frame_slot_id}`", "",
+            "## 连续性约束", "",
+            *[f"- {item}" for item in bundle.continuity_constraints], "",
+            "## 文件", "",
+            "- 首帧：`first-frame-prompt.md`",
+            "- 尾帧：`last-frame-prompt.md`",
+            "- 视频剧情提示词：`video-prompt.md`", "",
+        ]
+        return "\n".join(parts).rstrip() + "\n"
+    intro = {
+        "I2VA": "首帧把人物、道具和场景融合在同一画面中；视频提示词从该首帧画面出发向前发展。",
+        "L2VA": "尾帧把人物、道具和场景融合在同一画面中；视频提示词从合理开场逐步收敛到该尾帧画面。",
+    }[variant]
     parts = [
-        "# FL2VA 融合首尾帧提示词", "",
-        "首帧和尾帧均把人物、道具和场景融合在同一画面中；视频提示词描述两帧之间的连续变化。", "",
+        f"# {variant} 关键帧提示词", "",
+        intro, "",
         f"- 场景锚点：{bundle.scene_anchor}",
         f"- 视频 Profile：`{bundle.profile_id}`",
         f"- 视频提示词节点：`{bundle.prompt_node_id}`（输入：`{bundle.prompt_input}`）",
-        f"- 首帧输入槽：`{bundle.first_frame_slot_id}`",
-        f"- 尾帧输入槽：`{bundle.last_frame_slot_id}`", "",
-        "## 连续性约束", "",
-        *[f"- {item}" for item in bundle.continuity_constraints], "",
-        "## 文件", "",
-        "- 首帧：`first-frame-prompt.md`",
-        "- 尾帧：`last-frame-prompt.md`",
-        "- 视频剧情提示词：`video-prompt.md`", "",
     ]
+    if bundle.first:
+        parts.append(f"- 首帧输入槽：`{bundle.first_frame_slot_id}`")
+    if bundle.last:
+        parts.append(f"- 尾帧输入槽：`{bundle.last_frame_slot_id}`")
+    parts.extend(["", "## 连续性约束", "", *[f"- {item}" for item in bundle.continuity_constraints], "", "## 文件", ""])
+    if bundle.first:
+        parts.append("- 首帧：`first-frame-prompt.md`")
+    if bundle.last:
+        parts.append("- 尾帧：`last-frame-prompt.md`")
+    parts.append("- 视频剧情提示词：`video-prompt.md`")
+    parts.append("")
     return "\n".join(parts).rstrip() + "\n"
 def render_generation(result: GenerationResult) -> dict[str, str]:
     """返回当前生成模式的可复制产物；FL2VA 只输出融合首尾帧。"""

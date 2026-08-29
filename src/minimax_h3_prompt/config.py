@@ -79,6 +79,8 @@ class Config:
         self.output_path: Path = PROJECT_ROOT / pipeline.get("output_path", "output/final_prompt.txt")
         self.save_stages: bool = bool(pipeline.get("save_stages", True))
         self.stages_path: Path = PROJECT_ROOT / pipeline.get("stages_path", "output/stages")
+        # 生图提示词 / 视频提示词的日常常识 QA（每代一次 LLM 审核；可关以省成本）。
+        self.common_sense_qa: bool = bool(pipeline.get("common_sense_qa", True))
 
         cost = self.raw.get("cost", {}) or {}
         self.price_per_m_input: float = float(cost.get("price_per_m_input", 0.5))

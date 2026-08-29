@@ -29,8 +29,20 @@ from ..session_store import (
 from .progress import TextProgress
 
 
-def resolve_effective_variant(have_first: bool, have_last: bool) -> str:
-    """按用户实际拥有的关键帧决定有效变体（缺帧降级矩阵）。"""
+def resolve_effective_variant(requested: str, have_first: bool, have_last: bool) -> str:
+    """按用户请求变体 + 实际拥有的关键帧决定有效变体（缺帧降级矩阵，请求优先）。
+
+    用户显式选 I2VA/L2VA 时保持该变体（即使提供了多余的帧也不静默升级）；
+    FL2VA 按实际拥有帧降级；未知请求按 FL2VA 处理（兼容旧会话）。
+    """
+    requested = str(requested).upper()
+    if requested == "I2VA":
+        return "I2VA" if have_first else "T2VA"
+    if requested == "L2VA":
+        return "L2VA" if have_last else "T2VA"
+    if requested == "T2VA":
+        return "T2VA"
+    # FL2VA（或未知）：拥有帧 → 变体
     if have_first and have_last:
         return "FL2VA"
     if have_first:
@@ -83,6 +95,21 @@ def _confirm(text: str, default: bool = True) -> bool:
             return True
         if raw in ("n", "no"):
             return False
+
+
+def _choose_generation_mode() -> str:
+    """阶段 1 视频生成方式三选一：首帧(I2VA)/尾帧(L2VA)/首尾帧(FL2VA，默认)。"""
+    print("请选择视频生成方式：")
+    print("  1. 首帧生成视频（I2VA，以首帧图起笔，向前发展）")
+    print("  2. 尾帧生成视频（L2VA，从合理开场逐步收敛到尾帧图）")
+    print("  3. 首尾帧生成视频（FL2VA，首尾帧锚定，默认）")
+    while True:
+        raw = _prompt("输入 1/2/3（回车=3 首尾帧）：").strip()
+        if not raw:
+            return "FL2VA"
+        if raw in ("1", "2", "3"):
+            return {1: "I2VA", 2: "L2VA", 3: "FL2VA"}[int(raw)]
+        print("无效输入，请输入 1/2/3。")
 
 
 # LangGraph 节点名 → 用户可读环节名（用于节点级进度）。
@@ -189,10 +216,11 @@ def _phase1_new(config: Config) -> SessionState | None:
         print(f"时长无效，使用默认 {config.default_duration:.0f}s。")
         duration = config.default_duration
     style = _prompt("视觉风格（回车=AI 根据主题自行确定）：")
+    variant = _choose_generation_mode()
 
     brief = Brief(
         mode="base",
-        variant="FL2VA",
+        variant=variant,
         duration=duration,
         style=style or "",
         language=config.default_language,
@@ -209,7 +237,7 @@ def _phase1_new(config: Config) -> SessionState | None:
         project_id,
         topic[:120],
         duration_seconds=duration,
-        variant="FL2VA",
+        variant=variant,
         global_style=style,
     )
     generation_dir = document.directory / "generations" / "GEN001"
@@ -271,29 +299,33 @@ def store_next_project_id(store: ProjectStore, topic_id: str) -> str:
 
 
 def _show_frame_prompts(state: dict, generation_dir: Path) -> None:
-    from ..brief_parser import Brief
-
     bundle = state.get("fl2va_prompt_bundle")
     print("\n" + "=" * 60)
     print(f"资产库目录：{generation_dir}")
     print("=" * 60)
     if not isinstance(bundle, dict):
-        print("（本次流程没有产出 FL2VA 首尾帧提示词）")
+        print("（本次流程没有产出关键帧生图提示词）")
         return
-    fake_result_state = {"fl2va_prompt_bundle": bundle}
     from ..generation import FL2VAPromptBundle
 
     parsed = FL2VAPromptBundle.from_dict(bundle)
-    print(render_fl2va_frame_markdown_from_bundle(parsed, "first"))
-    print()
-    print(render_fl2va_frame_markdown_from_bundle(parsed, "last"))
+    for frame in ("first", "last"):
+        rendered = render_fl2va_frame_markdown_from_bundle(parsed, frame)
+        if rendered:
+            print(rendered)
+            print()
 
 
 def render_fl2va_frame_markdown_from_bundle(bundle, frame: str) -> str:
-    """渲染单帧双模型提示词（不依赖 GenerationResult）。"""
+    """渲染单帧双模型提示词（不依赖 GenerationResult）；空帧返回空串。"""
+    if frame not in {"first", "last"}:
+        raise ValueError(f"帧类型无效：{frame}")
     rows = bundle.first if frame == "first" else bundle.last
+    if not rows:
+        return ""
     title = "首帧" if frame == "first" else "尾帧"
-    parts = [f"# FL2VA {title}生图提示词", ""]
+    variant = "FL2VA" if (bundle.first and bundle.last) else "I2VA" if bundle.first else "L2VA"
+    parts = [f"# {variant} {title}生图提示词", ""]
     for item in rows:
         model_title = "Z-Image" if item.model_family == "zimage" else "Flux.2"
         parts.extend([
@@ -325,12 +357,11 @@ def _ask_optional_path(label: str) -> str:
 
 def _collect_frame_paths(variant: str) -> tuple[str, str]:
     """收集首/尾帧路径；空=跳过（需二次确认）。返回 (first_path, last_path)。"""
-    need_first = any(p == (1, "first") for p in _required_frames(variant))
-    need_last = any(p == (2, "last") for p in _required_frames(variant))
+    roles = {role for _, role in _required_frames(variant)}
     first = last = ""
-    if need_first or variant.upper() == "FL2VA":
+    if "first" in roles or variant.upper() == "FL2VA":
         first = _ask_optional_path("首帧")
-    if need_last or variant.upper() == "FL2VA":
+    if "last" in roles or variant.upper() == "FL2VA":
         last = _ask_optional_path("尾帧")
     return first, last
 
@@ -370,13 +401,13 @@ def _phase2_collect_and_finish(config: Config, session: SessionState) -> int:
         break
 
     have_first, have_last = first_path is not None, last_path is not None
-    effective = resolve_effective_variant(have_first, have_last)
     original = brief.variant
+    effective = resolve_effective_variant(original, have_first, have_last)
     downgraded = ""
     if effective != original:
         brief.variant = effective
         downgraded = f"{original}→{effective}"
-        label = {"I2VA": "仅首帧模式（I2VA）", "L2VA": "仅尾帧模式（L2VA）", "T2VA": "纯文字模式（T2VA）"}[effective]
+        label = {"I2VA": "仅首帧模式（I2VA）", "L2VA": "仅尾帧模式（L2VA）", "T2VA": "纯文字模式（T2VA）", "FL2VA": "首尾帧模式（FL2VA）"}[effective]
         print(f"[提示] 未提供完整首尾帧，已切换为{label}。")
     if first_path and last_path and first_path == last_path:
         print("[警告] 首帧与尾帧是同一张图，视频将几乎静止。")
@@ -389,20 +420,21 @@ def _phase2_collect_and_finish(config: Config, session: SessionState) -> int:
         from ..tools.frame_auditor import audit_frame_images
 
         refs = []
+        frame_slots = {role: picture for picture, role in _required_frames(effective)}
         if have_first:
             record = copy_frame_image(
                 first_path, topic_id=_topic_dir_name(session), generation_id=generation_dir.name,
                 role="first", assets_root=config.assets_root,
             )
             frame_records.append(record)
-            refs.append(RefItem(picture=1, name="首帧", description="", path=str(first_path)))
+            refs.append(RefItem(picture=frame_slots.get("first", 1), name="首帧", description="", path=str(first_path)))
         if have_last:
             record = copy_frame_image(
                 last_path, topic_id=_topic_dir_name(session), generation_id=generation_dir.name,
                 role="last", assets_root=config.assets_root,
             )
             frame_records.append(record)
-            refs.append(RefItem(picture=2, name="尾帧", description="", path=str(last_path)))
+            refs.append(RefItem(picture=frame_slots.get("last", 2), name="尾帧", description="", path=str(last_path)))
         def report_frame(frame_role: str) -> None:
             print(f"正在读取{frame_role}的实际画面……", flush=True)
 

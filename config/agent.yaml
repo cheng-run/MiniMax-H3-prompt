@@ -6,6 +6,7 @@ pipeline:
   output_path: output/final_prompt.txt
   save_stages: true          # 每个角色/阶段的产物落盘 output/stages/
   stages_path: output/stages
+  common_sense_qa: true      # 生图/视频提示词日常常识 QA（每代一次 LLM 审核；false 关闭省成本）
 
 # token 费用估算单价（元 / 百万 token），用于交互界面展示成本，可按实际改
 cost:
@@ -22,14 +23,14 @@ models:
     # api_key_env: DEEPSEEK_API_KEY
 
     provider: dashscope
-    model: qwen3.7-plus
-    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    model: deepseek-v4-flash-0731
+    base_url: https://ws-hzk37yyattdxxdls.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
     api_key_env: DASHSCOPE_API_KEY
 
   vision:
     provider: dashscope
-    model: qwen3.7-plus
-    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    model: qwen3.8-27b
+    base_url: https://ws-hzk37yyattdxxdls.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
     api_key_env: DASHSCOPE_API_KEY
 
 # 旧字段：仅在新模型配置和兼容环境变量都未提供模型名时作为 fallback。

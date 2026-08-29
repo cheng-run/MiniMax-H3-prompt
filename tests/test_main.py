@@ -115,6 +115,22 @@ def test_project_cli_generate_dry_run_does_not_call_pipeline(tmp_path, monkeypat
     assert json.loads(capsys.readouterr().out)["dry_run"] is True
 
 
+def test_cli_brief_respects_l2va(tmp_path, capsys):
+    """brief 声明尾帧 → dry-run 显示变体 L2VA（不再被硬编码 FL2VA 覆盖）。"""
+    brief_path = tmp_path / "brief_l2va.md"
+    brief_path.write_text("输入: 尾帧\n\n## 剧情\n主题。\n", encoding="utf-8")
+    assert main(["--brief", str(brief_path), "--dry-run"]) == 0
+    assert "变体: L2VA" in capsys.readouterr().out
+
+
+def test_cli_brief_defaults_fl2va(tmp_path, capsys):
+    """brief 无变体声明 → 缺省 FL2VA。"""
+    brief_path = tmp_path / "brief.md"
+    brief_path.write_text("## 剧情\n主题。\n", encoding="utf-8")
+    assert main(["--brief", str(brief_path), "--dry-run"]) == 0
+    assert "变体: FL2VA" in capsys.readouterr().out
+
+
 def _patch_execution(monkeypatch):
     """把 execution 新命令函数替换为记录调用的桩，验证 CLI 分发与退出码。"""
     import minimax_h3_prompt.execution as ex

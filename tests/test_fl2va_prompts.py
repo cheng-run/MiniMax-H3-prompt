@@ -5,7 +5,9 @@ import pytest
 
 from minimax_h3_prompt.brief_parser import Brief
 from minimax_h3_prompt.generation import (
+    FL2VAFramePrompt,
     FL2VAPromptBundle,
+    GenerationResult,
     fl2va_bundle_from_dict,
     result_from_state,
     validate_fl2va_bundle,
@@ -120,3 +122,116 @@ def test_frame_node_uses_shot_and_visual_context(monkeypatch):
     assert "分镜表" in captured["message"]
     assert "画面细化" in captured["message"]
     assert output["fl2va_prompt_bundle"]["profile_id"] == "h3_fl2va_v2"
+
+
+# ---------------------------------------------------------------------------
+# I2VA / L2VA 单帧 bundle
+# ---------------------------------------------------------------------------
+
+def _single_frame_payload(frame_key: str, prompt: str) -> dict:
+    return {
+        "scene_anchor": "medieval tavern interior",
+        frame_key: frame_payload(prompt),
+        "continuity_constraints": ["Keep the same characters and props."],
+    }
+
+
+def test_single_frame_bundle_i2va():
+    brief = Brief(variant="I2VA", duration=5, plot="中世纪酒馆室内")
+    bundle = fl2va_bundle_from_dict(
+        _single_frame_payload("first", "Three adventurers inside a medieval tavern interior."), brief,
+    )
+    assert bundle.first
+    assert bundle.last == ()
+    assert validate_fl2va_bundle(bundle, duration=5) == []
+    # roundtrip 保持单帧
+    restored = FL2VAPromptBundle.from_dict(bundle.to_dict())
+    assert restored.first and not restored.last
+
+
+def test_single_frame_bundle_l2va():
+    brief = Brief(variant="L2VA", duration=5, plot="中世纪酒馆室内")
+    bundle = fl2va_bundle_from_dict(
+        _single_frame_payload("last", "Three adventurers raise mugs inside a medieval tavern interior."), brief,
+    )
+    assert bundle.last
+    assert bundle.first == ()
+    assert validate_fl2va_bundle(bundle, duration=5) == []
+
+
+def test_fl2va_bundle_still_requires_both_frames():
+    """FL2VA 请求但只给单帧 → 必须 raise（回归强校验，不能因单帧化放宽）。"""
+    brief = Brief(variant="FL2VA", duration=5, plot="中世纪酒馆室内")
+    with pytest.raises(ValueError, match="必须同时包含首帧和尾帧"):
+        fl2va_bundle_from_dict(
+            _single_frame_payload("first", "Three adventurers inside a medieval tavern interior."), brief,
+        )
+
+
+def test_validate_fl2va_bundle_variant_aware():
+    """I2VA 只校验首帧；L2VA 的 last.time <= duration 检查生效。"""
+    brief = Brief(variant="I2VA", duration=5, plot="中世纪酒馆室内")
+    bundle = fl2va_bundle_from_dict(
+        _single_frame_payload("first", "Three adventurers inside a medieval tavern interior."), brief,
+    )
+    assert validate_fl2va_bundle(bundle, duration=5, variant="I2VA") == []
+    bad_last = (
+        FL2VAFramePrompt(frame="last", model_family="zimage", positive_prompt="x",
+                         time_seconds=9.0, scene_anchor="medieval tavern interior"),
+        FL2VAFramePrompt(frame="last", model_family="flux2", positive_prompt="y",
+                         time_seconds=9.0, scene_anchor="medieval tavern interior"),
+    )
+    bad = FL2VAPromptBundle(scene_anchor="medieval tavern interior", first=(), last=bad_last,
+                            continuity_constraints=("c",))
+    assert "FL2VA_LAST_FRAME_TIME_EXCEEDS_DURATION" in validate_fl2va_bundle(bad, duration=5, variant="L2VA")
+
+
+def test_result_from_state_single_frame_roundtrip():
+    brief = Brief(variant="I2VA", duration=5, style="live-action realism", plot="中世纪酒馆室内，冒险者团队庆祝")
+    result = result_from_state(
+        {
+            "script": "The adventurers celebrate in the tavern.",
+            "final_prompt": "video prompt",
+            "character_design": "three adventurers",
+            "prop_design": "wooden mugs and quest gear",
+            "background_design": "medieval tavern interior",
+            "fl2va_prompt_bundle": _single_frame_payload(
+                "first", "Three adventurers inside a medieval tavern interior."),
+        },
+        brief,
+        generation_id="GEN001",
+        topic_id="topic",
+        project_id="project",
+    )
+    assert result.variant == "I2VA"
+    assert result.fl2va_prompt_bundle is not None
+    assert result.fl2va_prompt_bundle.first and not result.fl2va_prompt_bundle.last
+    assert GenerationResult.from_dict(result.to_dict()) == result
+
+
+def test_frame_node_i2va_emits_first_only(monkeypatch):
+    captured = {}
+    payload = json.dumps(_single_frame_payload(
+        "first", "Three adventurers inside a medieval tavern interior."))
+
+    def fake_run_agent(agent, message):
+        captured["message"] = message
+        return payload
+
+    monkeypatch.setattr(nodes, "run_agent", fake_run_agent)
+    node = nodes._make_fl2va_frame_prompt_node({"frame_prompt_engineer": object()})
+    brief = Brief(variant="I2VA", duration=5, plot="中世纪酒馆室内")
+    output = node({
+        "brief": brief,
+        "script": "script",
+        "character_design": "characters",
+        "prop_design": "props",
+        "background_design": "tavern interior",
+        "art_design": "integrated tavern design",
+        "shot_table": "start and end states",
+        "shot_review_lock": "locked shot",
+        "visual_design": "medium-wide composition",
+    })
+    assert output["fl2va_prompt_bundle"]["first"]
+    assert not output["fl2va_prompt_bundle"]["last"]
+    assert "I2VA" in captured["message"]

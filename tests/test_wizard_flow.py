@@ -37,10 +37,21 @@ def test_required_frames_by_variant():
 def test_resolve_effective_variant_matrix():
     from minimax_h3_prompt.ui.wizard import resolve_effective_variant
 
-    assert resolve_effective_variant(True, True) == "FL2VA"
-    assert resolve_effective_variant(True, False) == "I2VA"
-    assert resolve_effective_variant(False, True) == "L2VA"
-    assert resolve_effective_variant(False, False) == "T2VA"
+    # FL2VA 请求：按实际拥有帧降级
+    assert resolve_effective_variant("FL2VA", True, True) == "FL2VA"
+    assert resolve_effective_variant("FL2VA", True, False) == "I2VA"
+    assert resolve_effective_variant("FL2VA", False, True) == "L2VA"
+    assert resolve_effective_variant("FL2VA", False, False) == "T2VA"
+    # I2VA 请求：只需首帧；即使有尾帧也保持 I2VA（请求优先）
+    assert resolve_effective_variant("I2VA", True, False) == "I2VA"
+    assert resolve_effective_variant("I2VA", True, True) == "I2VA"
+    assert resolve_effective_variant("I2VA", False, False) == "T2VA"
+    # L2VA 请求：只需尾帧；有首帧也保持 L2VA
+    assert resolve_effective_variant("L2VA", False, True) == "L2VA"
+    assert resolve_effective_variant("L2VA", True, True) == "L2VA"
+    assert resolve_effective_variant("L2VA", False, False) == "T2VA"
+    # T2VA 请求：保持
+    assert resolve_effective_variant("T2VA", True, True) == "T2VA"
 
 
 # ---------------------------------------------------------------------------
@@ -408,7 +419,7 @@ def test_full_wizard_gate_default_exits_before_stage2(monkeypatch, tmp_path, cap
     stage1_calls = _patch_run_stage1(monkeypatch)
     stage2_calls = _patch_run_stage2(monkeypatch)
     seen: list[str] = []
-    _scripted_inputs(monkeypatch, seen, ["酒馆短剧", "", "", "", ""])  # 主题、时长、风格、审阅默认、门禁默认
+    _scripted_inputs(monkeypatch, seen, ["酒馆短剧", "", "", "", "", ""])  # 主题、时长、风格、生成方式默认、审阅默认、门禁默认
 
     code = wizard_module.run_wizard(config)
 
@@ -428,8 +439,8 @@ def test_full_wizard_gate_yes_runs_phase2_with_skip_confirms(monkeypatch, tmp_pa
     _patch_run_stage1(monkeypatch)
     stage2_calls = _patch_run_stage2(monkeypatch)
     seen: list[str] = []
-    # 主题、时长、风格、审阅默认、门禁 y、首帧空+确认 y、尾帧空+确认 y
-    _scripted_inputs(monkeypatch, seen, ["酒馆短剧", "", "", "", "y", "", "y", "", "y"])
+    # 主题、时长、风格、生成方式默认、审阅默认、门禁 y、首帧空+确认 y、尾帧空+确认 y
+    _scripted_inputs(monkeypatch, seen, ["酒馆短剧", "", "", "", "", "y", "", "y", "", "y"])
 
     code = wizard_module.run_wizard(config)
 
@@ -463,7 +474,7 @@ def test_regenerate_error_unsubscribes_progress_listener(monkeypatch, tmp_path):
     )
 
     seen: list[str] = []
-    _scripted_inputs(monkeypatch, seen, ["酒馆短剧", "", "", "y", "1", "更多火光"])
+    _scripted_inputs(monkeypatch, seen, ["酒馆短剧", "", "", "", "y", "1", "更多火光"])
 
     before = list(reporter._subscribers)
     with pytest.raises(RuntimeError):
@@ -471,6 +482,60 @@ def test_regenerate_error_unsubscribes_progress_listener(monkeypatch, tmp_path):
     after = list(reporter._subscribers)
 
     assert after == before, "异常退出后 reporter 不得残留向导订阅"
+
+
+def test_wizard_phase1_chooses_i2va_mode(monkeypatch, tmp_path, capsys):
+    """三选一选 1（I2VA）→ run_stage1 收到的 brief.variant 与 init_project 落盘均为 I2VA。"""
+    _fake_tty(monkeypatch)
+    config = _fake_config(monkeypatch, tmp_path)
+    captured = {}
+
+    def fake_run_stage1(brief, config, *, on_node=None):
+        captured["variant"] = brief.variant
+        return _stage1_state(), object(), object()
+
+    monkeypatch.setattr(wizard_module, "run_stage1", fake_run_stage1)
+    seen: list[str] = []
+    # 主题、时长、风格、生成方式 1、审阅默认、门禁默认
+    _scripted_inputs(monkeypatch, seen, ["酒馆短剧", "", "", "1", "", ""])
+
+    code = wizard_module.run_wizard(config)
+
+    assert code == 0
+    assert captured["variant"] == "I2VA"
+    project_files = list(tmp_path.rglob("project.json"))
+    assert project_files
+    assert json.loads(project_files[0].read_text(encoding="utf-8"))["variant"] == "I2VA"
+
+
+def test_wizard_phase2_l2va_ref_uses_picture_1(monkeypatch, tmp_path):
+    """选尾帧（L2VA）阶段 2 只问尾帧图，且尾帧 ref 用 picture=1（修复读图被跳过 bug）。"""
+    _fake_tty(monkeypatch)
+    config = _fake_config(monkeypatch, tmp_path)
+    _patch_run_stage1(monkeypatch)
+    _patch_run_stage2(monkeypatch)
+    last_png = tmp_path / "last.png"
+    _make_png(last_png)
+    captured = {}
+    import minimax_h3_prompt.tools.frame_auditor as fa_mod
+
+    def fake_audit(refs, variant, **kwargs):
+        captured["refs"] = refs
+        captured["variant"] = variant
+        return []
+
+    monkeypatch.setattr(fa_mod, "audit_frame_images", fake_audit)
+    seen: list[str] = []
+    # 主题、时长、风格、生成方式 2、审阅默认、门禁 y、尾帧路径
+    _scripted_inputs(monkeypatch, seen, ["酒馆短剧", "", "", "2", "", "y", str(last_png)])
+
+    code = wizard_module.run_wizard(config)
+
+    assert code == 0
+    assert captured["variant"] == "L2VA"
+    assert len(captured["refs"]) == 1
+    assert captured["refs"][0].picture == 1
+    assert captured["refs"][0].name == "尾帧"
 
 
 def test_text_progress_lines_with_stripped_role_prefix(capsys):
