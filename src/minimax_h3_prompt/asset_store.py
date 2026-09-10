@@ -21,9 +21,13 @@ _PROJECT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _ASSET_ID = re.compile(r"^[CSPE]\d{2}$")
 _GENERATION_ID = re.compile(r"^(?:[CSPE]\d{2}|SH\d{3})-G\d{3}$")
 _VERSION_ID = re.compile(r"^(?:[CSPE]\d{2}|SH\d{3})-v\d{3}$")
+_SEGMENT_ID = re.compile(r"^SEG\d{2}-SH\d{3}[a-z]$")
 
 _TOPIC_SUBDIRECTORIES = ("projects", "shared", "catalog", "schemas")
 _INBOX_DIRECTORY = "inbox"
+_BRIDGE_FRAME_DIRECTORY = "bridge_frames"
+# 桥接帧资产 ID 从 E（背景元素）号段分配：它们是镜头间的技术帧，不属于人物/场景/道具。
+_BRIDGE_FRAME_PREFIX = "E"
 
 
 @dataclass(frozen=True)
@@ -180,6 +184,61 @@ class AssetStore:
             with catalog_path.open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
         return plan
+
+    def bridge_frame_path(self, topic_id: str, project_id: str, segment_id: str) -> Path:
+        """桥接帧落盘路径：``<topic>/projects/<project>/bridge_frames/<segment>-end.png``。"""
+        _validate_token(topic_id, _TOPIC_ID, "topic_id")
+        _validate_token(project_id, _PROJECT_ID, "project_id")
+        _validate_token(segment_id, _SEGMENT_ID, "segment_id")
+        return _safe_child(
+            self.root, topic_id, "projects", project_id,
+            _BRIDGE_FRAME_DIRECTORY, f"{segment_id}-end.png",
+        )
+
+    def register_bridge_frame(
+        self,
+        topic_id: str,
+        project_id: str,
+        segment_id: str,
+        frame_path: str | Path,
+        *,
+        existing_asset_ids: tuple[str, ...] = (),
+        source_video: str | Path | None = None,
+    ) -> AssetRecord:
+        """把一张剥出的尾帧登记为 ``bridge_frame`` 类型资产记录（不落进 catalog）。
+
+        - 帧图复制到 bridge_frames/ 标准位置（同内容重登记时幂等覆盖同名文件）。
+        - asset_id 从 E 号段分配；调用方负责把记录 add 进项目 AssetRegistry。
+        - 状态固定 planned：桥接帧是执行溯源产物，绝不自动 approved。
+        """
+        import hashlib
+        import shutil
+
+        source_frame = Path(frame_path)
+        if not source_frame.is_file():
+            raise FileNotFoundError(f"桥接帧源文件不存在：{source_frame}")
+        target = self.bridge_frame_path(topic_id, project_id, segment_id)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256(source_frame.read_bytes()).hexdigest()
+        if not target.exists() or hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+            shutil.copy2(source_frame, target)
+
+        used = {asset_id for asset_id in existing_asset_ids if asset_id.startswith(_BRIDGE_FRAME_PREFIX)}
+        taken_numbers = sorted(int(asset_id[1:]) for asset_id in used if asset_id[1:].isdigit())
+        next_number = (taken_numbers[-1] + 1) if taken_numbers else 1
+        if next_number > 99:
+            raise ValueError("桥接帧资产 E 号段已用尽（>99），请人工整理资产库")
+        asset_id = f"{_BRIDGE_FRAME_PREFIX}{next_number:02d}"
+        return AssetRecord(
+            asset_id=asset_id,
+            asset_type="bridge_frame",
+            name=f"{segment_id} 尾帧桥接",
+            description=f"执行段 {segment_id} 输出视频的剥尾帧，用作下一段 FL2VA 首帧锚定",
+            source_path=str(source_video or source_frame),
+            target_path=str(target),
+            sha256=digest,
+            status="planned",
+        )
 
 
 def create_topic_template(root: str | Path = r"D:\笔记\Assets") -> Path:

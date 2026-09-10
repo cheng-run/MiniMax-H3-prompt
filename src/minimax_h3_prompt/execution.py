@@ -14,7 +14,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .project_models import ReviewRecord
+from .project_models import (
+    ReviewRecord,
+    Segment,
+    ShotPlan,
+    split_shot_into_segments,
+    verify_chain,
+)
 from .project_store import ProjectStore
 from .task_package import TaskPackage, import_output, inspect_asset
 from .workflow_profiles import (
@@ -368,6 +374,26 @@ def apply_review(
         store.update_shot_plan(topic_id, project_id, updated_plan, overwrite=True)
         return {"entity_type": "shot", "entity_id": entity_id, "status": updated_shot.status}
 
+    if entity_id.startswith("SEG"):  # 执行段流：proposed→approved→executed→reviewed
+        shot, segment = _find_segment(document, entity_id)
+        if outcome == "approved" and segment.pipeline_state in ("proposed", "executed"):
+            target_state = "approved" if segment.pipeline_state == "proposed" else "reviewed"
+        elif outcome == "rejected" and segment.pipeline_state == "approved":
+            target_state = "rejected"
+        else:
+            raise ValueError(
+                f"段 {entity_id} 当前为 {segment.pipeline_state}，不能标记 {outcome}；"
+                "请先完成前一步骤（plan / import-output / extract-bridge）"
+            )
+        updated_segment = segment.with_status(target_state, review)
+        new_segments = tuple(
+            updated_segment if item.segment_id == segment.segment_id else item
+            for item in shot.segments
+        )
+        updated_plan = document.shot_plan.with_shot_segments(shot.shot_id, new_segments)
+        store.update_shot_plan(topic_id, project_id, updated_plan, overwrite=True)
+        return {"entity_type": "segment", "entity_id": entity_id, "status": updated_segment.pipeline_state}
+
     # 资产流
     asset = document.registry.get(entity_id)
     if asset is None:
@@ -563,4 +589,259 @@ __all__ = [
     "apply_review",
     "check_executability",
     "promote_profile",
+    "plan_segments",
+    "extract_bridge_frame",
+    "verify_segment_chain",
 ]
+
+
+# ---------------------------------------------------------------------------
+# 分段流水线：Shot（叙事单元）→ Segment（3-8s 实际执行单元）
+# ---------------------------------------------------------------------------
+
+def _link_segment_chain(segments: list[Segment]) -> tuple[Segment, ...]:
+    """按列表顺序重建 prev/next 双向指针（跨镜头段链也在此接续）。"""
+    linked: list[Segment] = []
+    for index, segment in enumerate(segments):
+        data = segment.to_dict()
+        data["prev_segment_id"] = segments[index - 1].segment_id if index else ""
+        data["next_segment_id"] = segments[index + 1].segment_id if index + 1 < len(segments) else ""
+        linked.append(Segment.from_dict(data))
+    return tuple(linked)
+
+
+def _synthesize_shots_from_latest_prompt(document: Any) -> list[Any]:
+    """向导路径的项目 ShotPlan 为空：从最新生成的视频提示词反推镜头表。"""
+    from .segment_prompts import shots_from_prompt
+
+    generations_dir = document.directory / "generations"
+    candidates = sorted(
+        generations_dir.glob("*/video-prompt.md"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    ) if generations_dir.is_dir() else []
+    if not candidates:
+        return []
+    return list(shots_from_prompt(candidates[0].read_text(encoding="utf-8"), document.shot_plan.duration_seconds))
+
+
+def plan_segments(
+    store: ProjectStore,
+    topic_id: str,
+    project_id: str,
+    *,
+    max_segment_seconds: float | None = None,
+    min_segment_seconds: float | None = None,
+) -> dict[str, Any]:
+    """把每个未拆分的 Shot 拆成执行段并写回 ShotPlan（幂等：已拆分镜头跳过）。
+
+    段间 prev/next 指针按镜头顺序全局接续；桥接帧资产仍为空，待 extract-bridge 填充。
+    """
+    from .config import SEGMENT_CONFIG
+
+    max_seconds = float(max_segment_seconds or SEGMENT_CONFIG["max_segment_seconds"])
+    min_seconds = float(min_segment_seconds or SEGMENT_CONFIG["min_segment_seconds"])
+
+    document = store.load_project(topic_id, project_id)
+    plan = document.shot_plan
+    synthesized_from_prompt = False
+    if not plan.shots:
+        shots = _synthesize_shots_from_latest_prompt(document)
+        if not shots:
+            raise ValueError(
+                "该项目尚无镜头且找不到已生成的视频提示词："
+                "请先运行向导（uv run launch.py）或 project generate-prompts 生成带分镜的提示词，再重试 segment-plan"
+            )
+        plan = ShotPlan(
+            plan.shot_plan_id, plan.project_id, plan.variant, plan.duration_seconds, tuple(shots),
+        )
+        store.update_shot_plan(topic_id, project_id, plan, overwrite=True)
+        synthesized_from_prompt = True
+        document = store.load_project(topic_id, project_id)
+        plan = document.shot_plan
+
+    per_shot: list[tuple[Segment, ...]] = []
+    split_shots: list[str] = []
+    skipped_shots: list[str] = []
+    for shot in plan.shots:
+        if shot.segments:
+            per_shot.append(shot.segments)
+            skipped_shots.append(shot.shot_id)
+            continue
+        segments = split_shot_into_segments(
+            shot, max_segment_seconds=max_seconds, min_segment_seconds=min_seconds,
+        )
+        per_shot.append(segments)
+        split_shots.append(shot.shot_id)
+
+    flat = list(_link_segment_chain([segment for segments in per_shot for segment in segments]))
+    updated_plan = plan
+    cursor = 0
+    for shot, segments in zip(plan.shots, per_shot):
+        updated_plan = updated_plan.with_shot_segments(
+            shot.shot_id, tuple(flat[cursor:cursor + len(segments)]),
+        )
+        cursor += len(segments)
+    store.update_shot_plan(topic_id, project_id, updated_plan, overwrite=True)
+
+    warnings: list[str] = []
+    warn_below = int(SEGMENT_CONFIG["warn_shot_count_below"])
+    if plan.duration_seconds > 30 and len(plan.shots) < warn_below:
+        warnings.append(
+            f"SHOT_COUNT_LOW: {plan.duration_seconds:.0f}s 视频只有 {len(plan.shots)} 个镜头"
+            f"（建议 ≥{warn_below}），可能导致内容密度不足"
+        )
+    return {
+        "topic_id": topic_id,
+        "project_id": project_id,
+        "synthesized_from_prompt": synthesized_from_prompt,
+        "split_shots": split_shots,
+        "skipped_shots": skipped_shots,
+        "segment_count": len(flat),
+        "segments": [
+            {"segment_id": s.segment_id, "shot_ref": s.shot_ref, "duration_seconds": s.duration_seconds}
+            for s in flat
+        ],
+        "warnings": warnings,
+    }
+
+
+def _find_segment(document: Any, segment_id: str) -> tuple[Any, Segment]:
+    """在 ShotPlan 中定位一个执行段，返回 (所属 Shot, Segment)。"""
+    for shot in document.shot_plan.shots:
+        for segment in shot.segments:
+            if segment.segment_id == segment_id:
+                return shot, segment
+    raise ValueError(f"执行段不存在：{segment_id}（请先运行 project segment-plan）")
+
+
+def _resolve_segment_video(store: ProjectStore, topic_id: str, shot: Any) -> Path:
+    """缺省从该镜头 generation 的 inbox 目录取最新视频文件。"""
+    if not shot.generation_id:
+        raise ValueError(f"镜头 {shot.shot_id} 没有 generation_id，请用 --source 显式指定视频路径")
+    inbox = store.asset_store.root / "inbox" / topic_id / shot.generation_id
+    videos = [
+        path for path in inbox.rglob("*")
+        if path.suffix.lower() in (".mp4", ".mov", ".webm", ".mkv") and path.is_file()
+    ] if inbox.is_dir() else []
+    if not videos:
+        raise FileNotFoundError(
+            f"未找到镜头 {shot.shot_id} 的已导入视频（{inbox}）；"
+            "请先 project import-output，或用 --source 显式指定视频路径"
+        )
+    return max(videos, key=lambda path: path.stat().st_mtime)
+
+
+def extract_bridge_frame(
+    store: ProjectStore,
+    topic_id: str,
+    project_id: str,
+    segment_id: str,
+    source: str | Path | None = None,
+) -> dict[str, Any]:
+    """剥出执行段输出视频的尾帧，登记为 bridge_frame 资产并接线到下一段首帧。
+
+    只动 project 文档和 bridge_frames/ 目录；不改变段的人工验收状态，
+    桥接帧资产永远以 planned 入库（不自动 approved）。
+    """
+    from .tools.frame_auditor import extract_last_frame
+
+    document = store.load_project(topic_id, project_id)
+    shot, segment = _find_segment(document, segment_id)
+    video_path = Path(source).resolve() if source else _resolve_segment_video(store, topic_id, shot)
+
+    frame_path = extract_last_frame(video_path, store.asset_store.bridge_frame_path(topic_id, project_id, segment_id))
+
+    # 幂等：同一目标路径已登记过则复用原资产 ID，避免重复资产。
+    existing = [a for a in document.registry.assets if a.target_path == str(frame_path)]
+    if existing:
+        record = existing[0]
+    else:
+        record = store.asset_store.register_bridge_frame(
+            topic_id, project_id, segment_id, frame_path,
+            existing_asset_ids=tuple(a.asset_id for a in document.registry.assets),
+            source_video=video_path,
+        )
+        store.update_registry(
+            topic_id, project_id, document.registry.add(record), overwrite=True,
+        )
+
+    # 接线：本段记 end_frame；下一段（若存在）记 start_frame + 派生来源。
+    segment = Segment.from_dict({**segment.to_dict(), "end_frame_asset_id": record.asset_id})
+    new_segments = []
+    for item in shot.segments:
+        if item.segment_id == segment.segment_id:
+            new_segments.append(segment)
+        elif segment.next_segment_id and item.segment_id == segment.next_segment_id:
+            new_segments.append(Segment.from_dict({
+                **item.to_dict(),
+                "start_frame_asset_id": record.asset_id,
+                "start_state_derived_from": segment.segment_id,
+            }))
+        else:
+            new_segments.append(item)
+    document = store.load_project(topic_id, project_id)  # registry 已更新，重载保持一致
+    updated_plan = document.shot_plan.with_shot_segments(shot.shot_id, tuple(new_segments))
+    store.update_shot_plan(topic_id, project_id, updated_plan, overwrite=True)
+
+    return {
+        "segment_id": segment_id,
+        "shot_id": shot.shot_id,
+        "video": str(video_path),
+        "frame_path": str(frame_path),
+        "asset": record.to_dict(),
+        "next_segment_id": segment.next_segment_id,
+        "next_segment_ready": bool(segment.next_segment_id),
+    }
+
+
+def verify_segment_chain(
+    store: ProjectStore,
+    topic_id: str,
+    project_id: str,
+    shot_id: str | None = None,
+) -> dict[str, Any]:
+    """跨段连续性检查：结构指针（verify_chain）+ 桥接帧资产完整性与哈希一致性。"""
+    document = store.load_project(topic_id, project_id)
+    shots = [s for s in document.shot_plan.shots if shot_id is None or s.shot_id == shot_id]
+    if not shots:
+        raise ValueError(f"镜头不存在：{shot_id}")
+    segments = tuple(segment for shot in shots for segment in shot.segments)
+    if not segments:
+        raise ValueError(
+            f"{'镜头 ' + shot_id if shot_id else '项目'}尚未拆分执行段：请先运行 project segment-plan"
+        )
+
+    errors = list(verify_chain(segments))
+    for index, segment in enumerate(segments):
+        if index == 0:
+            continue
+        previous = segments[index - 1]
+        if not previous.end_frame_asset_id:
+            errors.append(
+                f"{previous.segment_id}: BRIDGE_FRAME_PENDING 尾帧未剥出"
+                f"（先执行并 project extract-bridge {previous.segment_id}）"
+            )
+            continue
+        if not segment.start_frame_asset_id:
+            errors.append(f"{segment.segment_id}: BRIDGE_FRAME_MISSING 未声明首帧资产")
+        previous_asset = document.registry.get(previous.end_frame_asset_id)
+        current_asset = document.registry.get(segment.start_frame_asset_id) if segment.start_frame_asset_id else None
+        if previous_asset is None:
+            errors.append(f"{previous.segment_id}: BRIDGE_FRAME_MISSING 尾帧资产 {previous.end_frame_asset_id} 不在注册表")
+        if current_asset is None and segment.start_frame_asset_id:
+            errors.append(f"{segment.segment_id}: BRIDGE_FRAME_MISSING 首帧资产 {segment.start_frame_asset_id} 不在注册表")
+        if previous_asset is not None and current_asset is not None:
+            if previous_asset.sha256 != current_asset.sha256:
+                errors.append(
+                    f"{segment.segment_id}: BRIDGE_FRAME_HASH_MISMATCH "
+                    f"首帧资产 {current_asset.asset_id} 与尾帧资产 {previous_asset.asset_id} 内容不一致"
+                )
+    return {
+        "topic_id": topic_id,
+        "project_id": project_id,
+        "shot_id": shot_id,
+        "segment_count": len(segments),
+        "errors": errors,
+        "chain_ok": not errors,
+    }

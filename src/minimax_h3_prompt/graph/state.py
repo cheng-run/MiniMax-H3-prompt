@@ -33,6 +33,7 @@ class PipelineState(TypedDict, total=False):
 
     # 视觉（分镜 → 并行决策 → 并行制作）
     shot_table: str  # 分镜
+    shot_duration_warning: str  # 分镜镜头时长均分警告（重试仍未修正时记录）
     shot_review_lock: str  # 镜头评审会（圆桌 2）锁定
     visual_design: str  # 摄影指导
     fl2va_prompt_bundle: dict  # FL2VA 融合首帧/尾帧提示词

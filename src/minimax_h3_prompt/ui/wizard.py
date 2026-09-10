@@ -458,11 +458,121 @@ def _phase2_collect_and_finish(config: Config, session: SessionState) -> int:
 
     output_file = generation_dir / "video-prompt.md"
     output_file.write_text(prompt, encoding="utf-8")
-    print("\n" + "=" * 60)
-    print(prompt)
-    print("=" * 60)
-    print(f"\n✓ 最终视频提示词已写入：{output_file}")
+    if brief.duration > 10:
+        # 长视频：不倾倒整条提示词，改走逐段陪跑（每段独立完成+验收后才给下一段）。
+        print(f"\n✓ 完整提示词已写入：{output_file}（供存档，长视频请按下方分段执行）")
+        _run_segmented_flow(brief, session, prompt)
+    else:
+        print("\n" + "=" * 60)
+        print(prompt)
+        print("=" * 60)
+        print(f"\n✓ 最终视频提示词已写入：{output_file}")
     return 0
+
+
+# ---------------------------------------------------------------------------
+# 长视频分段陪跑（>10s：H3 单次执行窗口只有 3-8s，必须逐段生成）
+# ---------------------------------------------------------------------------
+
+def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str) -> None:
+    """把整条提示词按 [Shot N] 拆成单镜头提示词，逐段陪跑。
+
+    循环规则：先尽量用 LLM 把本段 soundscape/music 按时间窗重写成独立提示词（
+    失败自动回退机械拆分并明示）；显示信息卡（段号/Shot/时长/文件路径）→ 人工复制
+    到 H3 生成 → 回车确认 → 才显示下一段；第 2 段起可提交上一段视频路径，自动剥尾帧
+    作为本段首帧图；中断后由 progress.json 续接。
+    """
+    import json
+
+    from ..model_factory import build_chat_model
+    from ..segment_prompts import rewrite_segment_prompt, split_shots_from_prompt
+    from ..tools.frame_auditor import extract_last_frame
+
+    segments = split_shots_from_prompt(prompt, total_duration=brief.duration)
+    if len(segments) < 2:
+        print("[警告] 提示词未能拆出多个镜头（模型可能只产出了单镜头结构），回退为整段提示词。")
+        print("\n" + "=" * 60)
+        print(prompt)
+        print("=" * 60)
+        return
+
+    seg_dir = session.directory / "segments"
+    seg_dir.mkdir(parents=True, exist_ok=True)
+    progress_path = seg_dir / "progress.json"
+    done = 0
+    if progress_path.exists():
+        try:
+            done = int(json.loads(progress_path.read_text(encoding="utf-8")).get("done", 0))
+        except (OSError, json.JSONDecodeError, ValueError):
+            done = 0
+    total = len(segments)
+    print(f"\n已按镜头拆分为 {total} 段逐次执行（每段提示词同时存入 {seg_dir}）。")
+    if done:
+        print(f"[续接] 检测到已完成 {done}/{total} 段，从第 {done + 1} 段继续。")
+
+    try:
+        rewrite_llm = build_chat_model()
+    except Exception:
+        rewrite_llm = None
+
+    for position in range(done, total):
+        segment = segments[position]
+        # ① 每段重写：声音描述按本段时间窗裁切；失败回退机械拆分并明示
+        rewritten: str | None = None
+        if rewrite_llm is not None:
+            rewritten = rewrite_segment_prompt(segment, prompt, rewrite_llm)
+        display_text = rewritten or segment.text
+        fallback_label = "" if rewritten else "[回退] 声音描述保持整条原样（未按段裁剪）"
+
+        # ② 桥接帧：剥上一段尾帧，输出显式落盘信息（路径 + 大小）
+        if position > 0 and _confirm("是否用上一段视频的尾帧作为本段首帧图（保证画面连续）？", default=True):
+            video_raw = _prompt("上一段输出视频路径（回车=跳过）：").strip()
+            if video_raw:
+                try:
+                    frame = extract_last_frame(
+                        Path(video_raw),
+                        session.directory / "bridge_frames" / f"shot-{position + 1:02d}-start.png",
+                    )
+                    size_kb = frame.stat().st_size / 1024
+                    print("[桥接帧] ✓ 已从上一段视频提取尾帧：")
+                    print(f"  位置：{frame}")
+                    print(f"  大小：{size_kb:.0f} KB")
+                    print("  → 请在 H3 中把这张图设为本段的 first frame 输入。")
+                except Exception as exc:  # noqa: BLE001 - 剥帧失败不阻塞人工流程
+                    print(f"[警告] 剥尾帧失败（{exc}），可手动截图作为首帧图。")
+
+        duration_line = (
+            f"{segment.duration_seconds:.2f}s"
+            if segment.duration_seconds is not None else "未知时长"
+        )
+        window_line = (
+            f"（全局时间窗：{segment.start_seconds:.2f}s 起）"
+            if segment.start_seconds is not None else ""
+        )
+        (seg_dir / f"shot-{position + 1:02d}.md").write_text(display_text, encoding="utf-8")
+        print("\n" + "=" * 60)
+        print(f"第 {position + 1}/{total} 段（Shot {segment.shot_number}）· 本段时长 {duration_line}{window_line}")
+        if fallback_label:
+            print(fallback_label)
+        print("=" * 60)
+        print(display_text)
+        print("-" * 60)
+        print(f"提示词文件：{seg_dir / f'shot-{position + 1:02d}.md'}")
+        while True:
+            raw = _prompt("本段生成并检查满意后回车进入下一段；输入 r 重显本段提示词：").lower()
+            if raw in ("", "y", "yes"):
+                break
+            if raw == "r":
+                print(display_text)
+                continue
+            print("回车=完成本段，r=重显提示词。")
+        progress_path.write_text(
+            json.dumps({"done": position + 1, "total": total}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        if position + 1 < total:
+            print(f"[完成] 第 {position + 1}/{total} 段。下面给出第 {position + 2} 段……")
+    print(f"\n✓ 全部 {total} 段已人工确认完成。可在剪辑工具中按顺序拼接 segments/ 下的各段输出。")
 
 
 def _topic_dir_name(session: SessionState) -> str:

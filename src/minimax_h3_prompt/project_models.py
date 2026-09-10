@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -14,12 +15,14 @@ from typing import Any, Literal
 AssetStatus = Literal["planned", "candidate", "approved", "rejected"]
 ReviewSeverity = Literal["info", "warning", "error"]
 ReviewKind = Literal["static", "manual", "visual", "audio"]
+SegmentPipelineState = Literal["proposed", "approved", "executed", "reviewed"]
 
 _ASSET_ID = re.compile(r"^[CSP E]\d{2}$".replace(" ", ""))
 _SHOT_ID = re.compile(r"^SH\d{3}$")
 _VERSION_ID = re.compile(r"^(?:[A-Z]+\d{2}|SH\d{3})-v\d{3}$")
 _GENERATION_ID = re.compile(r"^(?:[A-Z]+\d{2}|SH\d{3})-G\d{3}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_SEGMENT_ID = re.compile(r"^SEG\d{2}-SH\d{3}[a-z]$")
 
 
 def _now() -> str:
@@ -261,6 +264,140 @@ class ProjectBible:
 
 
 @dataclass(frozen=True)
+class Segment:
+    """实际执行单元：一次 3-8s 的 Workflow 生成。
+
+    `Shot` 是叙事单元（纸飞机飞过麦田），`Segment` 是运行为单元
+    （单次 H3/FL2VA 生成）。当镜头时长超过 8s 时按 `split_shot_into_segments`
+    拆分为连续段，段间通过桥接帧（bridge frame）保证连续性。
+    """
+
+    segment_id: str
+    shot_ref: str
+    duration_seconds: float
+    prev_segment_id: str = ""
+    next_segment_id: str = ""
+    start_frame_asset_id: str = ""      # 空 = 无需帧输入（T2VA）
+    end_frame_asset_id: str = ""        # 空 = 无帧输入；执行后由 extract-bridge 填充
+    workflow_profile_id: str = ""
+    workflow_profile_version: str = ""
+    workflow_sha256: str = ""
+    task_package_path: str = ""
+    pipeline_state: SegmentPipelineState = "proposed"
+    review_records: tuple[ReviewRecord, ...] = field(default_factory=tuple)
+    start_state_derived_from: str = ""  # 上一段的段 ID 或来源说明
+
+    def __post_init__(self) -> None:
+        if not _SEGMENT_ID.fullmatch(self.segment_id):
+            raise ValueError(
+                f"Segment ID 格式无效：{self.segment_id}（应为 SEG<shot_number>-SH<id><letter>）"
+            )
+        if not _SHOT_ID.fullmatch(self.shot_ref):
+            raise ValueError(f"Segment shot_ref 格式无效：{self.shot_ref}")
+        if self.duration_seconds <= 0:
+            raise ValueError("Segment 时长必须大于 0")
+        for key in ("prev_segment_id", "next_segment_id"):
+            other = getattr(self, key)
+            if other and not _SEGMENT_ID.fullmatch(other):
+                raise ValueError(f"{key} 格式无效：{other}")
+        for asset_id in (self.start_frame_asset_id, self.end_frame_asset_id):
+            if asset_id and not _ASSET_ID.fullmatch(asset_id):
+                raise ValueError(f"桥接帧资产 ID 格式无效：{asset_id}")
+
+    @property
+    def shot_number(self) -> int:
+        return int(_SHOT_ID.fullmatch(self.shot_ref).group(0)[2:])
+
+    @property
+    def sequence_letter(self) -> str:
+        """该段在其镜头内的序号字母（a/b/c…）。"""
+        return self.segment_id.rsplit("-", 1)[1][-1]
+
+    @property
+    def is_first_in_shot(self) -> bool:
+        return self.sequence_letter == "a"
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> Segment:
+        data = dict(raw)
+        data["review_records"] = tuple(ReviewRecord.from_dict(x) for x in data.get("review_records", []))
+        return cls(**{key: data[key] for key in cls.__dataclass_fields__ if key in data})
+
+    def to_dict(self) -> dict[str, Any]:
+        return _jsonable(self.__dict__)
+
+    def with_status(self, state: SegmentPipelineState, review: ReviewRecord | None = None) -> Segment:
+        allowed = {
+            "proposed": {"approved"},
+            "approved": {"executed", "rejected"},
+            "executed": {"reviewed"},
+            "reviewed": {"approved"},  # 回看/重制
+        }
+        if state != self.pipeline_state and state not in allowed[self.pipeline_state]:
+            raise ValueError(f"不允许的段状态转换：{self.pipeline_state} → {state}")
+        records = self.review_records + ((review,) if review else ())
+        return Segment(**{**self.to_dict(), "pipeline_state": state, "review_records": records})
+
+
+def split_shot_into_segments(
+    shot: Shot,
+    *,
+    max_segment_seconds: float = 8.0,
+    min_segment_seconds: float = 3.0,
+) -> tuple[Segment, ...]:
+    """把单个 `Shot` 拆成连续执行段。
+
+    - 时长 ≤ max 的镜头返回一个段（`a`）。
+    - 时长超限的镜头按 `max_segment_seconds` 切分，末段至少 `min_segment_seconds`；
+      若末段会小于 min，则把最后一个完整段减短并入它。
+    - 段间前后指针自动接续；首段 prev_segment_id 为空。
+    """
+    if shot.duration_seconds <= max_segment_seconds:
+        return (
+            Segment(
+                segment_id=_segment_id_for(shot, "a"),
+                shot_ref=shot.shot_id,
+                duration_seconds=shot.duration_seconds,
+                workflow_profile_id=shot.workflow_profile_id,
+                workflow_profile_version=shot.workflow_profile_version,
+                workflow_sha256=shot.workflow_sha256,
+                pipeline_state="proposed",
+            ),
+        )
+
+    count = int(math.ceil(shot.duration_seconds / max_segment_seconds))
+    base = shot.duration_seconds / count
+    # 修正末段过短：把最后一个完整段的部分时长并入末段，保证末段 ≥ min
+    if base * (count - 1) < min_segment_seconds and count > 1:
+        count -= 1
+        base = shot.duration_seconds / count
+    remaining = shot.duration_seconds
+    segments: list[Segment] = []
+    for index in range(count):
+        duration = max(0.0, min(base, remaining))
+        remaining -= duration
+        letter = chr(ord("a") + index)
+        segment = Segment(
+            segment_id=_segment_id_for(shot, letter),
+            shot_ref=shot.shot_id,
+            duration_seconds=round(duration, 3),
+            workflow_profile_id=shot.workflow_profile_id,
+            workflow_profile_version=shot.workflow_profile_version,
+            workflow_sha256=shot.workflow_sha256,
+            pipeline_state="proposed",
+        )
+        if segments:
+            segments[-1] = Segment(**{**segments[-1].to_dict(), "next_segment_id": segment.segment_id})
+            segment = Segment(**{**segment.to_dict(), "prev_segment_id": segments[-1].segment_id})
+        segments.append(segment)
+    return tuple(segments)
+
+
+def _segment_id_for(shot: Shot, letter: str) -> str:
+    return f"SEG{shot.shot_number:02d}-{shot.shot_id}{letter}"
+
+
+@dataclass(frozen=True)
 class Shot:
     shot_id: str
     shot_number: int
@@ -281,6 +418,8 @@ class Shot:
     status: str = "planned"
     locked: bool = False
     review_records: tuple[ReviewRecord, ...] = field(default_factory=tuple)
+    # 执行段（3-8s/段），由 split_shot_into_segments() 生成；为空表示未拆分
+    segments: tuple[Segment, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if not _SHOT_ID.fullmatch(self.shot_id):
@@ -302,10 +441,15 @@ class Shot:
         for key in ("subject_asset_ids", "input_asset_ids", "continuity_constraints"):
             data[key] = tuple(str(x) for x in data.get(key, []))
         data["review_records"] = tuple(ReviewRecord.from_dict(x) for x in data.get("review_records", []))
+        data["segments"] = tuple(Segment.from_dict(x) for x in data.get("segments", []))
         return cls(**{key: data[key] for key in cls.__dataclass_fields__ if key in data})
 
     def to_dict(self) -> dict[str, Any]:
         return _jsonable(self.__dict__)
+
+    def with_segments(self, segments: tuple[Segment, ...]) -> Shot:
+        """返回携带拆分执行段的新 Shot（复用 frozen 结构，替换 segments 字段）。"""
+        return Shot(**{**self.to_dict(), "segments": segments})
 
     def validate(self, previous: Shot | None = None) -> list[str]:
         errors: list[str] = []
@@ -386,6 +530,49 @@ class ShotPlan:
             raise ValueError("所有镜头都必须 approved 后才能锁定 ShotPlan")
         locked_shots = tuple(Shot(**{**shot.to_dict(), "locked": True}) for shot in self.shots)
         return ShotPlan(self.shot_plan_id, self.project_id, self.variant, self.duration_seconds, locked_shots, "locked", self.review_records, self.schema_version)
+
+    def all_segments(self) -> tuple[Segment, ...]:
+        """按镜头顺序展开整个 ShotPlan 的所有执行段。"""
+        return tuple(segment for shot in self.shots for segment in shot.segments)
+
+    def with_shot_segments(self, shot_id: str, segments: tuple[Segment, ...]) -> ShotPlan:
+        """把某个镜头的执行段写回 ShotPlan（返回新不可变实例）。"""
+        shots = tuple(
+            shot.with_segments(segments) if shot.shot_id == shot_id else shot
+            for shot in self.shots
+        )
+        return ShotPlan(self.shot_plan_id, self.project_id, self.variant, self.duration_seconds, shots, self.status, self.review_records, self.schema_version)
+
+
+def verify_chain(segments: tuple[Segment, ...]) -> list[str]:
+    """跨段连续性检查。
+
+    校验规则：
+    - 首段不得声明 prev_segment_id；
+    - 后续段必须声明 prev_segment_id 且指向前一段；
+    - 前一段的 next_segment_id 必须指向后一段（双向一致）；
+    - 后续段的 start_frame_asset_id（若非空）必须等于上一段的 end_frame_asset_id。
+    """
+    errors: list[str] = []
+    for index, segment in enumerate(segments):
+        if index == 0:
+            if segment.prev_segment_id:
+                errors.append(f"{segment.segment_id}: FIRST_SEGMENT_HAS_PREDECESSOR 首段不能声明上一段")
+            continue
+        previous = segments[index - 1]
+        if not segment.prev_segment_id:
+            errors.append(f"{segment.segment_id}: MISSING_PREV_SEGMENT 未声明上一段")
+        elif segment.prev_segment_id != previous.segment_id:
+            errors.append(f"{segment.segment_id}: PREV_SEGMENT_MISMATCH 指向前一段为 {segment.prev_segment_id}，实际应为 {previous.segment_id}")
+        if previous.next_segment_id != segment.segment_id:
+            errors.append(f"{previous.segment_id}: NEXT_SEGMENT_MISMATCH next_segment_id 应为 {segment.segment_id}")
+        # 桥接帧哈希/资产 ID 衔接：若下一段声明首帧，必须等于上一段尾帧
+        if segment.start_frame_asset_id and previous.end_frame_asset_id:
+            if segment.start_frame_asset_id != previous.end_frame_asset_id:
+                errors.append(
+                    f"{segment.segment_id}: BRIDGE_FRAME_MISMATCH 首帧资产 {segment.start_frame_asset_id} 与上一段尾帧 {previous.end_frame_asset_id} 不一致"
+                )
+    return errors
 
 
 def prompt_sha256(prompt: str) -> str:

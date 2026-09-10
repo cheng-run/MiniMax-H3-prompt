@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from ..brief_parser import Brief, RefItem
 from ..task_package import resolve_input_path
@@ -93,4 +94,52 @@ def audit_frame_images(
     return audits
 
 
-__all__ = ["FrameAudit", "required_frames", "audit_frame_images"]
+__all__ = ["FrameAudit", "required_frames", "audit_frame_images", "extract_last_frame"]
+
+
+# ---------------------------------------------------------------------------
+# 桥接帧：从执行输出剥尾帧（cv2，无外部 ffmpeg 依赖）
+# ---------------------------------------------------------------------------
+
+def extract_last_frame(video_path: str | Path, output_path: str | Path | None = None) -> Path:
+    """用 OpenCV 剥出视频最后一帧并写为 PNG。
+
+    - cv2 懒加载：只为段桥接流程引入解码依赖，不拖慢主流程 import。
+    - 先按总帧数 seek；seek 失败（部分编码不允许随机访问）则顺序遍历兜底。
+    - Windows 非 ASCII 路径用 ``imencode + tofile`` 落盘，绕开 ``cv2.imwrite`` 的编码坑。
+    """
+    import cv2  # noqa: PLC0415 - 懒加载重依赖
+
+    source = Path(video_path)
+    if not source.is_file():
+        raise FileNotFoundError(f"视频文件不存在：{source}")
+    capture = cv2.VideoCapture(str(source))
+    if not capture.isOpened():
+        raise ValueError(f"无法打开视频（编码不被支持或文件损坏）：{source}")
+    try:
+        total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        frame = None
+        if total > 0:
+            capture.set(cv2.CAP_PROP_POS_FRAMES, total - 1)
+            ok, candidate = capture.read()
+            if ok and candidate is not None:
+                frame = candidate
+        if frame is None:  # seek 失败：顺序读到最后一帧
+            capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            while True:
+                ok, candidate = capture.read()
+                if not ok or candidate is None:
+                    break
+                frame = candidate
+    finally:
+        capture.release()
+    if frame is None:
+        raise ValueError(f"未能从视频中读取任何帧：{source}")
+
+    target = Path(output_path) if output_path else source.with_suffix(".last-frame.png")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    ok, buffer = cv2.imencode(".png", frame)
+    if not ok:
+        raise ValueError(f"尾帧编码为 PNG 失败：{source}")
+    buffer.tofile(str(target))
+    return target

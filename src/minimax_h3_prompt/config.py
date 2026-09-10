@@ -13,6 +13,15 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = PROJECT_ROOT / "config" / "agent.yaml"
 
+# 执行段（Segment）拆分约束：H3 单次可执行窗口约 3-8s。
+SEGMENT_CONFIG: dict[str, float | int] = {
+    "default_segment_seconds": 7.0,   # 工作流 62 已验证的执行窗口
+    "min_segment_seconds": 3.0,       # 低于此首尾帧几乎重合，无意义
+    "max_segment_seconds": 8.0,       # H3 可执行窗口上限；Shot 超过即拆分
+    "shot_seconds_ceiling": 8.0,      # > 8s 的镜头自动拆成连续段
+    "warn_shot_count_below": 8,       # 60s 项目镜头少于 8 个时给出提示
+}
+
 
 @dataclass(frozen=True)
 class ModelSettings:

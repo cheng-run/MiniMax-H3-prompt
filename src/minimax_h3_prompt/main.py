@@ -76,10 +76,39 @@ def build_parser() -> argparse.ArgumentParser:
 
     verify_parser = project_commands.add_parser("verify", help="一键检查执行资格闸门（只读）")
     verify_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
-    verify_parser.add_argument("--topic-id", required=True, help="主题 ID")
-    verify_parser.add_argument("--project-id", required=True, help="项目 ID")
+    verify_parser.add_argument("--topic-id", default=None, help="主题 ID（可自动探测）")
+    verify_parser.add_argument("--project-id", default=None, help="项目 ID（可自动探测）")
+    verify_parser.add_argument("topic", nargs="?", default=None, help="主题 ID（位置参数）")
+    verify_parser.add_argument("project", nargs="?", default=None, help="项目 ID（位置参数）")
     verify_parser.add_argument("--shot", default=None, help="只检查指定镜头（默认全部）")
+    verify_parser.add_argument("--chain", default=None, help="检查指定镜头（或 *）的段链连续性（只读）")
     verify_parser.add_argument("--workflow-root", default=r"D:\Comfyui\ComfyUI\user\default\workflows", help="ComfyUI 工作流根目录")
+
+    segment_plan_parser = project_commands.add_parser("segment-plan", help="把未拆分镜头拆成 3-8s 执行段并写回 ShotPlan（幂等）")
+    segment_plan_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    segment_plan_parser.add_argument("--topic-id", default=None, help="主题 ID（根目录下只有一个主题时可省略）")
+    segment_plan_parser.add_argument("--project-id", default=None, help="项目 ID（主题下只有一个项目时可省略）")
+    segment_plan_parser.add_argument("topic", nargs="?", default=None, help="主题 ID（位置参数，等同 --topic-id）")
+    segment_plan_parser.add_argument("project", nargs="?", default=None, help="项目 ID（位置参数，等同 --project-id）")
+    segment_plan_parser.add_argument("--max-segment-seconds", type=float, default=None, help="单段时长上限（默认取 SEGMENT_CONFIG）")
+    segment_plan_parser.add_argument("--min-segment-seconds", type=float, default=None, help="单段时长下限（默认取 SEGMENT_CONFIG）")
+
+    chain_parser = project_commands.add_parser("segment-chain", help="打印镜头（或全项目）的段链执行顺序（只读）")
+    chain_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    chain_parser.add_argument("--topic-id", default=None, help="主题 ID（可自动探测）")
+    chain_parser.add_argument("--project-id", default=None, help="项目 ID（可自动探测）")
+    chain_parser.add_argument("topic", nargs="?", default=None, help="主题 ID（位置参数）")
+    chain_parser.add_argument("project", nargs="?", default=None, help="项目 ID（位置参数）")
+    chain_parser.add_argument("--shot", default=None, help="只显示指定镜头（默认全部）")
+
+    extract_parser = project_commands.add_parser("extract-bridge", help="剥执行段输出视频尾帧 → bridge_frames/ 并接线下一段首帧")
+    extract_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    extract_parser.add_argument("--topic-id", default=None, help="主题 ID（可自动探测）")
+    extract_parser.add_argument("--project-id", default=None, help="项目 ID（可自动探测）")
+    extract_parser.add_argument("topic", nargs="?", default=None, help="主题 ID（位置参数，写在段 ID 后）")
+    extract_parser.add_argument("project", nargs="?", default=None, help="项目 ID（位置参数）")
+    extract_parser.add_argument("segment", help="执行段 ID（如 SEG01-SH001a）")
+    extract_parser.add_argument("--source", default=None, help="输出视频路径（缺省从该镜头 inbox 取最新视频）")
 
     profile_parser = project_commands.add_parser("profile", help="Profile 状态升级（verified/approved，写 docs/profiles）")
     profile_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
@@ -186,6 +215,52 @@ def main(argv: list[str] | None = None) -> int:
     return _run_cli(args)
 
 
+def _pick_candidate(label: str, candidates: list[str]) -> str:
+    """交互终端上对多个候选给出编号菜单；非交互环境报错列出候选。"""
+    import sys
+
+    if sys.stdin.isatty() and candidates:
+        print(f"发现多个{label}，请选择：")
+        for index, name in enumerate(candidates, 1):
+            print(f"  {index}. {name}")
+        while True:
+            raw = input(f"输入序号（回车=1）：").strip()
+            if not raw:
+                return candidates[0]
+            if raw.isdigit() and 1 <= int(raw) <= len(candidates):
+                return candidates[int(raw) - 1]
+            print("无效序号，请重输。")
+    raise ValueError(f"请用 --{label == '主题' and 'topic-id' or 'project-id'} 或位置参数指定{label}（候选：{', '.join(candidates) or '无'}）")
+
+
+def _resolve_topic_project(store, topic_id, project_id) -> tuple[str, str]:
+    """主题/项目 ID 缺省时自动探测：唯一候选则采用，多个候选交互选择/报错。"""
+    root = store.root
+    if not topic_id:
+        if not root.is_dir():
+            raise ValueError(f"Assets 根目录不存在：{root}")
+        candidates = sorted(
+            child.name for child in root.iterdir()
+            if child.is_dir() and child.name not in ("inbox", "_template") and (child / "projects").is_dir()
+        )
+        if len(candidates) == 1:
+            topic_id = candidates[0]
+            print(f"[自动识别] 主题：{topic_id}")
+        else:
+            topic_id = _pick_candidate("主题", candidates)
+    if not project_id:
+        projects_root = root / topic_id / "projects"
+        candidates = sorted(
+            child.name for child in projects_root.iterdir() if child.is_dir()
+        ) if projects_root.is_dir() else []
+        if len(candidates) == 1:
+            project_id = candidates[0]
+            print(f"[自动识别] 项目：{project_id}")
+        else:
+            project_id = _pick_candidate("项目", candidates)
+    return topic_id, project_id
+
+
 def _run_project_command(args: argparse.Namespace) -> int:
     """执行离线项目命令；不调用 LLM、ComfyUI 或 output 扫描。"""
     from .project_store import ProjectStore
@@ -271,12 +346,56 @@ def _run_project_command(args: argparse.Namespace) -> int:
         apply_review,
         build_execution_card,
         check_executability,
+        extract_bridge_frame,
         import_generation,
+        plan_segments,
         promote_profile,
         render_card,
+        verify_segment_chain,
     )
 
-    topic, project = args.topic_id, args.project_id
+    topic, project = _resolve_topic_project(
+        store,
+        getattr(args, "topic", None) or getattr(args, "topic_id", None),
+        getattr(args, "project", None) or getattr(args, "project_id", None),
+    )
+    if args.project_command == "segment-plan":
+        result = plan_segments(
+            store, topic, project,
+            max_segment_seconds=args.max_segment_seconds,
+            min_segment_seconds=args.min_segment_seconds,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.project_command == "segment-chain":
+        document = store.load_project(topic, project)
+        shots = [s for s in document.shot_plan.shots if args.shot is None or s.shot_id == args.shot]
+        if not shots:
+            raise ValueError(f"镜头不存在：{args.shot}")
+        rows = []
+        for shot in shots:
+            for segment in shot.segments:
+                rows.append({
+                    "segment_id": segment.segment_id,
+                    "shot_ref": segment.shot_ref,
+                    "duration_seconds": segment.duration_seconds,
+                    "state": segment.pipeline_state,
+                    "prev": segment.prev_segment_id or "-",
+                    "start_frame": segment.start_frame_asset_id or "-",
+                    "end_frame": segment.end_frame_asset_id or "-",
+                })
+        if not rows:
+            print("尚无执行段：请先运行 project segment-plan。")
+            return 1
+        print(json.dumps({"segment_count": len(rows), "segments": rows}, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.project_command == "extract-bridge":
+        result = extract_bridge_frame(store, topic, project, args.segment, source=args.source)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+
     if args.project_command == "plan":
         card = build_execution_card(
             store, topic, project, args.shot, workflow_root=Path(args.workflow_root)
@@ -300,6 +419,11 @@ def _run_project_command(args: argparse.Namespace) -> int:
         return 0
 
     if args.project_command == "verify":
+        if args.chain:
+            chain_shot = None if args.chain == "*" else args.chain
+            result = verify_segment_chain(store, topic, project, shot_id=chain_shot)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0 if result["chain_ok"] else 1
         result = check_executability(
             store, topic, project, shot_id=args.shot, workflow_root=Path(args.workflow_root)
         )

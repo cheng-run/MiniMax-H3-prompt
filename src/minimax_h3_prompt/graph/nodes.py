@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Callable
 
 from langgraph.graph.state import CompiledStateGraph
@@ -210,13 +211,62 @@ def _make_art_director_node(agents: dict) -> Callable:
     return node
 
 
+@dataclass
+class ShotScale:
+    """根据时长与内容复杂度推导的分镜规模建议。"""
+
+    min_shots: int
+    max_shots: int
+    target_segment_seconds: float
+    shot_seconds_ceiling: float = 8.0
+
+    def describe(self) -> str:
+        return (f"视频总时长按情节节拍分配，不按固定比例平分；预期 {self.min_shots}-{self.max_shots} 个镜头，"
+                f"建议平均镜头时长 ~{self.target_segment_seconds:.0f}s（单镜头上限 {self.shot_seconds_ceiling:.0f}s，"
+                f"超过的部分会由生产管线自动拆成连续执行段，无需在分镜中缩短镜头）。")
+
+
+def derive_shot_scale(duration: float, plot_richness_hint: str = "") -> ShotScale:
+    """根据时长和粗略内容复杂度推导镜头数与镜头时长区间。
+
+    设定依据（H3 官方 base-en 案例）：
+    - ≤10s：短影片，1-3 镜，单镜即执行窗口（7s）。
+    - 11-30s：中片，4-6 镜，镜头按情节节拍 5-7s，不硬限。
+    - >30s：长片（本项目产能目标），8-12 镜，单镜需求被 H3 执行窗口约束，
+      超过 shot_seconds_ceiling 的镜头由管线自动拆分。
+    """
+    if duration <= 10:
+        return ShotScale(min_shots=1, max_shots=3, target_segment_seconds=7.0)
+    if duration <= 30:
+        return ShotScale(min_shots=4, max_shots=6, target_segment_seconds=6.0)
+    return ShotScale(min_shots=8, max_shots=12, target_segment_seconds=min(6.0, 60.0 / 12))
+
+
+def _shot_durations_from_table(shot_table: str, total_duration: float) -> list[float]:
+    """从分镜表的 [Shot N] 块与时间戳推各镜头时长（用于均分检测）。"""
+    from ..segment_prompts import _shot_blocks
+
+    blocks = _shot_blocks(shot_table)
+    if len(blocks) < 2:
+        return []
+    durations = [
+        round(blocks[index + 1][1] - blocks[index][1], 3)
+        for index in range(len(blocks) - 1)
+    ]
+    durations.append(round(max(total_duration - blocks[-1][1], 0.0), 3))
+    return durations
+
+
 def _make_storyboard_node(agents: dict) -> Callable:
     def node(state: PipelineState) -> dict:
+        from ..segment_prompts import is_degenerate_durations
+
         brief: Brief = state["brief"]
         issues = "\n".join(state.get("qa_issues") or []) or ""
+        scale = derive_shot_scale(brief.duration)
         msg = (
-            "请给出分镜镜头表（时长 "
-            + f"{brief.duration}s）：\n"
+            "请给出分镜镜头表（视频总时长 "
+            + f"{brief.duration}s，{scale.describe()}）：\n"
             + _ctx(原始剧情=brief.plot,
                    分场剧本=state.get("script", ""), 美术设计=state.get("art_design", ""),
                    人物设计=state.get("character_design", ""),
@@ -224,7 +274,23 @@ def _make_storyboard_node(agents: dict) -> Callable:
                    道具设计=state.get("prop_design", ""),
                    上一轮质检问题=issues)
         )
-        return {"shot_table": run_agent(agents["storyboard"], msg)}
+        shot_table = run_agent(agents["storyboard"], msg)
+        durations = _shot_durations_from_table(shot_table, brief.duration)
+        warning = ""
+        if is_degenerate_durations(durations):
+            # 均分 = 无视情节节拍的偷懒输出：自动重试一次（带明确指出问题）
+            retry_msg = msg + (
+                "\n\n[质检退回] 上轮所有镜头时长完全相同（"
+                + f"{durations[0]:.1f}s × {len(durations)}），属于均分偷懒。"
+                "请按情节节拍重新分配镜头时长（可以长短不一），并以相同格式重出分镜表。"
+            )
+            shot_table = run_agent(agents["storyboard"], retry_msg)
+            durations = _shot_durations_from_table(shot_table, brief.duration)
+            if is_degenerate_durations(durations):
+                warning = ("SHOT_DURATIONS_UNIFORM: 重试后镜头仍为均分（"
+                           f"{durations[0]:.1f}s × {len(durations)}），请人工检查节奏")
+                print(f"[警告] 分镜时长仍是均分：{durations[0]:.1f}s × {len(durations)}")
+        return {"shot_table": shot_table, **({"shot_duration_warning": warning} if warning else {})}
     return node
 
 
