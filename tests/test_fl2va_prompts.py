@@ -186,6 +186,31 @@ def test_validate_fl2va_bundle_variant_aware():
     assert "FL2VA_LAST_FRAME_TIME_EXCEEDS_DURATION" in validate_fl2va_bundle(bad, duration=5, variant="L2VA")
 
 
+def test_multi_scene_journey_bundle_passes():
+    """穿越题材（森林→海边）：每组地点词只需被 anchor 或某个关键帧覆盖。"""
+    brief = Brief(variant="FL2VA", duration=30, plot="黑夜森林徒步，黎明云海，傍晚海边日落")
+    payload = {
+        "scene_anchor": "traveller journeying through a misty forest at night, ending on a beach at sunset",
+        "first": frame_payload("A tired traveller walks through a dark misty forest at night, headlumpon."),
+        "last": frame_payload("The same traveller sits on coastal rocks at sunset, watching waves on the beach."),
+        "continuity_constraints": ["Keep the traveller's appearance consistent."],
+    }
+    assert validate_fl2va_bundle(fl2va_bundle_from_dict(payload, brief), duration=30) == []
+
+
+def test_multi_scene_group_uncovered_flagged():
+    """任一组地点词完全没被任何帧/anchor 覆盖 → 仍然报错。"""
+    brief = Brief(variant="FL2VA", duration=30, plot="黑夜森林徒步，黎明云海，傍晚海边日落")
+    payload = {
+        "scene_anchor": "misty forest at night",
+        "first": frame_payload("A tired traveller walks through a dark misty forest."),
+        "last": frame_payload("The traveller still deep in the misty forest."),  # 完全没提 beach/coast
+        "continuity_constraints": ["Keep the traveller's appearance consistent."],
+    }
+    with pytest.raises(ValueError, match="FL2VA_SCENE_GROUP_UNCOVERED"):
+        fl2va_bundle_from_dict(payload, brief)
+
+
 def test_result_from_state_single_frame_roundtrip():
     brief = Brief(variant="I2VA", duration=5, style="live-action realism", plot="中世纪酒馆室内，冒险者团队庆祝")
     result = result_from_state(

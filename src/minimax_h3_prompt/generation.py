@@ -352,6 +352,17 @@ def validate_fl2va_bundle(
         issues.append("FL2VA_PROMPT_NODE_MISMATCH")
     if not bundle.continuity_constraints:
         issues.append("FL2VA_CONTINUITY_MISSING")
+    # 单一要求地点组时：逐帧校验（防漂移语义）。
+    # 多场景穿越题材（森林→海边→星空）下"每帧都含全部地点词"不成立：
+    # 只要求每组地点词在 anchor 或至少一个关键帧里被覆盖（覆盖式校验）。
+    groups = [group for group in bundle.required_scene_terms if group]
+    multi_scene = len(groups) > 1
+    all_frame_text = " ".join(
+        row.positive_prompt
+        for frame_name in _variant_frame_names(variant)
+        for row in getattr(bundle, frame_name)
+    ).lower()
+    anchor_lower = bundle.scene_anchor.lower()
     for frame_name in _variant_frame_names(variant):
         for row in getattr(bundle, frame_name):
             if row.scene_anchor != bundle.scene_anchor:
@@ -362,14 +373,24 @@ def validate_fl2va_bundle(
                 issues.append("FL2VA_FIRST_FRAME_TIME_MISMATCH")
             if duration is not None and frame_name == "last" and row.time_seconds > duration:
                 issues.append("FL2VA_LAST_FRAME_TIME_EXCEEDS_DURATION")
-            anchor_text = bundle.scene_anchor.lower()
-            prompt_text = row.positive_prompt.lower()
-            for group in bundle.required_scene_terms:
-                if group and not any(term.lower() in anchor_text for term in group):
-                    issues.append("FL2VA_SCENE_ANCHOR_MISMATCH")
-                if group and not any(term.lower() in prompt_text for term in group):
-                    issues.append("FL2VA_SCENE_PROMPT_MISMATCH")
-            if bundle.required_scene_terms:
+            if multi_scene:
+                # 覆盖式：每组词至少在 anchor 或某帧出现
+                prompt_text = row.positive_prompt.lower()
+                for group in groups:
+                    if not any(term.lower() in anchor_lower for term in group) \
+                            and not any(term.lower() in all_frame_text for term in group):
+                        issues.append("FL2VA_SCENE_GROUP_UNCOVERED")
+                    elif not any(term.lower() in anchor_lower for term in group) \
+                            and not any(term.lower() in prompt_text for term in group) \
+                            and any(term.lower() in all_frame_text for term in group):
+                        pass  # 该组由其他帧覆盖：合法的多场景分布
+            else:
+                for group in groups:
+                    if not any(term.lower() in anchor_lower for term in group):
+                        issues.append("FL2VA_SCENE_ANCHOR_MISMATCH")
+                    if not any(term.lower() in row.positive_prompt.lower() for term in group):
+                        issues.append("FL2VA_SCENE_PROMPT_MISMATCH")
+            if groups:
                 for term in _CONFLICTING_OUTDOOR_TERMS:
                     if _contains_unqualified_conflict(row.positive_prompt, term):
                         issues.append("FL2VA_SCENE_DRIFT")
