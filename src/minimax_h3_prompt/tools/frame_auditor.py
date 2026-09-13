@@ -107,34 +107,46 @@ def extract_last_frame(video_path: str | Path, output_path: str | Path | None = 
     - cv2 懒加载：只为段桥接流程引入解码依赖，不拖慢主流程 import。
     - 先按总帧数 seek；seek 失败（部分编码不允许随机访问）则顺序遍历兜底。
     - Windows 非 ASCII 路径用 ``imencode + tofile`` 落盘，绕开 ``cv2.imwrite`` 的编码坑。
+    - Windows 下 cv2.VideoCapture 打不开非 ASCII 路径：含非 ASCII 字符时先复制到
+      系统临时目录（纯 ASCII 路径）再解码，剥完删除临时文件。
     """
     import cv2  # noqa: PLC0415 - 懒加载重依赖
 
     source = Path(video_path)
     if not source.is_file():
-        raise FileNotFoundError(f"视频文件不存在：{source}")
-    capture = cv2.VideoCapture(str(source))
-    if not capture.isOpened():
-        raise ValueError(f"无法打开视频（编码不被支持或文件损坏）：{source}")
+        raise FileNotFoundError(
+            f"视频文件不存在：{source}"
+            "（提示：粘贴路径时不要带首尾引号；含空格的路径也无需加引号）"
+        )
+    decode_source = source
+    temp_copy = None
     try:
-        total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-        frame = None
-        if total > 0:
-            capture.set(cv2.CAP_PROP_POS_FRAMES, total - 1)
-            ok, candidate = capture.read()
-            if ok and candidate is not None:
-                frame = candidate
-        if frame is None:  # seek 失败：顺序读到最后一帧
-            capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            while True:
-                ok, candidate = capture.read()
-                if not ok or candidate is None:
-                    break
-                frame = candidate
+        str(source).encode("ascii")
+    except UnicodeEncodeError:
+        import shutil
+        import tempfile
+
+        temp_dir = Path(tempfile.mkdtemp(prefix="h3-bridge-"))
+        temp_copy = temp_dir / ("source" + source.suffix.lower())
+        shutil.copy2(source, temp_copy)
+        decode_source = temp_copy
+
+    try:
+        capture = cv2.VideoCapture(str(decode_source))
+        if not capture.isOpened():
+            raise ValueError(
+                f"无法打开视频（编码不被支持或文件损坏）：{source}"
+            )
+        try:
+            frame = _read_last_frame(capture)
+        finally:
+            capture.release()
     finally:
-        capture.release()
+        if temp_copy is not None:
+            shutil.rmtree(temp_copy.parent, ignore_errors=True)
+
     if frame is None:
-        raise ValueError(f"未能从视频中读取任何帧：{source}")
+        raise ValueError(f"能打开但一帧都没读到（可能文件损坏）：{source}")
 
     target = Path(output_path) if output_path else source.with_suffix(".last-frame.png")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -143,3 +155,24 @@ def extract_last_frame(video_path: str | Path, output_path: str | Path | None = 
         raise ValueError(f"尾帧编码为 PNG 失败：{source}")
     buffer.tofile(str(target))
     return target
+
+
+def _read_last_frame(capture):
+    """从已打开的 VideoCapture 取最后一帧；seek 失败时顺序遍历兜底。"""
+    import cv2  # noqa: PLC0415
+
+    total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame = None
+    if total > 0:
+        capture.set(cv2.CAP_PROP_POS_FRAMES, total - 1)
+        ok, candidate = capture.read()
+        if ok and candidate is not None:
+            frame = candidate
+    if frame is None:  # seek 失败：顺序读到最后一帧
+        capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        while True:
+            ok, candidate = capture.read()
+            if not ok or candidate is None:
+                break
+            frame = candidate
+    return frame

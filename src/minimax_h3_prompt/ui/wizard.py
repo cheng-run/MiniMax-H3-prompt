@@ -84,6 +84,19 @@ def _prompt(text: str) -> str:
     return input(text).strip()
 
 
+def _clean_path_input(raw: str) -> str:
+    """清洗交互输入的文件路径：剥空白与首尾成对引号。
+
+    Windows 资源管理器"复制为路径"自带双引号，直接 Path(raw) 会得到
+    不存在的路径。只剥"首尾成对"的引号，路径中间内容原样保留——
+    无引号输入的行为与清洗前完全一致。
+    """
+    text = raw.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        text = text[1:-1].strip()
+    return text
+
+
 def _confirm(text: str, default: bool = True) -> bool:
     suffix = " [Y/n]: " if default else " [y/N]: "
     while True:
@@ -346,7 +359,7 @@ def render_fl2va_frame_markdown_from_bundle(bundle, frame: str) -> str:
 def _ask_optional_path(label: str) -> str:
     """询问可选的图片路径；空=跳过，但需二次确认，防止误触静默降级 T2VA。"""
     while True:
-        raw = _prompt(f"{label}图片路径（回车=跳过）：")
+        raw = _clean_path_input(_prompt(f"{label}图片路径（回车=跳过）："))
         if raw:
             return raw
         print(f"[警告] 未提供{label}将影响变体（可能降级为纯文字 T2VA，视频没有画面参考）。")
@@ -458,23 +471,80 @@ def _phase2_collect_and_finish(config: Config, session: SessionState) -> int:
 
     output_file = generation_dir / "video-prompt.md"
     output_file.write_text(prompt, encoding="utf-8")
+
+    # 中文摘要：让不读英文的用户也能核对视频走向；失败降级不阻塞。
+    summary_obj = None
+    try:
+        from ..model_factory import build_chat_model
+
+        with _progress_scope("正在生成中文摘要（便于核对视频走向）……"):
+            summary_obj = _load_or_make_summary(prompt, build_chat_model(), generation_dir)
+        _drain_stdin()
+    except Exception:  # noqa: BLE001 - 摘要是增强体验，生成失败仅提示
+        summary_obj = None
+    if summary_obj is not None:
+        from ..summary import render_summary_zh
+
+        print("\n" + "=" * 60)
+        print("[中文摘要] 视频内容走向（供人工核对）")
+        print("=" * 60)
+        print(render_summary_zh(summary_obj))
+    else:
+        print(f"[提示] 中文摘要生成失败，完整英文提示词见文件：{output_file}")
+
     if brief.duration > 10:
         # 长视频：不倾倒整条提示词，改走逐段陪跑（每段独立完成+验收后才给下一段）。
         print(f"\n✓ 完整提示词已写入：{output_file}（供存档，长视频请按下方分段执行）")
-        _run_segmented_flow(brief, session, prompt)
+        _run_segmented_flow(brief, session, prompt, summary=summary_obj)
     else:
-        print("\n" + "=" * 60)
-        print(prompt)
-        print("=" * 60)
         print(f"\n✓ 最终视频提示词已写入：{output_file}")
+        if _prompt("输入 e 查看完整英文提示词，回车跳过：").lower() == "e":
+            print("\n" + "=" * 60)
+            print(prompt)
+            print("=" * 60)
     return 0
+
+
+def _load_or_make_summary(prompt: str, llm, directory: Path):
+    """生成或复用中文摘要；结果持久化为 summary-zh.json / summary-zh.md。
+
+    续接（progress.json 已存在）时直接读 JSON，避免重复 LLM 调用。
+    """
+    import json
+
+    from ..summary import PromptSummary, render_summary_zh, summarize_prompt_zh
+
+    json_path = directory / "summary-zh.json"
+    if json_path.is_file():
+        try:
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and payload.get("overall"):
+                return PromptSummary(
+                    overall=str(payload["overall"]),
+                    shots=payload.get("shots") if isinstance(payload.get("shots"), list) else [],
+                )
+        except (OSError, ValueError):
+            pass  # 损坏则重新生成
+    summary = summarize_prompt_zh(prompt, llm)
+    if summary is None:
+        return None
+    try:
+        json_path.write_text(
+            json.dumps({"overall": summary.overall, "shots": summary.shots},
+                       ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (directory / "summary-zh.md").write_text(render_summary_zh(summary) + "\n", encoding="utf-8")
+    except OSError:
+        pass  # 落盘失败不影响本次展示
+    return summary
 
 
 # ---------------------------------------------------------------------------
 # 长视频分段陪跑（>10s：H3 单次执行窗口只有 3-8s，必须逐段生成）
 # ---------------------------------------------------------------------------
 
-def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str) -> None:
+def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summary=None) -> None:
     """把整条提示词按 [Shot N] 拆成单镜头提示词，逐段陪跑。
 
     循环规则：先尽量用 LLM 把本段 soundscape/music 按时间窗重写成独立提示词（
@@ -526,7 +596,7 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str) -> Non
 
         # ② 桥接帧：剥上一段尾帧，输出显式落盘信息（路径 + 大小）
         if position > 0 and _confirm("是否用上一段视频的尾帧作为本段首帧图（保证画面连续）？", default=True):
-            video_raw = _prompt("上一段输出视频路径（回车=跳过）：").strip()
+            video_raw = _clean_path_input(_prompt("上一段输出视频路径（回车=跳过）："))
             if video_raw:
                 try:
                     frame = extract_last_frame(
@@ -554,18 +624,31 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str) -> Non
         print(f"第 {position + 1}/{total} 段（Shot {segment.shot_number}）· 本段时长 {duration_line}{window_line}")
         if fallback_label:
             print(fallback_label)
+        # 本段中文摘要：回车确认前强制展示，作为人工验收的对照锚
+        if summary is not None:
+            from ..summary import render_summary_zh
+
+            print("-" * 60)
+            print("[本段中文摘要]")
+            print(render_summary_zh(summary, shot_number=segment.shot_number))
+            print("对照摘要检查：人物/场景/动作/声音是否符合预期走向？")
         print("=" * 60)
         print(display_text)
         print("-" * 60)
         print(f"提示词文件：{seg_dir / f'shot-{position + 1:02d}.md'}")
         while True:
-            raw = _prompt("本段生成并检查满意后回车进入下一段；输入 r 重显本段提示词：").lower()
+            raw = _prompt("本段生成并检查满意后回车进入下一段；输入 r 重显英文提示词，s 重看中文摘要：").lower()
             if raw in ("", "y", "yes"):
                 break
             if raw == "r":
                 print(display_text)
                 continue
-            print("回车=完成本段，r=重显提示词。")
+            if raw == "s" and summary is not None:
+                from ..summary import render_summary_zh
+
+                print(render_summary_zh(summary, shot_number=segment.shot_number))
+                continue
+            print("回车=完成本段，r=重显英文提示词，s=重看中文摘要。")
         progress_path.write_text(
             json.dumps({"done": position + 1, "total": total}, ensure_ascii=False, indent=2),
             encoding="utf-8",

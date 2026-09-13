@@ -439,8 +439,8 @@ def test_full_wizard_gate_yes_runs_phase2_with_skip_confirms(monkeypatch, tmp_pa
     _patch_run_stage1(monkeypatch)
     stage2_calls = _patch_run_stage2(monkeypatch)
     seen: list[str] = []
-    # 主题、时长、风格、生成方式默认、审阅默认、门禁 y、首帧空+确认 y、尾帧空+确认 y
-    _scripted_inputs(monkeypatch, seen, ["酒馆短剧", "", "", "", "", "y", "", "y", "", "y"])
+    # 主题、时长、风格、生成方式默认、审阅默认、门禁 y、首帧空+确认 y、尾帧空+确认 y、查看英文提示词=回车跳过
+    _scripted_inputs(monkeypatch, seen, ["酒馆短剧", "", "", "", "", "y", "", "y", "", "y", ""])
 
     code = wizard_module.run_wizard(config)
 
@@ -526,8 +526,8 @@ def test_wizard_phase2_l2va_ref_uses_picture_1(monkeypatch, tmp_path):
 
     monkeypatch.setattr(fa_mod, "audit_frame_images", fake_audit)
     seen: list[str] = []
-    # 主题、时长、风格、生成方式 2、审阅默认、门禁 y、尾帧路径
-    _scripted_inputs(monkeypatch, seen, ["酒馆短剧", "", "", "2", "", "y", str(last_png)])
+    # 主题、时长、风格、生成方式 2、审阅默认、门禁 y、尾帧路径、查看英文提示词=回车跳过
+    _scripted_inputs(monkeypatch, seen, ["酒馆短剧", "", "", "2", "", "y", str(last_png), ""])
 
     code = wizard_module.run_wizard(config)
 
