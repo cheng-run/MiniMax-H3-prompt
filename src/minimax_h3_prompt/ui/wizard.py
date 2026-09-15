@@ -483,12 +483,12 @@ def _phase2_collect_and_finish(config: Config, session: SessionState) -> int:
     except Exception:  # noqa: BLE001 - 摘要是增强体验，生成失败仅提示
         summary_obj = None
     if summary_obj is not None:
-        from ..summary import render_summary_zh
-
+        # 只展示整体走向：逐镜头清单已由分段陪跑的 [本段中文摘要] 逐段展示，避免重复
         print("\n" + "=" * 60)
-        print("[中文摘要] 视频内容走向（供人工核对）")
+        print("[中文摘要] 整体视频走向（供人工核对）")
         print("=" * 60)
-        print(render_summary_zh(summary_obj))
+        print("【整条视频走向】")
+        print(summary_obj.overall)
     else:
         print(f"[提示] 中文摘要生成失败，完整英文提示词见文件：{output_file}")
 
@@ -541,7 +541,7 @@ def _load_or_make_summary(prompt: str, llm, directory: Path):
 
 
 # ---------------------------------------------------------------------------
-# 长视频分段陪跑（>10s：H3 单次执行窗口只有 3-8s，必须逐段生成）
+# 长视频分段陪跑（>10s：ComfyUI H3 时长选项只有 4-10s 整数档，必须逐段生成）
 # ---------------------------------------------------------------------------
 
 def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summary=None) -> None:
@@ -612,11 +612,11 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
                     print(f"[警告] 剥尾帧失败（{exc}），可手动截图作为首帧图。")
 
         duration_line = (
-            f"{segment.duration_seconds:.2f}s"
+            f"{segment.duration_seconds:g}s"
             if segment.duration_seconds is not None else "未知时长"
         )
         window_line = (
-            f"（全局时间窗：{segment.start_seconds:.2f}s 起）"
+            f"（全局时间窗：{segment.start_seconds:g}s 起）"
             if segment.start_seconds is not None else ""
         )
         (seg_dir / f"shot-{position + 1:02d}.md").write_text(display_text, encoding="utf-8")

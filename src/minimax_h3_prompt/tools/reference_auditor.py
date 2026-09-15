@@ -24,7 +24,13 @@ def _build_vision_model() -> ChatOpenAI:
         raise RuntimeError(
             f"缺失 {settings.api_key_env}：参考图审核需要 {settings.provider} 视觉模型"
         ) from exc
-    return ChatOpenAI(model=settings.model, api_key=key, base_url=settings.base_url)
+    return ChatOpenAI(
+        model=settings.model,
+        api_key=key,
+        base_url=settings.base_url,
+        timeout=300,      # 读图请求超时，防止服务端长连接挂起
+        max_retries=2,
+    )
 
 
 def _downscale_to_jpeg(path: Path, max_side: int = 1024) -> str:

@@ -83,10 +83,16 @@ At the beginning of `[Shot 1]`, state the overall style and initial composition.
 
 ### 4.2 Shots and Cuts
 
-Do not add a timestamp to the first shot. Use sequential shot numbers for later shots, and begin each one with a strictly increasing cut time that falls within the video duration:
+Do not add a timestamp to the first shot. Use sequential shot numbers for later shots, and begin each one with a strictly increasing cut time that falls within the video duration. Cut times must be whole seconds (the milliseconds component must be `.000`), because the ComfyUI H3 duration option only offers integer-second choices in the 4-10s range; each shot's implied duration must also be an integer within 4-10 seconds:
 
 ```text
-[Shot 2] At 00:03.500, the camera cuts to...
+[Shot 2] At 00:04.000, the camera cuts to...
+```
+
+Additionally, end every shot block with this exact edge-stability sentence, so the extracted tail frame keeps a crisp character outline for the next segment's first-frame reference:
+
+```text
+Keep every character's silhouette, facial outline, and clothing edges crisp and stable throughout; no rippling, warping, or edge shimmer.
 ```
 
 For ordinary cuts, use `the camera cuts to`, `the shot cuts to`, `the shot transitions to`, `the shot changes to`, or `the shot switches to`. When explicitly requested by the user, cross-dissolve, fade, or wipe may also be used. A cut should introduce new information about the subject, space, state, viewpoint, or time. If only the distance or a slight angle needs to change, prefer camera motion.

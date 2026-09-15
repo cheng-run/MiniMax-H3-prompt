@@ -6,6 +6,10 @@ from langchain_openai import ChatOpenAI
 
 from .config import ModelSettings, config
 
+# 单个节点最长正常耗时约 230s；超时取 300s，超时后自动重试，杜绝僵尸长连接永久挂起。
+_LLM_TIMEOUT_SECONDS = 300
+_LLM_MAX_RETRIES = 2
+
 try:  # deepagents 依赖 langchain-anthropic，单独 import 避免硬依赖
     from langchain_anthropic import ChatAnthropic  # type: ignore
 except ImportError:  # pragma: no cover
@@ -29,7 +33,13 @@ def _detect_provider() -> str:
 def _anthropic(key: str, settings: ModelSettings) -> BaseChatModel:
     if ChatAnthropic is None:
         raise ImportError("langchain-anthropic 未安装：`uv add langchain-anthropic`")
-    return ChatAnthropic(model=settings.model, api_key=key, base_url=settings.base_url)
+    return ChatAnthropic(
+        model=settings.model,
+        api_key=key,
+        base_url=settings.base_url,
+        timeout=_LLM_TIMEOUT_SECONDS,
+        max_retries=_LLM_MAX_RETRIES,
+    )
 
 
 def build_chat_model() -> BaseChatModel:
@@ -44,6 +54,12 @@ def build_chat_model() -> BaseChatModel:
         base_url = settings.base_url
         if provider == "deepseek" and base_url and "anthropic" in base_url:
             return _anthropic(key, settings)
-        return ChatOpenAI(model=settings.model, api_key=key, base_url=base_url)
+        return ChatOpenAI(
+            model=settings.model,
+            api_key=key,
+            base_url=base_url,
+            timeout=_LLM_TIMEOUT_SECONDS,
+            max_retries=_LLM_MAX_RETRIES,
+        )
 
     raise ValueError(f"未知 LLM_PROVIDER: {provider}（应为 anthropic | openai | dashscope | deepseek）")

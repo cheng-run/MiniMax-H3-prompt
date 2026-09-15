@@ -31,7 +31,7 @@ def make_video(path: Path, *, frames: int = 8) -> Path:
     return path
 
 
-def make_project_with_shot(store: ProjectStore, duration: float = 10.0) -> Shot:
+def make_project_with_shot(store: ProjectStore, duration: float = 12.0) -> Shot:
     store.init_project("topic", "project", "分段测试", duration_seconds=duration)
     shot = Shot(
         shot_id="SH001", shot_number=1, duration_seconds=duration,
@@ -69,13 +69,19 @@ def _bare_shot(duration: float) -> Shot:
 
 
 def test_shot_auto_split():
-    segments = split_shot_into_segments(_bare_shot(10.0))
+    segments = split_shot_into_segments(_bare_shot(14.0))
     assert len(segments) == 2
-    assert [s.duration_seconds for s in segments] == pytest.approx([5.0, 5.0])
+    assert [s.duration_seconds for s in segments] == pytest.approx([7.0, 7.0])
     assert segments[1].prev_segment_id == segments[0].segment_id
     assert segments[0].next_segment_id == segments[1].segment_id
 
-    single = split_shot_into_segments(_bare_shot(7.0))
+    # 整数秒且末段吸收余数（9s → 4+5）
+    assert [s.duration_seconds for s in split_shot_into_segments(_bare_shot(15.0))] == \
+        pytest.approx([8.0, 7.0])
+    assert [s.duration_seconds for s in split_shot_into_segments(_bare_shot(21.0))] == \
+        pytest.approx([7.0, 7.0, 7.0])
+
+    single = split_shot_into_segments(_bare_shot(9.0))
     assert len(single) == 1
     assert single[0].segment_id == "SEG01-SH001a"
     assert single[0].prev_segment_id == ""
@@ -100,7 +106,7 @@ def test_chain_broken():
 
 def test_bridge_frame_registered(tmp_path):
     store = ProjectStore(tmp_path / "Assets")
-    make_project_with_shot(store, duration=10.0)
+    make_project_with_shot(store, duration=12.0)
     plan_segments(store, "topic", "project")
 
     video = make_video(tmp_path / "output" / "SH001-G001.mp4")
@@ -129,7 +135,7 @@ def test_bridge_frame_registered(tmp_path):
 
 def test_verify_chain_pass(tmp_path):
     store = ProjectStore(tmp_path / "Assets")
-    make_project_with_shot(store, duration=10.0)
+    make_project_with_shot(store, duration=12.0)
     plan_segments(store, "topic", "project")
     video = make_video(tmp_path / "output" / "SH001-G001.mp4")
     extract_bridge_frame(store, "topic", "project", "SEG01-SH001a", video)
@@ -141,7 +147,7 @@ def test_verify_chain_pass(tmp_path):
 
     # 未剥尾帧时链不完整
     store2 = ProjectStore(tmp_path / "Assets2")
-    make_project_with_shot(store2, duration=10.0)
+    make_project_with_shot(store2, duration=12.0)
     plan_segments(store2, "topic", "project")
     broken = verify_segment_chain(store2, "topic", "project", "SH001")
     assert broken["chain_ok"] is False

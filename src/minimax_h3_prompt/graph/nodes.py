@@ -218,7 +218,7 @@ class ShotScale:
     min_shots: int
     max_shots: int
     target_segment_seconds: float
-    shot_seconds_ceiling: float = 8.0
+    shot_seconds_ceiling: float = 10.0
 
     def describe(self) -> str:
         return (f"视频总时长按情节节拍分配，不按固定比例平分；预期 {self.min_shots}-{self.max_shots} 个镜头，"
@@ -229,8 +229,8 @@ class ShotScale:
 def derive_shot_scale(duration: float, plot_richness_hint: str = "") -> ShotScale:
     """根据时长和粗略内容复杂度推导镜头数与镜头时长区间。
 
-    设定依据（H3 官方 base-en 案例）：
-    - ≤10s：短影片，1-3 镜，单镜即执行窗口（7s）。
+    设定依据（H3 官方 base-en 案例 + ComfyUI H3 时长选项 4-10s 整数档）：
+    - ≤10s：短影片，1-3 镜，单镜即执行窗口（4-10s 整数）。
     - 11-30s：中片，4-6 镜，镜头按情节节拍 5-7s，不硬限。
     - >30s：长片（本项目产能目标），8-12 镜，单镜需求被 H3 执行窗口约束，
       超过 shot_seconds_ceiling 的镜头由管线自动拆分。

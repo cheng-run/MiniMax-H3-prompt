@@ -691,6 +691,21 @@ def plan_segments(
             f"SHOT_COUNT_LOW: {plan.duration_seconds:.0f}s 视频只有 {len(plan.shots)} 个镜头"
             f"（建议 ≥{warn_below}），可能导致内容密度不足"
         )
+    # 段时长必须是 4-10s 整数（ComfyUI H3 时长选项）；越界只警告，由人工调整
+    bad = [
+        f"{s.segment_id}={s.duration_seconds:g}s"
+        for s in flat
+        if not (
+            float(s.duration_seconds).is_integer()
+            and min_seconds <= s.duration_seconds <= max_seconds
+        )
+    ]
+    if bad:
+        warnings.append(
+            "SEGMENT_DURATION_INVALID: 段时长超出 ComfyUI H3 可选区间（4-10s 整数）："
+            + "、".join(bad)
+            + "；请人工调整对应镜头时长或总时长"
+        )
     return {
         "topic_id": topic_id,
         "project_id": project_id,

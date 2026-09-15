@@ -102,8 +102,10 @@ __all__ = ["FrameAudit", "required_frames", "audit_frame_images", "extract_last_
 # ---------------------------------------------------------------------------
 
 def extract_last_frame(video_path: str | Path, output_path: str | Path | None = None) -> Path:
-    """用 OpenCV 剥出视频最后一帧并写为 PNG。
+    """用 OpenCV 剥出视频尾部最锐利的一帧并写为 PNG（作下一段首帧参考）。
 
+    - 取最后 5 帧候选，按 Laplacian 方差选最锐利的一张；全部低于阈值时回退
+      最后一帧并打印警告（见 ``_read_sharpest_tail_frame``）。
     - cv2 懒加载：只为段桥接流程引入解码依赖，不拖慢主流程 import。
     - 先按总帧数 seek；seek 失败（部分编码不允许随机访问）则顺序遍历兜底。
     - Windows 非 ASCII 路径用 ``imencode + tofile`` 落盘，绕开 ``cv2.imwrite`` 的编码坑。
@@ -138,7 +140,7 @@ def extract_last_frame(video_path: str | Path, output_path: str | Path | None = 
                 f"无法打开视频（编码不被支持或文件损坏）：{source}"
             )
         try:
-            frame = _read_last_frame(capture)
+            frame = _read_sharpest_tail_frame(capture)
         finally:
             capture.release()
     finally:
@@ -176,3 +178,51 @@ def _read_last_frame(capture):
                 break
             frame = candidate
     return frame
+
+
+# 尾帧锐度优选：生成末帧常有编码压缩伪影/边缘抖动，剥作下一段首帧参考时
+# 会导致人物识别失败。剥最后 N 帧选最锐利的；全低于阈值则回退最后一帧并告警。
+_TAIL_FRAME_CANDIDATES = 5
+_MIN_SHARPNESS = 20.0  # Laplacian 方差阈值（低于视为运动模糊/压缩糊）
+
+
+def _frame_sharpness(frame) -> float:
+    """Laplacian 方差：值越高边缘越锐利。"""
+    import cv2  # noqa: PLC0415
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+
+def _read_sharpest_tail_frame(capture):
+    """从已打开的 VideoCapture 取最后 N 帧中最锐利的一帧作桥接参考帧。
+
+    参考帧只作为下一段 H3 的 first_frame 输入、不进成片时间线，因此取倒数
+    第几帧都不会造成成片跳接；最多有几帧动作提前量（约毫秒级）。seek 失败
+    或总帧数未知时回退单帧策略（_read_last_frame）。
+    """
+    import cv2  # noqa: PLC0415
+
+    total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    if total <= 1:
+        return _read_last_frame(capture)
+    start = max(0, total - _TAIL_FRAME_CANDIDATES)
+    candidates: list[tuple[float, object]] = []  # (sharpness, frame)
+    capture.set(cv2.CAP_PROP_POS_FRAMES, start)
+    while True:
+        ok, candidate = capture.read()
+        if not ok or candidate is None:
+            break
+        candidates.append((_frame_sharpness(candidate), candidate))
+    if not candidates:
+        return _read_last_frame(capture)
+    best_sharpness, best_frame = max(candidates, key=lambda item: item[0])
+    if best_sharpness < _MIN_SHARPNESS:
+        last_frame = candidates[-1][1]
+        print(
+            f"[警告] 尾帧候选（最后 {len(candidates)} 帧）锐度均低于阈值 "
+            f"{_MIN_SHARPNESS:g}（最高 {best_sharpness:.1f}），可能整体处于运动模糊；"
+            "已回退取最后一帧，若下一段人物识别失败请重生成"
+        )
+        return last_frame
+    return best_frame

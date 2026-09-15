@@ -80,6 +80,9 @@ def split_shots_from_prompt(prompt: str, total_duration: float | None = None) ->
     prompt = prompt.strip()
     if not prompt:
         return []
+    if total_duration is not None:
+        # 总时长同样取整：ComfyUI H3 时长选项只有整数档
+        total_duration = float(round(total_duration))
     matches = _shot_starts(prompt)
     if len(matches) < 2:
         return [ShotPrompt(1, prompt)]
@@ -101,6 +104,9 @@ def split_shots_from_prompt(prompt: str, total_duration: float | None = None) ->
         end = inner[index + 1].start() if index + 1 < len(inner) else len(body)
         block = body[match.start():end].strip()
         block = _TIMESTAMP_AFTER_TAG.sub(r"\1 ", block)  # 单镜头视频从 0 秒开始
+        # 防波纹兜底：机械拆分不经过 LLM 重写，直接附加边缘稳定约束句
+        if EDGE_STABILITY_SENTENCE not in block:
+            block = block.rstrip() + " " + EDGE_STABILITY_SENTENCE
         segment_header = header
         if index > 0:
             # `(from [Shot N])` 绑定行指向原整片的 Picture 布局，后续段的头帧由桥接帧替代，剔除避免误导
@@ -115,11 +121,18 @@ def split_shots_from_prompt(prompt: str, total_duration: float | None = None) ->
             shot_number=int(match.group(1)), text=text.strip() + "\n",
             start_seconds=start_s, duration_seconds=duration,
         ))
+    warn_out_of_range_durations(
+        [s.duration_seconds for s in segments if s.duration_seconds is not None]
+    )
     return segments
 
 
 def _shot_blocks(prompt: str) -> list[tuple[int, float, str]]:
-    """返回 [(shot_number, start_seconds, block_text)]；[Shot 1] 起点为 0。"""
+    """返回 [(shot_number, start_seconds, block_text)]；[Shot 1] 起点为 0。
+
+    时间戳取整：ComfyUI 的 H3 时长选项只有 4-10 秒整数档，LLM 若生成小数
+    时间戳（如 8.50s）会产生小数段；此处统一四舍五入到整数秒兜底。
+    """
     matches = _shot_starts(prompt)
     if not matches:
         return []
@@ -138,19 +151,37 @@ def _shot_blocks(prompt: str) -> list[tuple[int, float, str]]:
         seconds = 0.0
         if stamp:
             minutes, secs, millis = int(stamp.group(2)), int(stamp.group(3)), int(stamp.group(4))
-            seconds = minutes * 60 + secs + millis / 1000.0
+            seconds = float(round(minutes * 60 + secs + millis / 1000.0))
         blocks.append((int(match.group(1)), seconds, _TIMESTAMP_AFTER_TAG.sub(r"\1 ", block).strip()))
     return blocks
+
+
+# ComfyUI 的 H3 时长选项区间：段时长必须落在此区间（整数秒）
+MIN_SEGMENT_SECONDS = 4.0
+MAX_SEGMENT_SECONDS = 10.0
+
+
+def warn_out_of_range_durations(durations: list[float], *, stream_print=print) -> None:
+    """对落在 4-10s 区间外的段长打印警告（不阻断流程，由人工调整总时长）。"""
+    bad = [d for d in durations if not (MIN_SEGMENT_SECONDS <= d <= MAX_SEGMENT_SECONDS)]
+    if bad:
+        rendered = "、".join(f"{d:g}s" for d in bad)
+        stream_print(
+            f"[警告] 段时长 {rendered} 超出 ComfyUI H3 可选区间（4-10s 整数），"
+            "请人工调整对应镜头时长或总时长"
+        )
 
 
 def shots_from_prompt(prompt: str, total_duration: float):
     """从提示词的 [Shot N] 块 + At MM:SS.mmm 时间戳反推 Shot 列表。
 
     时长规则：第 N 镜时长 = 第 N+1 镜起点 − 本镜起点；最后一镜 = total_duration − 起点。
+    时间戳与总时长均按整数秒处理（ComfyUI H3 时长选项只有 4-10s 整数档）。
     链式字段（previous_shot_id / start_state_derived_from）按顺序接续，满足 ShotPlan.validate。
     """
     from .project_models import Shot  # 延迟导入，避免循环依赖
 
+    total_duration = float(round(total_duration))
     blocks = _shot_blocks(prompt)
     if not blocks:
         return []
@@ -162,8 +193,8 @@ def shots_from_prompt(prompt: str, total_duration: float):
             duration = total_duration - start
         if duration <= 0:
             raise ValueError(
-                f"[Shot {shot_number}] 时间戳推断出非正时长（起点 {start:.3f}s，总长 {total_duration:.1f}s）；"
-                "请检查提示词中各镜头时间戳是否严格递增且不超总时长"
+                f"[Shot {shot_number}] 时间戳推断出非正时长（起点 {start:g}s，总长 {total_duration:g}s）；"
+                "时间戳按整数秒处理，请检查各镜头时间戳是否严格递增且间隔 ≥1s、不超总时长"
             )
         previous_id = f"SH{shot_number - 1:03d}" if index else ""
         one_line = " ".join(block.split())
@@ -190,14 +221,22 @@ def is_degenerate_durations(durations: list[float]) -> bool:
 # 按段重写：soundscape/music 裁到本段时间窗，生成合规的独立单镜头提示词
 # ---------------------------------------------------------------------------
 
-_REWRITE_INSTRUCTION = """你是 H3 视频提示词工程师。把整条视频的提示词重写为**只覆盖指定时间窗的一段独立单镜头提示词**。
+# 尾帧保边约束：上一段尾帧会剥下来作为下一段首帧参考，生成端出现人物轮廓
+# 波纹/边缘抖动会直接导致下一段人物识别失败；此句无条件注入每段提示词。
+EDGE_STABILITY_SENTENCE = (
+    "Keep every character's silhouette, facial outline, and clothing edges crisp "
+    "and stable throughout; no rippling, warping, or edge shimmer."
+)
+
+_REWRITE_INSTRUCTION = f"""你是 H3 视频提示词工程师。把整条视频的提示词重写为**只覆盖指定时间窗的一段独立单镜头提示词**。
 
 输入：完整提示词（多镜头）+ 本段时间窗（秒）。
 输出格式（严格遵守 H3 base 规范，只输出提示词本身，不要任何解释）：
-- 第一行指令行：说明本段时长（精确到 0.01 秒）与镜头数（1），英文；
+- 第一行指令行：说明本段时长（**整数秒**，ComfyUI H3 时长选项只有 4-10 秒整数档）与镜头数（1），英文；
 - 空一行；
 - integrated_multimodal_description: 只含本段的一个 [Shot 1] 块
   （沿用原 [Shot N] 的画面/运镜/表演描述，时间戳归零，不得虚构原镜头外的内容）；
+  镜头块结尾必须原样追加这句边缘稳定约束：{EDGE_STABILITY_SENTENCE}
 - overall_soundscape: 只保留本段时间窗内的环境声与动作声（原描述中超出该窗口的内容一律删除）；
 - non_diegetic_music: 只保留本段时间窗内的配乐内容与起止（删除其他时间点的渐强/渐弱描述）。
 """
@@ -215,8 +254,8 @@ def rewrite_segment_prompt(
     start = segment.start_seconds or 0.0
     duration = segment.duration_seconds
     window = (
-        f"{start:.2f}s – {start + duration:.2f}s"
-        if duration is not None else f"{start:.2f}s 起（时长未知）"
+        f"{start:g}s – {start + duration:g}s"
+        if duration is not None else f"{start:g}s 起（时长未知）"
     )
     request = (
         f"{_REWRITE_INSTRUCTION}\n\n本段时间窗：{window}\n"

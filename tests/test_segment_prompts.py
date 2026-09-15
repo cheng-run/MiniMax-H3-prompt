@@ -57,12 +57,12 @@ def test_split_shots_single_or_empty():
 
 def _seed_project(root: Path, topic_id: str, project_id: str) -> None:
     store = ProjectStore(root)
-    store.init_project(topic_id, project_id, "自动探测", duration_seconds=10.0)
+    store.init_project(topic_id, project_id, "自动探测", duration_seconds=12.0)
     doc = store.load_project(topic_id, project_id)
-    shot = Shot(shot_id="SH001", shot_number=1, duration_seconds=10.0,
+    shot = Shot(shot_id="SH001", shot_number=1, duration_seconds=12.0,
                 start_state="s", action="a", end_state="e")
     store.update_shot_plan(topic_id, project_id, ShotPlan(
-        doc.shot_plan.shot_plan_id, project_id, "FL2VA", 10.0, (shot,),
+        doc.shot_plan.shot_plan_id, project_id, "FL2VA", 12.0, (shot,),
     ), overwrite=True)
 
 
@@ -77,7 +77,7 @@ def test_cli_segment_plan_auto_detect_ids(tmp_path, capsys):
     assert "自动识别" in out
     document = ProjectStore(root).load_project("paper-plane", "project-001")
     segments = document.shot_plan.shots[0].segments
-    assert len(segments) == 2  # 10s → 5+5
+    assert len(segments) == 2  # 12s → 6+6
     assert segments[1].prev_segment_id == segments[0].segment_id
 
 
@@ -129,7 +129,7 @@ def test_rewrite_segment_prompt_uses_llm_and_window():
     llm = FakeLLM()
     rewritten = rewrite_segment_prompt(segments[1], SAMPLE_PROMPT, llm)
     assert rewritten.startswith("For the target video")
-    assert "00:05" in llm.last_request or "5.00s" in llm.last_request  # 时间窗已传入
+    assert "5s" in llm.last_request  # 时间窗已传入（整数秒格式）
     assert "Shot 2" in llm.last_request
 
 

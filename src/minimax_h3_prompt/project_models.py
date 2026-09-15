@@ -265,10 +265,10 @@ class ProjectBible:
 
 @dataclass(frozen=True)
 class Segment:
-    """实际执行单元：一次 3-8s 的 Workflow 生成。
+    """实际执行单元：一次 4-10s（整数秒）的 Workflow 生成。
 
     `Shot` 是叙事单元（纸飞机飞过麦田），`Segment` 是运行为单元
-    （单次 H3/FL2VA 生成）。当镜头时长超过 8s 时按 `split_shot_into_segments`
+    （单次 H3/FL2VA 生成）。当镜头时长超过 10s 时按 `split_shot_into_segments`
     拆分为连续段，段间通过桥接帧（bridge frame）保证连续性。
     """
 
@@ -339,43 +339,59 @@ class Segment:
         return Segment(**{**self.to_dict(), "pipeline_state": state, "review_records": records})
 
 
+def _plan_segment_durations(
+    total: float,
+    *,
+    min_seconds: float,
+    max_seconds: float,
+) -> list[float]:
+    """把镜头总时长规划成整数秒段长序列：前段取整，末段吸收余数。
+
+    - total ≤ max：直接返回 [total]（单段）。
+    - 前 count-1 段统一取 int(round(total/count))（始终落在区间内）；
+      末段 = total − 前段之和，是唯一可能越界的段。
+    - 末段越界兜底：末段 < min → 少拆一段重算（并入末段）；
+      末段 > max → 多拆一段重算；单段仍越界则原样返回（由调用方告警）。
+    """
+    if total <= max_seconds:
+        # 单段也要整数：ComfyUI H3 时长选项只有整数档
+        return [float(round(total))]
+    count = int(math.ceil(total / max_seconds))
+    while True:
+        base = int(round(total / count))
+        base = max(int(min_seconds), min(int(max_seconds), base))
+        durations = [float(base)] * (count - 1)
+        durations.append(total - base * (count - 1))
+        if count > 1 and durations[-1] < min_seconds:
+            count -= 1
+            continue
+        if durations[-1] > max_seconds:
+            count += 1
+            continue
+        return durations
+
+
 def split_shot_into_segments(
     shot: Shot,
     *,
-    max_segment_seconds: float = 8.0,
-    min_segment_seconds: float = 3.0,
+    max_segment_seconds: float = 10.0,
+    min_segment_seconds: float = 4.0,
 ) -> tuple[Segment, ...]:
     """把单个 `Shot` 拆成连续执行段。
 
     - 时长 ≤ max 的镜头返回一个段（`a`）。
-    - 时长超限的镜头按 `max_segment_seconds` 切分，末段至少 `min_segment_seconds`；
-      若末段会小于 min，则把最后一个完整段减短并入它。
+    - 时长超限的镜头按 `max_segment_seconds` 切分；段时长为整数秒
+      （ComfyUI H3 时长选项只有 4-10s 整数档），**末段吸收余数**（前面
+      各段取整，末段 = 总时长 − 各前段之和）。末段越界时递归增减段数拉回区间。
     - 段间前后指针自动接续；首段 prev_segment_id 为空。
     """
-    if shot.duration_seconds <= max_segment_seconds:
-        return (
-            Segment(
-                segment_id=_segment_id_for(shot, "a"),
-                shot_ref=shot.shot_id,
-                duration_seconds=shot.duration_seconds,
-                workflow_profile_id=shot.workflow_profile_id,
-                workflow_profile_version=shot.workflow_profile_version,
-                workflow_sha256=shot.workflow_sha256,
-                pipeline_state="proposed",
-            ),
-        )
-
-    count = int(math.ceil(shot.duration_seconds / max_segment_seconds))
-    base = shot.duration_seconds / count
-    # 修正末段过短：把最后一个完整段的部分时长并入末段，保证末段 ≥ min
-    if base * (count - 1) < min_segment_seconds and count > 1:
-        count -= 1
-        base = shot.duration_seconds / count
-    remaining = shot.duration_seconds
+    durations = _plan_segment_durations(
+        shot.duration_seconds,
+        min_seconds=min_segment_seconds,
+        max_seconds=max_segment_seconds,
+    )
     segments: list[Segment] = []
-    for index in range(count):
-        duration = max(0.0, min(base, remaining))
-        remaining -= duration
+    for index, duration in enumerate(durations):
         letter = chr(ord("a") + index)
         segment = Segment(
             segment_id=_segment_id_for(shot, letter),
@@ -418,7 +434,7 @@ class Shot:
     status: str = "planned"
     locked: bool = False
     review_records: tuple[ReviewRecord, ...] = field(default_factory=tuple)
-    # 执行段（3-8s/段），由 split_shot_into_segments() 生成；为空表示未拆分
+    # 执行段（4-10s 整数秒/段），由 split_shot_into_segments() 生成；为空表示未拆分
     segments: tuple[Segment, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
