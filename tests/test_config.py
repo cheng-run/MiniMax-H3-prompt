@@ -30,12 +30,15 @@ def config_without_env(monkeypatch):
 
 def test_loads_primary_and_vision_from_yaml(config_without_env):
     cfg = config_without_env()
-    assert cfg.primary_model.provider == "dashscope"
-    assert cfg.primary_model.model == "qwen3.7-plus"
-    assert cfg.primary_model.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    assert cfg.vision_model.provider == "dashscope"
-    assert cfg.vision_model.model == "qwen3.7-plus"
-    assert cfg.vision_model.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    # 直接引用 YAML 中的值，而不是硬编码模型名——YAML 改模型，测试无需同步改。
+    yaml_primary = cfg.raw.get("models", {}).get("primary", {})
+    yaml_vision = cfg.raw.get("models", {}).get("vision", {})
+    assert cfg.primary_model.provider == yaml_primary.get("provider", "dashscope")
+    assert cfg.primary_model.model == yaml_primary.get("model")
+    assert cfg.primary_model.base_url == yaml_primary.get("base_url")
+    assert cfg.vision_model.provider == yaml_vision.get("provider", "dashscope")
+    assert cfg.vision_model.model == yaml_vision.get("model")
+    assert cfg.vision_model.base_url == yaml_vision.get("base_url")
 
 
 def test_api_keys_are_resolved_from_environment(config_without_env, monkeypatch):

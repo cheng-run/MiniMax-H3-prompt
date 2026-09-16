@@ -28,7 +28,7 @@ def _build_vision_model() -> ChatOpenAI:
         model=settings.model,
         api_key=key,
         base_url=settings.base_url,
-        timeout=300,      # 读图请求超时，防止服务端长连接挂起
+        timeout=600,      # 读图请求超时，防止服务端长连接挂起
         max_retries=2,
     )
 

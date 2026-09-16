@@ -16,8 +16,6 @@ from typing import Any
 
 from PIL import Image
 
-from .workflow_profiles import WorkflowProfile
-
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _GENERATION_ID_RE = re.compile(r"^(?:G\d{3}|[A-Z][A-Z0-9]*-G\d{3})$")
@@ -107,32 +105,6 @@ class TaskPackage:
     schema_version: str = "1"
     status: str = "planned"
     manual_steps: tuple[str, ...] = field(default_factory=tuple)
-
-    @classmethod
-    def from_profile(
-        cls,
-        generation_id: str,
-        task_type: str,
-        profile: WorkflowProfile,
-        prompt: str,
-        *,
-        inputs: tuple[AssetInput, ...] = (),
-        **overrides: Any,
-    ) -> TaskPackage:
-        return cls(
-            generation_id=generation_id,
-            task_type=task_type,
-            profile_id=profile.profile_id,
-            profile_version=profile.profile_version,
-            workflow_path=profile.workflow_path,
-            workflow_sha256=profile.workflow_sha256,
-            prompt=prompt,
-            inputs=inputs,
-            created_at=_now(),
-            profile_status_at_creation=profile.status,
-            manual_steps=profile.manual_steps,
-            **overrides,
-        )
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> TaskPackage:

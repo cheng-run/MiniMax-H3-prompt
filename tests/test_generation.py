@@ -5,7 +5,7 @@ import pytest
 
 from minimax_h3_prompt.generation import GenerationResult, PromptArtifact, result_from_state
 from minimax_h3_prompt.brief_parser import Brief
-from minimax_h3_prompt.project_store import ProjectStore
+from minimax_h3_prompt.topic_generation import save_generation
 
 
 def make_result(generation_id="GEN001"):
@@ -46,27 +46,13 @@ def test_generation_result_rejects_missing_output_or_bad_hash():
     assert len(artifact.sha256) == 64
 
 
-def test_project_store_persists_generation_and_is_backward_compatible(tmp_path):
-    store = ProjectStore(tmp_path / "Assets")
-    store.init_project("topic", "project", "Title")
+def test_save_generation_writes_files_and_rejects_changed_without_overwrite(tmp_path):
     result = make_result()
-    directory = store.save_generation_result("topic", "project", result)
+    directory = save_generation(result, tmp_path / "GEN001")
     assert (directory / "script.md").read_text(encoding="utf-8").strip() == result.script
-    assert store.load_generation_result("topic", "project", "GEN001") == result
-    listed = store.list_generation_results("topic", "project")
-    assert listed[0]["generation_id"] == "GEN001"
-    shown = store.show_generation("topic", "project", "GEN001", kind="video", raw=True)
-    assert shown["artifacts"] == {"video": "video prompt"}
+    assert (directory / "video-prompt.md").read_text(encoding="utf-8").strip() == "video prompt"
     assert "api_key" not in json.dumps(result.to_dict())
 
-
-def test_project_store_rejects_changed_generation_without_overwrite(tmp_path):
-    store = ProjectStore(tmp_path / "Assets")
-    store.init_project("topic", "project", "Title")
-    store.save_generation_result("topic", "project", make_result())
-    changed = make_result()
-    changed = GenerationResult(
-        **{**changed.__dict__, "script": "不同剧本"}
-    )
+    changed = GenerationResult(**{**result.__dict__, "script": "不同剧本"})
     with pytest.raises(FileExistsError):
-        store.save_generation_result("topic", "project", changed)
+        save_generation(changed, directory)

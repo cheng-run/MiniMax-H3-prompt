@@ -1,12 +1,14 @@
 """由 ``launch.py`` 调用的 CLI 实现；项目唯一启动入口是 ``uv run launch.py``。
 
 ``main()`` 保留为内部可测试函数，不作为独立命令注册。
+
+资产库（Assets 主题 / 项目文档 / Workflow Profile / 分段执行闭环）已整体移除，
+本 CLI 只保留面向用户的两阶段向导与 brief 快路径，以及 generate-prompts 入口。
 """
 from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -25,120 +27,19 @@ def build_parser() -> argparse.ArgumentParser:
     project = parser.add_subparsers(dest="command")
     create_parser = project.add_parser("create-video", help="输入主题，自动生成剧本与视频/关键帧提示词")
     create_parser.add_argument("--topic", required=True, help="视频主题")
-    create_parser.add_argument("--root", default=r"D:\\笔记\\Assets", help="Assets 根目录")
     create_parser.add_argument("--duration", type=float, default=None, help="视频时长（秒，默认使用配置）")
     create_parser.add_argument("--style", default=None, help="视觉风格（默认使用配置）")
     create_parser.add_argument("--language", default=None, help="提示词语言（默认使用配置）")
     create_parser.add_argument("--variant", choices=["I2VA", "L2VA", "FL2VA"], default="FL2VA")
 
-    project_parser = project.add_parser("project", help="管理长视频项目文档（离线，不调用模型）")
-    project_parser.add_argument("--root", default=r"D:\笔记\Assets", help="Assets 根目录")
-    project_commands = project_parser.add_subparsers(dest="project_command", required=True)
-
-    init_parser = project_commands.add_parser("init", help="初始化项目文档")
-    init_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
-    init_parser.add_argument("--topic-id", required=True, help="主题 ID")
-    init_parser.add_argument("--project-id", required=True, help="项目 ID")
-    init_parser.add_argument("--title", required=True, help="项目标题")
-    init_parser.add_argument("--duration", type=float, default=60.0, help="项目时长（秒）")
-    init_parser.add_argument("--variant", choices=["FL2VA"], default="FL2VA")
-    init_parser.add_argument("--global-style", default="", help="全局视觉风格")
-
-    for name, help_text in (("validate", "校验项目文档"), ("show", "展示项目摘要")):
-        command_parser = project_commands.add_parser(name, help=help_text)
-        command_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
-        command_parser.add_argument("--topic-id", required=True, help="主题 ID")
-        command_parser.add_argument("--project-id", required=True, help="项目 ID")
-
-    plan_parser = project_commands.add_parser("plan", help="生成镜头的人工 ComfyUI 执行指引（只读）")
-    plan_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
-    plan_parser.add_argument("--topic-id", required=True, help="主题 ID")
-    plan_parser.add_argument("--project-id", required=True, help="项目 ID")
-    plan_parser.add_argument("--shot", required=True, help="镜头 ID（如 SH001）")
-    plan_parser.add_argument("--workflow-root", default=r"D:\Comfyui\ComfyUI\user\default\workflows", help="ComfyUI 工作流根目录")
-    plan_parser.add_argument("--out", default=None, help="把指引写到文件（默认打印到 stdout）")
-
-    import_parser = project_commands.add_parser("import-output", help="导入人工 ComfyUI 执行输出并标记任务 executed")
-    import_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
-    import_parser.add_argument("--topic-id", required=True, help="主题 ID")
-    import_parser.add_argument("--project-id", required=True, help="项目 ID")
-    import_parser.add_argument("generation", help="generation_id（如 SH001-G001）")
-    import_parser.add_argument("source", help="ComfyUI output 源文件路径")
-
-    review_parser = project_commands.add_parser("review", help="人工视觉/听觉验收资产或镜头")
-    review_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
-    review_parser.add_argument("--topic-id", required=True, help="主题 ID")
-    review_parser.add_argument("--project-id", required=True, help="项目 ID")
-    review_parser.add_argument("--entity", required=True, help="验收实体 ID（C01/S01/P01 资产或 SH001 镜头）")
-    review_parser.add_argument("--kind", choices=["visual", "audio"], required=True, help="视觉或听觉验收")
-    review_parser.add_argument("--outcome", choices=["approved", "rejected"], required=True, help="验收结论")
-    review_parser.add_argument("--reviewer", default="", help="验收人标识")
-
-    verify_parser = project_commands.add_parser("verify", help="一键检查执行资格闸门（只读）")
-    verify_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
-    verify_parser.add_argument("--topic-id", default=None, help="主题 ID（可自动探测）")
-    verify_parser.add_argument("--project-id", default=None, help="项目 ID（可自动探测）")
-    verify_parser.add_argument("topic", nargs="?", default=None, help="主题 ID（位置参数）")
-    verify_parser.add_argument("project", nargs="?", default=None, help="项目 ID（位置参数）")
-    verify_parser.add_argument("--shot", default=None, help="只检查指定镜头（默认全部）")
-    verify_parser.add_argument("--chain", default=None, help="检查指定镜头（或 *）的段链连续性（只读）")
-    verify_parser.add_argument("--workflow-root", default=r"D:\Comfyui\ComfyUI\user\default\workflows", help="ComfyUI 工作流根目录")
-
-    segment_plan_parser = project_commands.add_parser("segment-plan", help="把未拆分镜头拆成 3-8s 执行段并写回 ShotPlan（幂等）")
-    segment_plan_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
-    segment_plan_parser.add_argument("--topic-id", default=None, help="主题 ID（根目录下只有一个主题时可省略）")
-    segment_plan_parser.add_argument("--project-id", default=None, help="项目 ID（主题下只有一个项目时可省略）")
-    segment_plan_parser.add_argument("topic", nargs="?", default=None, help="主题 ID（位置参数，等同 --topic-id）")
-    segment_plan_parser.add_argument("project", nargs="?", default=None, help="项目 ID（位置参数，等同 --project-id）")
-    segment_plan_parser.add_argument("--max-segment-seconds", type=float, default=None, help="单段时长上限（默认取 SEGMENT_CONFIG）")
-    segment_plan_parser.add_argument("--min-segment-seconds", type=float, default=None, help="单段时长下限（默认取 SEGMENT_CONFIG）")
-
-    chain_parser = project_commands.add_parser("segment-chain", help="打印镜头（或全项目）的段链执行顺序（只读）")
-    chain_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
-    chain_parser.add_argument("--topic-id", default=None, help="主题 ID（可自动探测）")
-    chain_parser.add_argument("--project-id", default=None, help="项目 ID（可自动探测）")
-    chain_parser.add_argument("topic", nargs="?", default=None, help="主题 ID（位置参数）")
-    chain_parser.add_argument("project", nargs="?", default=None, help="项目 ID（位置参数）")
-    chain_parser.add_argument("--shot", default=None, help="只显示指定镜头（默认全部）")
-
-    extract_parser = project_commands.add_parser("extract-bridge", help="剥执行段输出视频尾帧 → bridge_frames/ 并接线下一段首帧")
-    extract_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
-    extract_parser.add_argument("--topic-id", default=None, help="主题 ID（可自动探测）")
-    extract_parser.add_argument("--project-id", default=None, help="项目 ID（可自动探测）")
-    extract_parser.add_argument("topic", nargs="?", default=None, help="主题 ID（位置参数，写在段 ID 后）")
-    extract_parser.add_argument("project", nargs="?", default=None, help="项目 ID（位置参数）")
-    extract_parser.add_argument("segment", help="执行段 ID（如 SEG01-SH001a）")
-    extract_parser.add_argument("--source", default=None, help="输出视频路径（缺省从该镜头 inbox 取最新视频）")
-
-    profile_parser = project_commands.add_parser("profile", help="Profile 状态升级（verified/approved，写 docs/profiles）")
-    profile_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
-    profile_parser.add_argument("--topic-id", required=True, help="主题 ID")
-    profile_parser.add_argument("--project-id", required=True, help="项目 ID")
-    profile_parser.add_argument("--profile", required=True, help="Profile ID（如 h3_fl2va_v2）")
-    profile_parser.add_argument("--status", choices=["verified", "approved"], required=True, help="升级目标状态")
-    profile_parser.add_argument("--reviewer", default="", help="验收人标识")
-    profile_parser.add_argument("--note", default="", help="附加说明")
-    profile_parser.add_argument("--generation", default="", help="关联的 generation_id（approved 时需要）")
-
-    generate_parser = project_commands.add_parser("generate-prompts", help="从 brief 生成剧本与视频/关键帧提示词并保存到项目")
-    generate_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
-    generate_parser.add_argument("--topic-id", required=True, help="主题 ID")
-    generate_parser.add_argument("--project-id", required=True, help="项目 ID")
-    generate_parser.add_argument("--brief", required=True, help="brief 文件路径")
-    generate_parser.add_argument("--generation-id", default=None, help="指定生成 ID（默认自动分配）")
-    generate_parser.add_argument("--model", choices=["fl2va"], default=None)
-    generate_parser.add_argument("--mode", choices=["base"], default=None)
-    generate_parser.add_argument("--variant", choices=["I2VA", "L2VA", "FL2VA"], default=None)
+    generate_parser = project.add_parser("generate-prompts", help="从 brief 生成剧本与视频/关键帧提示词")
+    generate_parser.add_argument("--brief", "-b", required=False, help="brief 文件路径")
+    generate_parser.add_argument("--topic", default=None, help="视频主题")
+    generate_parser.add_argument("--duration", type=float, default=None, help="视频时长（秒）")
+    generate_parser.add_argument("--style", default=None, help="视觉风格")
+    generate_parser.add_argument("--language", default=None, help="提示词语言")
+    generate_parser.add_argument("--variant", choices=["I2VA", "L2VA", "FL2VA"], default="FL2VA")
     generate_parser.add_argument("--dry-run", action="store_true", help="只解析 brief，不调用模型或落盘")
-    generate_parser.add_argument("--overwrite", action="store_true", help="允许覆盖同一 generation_id")
-
-    show_parser = project_commands.add_parser("show-prompts", help="查看项目中的剧本与提示词")
-    show_parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
-    show_parser.add_argument("--topic-id", required=True, help="主题 ID")
-    show_parser.add_argument("--project-id", required=True, help="项目 ID")
-    show_parser.add_argument("--generation", required=True, help="generation_id")
-    show_parser.add_argument("--kind", choices=["script", "video", "fl2va", "first-frame", "last-frame"], default=None)
-    show_parser.add_argument("--raw", action="store_true", help="输出正文，供手动复制")
     return parser
 
 
@@ -156,7 +57,7 @@ def _topic_progress(event: dict) -> None:
 def _create_video_with_progress(topic: str, config, **kwargs):
     """运行主题生成，并确保异常或中断时解除进度订阅。"""
     from .observability import reporter
-    from .project_generation import create_video_from_topic
+    from .topic_generation import create_video_from_topic
 
     reporter.subscribe(_topic_progress)
     try:
@@ -166,8 +67,7 @@ def _create_video_with_progress(topic: str, config, **kwargs):
 
 
 def _print_generation_result(result, directory) -> None:
-    print(f"\n项目已创建：{result.project_id}")
-    print(f"生成结果目录：{directory}")
+    print(f"\n执行完成：{directory}")
     print("\n剧本：\n" + result.script)
     if result.fl2va_prompt_bundle is not None:
         from .generation import render_fl2va_frame_markdown
@@ -183,23 +83,62 @@ def _print_generation_result(result, directory) -> None:
     print("\n以上内容已保存；请手动复制到对应模型并自行审查生成结果。")
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+def _run_create_video(args) -> int:
+    from .config import config
+    from .topic_generation import create_video_from_topic
 
-    if args.command == "create-video":
-        from .config import config
-        from .generation import render_generation
-        from .project_generation import create_video_from_topic
+    result, directory = _create_video_with_progress(
+        args.topic, config, duration=args.duration,
+        style=args.style, language=args.language, variant=args.variant,
+    )
+    _print_generation_result(result, directory)
+    return 0
 
-        result, directory = _create_video_with_progress(
-            args.topic, config, root=args.root, duration=args.duration,
-            style=args.style, language=args.language, variant=args.variant,
+
+def _run_generate_prompts(args) -> int:
+    from .brief_parser import parse_brief
+    from .config import config
+    from .topic_generation import create_video_from_topic
+
+    if args.brief:
+        brief = parse_brief(args.brief)
+        brief.mode = "base"
+        if args.variant:
+            brief.variant = args.variant.upper()
+        elif brief.variant == "T2VA":
+            brief.variant = "FL2VA"
+        if args.dry_run:
+            print(json.dumps({
+                "brief": {"mode": brief.mode, "variant": brief.variant, "duration": brief.duration,
+                          "style": brief.style, "language": brief.language, "plot": brief.plot, "draft": brief.draft},
+                "dry_run": True,
+            }, ensure_ascii=False, indent=2))
+            return 0
+        result, directory = create_video_from_topic(
+            brief.plot, config,
+            duration=brief.duration, style=brief.style, language=brief.language, variant=brief.variant,
         )
         _print_generation_result(result, directory)
         return 0
 
-    if args.command == "project":
-        return _run_project_command(args)
+    # 无 --brief：用主题直接跑（等价 create-video，统一一条入口）
+    if not args.topic:
+        raise ValueError("generate-prompts 需要 --brief 文件或 --topic 主题")
+    result, directory = _create_video_with_progress(
+        args.topic, config, duration=args.duration,
+        style=args.style, language=args.language, variant=args.variant,
+    )
+    _print_generation_result(result, directory)
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+
+    if args.command == "create-video":
+        return _run_create_video(args)
+    if args.command == "generate-prompts":
+        return _run_generate_prompts(args)
 
     if not args.brief:
         # 面向最终用户的两阶段向导：先生图提示词 → 人工生图 → 提交图片 → 视频提示词。
@@ -211,236 +150,7 @@ def main(argv: list[str] | None = None) -> int:
         except (KeyboardInterrupt, EOFError):
             print("\n已取消。")
             return 1
-
     return _run_cli(args)
-
-
-def _pick_candidate(label: str, candidates: list[str]) -> str:
-    """交互终端上对多个候选给出编号菜单；非交互环境报错列出候选。"""
-    import sys
-
-    if sys.stdin.isatty() and candidates:
-        print(f"发现多个{label}，请选择：")
-        for index, name in enumerate(candidates, 1):
-            print(f"  {index}. {name}")
-        while True:
-            raw = input(f"输入序号（回车=1）：").strip()
-            if not raw:
-                return candidates[0]
-            if raw.isdigit() and 1 <= int(raw) <= len(candidates):
-                return candidates[int(raw) - 1]
-            print("无效序号，请重输。")
-    raise ValueError(f"请用 --{label == '主题' and 'topic-id' or 'project-id'} 或位置参数指定{label}（候选：{', '.join(candidates) or '无'}）")
-
-
-def _resolve_topic_project(store, topic_id, project_id) -> tuple[str, str]:
-    """主题/项目 ID 缺省时自动探测：唯一候选则采用，多个候选交互选择/报错。"""
-    root = store.root
-    if not topic_id:
-        if not root.is_dir():
-            raise ValueError(f"Assets 根目录不存在：{root}")
-        candidates = sorted(
-            child.name for child in root.iterdir()
-            if child.is_dir() and child.name not in ("inbox", "_template") and (child / "projects").is_dir()
-        )
-        if len(candidates) == 1:
-            topic_id = candidates[0]
-            print(f"[自动识别] 主题：{topic_id}")
-        else:
-            topic_id = _pick_candidate("主题", candidates)
-    if not project_id:
-        projects_root = root / topic_id / "projects"
-        candidates = sorted(
-            child.name for child in projects_root.iterdir() if child.is_dir()
-        ) if projects_root.is_dir() else []
-        if len(candidates) == 1:
-            project_id = candidates[0]
-            print(f"[自动识别] 项目：{project_id}")
-        else:
-            project_id = _pick_candidate("项目", candidates)
-    return topic_id, project_id
-
-
-def _run_project_command(args: argparse.Namespace) -> int:
-    """执行离线项目命令；不调用 LLM、ComfyUI 或 output 扫描。"""
-    from .project_store import ProjectStore
-
-    store = ProjectStore(getattr(args, "root", r"D:\笔记\Assets"))
-    if args.project_command == "init":
-        document = store.init_project(
-            args.topic_id,
-            args.project_id,
-            args.title,
-            duration_seconds=args.duration,
-            variant=args.variant,
-            global_style=args.global_style,
-        )
-        print(json.dumps({"directory": str(document.directory), "project_id": document.project_id}, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.project_command == "validate":
-        issues = store.validate(args.topic_id, args.project_id)
-        for issue in issues:
-            print(f"[{issue.severity}] {issue.code}: {issue.message}")
-        return 1 if any(issue.severity == "error" for issue in issues) else 0
-
-    if args.project_command == "show":
-        print(json.dumps(store.show(args.topic_id, args.project_id), ensure_ascii=False, indent=2))
-        return 0
-
-    if args.project_command == "generate-prompts":
-        from .brief_parser import parse_brief
-        from .graph.pipeline import run_pipeline_structured
-
-        brief = parse_brief(args.brief)
-        # 产品主流程固定 base 模式；生成方式默认 FL2VA，允许 brief 声明或 --variant 显式指定。
-        brief.mode = "base"
-        if args.variant:
-            brief.variant = args.variant.upper()
-        elif brief.variant == "T2VA":
-            brief.variant = "FL2VA"
-        if args.model and args.model != "fl2va":
-            raise ValueError("当前产品只支持 fl2va 模型")
-        if args.mode and args.mode != "base":
-            raise ValueError("当前产品只支持 base 模式")
-        if args.dry_run:
-            print(json.dumps({"topic_id": args.topic_id, "project_id": args.project_id, "brief": {"mode": brief.mode, "variant": brief.variant, "duration": brief.duration, "style": brief.style, "language": brief.language, "plot": brief.plot}, "dry_run": True}, ensure_ascii=False, indent=2))
-            return 0
-        from .config import config
-        existing = store.list_generation_results(args.topic_id, args.project_id)
-        generation_id = args.generation_id or f"GEN{len(existing) + 1:03d}"
-        # brief 参考图行带 (图片路径) 时：先读图，真实画面描述注入管线（阶段 2 锚定）。
-        frame_descriptions = []
-        if any(ref.path for ref in brief.refs):
-            try:
-                audits = audit_frame_images(brief.refs, brief.variant)
-                frame_descriptions = [a.to_dict() for a in audits]
-                if frame_descriptions:
-                    print(f"[读图] 已读取 {len(frame_descriptions)} 张关键帧图片（qwen3.7-plus）。")
-            except FileNotFoundError as exc:
-                print(f"[警告] 关键帧图片读取失败，回退生图提示词锚定：{exc}")
-            except Exception as exc:  # noqa: BLE001 - 读图失败不阻塞生成
-                print(f"[警告] 读图服务异常，回退生图提示词锚定：{exc}")
-        result = run_pipeline_structured(
-            brief, config, generation_id=generation_id,
-            topic_id=args.topic_id, project_id=args.project_id,
-            frame_descriptions=frame_descriptions,
-        )
-        directory = store.save_generation_result(args.topic_id, args.project_id, result, overwrite=args.overwrite)
-        if result.fl2va_prompt_bundle is not None:
-            names = ["script.md", "video-prompt.md", "fl2va-prompt.md"]
-            if result.fl2va_prompt_bundle.first:
-                names.append("first-frame-prompt.md")
-            if result.fl2va_prompt_bundle.last:
-                names.append("last-frame-prompt.md")
-        else:
-            names = ["script.md", "video-prompt.md", "character-prompt.md", "prop-prompt.md", "scene-prompt.md"]
-        print(json.dumps({"generation_id": generation_id, "directory": str(directory), "artifacts": [str(directory / name) for name in names]}, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.project_command == "show-prompts":
-        print(json.dumps(store.show_generation(args.topic_id, args.project_id, args.generation, kind=args.kind, raw=args.raw), ensure_ascii=False, indent=2))
-        return 0
-
-    from .execution import (
-        apply_review,
-        build_execution_card,
-        check_executability,
-        extract_bridge_frame,
-        import_generation,
-        plan_segments,
-        promote_profile,
-        render_card,
-        verify_segment_chain,
-    )
-
-    topic, project = _resolve_topic_project(
-        store,
-        getattr(args, "topic", None) or getattr(args, "topic_id", None),
-        getattr(args, "project", None) or getattr(args, "project_id", None),
-    )
-    if args.project_command == "segment-plan":
-        result = plan_segments(
-            store, topic, project,
-            max_segment_seconds=args.max_segment_seconds,
-            min_segment_seconds=args.min_segment_seconds,
-        )
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.project_command == "segment-chain":
-        document = store.load_project(topic, project)
-        shots = [s for s in document.shot_plan.shots if args.shot is None or s.shot_id == args.shot]
-        if not shots:
-            raise ValueError(f"镜头不存在：{args.shot}")
-        rows = []
-        for shot in shots:
-            for segment in shot.segments:
-                rows.append({
-                    "segment_id": segment.segment_id,
-                    "shot_ref": segment.shot_ref,
-                    "duration_seconds": segment.duration_seconds,
-                    "state": segment.pipeline_state,
-                    "prev": segment.prev_segment_id or "-",
-                    "start_frame": segment.start_frame_asset_id or "-",
-                    "end_frame": segment.end_frame_asset_id or "-",
-                })
-        if not rows:
-            print("尚无执行段：请先运行 project segment-plan。")
-            return 1
-        print(json.dumps({"segment_count": len(rows), "segments": rows}, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.project_command == "extract-bridge":
-        result = extract_bridge_frame(store, topic, project, args.segment, source=args.source)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.project_command == "plan":
-        card = build_execution_card(
-            store, topic, project, args.shot, workflow_root=Path(args.workflow_root)
-        )
-        markdown = render_card(card)
-        if args.out:
-            Path(args.out).write_text(markdown, encoding="utf-8")
-            print(f"执行指引已写入: {args.out}")
-        else:
-            print(markdown)
-        return 0
-
-    if args.project_command == "import-output":
-        result = import_generation(store, topic, project, args.generation, args.source)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.project_command == "review":
-        result = apply_review(store, topic, project, args.entity, args.kind, args.outcome, reviewer=args.reviewer)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.project_command == "verify":
-        if args.chain:
-            chain_shot = None if args.chain == "*" else args.chain
-            result = verify_segment_chain(store, topic, project, shot_id=chain_shot)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-            return 0 if result["chain_ok"] else 1
-        result = check_executability(
-            store, topic, project, shot_id=args.shot, workflow_root=Path(args.workflow_root)
-        )
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        shots_ok = all(shot["can_execute"] for shot in result["shots"])
-        documents_ok = not any(issue["severity"] == "error" for issue in result["document_issues"])
-        return 0 if shots_ok and documents_ok else 1
-
-    if args.project_command == "profile":
-        result = promote_profile(
-            store, topic, project, args.profile, args.status,
-            reviewer=args.reviewer, note=args.note, generation_id=args.generation,
-        )
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
-
-    raise ValueError(f"未知项目命令：{args.project_command}")
 
 
 def _run_cli(args: argparse.Namespace) -> int:
@@ -485,3 +195,7 @@ def _run_cli(args: argparse.Namespace) -> int:
     print("=" * 60)
     print(final_prompt)
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -13,7 +13,7 @@ from minimax_h3_prompt.generation import (
     validate_fl2va_bundle,
 )
 from minimax_h3_prompt.graph import nodes, pipeline
-from minimax_h3_prompt.project_store import ProjectStore
+from minimax_h3_prompt.topic_generation import save_generation
 
 
 def frame_payload(prompt: str) -> dict:
@@ -76,20 +76,16 @@ def test_window_view_of_forest_does_not_break_tavern_anchor():
     assert fl2va_bundle_from_dict(payload, brief).scene_anchor == "medieval tavern interior"
 
 
-def test_fl2va_generation_persists_new_files_without_assets(tmp_path):
-    store = ProjectStore(tmp_path / "Assets")
-    store.init_project("topic", "project", "Tavern")
+def test_fl2va_generation_persists_prompt_files(tmp_path):
     result = make_fl2va_result()
-    directory = store.save_generation_result("topic", "project", result)
+    directory = save_generation(result, tmp_path / "GEN001")
     assert (directory / "fl2va-prompt.json").exists()
     assert (directory / "fl2va-prompt.md").exists()
     assert (directory / "first-frame-prompt.md").exists()
     assert (directory / "last-frame-prompt.md").exists()
-    assert store.load_generation_result("topic", "project", "GEN001") == result
-    shown = store.show_generation("topic", "project", "GEN001", kind="first-frame", raw=True)
-    assert "medieval tavern interior" in shown["artifacts"]["first-frame"]
-    registry = (store.project_directory("topic", "project") / "asset-registry.json").read_text(encoding="utf-8")
-    assert '"assets": []' in registry
+    assert (directory / "generation.json").exists()
+    first_frame = (directory / "first-frame-prompt.md").read_text(encoding="utf-8")
+    assert "medieval tavern interior" in first_frame
 
 
 def test_pipeline_chain_places_frame_node_after_visual():

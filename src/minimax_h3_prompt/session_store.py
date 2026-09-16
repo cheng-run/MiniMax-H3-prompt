@@ -138,9 +138,9 @@ def load_session(directory: str | Path) -> SessionState | None:
     )
 
 
-def find_awaiting_sessions(assets_root: str | Path) -> list[SessionState]:
-    """扫描资产库中所有待续接的会话（供向导恢复入口）。只读，不猜测内容归属。"""
-    root = Path(assets_root)
+def find_awaiting_sessions(root_dir: str | Path) -> list[SessionState]:
+    """扫描会话根目录下所有待续接的会话（供向导恢复入口）。只读，不猜测内容归属。"""
+    root = Path(root_dir)
     results: list[SessionState] = []
     if not root.is_dir():
         return results

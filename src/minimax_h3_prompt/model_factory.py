@@ -6,8 +6,9 @@ from langchain_openai import ChatOpenAI
 
 from .config import ModelSettings, config
 
-# 单个节点最长正常耗时约 230s；超时取 300s，超时后自动重试，杜绝僵尸长连接永久挂起。
-_LLM_TIMEOUT_SECONDS = 300
+# 单个节点最长正常耗时约 230s；prompt_engineer 长文输出可能超过 300s。
+# 超时取 600s 兜底，配合节点级重试，避免长连接僵尸与长输出超时炸崩。
+_LLM_TIMEOUT_SECONDS = 600
 _LLM_MAX_RETRIES = 2
 
 try:  # deepagents 依赖 langchain-anthropic，单独 import 避免硬依赖

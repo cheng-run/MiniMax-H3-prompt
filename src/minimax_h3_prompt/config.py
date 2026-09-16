@@ -98,8 +98,8 @@ class Config:
 
         self.default_style: str = defaults.get("style", "Cinematic")
         self.default_language: str = defaults.get("language", "Chinese")
-        # 资产库根目录（两阶段向导的会话落盘与帧图入库位置）。
-        self.assets_root: str = str(defaults.get("assets_root", r"D:\笔记\Assets"))
+        # 会话根目录：两阶段向导的会话落盘与关键帧暂存位置（项目内，不再依赖外部资产库）。
+        self.sessions_root: Path = PROJECT_ROOT / defaults.get("sessions_root", "output/sessions")
         # 旧字段保留作为最低优先级的模型名 fallback。
         self.model_override: str = (self.raw.get("model") or "").strip()
 

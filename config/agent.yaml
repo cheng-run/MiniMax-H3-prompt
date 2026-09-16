@@ -39,4 +39,4 @@ models:
 defaults:
   style: "Cinematic"
   language: "Chinese"
-  assets_root: "D:\\笔记\\Assets"   # 资产库根目录（两阶段向导会话落盘/帧图入库）
+  sessions_root: "output/sessions"   # 两阶段向导会话落盘/关键帧暂存根目录（项目内）

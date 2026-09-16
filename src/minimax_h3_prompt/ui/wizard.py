@@ -1,7 +1,7 @@
 """两阶段生产流向导。
 
-阶段 1：主题/时长/风格 → 管线跑到声音设计 → 首尾帧生图提示词落进资产库 → 人工确认/意见循环。
-阶段 2：提交真实帧图片（缺帧自动降级 I2VA/L2VA/T2VA）→ 复制入库 → qwen3.7-plus 读图
+阶段 1：主题/时长/风格 → 管线跑到声音设计 → 首尾帧生图提示词落进会话目录 → 人工确认/意见循环。
+阶段 2：提交真实帧图片（缺帧自动降级 I2VA/L2VA/T2VA）→ 暂存进会话 frames/ → qwen3.7-plus 读图
 → 视频提示词组装 + QA 精修。
 
 两阶段之间可关终端：阶段 1 的 state 经 session_store 落盘，重启后自动发现待续接会话。
@@ -17,7 +17,6 @@ from ..brief_parser import Brief, RefItem
 from ..config import Config
 from ..generation import render_fl2va_frame_markdown
 from ..graph.pipeline import run_stage1, run_stage2
-from ..project_store import ProjectStore
 from ..session_store import (
     STATUS_AWAITING_FRAMES,
     STATUS_COMPLETED,
@@ -172,19 +171,11 @@ def run_wizard(config: Config) -> int:
         raise SystemExit("向导需要交互终端运行；脚本场景请用 --brief 快路径。")
 
     session = _offer_resume(config)
-    resumed = session is not None
     if session is None:
         session = _phase1_new(config)
         if session is None:
             return 1
-    # 显式门禁：阶段 1 刚完成时不直通阶段 2（用户需先去 ComfyUI 出图）；
-    # 续接路径不加门禁——主动选续接就是要进阶段 2。
-    if not resumed and not _confirm(
-        "是否立即继续阶段 2 提交关键帧图片？（通常需先复制生图提示词到 ComfyUI 出图）",
-        default=False,
-    ):
-        print("已暂停。生成好图片后重新运行 `uv run launch.py` 选择续接即可进入阶段 2。")
-        return 0
+    # 阶段 1 完成后直接进入阶段 2（生图很快，无需暂停等人工确认）。
     return _phase2_collect_and_finish(config, session)
 
 
@@ -193,7 +184,7 @@ def run_wizard(config: Config) -> int:
 # ---------------------------------------------------------------------------
 
 def _offer_resume(config: Config) -> SessionState | None:
-    sessions = find_awaiting_sessions(config.assets_root)
+    sessions = find_awaiting_sessions(config.sessions_root)
     if not sessions or not _confirm(f"发现 {len(sessions)} 个未完成的两阶段任务，是否继续其中一个？", default=True):
         return None
     for index, item in enumerate(sessions, 1):
@@ -240,20 +231,7 @@ def _phase1_new(config: Config) -> SessionState | None:
         plot=topic,
         raw=topic,
     )
-    from ..project_generation import topic_slug
-
-    store = ProjectStore(config.assets_root)
-    resolved_topic_id = topic_slug(topic)
-    project_id = store_next_project_id(store, resolved_topic_id)
-    document = store.init_project(
-        resolved_topic_id,
-        project_id,
-        topic[:120],
-        duration_seconds=duration,
-        variant=variant,
-        global_style=style,
-    )
-    generation_dir = document.directory / "generations" / "GEN001"
+    generation_dir = _session_dir(config, topic)
 
     with _progress_scope("[阶段 1] 正在生成剧本、设计与首尾帧生图提示词……（预计几分钟，期间无需输入）"):
         state, model, agents = run_stage1(brief, config, on_node=_report_node)
@@ -291,30 +269,31 @@ def _phase1_new(config: Config) -> SessionState | None:
         save_session(generation_dir, brief_retry, state, status=STATUS_AWAITING_FRAMES)
         print("[已更新] 请查看下方新版本的提示词。")
 
-    print("\n阶段 1 完成。请复制上面的生图提示词到 ComfyUI（Z-Image/Flux.2）生成图片。")
-    print("可以关闭本窗口；生成好图片后重新运行 `uv run launch.py` 选择续接即可进入阶段 2。")
+    print("\n阶段 1 完成。请复制上面的生图提示词到 ComfyUI（Z-Image）生成图片。")
     return load_session(generation_dir)
 
 
-def store_next_project_id(store: ProjectStore, topic_id: str) -> str:
-    """在主题目录下分配下一个 project-NNN。"""
-    root = store.root / topic_id / "projects"
-    if not root.exists():
-        return "project-001"
-    numbers = []
-    for path in root.iterdir():
-        if path.is_dir() and path.name.startswith("project-"):
-            try:
-                numbers.append(int(path.name.rsplit("-", 1)[1]))
-            except ValueError:
-                continue
-    return f"project-{max(numbers, default=0) + 1:03d}"
+def _topic_slug(topic: str) -> str:
+    """主题摘要命名：可读前缀 + 哈希后缀，如 `雨夜旧信-a3f2b1c0`。"""
+    import hashlib
+    import re
+
+    text = re.sub(r"[^\w-]+", "-", topic.strip(), flags=re.UNICODE).strip("-")
+    text = re.sub(r"-{2,}", "-", text)[:20].strip("-") or "topic"
+    return f"{text}-{hashlib.sha256(topic.strip().encode('utf-8')).hexdigest()[:8]}"
+
+
+def _session_dir(config: Config, topic: str) -> Path:
+    """该主题的会话目录：``<sessions_root>/<topic_slug>/GEN001``（幂等，已存在则复用）。"""
+    directory = Path(config.sessions_root) / _topic_slug(topic) / "GEN001"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
 
 
 def _show_frame_prompts(state: dict, generation_dir: Path) -> None:
     bundle = state.get("fl2va_prompt_bundle")
     print("\n" + "=" * 60)
-    print(f"资产库目录：{generation_dir}")
+    print(f"输出目录：{generation_dir}")
     print("=" * 60)
     if not isinstance(bundle, dict):
         print("（本次流程没有产出关键帧生图提示词）")
@@ -334,15 +313,14 @@ def render_fl2va_frame_markdown_from_bundle(bundle, frame: str) -> str:
     if frame not in {"first", "last"}:
         raise ValueError(f"帧类型无效：{frame}")
     rows = bundle.first if frame == "first" else bundle.last
+    rows = [item for item in rows if item.model_family == "zimage"]  # 只展示 Z-Image
     if not rows:
         return ""
     title = "首帧" if frame == "first" else "尾帧"
     variant = "FL2VA" if (bundle.first and bundle.last) else "I2VA" if bundle.first else "L2VA"
-    parts = [f"# {variant} {title}生图提示词", ""]
+    parts = [f"# {variant} {title}生图提示词（Z-Image）", ""]
     for item in rows:
-        model_title = "Z-Image" if item.model_family == "zimage" else "Flux.2"
         parts.extend([
-            f"## {model_title}", "",
             f"- 推荐尺寸：`{item.width} × {item.height}`",
             f"- 提示词节点：`{item.prompt_node_id}`", "",
             "### Positive Prompt", "", item.positive_prompt, "",
@@ -429,29 +407,22 @@ def _phase2_collect_and_finish(config: Config, session: SessionState) -> int:
     descriptions = []
     frame_records = []
     if have_first or have_last:
-        from ..execution import copy_frame_image
         from ..tools.frame_auditor import audit_frame_images
 
         refs = []
         frame_slots = {role: picture for picture, role in _required_frames(effective)}
         if have_first:
-            record = copy_frame_image(
-                first_path, topic_id=_topic_dir_name(session), generation_id=generation_dir.name,
-                role="first", assets_root=config.assets_root,
-            )
+            record = _store_frame(first_path, generation_dir, "first")
             frame_records.append(record)
             refs.append(RefItem(picture=frame_slots.get("first", 1), name="首帧", description="", path=str(first_path)))
         if have_last:
-            record = copy_frame_image(
-                last_path, topic_id=_topic_dir_name(session), generation_id=generation_dir.name,
-                role="last", assets_root=config.assets_root,
-            )
+            record = _store_frame(last_path, generation_dir, "last")
             frame_records.append(record)
             refs.append(RefItem(picture=frame_slots.get("last", 2), name="尾帧", description="", path=str(last_path)))
         def report_frame(frame_role: str) -> None:
             print(f"正在读取{frame_role}的实际画面……", flush=True)
 
-        with _progress_scope("qwen3.7-plus 正在读取关键帧实际画面……"):
+        with _progress_scope(f"{config.vision_model.model} 正在读取关键帧实际画面……"):
             audits = audit_frame_images(refs, brief.variant, on_frame=report_frame)
         descriptions = [a.to_dict() for a in audits]
         for audit in audits:
@@ -462,7 +433,7 @@ def _phase2_collect_and_finish(config: Config, session: SessionState) -> int:
     state["frame_images"] = frame_records
 
     with _progress_scope("[阶段 2] 正在组装最终视频提示词并进行质检精修……（预计几分钟，期间无需输入）"):
-        final_state, prompt = run_stage2(state, brief, config, on_node=_report_node)
+        final_state, prompt = run_stage2(state, brief, config, on_node=_report_node, checkpoint_dir=generation_dir)
     _drain_stdin()
     save_session(generation_dir, brief, final_state, status=STATUS_COMPLETED)
     if downgraded:
@@ -497,11 +468,11 @@ def _phase2_collect_and_finish(config: Config, session: SessionState) -> int:
         print(f"\n✓ 完整提示词已写入：{output_file}（供存档，长视频请按下方分段执行）")
         _run_segmented_flow(brief, session, prompt, summary=summary_obj)
     else:
+        # 短视频：直接展示完整提示词，方便立即复制进 ComfyUI。
         print(f"\n✓ 最终视频提示词已写入：{output_file}")
-        if _prompt("输入 e 查看完整英文提示词，回车跳过：").lower() == "e":
-            print("\n" + "=" * 60)
-            print(prompt)
-            print("=" * 60)
+        print("\n" + "=" * 60)
+        print(prompt)
+        print("=" * 60)
     return 0
 
 
@@ -658,9 +629,34 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
     print(f"\n✓ 全部 {total} 段已人工确认完成。可在剪辑工具中按顺序拼接 segments/ 下的各段输出。")
 
 
-def _topic_dir_name(session: SessionState) -> str:
-    """从 generation 目录路径提取 topic_id（Assets/<topic>/projects/<pid>/generations/<gen>）。"""
-    return session.directory.parents[3].name
+def _store_frame(source: Path, generation_dir: Path, role: str) -> dict:
+    """把用户提交的关键帧复制进会话 ``frames/`` 目录，返回溯源记录（只复制不移动）。"""
+    import hashlib
+    import json
+    import shutil
+
+    frames_dir = Path(generation_dir) / "frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    suffix = Path(source).suffix or ".png"
+    target = frames_dir / f"{role}{suffix}"
+    digest = hashlib.sha256(Path(source).read_bytes()).hexdigest()
+    if not target.exists() or hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+        shutil.copy2(source, target)
+    record = {"role": role, "source": str(source), "target": str(target), "sha256": digest}
+    manifest = frames_dir / "source.json"
+    existing = {"schema_version": "frame-import.v1", "frames": []}
+    if manifest.exists():
+        try:
+            raw = json.loads(manifest.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                existing = raw
+        except (OSError, json.JSONDecodeError):
+            pass
+    frames = {item.get("role"): item for item in existing.get("frames", [])}
+    frames[role] = record
+    existing["frames"] = list(frames.values())
+    manifest.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+    return record
 
 
 def _record_downgrade(directory: Path, downgraded: str) -> None:

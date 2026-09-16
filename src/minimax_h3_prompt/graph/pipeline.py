@@ -195,36 +195,50 @@ def _stage1_frame_qa_loop(state: dict, brief: Brief, agents, model, config: Conf
     return state
 
 
-def run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_node=None) -> tuple[dict, str]:
+def run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_node=None, checkpoint_dir=None) -> tuple[dict, str]:
     """阶段 2：注入真实帧描述后组装视频正文 + 有界 QA/theme_guard 精修。返回 (state, 最终提示词)。
 
     on_node：可选回调，每个图节点跑完（有产出）时以节点名调用，供 UI 报进度。
+    checkpoint_dir：可选断点目录。若已有装组初稿断点，跳过组装直接进 QA 精修；
+    组装完成后立刻落盘，质检每轮也更新，保证中途崩溃只重跑当前质检轮。
     """
     from ..model_factory import build_chat_model
+    from ..stage2_checkpoint import clear_checkpoint, load_checkpoint, save_checkpoint
 
     model = model or build_chat_model()
     ref_meta = to_tuple(brief.refs)
+    # QA 精修循环需要 qa / prompt_engineer agent，即便是断点续跑也要先构建
+    agents = build_role_agents(model, brief.refs, brief.mode, brief.duration, brief.variant)
 
-    graph, agents = build_pipeline_graph(model, brief, config, stage=2)
-    initial: PipelineState = {
-        "brief": brief,
-        "mode": brief.mode,
-        "variant": brief.variant,
-        "duration": brief.duration,
-        "ref_meta": ref_meta,
-        "iterations": 0,
-        **{k: v for k, v in state.items() if k not in ("final_prompt", "final_report", "brief")},
-    }
-    merged: dict = dict(initial)
-    for chunk in graph.stream(initial, stream_mode="updates"):
-        for node_name, update in chunk.items():
-            if update:
-                merged.update(update)
-                stage_saver.save(node_name, update)
-                if on_node is not None:
-                    on_node(node_name)
+    checkpoint = load_checkpoint(checkpoint_dir) if checkpoint_dir else None
+    if checkpoint is not None:
+        merged = {k: v for k, v in state.items() if k not in ("final_prompt", "final_report")}
+        prompt = str(checkpoint["prompt_draft"])
+        print("[续接] 检测到阶段 2 断点（组装已于此前完成），直接进入质检精修。", flush=True)
+    else:
+        graph, _ = build_pipeline_graph(model, brief, config, stage=2)
+        initial: PipelineState = {
+            "brief": brief,
+            "mode": brief.mode,
+            "variant": brief.variant,
+            "duration": brief.duration,
+            "ref_meta": ref_meta,
+            "iterations": 0,
+            **{k: v for k, v in state.items() if k not in ("final_prompt", "final_report", "brief")},
+        }
+        merged: dict = dict(initial)
+        for chunk in graph.stream(initial, stream_mode="updates"):
+            for node_name, update in chunk.items():
+                if update:
+                    merged.update(update)
+                    stage_saver.save(node_name, update)
+                    if on_node is not None:
+                        on_node(node_name)
 
-    prompt = merged.get("final_prompt", "")
+        prompt = merged.get("final_prompt", "")
+        prompt, _ = assemble_and_repair(prompt, brief.mode, brief.variant)
+        if checkpoint_dir:
+            save_checkpoint(checkpoint_dir, prompt_draft=prompt)
 
     # 有界质检精修：确定性校验 → 有 error 则 qa 给建议 + prompt_engineer 修正
     for i in range(config.max_qa_iterations):
@@ -260,9 +274,13 @@ def run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_node
         )
         prompt, _ = assemble_and_repair(prompt, brief.mode, brief.variant)
         stage_saver.save(f"qa_refine_{i}", {"质检建议": review, "重出提示词": prompt, "主题忠实度校验": format_issues(theme_issues)})
+        if checkpoint_dir:
+            save_checkpoint(checkpoint_dir, prompt_draft=prompt, status=f"qa_round_{i + 1}")
 
     prompt, _ = assemble_and_repair(prompt, brief.mode, brief.variant)
     merged["final_prompt"] = prompt
+    if checkpoint_dir:
+        clear_checkpoint(checkpoint_dir)
     return merged, prompt
 
 

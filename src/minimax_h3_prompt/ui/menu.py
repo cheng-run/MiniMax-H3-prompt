@@ -120,9 +120,9 @@ def run_interactive() -> None:
         collect_params(brief)
         show_brief(brief)
 
-        # 参考图审核：brief 里带图片路径则用 qwen3.7-plus 读图，人工确认描述
+        # 参考图审核：brief 里带图片路径则用视觉模型读图，人工确认描述
         if any(r.path for r in brief.refs):
-            if questionary.confirm("用 qwen3.7-plus 审核参考图？", default=True).ask():
+            if questionary.confirm(f"用 {config.vision_model.model} 审核参考图？", default=True).ask():
                 try:
                     from ..tools.reference_auditor import audit_refs
 

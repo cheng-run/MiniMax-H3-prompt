@@ -153,16 +153,53 @@ START → [制片] → [导演] → [创意会·圆桌] → [编剧]
 
 ```
 src/minimax_h3_prompt/
-├── main.py              # CLI
+├── main.py              # CLI（wizard 向导 / brief 快路径 / create-video / generate-prompts）
 ├── config.py            # YAML + `.env` 统一配置（API key 仅从 `.env` 读取）
 ├── model_factory.py     # LLM 后端工厂（自动探测）
 ├── brief_parser.py      # brief 解析
+├── topic_generation.py  # 主题 → 提示词单入口（落盘到 output/sessions）
+├── session_store.py     # 两阶段会话持久化（断点续接）
+├── generation.py        # 生成结果模型与渲染
+├── summary.py           # 视频提示词中文摘要
+├── segment_prompts.py   # 长视频按镜头拆段与逐段重写
 ├── references/          # H3 官方规范（唯一格式依据）
-├── prompts/             # 15 个角色 system prompt
+├── prompts/             # 角色 system prompt
 ├── agents/              # create_agent 装配 + run_agent
 ├── graph/               # state / roundtable / nodes / pipeline
-├── tools/               # h3_validator + ref_metadata
+├── ui/                  # wizard 两阶段向导 + 进度显示
+├── tools/               # h3_validator / frame_auditor / frame_sanity / theme_guard / ref_metadata
 └── output/              # assembler（确定性格式保障）+ renderer
+```
+
+## 输出与会话目录
+
+生成产物统一落在项目内的会话目录（不再依赖外部资产库）：
+
+```text
+output/
+├── final_prompt.txt                   # --brief 快路径的最终提示词
+├── stages/                            # 各角色/阶段产物（save_stages）
+└── sessions\                          # 两阶段向导的会话
+    └── <主题slug>-<hash8>\GEN001\
+        ├── session-state.json         # 断点续接（阶段 1 → 阶段 2）
+        ├── frames\                    # 人工提交的关键帧（first/last + source.json）
+        ├── video-prompt.md            # 最终视频提示词
+        ├── first-frame-prompt.md      # 首帧生图提示词
+        ├── last-frame-prompt.md       # 尾帧生图提示词
+        ├── fl2va-prompt.md / .json    # FL2VA 汇总
+        ├── summary-zh.md / .json      # 中文摘要（核对视频走向）
+        └── segments\                  # 长视频逐段陪跑的每段提示词
+```
+
+根目录可用 `config/agent.yaml` 的 `defaults.sessions_root` 修改（默认 `output/sessions`）。
+
+> [!note] 已移除：资产库
+> 早期版本在 `D:\笔记\Assets` 维护过一套「主题 / 项目 / 资产 / Workflow Profile / 分段执行闭环」资产库。该机制当前阶段使用极少、维护成本高于收益，已整体移除（含 `project` 子命令组与 Profile 校验）。历史数据已归档到 `D:\笔记\_archive-assets-<时间戳>\`。
+
+```powershell
+uv run launch.py --brief examples/brief_fl2va.md              # brief 快路径
+uv run launch.py create-video --topic "雨夜行人" --variant FL2VA  # 主题 → 提示词
+uv run launch.py                                              # 两阶段交互向导
 ```
 
 ## 已知限制与后续优化

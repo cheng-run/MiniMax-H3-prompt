@@ -50,7 +50,13 @@ class TextProgress:
             print(f"  ▶ {name} 正在处理……", flush=True)
         else:
             duration = float(event.get("duration", 0))
-            print(f"  ✓ {name} 完成（{duration:.1f}s | 累计 {fmt_clock(self._clock() - self._t0)}）", flush=True)
+            in_t = int(event.get("input", 0) or 0)
+            out_t = int(event.get("output", 0) or 0)
+            print(
+                f"  ✓ {name} 完成（{duration:.1f}s | 输入 {in_t} tok / 输出 {out_t} tok | "
+                f"累计 {fmt_clock(self._clock() - self._t0)}）",
+                flush=True,
+            )
 
 
 class LiveProgress:

@@ -1,11 +1,6 @@
-"""prompt 按镜头拆分 + CLI 主题/项目自动探测测试。"""
-from pathlib import Path
-
+"""prompt 按镜头拆分与逐段重写测试（纯文本逻辑，不依赖资产库）。"""
 import pytest
 
-from minimax_h3_prompt.main import _resolve_topic_project, main
-from minimax_h3_prompt.project_models import Shot, ShotPlan
-from minimax_h3_prompt.project_store import ProjectStore
 from minimax_h3_prompt.segment_prompts import (
     is_degenerate_durations,
     rewrite_segment_prompt,
@@ -55,32 +50,6 @@ def test_split_shots_single_or_empty():
     assert single[0].text.startswith("just one prompt")
 
 
-def _seed_project(root: Path, topic_id: str, project_id: str) -> None:
-    store = ProjectStore(root)
-    store.init_project(topic_id, project_id, "自动探测", duration_seconds=12.0)
-    doc = store.load_project(topic_id, project_id)
-    shot = Shot(shot_id="SH001", shot_number=1, duration_seconds=12.0,
-                start_state="s", action="a", end_state="e")
-    store.update_shot_plan(topic_id, project_id, ShotPlan(
-        doc.shot_plan.shot_plan_id, project_id, "FL2VA", 12.0, (shot,),
-    ), overwrite=True)
-
-
-def test_cli_segment_plan_auto_detect_ids(tmp_path, capsys):
-    root = tmp_path / "Assets"
-    _seed_project(root, "paper-plane", "project-001")
-
-    code = main(["project", "segment-plan", "--root", str(root)])
-
-    assert code == 0
-    out = capsys.readouterr().out
-    assert "自动识别" in out
-    document = ProjectStore(root).load_project("paper-plane", "project-001")
-    segments = document.shot_plan.shots[0].segments
-    assert len(segments) == 2  # 12s → 6+6
-    assert segments[1].prev_segment_id == segments[0].segment_id
-
-
 def test_shots_from_prompt_infers_durations():
     shots = shots_from_prompt(SAMPLE_PROMPT, total_duration=12.0)
     assert [s.shot_id for s in shots] == ["SH001", "SH002", "SH003"]
@@ -89,26 +58,6 @@ def test_shots_from_prompt_infers_durations():
     assert shots[2].start_state_derived_from == "SH002"
     assert shots[0].previous_shot_id == ""
     assert "wheat field" in shots[0].action
-
-
-def test_plan_segments_synthesizes_from_wizard_prompt(tmp_path):
-    """向导项目 ShotPlan 为空：从 generations/*/video-prompt.md 反推镜头再拆段。"""
-    from minimax_h3_prompt.execution import plan_segments
-
-    root = tmp_path / "Assets"
-    store = ProjectStore(root)
-    store.init_project("wizard-topic", "project-001", "机器人", duration_seconds=12.0)
-    gen_dir = root / "wizard-topic" / "projects" / "project-001" / "generations" / "GEN001"
-    gen_dir.mkdir(parents=True)
-    (gen_dir / "video-prompt.md").write_text(SAMPLE_PROMPT, encoding="utf-8")
-
-    result = plan_segments(store, "wizard-topic", "project-001")
-
-    assert result["synthesized_from_prompt"] is True
-    assert len(result["segments"]) == 3  # 5s/5s/2s 都在执行窗口内，不再拆分
-    document = store.load_project("wizard-topic", "project-001")
-    assert len(document.shot_plan.shots) == 3
-    assert document.shot_plan.shots[0].segments[0].segment_id == "SEG01-SH001a"
 
 
 def test_shot_prompt_carries_time_window():
@@ -161,12 +110,3 @@ def test_storyboard_uniform_durations_warning():
     durations = _shot_durations_from_table(table, total_duration=15.0)
     assert durations == [5.0, 5.0, 5.0]
     assert is_degenerate_durations(durations) is True
-
-
-def test_resolve_ids_ambiguous_raises(tmp_path):
-    root = tmp_path / "Assets"
-    _seed_project(root, "topic-a", "project-001")
-    _seed_project(root, "topic-b", "project-001")
-    store = ProjectStore(root)
-    with pytest.raises(ValueError, match="--topic-id"):
-        _resolve_topic_project(store, None, None)
