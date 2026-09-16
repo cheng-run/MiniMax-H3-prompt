@@ -526,9 +526,36 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
     import json
 
     from ..model_factory import build_chat_model
-    from ..segment_prompts import rewrite_segment_prompt, split_shots_from_prompt
+    from ..segment_planner import plan_segments
+    from ..segment_prompts import rewrite_segment_prompt, split_shots_from_prompt, write_segment_v2
     from ..tools.frame_auditor import extract_last_frame
 
+    # ① 先走新流程：segment_planner 规划整秒分段边界 → 每段独立细写 (GLOBAL_LOCK/BRIDGE_FROM/END_HOOK)
+    state = session.stage_state
+    plans = None
+    try:
+        llm = build_chat_model()
+        if state.get("shot_table"):
+            with _progress_scope("[分段规划] 正在按 4-10s 整数边界切分剧情并锁定衔接……"):
+                plans = plan_segments(str(state.get("shot_table", "")), brief.duration, llm)
+    except Exception as exc:  # noqa: BLE001 - 规划失败回退旧路径
+        print(f"[提示] 分段规划失败（{exc}），回退到按 [Shot N] 机械拆分。")
+
+    if plans:
+        print(f"[分段规划] 规划了 {len(plans)} 段：" + ", ".join(f"{p.start_s}-{p.end_s}s" for p in plans))
+        segments = []
+        for p in plans:
+            with _progress_scope(f"[分段撰写] 正在写第 {p.index + 1}/{len(plans)} 段提示词（{p.start_s}-{p.end_s}s）……"):
+                text = write_segment_v2(p, plans, state, brief, llm)
+            if text:
+                segments.append((p, text))
+            else:
+                print(f"[警告] 第 {p.index + 1} 段生成失败，跳过。")
+        if segments:
+            return _run_segmented_flow_v2(brief, session, segments, summary=summary)
+        print("[提示] 新流程未产出任何段，回退旧机械拆分。")
+
+    # ② 回退：依旧按 [Shot N] 拆分
     segments = split_shots_from_prompt(prompt, total_duration=brief.duration)
     if len(segments) < 2:
         print("[警告] 提示词未能拆出多个镜头（模型可能只产出了单镜头结构），回退为整段提示词。")
@@ -620,6 +647,76 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
                 print(render_summary_zh(summary, shot_number=segment.shot_number))
                 continue
             print("回车=完成本段，r=重显英文提示词，s=重看中文摘要。")
+        progress_path.write_text(
+            json.dumps({"done": position + 1, "total": total}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        if position + 1 < total:
+            print(f"[完成] 第 {position + 1}/{total} 段。下面给出第 {position + 2} 段……")
+    print(f"\n✓ 全部 {total} 段已人工确认完成。可在剪辑工具中按顺序拼接 segments/ 下的各段输出。")
+
+
+def _run_segmented_flow_v2(brief: Brief, session: SessionState, segments: list, summary=None) -> None:
+    """v2 陪跑：segments 为 [(SegmentPlan, 每段已写好的细颗粒度提示词)]。
+
+    与 v1 的区别：提示词已在生成阶段完整写好（含 GLOBAL_LOCK/BRIDGE_FROM/END_HOOK），
+    本函数只负责：按段展示 + 剥尾帧桥接 + progress.json 续跑。
+    """
+    import json
+
+    from ..tools.frame_auditor import extract_last_frame
+
+    seg_dir = session.directory / "segments"
+    seg_dir.mkdir(parents=True, exist_ok=True)
+    progress_path = seg_dir / "progress.json"
+    done = 0
+    if progress_path.exists():
+        try:
+            done = int(json.loads(progress_path.read_text(encoding="utf-8")).get("done", 0))
+        except (OSError, json.JSONDecodeError, ValueError):
+            done = 0
+    total = len(segments)
+    print(f"\n已规划为 {total} 段逐次执行（每段文件存入 {seg_dir}）。")
+    if done:
+        print(f"[续接] 检测到已完成 {done}/{total} 段，从第 {done + 1} 段继续。")
+
+    for position in range(done, total):
+        plan, text = segments[position]
+        # 桥接帧：剥上一段尾帧作为本段首帧
+        if position > 0 and _confirm("是否用上一段视频的尾帧作为本段首帧图（保证画面连续）？", default=True):
+            from ..tools.frame_auditor import extract_last_frame
+            video_raw = _clean_path_input(_prompt("上一段输出视频路径（回车=跳过）："))
+            if video_raw:
+                try:
+                    frame = extract_last_frame(
+                        Path(video_raw),
+                        session.directory / "bridge_frames" / f"shot-{position + 1:02d}-start.png",
+                    )
+                    size_kb = frame.stat().st_size / 1024
+                    print("[桥接帧] ✓ 已从上一段视频提取尾帧：")
+                    print(f"  位置：{frame}")
+                    print(f"  大小：{size_kb:.0f} KB")
+                    print("  → 请在 H3 中把这张图设为本段的 first frame 输入。")
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[警告] 剥尾帧失败（{exc}），可手动截图作为首帧图。")
+
+        (seg_dir / f"shot-{position + 1:02d}.md").write_text(text, encoding="utf-8")
+        print("\n" + "=" * 60)
+        print(f"第 {position + 1}/{total} 段 · 时长 {plan.start_s}-{plan.end_s}s（{plan.duration_s}s）· 覆盖 Shot {plan.shots_in_segment}")
+        print("=" * 60)
+        print(text)
+        print("-" * 60)
+        print(f"提示词文件：{seg_dir / f'shot-{position + 1:02d}.md'}")
+        if plan.end_hook:
+            print(f"本段末态（段尾钩子）：{plan.end_hook}")
+        while True:
+            raw = _prompt("本段生成并检查满意后回车进入下一段；输入 r 重显提示词：").lower()
+            if raw in ("", "y", "yes"):
+                break
+            if raw == "r":
+                print(text)
+                continue
+            print("回车=完成本段，r=重显提示词。")
         progress_path.write_text(
             json.dumps({"done": position + 1, "total": total}, ensure_ascii=False, indent=2),
             encoding="utf-8",

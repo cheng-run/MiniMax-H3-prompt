@@ -26,6 +26,26 @@ non_diegetic_music: gentle piano.
 """
 
 
+BARE_TIMESTAMP_SAMPLE = """[Shot 1] Close-up of a woman at the door.
+At 00:05.000, a cut to the hallway.
+At 00:10.000, the hallway is empty.
+
+overall_soundscape: quiet room.
+
+non_diegetic_music: piano.
+"""
+
+
+def test_split_shots_with_bare_timestamps():
+    """LLM 漏标 [Shot N]、只写行首 At MM:SS.mmm 时，拆分器应自动补标镜头号。"""
+    segments = split_shots_from_prompt(BARE_TIMESTAMP_SAMPLE, total_duration=12.0)
+    assert [s.shot_number for s in segments] == [1, 2, 3]
+    assert [s.start_seconds for s in segments] == [0.0, 5.0, 10.0]
+    # 拆分后的单段里时间戳归零
+    assert "At 00:05.000" not in segments[1].text
+    assert segments[1].text.count("[Shot 2]") == 1
+
+
 def test_split_shots_basic():
     segments = split_shots_from_prompt(SAMPLE_PROMPT)
     assert [s.shot_number for s in segments] == [1, 2, 3]

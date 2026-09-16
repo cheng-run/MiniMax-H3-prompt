@@ -14,6 +14,8 @@ from dataclasses import dataclass
 
 _SHOT_RE = re.compile(r"\[Shot\s+(\d+)\]")
 _TIME_RE = re.compile(r"At\s+(\d{2}):(\d{2})\.(\d{3})")
+# 行首裸时间戳镜头：At MM:SS.mmm 开头且本行无 [Shot N]——长视频拆分器会漏掉
+_BARE_TIMESTAMP_LINE = re.compile(r"^\s*At\s+\d{2}:\d{2}\.\d{3}")
 _DIALOG_OPEN_RE = re.compile(r"<d>")
 _DIALOG_CLOSE_RE = re.compile(r"</d>")
 _LANG_TAG_RE = re.compile(r"<d>\s*\[([A-Za-z\-]{2,})\]")
@@ -155,7 +157,22 @@ def _find_sections(text: str, headers: list[str]) -> dict[str, tuple[str, int]]:
 
 
 def _check_shots(text: str, duration: float | None, issues: list[ValidationIssue]) -> None:
-    """[Shot N] 序号连续、首镜无时间戳、切点单调递增且在时长内。"""
+    """[Shot N] 序号连续、首镜无时间戳、切点单调递增且在时长内。
+
+    额外检出"裸时间戳镜头"：行首为 At MM:SS.mmm 但同行没有 [Shot N] 标记——
+    说明模型分了多个镜头却漏写标记，分段执行会无法拆分，属 error 级。
+    """
+    # 裸时间戳镜头检测：行首 At MM:SS.mmm 且行内无 [Shot N]
+    bare_ts_lines = [
+        i for i, line in enumerate(text.splitlines(), 1)
+        if _BARE_TIMESTAMP_LINE.match(line) and not _SHOT_RE.search(line)
+    ]
+    if len(bare_ts_lines) >= 1 and duration is not None and duration > 10:
+        issues.append(ValidationIssue(
+            "error", "BARE_TIMESTAMP_SHOT",
+            f"行 {', '.join(map(str, bare_ts_lines))}：检测到独立时间戳镜头但缺 [Shot N] 标记。"
+            "长视频需要逐镜头拆分执行，每个镜头必须以 [Shot N] 开头（如 '[Shot 2] At 00:05.000, ...'）。"))
+
     shots: list[tuple[int, float | None, int]] = []  # (N, time_sec, line_no)
     for i, line in enumerate(text.splitlines(), 1):
         for sm in _SHOT_RE.finditer(line):

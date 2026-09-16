@@ -24,6 +24,37 @@ _TIMESTAMP_AFTER_TAG = re.compile(r"(\[Shot\s+\d+\])\s*At\s+(\d{2}):(\d{2})\.(\d
 # 镜头区之后属于全局声音/配乐段落的标记（用于界定镜头区结尾）
 _SUFFIX_MARKERS = ("overall_soundscape:", "non_diegetic_music:")
 
+# 行首裸时间戳（无 [Shot N] 标记的镜头边界），用于"模型漏标镜头号"的兼容降级
+_BARE_TIMESTAMP_LINE = re.compile(r"^At\s+(\d{2}):(\d{2})\.(\d{3}),?\s*", re.IGNORECASE)
+
+
+def _mark_bare_timestamp_shots(prompt: str) -> str:
+    """兜底：LLM 漏标 [Shot N] 时，把行首 At MM:SS.mmm 行补上 [Shot N] 再拆分。
+
+    触发条件：只有 1 个真实镜头块（_shot_starts 排除 `(from [Shot N])` 交叉引用），
+    但行首存在 ≥1 个裸时间戳；每个裸时间戳行前补 `[Shot N]`，N 递增。
+    """
+    if len(_shot_starts(prompt)) != 1:
+        return prompt  # 0 个（真单段）或多于 1 个（已标好）都不用兜底
+    lines = prompt.splitlines(keepends=True)
+    first_shot_seen = False
+    shot_n = 1
+    out: list[str] = []
+    changed = False
+    for line in lines:
+        if _SHOT_BLOCK.search(line):
+            first_shot_seen = True
+        if (
+            first_shot_seen
+            and _BARE_TIMESTAMP_LINE.match(line)
+            and not _SHOT_BLOCK.search(line)
+        ):
+            shot_n += 1
+            line = f"[Shot {shot_n}] " + line  # 在原行首加镜头标记
+            changed = True
+        out.append(line)
+    return "".join(out) if changed else prompt
+
 
 @dataclass(frozen=True)
 class ShotPrompt:
@@ -80,6 +111,7 @@ def split_shots_from_prompt(prompt: str, total_duration: float | None = None) ->
     prompt = prompt.strip()
     if not prompt:
         return []
+    prompt = _mark_bare_timestamp_shots(prompt)  # 兼容 LLM 漏标 [Shot N] 的裸时间戳镜头
     if total_duration is not None:
         # 总时长同样取整：ComfyUI H3 时长选项只有整数档
         total_duration = float(round(total_duration))
@@ -268,3 +300,98 @@ def rewrite_segment_prompt(
     text = getattr(response, "content", response)
     text = str(text).strip()
     return text or None
+
+
+# ---------------------------------------------------------------------------
+# v2：规划式分段（planner 给整秒边界 + 剧情钩子；每段独立细写）
+# ---------------------------------------------------------------------------
+
+_SEGMENT_V2_INSTRUCTION = f"""你是 H3 视频提示词的"分段编剧"。为长视频的其中一个 4-10 秒执行段写**可以直接喂给 MiniMax H3 的完整英文提示词**。
+
+H3 是执行型模型：你写什么它就做什么，含糊等于失控。要求：
+
+## 结构（严格遵守）
+第一行：This is a {{N}}-second continuous shot. （N = 本段秒数）
+空一行后按字段：
+1. `GLOBAL_LOCK:`（用户全局设定锁定，输入已给中文，你负责**精准翻译成英文**，必须逐条抄入，不得漏项）
+2. `BRIDGE_FROM:` 本段**第 0 帧的画面状态**（精确描述人物位置/姿态/光线/景深，作为与上一段的锚）。若第 1 段且无桥接帧输入（用户选了 T2VA），写 `N/A`。
+3. `integrated_multimodal_description:` 本段剧情，分 [Shot 1]、[Shot 2]...。**时间戳必须是 0.1 秒精度的小数**（如 `At 00:01.200`），剧情事件按发生时刻切开，不要一段话写完：
+   - 例：`0.0-0.5s: she stands frozen. At 00:00.600, her left hand rises to grip the strap. At 00:01.200, the camera begins a slow push-in...`
+   - 镜头块末必须原样追加：{EDGE_STABILITY_SENTENCE}
+4. `overall_soundscape:` 只覆盖本段时间窗的环境声与动作声，超出的一律删。
+5. `non_diegetic_music:` 只写本段出现的配乐（强度/乐器/情绪随段内时间推写）。
+6. `END_HOOK:` 本段结束时画面必须达到的具体状态（谁+位置+朝向+最后半秒的动作）。这句作用是：**下一段的 BRIDGE_FROM 会原样复用这句**，两段才能无缝接上。要写成可让 LLM 精确生成画面的描述（不要仅"她转头"这种歧义描述）。
+
+## 禁止
+- 不要用大段落笼统描述"5 秒里发生了什么"
+- 不要省略 GLOBAL_LOCK 里的任何一条
+- 不要改动剧情**时间**（段内剧情的时间戳必须落在 [0, N) 区间）
+- 不要输出任何解释/markdown / 前言；只输出提示词纯正文
+"""
+
+
+def build_segment_v2_request(
+    plan,  # SegmentPlan
+    all_plans: list,
+    state: dict,
+    brief,
+) -> str:
+    """组装 v2 写段请求；GLOBAL_LOCK 与 BRIDGE_FROM 用项目素材拼装。
+
+    plan：当前段的 SegmentPlan；all_plans：全部规划（用于 BRIDGE_FROM 反推上一段）。
+    """
+    # 全局锁定：中文字段翻译成英文后作为不可违背约束
+    global_lock = _ctx(
+        character=state.get("character_design", ""),
+        background=state.get("background_design", ""),
+        prop=state.get("prop_design", ""),
+        visual_style=state.get("art_design", ""),
+        soundstyle_hint=state.get("creative_lock", ""),
+    )
+    # 本段 Shot 块原文：从原 prompt 的该时间段抓（planner 给出 shot 号后从 state 里挑）
+    shots_text = []
+    for shot_n in plan.shots_in_segment:
+        shot_key = f"shot_text_{shot_n}"  # stage 2 每段 prompt 生成时把每个 Shot 单独写进 state
+        if shot_key in state:
+            shots_text.append(str(state[shot_key]))
+    # 上段的 end_hook 就是本段的 BRIDGE_FROM
+    bridge_from = "（首段，从用户提供的首帧图或文本直接生成）"
+    if plan.index > 0:
+        prev = all_plans[plan.index - 1]
+        bridge_from = f"上一段末尾画面：{prev.end_hook}"
+
+    return (
+        f"{_SEGMENT_V2_INSTRUCTION}\n\n"
+        f"--- \n"
+        f"本段编号：Segment {plan.index + 1}/{len(all_plans)}\n"
+        f"时间窗：{plan.start_s}s – {plan.end_s}s（时长 {plan.duration_s}s）\n"
+        f"包含 Shot：{plan.shots_in_segment}\n"
+        f"本段剧情概述：{plan.summary}\n"
+        f"段尾钩子（画面必须停在这个状态）：{plan.end_hook}\n"
+        f"\nGLOBAL_LOCK（人物/场景/服装/光线/氛围，逐条翻译并抄入）：\n{global_lock}\n"
+        f"\nBRIDGE_FROM（上一段结尾画面状态，本段第 0 帧必须与其一致）：\n{bridge_from}\n"
+        f"\n本段 Shot 原始描述（如有多条则依次按时间顺序排）：\n" + ("\n\n".join(shots_text) or state.get("shot_table", ""))
+    )
+
+
+def write_segment_v2(
+    plan,
+    all_plans: list,
+    state: dict,
+    brief,
+    llm,
+) -> str | None:
+    """用 LLM 为该段写细颗粒度完整提示词（含 GLOBAL_LOCK / BRIDGE_FROM / END_HOOK）。失败返回 None。"""
+    try:
+        response = llm.invoke(build_segment_v2_request(plan, all_plans, state, brief))
+    except Exception:  # noqa: BLE001
+        return None
+    text = getattr(response, "content", response)
+    text = str(text).strip()
+    return text or None
+
+
+def _ctx(**fields: str) -> str:
+    """CONTEXT 行内嵌套：key: value，跳过空值。"""
+    lines = [f"- {k}: {v}" for k, v in fields.items() if v]
+    return "\n".join(lines) if lines else "（空）"

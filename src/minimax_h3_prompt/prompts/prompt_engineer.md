@@ -13,6 +13,10 @@
   - FL2VA 首行（`N`=最终镜头号，`S.SS`=时长两位小数）：`How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the 0.00-second mark of the target video; Picture 2 (from Shot N) aligns with the S.SS-second mark of the target video.`
   - L2VA 首行：`How the reference pictures align with the target video — <Picture 1> (from [Shot N]) aligns with the S.SS-second mark of the target video.`
   - 首行指令之后空一行再接核心字段；FL2VA 默认单镜头连续插值（除非用户明确要求多镜）。
+- **镜头块标记格式（硬约束）**：`integrated_multimodal_description` 里每个镜头必须以 `[Shot N]` 标记开头；Shot 1 直接接正文，Shot 2 起在标记后紧跟 `At MM:SS.mmm` 时间戳。
+  - ✅ 正确：`[Shot 2] At 00:05.000, the camera cuts to ...`
+  - ❌ 错误（禁止）：只用时间戳开头而省略镜头号，如 `At 00:05.000, the camera ...`
+  - 时长 > 1 段的视频（user 需要拆成 4-10s 执行段）尤其依赖此标记做后续拆分；缺标记视为 error 级格式问题。
 - 对白 / 歌词 / 画面可见文字保留原文，放 `<d>[语言]…</d>`；画面可见文字用英文双引号。
 
 ## 详细度增强（忠实前提下）
