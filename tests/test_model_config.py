@@ -23,7 +23,7 @@ def test_build_deepseek_from_config(monkeypatch):
 
     constructor.assert_called_once_with(
         model="deepseek-v4-flash", api_key="secret", base_url="https://api.deepseek.com/v1",
-        timeout=600, max_retries=2,
+        timeout=900, max_retries=0,
     )
 
 
@@ -46,5 +46,5 @@ def test_build_vision_uses_config(monkeypatch):
 
     constructor.assert_called_once_with(
         model="qwen3.7-plus", api_key="secret", base_url="https://vision.example/v1",
-        timeout=600, max_retries=2,
+        timeout=900, max_retries=0,
     )

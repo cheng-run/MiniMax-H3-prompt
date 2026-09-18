@@ -133,9 +133,38 @@ def _content_to_text(content: object) -> str:
 def run_agent(agent: object, message: str, retry_empty: bool = True) -> str:
     """invoke 一个角色 agent，返回最终回答的纯文本。
 
-    优先取「最后一个有非空文本的 AI 消息」（避免工具调用后 thinking-only 消息导致空产出）。
-    若整体为空且 retry_empty=True，追加一句提示重试一次（缓解大上下文偶发空产出）。
-    每次调用都会上报 token 计量与进度事件（观测）。
+    超时处理策略：
+    - 捕获 openai.APITimeoutError（DashScope 网关对长输出请求有超时天花板）；
+    - 最多自动重试 1 次（第二次也一样超时就抛 RuntimeError，给调用方清晰的中文信息，
+      避免栈炸 + 避免 openai 客户端级重试把 token 翻倍的隐性成本）。
+    """
+    role = getattr(agent, "name", "agent")
+    try:
+        return _run_agent_inner(agent, message, retry_empty=retry_empty)
+    except Exception as exc:
+        # 只在是 API 超时时重试一次；其他异常直接抛
+        try:
+            from openai import APITimeoutError
+        except ImportError:
+            APITimeoutError = None  # type: ignore
+        if APITimeoutError is not None and isinstance(exc, APITimeoutError):
+            print(f"[重试] {role} 首次调用超时，正在自动重试一次……", flush=True)
+            try:
+                return _run_agent_inner(agent, message, retry_empty=retry_empty)
+            except APITimeoutError as retry_exc:
+                raise RuntimeError(
+                    f"{role} 连续两次调用 DashScope 超时（单次 900s 上限）。\n"
+                    f"这通常是服务端网关瓶颈，不是网络问题。\n"
+                    f"建议：稍后重试；或检查代理/网络稳定性。"
+                ) from retry_exc
+        raise
+
+
+def _run_agent_inner(agent: object, message: str, retry_empty: bool = True) -> str:
+    """一次 LLM 调用本体；run_agent 的超时重试层包裹在它外面。
+
+    原 run_agent 的取文本逻辑原封不动搬到这里——优先取「最后一个有非空文本的 AI 消息」，
+    空产出且 retry_empty=True 时追加一句提示重试一次。
     """
     role = getattr(agent, "name", "agent")
     reporter.emit({"type": "agent_start", "role": role})
@@ -157,7 +186,7 @@ def run_agent(agent: object, message: str, retry_empty: bool = True) -> str:
                 out = txt
                 break
     if not out and retry_empty:
-        out = run_agent(
+        out = _run_agent_inner(
             agent,
             f"{message}\n\n（你上一条回复是空的，请直接给出内容，不要空谈。）",
             retry_empty=False,

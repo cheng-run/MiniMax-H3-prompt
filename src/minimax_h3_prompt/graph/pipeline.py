@@ -75,8 +75,11 @@ _FOLDED_NODES = {
     "image_prompt_character", "image_prompt_prop", "image_prompt_scene",
 }
 
-def build_pipeline_graph(model, brief: Brief, config: Config, *, stage: int = 0):
-    """构建并编译主管线。stage=0 全图；1 仅阶段 1（生图提示词）；2 仅阶段 2（视频正文）。返回 (编译图, agents)。"""
+def build_pipeline_graph(model, brief: Brief, config: Config, *, stage: int = 0,
+                         chain: list[str] | None = None):
+    """构建并编译主管线。stage=0 全图；1 仅阶段 1；2 仅阶段 2。
+    chain：可选显式指定节点列表（用于 resume_from_node 截断链）；不传则按 stage 推导。
+    返回 (编译图, agents)。"""
     agents = build_role_agents(model, brief.refs, brief.mode, brief.duration, brief.variant)
     nodes = make_nodes(agents, model, brief, config)
 
@@ -84,12 +87,13 @@ def build_pipeline_graph(model, brief: Brief, config: Config, *, stage: int = 0)
     shot_rt = build_roundtable(model, ["storyboard", "cinematographer", "feasibility_reviewer"], config.roundtable_max_rounds)
     identity_rt = build_roundtable(model, ["art_director", "reference_consistency"], config.roundtable_max_rounds)
 
-    if stage == 1:
-        chain = _STAGE1_CHAIN
-    elif stage == 2:
-        chain = _STAGE2_CHAIN
-    else:
-        chain = _LINEAR_CHAIN
+    if chain is None:
+        if stage == 1:
+            chain = _STAGE1_CHAIN
+        elif stage == 2:
+            chain = _STAGE2_CHAIN
+        else:
+            chain = _LINEAR_CHAIN
 
     g = StateGraph(PipelineState)
     for name in chain:
@@ -133,16 +137,32 @@ def _build_stage_graph(model, brief: Brief, config: Config, chain: list[str]):
     return build_pipeline_graph(model, brief, config, stage=stage)[0]
 
 
-def run_stage1(brief: Brief, config: Config, *, on_node=None) -> tuple[dict, object, object]:
+def run_stage1(brief: Brief, config: Config, *, on_node=None,
+               resume_from_node: str | None = None,
+               initial_state: dict | None = None,
+               on_step_done=None) -> tuple[dict, object, object]:
     """阶段 1：创意/设计/分镜/首尾帧生图提示词/声音。返回 (state, model, agents)。
 
     on_node：可选回调，每个图节点跑完（有产出）时以节点名调用，供 UI 报进度。
+    resume_from_node：从某个节点继续阶段 1（之前的产物由 initial_state 传入），用于中断续跑。
+    initial_state：续跑时预填的 state（通常是上次中断时已落盘的 stage_state）。
+    on_step_done：可选回调，每次节点完成后立刻以 (node_name, current_state) 调用，
+    供调用方增量落盘（防中断丢进度）。
     不组装视频正文；state 可经 session_store 落盘后中断，由 run_stage2 续跑。
     """
     from ..model_factory import build_chat_model
 
     model = build_chat_model()
     ref_meta = to_tuple(brief.refs)
+
+    # 确定从哪个节点开始跑；中断续跑时跳过已完成节点
+    chain = list(_STAGE1_CHAIN)
+    if resume_from_node:
+        if resume_from_node not in chain:
+            raise ValueError(f"resume_from_node 不在阶段 1 链中：{resume_from_node}")
+        chain = chain[chain.index(resume_from_node):]
+
+    base_state: dict = dict(initial_state or {})
     initial: PipelineState = {
         "brief": brief,
         "mode": brief.mode,
@@ -151,10 +171,11 @@ def run_stage1(brief: Brief, config: Config, *, on_node=None) -> tuple[dict, obj
         "ref_meta": ref_meta,
         "iterations": 0,
         "qa_issues": [],
+        **base_state,  # 续跑时的已有产物
     }
     token_meter.reset()
     stage_saver.base.mkdir(parents=True, exist_ok=True)
-    graph, agents = build_pipeline_graph(model, brief, config, stage=1)
+    graph, agents = build_pipeline_graph(model, brief, config, stage=1, chain=chain)
     state: dict = dict(initial)
     for chunk in graph.stream(initial, stream_mode="updates"):
         for node_name, update in chunk.items():
@@ -163,6 +184,8 @@ def run_stage1(brief: Brief, config: Config, *, on_node=None) -> tuple[dict, obj
                 stage_saver.save(node_name, update)
                 if on_node is not None:
                     on_node(node_name)
+                if on_step_done is not None:
+                    on_step_done(node_name, dict(state))
     if config.common_sense_qa:
         state = _stage1_frame_qa_loop(state, brief, agents, model, config)
     return state, model, agents

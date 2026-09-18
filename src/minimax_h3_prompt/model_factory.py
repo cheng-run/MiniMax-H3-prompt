@@ -6,10 +6,11 @@ from langchain_openai import ChatOpenAI
 
 from .config import ModelSettings, config
 
-# 单个节点最长正常耗时约 230s；prompt_engineer 长文输出可能超过 300s。
-# 超时取 600s 兜底，配合节点级重试，避免长连接僵尸与长输出超时炸崩。
-_LLM_TIMEOUT_SECONDS = 600
-_LLM_MAX_RETRIES = 2
+# DashScope MaaS 网关对长输出（16k+ token）整体响应有约 10 分钟天花板；
+# 取 900s 单次超时兜底，关掉 openai 客户端自动重试——它重试会重发完整上下文，
+# token 计费翻倍；重试由 run_agent 层面接管（最多 1 次）。
+_LLM_TIMEOUT_SECONDS = 900
+_LLM_MAX_RETRIES = 0
 
 try:  # deepagents 依赖 langchain-anthropic，单独 import 避免硬依赖
     from langchain_anthropic import ChatAnthropic  # type: ignore

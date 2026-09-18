@@ -28,8 +28,8 @@ def _build_vision_model() -> ChatOpenAI:
         model=settings.model,
         api_key=key,
         base_url=settings.base_url,
-        timeout=600,      # 读图请求超时，防止服务端长连接挂起
-        max_retries=2,
+        timeout=900,      # 读图请求超时（DashScope 长输出可能超 600s）
+        max_retries=0,    # 重试由调用方控制（openai 自动重试会翻倍烧 token）
     )
 
 

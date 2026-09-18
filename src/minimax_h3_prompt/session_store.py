@@ -17,17 +17,19 @@ SESSION_FILENAME = "session-state.json"
 _SCHEMA_VERSION = "wizard_session.v1"
 
 # status: awaiting_frames = 阶段 1 完成、等待用户提交帧图；completed = 视频提示词已产出
+# stage1_running = 阶段 1 跑到一半中断（每个节点完成时增量落盘），重启后可以从断点继续
 STATUS_AWAITING_FRAMES = "awaiting_frames"
 STATUS_COMPLETED = "completed"
+STATUS_STAGE1_RUNNING = "stage1_running"
 
-# state 中允许持久化的键；brief 对象单独序列化
+# state 中允许持久化的键；brief 对象单独序列化。`_progress` 是阶段 1 断点的元数据（哪个节点跑完了）。
 _STATE_KEYS = (
     "production_plan", "director_brief", "creative_lock", "script",
     "character_design", "background_design", "prop_design", "art_design",
     "character_image_prompts", "prop_image_prompts", "scene_image_prompts",
     "identity_lock", "shot_table", "shot_review_lock", "visual_design",
     "fl2va_prompt_bundle", "subject_defs", "sound_design", "music",
-    "final_prompt", "final_report",
+    "final_prompt", "final_report", "_progress",
 )
 
 
@@ -139,14 +141,14 @@ def load_session(directory: str | Path) -> SessionState | None:
 
 
 def find_awaiting_sessions(root_dir: str | Path) -> list[SessionState]:
-    """扫描会话根目录下所有待续接的会话（供向导恢复入口）。只读，不猜测内容归属。"""
+    """扫描会话根目录下所有可续接的会话（阶段 1 中断的 + 等帧图的）。只读，不猜测内容归属。"""
     root = Path(root_dir)
     results: list[SessionState] = []
     if not root.is_dir():
         return results
     for session_file in sorted(root.glob("**/" + SESSION_FILENAME)):
         session = load_session(session_file.parent)
-        if session is not None and session.awaiting_frames:
+        if session is not None and session.status in (STATUS_AWAITING_FRAMES, STATUS_STAGE1_RUNNING):
             results.append(session)
     return results
 

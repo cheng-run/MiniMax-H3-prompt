@@ -20,6 +20,7 @@ from ..graph.pipeline import run_stage1, run_stage2
 from ..session_store import (
     STATUS_AWAITING_FRAMES,
     STATUS_COMPLETED,
+    STATUS_STAGE1_RUNNING,
     SessionState,
     find_awaiting_sessions,
     load_session,
@@ -175,6 +176,11 @@ def run_wizard(config: Config) -> int:
         session = _phase1_new(config)
         if session is None:
             return 1
+    # 阶段 1 完成（或完成了一半）后若断在阶段 1 中途，先从中断节点续跑完阶段 1
+    if session.status == STATUS_STAGE1_RUNNING:
+        session = _resume_stage1(config, session)
+        if session is None:
+            return 1
     # 阶段 1 完成后直接进入阶段 2（生图很快，无需暂停等人工确认）。
     return _phase2_collect_and_finish(config, session)
 
@@ -199,6 +205,54 @@ def _offer_resume(config: Config) -> SessionState | None:
             print("无效序号，请重输。")
             continue
         return sessions[choice - 1]
+
+
+def _resume_stage1(config: Config, session: SessionState) -> SessionState | None:
+    """阶段 1 中断续跑：从上次最后一个完成节点的下一阶段继续。"""
+    progress = session.stage_state.get("_progress") or {}
+    last_node = str(progress.get("last_completed_node", ""))
+    if not last_node:
+        print("[提示] 会话没有记录阶段 1 断点位置，从头开始跑。")
+        # 直接走阶段 1 全新跑法
+        return _phase1_new(config)
+
+    # 阶段 1 链中下一个节点
+    from ..graph.pipeline import _STAGE1_CHAIN
+    if last_node not in _STAGE1_CHAIN:
+        print(f"[提示] 上次完成节点 {last_node} 不在阶段 1 链里，从头开始。")
+        return _phase1_new(config)
+    next_index = _STAGE1_CHAIN.index(last_node) + 1
+    if next_index >= len(_STAGE1_CHAIN):
+        # 阶段 1 已跑完但状态还是 running（比如写盘刚好中断在收尾），直接进阶段 2
+        return session
+    resume_node = _STAGE1_CHAIN[next_index]
+    print(f"[续接] 上次跑到「{last_node}」，从「{resume_node}」继续阶段 1……")
+
+    brief = session.brief
+    generation_dir = session.directory
+    initial_state = dict(session.stage_state)
+
+    def _save_progress(node_name: str, current_state: dict) -> None:
+        progress_state = dict(current_state)
+        progress_state["_progress"] = {"last_completed_node": node_name}
+        save_session(generation_dir, brief, progress_state, status=STATUS_STAGE1_RUNNING)
+
+    with _progress_scope(f"[阶段 1·续接] 从「{resume_node}」继续……"):
+        state, model, agents = run_stage1(
+            brief, config,
+            on_node=_report_node,
+            resume_from_node=resume_node,
+            initial_state=initial_state,
+            on_step_done=_save_progress,
+        )
+    _drain_stdin()
+
+    # 复用 _phase1_new 的收尾逻辑（这里不重跳生图提示词修改循环，沿用已有的 bundle）
+    if "_progress" in state:
+        state.pop("_progress")
+    save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
+    print("\n阶段 1 已恢复完成。")
+    return load_session(generation_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -233,8 +287,16 @@ def _phase1_new(config: Config) -> SessionState | None:
     )
     generation_dir = _session_dir(config, topic)
 
+    # 阶段 1 断点：每完成一个节点就立刻落盘（含 _progress 记录跑到哪个节点）
+    def _save_progress(node_name: str, current_state: dict) -> None:
+        progress_state = dict(current_state)
+        progress_state["_progress"] = {"last_completed_node": node_name}
+        save_session(generation_dir, brief, progress_state, status=STATUS_STAGE1_RUNNING)
+
     with _progress_scope("[阶段 1] 正在生成剧本、设计与首尾帧生图提示词……（预计几分钟，期间无需输入）"):
-        state, model, agents = run_stage1(brief, config, on_node=_report_node)
+        state, model, agents = run_stage1(
+            brief, config, on_node=_report_node, on_step_done=_save_progress
+        )
     _drain_stdin()
     bundle = state.get("fl2va_prompt_bundle") or {}
     state.setdefault("fl2va_frame_descriptions", [])

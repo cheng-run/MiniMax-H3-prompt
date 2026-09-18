@@ -26,17 +26,17 @@
 只输出一个 JSON 对象，不要 markdown 代码围栏、前言或解释：
 
 {
-  "scene_anchor": "A precise shared location and environment anchor in English",
+  "scene_anchor": "精确共享的位置与环境锚点（中文）",
   "first": {
     "shot_id": "SH001",
     "time_seconds": 0,
     "zimage": {
-      "positive_prompt": "A complete English static image prompt for the first frame",
+      "positive_prompt": "一段完整的中文静态画面提示词，描述首帧",
       "negative_prompt": "",
       "instructions": ["粘贴到 Z-Image 节点 10 的 text 输入"]
     },
     "flux2": {
-      "positive_prompt": "A complete English static image prompt for the first frame, rewritten for Flux.2",
+      "positive_prompt": "一段完整的中文静态画面提示词，描述首帧（为 Flux.2 重写）",
       "negative_prompt": "",
       "instructions": ["粘贴到 Flux.2 节点 118 的 text 输入"]
     }
@@ -45,27 +45,27 @@
     "shot_id": "SH001",
     "time_seconds": 5,
     "zimage": {
-      "positive_prompt": "A complete English static image prompt for the last frame",
+      "positive_prompt": "一段完整的中文静态画面提示词，描述尾帧",
       "negative_prompt": "",
       "instructions": ["粘贴到 Z-Image 节点 10 的 text 输入"]
     },
     "flux2": {
-      "positive_prompt": "A complete English static image prompt for the last frame, rewritten for Flux.2",
+      "positive_prompt": "一段完整的中文静态画面提示词，描述尾帧（为 Flux.2 重写）",
       "negative_prompt": "",
       "instructions": ["粘贴到 Flux.2 节点 118 的 text 输入"]
     }
   },
   "continuity_constraints": [
-    "The same location, characters, clothing, props, lighting direction, and visual style must be preserved."
+    "同一空间、同一组人物、同一套服装、同一组关键道具、同一光线方向和视觉风格。"
   ]
 }
 
 ## 内容规则
 
-- `positive_prompt` 必须是完整、可直接复制的英文自然语言生图提示词。
+- `positive_prompt` 必须是完整、可直接复制的中文自然语言生图提示词。
 - 每个正向提示词必须同时描述主体、外观/服装、关键道具、人物与道具关系、场景地点、空间性质、构图、光线、时代和写实视觉风格。
 - 首帧和尾帧必须共享明确的 `scene_anchor`。
-- 如果主题明确说“酒馆”或“室内”，必须直接写 `tavern`/`inn` 和 `interior`/`indoor`；不得改写成泛化的 outdoor environment。
+- 如果主题明确说“酒馆”或“室内”，必须直接写"酒馆"/"室内"；不得改写成泛化的户外环境。
 - 不得把人物、道具和场景写成互相独立的素材说明。
 - 尾帧只能改变姿态、动作结果、表情、道具状态或镜头内构图，不得无理由换到森林、荒野、田野或另一个地点。
 - 可以描述酒馆窗外的森林等合理背景，但必须明确主体仍处在酒馆室内。
