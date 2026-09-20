@@ -1,0 +1,44 @@
+"""合成素材 fixture：不依赖真实 ComfyUI 输出，秒级可跑。"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import cv2
+import numpy as np
+import pytest
+
+
+def write_test_video(
+    path: Path,
+    *,
+    frames: int = 24,
+    fps: int = 24,
+    width: int = 128,
+    height: int = 72,
+    base: tuple[int, int, int] = (30, 30, 30),
+    moving: bool = True,
+) -> Path:
+    """写一段小 mp4：纯色背景 + 一个逐帧移动的白色方块。
+
+    moving=False 时整段完全静止（用于测 sanity check）。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(
+        str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height)
+    )
+    assert writer.isOpened(), f"VideoWriter 打不开 {path}"
+    for i in range(frames):
+        frame = np.full((height, width, 3), base, dtype=np.uint8)
+        x = 8 + (i * 3 if moving else 0)
+        cv2.rectangle(frame, (x, 20), (x + 20, 40), (255, 255, 255), -1)
+        writer.write(frame)
+    writer.release()
+    return path
+
+
+@pytest.fixture
+def tmp_video(tmp_path: Path):
+    """返回一个可调用对象：make(name="a.mp4", **kwargs) -> Path"""
+    def make(name: str = "clip.mp4", **kwargs) -> Path:
+        return write_test_video(tmp_path / name, **kwargs)
+    return make
