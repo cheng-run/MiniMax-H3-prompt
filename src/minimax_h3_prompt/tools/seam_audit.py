@@ -156,7 +156,11 @@ class AuditReport:
 
 
 def merge_videos(videos: list[Path], out_path: Path) -> tuple[bool, str]:
-    """ffmpeg concat。先试 stream copy（无损且快），失败再重编码。"""
+    """ffmpeg concat。先试 stream copy（无损且快），失败再重编码。
+
+    中间产物 ``concat_list.txt`` 无论成败都会清理掉——失败线索由返回的
+    ffmpeg stderr 承载，不需要靠残留文件，也别在输出目录里留垃圾。
+    """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     list_file = out_path.parent / "concat_list.txt"
     list_file.write_text("\n".join(f"file '{v.as_posix()}'" for v in videos),
@@ -167,12 +171,15 @@ def merge_videos(videos: list[Path], out_path: Path) -> tuple[bool, str]:
         ("re-encode", ["-c:v", "libx264", "-crf", "18", "-c:a", "aac", "-b:a", "192k"]),
     ]
     last_error = ""
-    for tag, extra in attempts:
-        proc = subprocess.run(base + extra + [str(out_path)], capture_output=True,
-                              text=True, encoding="utf-8", errors="replace")
-        if proc.returncode == 0 and out_path.is_file() and out_path.stat().st_size > 0:
-            return True, tag
-        last_error = (proc.stderr or "")[-1500:]
+    try:
+        for tag, extra in attempts:
+            proc = subprocess.run(base + extra + [str(out_path)], capture_output=True,
+                                  text=True, encoding="utf-8", errors="replace")
+            if proc.returncode == 0 and out_path.is_file() and out_path.stat().st_size > 0:
+                return True, tag
+            last_error = (proc.stderr or "")[-1500:]
+    finally:
+        list_file.unlink(missing_ok=True)
     return False, last_error
 
 

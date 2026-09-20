@@ -16,6 +16,7 @@ from minimax_h3_prompt.tools.seam_audit import (
     leading_run,
     load_baseline,
     longest_run,
+    merge_videos,
     promote_baseline,
     render_markdown,
     sanity_check,
@@ -128,3 +129,16 @@ def test_promote_and_load_baseline_roundtrip(tmp_path, tmp_video):
 
 def test_load_baseline_missing_returns_none(tmp_path):
     assert load_baseline(tmp_path) is None
+
+
+def test_merge_videos_leaves_no_concat_list(tmp_path, tmp_video):
+    """合并成功后不该在输出目录留下中间产物 concat_list.txt。"""
+    a = tmp_video("a.mp4", frames=24)
+    b = tmp_video("b.mp4", frames=24)
+    out = tmp_path / "audit" / "merged_naive.mp4"
+
+    ok, how = merge_videos([a, b], out)
+
+    assert ok, f"合并应成功，实际返回 {how!r}"
+    assert out.is_file()
+    assert not (tmp_path / "audit" / "concat_list.txt").exists()
