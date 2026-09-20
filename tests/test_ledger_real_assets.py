@@ -5,23 +5,24 @@
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 
 from minimax_h3_prompt.tools.ledger import build_ledger
+from tests.conftest import comfy_output_dir
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-COMFY_OUTPUT = Path(os.environ.get(
-    "H3_COMFY_OUTPUT", r"D:/Comfyui/ComfyUI/output/视频/MiniMax-H3/2026-09-18"))
+# 机器专属默认值集中在 conftest；换机器用 H3_COMFY_OUTPUT 覆盖
+COMFY_OUTPUT = comfy_output_dir()
 SESSION = PROJECT_ROOT / (
     "output/sessions/古老图书馆里-少年撕下会发光的书页折成纸-9ac0bf14/GEN001")
 
 pytestmark = pytest.mark.skipif(
     not (COMFY_OUTPUT.is_dir() and SESSION.is_dir()),
-    reason=f"需要本地素材：{COMFY_OUTPUT} 与 {SESSION}",
+    reason=f"需要本地素材：{COMFY_OUTPUT} 与 {SESSION}"
+           f"（换机器请设 H3_COMFY_OUTPUT）",
 )
 
 

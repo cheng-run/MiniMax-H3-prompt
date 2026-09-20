@@ -1,11 +1,26 @@
-"""合成素材 fixture：不依赖真实 ComfyUI 输出，秒级可跑。"""
+"""合成素材 fixture：不依赖真实 ComfyUI 输出，秒级可跑。
+
+另外集中放**机器专属路径**——真实素材在仓库外（`output/` 已 gitignore），
+换机器时需要覆盖。
+"""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import cv2
 import numpy as np
 import pytest
+
+# 本机便利默认值（这台机器上 ComfyUI 的 H3 视频输出目录）。
+# 换机器请设 H3_COMFY_OUTPUT；未设且该目录不存在时，真实素材模块整体 SKIP。
+DEFAULT_COMFY_OUTPUT = Path(
+    r"D:/Comfyui/ComfyUI/output/视频/MiniMax-H3/2026-09-18")
+
+
+def comfy_output_dir() -> Path:
+    """真实素材的输出目录：``H3_COMFY_OUTPUT`` 优先，空字符串视为未设。"""
+    return Path(os.environ.get("H3_COMFY_OUTPUT") or DEFAULT_COMFY_OUTPUT)
 
 
 def write_test_video(
