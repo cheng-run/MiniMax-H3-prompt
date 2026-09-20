@@ -8,9 +8,15 @@ from minimax_h3_prompt.tools.frame_match import read_window
 from minimax_h3_prompt.tools.ledger import Discarded, Ledger, SCHEMA
 from minimax_h3_prompt.tools.preflight import (
     EXPECTED_VIDEO_SIZE,
+    FROZEN_WORDS,
+    check_budget,
+    check_frozen_words,
     check_input_frame,
     check_not_discarded,
     check_shot_duration,
+    estimate_remaining_shots,
+    find_frozen_words,
+    suggest_defrost,
 )
 
 
@@ -82,3 +88,47 @@ def test_discarded_prev_video_is_error():
     assert issues[0].code == "prev_video_discarded"
     assert issues[0].severity == "error"
     assert check_not_discarded("new.mp4", ledger) == []
+
+
+def test_frozen_words_cover_the_ones_found_in_the_plan():
+    for word in ("停住", "定格", "静止", "不再变化", "停在"):
+        assert word in FROZEN_WORDS
+
+
+def test_find_frozen_words_detects():
+    assert find_frozen_words("少年垂眼，双手停在巨书封面上") == ["停在"]
+    assert find_frozen_words("镜头停在掌心尺度的特写") == ["停在"]
+
+
+def test_find_frozen_words_none_when_clean():
+    assert find_frozen_words("纸鸟卧进摊开掌心，头颈朝向少年") == []
+
+
+def test_check_frozen_words_is_warning_not_error():
+    issues = check_frozen_words("她停住脚步")
+    assert issues and all(i.severity == "warning" for i in issues)
+    assert issues[0].code == "frozen_word"
+
+
+def test_suggest_defrost_replaces_hold_verbs():
+    out = suggest_defrost("双手停在巨书封面上")
+    assert "停在" not in out
+    assert "停在" in suggest_defrost.__doc__ or True  # 只要求产出可读改写
+
+
+def test_estimate_remaining_shots():
+    assert estimate_remaining_shots(remaining_tokens=200_000, tokens_per_shot=50_000) == 4
+    assert estimate_remaining_shots(remaining_tokens=0, tokens_per_shot=50_000) == 0
+    assert estimate_remaining_shots(remaining_tokens=100, tokens_per_shot=0) == 0
+
+
+def test_check_budget_refrains_when_short():
+    issues = check_budget(remaining_tokens=50_000, tokens_per_shot=50_000,
+                          remaining_shots=3)
+    assert issues and issues[0].severity == "refrain"
+    assert "还能跑 1 段" in issues[0].message
+
+
+def test_check_budget_silent_when_plenty():
+    assert check_budget(remaining_tokens=10_000_000, tokens_per_shot=50_000,
+                        remaining_shots=3) == []

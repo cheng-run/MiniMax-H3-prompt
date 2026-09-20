@@ -123,3 +123,14 @@ class TestStageSaver:
         s = StageSaver(tmp_path)
         s.save("空节点", {"a": ""})
         assert "（空）" in (tmp_path / "空节点.txt").read_text(encoding="utf-8")
+
+
+def test_percent_used_and_remaining():
+    from minimax_h3_prompt.observability import TokenMeter
+
+    meter = TokenMeter(0.5, 1.5)
+    meter.add("role_a", input_tokens=300_000, output_tokens=200_000)
+    assert meter.percent_used(1_000_000) == pytest.approx(0.5)
+    assert meter.remaining_tokens(1_000_000) == 500_000
+    assert meter.percent_used(0) == 0.0
+    assert meter.remaining_tokens(0) == 0

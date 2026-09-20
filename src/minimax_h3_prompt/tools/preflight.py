@@ -97,3 +97,66 @@ def check_not_discarded(prev_video_name: str, ledger: Ledger) -> list[Issue]:
                           f"上一段 {prev_video_name} 是废弃版本（{item.reason}）"
                           f"{replaced}")]
     return []
+
+
+# 这些词让 H3 在段尾把画面冻住；下一段又从同一张冻住的画面长出来，
+# 于是接缝处出现连续静止。2026-09-18 实测：镜头 1/3 的 end_hook 含「停在」，
+# 末尾静止 11/29 帧；镜头 5 含「定格」却为 0——所以只是相关，不是因果，
+# 只能给 warning。
+FROZEN_WORDS: tuple[str, ...] = ("停住", "定格", "静止", "不再变化", "停在")
+
+_DEFROST_REPLACEMENTS: tuple[tuple[str, str], ...] = (
+    ("停在", "刚落在"),
+    ("停住", "刚收住"),
+    ("定格", "姿态落定"),
+    ("静止", "动作收势"),
+    ("不再变化", "保持微动"),
+)
+
+
+def find_frozen_words(text: str) -> list[str]:
+    """返回文本里命中的冻结词（去重，保持 FROZEN_WORDS 的顺序）。"""
+    return [word for word in FROZEN_WORDS if word in text]
+
+
+def suggest_defrost(text: str) -> str:
+    """给出确定性改写建议：把"停住"类词换成"动作刚落定的姿态"。
+
+    只做字符串替换，不改语义结构；产出需人工确认后才使用。
+    """
+    result = text
+    for frozen, alive in _DEFROST_REPLACEMENTS:
+        result = result.replace(frozen, alive)
+    return result
+
+
+def check_frozen_words(text: str) -> list[Issue]:
+    """启发式规则：命中冻结词只提示，不阻断。"""
+    hits = find_frozen_words(text)
+    if not hits:
+        return []
+    return [Issue(
+        "warning", "frozen_word",
+        f"命中冻结词 {', '.join(hits)}——可能造成段尾冻结。"
+        f"建议改写为：{suggest_defrost(text)[:120]}",
+    )]
+
+
+def estimate_remaining_shots(remaining_tokens: int, tokens_per_shot: int) -> int:
+    """按单段实测消耗估算还能跑几段。"""
+    if tokens_per_shot <= 0:
+        return 0
+    return max(0, remaining_tokens // tokens_per_shot)
+
+
+def check_budget(remaining_tokens: int, tokens_per_shot: int,
+                 remaining_shots: int) -> list[Issue]:
+    """资源规则：剩余额度不够跑完时劝阻（不阻断，由人决定）。"""
+    affordable = estimate_remaining_shots(remaining_tokens, tokens_per_shot)
+    if affordable >= remaining_shots:
+        return []
+    return [Issue(
+        "refrain", "budget_short",
+        f"剩余额度按当前消耗还能跑 {affordable} 段，但计划还剩 {remaining_shots} 段。"
+        f"2026-09-18 曾因百炼免费额度耗尽导致第 6 段中断",
+    )]

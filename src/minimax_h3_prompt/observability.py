@@ -72,6 +72,21 @@ class TokenMeter:
         cost = input_t / 1e6 * self._price_in + output_t / 1e6 * self._price_out
         return {"calls": calls, "input": input_t, "output": output_t, "cost": cost}
 
+    def percent_used(self, budget_tokens: int) -> float:
+        """已用 token 占预算的比例（0–1）。预算为 0 时返回 0.0。"""
+        if budget_tokens <= 0:
+            return 0.0
+        totals = self.totals()
+        used = totals["input"] + totals["output"]
+        return min(1.0, used / budget_tokens)
+
+    def remaining_tokens(self, budget_tokens: int) -> int:
+        """剩余 token 数（不小于 0）。"""
+        if budget_tokens <= 0:
+            return 0
+        totals = self.totals()
+        return max(0, budget_tokens - totals["input"] - totals["output"])
+
     def format(self) -> str:
         t = self.totals()
         return (f"调用 {t['calls']} 次 | 输入 {t['input']} tok / 输出 {t['output']} tok | "
