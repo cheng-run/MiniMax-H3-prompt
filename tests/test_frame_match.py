@@ -8,8 +8,12 @@ import pytest
 from minimax_h3_prompt.tools.frame_match import (
     ANALYZE_H,
     ANALYZE_W,
+    MAD_MAYBE,
+    MAD_SAME,
+    classify_match,
     imread_unicode,
     mad,
+    match_video,
     read_frames_gray,
     read_window,
     to_gray,
@@ -80,3 +84,48 @@ def test_read_window_head_and_tail_do_not_overlap(tmp_path, tmp_video):
 def test_read_window_rejects_bad_window(tmp_path, tmp_video):
     with pytest.raises(ValueError, match="head"):
         read_window(tmp_video(), window="middle")
+
+
+def test_classify_match_three_bands():
+    assert classify_match(0.0) == "high"
+    assert classify_match(1.99) == "high"
+    assert classify_match(2.0) == "medium"
+    assert classify_match(4.99) == "medium"
+    assert classify_match(5.0) == "no_match"
+    assert classify_match(66.98) == "no_match"
+
+
+def test_match_video_finds_source_by_tail(tmp_path, tmp_video):
+    """一张由某视频尾帧复制而来的图，match_video 应找出那个视频。"""
+    source = tmp_video("source.mp4", frames=24)
+    other = tmp_video("other.mp4", frames=24, base=(200, 200, 200))
+
+    tail = read_window(source, window="tail", k=1)[0]
+    # 把灰度小图放大回 BGR 供 match_video 使用
+    probe = cv2.cvtColor(
+        cv2.resize(tail, (128, 72), interpolation=cv2.INTER_NEAREST), cv2.COLOR_GRAY2BGR
+    )
+
+    best = match_video(probe, [source, other], window="tail")
+    assert best is not None
+    assert best[0] == source
+    assert best[1] < MAD_SAME
+
+
+def test_match_video_returns_none_for_empty_list(tmp_path):
+    blank = np.zeros((72, 128, 3), dtype=np.uint8)
+    assert match_video(blank, [], window="tail") is None
+
+
+def test_match_video_skips_unreadable_video(tmp_path, tmp_video):
+    good = tmp_video("good.mp4")
+    broken = tmp_path / "broken.mp4"
+    broken.write_bytes(b"not a video")
+
+    tail = read_window(good, window="tail", k=1)[0]
+    probe = cv2.cvtColor(
+        cv2.resize(tail, (128, 72), interpolation=cv2.INTER_NEAREST), cv2.COLOR_GRAY2BGR
+    )
+    best = match_video(probe, [broken, good], window="tail")
+    assert best is not None
+    assert best[0] == good

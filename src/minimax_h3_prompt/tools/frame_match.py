@@ -117,3 +117,59 @@ def read_window(path: Path, *, window: str, k: int = WINDOW) -> list[np.ndarray]
         buf.append(to_gray(frame))
     cap.release()
     return buf[-k:] if len(buf) >= k else buf
+
+
+# 阈值来自 2026-09-18《古老图书馆》实测：同源帧 mad 为 0.00/0.37/0.49/1.97，
+# 非同源帧为 22–67，中间隔着一个数量级，所以阈值取哪都安全。
+MAD_SAME = 2.0
+MAD_MAYBE = 5.0
+
+
+def classify_match(d: float) -> str:
+    """"high"（同源）| "medium"（疑似同源）| "no_match"（不同源）。"""
+    if d < MAD_SAME:
+        return "high"
+    if d < MAD_MAYBE:
+        return "medium"
+    return "no_match"
+
+
+def match_video(
+    frame: np.ndarray, videos: list[Path], *, window: str
+) -> tuple[Path, float] | None:
+    """在一组视频里找与 frame 最接近的那个，按窗口取最小 mad。
+
+    返回 ``(视频路径, 最小 mad)``；``videos`` 为空或全部读不到时返回 None。
+    读不到的视频被静默跳过——调用方据返回的 mad 自行判断置信度。
+    """
+    best: tuple[Path, float] | None = None
+    probe = to_gray(frame)
+    for video in videos:
+        window_frames = read_window(video, window=window)
+        if not window_frames:
+            continue
+        d = min(mad(probe, w) for w in window_frames)
+        if best is None or d < best[1]:
+            best = (video, d)
+    return best
+
+
+def match_video_all(
+    frame: np.ndarray, videos: list[Path], *, window: str, threshold: float = MAD_MAYBE
+) -> list[tuple[Path, float]]:
+    """返回**全部** mad < threshold 的视频，按 mad 升序。
+
+    必须保留多个候选：2026-09-18 的实测里，``shot-03-start.png`` 同时像
+    ``00003`` 和 ``00004`` 的首帧（两者用了同一张输入图，mad=0.88），
+    只留一个会让链路在那里断掉。消歧交给 `ledger.resolve_chain`。
+    """
+    probe = to_gray(frame)
+    hits: list[tuple[Path, float]] = []
+    for video in videos:
+        window_frames = read_window(video, window=window)
+        if not window_frames:
+            continue
+        d = min(mad(probe, w) for w in window_frames)
+        if d < threshold:
+            hits.append((video, d))
+    return sorted(hits, key=lambda item: item[1])
