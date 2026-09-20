@@ -407,25 +407,32 @@ def _shot_input_frame(session_dir: Path, video: Path, bridge: BridgeRef | None,
         return InputFrame(file=rel, kind=kind, source=None, match_mad=None,
                           confidence="high")
 
-    if bridge is None or bridge.src_video is None:
+    if bridge is None:
         return InputFrame(file="", kind="unknown", source=None, match_mad=None,
                           confidence="low")
 
     rel = f"bridge_frames/{bridge.path.name}"
     image = imread_unicode(bridge.path)
+    if image is None:
+        # 文件读不了：至少把路径报出来，别让读者以为这张帧不存在
+        return InputFrame(file=rel, kind="unknown", source=None, match_mad=None,
+                          confidence="low")
+
     # 尺寸只是"这张图来自视频"的**代理**指标：管线里有 upscale 环节，
     # 输出未必还是 1280×736，尺寸代理会失效。而"这张帧的窗口匹配到某段
     # 视频的尾帧"（``src_video`` 非 None）是**直接证据**，优先采信；
-    # 匹配不上时才退回尺寸判定。见 spec「三个设计决定 ①」。
-    if bridge.src_video is not None:
-        kind = "extracted"
-    elif image is not None:
-        height, width = image.shape[:2]
-        kind = "extracted" if (width, height) == _EXTRACTED_SIZE else "generated"
-    else:
-        kind = "unknown"
+    # 匹配不上时才退回尺寸判定（候选进 `review_needed`）。见 spec「三个设计决定 ①」。
+    height, width = image.shape[:2]
+    by_size = "extracted" if (width, height) == _EXTRACTED_SIZE else "generated"
+
+    if bridge.src_video is None:
+        # 匹配不上任何视频尾帧：不猜来源（source 留 None、置信度 low），
+        # 但把「磁盘上确实有这张帧」记下来——台账的意义就是可追溯
+        return InputFrame(file=rel, kind=by_size, source=None, match_mad=None,
+                          confidence="low")
+
     return InputFrame(
-        file=rel, kind=kind,
+        file=rel, kind="extracted",
         source={"video": bridge.src_video.name, "frame": "tail"},
         match_mad=round(bridge.src_mad, 2) if bridge.src_mad is not None else None,
         confidence=classify_match(bridge.src_mad) if bridge.src_mad is not None else "low",
@@ -492,10 +499,23 @@ def build_ledger(session_dir: Path, output_dirs: list[Path], *,
     discarded, leftover_review = classify_leftovers(videos, chain_set, head_gray)
     review.extend(leftover_review)
 
-    unreadable = [b.path.name for b in bridges if imread_unicode(b.path) is None]
+    # 一次遍历分拣：读不了的（warn + review）与读得出但没匹配上来源的（review）
+    unreadable: list[str] = []
+    unmatched: list[str] = []
+    for ref in bridges:
+        if imread_unicode(ref.path) is None:
+            unreadable.append(ref.path.name)
+        elif ref.src_video is None:
+            unmatched.append(ref.path.name)
+
     if unreadable:
         warnings.append(f"读不了 {len(unreadable)} 张桥接帧：{', '.join(unreadable)}")
         review.extend(f"桥接帧 {name} 读不了，相关接缝无法校验" for name in unreadable)
+    if unmatched:
+        review.extend(
+            f"桥接帧 {name} 没匹配上任何视频尾帧，来源无法确认，请人工确认"
+            for name in unmatched
+        )
 
     plan_segments = read_plan_segment_count(session_dir)
     interruptions = detect_interruptions(shots, plan_segments)

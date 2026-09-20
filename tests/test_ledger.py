@@ -412,3 +412,58 @@ def test_resolve_chain_falls_back_to_mtime_when_nothing_continues(tmp_path, tmp_
                        [(older, 0.88), (newer, 0.88)])]
     chain = resolve_chain(edges, [first, older, newer], first)
     assert [v.name for _, v in chain] == ["00001.mp4", "00003.mp4"]
+
+
+# --- 桥接帧未匹配任何视频尾帧：报路径 + 按尺寸判 kind + 进 review ---------------
+
+import numpy as np
+
+from minimax_h3_prompt.tools.ledger import _shot_input_frame
+
+
+def _write_png(path: Path, width: int, height: int,
+               colour: tuple[int, int, int] = (255, 255, 255)) -> Path:
+    """写一张纯色 png（BGR），返回路径。"""
+    ok, buf = cv2.imencode(".png", np.full((height, width, 3), colour, dtype=np.uint8))
+    assert ok
+    path.write_bytes(buf.tobytes())
+    return path
+
+
+def test_shot_input_frame_reports_bridge_without_source(tmp_path, tmp_video):
+    """匹配不上任何视频尾帧时：路径要报出来，kind 退回尺寸判定（1280×736 → extracted），
+    但不猜来源（source 为 None）、置信度 low。"""
+    bridge_path = _write_png(tmp_path / "shot-02-start.png", 1280, 736)
+    shot2 = tmp_video("00002.mp4", frames=24)
+    shot1 = tmp_video("00001.mp4", frames=24)
+
+    frame = _shot_input_frame(tmp_path, shot2, BridgeRef(2, bridge_path, None, None, []),
+                              shot1)
+    assert frame.file == "bridge_frames/shot-02-start.png"
+    assert frame.kind == "extracted"
+    assert frame.source is None
+    assert frame.match_mad is None
+    assert frame.confidence == "low"
+
+
+def test_shot_input_frame_size_fallback_for_unmatched_bridge(tmp_path, tmp_video):
+    """同一分支、尺寸换成生图尺寸 → kind 换成 generated，证明尺寸后备真的在区分。"""
+    bridge_path = _write_png(tmp_path / "shot-02-start.png", 3840, 2160)
+    shot2 = tmp_video("00002.mp4", frames=24)
+    shot1 = tmp_video("00001.mp4", frames=24)
+
+    frame = _shot_input_frame(tmp_path, shot2, BridgeRef(2, bridge_path, None, None, []),
+                              shot1)
+    assert frame.kind == "generated"
+    assert frame.source is None
+    assert frame.confidence == "low"
+
+
+def test_build_ledger_flags_unmatched_bridge_for_review(tmp_path, tmp_video):
+    """能读出来、但没匹配上任何视频尾帧的桥接帧 → 进 review_needed，不猜来源。"""
+    session, out = _make_session(tmp_path, tmp_video, n_shots=2)
+    # 覆盖成纯白 1280×736：与任何视频（深色背景 + 小白块）的尾帧 mad 都远大于阈值
+    _write_png(session / "bridge_frames" / "shot-02-start.png", 1280, 736)
+
+    ledger = build_ledger(session, [out])
+    assert any("shot-02-start.png" in item for item in ledger.review_needed)
