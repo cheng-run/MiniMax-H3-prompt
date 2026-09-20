@@ -272,3 +272,93 @@ def test_read_plan_segment_count(tmp_path):
 
 def test_read_plan_segment_count_missing_returns_none(tmp_path):
     assert read_plan_segment_count(tmp_path) is None
+
+
+# --- Task 6: rebuild 整合与落盘 ---------------------------------------------
+
+from minimax_h3_prompt.tools.ledger import build_ledger, rebuild
+
+
+def _make_session(tmp_path, tmp_video, *, n_shots: int,
+                  plan_segments: int | None = None):
+    """造一个最小会话：n_shots 个镜头，**尾帧接力**，可选一个废弃初版。"""
+    session = tmp_path / "sessions" / "主题-abc" / "GEN001"
+    (session / "bridge_frames").mkdir(parents=True)
+    (session / "frames").mkdir(parents=True)
+    out = tmp_path / "comfy" / "2026-09-18"
+    out.mkdir(parents=True)
+
+    videos = []
+    for i in range(1, n_shots + 1):
+        # 见裁决 2：offset 让视频 i 的首帧 = 视频 i-1 的尾帧
+        v = tmp_video(f"MiniMax-H3视频_{i:05d}.mp4", frames=24, step=1,
+                      offset=(i - 1) * 23)
+        v.rename(out / v.name)
+        videos.append(out / f"MiniMax-H3视频_{i:05d}.mp4")
+
+    # frames/first.png：镜头1 的生图输入（非视频尺寸，用 4 倍放大模拟）
+    first = read_window(videos[0], window="head", k=1)[0]
+    big = cv2.resize(first, (512, 288), interpolation=cv2.INTER_NEAREST)
+    ok, buf = cv2.imencode(".png", cv2.cvtColor(big, cv2.COLOR_GRAY2BGR))
+    assert ok
+    (session / "frames" / "first.png").write_bytes(buf.tobytes())
+
+    # 桥接帧：镜头 N（N>=2）的首帧 = 镜头 N-1 的尾帧
+    for i in range(2, n_shots + 1):
+        tail = read_window(videos[i - 2], window="tail", k=1)[0]
+        img = cv2.cvtColor(cv2.resize(tail, (128, 72), interpolation=cv2.INTER_NEAREST),
+                           cv2.COLOR_GRAY2BGR)
+        ok, buf = cv2.imencode(".png", img)
+        assert ok
+        (session / "bridge_frames" / f"shot-{i:02d}-start.png").write_bytes(buf.tobytes())
+
+    if plan_segments is not None:
+        (session / "segments").mkdir()
+        (session / "segments" / "plan.json").write_text(
+            json.dumps([{"index": i} for i in range(plan_segments)]), encoding="utf-8")
+
+    return session, out
+
+
+def test_build_ledger_recovers_shot_order(tmp_path, tmp_video):
+    session, out = _make_session(tmp_path, tmp_video, n_shots=3)
+    ledger = build_ledger(session, [out])
+    assert [s.shot for s in ledger.shots] == [1, 2, 3]
+
+
+def test_build_ledger_first_shot_input_is_generated(tmp_path, tmp_video):
+    session, out = _make_session(tmp_path, tmp_video, n_shots=3)
+    ledger = build_ledger(session, [out])
+    assert ledger.shots[0].input_frame.kind == "generated"
+    assert ledger.shots[1].input_frame.kind == "extracted"
+
+
+def test_build_ledger_extracted_frames_are_high_confidence(tmp_path, tmp_video):
+    session, out = _make_session(tmp_path, tmp_video, n_shots=3)
+    ledger = build_ledger(session, [out])
+    assert all(s.input_frame.confidence == "high" for s in ledger.shots[1:])
+
+
+def test_build_ledger_reports_interruption_when_plan_longer(tmp_path, tmp_video):
+    session, out = _make_session(tmp_path, tmp_video, n_shots=2, plan_segments=4)
+    ledger = build_ledger(session, [out])
+    assert [i.at_shot for i in ledger.interruptions] == [3]
+    assert ledger.interruptions[0].type == "unfinished"
+
+
+def test_rebuild_writes_and_reloads(tmp_path, tmp_video):
+    session, out = _make_session(tmp_path, tmp_video, n_shots=2)
+    written = rebuild(session, [out])
+    assert (session / "ledger.json").is_file()
+    reloaded = Ledger.from_dict(
+        json.loads((session / "ledger.json").read_text(encoding="utf-8")))
+    assert reloaded.to_dict() == written.to_dict()
+
+
+def test_rebuild_does_not_touch_override_file(tmp_path, tmp_video):
+    session, out = _make_session(tmp_path, tmp_video, n_shots=2)
+    override = session / "ledger.override.json"
+    override.write_text(json.dumps({"shots": {"1": {"video": "手改.mp4"}}}),
+                        encoding="utf-8")
+    rebuild(session, [out])
+    assert json.loads(override.read_text(encoding="utf-8"))["shots"]["1"]["video"] == "手改.mp4"

@@ -17,14 +17,18 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict, dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 
 from .frame_match import (
     MAD_MAYBE,
+    classify_match,
     imread_unicode,
     match_video_all,
+    read_window,
+    video_meta,
 )
 
 SCHEMA = "h3-ledger/1"
@@ -372,3 +376,149 @@ def apply_override(ledger: Ledger, override: dict) -> Ledger:
                               replaced_by=None, confidence="high",
                               evidence=["来自 ledger.override.json"]))
     return replace(ledger, shots=shots, discarded=kept)
+
+
+# --- 整合与落盘 ------------------------------------------------------------
+
+_FIRST_FRAME_NAME = "first.png"
+_EXTRACTED_SIZE = (1280, 736)   # H3 所有输出的统一尺寸
+PLAN_HINT = "plan.json 期望 {n} 段"
+
+
+def _iso_now() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _shot_input_frame(session_dir: Path, video: Path, bridge: BridgeRef | None,
+                      first_video: Path) -> InputFrame:
+    """判定某个镜头的输入帧。
+
+    起点镜头的输入是生图 ``frames/first.png``（尺寸不是 1280×736）；
+    其余镜头的输入是桥接帧，其来源由 ``bridge.src_video`` 给出。
+    """
+    if video == first_video:
+        rel = f"frames/{_FIRST_FRAME_NAME}"
+        image = imread_unicode(session_dir / rel)
+        if image is None:
+            return InputFrame(file="", kind="unknown", source=None, match_mad=None,
+                              confidence="low")
+        height, width = image.shape[:2]
+        kind = "extracted" if (width, height) == _EXTRACTED_SIZE else "generated"
+        return InputFrame(file=rel, kind=kind, source=None, match_mad=None,
+                          confidence="high")
+
+    if bridge is None or bridge.src_video is None:
+        return InputFrame(file="", kind="unknown", source=None, match_mad=None,
+                          confidence="low")
+
+    rel = f"bridge_frames/{bridge.path.name}"
+    image = imread_unicode(bridge.path)
+    # 尺寸只是"这张图来自视频"的**代理**指标：管线里有 upscale 环节，
+    # 输出未必还是 1280×736，尺寸代理会失效。而"这张帧的窗口匹配到某段
+    # 视频的尾帧"（``src_video`` 非 None）是**直接证据**，优先采信；
+    # 匹配不上时才退回尺寸判定。见 spec「三个设计决定 ①」。
+    if bridge.src_video is not None:
+        kind = "extracted"
+    elif image is not None:
+        height, width = image.shape[:2]
+        kind = "extracted" if (width, height) == _EXTRACTED_SIZE else "generated"
+    else:
+        kind = "unknown"
+    return InputFrame(
+        file=rel, kind=kind,
+        source={"video": bridge.src_video.name, "frame": "tail"},
+        match_mad=round(bridge.src_mad, 2) if bridge.src_mad is not None else None,
+        confidence=classify_match(bridge.src_mad) if bridge.src_mad is not None else "low",
+    )
+
+
+def build_ledger(session_dir: Path, output_dirs: list[Path], *,
+                 threshold: float = MAD_MAYBE, start: Path | None = None) -> Ledger:
+    """从磁盘推断出整套台账。只读，不写任何文件。
+
+    这是唯一的推断入口：``collect_videos`` → ``build_edges`` → ``pick_start``
+    → ``resolve_chain`` → 废片/中断判定 → 合并 override。落盘交给 `rebuild`。
+    """
+    videos = collect_videos(output_dirs)
+    bridges = build_edges(collect_bridges(session_dir), videos)
+
+    warnings: list[str] = []
+    review: list[str] = []
+    if not videos:
+        return Ledger(schema=SCHEMA,
+                      session={"topic_slug": session_dir.parent.name,
+                               "generation": session_dir.name},
+                      scan={"scanned_at": _iso_now(), "rule_version": "1",
+                            "output_dirs": [str(d) for d in output_dirs],
+                            "threshold_mad": threshold},
+                      shots=[], discarded=[], interruptions=[],
+                      review_needed=[], warnings=["输出目录里没有找到任何 mp4"])
+
+    first_video = start or pick_start(videos, bridges, threshold=threshold)
+    if first_video is None:
+        first_video = videos[0]
+        warnings.append("推断不出起点镜头（没有视频同时满足「是别人的来源」与"
+                        "「从不是消费者」），已退化为按文件名取第一个，结果可能不准")
+
+    chain = resolve_chain(bridges, videos, first_video, threshold=threshold)
+    bridge_by_shot = {b.shot_no: b for b in bridges}
+
+    shots: list[Shot] = []
+    for index, (shot_no, video) in enumerate(chain):
+        meta = video_meta(video)
+        bridge = bridge_by_shot.get(shot_no) if index > 0 else None
+        shots.append(Shot(
+            shot=shot_no,
+            video=video.name,
+            video_dir=video.parent.name,
+            frames=int(meta.get("frames", 0)),
+            duration_s=round(float(meta.get("duration_s", 0.0)), 2),
+            generated_at=datetime.fromtimestamp(_safe_mtime(video)).astimezone().isoformat(
+                timespec="seconds"),
+            input_frame=_shot_input_frame(session_dir, video, bridge, first_video),
+            status="final",
+            evidence=(["起点镜头"] if index == 0 else
+                      [f"输入帧来自 {bridge.src_video.name if bridge and bridge.src_video else '?'}"
+                       f" 的尾帧" if bridge else "输入帧无法确定"]),
+        ))
+
+    head_gray: dict[Path, np.ndarray] = {}
+    for video in videos:
+        window = read_window(video, window="head", k=1)
+        if window:
+            head_gray[video] = window[0]
+
+    chain_set = {v for _, v in chain}
+    discarded, leftover_review = classify_leftovers(videos, chain_set, head_gray)
+    review.extend(leftover_review)
+
+    unreadable = [b.path.name for b in bridges if imread_unicode(b.path) is None]
+    if unreadable:
+        warnings.append(f"读不了 {len(unreadable)} 张桥接帧：{', '.join(unreadable)}")
+        review.extend(f"桥接帧 {name} 读不了，相关接缝无法校验" for name in unreadable)
+
+    plan_segments = read_plan_segment_count(session_dir)
+    interruptions = detect_interruptions(shots, plan_segments)
+
+    ledger = Ledger(
+        schema=SCHEMA,
+        session={"topic_slug": session_dir.parent.name, "generation": session_dir.name},
+        scan={"scanned_at": _iso_now(), "rule_version": "1",
+              "output_dirs": [str(d) for d in output_dirs], "threshold_mad": threshold},
+        shots=shots, discarded=discarded, interruptions=interruptions,
+        review_needed=review, warnings=warnings,
+    )
+    return apply_override(ledger, load_override(session_dir))
+
+
+def rebuild(session_dir: Path, output_dirs: list[Path], *,
+            threshold: float = MAD_MAYBE, write: bool = True) -> Ledger:
+    """``build_ledger`` + 落盘 ``ledger.json``（``write=False`` 时只算不写）。
+
+    只写 ``ledger.json``：``ledger.override.json`` 是人写的，本工具永不碰它。
+    """
+    ledger = build_ledger(session_dir, output_dirs, threshold=threshold)
+    if write:
+        (session_dir / "ledger.json").write_text(
+            json.dumps(ledger.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    return ledger

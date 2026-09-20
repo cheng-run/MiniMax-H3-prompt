@@ -17,10 +17,17 @@ def write_test_video(
     height: int = 72,
     base: tuple[int, int, int] = (30, 30, 30),
     moving: bool = True,
+    step: int = 3,
+    offset: int = 0,
 ) -> Path:
     """写一段小 mp4：纯色背景 + 一个逐帧移动的白色方块。
 
     moving=False 时整段完全静止（用于测 sanity check）。
+
+    ``step`` / ``offset`` 用来构造**尾帧接力**的相邻片段：给第 k 段的
+    ``offset`` 取 ``(k-1) * step * (frames - 1)``，它的首帧方块位置就
+    恰好等于上一段的尾帧，从而"某帧等于某段尾帧"这件事在磁盘上真实成立。
+    默认值 3 / 0 与历史行为完全一致。
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     writer = cv2.VideoWriter(
@@ -29,7 +36,7 @@ def write_test_video(
     assert writer.isOpened(), f"VideoWriter 打不开 {path}"
     for i in range(frames):
         frame = np.full((height, width, 3), base, dtype=np.uint8)
-        x = 8 + (i * 3 if moving else 0)
+        x = 8 + offset + (i * step if moving else 0)
         cv2.rectangle(frame, (x, 20), (x + 20, 40), (255, 255, 255), -1)
         writer.write(frame)
     writer.release()
