@@ -60,6 +60,21 @@ def build_parser() -> argparse.ArgumentParser:
     audit_promote = audit_sub.add_parser("promote", help="把最近一次结果提升为基线")
     audit_promote.add_argument("session_dir")
     audit_promote.add_argument("--label", required=True, help="基线标签，如「修复前」")
+
+    pre_parser = project.add_parser("preflight", help="提交前预检：校验输入帧与预算")
+    pre_parser.add_argument("--input-frame", required=True, help="待提交的桥接帧 png")
+    pre_parser.add_argument("--prev-video", default=None, help="上一段的 mp4")
+    pre_parser.add_argument("--prev-video-name", default=None,
+                            help="上一段在 ledger 里的文件名（用于废片检查）")
+    pre_parser.add_argument("--session", default=None, help="会话目录（读 ledger 用）")
+    pre_parser.add_argument("--prompt", default=None, help="提示词或 end_hook 文本文件")
+    pre_parser.add_argument("--duration", type=float, default=None, help="本段时长（秒）")
+    pre_parser.add_argument("--budget-tokens", type=int, default=0,
+                            help="总额度 token（0 = 不检查预算）")
+    pre_parser.add_argument("--tokens-per-shot", type=int, default=0,
+                            help="单段实测 token 消耗")
+    pre_parser.add_argument("--remaining-shots", type=int, default=0,
+                            help="计划还剩几段")
     return parser
 
 
@@ -283,6 +298,67 @@ def _timestamp() -> str:
     return datetime.now().strftime("%Y-%m-%dT%H%M%S")
 
 
+def _run_preflight(args: argparse.Namespace) -> int:
+    """提交前预检。可证规则失败返回 1，其余返回 0。"""
+    from pathlib import Path
+
+    from .tools import preflight
+    from .tools.ledger import Ledger
+
+    issues: list[preflight.Issue] = []
+    prev_video = Path(args.prev_video) if args.prev_video else None
+
+    ledger = None
+    if args.session:
+        session_dir = Path(args.session)
+        if not session_dir.is_dir():
+            print(f"[错误] 会话目录不存在：{session_dir}")
+            return 1
+        ledger_path = session_dir / "ledger.json"
+        if ledger_path.is_file():
+            try:
+                ledger = Ledger.from_dict(json.loads(ledger_path.read_text(
+                    encoding="utf-8")))
+            except (OSError, ValueError) as exc:
+                print(f"[警告] ledger 读不了（{exc}），跳过废片检查")
+        else:
+            print("[警告] 会话目录里没有 ledger.json，跳过废片检查")
+
+    issues += preflight.check_input_frame(Path(args.input_frame), prev_video)
+
+    if ledger is not None and args.prev_video_name:
+        issues += preflight.check_not_discarded(args.prev_video_name, ledger)
+
+    if args.duration is not None:
+        issues += preflight.check_shot_duration(args.duration)
+
+    if args.prompt:
+        prompt_path = Path(args.prompt)
+        if not prompt_path.is_file():
+            print(f"[错误] 提示词文件不存在：{prompt_path}")
+            return 1
+        issues += preflight.check_frozen_words(
+            prompt_path.read_text(encoding="utf-8"))
+
+    if args.budget_tokens:
+        issues += preflight.check_budget(
+            remaining_tokens=args.budget_tokens,
+            tokens_per_shot=args.tokens_per_shot,
+            remaining_shots=args.remaining_shots,
+        )
+
+    errors = [i for i in issues if i.severity == "error"]
+    for issue in issues:
+        tag = {"error": "[阻断]", "warning": "[提醒]", "refrain": "[劝阻]"}[issue.severity]
+        print(f"{tag} {issue.message}")
+
+    if errors:
+        print(f"\n预检未通过：{len(errors)} 项阻断。请先修输入再提交。")
+        return 1
+    print("\n预检通过。")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -294,6 +370,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_ledger(args)
     if args.command == "audit":
         return _run_audit(args)
+    if args.command == "preflight":
+        return _run_preflight(args)
 
     if not args.brief:
         # 面向最终用户的两阶段向导：先生图提示词 → 人工生图 → 提交图片 → 视频提示词。
