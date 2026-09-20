@@ -1,5 +1,16 @@
 # H3 生成台账与审计 Implementation Plan
 
+> **✅ 执行完成（2026-09-20）**：14 个任务全部按 TDD 落地，全量测试 **228 passed**。
+> 真实素材验收：镜头链路 `00001→00002→00004→00005→00006`（`00003` 判为废片、第 6 段报中断）、
+> 接缝 **4.04s / 14.1% / 28.67s** 与 2026-09-20 手工基线逐字吻合。
+> 执行中修掉了计划自身的 4 处缺陷，见下方「执行期修正」。
+>
+> **执行期修正**（计划文档原文保留，实际实现以这些裁决为准）：
+> 1. **`kind` 判定**（Task 6）：桥接帧以「匹配到 src 视频」判 `extracted`，尺寸规则降级为后备 —— 用户拍板，spec ① 已同步更新。
+> 2. **Task 6 fixture 未真正接力**：计划的 `_make_session` 造的三个合成视频内容完全相同，`dst_candidates` 全空、链路只还原出 1 个镜头。已给 `write_test_video` 加 `step`/`offset` 参数使其真的尾帧接力（断言未改）。
+> 3. **`find_ffmpeg` 违反自身铁律**（Task 9）：参考实现里的 `except Exception: pass` 与本计划 Global Constraints 冲突，改为只捕 `ImportError` / `(OSError, RuntimeError)` 并 fallback。
+> 4. **`classify_leftovers` 取「遍历到的第一个」**（Task 5）：结果依赖 dict 插入序，改为取 mad 最小、同分取 mtime 更晚（与 `resolve_chain` tie-break 一致）。
+
 > **For agentic workers:** 逐个任务执行，用复选框（`- [ ]`）跟踪进度。
 >
 > **执行方式二选一：**
@@ -86,7 +97,7 @@
 2. **`cv2.VideoCapture` 反而能正常工作**于同样的中文路径。不要给它加奇怪的编码转换。
 3. 读尾帧时用 `CAP_PROP_POS_FRAMES` 精确 seek 到 `total-k` 在 H.264 上会因关键帧对齐而偏移，所以**往回多退 12 帧再顺序读到尾**，取最后 k 帧。
 
-- [ ] **Step 1: 在 `tests/conftest.py` 写合成视频 fixture**
+- [x] **Step 1: 在 `tests/conftest.py` 写合成视频 fixture**
 
 ```python
 """合成素材 fixture：不依赖真实 ComfyUI 输出，秒级可跑。"""
@@ -135,7 +146,7 @@ def tmp_video(tmp_path: Path):
     return make
 ```
 
-- [ ] **Step 2: 写失败测试**
+- [x] **Step 2: 写失败测试**
 
 创建 `tests/test_frame_match.py`：
 
@@ -224,12 +235,12 @@ def test_read_window_rejects_bad_window(tmp_path, tmp_video):
         read_window(tmp_video(), window="middle")
 ```
 
-- [ ] **Step 3: 运行测试，确认失败**
+- [x] **Step 3: 运行测试，确认失败**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_frame_match.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'minimax_h3_prompt.tools.frame_match'`
 
-- [ ] **Step 4: 实现 `frame_match.py`**
+- [x] **Step 4: 实现 `frame_match.py`**
 
 ```python
 """帧读取与比对原语。
@@ -353,17 +364,17 @@ def read_window(path: Path, *, window: str, k: int = WINDOW) -> list[np.ndarray]
     return buf[-k:] if len(buf) >= k else buf
 ```
 
-- [ ] **Step 5: 运行测试，确认通过**
+- [x] **Step 5: 运行测试，确认通过**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_frame_match.py -v`
 Expected: 全部 PASS（9 项）
 
-- [ ] **Step 6: 跑全量回归，确认没弄坏别的**
+- [x] **Step 6: 跑全量回归，确认没弄坏别的**
 
 Run: `./.venv/Scripts/python.exe -m pytest -q`
 Expected: 原有 134 项 + 新增 9 项全部通过
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add src/minimax_h3_prompt/tools/frame_match.py tests/test_frame_match.py tests/conftest.py
@@ -386,7 +397,7 @@ git commit -m "feat(tools): 新增 frame_match 帧读取与比对原语（中文
   - `match_video(frame: np.ndarray, videos: list[Path], *, window: str) -> tuple[Path, float] | None`
   - `match_video_all(frame: np.ndarray, videos: list[Path], *, window: str, threshold: float = MAD_MAYBE) -> list[tuple[Path, float]]`——**保留全部候选**，按 mad 升序
 
-- [ ] **Step 1: 写失败测试（追加到 `tests/test_frame_match.py`）**
+- [x] **Step 1: 写失败测试（追加到 `tests/test_frame_match.py`）**
 
 ```python
 from minimax_h3_prompt.tools.frame_match import (
@@ -442,12 +453,12 @@ def test_match_video_skips_unreadable_video(tmp_path, tmp_video):
     assert best[0] == good
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_frame_match.py -v -k "classify or match_video"`
 Expected: FAIL — `ImportError: cannot import name 'classify_match'`
 
-- [ ] **Step 3: 实现（追加到 `frame_match.py`）**
+- [x] **Step 3: 实现（追加到 `frame_match.py`）**
 
 ```python
 # 阈值来自 2026-09-18《古老图书馆》实测：同源帧 mad 为 0.00/0.37/0.49/1.97，
@@ -506,12 +517,12 @@ def match_video_all(
     return sorted(hits, key=lambda item: item[1])
 ```
 
-- [ ] **Step 4: 运行测试，确认通过**
+- [x] **Step 4: 运行测试，确认通过**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_frame_match.py -v`
 Expected: 全部 PASS（13 项）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/minimax_h3_prompt/tools/frame_match.py tests/test_frame_match.py
@@ -538,7 +549,7 @@ git commit -m "feat(tools): frame_match 增加窗口比对与 mad 阈值分级"
   - `Ledger.to_dict() -> dict`
   - `Ledger.from_dict(d: dict) -> Ledger`（schema 不认识时抛 `ValueError`）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 """ledger 生成台账测试。"""
@@ -608,12 +619,12 @@ def test_empty_ledger_roundtrips():
     assert Ledger.from_dict(empty.to_dict()).to_dict() == empty.to_dict()
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_ledger.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'minimax_h3_prompt.tools.ledger'`
 
-- [ ] **Step 3: 实现数据结构部分**
+- [x] **Step 3: 实现数据结构部分**
 
 创建 `src/minimax_h3_prompt/tools/ledger.py`：
 
@@ -728,12 +739,12 @@ class Ledger:
         )
 ```
 
-- [ ] **Step 4: 运行测试，确认通过**
+- [x] **Step 4: 运行测试，确认通过**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_ledger.py -v`
 Expected: 5 项全部 PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/minimax_h3_prompt/tools/ledger.py tests/test_ledger.py
@@ -758,7 +769,7 @@ git commit -m "feat(tools): ledger 数据结构与 schema 版本化序列化"
   - `pick_start(videos, edges, *, threshold=MAD_MAYBE) -> Path | None`（起点 = 是别人的 src、但从不是任何边的 dst）
   - `resolve_chain(edges, videos, start, *, threshold=MAD_MAYBE) -> list[tuple[int, Path]]`
 
-- [ ] **Step 1: 写失败测试（追加到 `tests/test_ledger.py`）**
+- [x] **Step 1: 写失败测试（追加到 `tests/test_ledger.py`）**
 
 ```python
 from pathlib import Path
@@ -872,12 +883,12 @@ def test_resolve_chain_ignores_bridges_above_threshold(tmp_path, tmp_video):
     assert [v.name for _, v in resolve_chain(edges, [a, b], a)] == ["a.mp4"]
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_ledger.py -v -k "collect or build_edges or resolve_chain"`
 Expected: FAIL — `ImportError: cannot import name 'BridgeRef'`
 
-- [ ] **Step 3: 实现（追加到 `ledger.py`）**
+- [x] **Step 3: 实现（追加到 `ledger.py`）**
 
 先补 import：
 
@@ -1031,12 +1042,12 @@ def resolve_chain(edges: list[BridgeRef], videos: list[Path], start: Path, *,
     return chain
 ```
 
-- [ ] **Step 4: 运行测试，确认通过**
+- [x] **Step 4: 运行测试，确认通过**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_ledger.py -v`
 Expected: 9 项全部 PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/minimax_h3_prompt/tools/ledger.py tests/test_ledger.py
@@ -1060,7 +1071,7 @@ git commit -m "feat(tools): ledger 建边与链路重建（链延续性优先消
   - `load_override(session_dir: Path) -> dict`
   - `read_plan_segment_count(session_dir: Path) -> int | None`
 
-- [ ] **Step 1: 写失败测试（追加到 `tests/test_ledger.py`）**
+- [x] **Step 1: 写失败测试（追加到 `tests/test_ledger.py`）**
 
 ```python
 import json
@@ -1157,12 +1168,12 @@ def test_read_plan_segment_count_missing_returns_none(tmp_path):
     assert read_plan_segment_count(tmp_path) is None
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_ledger.py -v -k "leftovers or interruptions or override or plan_segment"`
 Expected: FAIL — `ImportError: cannot import name 'apply_override'`
 
-- [ ] **Step 3: 实现（追加到 `ledger.py`）**
+- [x] **Step 3: 实现（追加到 `ledger.py`）**
 
 补 import：`import json`、`from dataclasses import replace`。
 
@@ -1272,12 +1283,12 @@ def apply_override(ledger: Ledger, override: dict) -> Ledger:
     return replace(ledger, shots=shots, discarded=kept)
 ```
 
-- [ ] **Step 4: 运行测试，确认通过**
+- [x] **Step 4: 运行测试，确认通过**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_ledger.py -v`
 Expected: 17 项全部 PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/minimax_h3_prompt/tools/ledger.py tests/test_ledger.py
@@ -1298,7 +1309,7 @@ git commit -m "feat(tools): ledger 废片/中断判定与 override 合并"
   - `build_ledger(session_dir: Path, output_dirs: list[Path], *, threshold: float = MAD_MAYBE, start: Path | None = None) -> Ledger`（纯计算，不落盘）
   - `rebuild(session_dir: Path, output_dirs: list[Path], *, threshold: float = MAD_MAYBE, write: bool = True) -> Ledger`（调 `build_ledger`，`write=True` 时写 `ledger.json`）
 
-- [ ] **Step 1: 写失败测试（追加到 `tests/test_ledger.py`）**
+- [x] **Step 1: 写失败测试（追加到 `tests/test_ledger.py`）**
 
 ```python
 import cv2
@@ -1389,12 +1400,12 @@ def test_rebuild_does_not_touch_override_file(tmp_path, tmp_video):
     assert json.loads(override.read_text(encoding="utf-8"))["shots"]["1"]["video"] == "手改.mp4"
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_ledger.py -v -k "build_ledger or rebuild"`
 Expected: FAIL — `ImportError: cannot import name 'build_ledger'`
 
-- [ ] **Step 3: 实现（追加到 `ledger.py`）**
+- [x] **Step 3: 实现（追加到 `ledger.py`）**
 
 ```python
 from datetime import datetime
@@ -1544,17 +1555,17 @@ from .frame_match import (
 )
 ```
 
-- [ ] **Step 4: 运行测试，确认通过**
+- [x] **Step 4: 运行测试，确认通过**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_ledger.py -v`
 Expected: 23 项全部 PASS
 
-- [ ] **Step 5: 跑全量回归**
+- [x] **Step 5: 跑全量回归**
 
 Run: `./.venv/Scripts/python.exe -m pytest -q`
 Expected: 全部通过
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add src/minimax_h3_prompt/tools/ledger.py tests/test_ledger.py
@@ -1573,7 +1584,7 @@ git commit -m "feat(tools): ledger.rebuild 整合推断流程并落盘 ledger.js
 - Consumes: `ledger.rebuild` / `Ledger`
 - Produces: `python launch.py ledger rebuild <session_dir> --output-dir <dir> [--output-dir ...] [--threshold N] [--json]`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 """ledger CLI 子命令测试。"""
@@ -1619,12 +1630,12 @@ def test_ledger_rebuild_json_flag_emits_json(tmp_path, tmp_video, capsys):
     assert len(payload["shots"]) == 2
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_ledger_cli.py -v`
 Expected: FAIL — `argparse` 报 `invalid choice: 'ledger'`
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 在 `main.py` 的 `build_parser()` 里，`generate_parser` 之后加入：
 
@@ -1684,12 +1695,12 @@ def _run_ledger(args: argparse.Namespace) -> int:
     return 0
 ```
 
-- [ ] **Step 4: 运行测试，确认通过**
+- [x] **Step 4: 运行测试，确认通过**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_ledger_cli.py -v`
 Expected: 4 项全部 PASS
 
-- [ ] **Step 5: 人工验收——跑真实的《古老图书馆》**
+- [x] **Step 5: 人工验收——跑真实的《古老图书馆》**
 
 Run:
 ```bash
@@ -1705,7 +1716,7 @@ Expected 输出（与 2026-09-20 实测一致）：
 [中断] 第 6 段未产出（medium）— 磁盘上无法判定中断原因…
 ```
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add src/minimax_h3_prompt/main.py tests/test_ledger_cli.py
@@ -1723,7 +1734,7 @@ git commit -m "feat(cli): 新增 ledger rebuild 子命令"
 - Consumes: Task 6 的 `build_ledger`
 - Produces: 无（纯测试）
 
-- [ ] **Step 1: 写测试**
+- [x] **Step 1: 写测试**
 
 ```python
 """真实素材回归：把 2026-09-20 的实测结论钉成断言。
@@ -1788,16 +1799,16 @@ def test_reports_plan_expects_six_but_five_produced():
     assert ledger.interruptions[0].type == "unfinished"
 ```
 
-- [ ] **Step 2: 运行测试**
+- [x] **Step 2: 运行测试**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_ledger_real_assets.py -v`
 Expected: 5 项 PASS（若素材不存在则 SKIPPED）
 
-- [ ] **Step 3: 若失败，修 `ledger.py` 直到通过**
+- [x] **Step 3: 若失败，修 `ledger.py` 直到通过**
 
 这里失败说明推断算法与实测不符，**必须修实现，不许改断言**。断言是 2026-09-20 人工核对过的地面真相。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add tests/test_ledger_real_assets.py
@@ -1831,12 +1842,12 @@ git commit -m "test: 真实素材回归——把《古老图书馆》实测结�
   - `sanity_check(diffs: list[float]) -> str | None`（整段几乎不动时返回告警文本）
   - `find_ffmpeg() -> Path`（找不到时抛 `RuntimeError`）
 
-- [ ] **Step 1: 加依赖**
+- [x] **Step 1: 加依赖**
 
 Run: `uv add imageio-ffmpeg`
 Expected: `pyproject.toml` 的 `dependencies` 里出现 `imageio-ffmpeg>=0.6`
 
-- [ ] **Step 2: 写失败测试**
+- [x] **Step 2: 写失败测试**
 
 ```python
 """seam_audit 接缝审计测试。"""
@@ -1903,12 +1914,12 @@ def test_find_ffmpeg_returns_existing_path():
     assert find_ffmpeg().is_file()
 ```
 
-- [ ] **Step 3: 运行测试，确认失败**
+- [x] **Step 3: 运行测试，确认失败**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_seam_audit.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'minimax_h3_prompt.tools.seam_audit'`
 
-- [ ] **Step 4: 实现**
+- [x] **Step 4: 实现**
 
 创建 `src/minimax_h3_prompt/tools/seam_audit.py`：
 
@@ -2023,12 +2034,12 @@ def analyze_shot(frames: list[np.ndarray], shot: int) -> tuple[ShotStill, str | 
     )
 ```
 
-- [ ] **Step 5: 运行测试，确认通过**
+- [x] **Step 5: 运行测试，确认通过**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_seam_audit.py -v`
 Expected: 9 项全部 PASS
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add pyproject.toml uv.lock src/minimax_h3_prompt/tools/seam_audit.py tests/test_seam_audit.py
@@ -2054,7 +2065,7 @@ git commit -m "feat(tools): seam_audit 静止检测原语 + imageio-ffmpeg 依�
   - `promote_baseline(session_dir: Path, report: AuditReport, label: str) -> Path`
   - `render_markdown(report: AuditReport, baseline: dict | None) -> str`
 
-- [ ] **Step 1: 写失败测试（追加到 `tests/test_seam_audit.py`）**
+- [x] **Step 1: 写失败测试（追加到 `tests/test_seam_audit.py`）**
 
 ```python
 import json
@@ -2129,12 +2140,12 @@ def test_load_baseline_missing_returns_none(tmp_path):
     assert load_baseline(tmp_path) is None
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_seam_audit.py -v -k "analyze or baseline or markdown"`
 Expected: FAIL — `ImportError: cannot import name 'analyze'`
 
-- [ ] **Step 3: 实现（追加到 `seam_audit.py`）**
+- [x] **Step 3: 实现（追加到 `seam_audit.py`）**
 
 ```python
 import json
@@ -2361,12 +2372,12 @@ def render_markdown(report: AuditReport, baseline: dict | None) -> str:
     return "\n".join(lines)
 ```
 
-- [ ] **Step 4: 运行测试，确认通过**
+- [x] **Step 4: 运行测试，确认通过**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_seam_audit.py -v`
 Expected: 16 项全部 PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/minimax_h3_prompt/tools/seam_audit.py tests/test_seam_audit.py
@@ -2387,7 +2398,7 @@ git commit -m "feat(tools): seam_audit 合并、报告与基线对比"
   - `python launch.py audit run <session_dir> --output-dir <dir> [--no-merge]`
   - `python launch.py audit promote <session_dir> --label <文字>`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 """audit CLI 子命令测试。"""
@@ -2426,12 +2437,12 @@ def test_audit_run_writes_report(tmp_path, tmp_video, capsys):
     assert "每缝均值" in output
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_audit_cli.py -v`
 Expected: FAIL — `invalid choice: 'audit'`
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 在 `build_parser()` 里追加：
 
@@ -2553,12 +2564,12 @@ def _timestamp() -> str:
     return datetime.now().strftime("%Y-%m-%dT%H%M%S")
 ```
 
-- [ ] **Step 4: 运行测试，确认通过**
+- [x] **Step 4: 运行测试，确认通过**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_audit_cli.py -v`
 Expected: 4 项全部 PASS
 
-- [ ] **Step 5: 人工验收——复现基线**
+- [x] **Step 5: 人工验收——复现基线**
 
 Run:
 ```bash
@@ -2569,7 +2580,7 @@ Run:
 
 Expected: `每缝均值 24.3 帧`、`占全片 14.1%`，与 2026-09-20 手工 spike 的 4.04s / 14.1% 一致（±0.1）。
 
-- [ ] **Step 6: 把基线固化下来**
+- [x] **Step 6: 把基线固化下来**
 
 Run:
 ```bash
@@ -2578,7 +2589,7 @@ Run:
   --label "修复前 @2026-09-18"
 ```
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add src/minimax_h3_prompt/main.py tests/test_audit_cli.py
@@ -2608,7 +2619,7 @@ git commit -m "feat(cli): 新增 audit run / audit promote 子命令"
   - `check_not_discarded(prev_video_name: str, ledger: Ledger) -> list[Issue]`
   - `EXPECTED_VIDEO_SIZE = (1280, 736)`、`SEGMENT_MIN_S = 4.0`、`SEGMENT_MAX_S = 10.0`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 """preflight 预检测试。"""
@@ -2697,12 +2708,12 @@ def test_discarded_prev_video_is_error():
     assert check_not_discarded("new.mp4", ledger) == []
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_preflight.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'minimax_h3_prompt.tools.preflight'`
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 创建 `src/minimax_h3_prompt/tools/preflight.py`：
 
@@ -2808,12 +2819,12 @@ def check_not_discarded(prev_video_name: str, ledger: Ledger) -> list[Issue]:
     return []
 ```
 
-- [ ] **Step 4: 运行测试，确认通过**
+- [x] **Step 4: 运行测试，确认通过**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_preflight.py -v`
 Expected: 9 项全部 PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/minimax_h3_prompt/tools/preflight.py tests/test_preflight.py
@@ -2840,7 +2851,7 @@ git commit -m "feat(tools): preflight 可证规则（输入帧来源/尺寸/时�
   - `check_budget(remaining_tokens: int, tokens_per_shot: int, remaining_shots: int) -> list[Issue]`
   - `TokenMeter.percent_used(budget_tokens: int) -> float`（改 `observability.py`）
 
-- [ ] **Step 1: 写失败测试（追加到 `tests/test_preflight.py`）**
+- [x] **Step 1: 写失败测试（追加到 `tests/test_preflight.py`）**
 
 ```python
 from minimax_h3_prompt.tools.preflight import (
@@ -2897,12 +2908,12 @@ def test_check_budget_silent_when_plenty():
                         remaining_shots=3) == []
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_preflight.py -v -k "frozen or budget or estimate"`
 Expected: FAIL — `ImportError: cannot import name 'FROZEN_WORDS'`
 
-- [ ] **Step 3: 实现（追加到 `preflight.py`）**
+- [x] **Step 3: 实现（追加到 `preflight.py`）**
 
 ```python
 # 这些词让 H3 在段尾把画面冻住；下一段又从同一张冻住的画面长出来，
@@ -3001,12 +3012,12 @@ def test_percent_used_and_remaining():
     assert meter.remaining_tokens(0) == 0
 ```
 
-- [ ] **Step 4: 运行测试，确认通过**
+- [x] **Step 4: 运行测试，确认通过**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_preflight.py tests/test_observability.py -v`
 Expected: 全部 PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/minimax_h3_prompt/tools/preflight.py src/minimax_h3_prompt/observability.py tests/test_preflight.py tests/test_observability.py
@@ -3025,7 +3036,7 @@ git commit -m "feat(tools): preflight 冻结词启发式与 token 预算规则"
 - Consumes: Task 12/13 全部
 - Produces: `python launch.py preflight --input-frame <png> [--prev-video <mp4>] [--session <dir>] [--prompt <file>] [--duration <s>] [--budget-tokens N]`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 """preflight CLI 测试。"""
@@ -3125,12 +3136,12 @@ def test_cli_budget_refrain_reported(tmp_path, tmp_video, capsys):
     assert "还能跑" in capsys.readouterr().out
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_preflight_cli.py -v`
 Expected: FAIL — `invalid choice: 'preflight'`
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 在 `build_parser()` 里追加：
 
@@ -3224,17 +3235,17 @@ def _run_preflight(args: argparse.Namespace) -> int:
     return 0
 ```
 
-- [ ] **Step 4: 运行测试，确认通过**
+- [x] **Step 4: 运行测试，确认通过**
 
 Run: `./.venv/Scripts/python.exe -m pytest tests/test_preflight_cli.py -v`
 Expected: 5 项全部 PASS
 
-- [ ] **Step 5: 全量回归**
+- [x] **Step 5: 全量回归**
 
 Run: `./.venv/Scripts/python.exe -m pytest -q`
 Expected: 原有 134 项 + 新增全部通过，0 失败
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add src/minimax_h3_prompt/main.py tests/test_preflight_cli.py
