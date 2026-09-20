@@ -276,12 +276,18 @@ def test_read_plan_segment_count_missing_returns_none(tmp_path):
 
 # --- Task 6: rebuild 整合与落盘 ---------------------------------------------
 
+import numpy as np
+
 from minimax_h3_prompt.tools.ledger import build_ledger, rebuild
 
 
 def _make_session(tmp_path, tmp_video, *, n_shots: int,
-                  plan_segments: int | None = None):
-    """造一个最小会话：n_shots 个镜头，**尾帧接力**，可选一个废弃初版。"""
+                  plan_segments: int | None = None, bridge_shift: float = 0.0):
+    """造一个最小会话：n_shots 个镜头，**尾帧接力**，可选一个废弃初版。
+
+    ``bridge_shift`` 把桥接帧整体抬高若干灰阶，从而把它与来源尾帧的 mad
+    抬到指定水平（默认 0.0 = 完全同源，与历史行为一致）。用于测阈值边界。
+    """
     session = tmp_path / "sessions" / "主题-abc" / "GEN001"
     (session / "bridge_frames").mkdir(parents=True)
     (session / "frames").mkdir(parents=True)
@@ -306,6 +312,8 @@ def _make_session(tmp_path, tmp_video, *, n_shots: int,
     # 桥接帧：镜头 N（N>=2）的首帧 = 镜头 N-1 的尾帧
     for i in range(2, n_shots + 1):
         tail = read_window(videos[i - 2], window="tail", k=1)[0]
+        if bridge_shift:
+            tail = np.clip(tail + bridge_shift, 0, 255)
         img = cv2.cvtColor(cv2.resize(tail, (128, 72), interpolation=cv2.INTER_NEAREST),
                            cv2.COLOR_GRAY2BGR)
         ok, buf = cv2.imencode(".png", img)
@@ -337,6 +345,36 @@ def test_build_ledger_extracted_frames_are_high_confidence(tmp_path, tmp_video):
     session, out = _make_session(tmp_path, tmp_video, n_shots=3)
     ledger = build_ledger(session, [out])
     assert all(s.input_frame.confidence == "high" for s in ledger.shots[1:])
+
+
+def test_build_ledger_forwards_threshold_to_edge_building(tmp_path, tmp_video):
+    """threshold 必须贯通到 ``build_edges``，否则 CLI 的 --threshold 静默无效。
+
+    桥接帧抬高 7 个灰阶后，它与来源尾帧的 mad 落在默认阈值 5.0 之上。
+    默认阈值下这段接不上（只剩起点镜头）；放大到 20 就该接上。
+    若 threshold 没传到建边（建边恒用 5.0），两次调用都会只剩 1 个镜头。
+    """
+    session, out = _make_session(tmp_path, tmp_video, n_shots=2, bridge_shift=7.0)
+
+    assert len(build_ledger(session, [out]).shots) == 1
+    assert len(build_ledger(session, [out], threshold=20.0).shots) == 2
+
+
+def test_build_ledger_flags_weak_bridge_source_for_review(tmp_path, tmp_video):
+    """桥接帧与来源尾帧的 mad 超过同源阈值时，来源存疑：置信度降为 low 并进 review。
+
+    threshold 放大到 20 后这段链能接上，但 mad≈7 说明它与来源并非同源帧，
+    不能当作可信来源静默放过（设计决定 ④：推断不出就进 review_needed，不猜）。
+    已找到的 source / match_mad 仍照实保留，不隐藏"在用户阈值下确有匹配"。
+    """
+    session, out = _make_session(tmp_path, tmp_video, n_shots=2, bridge_shift=7.0)
+    ledger = build_ledger(session, [out], threshold=20.0)
+
+    frame = ledger.shots[1].input_frame
+    assert frame.confidence == "low"
+    assert frame.source is not None
+    assert frame.match_mad is not None and frame.match_mad >= 5.0
+    assert any("镜头 2" in item for item in ledger.review_needed)
 
 
 def test_build_ledger_reports_interruption_when_plan_longer(tmp_path, tmp_video):

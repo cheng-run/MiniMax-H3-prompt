@@ -42,6 +42,8 @@ class InputFrame:
     kind: str            # "generated"（生图）| "extracted"（视频抽帧）| "unknown"
     source: dict | None  # {"video": "...", "frame": "head" | "tail"}；生图为 None
     match_mad: float | None
+    # 值域只有这三个。classify_match 还会返回 "no_match"，但那是"与来源对不上"，
+    # `_shot_input_frame` 已把它并入 "low" 并记入 review_needed，不让它漏进台账。
     confidence: str      # "high" | "medium" | "low"
 
 
@@ -431,11 +433,15 @@ def _shot_input_frame(session_dir: Path, video: Path, bridge: BridgeRef | None,
         return InputFrame(file=rel, kind=by_size, source=None, match_mad=None,
                           confidence="low")
 
+    distance = bridge.src_mad
     return InputFrame(
         file=rel, kind="extracted",
         source={"video": bridge.src_video.name, "frame": "tail"},
-        match_mad=round(bridge.src_mad, 2) if bridge.src_mad is not None else None,
-        confidence=classify_match(bridge.src_mad) if bridge.src_mad is not None else "low",
+        match_mad=round(distance, 2) if distance is not None else None,
+        # mad 超过同源阈值就是"对不上"：source 与 match_mad 照实保留，
+        # 但置信度降为 "low"，由 build_ledger 记入 review_needed（设计决定 ④）。
+        confidence=("low" if distance is None or distance >= MAD_MAYBE
+                    else classify_match(distance)),
     )
 
 
@@ -447,7 +453,7 @@ def build_ledger(session_dir: Path, output_dirs: list[Path], *,
     → ``resolve_chain`` → 废片/中断判定 → 合并 override。落盘交给 `rebuild`。
     """
     videos = collect_videos(output_dirs)
-    bridges = build_edges(collect_bridges(session_dir), videos)
+    bridges = build_edges(collect_bridges(session_dir), videos, threshold=threshold)
 
     warnings: list[str] = []
     review: list[str] = []
@@ -488,6 +494,17 @@ def build_ledger(session_dir: Path, output_dirs: list[Path], *,
                       [f"输入帧来自 {bridge.src_video.name if bridge and bridge.src_video else '?'}"
                        f" 的尾帧" if bridge else "输入帧无法确定"]),
         ))
+
+    # 输入帧与来源"对不上"（mad 超过同源阈值）的镜头：记入 review，不静默放过。
+    # 这类镜头只在放大 threshold 后才进得来（否则边根本建不起来）。
+    for shot in shots:
+        frame = shot.input_frame
+        if frame.confidence == "low" and frame.source is not None:
+            review.append(
+                f"镜头 {shot.shot}（{shot.video}）的输入帧与来源 "
+                f"{frame.source['video']} 尾帧 mad={frame.match_mad} "
+                f"≥ 同源阈值 {MAD_MAYBE}，来源存疑，请人工确认"
+            )
 
     head_gray: dict[Path, np.ndarray] = {}
     for video in videos:
