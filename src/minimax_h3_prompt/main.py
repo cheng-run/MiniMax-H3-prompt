@@ -40,6 +40,16 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("--language", default=None, help="提示词语言")
     generate_parser.add_argument("--variant", choices=["I2VA", "L2VA", "FL2VA"], default="FL2VA")
     generate_parser.add_argument("--dry-run", action="store_true", help="只解析 brief，不调用模型或落盘")
+
+    ledger_parser = project.add_parser("ledger", help="生成台账：从磁盘重建镜头链路")
+    ledger_sub = ledger_parser.add_subparsers(dest="ledger_command")
+    ledger_rebuild = ledger_sub.add_parser("rebuild", help="重扫并写出 ledger.json")
+    ledger_rebuild.add_argument("session_dir", help="会话目录（含 bridge_frames/ 与 segments/）")
+    ledger_rebuild.add_argument("--output-dir", action="append", required=True,
+                                help="ComfyUI 输出目录，可重复")
+    ledger_rebuild.add_argument("--threshold", type=float, default=5.0,
+                                help="mad 阈值（默认 5.0）")
+    ledger_rebuild.add_argument("--json", action="store_true", help="只输出 JSON，不写文件")
     return parser
 
 
@@ -132,6 +142,40 @@ def _run_generate_prompts(args) -> int:
     return 0
 
 
+def _run_ledger(args: argparse.Namespace) -> int:
+    """从磁盘重建生成台账，只读输入，仅写会话目录下的 ledger.json。"""
+    from pathlib import Path
+
+    from .tools.ledger import rebuild
+
+    session_dir = Path(args.session_dir)
+    if not session_dir.is_dir():
+        print(f"[错误] 会话目录不存在：{session_dir}")
+        return 1
+    if getattr(args, "ledger_command", None) != "rebuild":
+        print("[错误] 请指定子命令，例如：ledger rebuild <session_dir> --output-dir <dir>")
+        return 1
+
+    write = not args.json
+    ledger = rebuild(session_dir, [Path(d) for d in args.output_dir],
+                     threshold=args.threshold, write=write)
+    if args.json:
+        print(json.dumps(ledger.to_dict(), ensure_ascii=False, indent=2))
+        return 0
+
+    print(f"镜头 {len(ledger.shots)} 个：" + " → ".join(s.video for s in ledger.shots))
+    for item in ledger.discarded:
+        print(f"[废片] {item.video}（{item.confidence}）— {item.reason}")
+    for item in ledger.interruptions:
+        print(f"[中断] 第 {item.at_shot} 段未产出（{item.confidence}）— {item.hint}")
+    for note in ledger.review_needed:
+        print(f"[待确认] {note}")
+    for note in ledger.warnings:
+        print(f"[警告] {note}")
+    print(f"已写出：{session_dir / 'ledger.json'}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -139,6 +183,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_create_video(args)
     if args.command == "generate-prompts":
         return _run_generate_prompts(args)
+    if args.command == "ledger":
+        return _run_ledger(args)
 
     if not args.brief:
         # 面向最终用户的两阶段向导：先生图提示词 → 人工生图 → 提交图片 → 视频提示词。
