@@ -113,7 +113,7 @@ def test_check_frozen_words_is_warning_not_error():
 def test_suggest_defrost_replaces_hold_verbs():
     out = suggest_defrost("双手停在巨书封面上")
     assert "停在" not in out
-    assert "停在" in suggest_defrost.__doc__ or True  # 只要求产出可读改写
+    assert "刚落在" in out      # 换成了 _DEFROST_REPLACEMENTS 里的"活"词
 
 
 def test_estimate_remaining_shots():
