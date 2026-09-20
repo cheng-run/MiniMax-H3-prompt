@@ -14,9 +14,12 @@
 """
 from __future__ import annotations
 
+import json
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
+
+import numpy as np
 
 from .frame_match import (
     MAD_MAYBE,
@@ -252,3 +255,120 @@ def resolve_chain(edges: list[BridgeRef], videos: list[Path], start: Path, *,
         chain.append((shot_no, chosen))
         current = chosen
     return chain
+
+
+# --- 废片 / 中断判定 + 人工修正合并 -----------------------------------------
+
+OVERRIDE_FILENAME = "ledger.override.json"
+
+
+def read_plan_segment_count(session_dir: Path) -> int | None:
+    """读 ``segments/plan.json`` 的分段数。读不到返回 None。"""
+    plan_path = session_dir / "segments" / "plan.json"
+    if not plan_path.is_file():
+        return None
+    try:
+        data = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return len(data) if isinstance(data, list) else None
+
+
+def classify_leftovers(
+    videos: list[Path],
+    chain_videos: set[Path],
+    head_gray: dict[Path, np.ndarray],
+) -> tuple[list[Discarded], list[str]]:
+    """把没进链的视频分成「废弃初版」和「判不了」。
+
+    ``head_gray`` 是 {视频: 首帧灰度小图}；判不了的一律进第二返回值（review）。
+
+    「相似」= 与某个**链上**视频的首帧 mad < ``MAD_SAME``。多个候选同时满足时
+    取 mad 最小的（真正与它共用输入图的那一个）；mad 相同再取 mtime 更晚的
+    —— 与 `resolve_chain` 的 tie-break 一致。不能取"遍历到的第一个"：
+    同一次生成的两次尝试首帧完全一样，先遍历到谁纯属字典序巧合。
+    """
+    from .frame_match import MAD_SAME, mad
+
+    leftovers = [v for v in videos if v not in chain_videos]
+    if not leftovers:
+        return [], []
+
+    discarded: list[Discarded] = []
+    review: list[str] = []
+    for video in leftovers:
+        twin: Path | None = None
+        best: tuple[float, float] | None = None   # (mad, -mtime)：越小越优
+        probe = head_gray.get(video)
+        if probe is not None:
+            for other, other_probe in head_gray.items():
+                if other == video or other not in chain_videos:
+                    continue
+                distance = mad(probe, other_probe)
+                if distance >= MAD_SAME:
+                    continue
+                key = (distance, -_safe_mtime(other))
+                if best is None or key < best:
+                    best = key
+                    twin = other
+        if twin is not None:
+            discarded.append(Discarded(
+                video=video.name, video_dir=video.parent.name, reason="未被任何桥接帧引用",
+                replaced_by=twin.name, confidence="high",
+                evidence=[f"{video.name} 首帧与 {twin.name} 首帧 mad<{MAD_SAME}"
+                          "（同一输入帧的两次生成）"],
+            ))
+        else:
+            discarded.append(Discarded(
+                video=video.name, video_dir=video.parent.name, reason="未被任何桥接帧引用",
+                replaced_by=None, confidence="medium",
+                evidence=["找不到与它首帧相似的链上视频，无法确认是废弃初版"],
+            ))
+            review.append(f"{video.name} 未被引用且无法确认性质，请人工确认")
+    return discarded, review
+
+
+def detect_interruptions(shots: list[Shot], plan_segments: int | None) -> list[Interruption]:
+    """plan 期望的段数比实际镜头多 → 报中断，不猜原因。"""
+    if plan_segments is None or plan_segments <= len(shots):
+        return []
+    missing = list(range(len(shots) + 1, plan_segments + 1))
+    return [Interruption(
+        at_shot=missing[0],
+        type="unfinished",
+        evidence=[f"plan.json 期望 {plan_segments} 段", f"实际只有 {len(shots)} 个镜头"],
+        confidence="medium",
+        hint="磁盘上无法判定中断原因（配额 / 报错 / 主动停止），需人工确认",
+    )]
+
+
+def load_override(session_dir: Path) -> dict:
+    """读 ``ledger.override.json``。不存在或坏了都返回空 dict。"""
+    path = session_dir / OVERRIDE_FILENAME
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def apply_override(ledger: Ledger, override: dict) -> Ledger:
+    """把人工修正叠到推断结果上。返回新对象，不就地修改。"""
+    if not override:
+        return ledger
+
+    shots = []
+    for shot in ledger.shots:
+        patch = (override.get("shots") or {}).get(str(shot.shot)) or {}
+        shots.append(replace(shot, **{k: v for k, v in patch.items()
+                                      if k in {"video", "video_dir", "status"}})
+                     if patch else shot)
+
+    override_discarded = override.get("discarded") or {}
+    kept = [d for d in ledger.discarded if d.video not in override_discarded]
+    for video, reason in override_discarded.items():
+        kept.append(Discarded(video=video, video_dir="", reason=str(reason),
+                              replaced_by=None, confidence="high",
+                              evidence=["来自 ledger.override.json"]))
+    return replace(ledger, shots=shots, discarded=kept)

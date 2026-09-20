@@ -176,3 +176,99 @@ def test_resolve_chain_ignores_bridges_above_threshold(tmp_path, tmp_video):
     b = tmp_video("b.mp4")
     edges = [BridgeRef(2, tmp_path / "b2.png", a, 40.0, [(b, 0.5)])]
     assert [v.name for _, v in resolve_chain(edges, [a, b], a)] == ["a.mp4"]
+
+
+# --- Task 5: 废片 / 中断判定 + override 合并 ---------------------------------
+
+import json
+
+from minimax_h3_prompt.tools.ledger import (
+    apply_override,
+    classify_leftovers,
+    detect_interruptions,
+    load_override,
+    read_plan_segment_count,
+)
+
+
+def test_classify_leftovers_marks_similar_unreferenced_as_discarded(tmp_path, tmp_video):
+    """首帧几乎相同的两个视频，只有一个进了链 → 另一个是废弃初版，高置信度。"""
+    from minimax_h3_prompt.tools.frame_match import read_window
+
+    first = tmp_video("00001.mp4")
+    kept = tmp_video("00004.mp4")
+    twin = tmp_video("00003.mp4")   # 与 kept 用同一张输入图，首帧几乎相同
+    head_gray = {v: read_window(v, window="head", k=1)[0] for v in (first, kept, twin)}
+
+    discarded, review = classify_leftovers([first, kept, twin], {first, kept}, head_gray)
+    assert [d.video for d in discarded] == ["00003.mp4"]
+    assert discarded[0].confidence == "high"
+    assert discarded[0].replaced_by == "00004.mp4"
+    assert review == []
+
+
+def test_classify_leftovers_flags_unknown_as_review(tmp_path, tmp_video):
+    """找不到相似视频 → 中等置信度 + 进 review_needed，不猜。"""
+    from minimax_h3_prompt.tools.frame_match import read_window
+
+    only = tmp_video("solo.mp4")
+    head_gray = {only: read_window(only, window="head", k=1)[0]}
+    discarded, review = classify_leftovers([only], set(), head_gray)
+    assert [d.confidence for d in discarded] == ["medium"]
+    assert any("solo.mp4" in r for r in review)
+
+
+def test_classify_leftovers_returns_empty_when_nothing_left_over(tmp_path, tmp_video):
+    from minimax_h3_prompt.tools.frame_match import read_window
+
+    only = tmp_video("only.mp4")
+    head_gray = {only: read_window(only, window="head", k=1)[0]}
+    assert classify_leftovers([only], {only}, head_gray) == ([], [])
+
+
+def test_detect_interruptions_reports_missing_segment():
+    shots = [Shot(shot=i, video=f"{i}.mp4", video_dir="d", frames=10,
+                  duration_s=1.0, generated_at="", input_frame=InputFrame(
+                      file="", kind="unknown", source=None, match_mad=None,
+                      confidence="low"), status="final") for i in range(1, 6)]
+    interruptions = detect_interruptions(shots, plan_segments=6)
+    assert len(interruptions) == 1
+    assert interruptions[0].at_shot == 6
+    assert interruptions[0].type == "unfinished"
+
+
+def test_detect_interruptions_none_when_counts_match():
+    shots = [Shot(shot=1, video="1.mp4", video_dir="d", frames=10, duration_s=1.0,
+                  generated_at="", input_frame=InputFrame(
+                      file="", kind="unknown", source=None, match_mad=None,
+                      confidence="low"), status="final")]
+    assert detect_interruptions(shots, plan_segments=1) == []
+
+
+def test_apply_override_replaces_shot_video():
+    ledger = _sample_ledger()
+    patched = apply_override(ledger, {"shots": {"1": {"video": "新.mp4"}}})
+    assert patched.shots[0].video == "新.mp4"
+    assert ledger.shots[0].video == "a.mp4", "原对象不应被就地修改"
+
+
+def test_load_override_missing_file_returns_empty(tmp_path):
+    assert load_override(tmp_path) == {}
+
+
+def test_load_override_reads_json(tmp_path):
+    (tmp_path / "ledger.override.json").write_text(
+        json.dumps({"shots": {"1": {"video": "x.mp4"}}}), encoding="utf-8")
+    assert load_override(tmp_path)["shots"]["1"]["video"] == "x.mp4"
+
+
+def test_read_plan_segment_count(tmp_path):
+    seg = tmp_path / "segments"
+    seg.mkdir()
+    (seg / "plan.json").write_text(json.dumps([{"index": 0}, {"index": 1}]),
+                                   encoding="utf-8")
+    assert read_plan_segment_count(tmp_path) == 2
+
+
+def test_read_plan_segment_count_missing_returns_none(tmp_path):
+    assert read_plan_segment_count(tmp_path) is None
