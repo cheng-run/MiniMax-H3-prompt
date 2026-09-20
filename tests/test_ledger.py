@@ -362,3 +362,53 @@ def test_rebuild_does_not_touch_override_file(tmp_path, tmp_video):
                         encoding="utf-8")
     rebuild(session, [out])
     assert json.loads(override.read_text(encoding="utf-8"))["shots"]["1"]["video"] == "手改.mp4"
+
+
+# --- resolve_chain 消歧优先级：延续性 > 生成时间 ------------------------------
+# 既有那个 `prefers_continuation_over_time` 没有区分力：它构造的 continuer
+# 恰好 mtime 也更晚，删掉「延续性优先」那一行它照样过。下面两条把两个优先级
+# 各自单独钉死。
+
+import os
+import time
+
+
+def test_resolve_chain_beats_mtime_when_continuation_disagrees(tmp_path, tmp_video):
+    """延续性优先于生成时间：不延续的候选 mtime 明显更晚，也不能选它。
+
+    ``dead_end`` 的 mtime 被拨到 1 小时之后 —— 只按 mtime 排序一定会选错
+    它；能选对 ``continuer`` 说明「候选的尾帧还被别的桥接帧引用」这一条
+    优先级更高。这正是 00003 / 00004 的真实情形。
+    """
+    first = tmp_video("00001.mp4", frames=24)
+    dead_end = tmp_video("00003.mp4", frames=24)
+    continuer = tmp_video("00004.mp4", frames=24)
+    last = tmp_video("00005.mp4", frames=24)
+    later = time.time() + 3600
+    os.utime(dead_end, (later, later))
+
+    edges = [
+        BridgeRef(2, tmp_path / "b2.png", first, 0.5,
+                  [(dead_end, 0.88), (continuer, 0.88)]),   # 同分候选，一次给全
+        BridgeRef(3, tmp_path / "b3.png", continuer, 0.5, [(last, 0.5)]),
+    ]
+    chain = resolve_chain(edges, [first, dead_end, continuer, last], first)
+    assert [v.name for _, v in chain] == ["00001.mp4", "00004.mp4", "00005.mp4"]
+
+
+def test_resolve_chain_falls_back_to_mtime_when_nothing_continues(tmp_path, tmp_video):
+    """两个候选都不延续（都不是任何边的 src）时，退到第二优先级：取 mtime 更晚的。
+
+    候选列表故意把 ``older`` 放前面，确保选对靠的是排序而不是遍历顺序。
+    """
+    first = tmp_video("00001.mp4", frames=24)
+    older = tmp_video("00002.mp4", frames=24)
+    newer = tmp_video("00003.mp4", frames=24)
+    base = time.time()
+    os.utime(older, (base - 600, base - 600))
+    os.utime(newer, (base, base))
+
+    edges = [BridgeRef(2, tmp_path / "b2.png", first, 0.5,
+                       [(older, 0.88), (newer, 0.88)])]
+    chain = resolve_chain(edges, [first, older, newer], first)
+    assert [v.name for _, v in chain] == ["00001.mp4", "00003.mp4"]
