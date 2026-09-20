@@ -50,6 +50,16 @@ def build_parser() -> argparse.ArgumentParser:
     ledger_rebuild.add_argument("--threshold", type=float, default=5.0,
                                 help="mad 阈值（默认 5.0）")
     ledger_rebuild.add_argument("--json", action="store_true", help="只输出 JSON，不写文件")
+
+    audit_parser = project.add_parser("audit", help="接缝审计：拼接并量化接缝静止")
+    audit_sub = audit_parser.add_subparsers(dest="audit_command")
+    audit_run = audit_sub.add_parser("run", help="跑一次审计并写出报告")
+    audit_run.add_argument("session_dir")
+    audit_run.add_argument("--output-dir", action="append", required=True)
+    audit_run.add_argument("--no-merge", action="store_true", help="只分析不合并视频")
+    audit_promote = audit_sub.add_parser("promote", help="把最近一次结果提升为基线")
+    audit_promote.add_argument("session_dir")
+    audit_promote.add_argument("--label", required=True, help="基线标签，如「修复前」")
     return parser
 
 
@@ -176,6 +186,103 @@ def _run_ledger(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_audit(args: argparse.Namespace) -> int:
+    """接缝审计：从 ledger 取镜头顺序，拼接并量化。"""
+    import json
+    from pathlib import Path
+
+    from .tools import seam_audit
+    from .tools.ledger import rebuild
+    from .tools.seam_audit import AuditReport, SeamResult, ShotStill, promote_baseline
+
+    session_dir = Path(args.session_dir)
+    if not session_dir.is_dir():
+        print(f"[错误] 会话目录不存在：{session_dir}")
+        return 1
+    command = getattr(args, "audit_command", None)
+    out_dir = session_dir / "audit"
+
+    if command == "promote":
+        latest = out_dir / "latest.json"
+        if not latest.is_file():
+            print("[错误] 还没有审计结果，请先跑 audit run")
+            return 1
+        raw = json.loads(latest.read_text(encoding="utf-8"))
+        report = AuditReport(
+            shots=[ShotStill(**s) for s in raw["shots"]],
+            seams=[SeamResult(**s) for s in raw["seams"]],
+            duration_s=raw["duration_s"], still_seconds=raw["still_seconds"],
+            still_ratio=raw["still_ratio"],
+            per_seam_avg_frames=raw["per_seam_avg_frames"],
+            warnings=raw.get("warnings", []), merged_path=raw.get("merged_path", ""))
+        path = promote_baseline(session_dir, report, args.label)
+        print(f"基线已写出：{path}")
+        return 0
+
+    if command != "run":
+        print("[错误] 请指定子命令：audit run / audit promote")
+        return 1
+
+    output_dirs = [Path(d) for d in args.output_dir]
+    ledger = rebuild(session_dir, output_dirs)
+    videos = _resolve_videos(ledger, output_dirs)
+    if not videos:
+        print("[错误] ledger 里没有可用的镜头，无法审计")
+        return 1
+
+    report = seam_audit.analyze(videos, out_dir, merge=not args.no_merge)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    baseline = seam_audit.load_baseline(session_dir)
+    report_path = out_dir / f"{_timestamp()}.md"
+    report_path.write_text(seam_audit.render_markdown(report, baseline),
+                           encoding="utf-8")
+    (out_dir / "latest.json").write_text(
+        json.dumps({"shots": [vars(s) for s in report.shots],
+                    "seams": [vars(s) for s in report.seams],
+                    "duration_s": report.duration_s,
+                    "still_seconds": report.still_seconds,
+                    "still_ratio": report.still_ratio,
+                    "per_seam_avg_frames": report.per_seam_avg_frames,
+                    "warnings": report.warnings,
+                    "merged_path": report.merged_path},
+                   ensure_ascii=False, indent=2), encoding="utf-8")
+
+    print(f"镜头 {len(report.shots)} 个 ｜ 每缝均值 "
+          f"{report.per_seam_avg_frames:.1f} 帧 ｜ 占全片 "
+          f"{report.still_ratio * 100:.1f}%")
+    if baseline:
+        for name, base, cur, delta in seam_audit.compare_to_baseline(report, baseline):
+            print(f"  {name}: 基线 {base} → 本次 {cur}（{delta}）")
+    for note in report.warnings:
+        print(f"[警告] {note}")
+    print(f"报告：{report_path}")
+    return 0
+
+
+def _resolve_videos(ledger, output_dirs) -> list:
+    """把 ledger 里的镜头名解析回真实文件路径。"""
+    from pathlib import Path
+
+    index: dict[str, Path] = {}
+    for directory in output_dirs:
+        if directory.is_dir():
+            for path in directory.rglob("*.mp4"):
+                index.setdefault(path.name, path)
+    resolved = []
+    for shot in ledger.shots:
+        path = index.get(shot.video)
+        if path is not None:
+            resolved.append(path)
+    return resolved
+
+
+def _timestamp() -> str:
+    """当前本地时间戳，用于审计报告文件名。"""
+    from datetime import datetime
+
+    return datetime.now().strftime("%Y-%m-%dT%H%M%S")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -185,6 +292,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_generate_prompts(args)
     if args.command == "ledger":
         return _run_ledger(args)
+    if args.command == "audit":
+        return _run_audit(args)
 
     if not args.brief:
         # 面向最终用户的两阶段向导：先生图提示词 → 人工生图 → 提交图片 → 视频提示词。
