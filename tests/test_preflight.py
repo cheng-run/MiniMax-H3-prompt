@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import cv2
+import numpy as np
 import pytest
 
 from minimax_h3_prompt.tools.frame_match import read_window
@@ -29,7 +30,9 @@ def _write_png(path, image):
 
 def _probe_from_tail(video, size=(1280, 736)):
     tail = read_window(video, window="tail", k=1)[0]
-    return cv2.cvtColor(cv2.resize(tail, size, interpolation=cv2.INTER_NEAREST),
+    # read_window 返回 float32；PNG 编码器只收 8-bit，显式转换避免 OpenCV fallback 警告
+    return cv2.cvtColor(cv2.resize(tail.astype(np.uint8), size,
+                                   interpolation=cv2.INTER_NEAREST),
                         cv2.COLOR_GRAY2BGR)
 
 

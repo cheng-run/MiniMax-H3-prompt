@@ -84,7 +84,9 @@ from minimax_h3_prompt.tools.ledger import (
 def _probe_from_tail(video, size=(128, 72)):
     """取某视频尾帧，放大成 BGR 当作"桥接帧"。"""
     tail = read_window(video, window="tail", k=1)[0]
-    return cv2.cvtColor(cv2.resize(tail, size, interpolation=cv2.INTER_NEAREST),
+    # read_window 返回 float32；PNG 编码器只收 8-bit，显式转换避免 OpenCV fallback 警告
+    return cv2.cvtColor(cv2.resize(tail.astype(np.uint8), size,
+                                   interpolation=cv2.INTER_NEAREST),
                         cv2.COLOR_GRAY2BGR)
 
 
@@ -304,8 +306,10 @@ def _make_session(tmp_path, tmp_video, *, n_shots: int,
 
     # frames/first.png：镜头1 的生图输入（非视频尺寸，用 4 倍放大模拟）
     first = read_window(videos[0], window="head", k=1)[0]
-    big = cv2.resize(first, (512, 288), interpolation=cv2.INTER_NEAREST)
-    ok, buf = cv2.imencode(".png", cv2.cvtColor(big, cv2.COLOR_GRAY2BGR))
+    # read_window 返回 float32；PNG 编码器只收 8-bit，显式转换避免 OpenCV fallback 警告
+    first8 = cv2.cvtColor(first.astype(np.uint8), cv2.COLOR_GRAY2BGR)
+    big = cv2.resize(first8, (512, 288), interpolation=cv2.INTER_NEAREST)
+    ok, buf = cv2.imencode(".png", big)
     assert ok
     (session / "frames" / "first.png").write_bytes(buf.tobytes())
 
@@ -314,7 +318,8 @@ def _make_session(tmp_path, tmp_video, *, n_shots: int,
         tail = read_window(videos[i - 2], window="tail", k=1)[0]
         if bridge_shift:
             tail = np.clip(tail + bridge_shift, 0, 255)
-        img = cv2.cvtColor(cv2.resize(tail, (128, 72), interpolation=cv2.INTER_NEAREST),
+        img = cv2.cvtColor(cv2.resize(tail.astype(np.uint8), (128, 72),
+                                      interpolation=cv2.INTER_NEAREST),
                            cv2.COLOR_GRAY2BGR)
         ok, buf = cv2.imencode(".png", img)
         assert ok

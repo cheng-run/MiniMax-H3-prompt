@@ -1,6 +1,8 @@
 """preflight CLI 测试。"""
 from __future__ import annotations
 
+import numpy as np
+
 from minimax_h3_prompt.main import build_parser, main
 
 
@@ -17,7 +19,8 @@ def test_cli_clean_input_returns_zero(tmp_path, tmp_video, capsys):
 
     prev = tmp_video("prev.mp4")
     tail = read_window(prev, window="tail", k=1)[0]
-    img = cv2.cvtColor(cv2.resize(tail, (1280, 736), interpolation=cv2.INTER_NEAREST),
+    img = cv2.cvtColor(cv2.resize(tail.astype(np.uint8), (1280, 736),
+                                  interpolation=cv2.INTER_NEAREST),
                        cv2.COLOR_GRAY2BGR)
     frame_path = tmp_path / "shot-02-start.png"
     ok, buf = cv2.imencode(".png", img)
@@ -38,7 +41,8 @@ def test_cli_mismatched_input_returns_one(tmp_path, tmp_video, capsys):
     prev = tmp_video("prev.mp4")
     other = tmp_video("other.mp4", base=(200, 200, 200))
     tail = read_window(other, window="tail", k=1)[0]
-    img = cv2.cvtColor(cv2.resize(tail, (1280, 736), interpolation=cv2.INTER_NEAREST),
+    img = cv2.cvtColor(cv2.resize(tail.astype(np.uint8), (1280, 736),
+                                  interpolation=cv2.INTER_NEAREST),
                        cv2.COLOR_GRAY2BGR)
     frame_path = tmp_path / "shot-02-start.png"
     ok, buf = cv2.imencode(".png", img)
@@ -58,7 +62,8 @@ def test_cli_frozen_word_warns_but_passes(tmp_path, tmp_video, capsys):
 
     prev = tmp_video("prev.mp4")
     tail = read_window(prev, window="tail", k=1)[0]
-    img = cv2.cvtColor(cv2.resize(tail, (1280, 736), interpolation=cv2.INTER_NEAREST),
+    img = cv2.cvtColor(cv2.resize(tail.astype(np.uint8), (1280, 736),
+                                  interpolation=cv2.INTER_NEAREST),
                        cv2.COLOR_GRAY2BGR)
     frame_path = tmp_path / "shot-02-start.png"
     ok, buf = cv2.imencode(".png", img)
@@ -80,7 +85,8 @@ def test_cli_budget_refrain_reported(tmp_path, tmp_video, capsys):
 
     prev = tmp_video("prev.mp4")
     tail = read_window(prev, window="tail", k=1)[0]
-    img = cv2.cvtColor(cv2.resize(tail, (1280, 736), interpolation=cv2.INTER_NEAREST),
+    img = cv2.cvtColor(cv2.resize(tail.astype(np.uint8), (1280, 736),
+                                  interpolation=cv2.INTER_NEAREST),
                        cv2.COLOR_GRAY2BGR)
     frame_path = tmp_path / "shot-02-start.png"
     ok, buf = cv2.imencode(".png", img)
