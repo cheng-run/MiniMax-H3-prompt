@@ -136,9 +136,6 @@ def split_shots_from_prompt(prompt: str, total_duration: float | None = None) ->
         end = inner[index + 1].start() if index + 1 < len(inner) else len(body)
         block = body[match.start():end].strip()
         block = _TIMESTAMP_AFTER_TAG.sub(r"\1 ", block)  # 单镜头视频从 0 秒开始
-        # 防波纹兜底：机械拆分不经过 LLM 重写，直接附加边缘稳定约束句
-        if EDGE_STABILITY_SENTENCE not in block:
-            block = block.rstrip() + " " + EDGE_STABILITY_SENTENCE
         segment_header = header
         if index > 0:
             # `(from [Shot N])` 绑定行指向原整片的 Picture 布局，后续段的头帧由桥接帧替代，剔除避免误导
@@ -249,24 +246,18 @@ def is_degenerate_durations(durations: list[float]) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 按段重写：soundscape/music 裁到本段时间窗，生成合规的独立单镜头提示词
+# 按段重写：soundscape/music 按段重写为英文摘要句，生成合规的独立单镜头提示词
 # ---------------------------------------------------------------------------
-
-# 尾帧保边约束：上一段尾帧会剥下来作为下一段首帧参考，生成端出现人物轮廓
-# 波纹/边缘抖动会直接导致下一段人物识别失败；此句无条件注入每段提示词。
-EDGE_STABILITY_SENTENCE = (
-    "全程保持每个人物的轮廓、面部边缘与服装边缘清晰稳定，无波纹、扭曲或边缘抖动。"
-)
 
 _REWRITE_INSTRUCTION = f"""你是 H3 视频提示词工程师。把整条视频的提示词重写为**只覆盖指定时间窗的一段独立单镜头提示词**。
 
 输入：完整提示词（多镜头）+ 本段时间窗（秒）。
-输出格式（严格遵守 H3 base 规范，只输出提示词本身，不要任何解释）：
-- 第一行指令行：说明本段时长（**整数秒**，ComfyUI H3 时长选项只有 4-10 秒整数档）与镜头数（1），中文；
+输出格式（严格遵守官方 H3 base-en.txt 规范，只输出提示词本身，不要任何解释）：
+- 第一行 I2VA 对齐指令（逐字符）：For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.
 - 空一行；
-- integrated_multimodal_description: 只含本段的一个 [Shot 1] 块
+- integrated_multimodal_description: 只含本段的一个 [Shot 1] 块，英文
   （沿用原 [Shot N] 的画面/运镜/表演描述，时间戳归零，不得虚构原镜头外的内容）；
-  镜头块结尾必须原样追加这句边缘稳定约束：{EDGE_STABILITY_SENTENCE}
+  实体外观只写在首次出场的 Shot；不写 GLOBAL_LOCK/BRIDGE_FROM/END_HOOK/防波纹咒语/时长句；
 - overall_soundscape: **为本段重写**（不是从整条裁切，按段重写）：1-4 句 English 连续段落，
   描述本段时间窗内的环境声与动作声，无时间戳（官方 §4.6）；
 - non_diegetic_music: **为本段重写**：1-3 句 English，或无声时只写 N/A，无时间戳（官方 §4.7）。
@@ -305,37 +296,36 @@ def rewrite_segment_prompt(
 # v2：规划式分段（planner 给整秒边界 + 剧情钩子；每段独立细写）
 # ---------------------------------------------------------------------------
 
-_SEGMENT_V2_INSTRUCTION = f"""你是 H3 视频提示词的"分段编剧"。为长视频的其中一个 4-10 秒执行段写**可以直接喂给 MiniMax H3 的完整中文提示词**（字段名 / Shot 标记仍用英文）。
+_SEGMENT_V2_INSTRUCTION = """你是 H3 视频提示词的"分段编剧"。为长视频的其中一个 4-10 秒执行段写**可以直接喂给 MiniMax H3 的完整英文提示词**（严格官方 base-en.txt 格式；对白、歌词、画面可见文字保留原文语言）。
 
 H3 是执行型模型：你写什么它就做什么，含糊等于失控；把**不属于本段时间窗的事件**写进任何字段，H3 就会把它们提前演出来。要求：
 
 ## ⚠️ 时间窗纪律（最高优先级）
 - 你是给「整片 N 秒中的第 [start-end] 秒」写提示词
-- 你只负责写**本段时间窗发生的事**。整片提示词文案/分镜表/人物设定里出现的、发生在其他时间窗的事件（比如整片第 N1 秒才会破碎的窗户、第 N2 秒的转折动作），**本段一个字都不能出现**
-- 即使 GLOBAL_LOCK 里列了未来会发生的事情（比如 Scene 4 撞窗户），你也只能写"当下"的物理/人物/场景状态（人物穿着、表情、环境布光），**不能写剧情动作和事件**
+- 你只负责写**本段时间窗发生的事**。分镜表/人物设定里出现的、发生在其他时间窗的事件（比如整片第 N1 秒才会破碎的窗户、第 N2 秒的转折动作），**本段一个字都不能出现**
 - 违反这条 = 本段作废
 
-## 结构（严格遵守）
-第一行：This is a {{N}}-second continuous shot. （N = 本段秒数）
-空一行后按字段：
-1. `GLOBAL_LOCK:` 只写**与剧情无关的身份属性**（人物长相/服装/发型/固定道具材质/画面整体色调），每条一行，**剔除所有动作、事件、"Scene N"发展**（它们属于其他时间窗，不归你管）
-2. `BRIDGE_FROM:` 本段**第 0 帧的画面状态**——一句话锚住位置/姿态/光线（不超过 40 字，用名词性描述，"少年背对镜头站在门口"），然后**立即**起动作：00:00.100 之内必须开始本段的第一个新动作。不要把结尾画面再"演一遍"——它由桥接帧负责精确复现，文字只需衔接。
-3. `integrated_multimodal_description:` 本段剧情，分 [Shot 1]、[Shot 2]...。**时间戳必须是 0.1 秒精度的小数**（如 `At 00:01.200`），剧情事件按发生时刻切开，不要一段话写完：
-   - 例：`0.0-0.5s: 她僵立在原地。At 00:00.600，她左手抬起点捏住背带。At 00:01.200，镜头开始缓慢前推……`
-   - 只写本段内的剧情动作；**任何属于其他段的未发生动作/物品/场景元素都不许出现**
-   - 镜头块末必须原样追加：{EDGE_STABILITY_SENTENCE}
-4. `overall_soundscape:` **为本段重写**英文摘要句（官方 §4.6）：1-4 句 English 连续段落，
-   描述本段时间窗内的环境声与动作声；**无时间戳**；英文（对白/画面文字保留原文）。
-5. `non_diegetic_music:` **为本段重写**英文摘要句（官方 §4.7）：1-3 句 English，
-   写观众能听到、角色听不到的配乐（乐器/速度/节奏）；无声时只写 `N/A`；**无时间戳**。
-6. `END_HOOK:` 本段结束时"动作刚落定那一瞬"的具象姿态（谁+位置+朝向+刚做完什么），比如"她刚把杯子放回桌面，手还搭在杯把上"。**绝对禁止**写"静止/定格/停住不动"这类词——静态锚定应由剥取的尾帧完成，提示词再冻结一遍画面会让两个段之间出现 1 秒以上的明显停顿。
+## 结构（严格官方 base-en.txt 格式，全部英文）
+第一行 I2VA 对齐指令（逐字符）：
+`For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.`
+空一行后：
+1. `integrated_multimodal_description:` 本段剧情，**默认只有 [Shot 1] 一个镜头块**（段内切镜是显式例外，仅景别跳变等确有必要时）。
+   - 开头先声明风格与初始构图（如 `Live-action, cinematic, a wide shot frames ...`），描述画面必须与 Picture 1（本段首帧参考图/桥接帧）一致——图片是唯一事实源，文字只做锚定，不要描述图片里不存在的状态
+   - **实体外观只写在它首次出场的 Shot 内**，一次写全；未出场的实体不写外观，必要时只用一句否定（如 `No cat is visible in the frame.`）
+   - 时间戳 `At 00:XX.XXX` 写进句子内（如 `At 00:02.500, the glass door is slowly pushed open...`）
+   - **最后一个时间戳距段尾必须 ≥1s**——关键出场节拍要留展开空间，不许压在段尾
+   - 段尾状态自然收在最后一个 Shot 的末句（画面停在自然落定的一瞬，不写"静止/定格"）
+2. `overall_soundscape:` **为本段重写**英文摘要句（官方 §4.6）：1-4 句 English 连续段落，描述本段的环境声与动作声；**无时间戳**。
+3. `non_diegetic_music:` **为本段重写**英文摘要句（官方 §4.7）：1-3 句 English，写观众能听到、角色听不到的配乐（乐器/速度/节奏）；无声时只写 `N/A`；**无时间戳**。
 
-## 禁止
-- 不要把未来段的动作提前写进本段（即使 GLOBAL_LOCK 里有描述）
-- 不要用大段落笼统描述"5 秒里发生了什么"
-- 不要省略 GLOBAL_LOCK 里的非剧情身份字段
-- 不要改动剧情**时间**（段内剧情的时间戳必须落在 [0, N) 区间）
-- 不要输出任何解释/markdown / 前言；只输出提示词纯正文
+## 禁止（官方 base-en.txt 不存在的自创结构，出现即作废）
+- 不写 `GLOBAL_LOCK:` 集中定义区（实体外观只进首次出场的 Shot）
+- 不写 `BRIDGE_FROM:` 段首状态字段（段首由 Picture 1 锚定句表达）
+- 不写 `END_HOOK:` 段尾状态字段（段尾自然收句）
+- 不写 `This is a N-second continuous shot.` 时长句（时长由对齐指令承载）
+- 不写防波纹咒语（"保持轮廓…无波纹、扭曲或边缘抖动"之类）
+- 不要把未来段的动作提前写进本段
+- 不要输出任何解释/markdown/前言；只输出提示词纯正文
 """
 
 
@@ -345,29 +335,16 @@ def build_segment_v2_request(
     state: dict,
     brief,
 ) -> str:
-    """组装 v2 写段请求；GLOBAL_LOCK 与 BRIDGE_FROM 用项目素材拼装。
+    """组装 v2 写段请求（官方英文格式模板）。
 
-    plan：当前段的 SegmentPlan；all_plans：全部规划（用于 BRIDGE_FROM 反推上一段）。
+    plan：当前段的 SegmentPlan；all_plans：全部规划（用于未来段剧情红线与段落定位）。
     """
-    # 全局锁定：上游字段本就多为中文，直接作为不可违背约束抄入
-    global_lock = _ctx(
-        character=state.get("character_design", ""),
-        background=state.get("background_design", ""),
-        prop=state.get("prop_design", ""),
-        visual_style=state.get("art_design", ""),
-        soundstyle_hint=state.get("creative_lock", ""),
-    )
     # 本段 Shot 块原文：从原 prompt 的该时间段抓（planner 给出 shot 号后从 state 里挑）
     shots_text = []
     for shot_n in plan.shots_in_segment:
         shot_key = f"shot_text_{shot_n}"  # stage 2 每段 prompt 生成时把每个 Shot 单独写进 state
         if shot_key in state:
             shots_text.append(str(state[shot_key]))
-    # 上段的 end_hook 就是本段的 BRIDGE_FROM
-    bridge_from = "（首段，从用户提供的首帧图或文本直接生成）"
-    if plan.index > 0:
-        prev = all_plans[plan.index - 1]
-        bridge_from = f"上一段末尾画面：{prev.end_hook}"
 
     # 未来段剧情红线：把后续段的 summary 列出来，明令禁止提前出现
     future_events = [
@@ -379,6 +356,12 @@ def build_segment_v2_request(
         + "\n".join(f"- {s}" for s in future_events)
         if future_events else ""
     )
+    # 首段有用户首帧图；后续段首帧 = 上一段桥接帧（图片是唯一事实源）
+    anchor_note = (
+        "Picture 1 是用户提供的首帧参考图"
+        if plan.index == 0
+        else "Picture 1 是上一段剥出的桥接帧（上一段末尾画面），图片是唯一事实源"
+    )
 
     return (
         f"{_SEGMENT_V2_INSTRUCTION}\n\n"
@@ -386,11 +369,9 @@ def build_segment_v2_request(
         f"本段编号：Segment {plan.index + 1}/{len(all_plans)}\n"
         f"时间窗：{plan.start_s}-{plan.end_s}s（时长 {plan.duration_s}s，对应整段视频的 {plan.start_s}-{plan.end_s}s）\n"
         f"包含 Shot：{plan.shots_in_segment}\n"
-        f"本段剧情概述：{plan.summary}\n"
-        f"段尾钩子（画面必须停在这个状态）：{plan.end_hook}\n"
+        f"本段剧情概述（中文，仅供你理解剧情，不得写进提示词）：{plan.summary}\n"
+        f"{anchor_note}\n"
         f"{future_block}\n"
-        f"\nGLOBAL_LOCK（身份/外观/美术/光线/氛围约束，请只抄非剧情属性，Scene N 动作线请全部剔除）：\n{global_lock}\n"
-        f"\nBRIDGE_FROM（上一段结尾画面状态，本段第 0 帧必须与其一致）：\n{bridge_from}\n"
         f"\n本段 Shot 原始描述（如有多条则依次按时间顺序排）：\n" + ("\n\n".join(shots_text) or state.get("shot_table", ""))
     )
 
@@ -402,7 +383,7 @@ def write_segment_v2(
     brief,
     llm,
 ) -> str | None:
-    """用 LLM 为该段写细颗粒度完整提示词（含 GLOBAL_LOCK / BRIDGE_FROM / END_HOOK）。失败返回 None。"""
+    """用 LLM 为该段写细颗粒度完整提示词（官方英文格式）。失败返回 None。"""
     try:
         response = llm.invoke(build_segment_v2_request(plan, all_plans, state, brief))
     except Exception:  # noqa: BLE001

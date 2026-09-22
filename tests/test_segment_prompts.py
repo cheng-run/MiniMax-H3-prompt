@@ -186,3 +186,83 @@ def test_segment_v2_request_english_summary_soundscape():
     # 裁切措辞已删
     assert "超出的一律删" not in request
     assert "只保留本段时间窗内的配乐" not in request
+
+
+# ---------------------------------------------------------------------------
+# T3（issue #5）：提示词模板产出官方英文格式（I2VA 指令行 + 锚定句 + 中文摘要层）
+# ---------------------------------------------------------------------------
+
+def _v2_plans():
+    from minimax_h3_prompt.segment_planner import SegmentPlan
+    return [
+        SegmentPlan(index=0, start_s=0, end_s=4, shots_in_segment=(1,),
+                    summary="深夜便利店全景，店员打盹，片尾玻璃门被顶开窄缝",
+                    end_hook="玻璃门刚被顶开窄缝，猫眼从门缝探出"),
+        SegmentPlan(index=1, start_s=4, end_s=10, shots_in_segment=(2,),
+                    summary="橘猫进店跳上柜台蹭店员的手",
+                    end_hook="猫前爪搭上柜台沿"),
+    ]
+
+
+def test_segment_v2_request_official_format_discipline():
+    """v2 请求模板要求官方英文格式：I2VA 指令行、英文正文、节拍纪律、单 Shot 默认。"""
+    from minimax_h3_prompt.segment_prompts import build_segment_v2_request
+
+    plans = _v2_plans()
+    request = build_segment_v2_request(plans[1], plans, {"shot_table": "x"}, None)
+    # 官方结构要求出现：I2VA 指令行模板
+    assert "For the target video, at 0.00 seconds into the target video," in request
+    assert "<Picture 1> (from [Shot 1]) is fully referenced." in request
+    # 实体首次出场纪律
+    assert "首次出场" in request
+    # 节拍距段尾 ≥1s 纪律
+    assert "距段尾" in request or "1s" in request
+    # 单 Shot 默认
+    assert "[Shot 1]" in request
+
+
+def test_segment_v2_request_no_legacy_structures():
+    """v2 请求不再含 GLOBAL_LOCK/BRIDGE_FROM/END_HOOK 组装块。"""
+    from minimax_h3_prompt.segment_prompts import build_segment_v2_request
+
+    plans = _v2_plans()
+    request = build_segment_v2_request(plans[1], plans, {"shot_table": "x"}, None)
+    # 组装块不再注入；模板「禁止」节的禁令说明（不写 `X:`）允许出现
+    assert "GLOBAL_LOCK（" not in request
+    assert "BRIDGE_FROM（" not in request
+    assert "END_HOOK（" not in request
+    # 不存在任何把 X: 字段注入请求正文的组装行（禁令行都是「不写 `X:`」形式）
+    for marker in ("GLOBAL_LOCK", "BRIDGE_FROM", "END_HOOK"):
+        assert f"不写 `{marker}:`" in request  # 禁令在
+        lines_with_marker = [ln for ln in request.splitlines()
+                             if marker in ln and not ln.strip().startswith(("- 不写", "；"))]
+        assert lines_with_marker == [], f"{marker} 出现在非禁令行：{lines_with_marker}"
+
+
+def test_write_segment_v2_output_official_shape():
+    """v2 写段 mock：模板纪律 + validator 断言新产出过 T1 新裁判。"""
+    from minimax_h3_prompt.segment_planner import SegmentPlan
+    from minimax_h3_prompt.segment_prompts import write_segment_v2
+    from minimax_h3_prompt.tools.h3_validator import validate_base
+
+    official_reply = (
+        "For the target video, at 0.00 seconds into the target video, "
+        "<Picture 1> (from [Shot 1]) is fully referenced.\n\n"
+        "integrated_multimodal_description: [Shot 1] Live-action, cinematic, "
+        "a close shot frames an orange tabby cat landing on a checkout counter "
+        "under warm light. At 00:02.000, the cat rubs its head against the "
+        "clerk's hand. The scene settles on the cat leaning into her palm.\n\n"
+        "overall_soundscape: A low refrigerator hum continues while soft purring "
+        "rises near the counter. The clerk's sleeve rustles as the cat leans in.\n\n"
+        "non_diegetic_music: N/A"
+    )
+
+    class FakeLLM:
+        def invoke(self, request):
+            return official_reply
+
+    plans = _v2_plans()
+    text = write_segment_v2(plans[1], plans, {"shot_table": "x"}, None, FakeLLM())
+    assert text == official_reply
+    issues = validate_base(text, duration=6.0, variant="I2VA")
+    assert issues == []
