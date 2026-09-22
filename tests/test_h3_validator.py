@@ -2,7 +2,12 @@
 
 合法基准取自官方规范（base-en.txt Case 1、ref-en.txt 完整示例结构）；
 违规样例为针对性构造。
+2026-09-22 官方格式迁移（issue #2）：自创结构 GLOBAL_LOCK/BRIDGE_FROM/END_HOOK/
+防波纹咒语转为反向断言；新增 I2VA 出场节拍距段尾 ≥1s、单 Shot 默认；
+正负样本 fixture 钉回归（tests/fixtures/）。
 """
+from pathlib import Path
+
 import pytest
 
 from minimax_h3_prompt.tools.h3_validator import (
@@ -10,6 +15,10 @@ from minimax_h3_prompt.tools.h3_validator import (
     validate_prompt,
     validate_ref,
 )
+
+FIXTURES = Path(__file__).parent / "fixtures"
+LEGACY_SHOT01 = (FIXTURES / "legacy_shot01.md").read_text(encoding="utf-8")
+OFFICIAL_SHOT01_I2VA = (FIXTURES / "official_shot01_i2va.md").read_text(encoding="utf-8")
 
 REF_META = [
     (1, "白发仙师", "白发老妪，玄色长袍，手持拂尘"),
@@ -234,3 +243,96 @@ class TestDispatch:
     def test_validate_prompt_base(self):
         issues = validate_prompt(VALID_BASE_T2VA, "base", duration=8.0, variant="T2VA")
         assert errors_of(issues) == []
+
+
+class TestLegacyBannedStructures:
+    """官方格式迁移（issue #2）：自创结构出现即报 error（反向规则）。"""
+
+    @pytest.mark.parametrize("marker_code", [
+        "GLOBAL_LOCK_BANNED",
+        "BRIDGE_FROM_BANNED",
+        "END_HOOK_BANNED",
+    ])
+    def test_legacy_section_banned(self, marker_code):
+        text = LEGACY_SHOT01 + "\n\noverall_soundscape: x\n\nnon_diegetic_music: N/A"
+        issues = validate_base(text, duration=4.0)
+        assert marker_code in errors_of(issues)
+
+    def test_ripple_spell_banned(self):
+        text = base_prompt(
+            "[Shot 1] A woman dozes. 全程保持每个人物的轮廓、面部边缘与服装边缘清晰稳定，"
+            "无波纹、扭曲或边缘抖动。"
+        )
+        issues = validate_base(text, duration=4.0)
+        assert "RIPPLE_SPELL_BANNED" in errors_of(issues)
+
+    def test_first_line_duration_sentence_banned(self):
+        text = "This is a 4-second continuous shot.\n\n" + base_prompt("[Shot 1] A woman dozes.")
+        issues = validate_base(text, duration=4.0)
+        assert "DURATION_SENTENCE_BANNED" in errors_of(issues)
+
+
+class TestOfficialFormat:
+    """官方格式新规则（issue #2）。"""
+
+    def test_legacy_fixture_reports_errors(self):
+        """负样本：实测旧 shot-01.md 必须报错（自创结构 + 节拍压段尾）。"""
+        issues = validate_base(LEGACY_SHOT01, duration=4.0)
+        codes = errors_of(issues)
+        for expected in ("GLOBAL_LOCK_BANNED", "BRIDGE_FROM_BANNED", "END_HOOK_BANNED",
+                         "RIPPLE_SPELL_BANNED", "DURATION_SENTENCE_BANNED",
+                         "LAST_TIMESTAMP_TOO_CLOSE_TO_END"):
+            assert expected in codes, f"缺少 {expected}，实际 {codes}"
+
+    def test_official_fixture_passes(self):
+        """正样本：官方格式改写稿（I2VA 适配版）必须全绿。"""
+        issues = validate_base(OFFICIAL_SHOT01_I2VA, duration=4.0, variant="I2VA")
+        assert issues == []
+
+    def test_last_timestamp_too_close_to_end(self):
+        text = base_prompt(
+            "[Shot 1] A woman dozes. At 00:01.000 she stirs. At 00:03.900 a cat peeks in."
+        )
+        issues = validate_base(text, duration=4.0)
+        assert "LAST_TIMESTAMP_TOO_CLOSE_TO_END" in errors_of(issues)
+
+    def test_last_timestamp_one_second_before_end_ok(self):
+        text = base_prompt(
+            "[Shot 1] A woman dozes. At 00:01.000 she stirs. At 00:03.000 a cat peeks in."
+        )
+        issues = validate_base(text, duration=4.0)
+        assert "LAST_TIMESTAMP_TOO_CLOSE_TO_END" not in errors_of(issues)
+
+    def test_multi_shot_warns(self):
+        text = base_prompt(
+            "[Shot 1] A woman dozes behind the counter.\n"
+            "[Shot 2] At 00:02.000, the camera cuts to a close-up of her hand."
+        )
+        issues = validate_base(text, duration=4.0)
+        assert "MULTI_SHOT_SEGMENT" in codes(issues)
+
+    def test_single_shot_no_warning(self):
+        text = base_prompt("[Shot 1] A woman dozes behind the counter. At 00:02.000, she stirs.")
+        issues = validate_base(text, duration=4.0)
+        assert "MULTI_SHOT_SEGMENT" not in codes(issues)
+
+
+class TestSentenceCaps:
+    """官方 §4.6/§4.7 句数上限（issue #2 钉回归：规则为迁移前既有，此处钉住防退化）。"""
+
+    def test_soundscape_over_four_sentences_warns(self):
+        text = (OFFICIAL_SHOT01_I2VA
+                .replace(
+                    "A low refrigerator hum sustains the deep-night quiet while the woman's "
+                    "slow, long breaths pass at intervals. The glass door gives a faint "
+                    "metal-hinge creak as it is pushed, and the brass wind chime rings twice, "
+                    "softly, near the end.",
+                    "One. Two. Three. Four. Five."))
+        issues = validate_base(text, duration=4.0, variant="I2VA")
+        assert "SOUNDSCAPE_TOO_LONG" in codes(issues)
+
+    def test_music_over_three_sentences_warns(self):
+        text = OFFICIAL_SHOT01_I2VA.replace("non_diegetic_music: N/A",
+                                            "non_diegetic_music: One. Two. Three. Four.")
+        issues = validate_base(text, duration=4.0, variant="I2VA")
+        assert "MUSIC_TOO_LONG" in codes(issues)

@@ -27,6 +27,15 @@ _VIDEO_RE = re.compile(r"<Video\s+(\d+)>")
 _WORD_RE = re.compile(r"[A-Za-z]+")
 _SENTENCE_RE = re.compile(r"[.!?]+")
 
+# 官方格式迁移（2026-09-22 spec / issue #2）：自创结构一律禁止（行首标记式）
+_BANNED_SECTION_MARKERS = ("GLOBAL_LOCK", "BRIDGE_FROM", "END_HOOK")
+# 防波纹咒语（自创，官方一致性靠 Picture 锚定句）
+_RIPPLE_SPELL_RE = re.compile(r"无波纹|边缘抖动")
+# 首行时长句（官方由帧变体指令行承载时长）
+_DURATION_SENTENCE_RE = re.compile(r"^This is a \d+(?:\.\d+)?-second continuous shot\.")
+# 关键节拍距段尾最小余量（spec 决策 Q1：出场动作需要展开空间）
+_END_MARGIN_S = 1.0
+
 REF_SECTIONS = [
     "subject_definitions",
     "summary",
@@ -156,6 +165,55 @@ def _find_sections(text: str, headers: list[str]) -> dict[str, tuple[str, int]]:
     return result
 
 
+def _check_banned_structures(text: str, issues: list[ValidationIssue]) -> None:
+    """官方格式迁移：GLOBAL_LOCK/BRIDGE_FROM/END_HOOK/防波纹咒语/首行时长句出现即报 error。
+
+    结构标记按行首匹配（字段式自创结构）；防波纹咒语按行内关键词扫全文——
+    它历史上被附加在任意 Shot 块尾，不固定字段位置。
+    """
+    for marker in _BANNED_SECTION_MARKERS:
+        if re.search(rf"^{marker}\s*[:：]", text, re.MULTILINE):
+            issues.append(ValidationIssue(
+                "error", f"{marker}_BANNED",
+                f"自创结构 {marker}: 不存在于官方 base-en.txt 规范，必须删除"
+                "（实体外观写进首次出场的 Shot；段首靠 Picture 1 锚定句；段尾自然收句）"))
+    ripple_lines = [i for i, line in enumerate(text.splitlines(), 1)
+                    if _RIPPLE_SPELL_RE.search(line)]
+    if ripple_lines:
+        issues.append(ValidationIssue(
+            "error", "RIPPLE_SPELL_BANNED",
+            f"行 {', '.join(map(str, ripple_lines))}：防波纹咒语（无波纹/边缘抖动）是自创结构，"
+            "官方一致性机制是 Picture 锚定句，必须删除"))
+    first_nonempty = next((l for l in text.splitlines() if l.strip()), "")
+    if _DURATION_SENTENCE_RE.match(first_nonempty.strip()):
+        issues.append(ValidationIssue(
+            "error", "DURATION_SENTENCE_BANNED",
+            "首行时长句「This is a N-second continuous shot.」是自创结构；"
+            "帧变体时长由对齐指令行（S.SS-second mark）承载，T2VA 不写时长句"))
+
+
+def _check_beat_and_shot_count(text: str, duration: float | None,
+                               issues: list[ValidationIssue]) -> None:
+    """官方格式纪律：最后节拍距段尾 ≥1s（error）；段内默认单 Shot（warning）。"""
+    # 最后时间戳 ≤ 时长-1s（确定性代理：无法识别「关键出场节拍」，以最晚时间戳为准）
+    if duration is not None:
+        timestamps = [_time_to_seconds(m) for m in _TIME_RE.finditer(text)]
+        if timestamps:
+            last = max(timestamps)
+            if last > duration - _END_MARGIN_S:
+                issues.append(ValidationIssue(
+                    "error", "LAST_TIMESTAMP_TOO_CLOSE_TO_END",
+                    f"最后节拍 {last:.3f}s 距段尾 {duration}s 不足 {_END_MARGIN_S:g}s——"
+                    "关键出场节拍需要展开空间（spec 决策 Q1：问题①猫提前出现的对策）"))
+    # 段内默认单 Shot（Q7：切镜是显式例外，warning 提醒不禁止）
+    shot_nums = {int(m.group(1)) for m in _SHOT_RE.finditer(text)}
+    if len(shot_nums) > 1:
+        issues.append(ValidationIssue(
+            "warning", "MULTI_SHOT_SEGMENT",
+            f"段内含 {len(shot_nums)} 个 Shot——段内切镜是显式例外（仅景别跳变等确有必要时），"
+            "单 Shot 让 I2VA 只锚定一个构图"))
+
+
 def _check_shots(text: str, duration: float | None, issues: list[ValidationIssue]) -> None:
     """[Shot N] 序号连续、首镜无时间戳、切点单调递增且在时长内。
 
@@ -182,9 +240,11 @@ def _check_shots(text: str, duration: float | None, issues: list[ValidationIssue
             seg_end = next_shot.start() if next_shot else len(line)
             tm = _TIME_RE.search(line[sm.end():seg_end])
             time_sec = _time_to_seconds(tm) if tm else None
-            if n == 1 and tm:
+            # 官方格式：[Shot 1] 句子内部允许 At 00:XX.XXX 节拍（写在句中而非紧跟标记）；
+            # 只有紧跟标记的切点式时间戳（官方切镜写法，首镜无切点）才报错
+            if n == 1 and tm and line[sm.end():].lstrip().startswith("At"):
                 issues.append(ValidationIssue("error", "FIRST_SHOT_TIMESTAMP",
-                                              f"行 {i}：[Shot 1] 是首镜，不应带时间戳（官方规范）"))
+                                              f"行 {i}：[Shot 1] 是首镜，不应带切点时间戳（官方规范）"))
             shots.append((n, time_sec, i))
 
     if not shots:
@@ -276,10 +336,12 @@ def validate_base(text: str, duration: float | None = None, variant: str = "T2VA
     issues: list[ValidationIssue] = []
     sections = _find_sections(text, BASE_SECTIONS)
     body, _ = sections.get("integrated_multimodal_description", ("", 0))
+    _check_banned_structures(text, issues)
     # 镜头/对白/说话人只在描述正文里检查（其他段落里的 [Shot N] 是引用，不是镜头标记）
     _check_shots(body, duration, issues)
     _check_dialogues(body, issues)
     _check_speakers(body, issues)
+    _check_beat_and_shot_count(body, duration, issues)
     present_headers = list(sections.keys())
     if len(present_headers) != len(BASE_SECTIONS):
         missing = [h for h in BASE_SECTIONS if h not in sections]
