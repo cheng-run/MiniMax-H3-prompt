@@ -346,8 +346,25 @@ def _topic_slug(topic: str) -> str:
 
 
 def _session_dir(config: Config, topic: str) -> Path:
-    """该主题的会话目录：``<sessions_root>/<topic_slug>/GEN001``（幂等，已存在则复用）。"""
-    directory = Path(config.sessions_root) / _topic_slug(topic) / "GEN001"
+    """该主题的会话目录：``<sessions_root>/<topic_slug>/GEN00N``。
+
+    续接规则：最新 GEN 的会话未完成（阶段 1 中断 / 等帧图 / 分段进行中）→ 复用续接；
+    已完成（status=completed）或无会话文件 → 自动开下一个 GEN 编号
+    （同主题重新生成 = 新的一次验收运行，2026-09-22 裁定）。
+    """
+    from ..session_store import STATUS_COMPLETED, load_session
+
+    slug_dir = Path(config.sessions_root) / _topic_slug(topic)
+    existing = sorted(slug_dir.glob("GEN*"), key=lambda p: p.name)
+    if existing:
+        latest = existing[-1]
+        session = load_session(latest)
+        if session is not None and session.status != STATUS_COMPLETED:
+            directory = latest  # 未完成 → 续接
+        else:
+            directory = slug_dir / f"GEN{len(existing) + 1:03d}"  # 已完成/无会话 → 新 GEN
+    else:
+        directory = slug_dir / "GEN001"
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 
