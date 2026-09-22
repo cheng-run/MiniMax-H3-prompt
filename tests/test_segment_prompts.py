@@ -130,3 +130,59 @@ def test_storyboard_uniform_durations_warning():
     durations = _shot_durations_from_table(table, total_duration=15.0)
     assert durations == [5.0, 5.0, 5.0]
     assert is_degenerate_durations(durations) is True
+
+
+# ---------------------------------------------------------------------------
+# T2（issue #3）：soundscape/music 按段重写为英文摘要句（官方 §4.6/§4.7），
+# 删除时间窗裁切措辞
+# ---------------------------------------------------------------------------
+
+class FakeLLM:
+    def __init__(self, reply="rewritten"):
+        self.last_request = ""
+        self._reply = reply
+
+    def invoke(self, request):
+        self.last_request = request
+        return self._reply
+
+
+def test_rewrite_instruction_no_crop_wording():
+    """回退流重写指令不再要求「按时间窗裁切/删除」，改为按段重写英文摘要句。"""
+    segments = split_shots_from_prompt(SAMPLE_PROMPT, total_duration=12.0)
+    llm = FakeLLM()
+    rewrite_segment_prompt(segments[1], SAMPLE_PROMPT, llm)
+    request = llm.last_request
+    assert "一律删除" not in request
+    assert "只保留本段时间窗内" not in request
+    # 官方 §4.6/§4.7 纪律：英文摘要句 + 句数上限 + 无时间戳
+    assert "1-4" in request
+    assert "1-3" in request
+    assert "English" in request
+    assert "no timestamps" in request or "无时间戳" in request
+
+
+def test_rewrite_instruction_asks_rewrite_not_crop():
+    """指令语义是「为本段重写」而非「从整条裁出」。"""
+    segments = split_shots_from_prompt(SAMPLE_PROMPT, total_duration=12.0)
+    llm = FakeLLM()
+    rewrite_segment_prompt(segments[1], SAMPLE_PROMPT, llm)
+    request = llm.last_request
+    assert "按段重写" in request or "rewrite" in request.lower()
+
+
+def test_segment_v2_request_english_summary_soundscape():
+    """v2 主路径：字段 4/5 要求英文摘要句（1-4/1-3 句、无时间戳），不再裁时间窗。"""
+    from minimax_h3_prompt.segment_planner import SegmentPlan
+    from minimax_h3_prompt.segment_prompts import build_segment_v2_request
+
+    plan = SegmentPlan(index=1, start_s=4, end_s=10, shots_in_segment=(2,),
+                       summary="猫进店跳上柜台", end_hook="猫前爪搭上柜台沿")
+    request = build_segment_v2_request(plan, [plan], {"shot_table": "x"}, None)
+    # soundscape/music 字段要求英文摘要句
+    v2_part = request[request.index("_SEGMENT_V2"):] if "_SEGMENT_V2" in request else request
+    assert "1-4" in request and "1-3" in request
+    assert "English" in request
+    # 裁切措辞已删
+    assert "超出的一律删" not in request
+    assert "只保留本段时间窗内的配乐" not in request

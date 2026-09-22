@@ -637,12 +637,12 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
 
     for position in range(done, total):
         segment = segments[position]
-        # ① 每段重写：声音描述按本段时间窗裁切；失败回退机械拆分并明示
+        # ① 每段重写：soundscape/music 为本段重写英文摘要句（官方 §4.6/§4.7）；失败回退机械拆分并明示
         rewritten: str | None = None
         if rewrite_llm is not None:
             rewritten = rewrite_segment_prompt(segment, prompt, rewrite_llm)
         display_text = rewritten or segment.text
-        fallback_label = "" if rewritten else "[回退] 声音描述保持整条原样（未按段裁剪）"
+        fallback_label = "" if rewritten else "[回退] 声音描述保持整条原样（未按段重写）"
 
         # ② 桥接帧：剥上一段尾帧，输出显式落盘信息（路径 + 大小）
         if position > 0 and _confirm("是否用上一段视频的尾帧作为本段首帧图（保证画面连续）？", default=True):
