@@ -544,8 +544,10 @@ def _phase2_collect_and_finish(config: Config, session: SessionState) -> int:
 
     if brief.duration > 10:
         # 长视频：不倾倒整条提示词，改走逐段陪跑（每段独立完成+验收后才给下一段）。
+        # 必须传**阶段 2 之后的 state**：帧读图结果写在上面的局部副本里（旧 session 对象上没有），
+        # 分段流程拿不到它就会退回照分镜表写（2026-09-22 首帧不锚定缺陷）。
         print(f"\n✓ 完整提示词已写入：{output_file}（供存档，长视频请按下方分段执行）")
-        _run_segmented_flow(brief, session, prompt, summary=summary_obj)
+        _run_segmented_flow(brief, session, prompt, summary=summary_obj, state=final_state)
     else:
         # 短视频：直接展示完整提示词，方便立即复制进 ComfyUI。
         print(f"\n✓ 最终视频提示词已写入：{output_file}")
@@ -594,8 +596,12 @@ def _load_or_make_summary(prompt: str, llm, directory: Path):
 # 长视频分段陪跑（>10s：ComfyUI H3 时长选项只有 4-10s 整数档，必须逐段生成）
 # ---------------------------------------------------------------------------
 
-def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summary=None) -> None:
+def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summary=None,
+                        state: dict | None = None) -> None:
     """把整条提示词按 [Shot N] 拆成单镜头提示词，逐段陪跑。
+
+    state：阶段 2 之后的最终 state（含 ``fl2va_frame_descriptions`` 帧图读图结果）；
+    省略时退回 ``session.stage_state``（续跑/测试兼容）。
 
     循环规则：先尽量用 LLM 把本段 soundscape/music 按时间窗重写成独立提示词（
     失败自动回退机械拆分并明示）；显示信息卡（段号/Shot/时长/文件路径）→ 人工复制
@@ -606,17 +612,26 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
 
     from ..model_factory import build_chat_model
     from ..segment_planner import plan_segments
-    from ..segment_prompts import rewrite_segment_prompt, split_shots_from_prompt, write_segment_v2
+    from ..segment_prompts import (
+        frame_anchor_context,
+        rewrite_segment_prompt,
+        split_shots_from_prompt,
+        write_segment_v2,
+    )
     from ..tools.frame_auditor import extract_last_frame
 
     # ① 先走新流程：segment_planner 规划整秒分段边界 → 每段独立细写（官方英文格式，spec 2026-09-22）
-    state = session.stage_state
+    state = state if state is not None else session.stage_state
     plans = None
     try:
         llm = build_chat_model()
         if state.get("shot_table"):
+            # 帧图实际画面一并交给规划层：分镜表只是计划，用户可能复用/改了图（冲突时以图为准）
             with _progress_scope("[分段规划] 正在按 4-10s 整数边界切分剧情并锁定衔接……"):
-                plans = plan_segments(str(state.get("shot_table", "")), brief.duration, llm)
+                plans = plan_segments(
+                    str(state.get("shot_table", "")), brief.duration, llm,
+                    frame_context=frame_anchor_context(state),
+                )
     except Exception as exc:  # noqa: BLE001 - 规划失败回退旧路径
         print(f"[提示] 分段规划失败（{exc}），回退到按 [Shot N] 机械拆分。")
 
@@ -657,7 +672,10 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
         # ① 每段重写：soundscape/music 为本段重写英文摘要句（官方 §4.6/§4.7）；失败回退机械拆分并明示
         rewritten: str | None = None
         if rewrite_llm is not None:
-            rewritten = rewrite_segment_prompt(segment, prompt, rewrite_llm)
+            rewritten = rewrite_segment_prompt(
+                segment, prompt, rewrite_llm,
+                state=state, is_first=position == 0, is_last=position + 1 == total,
+            )
         display_text = rewritten or segment.text
         fallback_label = "" if rewritten else "[回退] 声音描述保持整条原样（未按段重写）"
 

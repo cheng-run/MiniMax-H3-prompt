@@ -1,5 +1,12 @@
 # 分段锁定区裁剪（Segment Lock Scoping）实施计划
 
+> ⚠️ **未实施 + 部分已废弃（2026-09-22 标注）——不要照本计划施工。**
+> 1. 本计划从未落成代码（全仓无 `segment_lock` / `segment_scope` / `extract_segment_shots`），且正文只写到 Task 2。
+> 2. 其核心结构 `GLOBAL_LOCK:` 与 `EDGE_STABILITY_SENTENCE`（防波纹咒语）已被 **2026-09-22 官方格式迁移明令删除**
+>    （`tools/h3_validator` 对其报 error，见 `CONTEXT.md` 末节「提示词格式纪律」）；照做会把违规结构重新引入。
+> 3. 仍然成立的部分：根因 4「`shot_text_{n}` 键根本不存在 → 回退整张分镜表」，已由 2026-09-22 的首帧锚定修复落地
+>    （`segment_prompts._segment_shot_texts`，缺陷编号 H4）。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 让每个执行段的提示词只携带本段窗口内的人设/场景/道具信息，并把官方对齐指令、单镜头编号、桥接原文做确定性注入，消除"锁定区塞满全片剧情"导致的越窗演出与跨段漂移。

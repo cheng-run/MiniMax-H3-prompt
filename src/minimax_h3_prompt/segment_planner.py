@@ -14,6 +14,9 @@ PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 MIN_SEG_S = 4
 MAX_SEG_S = 10
 
+# 注入规划请求的「关键帧实际画面」块标题（有读图结果时才出现）
+FRAME_CONTEXT_HEADER = "【关键帧实际画面（用户提交的图片读图结果，**唯一事实源**；与分镜表冲突时以画面为准）】"
+
 
 @dataclass(frozen=True)
 class SegmentPlan:
@@ -102,16 +105,24 @@ def parse_segment_plan(text: str, total_s: int) -> list[SegmentPlan] | None:
     return plans
 
 
-def plan_segments(shot_table: str, total_s: float, llm) -> list[SegmentPlan] | None:
+def plan_segments(shot_table: str, total_s: float, llm, *, frame_context: str = "") -> list[SegmentPlan] | None:
     """调 LLM 规划分段；任一失败返回 None（调用方回退机械拆分）。
 
     shot_table：阶段 1 的「分镜设计」文本（[Shot N] 描述 + 切点）。
+    frame_context：真实关键帧图片的读图结果（``segment_prompts.frame_anchor_context``）。
+    分镜表只是**计划**，用户可能复用/修改首帧图；两者冲突时以图片为准，否则
+    plan 层会把「空店→猫进门」这类已被图片否定的状态固化进每一段。
     """
     total_int = int(round(total_s))
+    frame_block = (
+        f"\n{FRAME_CONTEXT_HEADER}\n{frame_context}\n"
+        if frame_context.strip() else ""
+    )
     request = (
         f"{_load_instruction()}\n\n"
-        f"视频总时长：{total_int}s\n\n"
-        f"分镜表：\n{shot_table}"
+        f"视频总时长：{total_int}s\n"
+        f"{frame_block}"
+        f"\n分镜表：\n{shot_table}"
     )
     try:
         response = llm.invoke(request)

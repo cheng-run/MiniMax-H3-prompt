@@ -276,10 +276,17 @@ def rewrite_segment_prompt(
     segment: ShotPrompt,
     full_prompt: str,
     llm,
+    *,
+    state: dict | None = None,
+    is_first: bool = False,
+    is_last: bool = False,
 ) -> str | None:
     """用 LLM 把 segment 重写为本段时间窗内的独立提示词；失败返回 None（调用方回退机械拆分）。
 
     llm 由调用方注入（测试可传 stub）；应为带 ``invoke(str)`` 接口的对象。
+
+    state / is_first / is_last：首尾帧锚定。分段规划失败时流程会回退到本函数，
+    这条路径同样要按「图片实际画面」锚定，否则规划一失败，缺陷就原样复发。
     """
     start = segment.start_seconds or 0.0
     duration = segment.duration_seconds
@@ -287,9 +294,12 @@ def rewrite_segment_prompt(
         f"{start:g}s – {start + duration:g}s"
         if duration is not None else f"{start:g}s 起（时长未知）"
     )
+    anchor = _frame_anchor_note(is_first, is_last, state or {})
     request = (
         f"{_REWRITE_INSTRUCTION}\n\n本段时间窗：{window}\n"
-        f"目标镜头：[Shot {segment.shot_number}]\n\n完整提示词：\n{full_prompt}"
+        f"目标镜头：[Shot {segment.shot_number}]\n"
+        f"{anchor}\n"
+        f"\n完整提示词：\n{full_prompt}"
     )
     try:
         response = llm.invoke(request)
@@ -318,8 +328,10 @@ H3 是执行型模型：你写什么它就做什么，含糊等于失控；把**
 `{I2VA_ANCHOR_LINE}`
 空一行后：
 1. `integrated_multimodal_description:` 本段剧情，**默认只有 [Shot 1] 一个镜头块**（段内切镜是显式例外，仅景别跳变等确有必要时）。
-   - 开头先声明风格与初始构图（如 `Live-action, cinematic, a wide shot frames ...`），描述画面必须与 Picture 1（本段首帧参考图/桥接帧）一致——图片是唯一事实源，文字只做锚定，不要描述图片里不存在的状态
-   - **实体外观只写在它首次出场的 Shot 内**，一次写全；未出场的实体不写外观，必要时只用一句否定（如 `No cat is visible in the frame.`）
+   - 开头先声明风格与初始构图（如 `Live-action, cinematic, a wide shot frames ...`），描述画面必须与 Picture 1（本段首帧图：段 1 是用户提交的首帧，后续段是桥接帧）一致——图片是唯一事实源，文字只做锚定，不要描述图片里不存在的状态
+   - **实体外观只写在它首次出场的 Shot 内**，一次写全；未出场的实体不写外观。
+     **只有该实体在本段首帧（Picture 1）里确实不存在时**，才可以用一句否定（如 `No cat is visible in the frame.`）；
+     首帧图里已经有的实体**绝不能**否定——那等于让 H3 无视你喂进去的图，本段会当场跑偏
    - 时间戳 `At 00:XX.XXX` 写进句子内（如 `At 00:02.500, the glass door is slowly pushed open...`）
    - **最后一个时间戳距段尾必须 ≥1s**——关键出场节拍要留展开空间，不许压在段尾
    - 段尾状态自然收在最后一个 Shot 的末句（画面停在自然落定的一瞬，不写"静止/定格"）
@@ -337,6 +349,93 @@ H3 是执行型模型：你写什么它就做什么，含糊等于失控；把**
 """
 
 
+def real_frame_descriptions(state: dict) -> dict[str, str]:
+    """从 state 取真实帧图的读图结果 ``{role: description}``（无则空 dict）。
+
+    role 为 ``first`` / ``last``；空白描述视为没有（回退计划锚定）。
+    """
+    out: dict[str, str] = {}
+    for item in state.get("fl2va_frame_descriptions") or []:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role", "")).strip()
+        description = str(item.get("description", "")).strip()
+        if role and description:
+            out[role] = description
+    return out
+
+
+def frame_anchor_context(state: dict) -> str:
+    """渲染真实首/尾帧画面描述，供分段规划层（segment_planner）锚定；无读图结果返回 ""。"""
+    descriptions = real_frame_descriptions(state)
+    labels = {"first": "视频第一帧实际画面", "last": "视频最后一帧实际画面"}
+    return "\n".join(
+        f"{labels[role]}：{descriptions[role]}" for role in ("first", "last") if role in descriptions
+    )
+
+
+def _frame_anchor_note(is_first: bool, is_last: bool, state: dict) -> str:
+    """本段的首/尾帧锚定说明（两条分段路径共用）。
+
+    第 1 段的首帧 = 用户提交的关键帧图 → 注入读图结果，并明令它压过分镜表（图中已有的
+    事物不得写成不存在，否则 H3 会拿「猫已在店内」的图去演「空店等猫进门」）。
+    末段的尾帧 = 用户提交的尾帧图 → 正文结尾必须落到该状态。
+    中间段的首帧是桥接帧（图片本段生成时才存在，无读图结果）→ 只声明它是唯一事实源。
+    """
+    descriptions = real_frame_descriptions(state)
+    lines: list[str] = []
+    # 段 1 的 Picture 1 = 用户提交的那张关键帧图：FL2VA/I2VA 是首帧，仅尾帧模式（L2VA）是尾帧
+    anchor_role = "first" if "first" in descriptions else "last"
+    if is_first and anchor_role in descriptions:
+        slot = "首帧图" if anchor_role == "first" else "尾帧图（仅尾帧模式 L2VA）"
+        lines.append(f"Picture 1 是用户提交的{slot}，它的实际画面（读图结果，**唯一事实源**）：\n{descriptions[anchor_role]}")
+        lines.append(
+            "本段开场状态必须与这张图逐项一致：图中已经出现的人/动物/道具、它们已经处于的位置与朝向，"
+            "正文必须照写；**图中已有的事物绝不可写成不存在、尚未出现或「等它登场」**"
+            "（例如图中猫已站在店内，就不能写「空店」「无猫」「No cat is visible in the frame」，"
+            "也不能让它在本段才推门进来）。分镜表、上文「本段剧情概述」与这张图冲突时，一律以画面为准。"
+        )
+    elif is_first:
+        lines.append("Picture 1 是用户提交的首帧图（图片是唯一事实源）")
+    else:
+        lines.append("Picture 1 是上一段剥出的桥接帧（上一段末尾画面），图片是唯一事实源")
+    if is_last and "last" in descriptions:
+        lines.append(
+            f"本段是最后一段，视频结束时必须落到用户提交的尾帧实际画面（读图结果，唯一事实源）：\n{descriptions['last']}"
+        )
+    return "\n".join(lines)
+
+
+def _shot_text_map(state: dict) -> dict[int, str]:
+    """把 state 里的分镜表按 ``[Shot N]`` 切成 ``{shot 号: 该镜原文}``（无标记则空 dict）。"""
+    table = str(state.get("shot_table", "") or "").strip()
+    if not table:
+        return {}
+    return {number: text for number, _start, text in _shot_blocks(table)}
+
+
+def _segment_shot_texts(plan, state: dict) -> tuple[list[str], bool]:
+    """本段各 Shot 的原文。返回 ``(文本列表, 是否精确定位到本段镜头)``。
+
+    从分镜表按 ``[Shot N]`` 抽取本段覆盖的镜头——整条分镜表灌进每一段会把其他时间窗的
+    事件一起喂给 H3，破坏「时间窗纪律」。
+    同一根因早前已被诊断过并命名为 ``extract_segment_shots``
+    （`docs/superpowers/specs/2026-09-17-segment-lock-scoping-design.md` 根因 4：
+    「``shot_text_{n}`` 键根本不存在 → 回退整张分镜表」），但那份计划从未实现，
+    且其配套结构（GLOBAL_LOCK / 防波纹咒语）已被 2026-09-22 官方格式迁移废弃。
+    """
+    table_map = _shot_text_map(state)
+    texts: list[str] = []
+    exact = True
+    for shot_n in plan.shots_in_segment:
+        block = str(table_map.get(int(shot_n), "")).strip()
+        if block:
+            texts.append(block)
+        else:
+            exact = False
+    return texts, (exact and bool(texts))
+
+
 def build_segment_v2_request(
     plan,  # SegmentPlan
     all_plans: list,
@@ -347,12 +446,15 @@ def build_segment_v2_request(
 
     plan：当前段的 SegmentPlan；all_plans：全部规划（用于未来段剧情红线与段落定位）。
     """
-    # 本段 Shot 块原文：从原 prompt 的该时间段抓（planner 给出 shot 号后从 state 里挑）
-    shots_text = []
-    for shot_n in plan.shots_in_segment:
-        shot_key = f"shot_text_{shot_n}"  # stage 2 每段 prompt 生成时把每个 Shot 单独写进 state
-        if shot_key in state:
-            shots_text.append(str(state[shot_key]))
+    shots_text, shots_exact = _segment_shot_texts(plan, state)
+    if shots_exact:
+        shots_block = "本段 Shot 原始描述（只含本段覆盖的镜头，按时间顺序）：\n" + "\n\n".join(shots_text)
+    else:
+        shots_block = (
+            "本段 Shot 原始描述（⚠️ 未能按 Shot 号定位本段镜头，以下是整条分镜表；"
+            "**只准取本段时间窗内的内容**，其他镜头的事件一个字都不能出现）：\n"
+            + str(state.get("shot_table", ""))
+        )
 
     # 未来段剧情红线：把后续段的 summary 列出来，明令禁止提前出现
     future_events = [
@@ -364,12 +466,6 @@ def build_segment_v2_request(
         + "\n".join(f"- {s}" for s in future_events)
         if future_events else ""
     )
-    # 首段有用户首帧图；后续段首帧 = 上一段桥接帧（图片是唯一事实源）
-    anchor_note = (
-        "Picture 1 是用户提供的首帧参考图"
-        if plan.index == 0
-        else "Picture 1 是上一段剥出的桥接帧（上一段末尾画面），图片是唯一事实源"
-    )
 
     return (
         f"{_SEGMENT_V2_INSTRUCTION}\n\n"
@@ -378,9 +474,9 @@ def build_segment_v2_request(
         f"时间窗：{plan.start_s}-{plan.end_s}s（时长 {plan.duration_s}s，对应整段视频的 {plan.start_s}-{plan.end_s}s）\n"
         f"包含 Shot：{plan.shots_in_segment}\n"
         f"本段剧情概述（中文，仅供你理解剧情，不得写进提示词）：{plan.summary}\n"
-        f"{anchor_note}\n"
+        f"{_frame_anchor_note(plan.index == 0, plan.index == len(all_plans) - 1, state)}\n"
         f"{future_block}\n"
-        f"\n本段 Shot 原始描述（如有多条则依次按时间顺序排）：\n" + ("\n\n".join(shots_text) or state.get("shot_table", ""))
+        f"\n{shots_block}"
     )
 
 

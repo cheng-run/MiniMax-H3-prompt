@@ -1,5 +1,11 @@
 # 分段提示词"锁定区越窗"修复设计（Segment Lock Scoping）
 
+> ⚠️ **未实施 + 部分已废弃（2026-09-22 标注）**：本设计的 `GLOBAL_LOCK` 集中定义区与防波纹咒语部分，
+> 已被 **2026-09-22 官方格式迁移废弃**（`tools/h3_validator` 报 error，见 `CONTEXT.md` 末节）。
+> **根因分析仍然成立**，尤其「根因 4：`shot_text_{n}` 键根本不存在 → 回退整张分镜表」，
+> 已由 2026-09-22 的首帧锚定修复落地（`segment_prompts._segment_shot_texts`，缺陷编号 H4）。
+> 配套计划 `docs/superpowers/plans/2026-09-17-segment-lock-scoping.md` 同样未实施。
+
 ## 背景
 
 实测一次 30s / 5-shot 长视频分段生成（会话 `古老图书馆里-少年撕下会发光的书页折成纸-9ac0bf14`），

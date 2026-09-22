@@ -269,3 +269,157 @@ def test_split_keeps_i2va_instruction_line_for_later_segments():
     segments = split_shots_from_prompt(SAMPLE_PROMPT, total_duration=12.0)
     assert "fully referenced" in segments[1].text
     assert "fully referenced" in segments[2].text
+
+
+# ---------------------------------------------------------------------------
+# 首帧锚定：分段请求必须以「图片实际画面」为准
+# bug：同一 GEN 里主提示词锚定了首帧真实画面，但喂给 H3 的 segments/shot-01.md
+# 写的是分镜表里的「空店 + 店员趴着 + 无猫」→ 与首帧图直接矛盾，首段崩。
+# ---------------------------------------------------------------------------
+
+# 取自 2026-09-22 实测：用户提交的首帧图读图结果（截断版）
+FIRST_FRAME_DESC = (
+    "画面为竖构图，从便利店敞开的玻璃门外向内拍摄：室内灯光明亮，左侧是摆满瓶装与盒装商品的货架；"
+    "右侧收银台后站着一名年轻男性店员；前景下方偏左处，一只橘色虎斑猫站在门口地砖上，尾巴高高竖起。"
+)
+LAST_FRAME_DESC = "猫的侧脸贴住店员手背，店员指腹没入猫头顶软毛，暖光自侧后勾出绒边。"
+
+
+def _frame_state(**extra):
+    state = {
+        "shot_table": "[Shot 1] 深夜空店内，店员趴在柜台后……\n\n[Shot 2] At 00:04.500，橘猫顶开玻璃门……",
+        "fl2va_frame_descriptions": [
+            {"role": "first", "description": FIRST_FRAME_DESC},
+            {"role": "last", "description": LAST_FRAME_DESC},
+        ],
+    }
+    state.update(extra)
+    return state
+
+
+def test_segment_v2_request_carries_first_frame_description():
+    """段 1 请求必须注入首帧读图结果，并声明画面压过分镜表。"""
+    from minimax_h3_prompt.segment_prompts import build_segment_v2_request
+
+    plans = _v2_plans()
+    request = build_segment_v2_request(plans[0], plans, _frame_state(), None)
+    assert FIRST_FRAME_DESC in request, "分段请求未注入首帧实际画面 → 段 1 会照分镜表写错开场状态"
+    assert "唯一事实源" in request
+    # 冲突时的裁定方向：分镜表让位于图片
+    assert "以画面为准" in request
+
+
+def test_segment_v2_request_carries_last_frame_description_for_final_segment():
+    """末段请求必须注入尾帧读图结果，正文结尾要落到该状态。"""
+    from minimax_h3_prompt.segment_prompts import build_segment_v2_request
+
+    plans = _v2_plans()
+    request = build_segment_v2_request(plans[-1], plans, _frame_state(), None)
+    assert LAST_FRAME_DESC in request
+
+
+# ---------------------------------------------------------------------------
+# 本段 Shot 定位：只喂本段覆盖的镜头，不灌整条分镜表
+# bug：state 里从没有 shot_text_N，每段都拿到整条 2226 字分镜表 → 其他时间窗的
+# 事件被一起喂给 H3，与「时间窗纪律」直接冲突。
+# ---------------------------------------------------------------------------
+
+SHOT_TABLE = (
+    "# 分镜镜头表\n\n"
+    "## [Shot 1] 起 · 深夜的容器\n店员趴在暖光柜台后，台面内侧摆着白瓷碟小鱼干。\n\n"
+    "## [Shot 2] 承 · 不速之客\nAt 00:04.500，橘猫顶开玻璃门，侧身挤入店内。\n\n"
+    "## [Shot 3] 转 · 轻盈的登场\nAt 00:08.000，猫在柜台前蓄力跃起，四爪落上台面暖光锥中央。\n"
+)
+
+
+def test_segment_v2_request_scopes_shot_text_to_this_segment():
+    """段 1 的请求只含 Shot 1 原文，其他镜头的剧情不得进入（时间窗纪律）。"""
+    from minimax_h3_prompt.segment_prompts import build_segment_v2_request
+
+    plans = _v2_plans()
+    state = _frame_state(shot_table=SHOT_TABLE)
+    request = build_segment_v2_request(plans[0], plans, state, None)
+    assert "白瓷碟小鱼干" in request         # 本段 Shot 1 原文在
+    assert "四爪落上台面暖光锥中央" not in request  # Shot 3（其他时间窗）不在
+    assert "只含本段覆盖的镜头" in request
+
+
+def test_segment_v2_request_handles_last_frame_only_variant():
+    """仅尾帧模式（L2VA）：段 1 的 Picture 1 是尾帧图，不能写成首帧图。"""
+    from minimax_h3_prompt.segment_prompts import build_segment_v2_request
+
+    plans = _v2_plans()
+    state = {
+        "shot_table": SHOT_TABLE,
+        "fl2va_frame_descriptions": [{"role": "last", "description": LAST_FRAME_DESC}],
+    }
+    request = build_segment_v2_request(plans[0], plans, state, None)
+    assert "尾帧图" in request
+    assert LAST_FRAME_DESC in request
+
+
+def test_segment_v2_request_does_not_invite_negating_visible_entities():
+    """模板不得把 `No cat is visible in the frame.` 当范例推荐——那正是首段跑偏的原句。"""
+    from minimax_h3_prompt.segment_prompts import build_segment_v2_request
+
+    request = build_segment_v2_request(_v2_plans()[0], _v2_plans(), _frame_state(), None)
+    # 例句可以出现（说明「什么时候才该用」），但必须带上「首帧图里已有的实体绝不能否定」的限定
+    assert "只有该实体在本段首帧（Picture 1）里确实不存在时" in request
+    assert "绝不能" in request
+
+
+def test_segment_v2_request_flags_unscoped_fallback():
+    """分镜表没有 [Shot N] 标记时回退整表，但必须显式标注只准取本段内容。"""
+    from minimax_h3_prompt.segment_prompts import build_segment_v2_request
+
+    plans = _v2_plans()
+    state = _frame_state(shot_table="整条分镜表但没有镜头标记：猫顶开门，跳上柜台。")
+    request = build_segment_v2_request(plans[0], plans, state, None)
+    assert "未能按 Shot 号定位本段镜头" in request
+    assert "只准取本段时间窗内的内容" in request
+
+
+# ---------------------------------------------------------------------------
+# 回退路径（规划失败时）同样要锚定帧图
+# bug：segment_planner 规划失败 → 回退 split_shots_from_prompt + rewrite_segment_prompt，
+# 该分支不注入帧读图结果 → 规划一失败，首帧不锚定的缺陷原样复发。
+# ---------------------------------------------------------------------------
+
+def test_rewrite_segment_prompt_carries_first_frame_anchor():
+    """回退路径的第一段同样要以首帧实际画面为锚。"""
+    from minimax_h3_prompt.segment_prompts import rewrite_segment_prompt
+
+    segments = split_shots_from_prompt(SAMPLE_PROMPT, total_duration=12.0)
+    llm = FakeLLM()
+    rewrite_segment_prompt(
+        segments[0], SAMPLE_PROMPT, llm,
+        state={"fl2va_frame_descriptions": [{"role": "first", "description": FIRST_FRAME_DESC}]},
+        is_first=True,
+    )
+    assert FIRST_FRAME_DESC in llm.last_request
+    assert "唯一事实源" in llm.last_request
+
+
+def test_rewrite_segment_prompt_carries_last_frame_anchor():
+    """回退路径的末段要带尾帧落点。"""
+    from minimax_h3_prompt.segment_prompts import rewrite_segment_prompt
+
+    segments = split_shots_from_prompt(SAMPLE_PROMPT, total_duration=12.0)
+    llm = FakeLLM()
+    rewrite_segment_prompt(
+        segments[-1], SAMPLE_PROMPT, llm,
+        state={"fl2va_frame_descriptions": [{"role": "last", "description": LAST_FRAME_DESC}]},
+        is_last=True,
+    )
+    assert LAST_FRAME_DESC in llm.last_request
+
+
+def test_rewrite_segment_prompt_without_state_stays_generic():
+    """没有帧读图结果时不注入帧描述块（T2VA / 未提交帧图），只留通用锚定句。"""
+    from minimax_h3_prompt.segment_prompts import rewrite_segment_prompt
+
+    segments = split_shots_from_prompt(SAMPLE_PROMPT, total_duration=12.0)
+    llm = FakeLLM()
+    rewrite_segment_prompt(segments[0], SAMPLE_PROMPT, llm, is_first=True)
+    assert "读图结果" not in llm.last_request  # 「读图结果」只随真实帧描述出现
+    assert "Picture 1 是用户提交的首帧图" in llm.last_request
