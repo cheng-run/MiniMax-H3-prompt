@@ -1,13 +1,13 @@
 """按镜头拆分并按段重写 H3 视频提示词（长视频分段流水线的提示词侧）。
 
-H3 最终提示词结构（base-en.txt 规范）：指令行（时长 + 镜头数）→
-integrated_multimodal_description（含 [Shot N] 块）→ overall_soundscape →
-non_diegetic_music。soundscape/music 是按整条视频时间轴写的全局段落。
+H3 最终提示词结构（官方 base-en.txt，2026-09-22 迁移）：帧变体对齐指令行 →
+integrated_multimodal_description（含 [Shot N] 块，英文）→ overall_soundscape →
+non_diegetic_music。soundscape/music 按段重写为英文摘要句（官方 §4.6/§4.7）。
 
 本模块提供两级拆分：
 - ``split_shots_from_prompt``：机械拆分，每段 = 前缀 + 单镜头块（时间戳归零）+ 全局声音后缀。
-- ``rewrite_segment_prompt``：每段一次轻量 LLM 重写，把 soundscape/music
-  裁到本段时间窗，生成符合规范的独立单镜头提示词；失败自动回退机械拆分。
+- ``rewrite_segment_prompt``：每段一次轻量 LLM 重写，soundscape/music 为本段重写
+  英文摘要句，生成符合官方规范的独立单镜头提示词；失败自动回退机械拆分。
 
 另外提供 ``shots_from_prompt`` 与 ``_shot_blocks``：向导路径下 ShotPlan 为空时，
 从提示词的 [Shot N] 块与 At MM:SS.mmm 时间戳反推镜头表（时长 = 下一镜时间戳差值）。
@@ -138,8 +138,10 @@ def split_shots_from_prompt(prompt: str, total_duration: float | None = None) ->
         block = _TIMESTAMP_AFTER_TAG.sub(r"\1 ", block)  # 单镜头视频从 0 秒开始
         segment_header = header
         if index > 0:
-            # `(from [Shot N])` 绑定行指向原整片的 Picture 布局，后续段的头帧由桥接帧替代，剔除避免误导
-            kept = [line for line in segment_header.splitlines() if "(from [Shot" not in line]
+            # 官方 I2VA 单图指令行（`For the target video... <Picture 1> (from [Shot 1]) is fully referenced.`）
+            # 保留——每段独立喂 H3 时它就是本段的对齐指令；
+            # 只剔多 Picture 布局行（FL2VA/L2VA 的 Picture 2 对齐，指向原整片布局，后续段头帧由桥接帧替代）
+            kept = [line for line in segment_header.splitlines() if "Picture 2" not in line]
             segment_header = "\n".join(kept).rstrip() + "\n\n"
         text = segment_header + block + "\n\n" + suffix
 
@@ -249,11 +251,17 @@ def is_degenerate_durations(durations: list[float]) -> bool:
 # 按段重写：soundscape/music 按段重写为英文摘要句，生成合规的独立单镜头提示词
 # ---------------------------------------------------------------------------
 
+# 官方 I2VA 对齐指令行（Picture 1 锚定句，逐字符固定，base-en.txt 2.1）
+I2VA_ANCHOR_LINE = (
+    "For the target video, at 0.00 seconds into the target video, "
+    "<Picture 1> (from [Shot 1]) is fully referenced."
+)
+
 _REWRITE_INSTRUCTION = f"""你是 H3 视频提示词工程师。把整条视频的提示词重写为**只覆盖指定时间窗的一段独立单镜头提示词**。
 
 输入：完整提示词（多镜头）+ 本段时间窗（秒）。
 输出格式（严格遵守官方 H3 base-en.txt 规范，只输出提示词本身，不要任何解释）：
-- 第一行 I2VA 对齐指令（逐字符）：For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.
+- 第一行 I2VA 对齐指令（逐字符）：{I2VA_ANCHOR_LINE}
 - 空一行；
 - integrated_multimodal_description: 只含本段的一个 [Shot 1] 块，英文
   （沿用原 [Shot N] 的画面/运镜/表演描述，时间戳归零，不得虚构原镜头外的内容）；
@@ -296,18 +304,18 @@ def rewrite_segment_prompt(
 # v2：规划式分段（planner 给整秒边界 + 剧情钩子；每段独立细写）
 # ---------------------------------------------------------------------------
 
-_SEGMENT_V2_INSTRUCTION = """你是 H3 视频提示词的"分段编剧"。为长视频的其中一个 4-10 秒执行段写**可以直接喂给 MiniMax H3 的完整英文提示词**（严格官方 base-en.txt 格式；对白、歌词、画面可见文字保留原文语言）。
+_SEGMENT_V2_INSTRUCTION = f"""你是 H3 视频提示词的"分段编剧"。为长视频的其中一个 4-10 秒执行段写**可以直接喂给 MiniMax H3 的完整英文提示词**（严格官方 base-en.txt 格式；对白、歌词、画面可见文字保留原文语言）。
 
 H3 是执行型模型：你写什么它就做什么，含糊等于失控；把**不属于本段时间窗的事件**写进任何字段，H3 就会把它们提前演出来。要求：
 
 ## ⚠️ 时间窗纪律（最高优先级）
 - 你是给「整片 N 秒中的第 [start-end] 秒」写提示词
-- 你只负责写**本段时间窗发生的事**。分镜表/人物设定里出现的、发生在其他时间窗的事件（比如整片第 N1 秒才会破碎的窗户、第 N2 秒的转折动作），**本段一个字都不能出现**
+- 你只负责写**本段时间窗发生的事**。分析表/人物设定里出现的、发生在其他时间窗的事件（比如整片第 N1 秒才会破碎的窗户、第 N2 秒的转折动作），**本段一个字都不能出现**
 - 违反这条 = 本段作废
 
 ## 结构（严格官方 base-en.txt 格式，全部英文）
 第一行 I2VA 对齐指令（逐字符）：
-`For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.`
+`{I2VA_ANCHOR_LINE}`
 空一行后：
 1. `integrated_multimodal_description:` 本段剧情，**默认只有 [Shot 1] 一个镜头块**（段内切镜是显式例外，仅景别跳变等确有必要时）。
    - 开头先声明风格与初始构图（如 `Live-action, cinematic, a wide shot frames ...`），描述画面必须与 Picture 1（本段首帧参考图/桥接帧）一致——图片是唯一事实源，文字只做锚定，不要描述图片里不存在的状态

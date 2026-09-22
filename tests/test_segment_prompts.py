@@ -54,9 +54,11 @@ def test_split_shots_basic():
         assert "subject_definitions:" in segment.text
         assert "overall_soundscape:" in segment.text
         assert "non_diegetic_music:" in segment.text
-    # 每段只含自己的镜头块
+    # 每段只含自己的镜头块（指令行里的交叉引用 `(from [Shot 1])` 允许保留）
+    assert "[Shot 1] Live-action" not in segments[0].text or segments[0].shot_number == 1
+    assert "[Shot 1] Live-action" not in segments[1].text
     assert "[Shot 2]" not in segments[0].text
-    assert "[Shot 1]" not in segments[1].text
+    assert "[Shot 1] Live-action" not in segments[2].text
     # 时间戳归零：块首绝对时间戳被移除
     assert "At 00:05.000" not in segments[1].text
     assert "At 00:10.000" not in segments[2].text
@@ -180,8 +182,7 @@ def test_segment_v2_request_english_summary_soundscape():
                        summary="猫进店跳上柜台", end_hook="猫前爪搭上柜台沿")
     request = build_segment_v2_request(plan, [plan], {"shot_table": "x"}, None)
     # soundscape/music 字段要求英文摘要句
-    v2_part = request[request.index("_SEGMENT_V2"):] if "_SEGMENT_V2" in request else request
-    assert "1-4" in request and "1-3" in request
+    assert "1-4 句" in request and "1-3 句" in request
     assert "English" in request
     # 裁切措辞已删
     assert "超出的一律删" not in request
@@ -242,12 +243,11 @@ def test_segment_v2_request_no_legacy_structures():
 def test_write_segment_v2_output_official_shape():
     """v2 写段 mock：模板纪律 + validator 断言新产出过 T1 新裁判。"""
     from minimax_h3_prompt.segment_planner import SegmentPlan
-    from minimax_h3_prompt.segment_prompts import write_segment_v2
+    from minimax_h3_prompt.segment_prompts import I2VA_ANCHOR_LINE, write_segment_v2
     from minimax_h3_prompt.tools.h3_validator import validate_base
 
     official_reply = (
-        "For the target video, at 0.00 seconds into the target video, "
-        "<Picture 1> (from [Shot 1]) is fully referenced.\n\n"
+        f"{I2VA_ANCHOR_LINE}\n\n"
         "integrated_multimodal_description: [Shot 1] Live-action, cinematic, "
         "a close shot frames an orange tabby cat landing on a checkout counter "
         "under warm light. At 00:02.000, the cat rubs its head against the "
@@ -257,12 +257,15 @@ def test_write_segment_v2_output_official_shape():
         "non_diegetic_music: N/A"
     )
 
-    class FakeLLM:
-        def invoke(self, request):
-            return official_reply
-
     plans = _v2_plans()
-    text = write_segment_v2(plans[1], plans, {"shot_table": "x"}, None, FakeLLM())
+    text = write_segment_v2(plans[1], plans, {"shot_table": "x"}, None, FakeLLM(official_reply))
     assert text == official_reply
     issues = validate_base(text, duration=6.0, variant="I2VA")
     assert issues == []
+
+
+def test_split_keeps_i2va_instruction_line_for_later_segments():
+    """官方 I2VA 指令行含 `(from [Shot 1])`，机械拆分后续段必须保留（T3 评审发现）。"""
+    segments = split_shots_from_prompt(SAMPLE_PROMPT, total_duration=12.0)
+    assert "fully referenced" in segments[1].text
+    assert "fully referenced" in segments[2].text

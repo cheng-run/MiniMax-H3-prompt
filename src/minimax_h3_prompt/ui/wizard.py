@@ -592,7 +592,7 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
     from ..segment_prompts import rewrite_segment_prompt, split_shots_from_prompt, write_segment_v2
     from ..tools.frame_auditor import extract_last_frame
 
-    # ① 先走新流程：segment_planner 规划整秒分段边界 → 每段独立细写 (GLOBAL_LOCK/BRIDGE_FROM/END_HOOK)
+    # ① 先走新流程：segment_planner 规划整秒分段边界 → 每段独立细写（官方英文格式，spec 2026-09-22）
     state = session.stage_state
     plans = None
     try:
@@ -821,11 +821,14 @@ def _run_segmented_flow_v2(brief: Brief, session: SessionState, plans: list, sta
             print("\n" + "=" * 60)
             print(f"第 {position + 1}/{total} 段 · 时长 {plan.start_s}-{plan.end_s}s（{plan.duration_s}s）· 覆盖 Shot {plan.shots_in_segment}")
             print("=" * 60)
+            # 本段中文摘要：提示词正文是英文，走向核对靠 plan 层的中文 summary + end_hook 展示
+            if plan.summary:
+                print(f"[本段中文摘要] {plan.summary}")
             print(text)
             print("-" * 60)
             print(f"提示词文件：{seg_file(position)}")
             if plan.end_hook:
-                print(f"本段末态（段尾钩子）：{plan.end_hook}")
+                print(f"本段末态（段尾钩子，桥接帧验收对照）：{plan.end_hook}")
             while True:
                 raw = _prompt("本段生成并检查满意后回车进入下一段；输入 r 重显提示词：").lower()
                 if raw in ("", "y", "yes"):

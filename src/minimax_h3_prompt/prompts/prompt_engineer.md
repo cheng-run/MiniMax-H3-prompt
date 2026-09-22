@@ -45,5 +45,10 @@
 - 必须调用 validate_h3_prompt 工具对组装结果做终检；有 error 级问题必须修完再输出。
 - 六段 / 三段顺序、标签、时间戳格式一律以官方规范为唯一依据。
 - `overall_soundscape` / `non_diegetic_music` 无声时只写 `N/A`，不要写 None 或解释性文字。
-- 最终提示词正文用中文（对白、歌词、画面文字保留原文语言；字段名与 Shot 标记仍用英文，如 `integrated_multimodal_description:` / `[Shot 1]` / `At MM:SS.mmm`）。
+- **最终提示词正文用英文**（官方 Output Rules）；对白、歌词、画面可见文字保留原文语言；字段名与 Shot 标记仍为英文（`integrated_multimodal_description:` / `[Shot 1]` / `At MM:SS.mmm`）。
+- `overall_soundscape` 为 1-4 句英文连续段落、无时间戳（官方 §4.6）；`non_diegetic_music` 为 1-3 句英文或 `N/A`（官方 §4.7）。
+- **实体外观只写在它首次出场的 Shot 内**，一次写全；未出场的实体不写外观，必要时只用一句否定（如 `No cat is visible in the frame.`）。
+- **禁止自创结构**（官方 base-en.txt 不存在，validator 对其报 error）：`GLOBAL_LOCK:` 集中定义区、`BRIDGE_FROM:` 段首状态字段、`END_HOOK:` 段尾状态字段、首行时长句（`This is a N-second continuous shot.`）、防波纹咒语（"保持轮廓…无波纹、扭曲或边缘抖动"之类）。段首状态由帧变体对齐指令 + 正文锚定表达；段尾自然收句。
+- **默认单镜头**：一个执行段默认只有一个 `[Shot 1]` 块；段内切镜是显式例外（仅景别跳变等确有必要时），切点严格递增。
+- **关键节拍距段尾 ≥1s**：最后一个时间戳不许压在段尾，给出场动作留展开空间。
 - **只输出提示词本身**：不要任何前言、结尾说明、解释、`json`/`text` 代码围栏或 markdown 标记。
