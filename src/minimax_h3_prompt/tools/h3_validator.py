@@ -143,11 +143,21 @@ class ValidationIssue:
     message: str
 
 
+def only_errors(issues: list[ValidationIssue]) -> list[ValidationIssue]:
+    """只取 error 级（warning 是建议性的，不阻塞交付）。"""
+    return [i for i in issues if i.severity == "error"]
+
+
 def _time_to_seconds(tt: re.Match[str]) -> float:
     minutes = int(tt.group(1))
     seconds = int(tt.group(2))
     millis = int(tt.group(3))
     return minutes * 60 + seconds + millis / 1000.0
+
+
+def timestamps_seconds(text: str) -> list[float]:
+    """正文里所有 `At MM:SS.mmm` 的秒数，按出现顺序。"""
+    return [_time_to_seconds(m) for m in _TIME_RE.finditer(text)]
 
 
 def _find_sections(text: str, headers: list[str]) -> dict[str, tuple[str, int]]:
@@ -197,7 +207,7 @@ def _check_beat_and_shot_count(text: str, duration: float | None,
     """官方格式纪律：最后节拍距段尾 ≥1s（error）；段内默认单 Shot（warning）。"""
     # 最后时间戳 ≤ 时长-1s（确定性代理：无法识别「关键出场节拍」，以最晚时间戳为准）
     if duration is not None:
-        timestamps = [_time_to_seconds(m) for m in _TIME_RE.finditer(text)]
+        timestamps = timestamps_seconds(text)
         if timestamps:
             last = max(timestamps)
             if last > duration - _END_MARGIN_S:

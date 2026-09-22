@@ -17,6 +17,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from .tools.h3_validator import (
+    ValidationIssue,
+    only_errors,
+    timestamps_seconds,
+    validate_base,
+)
+
 # 镜头块标记：[Shot N]（允许中括号与数字间任意空白）
 _SHOT_BLOCK = re.compile(r"\[Shot\s+(\d+)\]")
 # 镜头块首的绝对时间戳：[Shot 2] At 00:03.500, the camera ...
@@ -263,8 +270,9 @@ _REWRITE_INSTRUCTION = f"""你是 H3 视频提示词工程师。把整条视频�
 输出格式（严格遵守官方 H3 base-en.txt 规范，只输出提示词本身，不要任何解释）：
 - 第一行 I2VA 对齐指令（逐字符）：{I2VA_ANCHOR_LINE}
 - 空一行；
-- integrated_multimodal_description: 只含本段的一个 [Shot 1] 块，英文
-  （沿用原 [Shot N] 的画面/运镜/表演描述，时间戳归零，不得虚构原镜头外的内容）；
+- integrated_multimodal_description: 只含本段的一个 [Shot 1] 块，英文；正文以 `[Shot 1] ` 标记紧跟字段名开头
+  （官方逐字符格式，如 `integrated_multimodal_description: [Shot 1] Live-action, cinematic, a wide shot frames ...`）
+  （沿用原 [Shot N] 的画面/运镜/表演描述，**时间戳归零＝相对本段起点计时，绝不得出现绝对片时**，不得虚构原镜头外的内容）；
   实体外观只写在首次出场的 Shot；不写 GLOBAL_LOCK/BRIDGE_FROM/END_HOOK/防波纹咒语/时长句；
 - overall_soundscape: **为本段重写**（不是从整条裁切，按段重写）：1-4 句 English 连续段落，
   描述本段时间窗内的环境声与动作声，无时间戳（官方 §4.6）；
@@ -290,9 +298,12 @@ def rewrite_segment_prompt(
     """
     start = segment.start_seconds or 0.0
     duration = segment.duration_seconds
+    # 写段时间基必须是本段 0 起：绝对片时只用于剧情定位，否则 LLM 会把节拍排到片段长度之外
     window = (
-        f"{start:g}s – {start + duration:g}s"
-        if duration is not None else f"{start:g}s 起（时长未知）"
+        f"0-{duration:g}s（本段时长 {duration:g}s；绝对片时 {start:g}s – {start + duration:g}s "
+        "仅作剧情定位，严禁写进提示词的时间戳）"
+        if duration is not None
+        else f"本段 0 起（时长未知；绝对片时 {start:g}s 起，仅作剧情定位，严禁写进时间戳）"
     )
     anchor = _frame_anchor_note(is_first, is_last, state or {})
     request = (
@@ -319,7 +330,10 @@ _SEGMENT_V2_INSTRUCTION = f"""你是 H3 视频提示词的"分段编剧"。为�
 H3 是执行型模型：你写什么它就做什么，含糊等于失控；把**不属于本段时间窗的事件**写进任何字段，H3 就会把它们提前演出来。要求：
 
 ## ⚠️ 时间窗纪律（最高优先级）
-- 你是给「整片 N 秒中的第 [start-end] 秒」写提示词
+- 你是给「整片 N 秒中的第 [start-end] 秒」写提示词，但**产出的是这一段自己的独立提示词**
+- **时间基（最高优先级）：正文里所有 `At 00:XX.XXX` 一律相对本段起点计时**（`00:00.000`＝本段第一帧＝Picture 1），
+  取值必须落在 `[0, 本段时长)` 内。绝对片时严禁出现——若本段从整片第 8 秒开始，正文**不能**写 `At 00:08.200`，
+  要写 `At 00:00.200`。喂给 H3 的是本段这一条片段，它的时钟从 0 开始；超出时长的节拍会被挤成一团或凭空乱动
 - 你只负责写**本段时间窗发生的事**。分析表/人物设定里出现的、发生在其他时间窗的事件（比如整片第 N1 秒才会破碎的窗户、第 N2 秒的转折动作），**本段一个字都不能出现**
 - 违反这条 = 本段作废
 
@@ -328,12 +342,14 @@ H3 是执行型模型：你写什么它就做什么，含糊等于失控；把**
 `{I2VA_ANCHOR_LINE}`
 空一行后：
 1. `integrated_multimodal_description:` 本段剧情，**默认只有 [Shot 1] 一个镜头块**（段内切镜是显式例外，仅景别跳变等确有必要时）。
-   - 开头先声明风格与初始构图（如 `Live-action, cinematic, a wide shot frames ...`），描述画面必须与 Picture 1（本段首帧图：段 1 是用户提交的首帧，后续段是桥接帧）一致——图片是唯一事实源，文字只做锚定，不要描述图片里不存在的状态
+   - 正文**以 `[Shot 1] ` 标记紧跟字段名开头**（官方逐字符格式，如 `integrated_multimodal_description: [Shot 1] Live-action, cinematic, a wide shot frames ...`）——
+     首行 `(from [Shot 1])` 的引用靠这个标记成立，漏写即引用悬空；标记后先声明风格与初始构图，描述画面必须与 Picture 1（本段首帧图：段 1 是用户提交的首帧，后续段是桥接帧）一致——图片是唯一事实源，文字只做锚定，不要描述图片里不存在的状态
    - **实体外观只写在它首次出场的 Shot 内**，一次写全；未出场的实体不写外观。
      **只有该实体在本段首帧（Picture 1）里确实不存在时**，才可以用一句否定（如 `No cat is visible in the frame.`）；
      首帧图里已经有的实体**绝不能**否定——那等于让 H3 无视你喂进去的图，本段会当场跑偏
-   - 时间戳 `At 00:XX.XXX` 写进句子内（如 `At 00:02.500, the glass door is slowly pushed open...`）
+   - 时间戳 `At 00:XX.XXX` 写进句子内，**且相对本段起点**（本段第 2.5 秒 → `At 00:02.500, the glass door is slowly pushed open...`）
    - **最后一个时间戳距段尾必须 ≥1s**——关键出场节拍要留展开空间，不许压在段尾
+     （此处的「段尾」＝**本段时长**，不是整片时长）
    - 段尾状态自然收在最后一个 Shot 的末句（画面停在自然落定的一瞬，不写"静止/定格"）
 2. `overall_soundscape:` **为本段重写**英文摘要句（官方 §4.6）：1-4 句 English 连续段落，描述本段的环境声与动作声；**无时间戳**。
 3. `non_diegetic_music:` **为本段重写**英文摘要句（官方 §4.7）：1-3 句 English，写观众能听到、角色听不到的配乐（乐器/速度/节奏）；无声时只写 `N/A`；**无时间戳**。
@@ -471,13 +487,48 @@ def build_segment_v2_request(
         f"{_SEGMENT_V2_INSTRUCTION}\n\n"
         f"--- \n"
         f"本段编号：Segment {plan.index + 1}/{len(all_plans)}\n"
-        f"时间窗：{plan.start_s}-{plan.end_s}s（时长 {plan.duration_s}s，对应整段视频的 {plan.start_s}-{plan.end_s}s）\n"
+        f"写段时间窗：0-{plan.duration_s}s（本段时长 {plan.duration_s}s；"
+        f"绝对片时 {plan.start_s}-{plan.end_s}s 仅作剧情定位，严禁写进提示词的时间戳）\n"
         f"包含 Shot：{plan.shots_in_segment}\n"
         f"本段剧情概述（中文，仅供你理解剧情，不得写进提示词）：{plan.summary}\n"
         f"{_frame_anchor_note(plan.index == 0, plan.index == len(all_plans) - 1, state)}\n"
         f"{future_block}\n"
         f"\n{shots_block}"
     )
+
+
+# 交付前校验：产出不合格时回插 issue 有界重写。2 = 共 2 次 LLM 调用（首次 + 1 次重写）
+MAX_SEGMENT_ATTEMPTS = 2
+
+
+def validate_segment(text: str, duration: float | None = None,
+                     start_s: float = 0.0) -> list[ValidationIssue]:
+    """按本段时长校验一段分段提示词（返回 issue 列表，error 级需阻塞）。
+
+    分段路径产出的是**本段自己的独立提示词**，它的 target video 就是这一条片段，
+    所以时间戳必须落在 ``[0, duration)`` 内；正文缺 ``[Shot 1]`` 标记会让首行
+    ``(from [Shot 1])`` 引用悬空（validator 报 NO_SHOT）。模板固定用 I2VA 锚定行，
+    故 variant 固定 I2VA。
+
+    ``start_s`` 补一条 error 级检查**抓不到**的启发式警告：写成绝对片时的正文，只要绝对
+    秒没超过片段长度，就与合法写法**完全同形**（``At 00:04.000`` 究竟是「片段第 4 秒」
+    还是「整片第 4 秒」，正则无法区分）。故：本段不从 0 起（``start_s > 0``）却**所有**
+    时间戳都 ≥ ``start_s`` → 高度可疑，报 warning（不阻塞，避免误伤合法写法）。
+    """
+    issues = validate_base(text, duration=duration, variant="I2VA")
+    stamps = timestamps_seconds(text)
+    if start_s > 0 and stamps and min(stamps) >= start_s:
+        issues.append(ValidationIssue(
+            "warning", "TIMESTAMPS_LOOK_ABSOLUTE",
+            f"本段从整片 {start_s:g}s 起，正文所有时间戳都 ≥ {start_s:g}s（最早 {min(stamps):.3f}s）"
+            "——疑似写成绝对片时。正文时间戳必须相对本段起点（0.000＝本段第一帧）"))
+    return issues
+
+
+def segment_errors(text: str, duration: float | None = None,
+                   start_s: float = 0.0) -> list[ValidationIssue]:
+    """只取 error 级 issue（warning 不阻塞交付），供重写循环用。"""
+    return only_errors(validate_segment(text, duration, start_s))
 
 
 def write_segment_v2(
@@ -487,14 +538,37 @@ def write_segment_v2(
     brief,
     llm,
 ) -> str | None:
-    """用 LLM 为该段写细颗粒度完整提示词（官方英文格式）。失败返回 None。"""
-    try:
-        response = llm.invoke(build_segment_v2_request(plan, all_plans, state, brief))
-    except Exception:  # noqa: BLE001
-        return None
-    text = getattr(response, "content", response)
-    text = str(text).strip()
-    return text or None
+    """用 LLM 为该段写细颗粒度完整提示词（官方英文格式）。LLM 调用失败返回 None。
+
+    产出先过 ``segment_errors``：有 error 就把 issue 回插请求里有界重写（共
+    ``MAX_SEGMENT_ATTEMPTS`` 次 LLM 调用 = 首次 + 1 次重写）。仍不合格时**交回原文**
+    而不是 None——返回 None 会被向导当成「生成失败」跳过，用户看不到坏在哪；
+    交回原文后由向导把 issue 明细当面打给用户（warning 级不参与重写）。
+    """
+    duration = float(plan.duration_s)
+    start_s = float(plan.start_s)
+    base_request = build_segment_v2_request(plan, all_plans, state, brief)
+    request = base_request
+    text: str | None = None
+    for attempt in range(MAX_SEGMENT_ATTEMPTS):
+        try:
+            response = llm.invoke(request)
+        except Exception:  # noqa: BLE001 - LLM 调用异常仍按老契约返回 None
+            return None
+        text = str(getattr(response, "content", response)).strip()
+        if not text:
+            return None
+        errors = segment_errors(text, duration, start_s)
+        if not errors:
+            return text
+        if attempt + 1 == MAX_SEGMENT_ATTEMPTS:
+            break  # 最后一轮：重试预算已用尽，不再构造没人用的请求
+        request = (
+            f"{base_request}\n\n"
+            "【上一次产出被校验器判为不合格，请按下列问题修正后重写】\n"
+            + "\n".join(f"- {i.code}: {i.message}" for i in errors)
+        )
+    return text
 
 
 def _ctx(**fields: str) -> str:

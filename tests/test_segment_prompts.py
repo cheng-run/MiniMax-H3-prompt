@@ -1,4 +1,6 @@
 """prompt 按镜头拆分与逐段重写测试（纯文本逻辑，不依赖资产库）。"""
+from pathlib import Path
+
 import pytest
 
 from minimax_h3_prompt.segment_prompts import (
@@ -423,3 +425,156 @@ def test_rewrite_segment_prompt_without_state_stays_generic():
     rewrite_segment_prompt(segments[0], SAMPLE_PROMPT, llm, is_first=True)
     assert "读图结果" not in llm.last_request  # 「读图结果」只随真实帧描述出现
     assert "Picture 1 是用户提交的首帧图" in llm.last_request
+
+
+# ---------------------------------------------------------------------------
+# 时间基 + 段落形状 + 交付前校验
+#
+# bug（2026-09-22，GEN003 实测）：v2 与回退两条重写路径都用「绝对片时」框定本段，
+# 却从未规定正文里 `At 00:XX.XXX` 用哪个基准 → LLM 跨段随机选边：段 2/3 写成绝对秒
+# （4.0/5.2/6.4/6.9，而该片段只有 4s），段 1/4 写成相对秒；人工验收坏的正是 2/3。
+# 官方 base-en.txt：`target video` 指被生成的这条片段，切点时间必须落在时长内。
+# 另外全部官方案例正文都以 `integrated_multimodal_description: [Shot 1] ` 开头，
+# 缺该标记会让首行 `(from [Shot 1])` 引用悬空（本仓库 validator 直接报 NO_SHOT）。
+#
+# 而 validator 本就能用真实产物把好坏分开（段 2/3 报 LAST_TIMESTAMP_TOO_CLOSE_TO_END，
+# 段 1/4 干净）——规则在、接线不在：分段是唯一「产出即交付」的路径，从不校验。
+# ---------------------------------------------------------------------------
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+class SequencedLLM:
+    """按顺序返回多条回复并记录每次请求；回复用完后一直返回最后一条。"""
+
+    def __init__(self, replies: list[str]):
+        self._replies = list(replies)
+        self.requests: list[str] = []
+
+    @property
+    def calls(self) -> int:
+        return len(self.requests)
+
+    def invoke(self, request):
+        self.requests.append(request)
+        index = min(len(self.requests), len(self._replies)) - 1
+        return self._replies[index]
+
+
+def _bad_segment_text() -> str:
+    """真实坏产物：GEN003 段 2（绝对时间戳 + 无 [Shot 1] 标记）。
+
+    末尾换行按 ``write_segment_v2`` 的既有契约去掉（LLM 回复同样会被 strip）。
+    """
+    raw = (FIXTURES / "segment_absolute_timestamps_bad.md").read_text(encoding="utf-8")
+    return raw.strip()
+
+
+def _good_segment_text() -> str:
+    """合规样本：直接用官方正样本 fixture（4-10s 时长零 error），不再手写一份。"""
+    raw = (FIXTURES / "official_shot01_i2va.md").read_text(encoding="utf-8")
+    return raw.strip()
+
+
+def test_v2_request_declares_segment_relative_timebase():
+    """v2 请求必须把写段时间基定死为「本段 0 起」，绝对片时只作剧情定位。"""
+    from minimax_h3_prompt.segment_prompts import build_segment_v2_request
+
+    plans = _v2_plans()  # 第 2 段：4-10s，时长 6s
+    request = build_segment_v2_request(plans[1], plans, {"shot_table": "x"}, None)
+    assert "0-6s" in request, "写段时间窗必须以本段 0 起，否则 LLM 会写绝对片时"
+    assert "仅作剧情定位" in request, "绝对片时必须显式降级为「只用于定位、不得写进时间戳」"
+
+
+def test_v2_request_teaches_shot1_marker():
+    """模板示例必须带 [Shot 1] 标记，否则首行 (from [Shot 1]) 引用悬空。"""
+    from minimax_h3_prompt.segment_prompts import build_segment_v2_request
+
+    plans = _v2_plans()
+    request = build_segment_v2_request(plans[1], plans, {"shot_table": "x"}, None)
+    assert "[Shot 1] Live-action" in request
+
+
+def test_rewrite_request_declares_segment_relative_timebase():
+    """回退路径的逐段重写同样要定死时间基（两条路径都得改，别只改主路径）。"""
+    from minimax_h3_prompt.segment_prompts import rewrite_segment_prompt
+
+    segments = split_shots_from_prompt(SAMPLE_PROMPT, total_duration=15.0)
+    assert segments[1].start_seconds == 5.0  # 第 2 镜：整片 5-10s，时长 5s
+    llm = FakeLLM()
+    rewrite_segment_prompt(segments[1], SAMPLE_PROMPT, llm)
+    assert "0-5s" in llm.last_request
+    assert "仅作剧情定位" in llm.last_request
+    assert "绝对片时 5s – 10s" in llm.last_request  # 既有契约：绝对位置仍要传、且标明只作定位
+    assert "Shot 2" in llm.last_request
+
+
+def test_validate_segment_flags_real_bad_artifact():
+    """真实坏产物必须被判不合格（这条是本次缺陷的可复现红线）。"""
+    from minimax_h3_prompt.segment_prompts import validate_segment
+
+    issues = validate_segment(_bad_segment_text(), 4.0, start_s=4.0)
+    assert "LAST_TIMESTAMP_TOO_CLOSE_TO_END" in {i.code for i in issues if i.severity == "error"}, \
+        "4s 片段的 6.9s 节拍没被拦下"
+    assert "TIMESTAMPS_LOOK_ABSOLUTE" in {i.code for i in issues}
+
+
+def test_validate_segment_catches_absolute_base_where_error_checks_cannot():
+    """error 级抓不到的那半个洞：本段 start < duration 时绝对片时与合法写法同形。
+
+    复现：段 2（start=4s、时长 6s）写成绝对 ``At 00:04.000``/``00:04.600``（应为 0.0/0.6），
+    绝对秒落在 [0,6) 内 → error 级全绿。GEN003 段 2/3 被抓到只因 6.9s 超过了 4s 片段，
+    凡是 start < duration 的段都会漏网，故用 warning 启发式补上。
+    """
+    from minimax_h3_prompt.segment_prompts import I2VA_ANCHOR_LINE, segment_errors, validate_segment
+
+    text = (
+        f"{I2VA_ANCHOR_LINE}\n\n"
+        "integrated_multimodal_description: [Shot 1] Live-action, cinematic, a full shot "
+        "frames the store. At 00:04.000, the door is nudged open. At 00:04.600, the cat "
+        "slips in low. The scene settles on the door seam.\n\n"
+        "overall_soundscape: A low hum sits under the quiet room tone.\n\n"
+        "non_diegetic_music: N/A"
+    )
+    assert segment_errors(text, 6.0, start_s=4.0) == [], "前提失效：error 级本应抓不到这个洞"
+    assert "TIMESTAMPS_LOOK_ABSOLUTE" in {i.code for i in validate_segment(text, 6.0, start_s=4.0)}
+
+    # 合法的相对写法（本段第 4 秒）不得误报——这正是它只报 warning 的原因
+    legal = text.replace("At 00:04.000", "At 00:00.000").replace("At 00:04.600", "At 00:00.600")
+    assert "TIMESTAMPS_LOOK_ABSOLUTE" not in {i.code for i in validate_segment(legal, 6.0, start_s=4.0)}
+
+    # 本段从整片 0 起时该启发式无意义（start_s == 0 不做此项检查）
+    assert "TIMESTAMPS_LOOK_ABSOLUTE" not in {i.code for i in validate_segment(text, 6.0)}
+
+
+def test_validate_segment_accepts_compliant_text():
+    """合规产物零 error——否则重试循环会把好文本也判死。"""
+    from minimax_h3_prompt.segment_prompts import validate_segment
+
+    issues = validate_segment(_good_segment_text(), 6.0)
+    assert [i for i in issues if i.severity == "error"] == []
+
+
+def test_write_segment_v2_reasks_when_timestamps_overrun_segment():
+    """不合格产出必须先重写；重写请求要带上校验反馈供 LLM 修正。"""
+    from minimax_h3_prompt.segment_prompts import write_segment_v2
+
+    llm = SequencedLLM([_bad_segment_text(), _good_segment_text()])
+    plans = _v2_plans()  # 第 2 段时长 6s
+    text = write_segment_v2(plans[1], plans, {"shot_table": "x"}, None, llm)
+
+    assert llm.calls == 2, "首次产出不合格却没有重写"
+    assert text == _good_segment_text()
+    assert "LAST_TIMESTAMP_TOO_CLOSE_TO_END" in llm.requests[1], "重写请求没带上失败原因"
+
+
+def test_write_segment_v2_retry_is_bounded_and_never_silent():
+    """始终不合格时：有界重试，且交回原文（返回 None 会变成向导里的静默跳过）。"""
+    from minimax_h3_prompt.segment_prompts import MAX_SEGMENT_ATTEMPTS, write_segment_v2
+
+    llm = SequencedLLM([_bad_segment_text()])
+    plans = _v2_plans()
+    text = write_segment_v2(plans[1], plans, {"shot_table": "x"}, None, llm)
+
+    assert llm.calls == MAX_SEGMENT_ATTEMPTS, "重试次数无界"
+    assert text == _bad_segment_text()

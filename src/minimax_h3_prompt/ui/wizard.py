@@ -596,6 +596,31 @@ def _load_or_make_summary(prompt: str, llm, directory: Path):
 # 长视频分段陪跑（>10s：ComfyUI H3 时长选项只有 4-10s 整数档，必须逐段生成）
 # ---------------------------------------------------------------------------
 
+def _gate_segment_text(position: int, text: str, duration: float | None,
+                       start_s: float) -> list:
+    """交付前校验一段分段提示词并当面示警；返回 error 级 issue（空 = 放行）。
+
+    分段是唯一「产出即交付」的路径：不合格的提示词会被用户直接粘进 H3，
+    所以必须显式告知坏在哪，绝不静默交付。两条分段路径（规划式与回退式）共用。
+    """
+    from ..segment_prompts import validate_segment
+    from ..tools.h3_validator import format_issues, only_errors
+
+    issues = validate_segment(text, duration, start_s)
+    if not issues:
+        return []
+    errors = only_errors(issues)
+    print("\n" + "!" * 60)
+    print(
+        f"[校验未通过] 第 {position + 1} 段有 {len(errors)} 项 error，直接喂给 H3 会跑偏："
+        if errors
+        else f"[校验提醒] 第 {position + 1} 段有 {len(issues)} 项 warning："
+    )
+    print(format_issues(issues))
+    print("!" * 60)
+    return errors
+
+
 def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summary=None,
                         state: dict | None = None) -> None:
     """把整条提示词按 [Shot N] 拆成单镜头提示词，逐段陪跑。
@@ -705,6 +730,9 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
             if segment.start_seconds is not None else ""
         )
         (seg_dir / f"shot-{position + 1:02d}.md").write_text(display_text, encoding="utf-8")
+        # 交付前校验：回退路径同样是「产出即交付」，同样不得静默
+        _gate_segment_text(position, display_text, segment.duration_seconds,
+                           segment.start_seconds or 0.0)
         print("\n" + "=" * 60)
         print(f"第 {position + 1}/{total} 段（Shot {segment.shot_number}）· 本段时长 {duration_line}{window_line}")
         if fallback_label:
@@ -809,7 +837,11 @@ def _run_segmented_flow_v2(brief: Brief, session: SessionState, plans: list, sta
             return
 
         def work() -> None:
-            prefetch[position] = generate(position)
+            try:
+                prefetch[position] = generate(position)
+            except Exception as exc:  # noqa: BLE001 - 异常若逃逸，take() 的等待循环会永远自旋
+                print(f"[警告] 第 {position + 1} 段撰写线程异常：{exc}")
+                prefetch[position] = None
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -830,9 +862,18 @@ def _run_segmented_flow_v2(brief: Brief, session: SessionState, plans: list, sta
             if text is None:
                 print(f"[警告] 第 {position + 1} 段生成失败，跳过。")
                 continue
+            # 交付前校验：分段是唯一「产出即交付」的路径，不合格必须当面示警（绝不静默）
+            errors = _gate_segment_text(position, text, float(plan.duration_s),
+                                        float(plan.start_s))
             # 立即预取下一级
             start_prefetch(position + 1)
-            print(f"\n✓ 第 {position + 1}/{total} 段提示词已生成，可立即复制到 H3 生成视频。", flush=True)
+            if errors:
+                print(
+                    f"\n⚠ 第 {position + 1}/{total} 段未通过校验：请先按上面的 issue 修正，再复制到 H3。",
+                    flush=True,
+                )
+            else:
+                print(f"\n✓ 第 {position + 1}/{total} 段提示词已生成，可立即复制到 H3 生成视频。", flush=True)
             if position + 1 < total:
                 print(f"  （后台正在同时撰写第 {position + 2} 段提示词）", flush=True)
 
