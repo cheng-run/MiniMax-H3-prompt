@@ -175,6 +175,21 @@ def test_rewrite_instruction_asks_rewrite_not_crop():
     assert "按段重写" in request or "rewrite" in request.lower()
 
 
+def test_both_segment_paths_carry_coexist_discipline():
+    """两条分段路径（v2 规划式 + 回退式）都必须带「快机位 + 多拍不同段共存」纪律。
+
+    这是模板层的锚：改模板名/重构时纪律句丢了会在此报红（两条路径都要改，别只改主路径）。
+    """
+    from minimax_h3_prompt.segment_prompts import (
+        _REWRITE_INSTRUCTION,
+        _SEGMENT_V2_INSTRUCTION,
+    )
+
+    for name, tpl in (("v2", _SEGMENT_V2_INSTRUCTION), ("fallback", _REWRITE_INSTRUCTION)):
+        assert "不得同段共存" in tpl, f"{name} 模板缺共存禁令"
+        assert "降机位" in tpl, f"{name} 模板缺默认处置（降机位）"
+
+
 def test_segment_v2_request_english_summary_soundscape():
     """v2 主路径：字段 4/5 要求英文摘要句（1-4/1-3 句、无时间戳），不再裁时间窗。"""
     from minimax_h3_prompt.segment_planner import SegmentPlan
@@ -578,3 +593,120 @@ def test_write_segment_v2_retry_is_bounded_and_never_silent():
 
     assert llm.calls == MAX_SEGMENT_ATTEMPTS, "重试次数无界"
     assert text == _bad_segment_text()
+
+
+# ---------------------------------------------------------------------------
+# 「快机位 + 多拍动作」同段共存检查（issue #11，2026-09-23 钉 seed 2×2 实测裁定：
+# error 级、多拍阈值 ≥3 个时间戳、物证正负样本在 tests/fixtures/flicker_arms/）
+# ---------------------------------------------------------------------------
+
+ARMS = Path(__file__).parent / "fixtures" / "flicker_arms"
+
+
+def _arm(name: str) -> str:
+    suffix = "" if name.endswith(".md") else ".txt"
+    return (ARMS / f"{name}{suffix}").read_text(encoding="utf-8")
+
+
+def test_coexist_check_flags_real_flaring_artifacts():
+    """负样本必须报红：armA（00017，flicker 4.865）与 original（00012，4.163）。"""
+    from minimax_h3_prompt.segment_prompts import validate_segment
+
+    for name in ("armA_H1_state_only", "original_00012"):
+        issues = validate_segment(_arm(name), 4.0)
+        codes = {i.code for i in issues if i.severity == "error"}
+        assert "FAST_CAMERA_MULTI_BEAT_COEXIST" in codes, f"{name}（致闪物证）未被报红"
+
+
+def test_coexist_check_single_factor_green():
+    """单因素不得误报：R1 只有快机位（2 拍，0.173）、R2 只有多拍（慢机位，0.78）。"""
+    from minimax_h3_prompt.segment_prompts import validate_segment
+
+    for name in ("R1_camera_only", "R2_action_only"):
+        issues = validate_segment(_arm(name), 4.0)
+        codes = {i.code for i in issues if i.severity == "error"}
+        assert "FAST_CAMERA_MULTI_BEAT_COEXIST" not in codes, f"{name} 是单因素反例，不该报"
+
+
+def test_coexist_check_positive_samples_clean():
+    """票面正样本全绿：executed_00014（静态低运动 0.092）。"""
+    from minimax_h3_prompt.segment_prompts import validate_segment
+
+    issues = validate_segment(_arm("executed_00014"), 4.0)
+    assert "FAST_CAMERA_MULTI_BEAT_COEXIST" not in {i.code for i in issues}
+
+
+def test_coexist_check_runs_even_without_duration():
+    """无时长（duration=None）时检查仍运行——判定只用绝对节拍数，
+    漏传时长不得让检查静默失效（「规则在、接线不在」同型风险的护栏）。"""
+    from minimax_h3_prompt.segment_prompts import validate_segment
+
+    issues = validate_segment(_arm("armA_H1_state_only"))
+    assert "FAST_CAMERA_MULTI_BEAT_COEXIST" in {i.code for i in issues}
+
+
+def test_coexist_check_two_beats_still_green():
+    """快机位 + 2 拍是合法边界（R1 物证 0.173），加一个节拍才越线。"""
+    from minimax_h3_prompt.segment_prompts import I2VA_ANCHOR_LINE, validate_segment
+
+    text = (
+        f"{I2VA_ANCHOR_LINE}\n\n"
+        "integrated_multimodal_description: [Shot 1] Live-action, cinematic, a fast low "
+        "tracking shot with small amplitude at fast speed frames the store. "
+        "At 00:00.500, the door swings open. At 00:02.000, the cat lands on the counter. "
+        "The shot settles on the landed cat.\n\n"
+        "overall_soundscape: A low hum sits under the room tone.\n\n"
+        "non_diegetic_music: N/A"
+    )
+    assert "FAST_CAMERA_MULTI_BEAT_COEXIST" not in {
+        i.code for i in validate_segment(text, 4.0)
+    }
+
+
+def test_coexist_rewrites_segment_until_clean():
+    """重写循环消费新检查：首稿共存 → 带原因重写 → 合格稿收工。"""
+    from minimax_h3_prompt.segment_prompts import write_segment_v2
+
+    good = _arm("executed_00014")
+    llm = SequencedLLM([_arm("armA_H1_state_only"), good])
+    plans = _v2_plans()  # 第 2 段时长 6s
+    text = write_segment_v2(plans[1], plans, {"shot_table": "x"}, None, llm)
+
+    assert llm.calls == 2
+    assert text == good
+    assert "FAST_CAMERA_MULTI_BEAT_COEXIST" in llm.requests[1], "重写请求没带上共存问题"
+
+
+def test_gate_surfaces_coexist_issue_for_gen004_shot02(tmp_path, monkeypatch, capsys):
+    """接线断言（调用点）：GEN004 shot-02.md 走向导闸门必须当面报红，不得静默交付。
+
+    票面闸门缺口：validate_segment 对该文本曾返回零 issue，而它正是产出坏片的文本。
+    物证已固化为 fixture（原件在未跟踪的 output/sessions/ 下，CI 不可达）。
+    """
+    from types import SimpleNamespace
+
+    from minimax_h3_prompt import segment_prompts as _sp, session_store
+    from minimax_h3_prompt.brief_parser import Brief
+    from minimax_h3_prompt.segment_planner import SegmentPlan
+    from minimax_h3_prompt.ui import wizard
+
+    bad = _arm("gen004_shot02.md")
+    brief = Brief(mode="base", variant="I2VA", duration=10.0, style="写实", plot="便利店橘猫")
+    generation_dir = tmp_path / "GEN001"
+    generation_dir.mkdir()
+    session = session_store.SessionState(
+        directory=generation_dir, brief=brief,
+        stage_state={"shot_table": "[Shot 1] 深夜空店内……"},
+        status=session_store.STATUS_COMPLETED,
+    )
+    plans = [SegmentPlan(index=0, start_s=0, end_s=4, shots_in_segment=(1,),
+                         summary="深夜便利店全景", end_hook="玻璃门刚被顶开窄缝")]
+    monkeypatch.setattr(_sp, "write_segment_v2", lambda *a, **k: bad)
+    monkeypatch.setattr(wizard, "_prompt", lambda *a, **k: "")
+    monkeypatch.setattr(wizard, "_confirm", lambda *a, **k: False)
+
+    wizard._run_segmented_flow_v2(brief, session, plans, {}, SimpleNamespace())
+
+    out = capsys.readouterr().out
+    assert "FAST_CAMERA_MULTI_BEAT_COEXIST" in out, "闸门对新检查静默了"
+    assert "可立即复制到 H3" not in out

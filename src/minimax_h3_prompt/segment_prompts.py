@@ -26,6 +26,17 @@ from .tools.h3_validator import (
 
 # 镜头块标记：[Shot N]（允许中括号与数字间任意空白）
 _SHOT_BLOCK = re.compile(r"\[Shot\s+(\d+)\]")
+# 「快机位」措辞（issue #11：致闪因素之一）。覆盖实测物证形态
+# 「a fast low tracking shot」「at fast speed」，兼顾 rapid/whip 等同义。
+_FAST_CAMERA_RE = re.compile(
+    r"\b(?:a\s+)?(?:fast|rapid|swift|whip)[\w-]*\s+"
+    r"(?:low\s+|high\s+|wide\s+|tight\s+|close\s+|handheld\s+|tracking\s+|pan\s+"
+    r"|dolly\s+|zoom\s+|push-in\s+|crane\s+|aerial\s+|overhead\s+)*"
+    r"\w*(?:shot|tracking|pan|dolly|zoom|camera move|push-in|crane|handheld)\b"
+    r"|at fast speed|rapid(?:ly)?\s+(?:tracking|pan|dolly|zoom|camera)|whip pan"
+    r"|fast-paced camera",
+    re.IGNORECASE,
+)
 # 镜头块首的绝对时间戳：[Shot 2] At 00:03.500, the camera ...
 _TIMESTAMP_AFTER_TAG = re.compile(r"(\[Shot\s+\d+\])\s*At\s+(\d{2}):(\d{2})\.(\d{3}),?\s*", re.IGNORECASE)
 # 镜头区之后属于全局声音/配乐段落的标记（用于界定镜头区结尾）
@@ -274,6 +285,9 @@ _REWRITE_INSTRUCTION = f"""你是 H3 视频提示词工程师。把整条视频�
   （官方逐字符格式，如 `integrated_multimodal_description: [Shot 1] Live-action, cinematic, a wide shot frames ...`）
   （沿用原 [Shot N] 的画面/运镜/表演描述，**时间戳归零＝相对本段起点计时，绝不得出现绝对片时**，不得虚构原镜头外的内容）；
   实体外观只写在首次出场的 Shot；不写 GLOBAL_LOCK/BRIDGE_FROM/END_HOOK/防波纹咒语/时长句；
+  **机位与节拍二选一**：快机位（fast/rapid tracking、whip pan、`at fast speed` 等）与 ≥3 个动作节拍
+  （正文 ≥3 个 `At 00:XX.XXX`）不得同段共存，否则产出剧烈闪动；默认降机位为静态/慢速中景、节拍照写，
+  剧情必须快镜时把本段节拍压到 2 个以内；
 - overall_soundscape: **为本段重写**（不是从整条裁切，按段重写）：1-4 句 English 连续段落，
   描述本段时间窗内的环境声与动作声，无时间戳（官方 §4.6）；
 - non_diegetic_music: **为本段重写**：1-3 句 English，或无声时只写 N/A，无时间戳（官方 §4.7）。
@@ -351,6 +365,11 @@ H3 是执行型模型：你写什么它就做什么，含糊等于失控；把**
    - **最后一个时间戳距段尾必须 ≥1s**——关键出场节拍要留展开空间，不许压在段尾
      （此处的「段尾」＝**本段时长**，不是整片时长）
    - 段尾状态自然收在最后一个 Shot 的末句（画面停在自然落定的一瞬，不写"静止/定格"）
+   - **机位与节拍二选一（实测纪律）**：快机位（fast/rapid tracking、whip pan、`at fast speed` 等）
+     与 **≥3 个动作节拍**（正文里 ≥3 个 `At 00:XX.XXX`）**不得同段共存**——同段共存会让 H3
+     产出剧烈闪动的片段。默认**降机位**：改静态/慢速中景（`a static medium shot with small
+     amplitude at slow speed`），节拍照写；剧情确实必须快镜时，把本段节拍压缩到 2 个以内，
+     或把后续节拍拆给相邻段
 2. `overall_soundscape:` **为本段重写**英文摘要句（官方 §4.6）：1-4 句 English 连续段落，描述本段的环境声与动作声；**无时间戳**。
 3. `non_diegetic_music:` **为本段重写**英文摘要句（官方 §4.7）：1-3 句 English，写观众能听到、角色听不到的配乐（乐器/速度/节奏）；无声时只写 `N/A`；**无时间戳**。
 
@@ -501,6 +520,30 @@ def build_segment_v2_request(
 MAX_SEGMENT_ATTEMPTS = 2
 
 
+def _check_fast_camera_multi_beat_coexist(text: str, stamps: list[float],
+                                          issues: list[ValidationIssue]) -> None:
+    """「快机位 + 多拍动作」同段共存 → error（issue #11，钉 seed 2×2 实测）。
+
+    两因素单独出现都不致闪（R1：快机位 + 2 拍 = 0.173 绿；R2：慢机位 + 3 拍 = 0.78 可接受），
+    共存才超加性致闪（00016 0.78 → 00017 4.865，同 seed 只差机位措辞，6.2 倍）。
+    故两个条件必须同时命中才报。多拍阈值 ≥3 个时间戳：快机位 + ≥3 拍的物证全部
+    落在 4.1–4.9（红），快机位 + 2 拍为 0.173（绿）——阈值落在实测分离边界上。
+
+    无条件运行（不按 duration 门控）：判定只用绝对节拍数，漏传时长不该让检查静默失效
+    ——「规则在、接线不在」的同型风险，不留给未来调用方。
+    """
+    if len(stamps) < 3:
+        return
+    if not _FAST_CAMERA_RE.search(text):
+        return
+    issues.append(ValidationIssue(
+        "error", "FAST_CAMERA_MULTI_BEAT_COEXIST",
+        f"本段同时存在快机位措辞（fast/rapid tracking 等）与 {len(stamps)} 个动作节拍"
+        "——「快机位 + 多拍动作」同段共存实测致闪（flicker_std 4.1–4.9，超加性；"
+        "单因素均绿）。默认降机位（改静态/慢速中景）；剧情必须快镜时，把动作节拍"
+        "压缩到 2 个以内或拆到相邻段"))
+
+
 def validate_segment(text: str, duration: float | None = None,
                      start_s: float = 0.0) -> list[ValidationIssue]:
     """按本段时长校验一段分段提示词（返回 issue 列表，error 级需阻塞）。
@@ -517,6 +560,7 @@ def validate_segment(text: str, duration: float | None = None,
     """
     issues = validate_base(text, duration=duration, variant="I2VA")
     stamps = timestamps_seconds(text)
+    _check_fast_camera_multi_beat_coexist(text, stamps, issues)
     if start_s > 0 and stamps and min(stamps) >= start_s:
         issues.append(ValidationIssue(
             "warning", "TIMESTAMPS_LOOK_ABSOLUTE",
