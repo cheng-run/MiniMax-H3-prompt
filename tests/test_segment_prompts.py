@@ -191,12 +191,17 @@ def test_both_segment_paths_carry_coexist_discipline():
 
 
 def test_both_segment_paths_state_the_sampling_premise_of_the_coexist_rule():
-    """共存禁令的**采样前提**必须写进两条路径的模板（ADR 0003 / issue #11）。
+    """共存禁令的**采样前提与成立状态**必须写进两条路径的模板（ADR 0003 / issue #11）。
 
-    那组阈值的物证是 4 步采样下量的（00016 低运动 0.78 vs 00017 快机位+动作 4.865）；
-    同一文本在 8 步下只有 0.869——**它是降级采样配置下的现象，不是内容的固有性质**。
+    那组阈值的物证是 4 步采样下量的（00016 慢机位 0.78 vs 00017 快机位+3 拍 4.865——
+    同 seed、同图、同节拍数，只差机位措辞）；同一文本在 8 步下只有 0.869。
     模板里只写「否则产出剧烈闪动」是把一个带前提的实测结论说成了因果事实，而这两句正是
-    写段 LLM 直接读到的文本；判据与模板说的不是同一件事，规则就会往错的方向推。
+    写段 LLM 直接读到的文本。
+
+    只补「4 步」还不够，必须把**状态**说全，否则 8 步的读者会读到「理由在我这档不成立，
+    但规矩照守」——那是本项目的「说反话」形态。三件事都要在：
+    - 缺哪两组样本（8 步的慢机位对照 / 独立载荷）→ 所以「8 步下是否还需要」未验证
+    - **不许自行放宽**（要放宽先补样本）
     """
     from minimax_h3_prompt.segment_prompts import (
         _REWRITE_INSTRUCTION,
@@ -206,6 +211,10 @@ def test_both_segment_paths_state_the_sampling_premise_of_the_coexist_rule():
     for name, tpl in (("v2", _SEGMENT_V2_INSTRUCTION), ("fallback", _REWRITE_INSTRUCTION)):
         assert "4 步" in tpl, f"{name} 模板没写阈值量于 4 步采样"
         assert "8 步" in tpl, f"{name} 模板没写同一文本在 8 步下的对照"
+        assert "未验证" in tpl, f"{name} 模板没说清「8 步下是否还需要」是未验证的"
+        assert "独立载荷" in tpl, f"{name} 模板没点出缺的是哪两组样本"
+        assert "不许自行放宽" in tpl, \
+            f"{name} 模板缺「不许自行放宽」——缺了它，补上前提会被读成可以无视这条纪律"
 
 
 def test_both_segment_paths_require_edge_stability_sentence():
