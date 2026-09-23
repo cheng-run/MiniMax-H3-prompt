@@ -302,10 +302,14 @@ def rewrite_segment_prompt(
     state: dict | None = None,
     is_first: bool = False,
     is_last: bool = False,
+    position_index: int | None = None,
 ) -> str | None:
     """用 LLM 把 segment 重写为本段时间窗内的独立提示词；失败返回 None（调用方回退机械拆分）。
 
     llm 由调用方注入（测试可传 stub）；应为带 ``invoke(str)`` 接口的对象。
+
+    position_index：本段 0-based 段号，用于从 ``bridge_frame_descriptions`` 按段号取
+    桥接帧读图结果（回退路径与 v2 路径同一套锚定）；缺省 None 保持旧行为。
 
     state / is_first / is_last：首尾帧锚定。分段规划失败时流程会回退到本函数，
     这条路径同样要按「图片实际画面」锚定，否则规划一失败，缺陷就原样复发。
@@ -319,7 +323,7 @@ def rewrite_segment_prompt(
         if duration is not None
         else f"本段 0 起（时长未知；绝对片时 {start:g}s 起，仅作剧情定位，严禁写进时间戳）"
     )
-    anchor = _frame_anchor_note(is_first, is_last, state or {})
+    anchor = _frame_anchor_note(is_first, is_last, state or {}, segment_index=position_index)
     request = (
         f"{_REWRITE_INSTRUCTION}\n\n本段时间窗：{window}\n"
         f"目标镜头：[Shot {segment.shot_number}]\n"
@@ -409,31 +413,78 @@ def frame_anchor_context(state: dict) -> str:
     )
 
 
-def _frame_anchor_note(is_first: bool, is_last: bool, state: dict) -> str:
+# 双向开场一致性纪律句（issue #12，所有段共用）。
+# 正向（issue #6，2026-09-22）：图中已有的事物不得写成不存在/尚未出现；
+# 反向（issue #12，GEN004 段 2 坏的正是这一半）：图中没有的事物不得写成已存在/
+# 从外部进入——桥接帧是门完整关闭、没有猫，正文却写「门被推开、猫已在店内」。
+_FRAME_CONSISTENCY_DISCIPLINE = (
+    "本段开场状态必须与这张图逐项一致，双向对齐："
+    "**图中已有的事物绝不可写成不存在、尚未出现或「等它登场」**"
+    "（例如图中猫已站在店内，就不能写「空店」「无猫」「No cat is visible in the frame」"
+    "或让它在本段才推门进来）；"
+    "**图中没有的事物也绝不可写成已经存在或正在入场**"
+    "（例如图中门是关着的、没有猫，就不能写「门被推开」「猫冲进店内」"
+    "或「clerk swings into frame」这类与首帧矛盾的开场）。"
+    "分镜表、上文「本段剧情概述」与这张图冲突时，一律以画面为准。"
+)
+
+
+def _bridge_frame_descriptions(state: dict) -> dict[int, str]:
+    """从 state 取各段桥接帧的读图结果 ``{0-based 段号: 描述}``。
+
+    元素形如 ``{"segment": <段号>, "description": ...}``，由向导在剥出桥接帧后
+    立刻读图写入（``bridge_frame_descriptions``）；缺段/空白描述视为没有（诚实降级）。
+    """
+    out: dict[int, str] = {}
+    for item in state.get("bridge_frame_descriptions") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            segment = int(item.get("segment"))
+        except (TypeError, ValueError):
+            continue
+        description = str(item.get("description", "")).strip()
+        if description:
+            out[segment] = description
+    return out
+
+
+def _frame_anchor_note(is_first: bool, is_last: bool, state: dict,
+                       segment_index: int | None = None) -> str:
     """本段的首/尾帧锚定说明（两条分段路径共用）。
 
-    第 1 段的首帧 = 用户提交的关键帧图 → 注入读图结果，并明令它压过分镜表（图中已有的
-    事物不得写成不存在，否则 H3 会拿「猫已在店内」的图去演「空店等猫进门」）。
+    第 1 段的首帧 = 用户提交的关键帧图 → 注入读图结果，并明令它压过分镜表。
+    中间段的首帧 = 桥接帧（上一段剥出的尾帧）→ 向导剥帧后已读图并写入
+    ``bridge_frame_descriptions`` 时注入该段的读图结果（issue #12：写段 LLM
+    此前对「本段 0.00s 状态」的全部输入都是动作中段的分镜表/剧情概述，在信息上
+    不可能写出与桥接帧一致的开场状态）；没有读图结果时只声明图片是唯一事实源。
     末段的尾帧 = 用户提交的尾帧图 → 正文结尾必须落到该状态。
-    中间段的首帧是桥接帧（图片本段生成时才存在，无读图结果）→ 只声明它是唯一事实源。
+
+    双向一致性纪律句（``_FRAME_CONSISTENCY_DISCIPLINE``）对**所有**段发出，
+    不只第 1 段——GEN004 段 2 正是在中间段把「图中没有的」写成了「正在入场」。
     """
     descriptions = real_frame_descriptions(state)
     lines: list[str] = []
     # 段 1 的 Picture 1 = 用户提交的那张关键帧图：FL2VA/I2VA 是首帧，仅尾帧模式（L2VA）是尾帧
     anchor_role = "first" if "first" in descriptions else "last"
+    bridge = _bridge_frame_descriptions(state)
+    if segment_index is not None:
+        # 段号是权威事实源：is_first 由它派生，杜绝调用方传出自相矛盾的组合
+        is_first = segment_index == 0
+    elif is_first:
+        segment_index = 0
     if is_first and anchor_role in descriptions:
         slot = "首帧图" if anchor_role == "first" else "尾帧图（仅尾帧模式 L2VA）"
         lines.append(f"Picture 1 是用户提交的{slot}，它的实际画面（读图结果，**唯一事实源**）：\n{descriptions[anchor_role]}")
+    elif not is_first and segment_index is not None and segment_index in bridge:
         lines.append(
-            "本段开场状态必须与这张图逐项一致：图中已经出现的人/动物/道具、它们已经处于的位置与朝向，"
-            "正文必须照写；**图中已有的事物绝不可写成不存在、尚未出现或「等它登场」**"
-            "（例如图中猫已站在店内，就不能写「空店」「无猫」「No cat is visible in the frame」，"
-            "也不能让它在本段才推门进来）。分镜表、上文「本段剧情概述」与这张图冲突时，一律以画面为准。"
+            f"Picture 1 是上一段剥出的桥接帧（上一段末尾画面），它的实际画面（读图结果，**唯一事实源**）：\n{bridge[segment_index]}"
         )
     elif is_first:
         lines.append("Picture 1 是用户提交的首帧图（图片是唯一事实源）")
     else:
         lines.append("Picture 1 是上一段剥出的桥接帧（上一段末尾画面），图片是唯一事实源")
+    lines.append(_FRAME_CONSISTENCY_DISCIPLINE)
     if is_last and "last" in descriptions:
         lines.append(
             f"本段是最后一段，视频结束时必须落到用户提交的尾帧实际画面（读图结果，唯一事实源）：\n{descriptions['last']}"
@@ -510,7 +561,7 @@ def build_segment_v2_request(
         f"绝对片时 {plan.start_s}-{plan.end_s}s 仅作剧情定位，严禁写进提示词的时间戳）\n"
         f"包含 Shot：{plan.shots_in_segment}\n"
         f"本段剧情概述（中文，仅供你理解剧情，不得写进提示词）：{plan.summary}\n"
-        f"{_frame_anchor_note(plan.index == 0, plan.index == len(all_plans) - 1, state)}\n"
+        f"{_frame_anchor_note(plan.index == 0, plan.index == len(all_plans) - 1, state, segment_index=plan.index)}\n"
         f"{future_block}\n"
         f"\n{shots_block}"
     )

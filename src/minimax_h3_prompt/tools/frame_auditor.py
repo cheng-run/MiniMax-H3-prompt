@@ -94,7 +94,40 @@ def audit_frame_images(
     return audits
 
 
-__all__ = ["FrameAudit", "required_frames", "audit_frame_images", "extract_last_frame"]
+__all__ = ["FrameAudit", "required_frames", "audit_frame_images", "describe_bridge_frame", "extract_last_frame"]
+
+
+# ---------------------------------------------------------------------------
+# 桥接帧读图（issue #12）：剥出的桥接帧必须在写下一段提示词前被读出来
+# ---------------------------------------------------------------------------
+
+def bridge_frame_prompt() -> str:
+    """桥接帧读图提示词：描述的是**下一段的 0.00s 开场状态**，措辞对齐关键帧读图。"""
+    return (
+        "这张图是一段 AI 视频某个执行段的开场静态画面（上一段视频的末尾，剥出作下一段首帧）。"
+        "请精确描述画面内容：地点与环境、人物（性别/年龄/发型/服装颜色款式/姿态）、"
+        "关键动物与道具、光线方向与色调、构图（景别与主体位置）。"
+        "只描述图中真实可见的内容，不要臆测或补充不存在的细节。用中文输出，3-5 句话。"
+    )
+
+
+def describe_bridge_frame(path: str | Path) -> str | None:
+    """读一张桥接帧图，返回画面描述；失败返回 None（调用方诚实降级，不阻塞人工流程）。
+
+    与 ``audit_frame_images`` 的单帧降级一致，但失败要**显式打印警告**——绝不静默
+    （设计决定 #8）；文件不存在同样走警告降级（剥帧刚成功却读不了图不该炸掉陪跑流程）。
+    """
+    from .reference_auditor import describe_image
+
+    p = Path(path)
+    try:
+        if not p.is_file():
+            raise FileNotFoundError(f"桥接帧图片不存在：{p}")
+        description = str(describe_image(p, bridge_frame_prompt())).strip()
+    except Exception as exc:  # noqa: BLE001 - 单帧失败降级，不阻塞陪跑流程
+        print(f"[警告] 桥接帧读图失败（{exc}），下一段提示词将退回仅按图片锚定（无读图结果）。")
+        return None
+    return description or None
 
 
 # ---------------------------------------------------------------------------

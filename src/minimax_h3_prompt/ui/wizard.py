@@ -621,6 +621,42 @@ def _gate_segment_text(position: int, text: str, duration: float | None,
     return errors
 
 
+def _capture_bridge_frame(state: dict, video_path: str, position: int, generation_dir: Path) -> None:
+    """剥上一段尾帧 → 读图 → 写进 state 的桥接帧描述记录（issue #12）。
+
+    必须在写**本段**提示词之前调用：写段 LLM 要拿到「本段 0.00s 画面是什么」，
+    否则它在信息上不可能写出与桥接帧一致的开场状态（GEN004 段 2 实证）。
+    剥帧/读图任一步失败都只警告降级——写段请求退回仅按图片锚定（无读图记录），
+    绝不伪造读图记录，也绝不中断人工陪跑流程。两条分段路径共用。
+    """
+    from ..tools.frame_auditor import describe_bridge_frame, extract_last_frame
+
+    try:
+        frame = extract_last_frame(
+            Path(video_path),
+            Path(generation_dir) / "bridge_frames" / f"shot-{position + 1:02d}-start.png",
+        )
+        size_kb = frame.stat().st_size / 1024
+        print("[桥接帧] ✓ 已从上一段视频提取尾帧：")
+        print(f"  位置：{frame}")
+        print(f"  大小：{size_kb:.0f} KB")
+        print("  → 请在 H3 中把这张图设为本段的 first frame 输入。")
+    except Exception as exc:  # noqa: BLE001 - 剥帧失败不阻塞人工流程
+        print(f"[警告] 剥尾帧失败（{exc}），可手动截图作为首帧图；本段提示词将不含桥接帧读图结果。")
+        return
+    with _progress_scope("正在读取桥接帧实际画面……"):
+        description = describe_bridge_frame(frame)
+    if description:
+        # 段号用 0-based（segment_prompts._bridge_frame_descriptions 按此消费）
+        state.setdefault("bridge_frame_descriptions", []).append(
+            {"segment": position, "description": description}
+        )
+        print(f"[桥接帧实际画面] {description}")
+        print("  → 本段提示词将以这张图的实际画面为开场锚（图中没有的事物不得写成已存在）。")
+    else:
+        print("[提示] 本段提示词未携带桥接帧读图结果，开场一致性仅由图片本身锚定。")
+
+
 def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summary=None,
                         state: dict | None = None) -> None:
     """把整条提示词按 [Shot N] 拆成单镜头提示词，逐段陪跑。
@@ -643,7 +679,6 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
         split_shots_from_prompt,
         write_segment_v2,
     )
-    from ..tools.frame_auditor import extract_last_frame
 
     # ① 先走新流程：segment_planner 规划整秒分段边界 → 每段独立细写（官方英文格式，spec 2026-09-22）
     state = state if state is not None else session.stage_state
@@ -694,32 +729,21 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
 
     for position in range(done, total):
         segment = segments[position]
-        # ① 每段重写：soundscape/music 为本段重写英文摘要句（官方 §4.6/§4.7）；失败回退机械拆分并明示
+        # ① 桥接帧：剥上一段尾帧 → 读图 → 写进 state（必须先于本段重写，issue #12）
+        if position > 0 and _confirm("是否用上一段视频的尾帧作为本段首帧图（保证画面连续）？", default=True):
+            video_raw = _clean_path_input(_prompt("上一段输出视频路径（回车=跳过）："))
+            if video_raw:
+                _capture_bridge_frame(state, video_raw, position, session.directory)
+        # ② 每段重写：soundscape/music 为本段重写英文摘要句（官方 §4.6/§4.7）；失败回退机械拆分并明示
         rewritten: str | None = None
         if rewrite_llm is not None:
             rewritten = rewrite_segment_prompt(
                 segment, prompt, rewrite_llm,
                 state=state, is_first=position == 0, is_last=position + 1 == total,
+                position_index=position,
             )
         display_text = rewritten or segment.text
         fallback_label = "" if rewritten else "[回退] 声音描述保持整条原样（未按段重写）"
-
-        # ② 桥接帧：剥上一段尾帧，输出显式落盘信息（路径 + 大小）
-        if position > 0 and _confirm("是否用上一段视频的尾帧作为本段首帧图（保证画面连续）？", default=True):
-            video_raw = _clean_path_input(_prompt("上一段输出视频路径（回车=跳过）："))
-            if video_raw:
-                try:
-                    frame = extract_last_frame(
-                        Path(video_raw),
-                        session.directory / "bridge_frames" / f"shot-{position + 1:02d}-start.png",
-                    )
-                    size_kb = frame.stat().st_size / 1024
-                    print("[桥接帧] ✓ 已从上一段视频提取尾帧：")
-                    print(f"  位置：{frame}")
-                    print(f"  大小：{size_kb:.0f} KB")
-                    print("  → 请在 H3 中把这张图设为本段的 first frame 输入。")
-                except Exception as exc:  # noqa: BLE001 - 剥帧失败不阻塞人工流程
-                    print(f"[警告] 剥尾帧失败（{exc}），可手动截图作为首帧图。")
 
         duration_line = (
             f"{segment.duration_seconds:g}s"
@@ -772,18 +796,19 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
 
 
 def _run_segmented_flow_v2(brief: Brief, session: SessionState, plans: list, state: dict, llm, summary=None) -> None:
-    """v2 陪跑：边生成边展示——当前段提示词一写完立即交付，后台线程同时写下一级。
+    """v2 陪跑：边生成边展示——当前段确认完成后，先剥本段尾帧读图（下一段的
+    Picture 1 锚，issue #12），再后台预写下一段；用户看第 N 段提示词、去 ComfyUI
+    生成、贴回尾帧，回车进入下一段时若已写完直接展示，否则等待。segments/shot-NN.md
+    逐段落盘，progress.json 支持中断续跑（已写入文件的段不重写）。
 
-    用户看第 N 段提示词、去 ComfyUI 生成、贴回尾帧，这段时间里后台已经把第 N+1 段写好；
-    回车进入下一段时若已写完直接展示，否则等待。segments/shot-NN.md 逐段落盘，
-    progress.json 支持中断续跑（已写入文件的段不重写）。
+    预取收益建立在「下一段的桥接帧已就位」之上：下一段桥接帧来自本段输出视频，
+    本段完成前它不存在，所以预取必须在本段剥帧读图之后启动（正确性优先于并行）。
     """
     import json
     import threading
     import time
 
     from ..segment_prompts import write_segment_v2
-    from ..tools.frame_auditor import extract_last_frame
 
     seg_dir = session.directory / "segments"
     seg_dir.mkdir(parents=True, exist_ok=True)
@@ -829,12 +854,18 @@ def _run_segmented_flow_v2(brief: Brief, session: SessionState, plans: list, sta
     from ..observability import reporter
     reporter.subscribe(loader)
 
-    # 后台预取：当前段展示期间，下一级在后台写
+    # 后台预取：当前段确认后，下一段在后台写。inflight 记录在途线程：预取与
+    # take() 兜底都走这里，只查结果在不在会把「线程在途」误判成「没在写」，
+    # 同一段被两个线程各写一遍（两次 LLM 调用，结果互相覆盖）。
     prefetch: dict = {}
+    # 主线程 add、工作线程 finally discard：CPython set 的单操作原子（GIL），
+    # 不另加锁；只做「在不在」判断，不做跨多步的 check-then-act。
+    inflight: set[int] = set()
 
     def start_prefetch(position: int) -> None:
-        if position >= total or position in prefetch:
+        if position >= total or position in prefetch or position in inflight:
             return
+        inflight.add(position)
 
         def work() -> None:
             try:
@@ -842,12 +873,14 @@ def _run_segmented_flow_v2(brief: Brief, session: SessionState, plans: list, sta
             except Exception as exc:  # noqa: BLE001 - 异常若逃逸，take() 的等待循环会永远自旋
                 print(f"[警告] 第 {position + 1} 段撰写线程异常：{exc}")
                 prefetch[position] = None
+            finally:
+                inflight.discard(position)
 
         threading.Thread(target=work, daemon=True).start()
 
     def take(position: int) -> str | None:
         if position not in prefetch:
-            start_prefetch(position)  # 没预取过就现在跑（理论上不会到这，除非首段被跳过）
+            start_prefetch(position)  # 没预取过就现在跑（首段；或旧产物续跑文件缺失时）
         while position not in prefetch:
             time.sleep(0.3)
         return prefetch.pop(position)
@@ -865,8 +898,6 @@ def _run_segmented_flow_v2(brief: Brief, session: SessionState, plans: list, sta
             # 交付前校验：分段是唯一「产出即交付」的路径，不合格必须当面示警（绝不静默）
             errors = _gate_segment_text(position, text, float(plan.duration_s),
                                         float(plan.start_s))
-            # 立即预取下一级
-            start_prefetch(position + 1)
             if errors:
                 print(
                     f"\n⚠ 第 {position + 1}/{total} 段未通过校验：请先按上面的 issue 修正，再复制到 H3。",
@@ -874,25 +905,6 @@ def _run_segmented_flow_v2(brief: Brief, session: SessionState, plans: list, sta
                 )
             else:
                 print(f"\n✓ 第 {position + 1}/{total} 段提示词已生成，可立即复制到 H3 生成视频。", flush=True)
-            if position + 1 < total:
-                print(f"  （后台正在同时撰写第 {position + 2} 段提示词）", flush=True)
-
-            # 桥接帧：剥上一段尾帧作为本段首帧
-            if position > 0 and _confirm("是否用上一段视频的尾帧作为本段首帧图（保证画面连续）？", default=True):
-                video_raw = _clean_path_input(_prompt("上一段输出视频路径（回车=跳过）："))
-                if video_raw:
-                    try:
-                        frame = extract_last_frame(
-                            Path(video_raw),
-                            session.directory / "bridge_frames" / f"shot-{position + 1:02d}-start.png",
-                        )
-                        size_kb = frame.stat().st_size / 1024
-                        print("[桥接帧] ✓ 已从上一段视频提取尾帧：")
-                        print(f"  位置：{frame}")
-                        print(f"  大小：{size_kb:.0f} KB")
-                        print("  → 请在 H3 中把这张图设为本段的 first frame 输入。")
-                    except Exception as exc:  # noqa: BLE001
-                        print(f"[警告] 剥尾帧失败（{exc}），可手动截图作为首帧图。")
 
             print("\n" + "=" * 60)
             print(f"第 {position + 1}/{total} 段 · 时长 {plan.start_s}-{plan.end_s}s（{plan.duration_s}s）· 覆盖 Shot {plan.shots_in_segment}")
@@ -917,7 +929,18 @@ def _run_segmented_flow_v2(brief: Brief, session: SessionState, plans: list, sta
                 json.dumps({"done": position + 1, "total": total}, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            # 桥接帧：本段完成后，剥本段输出视频的尾帧 → 读图 → 写进 state，
+            # 作为下一段（position+1）的 Picture 1 锚（issue #12）。必须发生在
+            # 预取下一段**之前**：预取线程组装写段请求时要拿到下一段桥接帧的读图结果，
+            # 「先预取后剥帧」会让写段 LLM 在时序上不可能锚定开场画面。
+            if position + 1 < total and _confirm("是否用本段输出视频的尾帧作为下一段首帧图（保证画面连续）？", default=True):
+                video_raw = _clean_path_input(_prompt("本段输出视频路径（回车=跳过）："))
+                if video_raw:
+                    _capture_bridge_frame(state, video_raw, position + 1, session.directory)
+            # 立即预取下一级（此时 state 已含下一段桥接帧的读图结果）
+            start_prefetch(position + 1)
             if position + 1 < total:
+                print(f"  （后台正在同时撰写第 {position + 2} 段提示词）", flush=True)
                 print(f"[完成] 第 {position + 1}/{total} 段。")
     finally:
         reporter.unsubscribe(loader)
