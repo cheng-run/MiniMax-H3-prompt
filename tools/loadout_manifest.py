@@ -31,10 +31,13 @@ import json
 import os
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from PIL import Image
+
+# 落盘清单的格式版本：后续会话复算时靠它判自己认不认得这份文件
+SCHEMA_VERSION = "loadout-manifest.v1"
 
 # 本机便利默认值（这台机器上 ComfyUI 的根）。换机器用 --comfy-root 或 H3_COMFY_ROOT。
 # 与 tests/conftest.py 的 H3_COMFY_OUTPUT 同一套约定：机器专属路径给默认值 + 环境变量覆盖。
@@ -265,8 +268,99 @@ def render_report(report: Report) -> str:
     lines.append("-" * 72)
     lines.append(f"结论：{'全部引用解析成功' if report.ok else '有引用解析不到（见上）'}")
     lines.append(f"纪律：{AB_DISCIPLINE}")
+    lines.append("（--out-dir DIR 可把清单落盘成 <产物名>.loadout.json，供后续会话复算；"
+                 "默认不落盘，免得在 ComfyUI 输出树里留惊喜）")
     lines.append("-" * 72)
     return "\n".join(lines)
+
+
+def report_to_dict(report: Report, *, only: Path | None = None) -> dict:
+    """把报告转成可落盘的字典（issue #18 交付物 3）。
+
+    每条引用都带解析到的**绝对路径 + 大小 + mtime + SHA256**，解析不到的单独进
+    ``unresolved``——落盘的目的就是让后续会话能**重算**，所以不能只落一份渲染好的文本：
+    那样下次只读得到结论，重算不了。
+
+    ``only``：只导出某一份产物（``--out-dir`` 的旁挂清单按份写）。
+    """
+    by_artifact: dict[Path, list[ResolvedRef]] = {}
+    for item in report.resolved + report.missing:
+        if item.artifact is not None:
+            by_artifact.setdefault(item.artifact, []).append(item)
+
+    artifacts = []
+    for loadout in report.loadouts:
+        if only is not None and loadout.path != only:
+            continue
+        items = by_artifact.get(loadout.path, [])
+        artifacts.append({
+            "artifact": str(loadout.path),
+            "error": loadout.error,
+            "sampling": {
+                "steps": loadout.sampling.steps,
+                "scheduler": loadout.sampling.scheduler,
+                "denoise": loadout.sampling.denoise,
+                "sampler_name": loadout.sampling.sampler_name,
+                "noise_seed": loadout.sampling.noise_seed,
+                "strength_model": list(loadout.sampling.strength_model),
+            },
+            "refs": [_ref_to_dict(item) for item in items if item.resolved],
+            "unresolved": [_ref_to_dict(item) for item in items if not item.resolved],
+            "ok": loadout.error is None and all(item.resolved for item in items),
+        })
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "comfy_root": str(report.root),
+        "root_missing": report.root_missing,
+        "hashed": any(item.sha256 for item in report.resolved),
+        "ok": report.ok,
+        "artifacts": artifacts,
+        "discipline": AB_DISCIPLINE,
+    }
+
+
+def write_manifests(report: Report, *, out_dir: Path | str | None = None,
+                    out_file: Path | str | None = None) -> list[Path]:
+    """把清单落盘（issue #18 交付物 3），返回写出的文件列表。
+
+    ``out_dir`` → ``DIR/<产物名>.loadout.json``，每份产物一份（后续会话按产物复算）；
+    ``out_file`` → 所有产物合成一个 JSON。
+
+    **默认不落盘**：这是诊断工具，不该在 ComfyUI 的输出树里留惊喜，输出目录由调用方给。
+    也**不改 ComfyUI 本体**——写的只是旁挂的 JSON（票面「不改 ComfyUI」指不动它的代码）。
+    """
+    written: list[Path] = []
+    if out_dir is not None:
+        directory = Path(out_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        for loadout in report.loadouts:
+            target = directory / f"{loadout.path.stem}.loadout.json"
+            target.write_text(
+                json.dumps(report_to_dict(report, only=loadout.path), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            written.append(target)
+    if out_file is not None:
+        target = Path(out_file)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(report_to_dict(report), ensure_ascii=False, indent=2),
+                          encoding="utf-8")
+        written.append(target)
+    return written
+
+
+def _ref_to_dict(item: ResolvedRef) -> dict:
+    """一条引用落盘后的形状：能指认（path/size/mtime/sha256）才叫「可复算」。"""
+    return {
+        "kind": item.kind,
+        "name": item.name,
+        "node": item.node,
+        "resolved_path": str(item.path) if item.path else None,
+        "size": item.size or None,
+        "mtime": item.mtime,
+        "sha256": item.sha256,
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -293,6 +387,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"ComfyUI 根目录（默认 {DEFAULT_COMFY_ROOT}；也可用环境变量 H3_COMFY_ROOT）")
     parser.add_argument("--no-hash", action="store_true",
                         help="跳过模型文件哈希（只解析路径与大小，快得多）")
+    parser.add_argument("--out-dir", default=None, metavar="DIR",
+                        help="把每份产物的清单落盘为 DIR/<产物名>.loadout.json，供后续会话复算")
+    parser.add_argument("--out", default=None, metavar="FILE",
+                        help="把所有产物的清单落盘为单个 JSON 文件")
     return parser
 
 
@@ -303,6 +401,9 @@ def main(argv: list[str] | None = None) -> int:
     report = resolve_refs(loadouts, root, want_hash=not args.no_hash,
                           progress=_progress_to_stderr)
     print(render_report(report))
+    # 落盘在打印之后：stdout 始终保持是一份干净、可重定向的报告
+    for path in write_manifests(report, out_dir=args.out_dir, out_file=args.out):
+        _progress_to_stderr(f"[落盘] {path}")
     return 0 if report.ok else 1
 
 

@@ -258,3 +258,81 @@ def test_help_states_the_ab_discipline():
     help_text = buf.getvalue()
     assert "孤立观测" in help_text
     assert "同一张表" in help_text
+
+
+# --- 落盘（issue #18 交付物 3）-------------------------------------------
+
+def test_out_dir_writes_one_sidecar_per_artifact(tmp_path):
+    """``--out-dir``：每份产物旁边一份 ``<产物名>.loadout.json``，供后续会话复算。"""
+    root = fake_comfy_root(tmp_path)
+    out = tmp_path / "manifests"
+    a = write_artifact(tmp_path / "a.png", payload())
+    b = write_artifact(tmp_path / "b.png", payload())
+
+    assert main(["--comfy-root", str(root), "--no-hash", "--out-dir", str(out),
+                 str(a), str(b)]) == 0
+
+    first = json.loads((out / "a.loadout.json").read_text(encoding="utf-8"))
+    assert first["schema_version"] == "loadout-manifest.v1"
+    assert first["comfy_root"] == str(root)
+    assert len(first["artifacts"]) == 1, "每份产物一份清单，不合并"
+    entry = first["artifacts"][0]
+    assert entry["artifact"] == str(a)
+    assert entry["sampling"]["steps"] == 4
+    assert entry["sampling"]["noise_seed"] == 199287832709942
+    # 能**重算**才算复算：落盘的必须是解析到的绝对路径 + 大小 + 哈希，而不是渲染好的文本
+    lora = next(r for r in entry["refs"] if r["kind"] == "lora")
+    assert lora["resolved_path"] == str(root / "models/loras/MiniMax-H3/lora.safetensors")
+    assert lora["size"] > 0 and lora["mtime"]
+    assert (out / "b.loadout.json").is_file()
+
+
+def test_out_dir_creates_missing_directory(tmp_path):
+    root = fake_comfy_root(tmp_path)
+    art = write_artifact(tmp_path / "a.png", payload())
+    out = tmp_path / "deep" / "nested"
+
+    main(["--comfy-root", str(root), "--no-hash", "--out-dir", str(out), str(art)])
+
+    assert (out / "a.loadout.json").is_file()
+
+
+def test_sidecar_keeps_unresolved_refs_visible(tmp_path):
+    """解析不到的引用要单独列出来——否则后续会话只看得到「结论」，看不到「为什么作废」。"""
+    root = fake_comfy_root(tmp_path, files=("MiniMax-H3/lora.safetensors",))
+    art = write_artifact(tmp_path / "a.png", payload())
+    out = tmp_path / "manifests"
+
+    assert main(["--comfy-root", str(root), "--no-hash", "--out-dir", str(out), str(art)]) == 1
+
+    entry = json.loads((out / "a.loadout.json").read_text(encoding="utf-8"))["artifacts"][0]
+    assert entry["ok"] is False
+    assert [r["name"] for r in entry["refs"]] == ["MiniMax-H3\\lora.safetensors"]
+    unresolved = {r["name"] for r in entry["unresolved"]}
+    assert "MiniMax-H3\\unet.safetensors" in unresolved
+    assert "图片放大_00004_.png" in unresolved
+    assert all(r["resolved_path"] is None for r in entry["unresolved"])
+
+
+def test_out_file_writes_one_combined_manifest(tmp_path):
+    """``--out``：调用方指定路径的单一清单（多份产物在一个文件里）。"""
+    root = fake_comfy_root(tmp_path)
+    a = write_artifact(tmp_path / "a.png", payload())
+    b = write_artifact(tmp_path / "b.png", payload())
+    target = tmp_path / "combined.json"
+
+    assert main(["--comfy-root", str(root), "--no-hash", "--out", str(target),
+                 str(a), str(b)]) == 0
+
+    doc = json.loads(target.read_text(encoding="utf-8"))
+    assert [e["artifact"] for e in doc["artifacts"]] == [str(a), str(b)]
+
+
+def test_report_footer_mentions_the_sidecar_option(tmp_path, capsys):
+    """默认不落盘（诊断工具不该在 ComfyUI 输出树里留惊喜），所以要把开关告诉用户。"""
+    root = fake_comfy_root(tmp_path)
+    art = write_artifact(tmp_path / "a.png", payload())
+
+    main(["--comfy-root", str(root), "--no-hash", str(art)])
+
+    assert "--out-dir" in capsys.readouterr().out
