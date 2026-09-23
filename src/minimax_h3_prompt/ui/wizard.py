@@ -674,12 +674,196 @@ def _gate_segment_handoff(video_path: str, expected_seconds: float | None) -> li
     return errors
 
 
+# 闸门遭遇的判定（#14 动作集）。这些字面值会写进 segments/gate-log.jsonl，是将来给
+# 自动判据（#15）校准阈值**唯一**的素材来源，所以不许悄悄改含义。
+GATE_CONTINUE = "continue"                  # 人判：尾帧画面达到了上一段的末态
+GATE_ACCEPT = "accept"                      # 明知未达到，显式覆盖「接受并继续」
+GATE_RERUN = "rerun"                        # 重跑本段（回 ComfyUI 重生成，再交一次视频）
+GATE_MANUAL_FRAME = "manual_frame"          # 手工换帧（换一张尾帧图，仍在桥接链上）
+GATE_KEYFRAME_RESTART = "keyframe_restart"  # 改用关键帧图另起（放弃桥接链；#10 的 B，只作兜底）
+GATE_STOP = "stop"                          # 停下（默认出路）
+
+_OUTCOME_LABELS = {
+    GATE_CONTINUE: "画面达到末态，继续",
+    GATE_ACCEPT: "显式覆盖：接受并继续",
+    GATE_RERUN: "重跑本段",
+    GATE_MANUAL_FRAME: "手工换帧",
+    GATE_KEYFRAME_RESTART: "改用关键帧图另起",
+    GATE_STOP: "停下（默认）",
+}
+
+
+def _log_gate(directory: Path, record: dict) -> None:
+    """把一次闸门遭遇追加进 ``segments/gate-log.jsonl``（**每次**遭遇都记）。
+
+    为什么两种判定都记：「自动判据」票（#15）要的是「尾帧图 ＋ 末态声明 ＋ 人的判定」
+    这套**分离边界**，只留失败样本会让边界偏斜。记录里的帧图路径是事后复跑的唯一入口
+    ——没有它，攒下来的样本只是一堆无法重放的结论。
+    """
+    import json
+
+    seg_dir = Path(directory) / "segments"
+    seg_dir.mkdir(parents=True, exist_ok=True)
+    with open(seg_dir / "gate-log.jsonl", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _semantic_reference(previous_text: str | None) -> str | None:
+    """从一段提示词正文取「该达到的末态」参照：收尾句。
+
+    v2 规划路径用 ``plan.end_hook``（规划层显式声明的末态）；机械拆分不产出它，
+    所以回退路径退而取上一段正文的最后一行——官方格式下它就是该段最后一个动作节拍。
+    展示时会标明是降级参照，不假装它是 end_hook。
+    """
+    if not previous_text:
+        return None
+    lines = [line.strip() for line in previous_text.strip().splitlines() if line.strip()]
+    return lines[-1] if lines else None
+
+
+def _previous_segment_tail(seg_dir: Path, position: int) -> str | None:
+    """读上一段**落盘的那份**提示词（``shot-NN.md``）的收尾句。
+
+    读磁盘而不是内存里的 ``segments[position - 1]``：续接时前面几段不在内存里，
+    而磁盘上那份正是当时交付给用户、也就是 H3 实际吃进去的文本。
+    """
+    if position <= 0:
+        return None
+    path = Path(seg_dir) / f"shot-{position:02d}.md"
+    if not path.is_file():
+        return None
+    try:
+        return _semantic_reference(path.read_text(encoding="utf-8"))
+    except OSError:
+        return None
+
+
+def _anchor_state(state: dict, position: int, description: str | None) -> None:
+    """语义判定**放行后**才把这张图写成本段的开场锚（段号 0-based，消费方按此取）。
+
+    读图失败就什么都不写：诚实降级成立的前提是绝不伪造读图记录。写在判定之后而不是
+    剥帧之后，是因为判定可能判「重跑本段」——提前写进去，那段错锚就会留在 state 里，
+    而 ``_bridge_frame_descriptions`` 同段号取最后一个，会把错锚当成事实喂给写段 LLM。
+    """
+    if not description:
+        return
+    state.setdefault("bridge_frame_descriptions", []).append(
+        {"segment": position, "description": description}
+    )
+
+
+def _choose_gate_outcome(attempt: int) -> str:
+    """未达到末态时的出路。默认**停下**（劝阻），其余都是显式覆盖。
+
+    #10 裁定：动作集**不含自动重掷**——重掷不是独立实验（同一载荷换个 seed 不算新证据）。
+    「改用关键帧图另起」是 #10 的 B 方案，只作兜底不作常规路径，所以到第二次被拦才提示它。
+    """
+    print("\n" + "!" * 60)
+    print("[劝阻] 画面没有达到上一段的末态声明——默认**不继续**。")
+    print("  桥接链是逐段累积的：这一段的偏差会被下一段当成既成事实继承下去。")
+    print("  出路：")
+    print("    1. 停下（默认）——回 ComfyUI 重做本段，改好再来")
+    print("    2. 重跑本段——本段已重生成好，重新交一次输出视频")
+    print("    3. 手工换帧——自己换一张尾帧图（仍在桥接链上）")
+    print("    4. 改用关键帧图另起——放弃桥接链，用一张关键帧图作本段首帧（兜底）")
+    print("    5. 接受并继续——明知不一致仍继续（会记进 gate-log.jsonl）")
+    if attempt >= 2:
+        print(f"  ⚠ 同一段已被拦下 {attempt} 次：反复对不上时考虑第 4 条另起"
+              "（#10 裁定的兜底路径，不作常规走法）。")
+    print("!" * 60)
+    mapping = {
+        "": GATE_STOP, "1": GATE_STOP, "2": GATE_RERUN, "3": GATE_MANUAL_FRAME,
+        "4": GATE_KEYFRAME_RESTART, "5": GATE_ACCEPT,
+    }
+    while True:
+        raw = _prompt("选择出路（回车=1 停下）：").strip()
+        if raw in mapping:
+            return mapping[raw]
+        print("无效选项，重输。")
+
+
+def _judge_bridge_semantics(*, directory: Path, segment_number: int, total: int,
+                            reference: str | None, reference_label: str,
+                            description: str | None, frame_path: Path | None,
+                            attempt: int) -> str:
+    """语义层主判定（#14）：把「该达到的末态」与「尾帧实际画面」**并排**摆给人判。
+
+    这一层存在的理由就是「证据曾经从没在决策时刻被摆到一起」：``end_hook`` 只在展示
+    提示词时打印（比那张帧存在早约十分钟），剥帧当轮只打印读图结果——人得在两个时刻
+    各记一半，再凭记忆判。所以这里必须**并排**打，且打在人做决定的那一刻。
+
+    判不合格 → 劝阻（默认不继续，可显式覆盖）。返回值是 #14 动作集之一。
+    """
+    print("\n" + "-" * 60)
+    print(f"[锚帧语义核验] 第 {segment_number}/{total} 段的首帧锚（＝上一段尾帧）")
+    print("-" * 60)
+    print(f"  该达到的末态{reference_label}：")
+    print(f"    {reference or '（本段路径没有留下可用的末态声明）'}")
+    print("  尾帧实际画面（读图结果）：")
+    print(f"    {description or '（读图失败：没有可对照的画面描述）'}")
+    print(f"  尾帧图：{frame_path if frame_path else '（未取得）'}")
+    print("-" * 60)
+
+    reached = _confirm("尾帧画面达到上面那个末态了吗？", default=True)
+    outcome = GATE_CONTINUE if reached else _choose_gate_outcome(attempt)
+    _log_gate(directory, {
+        "segment": segment_number,
+        "reference_label": reference_label,
+        "end_hook": reference,
+        "bridge_frame_description": description,
+        "bridge_frame_path": str(frame_path) if frame_path else None,
+        "verdict": "reached" if reached else "not_reached",
+        "action": outcome,
+        "action_label": _OUTCOME_LABELS[outcome],
+        "attempt": attempt,
+    })
+    return outcome
+
+
+def _use_supplied_frame(position: int, generation_dir: Path, *, outcome: str) -> Path | None:
+    """让用户直接给一张图当本段首帧锚（#14 的「手工换帧」/「改用关键帧图另起」）。
+
+    两条出路落到同一机制（给一张现成的图），差别在**意图**：手工换帧仍留在桥接链上
+    （只是换一张尾帧图），改用关键帧图另起是放弃这条链（#10 裁定的兜底 B）。所以动作名
+    分两个取值记进 gate-log，将来校准判据时能分开看。落点仍用 ``bridge_frames/
+    shot-NN-start.png``，与剥帧共用同一个规范位置。
+
+    返回帧图路径；用户没给（回车）或复制失败返回 None，由调用方决定回到哪一步。
+    """
+    import shutil
+
+    label = ("关键帧图路径（放弃桥接链，用这张图作本段首帧）"
+             if outcome == GATE_KEYFRAME_RESTART else "尾帧图路径（你自己换的那一张）")
+    raw = _clean_path_input(_prompt(f"{label}："))
+    if not raw:
+        return None
+    source = Path(raw)
+    if not source.is_file():
+        print(f"[警告] 找不到这张图：{source}——没有换成，仍停在原地。")
+        return None
+    target = Path(generation_dir) / "bridge_frames" / f"shot-{position + 1:02d}-start.png"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.copyfile(source, target)
+    except OSError as exc:
+        print(f"[警告] 复制帧图失败（{exc}）——没有换成，仍停在原地。")
+        return None
+    print(f"[锚帧] ✓ 已改用你给的这张图：{target}")
+    return target
+
+
 def _capture_bridge_frame_until_clean(state: dict, position: int, generation_dir: Path, *,
                                       expected_seconds: float | None, ask: str,
-                                      segment_number: int, total: int) -> bool:
-    """索要输出视频并剥帧，直到可证层交接校验通过（issue #13）。
+                                      segment_number: int, total: int,
+                                      reference: str | None = None,
+                                      reference_label: str = "（上一段 plan.end_hook）") -> bool:
+    """拿到合格锚帧：索要输出视频 → 剥帧 → **可证层**判定 → 读图 → **语义层**人判。
 
-    返回 True = 已拿到合格锚帧；False = 用户拿不出合格视频，流程必须**停在这里**。
+    顺序按 #14 重排：**剥帧读图在前，「本段满意」的判断在后**——证据必须在决策时刻
+    摆在人面前，而不是让人先去别处记一半、再回来凭记忆做决定。所以返回 True 的含义是
+    「锚帧已就位**且**人看着并排证据判了继续」。
+
+    返回 True = 放行；False = 停下（默认出路，或用户交不出东西）。
 
     出路做在会话内（改交一段正确的视频即可重剥），不是"从头重跑"：这条出路过去其实
     不成立——阶段 2 结束就把会话标成 ``completed``，向导重跑会**另开一个新 GEN**、
@@ -687,6 +871,7 @@ def _capture_bridge_frame_until_clean(state: dict, position: int, generation_dir
     #17）。#17 落地后会话在陪跑期间是 ``segmented_running``，重跑向导会落回同一 GEN
     并从已完成段之后续接，这里返回 False 的代价才是「停在这一段」而不是「整条重来」。
     """
+    attempt = 0
     while True:
         video_raw = _clean_path_input(_prompt(ask))
         if not video_raw:
@@ -694,26 +879,58 @@ def _capture_bridge_frame_until_clean(state: dict, position: int, generation_dir
                   "必经环节，已停在这里——下一段不会被写，其提示词也不会去声明一张不存在的 "
                   "Picture 1。", flush=True)
             return False
-        errors = _capture_bridge_frame(state, video_raw, position, generation_dir,
-                                       expected_seconds=expected_seconds)
-        if not errors:
+        errors, description, frame = _capture_bridge_frame(
+            video_raw, position, generation_dir, expected_seconds=expected_seconds)
+        if errors:
+            attempt += 1
+            print("→ 请**重新剥帧**：改交本段正确的输出视频（时长需与本段计划一致，"
+                  "非末段必须提供）；回车则放弃继续。", flush=True)
+            if attempt >= 2:
+                print(f"  ⚠ 第 {segment_number}/{total} 段已连续被拦下 {attempt} 次："
+                      "若反复交不出合格的视频，可在下一步改用关键帧图另起（兜底路径）。",
+                      flush=True)
+            continue
+        outcome = _judge_bridge_semantics(
+            directory=generation_dir, segment_number=segment_number, total=total,
+            reference=reference, reference_label=reference_label,
+            description=description, frame_path=frame, attempt=attempt + 1)
+        if outcome in (GATE_CONTINUE, GATE_ACCEPT):
+            _anchor_state(state, position, description)
             return True
-        print("→ 请**重新剥帧**：改交本段正确的输出视频（时长需与本段计划一致，"
-              "非末段必须提供）；回车则放弃继续。", flush=True)
+        if outcome == GATE_RERUN:
+            attempt += 1
+            print(f"→ 重跑本段：回 ComfyUI 重做第 {segment_number}/{total} 段，"
+                  "然后把**新的**输出视频路径交上来。", flush=True)
+            continue
+        if outcome in (GATE_MANUAL_FRAME, GATE_KEYFRAME_RESTART):
+            supplied = _use_supplied_frame(position, generation_dir, outcome=outcome)
+            if supplied is None:
+                attempt += 1
+                continue
+            from ..tools.frame_auditor import describe_bridge_frame
+
+            with _progress_scope("正在读取你给的这张图的画面……"):
+                supplied_description = describe_bridge_frame(supplied)
+            _anchor_state(state, position, supplied_description)
+            return True
+        return False  # GATE_STOP
 
 
-def _capture_bridge_frame(state: dict, video_path: str, position: int, generation_dir: Path,
-                          *, expected_seconds: float | None = None) -> list:
-    """剥上一段尾帧 → 可证层交接校验 → 读图 → 写进 state（issue #12 / #13）。
+def _capture_bridge_frame(video_path: str, position: int, generation_dir: Path, *,
+                          expected_seconds: float | None = None
+                          ) -> tuple[list, str | None, Path | None]:
+    """剥上一段尾帧 → 可证层交接校验 → 读图（issue #12 / #13）。
 
-    必须在写**本段**提示词之前调用：写段 LLM 要拿到「本段 0.00s 画面是什么」，
-    否则它在信息上不可能写出与桥接帧一致的开场状态（GEN004 段 2 实证）。
-    剥帧/读图任一步失败都只警告降级——写段请求退回仅按图片锚定（无读图记录），
-    绝不伪造读图记录，也绝不中断人工陪跑流程。两条分段路径共用。
+    ``expected_seconds``＝交出这段视频的那一段的**计划时长**，供可证层校验（交错段、
+    用错时长档都会在这里被拦下）。
 
-    ``expected_seconds``＝交出这段视频的那一段的**计划时长**，供可证层校验。
-    **返回 error 级 issue**（空 = 放行）：调用方负责硬阻断——本函数只负责判与说，
-    不做流程决策（#13 之前这里只打印不阻断，交错段会静默接下去）。
+    **本函数只判与说，不写 state、不做流程决策**：语义层判定（#14）还在后面，判定之前
+    就往 state 里写读图结果，一旦人判「重跑本段」，那段错锚就留在了 state 里
+    （``_bridge_frame_descriptions`` 同段号取最后一个，会把它当成事实喂给写段 LLM）。
+
+    返回 ``(可证层 error issue, 读图结果, 帧图路径)``。剥帧/读图任一步失败都只警告
+    降级——写段请求退回仅按图片锚定（无读图记录），绝不伪造读图记录，也绝不中断人工
+    陪跑流程。两条分段路径共用。
     """
     from ..tools.frame_auditor import describe_bridge_frame, extract_last_frame
 
@@ -729,23 +946,19 @@ def _capture_bridge_frame(state: dict, video_path: str, position: int, generatio
         print("  → 请在 H3 中把这张图设为本段的 first frame 输入。")
     except Exception as exc:  # noqa: BLE001 - 剥帧失败不阻塞人工流程
         print(f"[警告] 剥尾帧失败（{exc}），可手动截图作为首帧图；本段提示词将不含桥接帧读图结果。")
-        return []
+        return [], None, None
     # 可证层先判：不合格就不必再花一次读图调用，也绝不把错误的交接物喂进 state
     errors = _gate_segment_handoff(video_path, expected_seconds)
     if errors:
-        return errors
+        return errors, None, frame
     with _progress_scope("正在读取桥接帧实际画面……"):
         description = describe_bridge_frame(frame)
     if description:
-        # 段号用 0-based（segment_prompts._bridge_frame_descriptions 按此消费）
-        state.setdefault("bridge_frame_descriptions", []).append(
-            {"segment": position, "description": description}
-        )
         print(f"[桥接帧实际画面] {description}")
         print("  → 本段提示词将以这张图的实际画面为开场锚（图中没有的事物不得写成已存在）。")
     else:
         print("[提示] 本段提示词未携带桥接帧读图结果，开场一致性仅由图片本身锚定。")
-    return []
+    return [], description, frame
 
 
 def _read_cached_summary(directory: Path):
@@ -899,6 +1112,9 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
                 expected_seconds=segments[position - 1].duration_seconds,
                 ask="上一段输出视频路径（必填，用于剥尾帧作本段首帧）：",
                 segment_number=position + 1, total=total,
+                # 回退路径没有 plan 层，末态参照取上一段**落盘那份**提示词的收尾句
+                reference=_previous_segment_tail(seg_dir, position),
+                reference_label="（上一段提示词收尾句；本路径无 plan 末态声明）",
             ):
                 return False  # 硬阻断（issue #13）：交接物不合格，不能算「已跑完」
         # ② 每段重写：soundscape/music 为本段重写英文摘要句（官方 §4.6/§4.7）；失败回退机械拆分并明示
@@ -941,7 +1157,8 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
         print("-" * 60)
         print(f"提示词文件：{seg_dir / f'shot-{position + 1:02d}.md'}")
         while True:
-            raw = _prompt("本段生成并检查满意后回车进入下一段；输入 r 重显完整提示词，s 重看中文摘要：").lower()
+            # 同 v2：这里只宣告「已生成好」，不宣告「满意」——是否算过留给剥帧后的语义核验
+            raw = _prompt("本段已在 ComfyUI 生成好后回车；输入 r 重显完整提示词，s 重看中文摘要：").lower()
             if raw in ("", "y", "yes"):
                 break
             if raw == "r":
@@ -952,7 +1169,7 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
 
                 print(render_summary_zh(summary, shot_number=segment.shot_number))
                 continue
-            print("回车=完成本段，r=重显完整提示词，s=重看中文摘要。")
+            print("回车=已生成好，r=重显完整提示词，s=重看中文摘要。")
         progress_path.write_text(
             json.dumps({"done": position + 1, "total": total}, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -1130,13 +1347,15 @@ def _run_segmented_flow_v2(brief: Brief, session: SessionState, plans: list, sta
             if plan.end_hook:
                 print(f"本段末态（段尾钩子，桥接帧验收对照）：{plan.end_hook}")
             while True:
-                raw = _prompt("本段生成并检查满意后回车进入下一段；输入 r 重显提示词：").lower()
+                # 这里只宣告「已在 ComfyUI 生成好」，**不宣告「满意」**：本段是否算过，
+                # 由接着的剥帧 + 语义核验（并排摆出末态与尾帧实际画面）来定（#14 重排）。
+                raw = _prompt("本段已在 ComfyUI 生成好后回车；输入 r 重显提示词：").lower()
                 if raw in ("", "y", "yes"):
                     break
                 if raw == "r":
                     print(text)
                     continue
-                print("回车=完成本段，r=重显提示词。")
+                print("回车=已生成好，r=重显提示词。")
             # 桥接帧：本段完成后，剥本段输出视频的尾帧 → 可证层交接校验 → 读图 →
             # 写进 state，作为下一段（position+1）的 Picture 1 锚（issue #12/#13）。
             # 必须发生在预取下一段**之前**：预取线程组装写段请求时要拿到下一段桥接帧的
@@ -1150,6 +1369,9 @@ def _run_segmented_flow_v2(brief: Brief, session: SessionState, plans: list, sta
                     expected_seconds=float(plan.duration_s),
                     ask="本段输出视频路径（必填，用于剥尾帧作下一段首帧）：",
                     segment_number=position + 1, total=total,
+                    # 语义层参照＝**本段**（刚跑完的这段）声明的末态，而锚帧正是它的尾帧
+                    reference=plan.end_hook,
+                    reference_label="（本段 plan.end_hook）",
                 ):
                     # 硬阻断（issue #13）：错误的交接物不得被当成下一段的事实喂下去。
                     # 进度也**不得**落盘——否则被拦下的这一段的锚会被续跑直接跳过。
