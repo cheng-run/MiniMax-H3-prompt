@@ -625,13 +625,79 @@ def _gate_segment_text(position: int, text: str, duration: float | None,
     return errors
 
 
-def _capture_bridge_frame(state: dict, video_path: str, position: int, generation_dir: Path) -> None:
-    """剥上一段尾帧 → 读图 → 写进 state 的桥接帧描述记录（issue #12）。
+def _gate_segment_handoff(video_path: str, expected_seconds: float | None) -> list:
+    """可证层交接校验：本段交上来的输出视频可信吗（issue #13）。
+
+    返回 error 级 issue（空 = 放行）；调用方据此**硬阻断**（不写下一段、不落盘进度）。
+    warning 级一律显式打出，绝不静默放行。
+
+    判据取 ``tools/preflight.py`` 的三档（可证 → error／启发式 → warning）。这里**故意
+    不调** ``check_input_frame``：向导的锚帧是当场从这段视频剥出来的，拿它比**同一段视频**
+    的尾窗恒等（窗口最小 mad 必然 < ``MAD_MAYBE``）——接上去是惰性闸门，比不接更坏
+    （看起来有牙齿）。那个函数的 MAD 档要等「用户回报实际投喂的那张图」的输入点才可能报
+    （见 issue #14）。
+    """
+    from ..tools.h3_validator import format_issues
+    from ..tools.preflight import check_segment_video
+
+    issues = check_segment_video(Path(video_path), expected_seconds)
+    if not issues:
+        return []
+    errors = [i for i in issues if i.severity == "error"]
+    print("\n" + "!" * 60)
+    print(
+        f"[交接校验未通过] 本段输出视频有 {len(errors)} 项可证错误，不进入下一段："
+        if errors
+        else f"[交接校验提醒] 本段输出视频有 {len(issues)} 项提示："
+    )
+    print(format_issues(issues))  # 与 _gate_segment_text 同一套渲染（preflight.Issue 同形）
+    if errors:
+        # 出路必须与**本闸门实际判的东西**对齐：它判的是这段视频（时长/尺寸），
+        # 所以"换一张帧图"在这里无效——那种口子要等 #14 的「实际投喂图」输入点。
+        print("出路：确认交上来的是**本段**的输出视频，且时长与本段计划一致"
+              "（交错了段、用错了时长档都会在这里被拦下）。")
+    print("!" * 60)
+    return errors
+
+
+def _capture_bridge_frame_until_clean(state: dict, position: int, generation_dir: Path, *,
+                                      expected_seconds: float | None, ask: str,
+                                      segment_number: int, total: int) -> bool:
+    """索要输出视频并剥帧，直到可证层交接校验通过（issue #13）。
+
+    返回 True = 已拿到合格锚帧；False = 用户拿不出合格视频，流程必须**停在这里**。
+
+    出路做在会话内（改交一段正确的视频即可重剥），不是"从头重跑"：向导重跑会因会话
+    已被标成 ``completed``（阶段 2 结束时就写了）而**另开一个新 GEN**，阶段 2 得整条重做，
+    ``segments/progress.json`` 的续接在向导路径上根本不可达（已核实，见 #17）。
+    """
+    while True:
+        video_raw = _clean_path_input(_prompt(ask))
+        if not video_raw:
+            print(f"\n⚠ 第 {segment_number}/{total} 段没有拿到输出视频：交接校验是本流程的"
+                  "必经环节，已停在这里——下一段不会被写，其提示词也不会去声明一张不存在的 "
+                  "Picture 1。", flush=True)
+            return False
+        errors = _capture_bridge_frame(state, video_raw, position, generation_dir,
+                                       expected_seconds=expected_seconds)
+        if not errors:
+            return True
+        print("→ 请**重新剥帧**：改交本段正确的输出视频（时长需与本段计划一致，"
+              "非末段必须提供）；回车则放弃继续。", flush=True)
+
+
+def _capture_bridge_frame(state: dict, video_path: str, position: int, generation_dir: Path,
+                          *, expected_seconds: float | None = None) -> list:
+    """剥上一段尾帧 → 可证层交接校验 → 读图 → 写进 state（issue #12 / #13）。
 
     必须在写**本段**提示词之前调用：写段 LLM 要拿到「本段 0.00s 画面是什么」，
     否则它在信息上不可能写出与桥接帧一致的开场状态（GEN004 段 2 实证）。
     剥帧/读图任一步失败都只警告降级——写段请求退回仅按图片锚定（无读图记录），
     绝不伪造读图记录，也绝不中断人工陪跑流程。两条分段路径共用。
+
+    ``expected_seconds``＝交出这段视频的那一段的**计划时长**，供可证层校验。
+    **返回 error 级 issue**（空 = 放行）：调用方负责硬阻断——本函数只负责判与说，
+    不做流程决策（#13 之前这里只打印不阻断，交错段会静默接下去）。
     """
     from ..tools.frame_auditor import describe_bridge_frame, extract_last_frame
 
@@ -647,7 +713,11 @@ def _capture_bridge_frame(state: dict, video_path: str, position: int, generatio
         print("  → 请在 H3 中把这张图设为本段的 first frame 输入。")
     except Exception as exc:  # noqa: BLE001 - 剥帧失败不阻塞人工流程
         print(f"[警告] 剥尾帧失败（{exc}），可手动截图作为首帧图；本段提示词将不含桥接帧读图结果。")
-        return
+        return []
+    # 可证层先判：不合格就不必再花一次读图调用，也绝不把错误的交接物喂进 state
+    errors = _gate_segment_handoff(video_path, expected_seconds)
+    if errors:
+        return errors
     with _progress_scope("正在读取桥接帧实际画面……"):
         description = describe_bridge_frame(frame)
     if description:
@@ -659,6 +729,7 @@ def _capture_bridge_frame(state: dict, video_path: str, position: int, generatio
         print("  → 本段提示词将以这张图的实际画面为开场锚（图中没有的事物不得写成已存在）。")
     else:
         print("[提示] 本段提示词未携带桥接帧读图结果，开场一致性仅由图片本身锚定。")
+    return []
 
 
 def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summary=None,
@@ -733,11 +804,17 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
 
     for position in range(done, total):
         segment = segments[position]
-        # ① 桥接帧：剥上一段尾帧 → 读图 → 写进 state（必须先于本段重写，issue #12）
-        if position > 0 and _confirm("是否用上一段视频的尾帧作为本段首帧图（保证画面连续）？", default=True):
-            video_raw = _clean_path_input(_prompt("上一段输出视频路径（回车=跳过）："))
-            if video_raw:
-                _capture_bridge_frame(state, video_raw, position, session.directory)
+        # ① 桥接帧：剥上一段尾帧 → 可证层交接校验 → 读图 → 写进 state（先于本段重写，
+        #    否则写段 LLM 在信息上不可能写出与桥接帧一致的开场状态；issue #12/#13）
+        # 非末段必须交出上一段视频（同上：不给 opt-out，否则闸门可被静默绕过）
+        if position > 0:
+            if not _capture_bridge_frame_until_clean(
+                state, position, session.directory,
+                expected_seconds=segments[position - 1].duration_seconds,
+                ask="上一段输出视频路径（必填，用于剥尾帧作本段首帧）：",
+                segment_number=position + 1, total=total,
+            ):
+                return  # 硬阻断（issue #13）
         # ② 每段重写：soundscape/music 为本段重写英文摘要句（官方 §4.6/§4.7）；失败回退机械拆分并明示
         rewritten: str | None = None
         if rewrite_llm is not None:
@@ -929,18 +1006,28 @@ def _run_segmented_flow_v2(brief: Brief, session: SessionState, plans: list, sta
                     print(text)
                     continue
                 print("回车=完成本段，r=重显提示词。")
+            # 桥接帧：本段完成后，剥本段输出视频的尾帧 → 可证层交接校验 → 读图 →
+            # 写进 state，作为下一段（position+1）的 Picture 1 锚（issue #12/#13）。
+            # 必须发生在预取下一段**之前**：预取线程组装写段请求时要拿到下一段桥接帧的
+            # 读图结果，「先预取后剥帧」会让写段 LLM 在时序上不可能锚定开场画面。
+            # 非末段必须交出本段输出视频：可证层交接校验是本流程的必经环节，不给 opt-out
+            # （ADR 0002：留 opt-out 等于闸门可被静默绕过，且下一段会去声明一张不存在的
+            # Picture 1）。原「是否用本段尾帧…」开关与 #14 第 4 条重复，已在此一并落地。
+            if position + 1 < total:
+                if not _capture_bridge_frame_until_clean(
+                    state, position + 1, session.directory,
+                    expected_seconds=float(plan.duration_s),
+                    ask="本段输出视频路径（必填，用于剥尾帧作下一段首帧）：",
+                    segment_number=position + 1, total=total,
+                ):
+                    # 硬阻断（issue #13）：错误的交接物不得被当成下一段的事实喂下去。
+                    # 进度也**不得**落盘——否则被拦下的这一段的锚会被续跑直接跳过。
+                    return
+            # 闸门通过后才落盘进度：被拦下的段不能被记成已完成
             progress_path.write_text(
                 json.dumps({"done": position + 1, "total": total}, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-            # 桥接帧：本段完成后，剥本段输出视频的尾帧 → 读图 → 写进 state，
-            # 作为下一段（position+1）的 Picture 1 锚（issue #12）。必须发生在
-            # 预取下一段**之前**：预取线程组装写段请求时要拿到下一段桥接帧的读图结果，
-            # 「先预取后剥帧」会让写段 LLM 在时序上不可能锚定开场画面。
-            if position + 1 < total and _confirm("是否用本段输出视频的尾帧作为下一段首帧图（保证画面连续）？", default=True):
-                video_raw = _clean_path_input(_prompt("本段输出视频路径（回车=跳过）："))
-                if video_raw:
-                    _capture_bridge_frame(state, video_raw, position + 1, session.directory)
             # 立即预取下一级（此时 state 已含下一段桥接帧的读图结果）
             start_prefetch(position + 1)
             if position + 1 < total:

@@ -16,15 +16,20 @@
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
-from .frame_match import MAD_MAYBE, imread_unicode, mad, read_window, to_gray
+from .frame_match import MAD_MAYBE, imread_unicode, mad, read_window, to_gray, video_meta
 from .ledger import Ledger
 
 EXPECTED_VIDEO_SIZE = (1280, 736)
 SEGMENT_MIN_S = 4.0
 SEGMENT_MAX_S = 10.0
+
+# 视频时长与标称整数秒的容差：fps 常报 23.976 之类名义值，``frames / fps`` 因此会偏离
+# 整数零点几个百分点。不设容差会把好视频判成「不是整数秒」而硬阻断。
+VIDEO_DURATION_TOLERANCE = 0.1
 
 
 @dataclass
@@ -86,6 +91,47 @@ def check_shot_duration(seconds: float) -> list[Issue]:
         return [Issue("error", "duration_not_integer",
                       f"段时长 {seconds}s 不是整数秒，H3 只接受整数档")]
     return []
+
+
+def check_segment_video(video_path: Path, expected_seconds: float | None = None) -> list[Issue]:
+    """校验本段交上来的输出视频：读得到、时长是 H3 的整数档、且与本段计划时长一致。
+
+    分段的交接物是「本段输出视频 + 由它剥出的锚帧」这一对。视频给错（拿错段、用了
+    别的时长档、被插帧改过时长），下游整条接错，所以要在剥帧当轮判——这是**可证**的
+    事实，错了就是错了，故报 ``error``。
+
+    为什么不能拿 ``check_input_frame`` 当这一档用：向导的锚帧是**当场从这段视频剥出来
+    的**，而那个函数比的正是**同一段视频**的尾窗（窗口最小 mad 必然 < ``MAD_MAYBE``），
+    在这个调用点恒真。它的 MAD 档只在「用户回报实际投喂的那张图」时才有牙齿。
+
+    尺寸不符只报 ``warning``：H3 输出 1280×736 是我们的假设，用户可以改工作流。
+    """
+    issues: list[Issue] = []
+    meta = video_meta(video_path)
+    seconds = float(meta.get("duration_s") or 0.0)
+    if not math.isfinite(seconds) or not seconds:
+        # 测不出事实就不许阻断——这不是「视频错了」，是「我们量不出来」。
+        # isfinite 也挡住 NaN：fps 报 NaN 时 duration 是 NaN，round(nan) 会抛 ValueError，
+        # 而调用点在向导的剥帧 try 之外，异常逃逸会直接崩掉陪跑流程。
+        issues.append(Issue("warning", "segment_video_unmeasurable",
+                            f"读不到本段视频的时长元数据：{video_path}（跳过时长校验）"))
+    else:
+        nominal = round(seconds)
+        effective = float(nominal) if abs(seconds - nominal) <= VIDEO_DURATION_TOLERANCE else seconds
+        issues += check_shot_duration(effective)
+        if expected_seconds is not None and abs(effective - float(expected_seconds)) > VIDEO_DURATION_TOLERANCE:
+            issues.append(Issue(
+                "error", "segment_video_duration_mismatch",
+                f"本段输出视频 {seconds:.2f}s（≈{effective:g}s）与本段计划时长 "
+                f"{expected_seconds:g}s 不符——可能交错了段，或用错了时长档"))
+    if meta:
+        size = (int(meta.get("width") or 0), int(meta.get("height") or 0))
+        if size != EXPECTED_VIDEO_SIZE:
+            issues.append(Issue(
+                "warning", "segment_video_size",
+                f"本段视频 {size[0]}×{size[1]} 与 H3 输出 "
+                f"{EXPECTED_VIDEO_SIZE[0]}×{EXPECTED_VIDEO_SIZE[1]} 不一致，可能不是 H3 这段的产出"))
+    return issues
 
 
 def check_not_discarded(prev_video_name: str, ledger: Ledger) -> list[Issue]:

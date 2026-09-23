@@ -146,10 +146,15 @@ def test_v2_flow_describes_bridge_frame_before_writing_segment(tmp_path, monkeyp
     ], "写段 3 时必须已拿到段 3 桥接帧的读图结果"
 
 
-def test_v2_flow_skipping_bridge_capture_degrades_without_record(tmp_path, monkeypatch, capsys):
-    """用户跳过剥帧：state 不加记录（诚实降级），流程照常走完，无伪造描述。"""
+def test_v2_flow_without_bridge_video_degrades_without_record(tmp_path, monkeypatch, capsys):
+    """拿不到输出视频：state 不加记录（绝不伪造），且流程**停在这里**。
+
+    原契约是「跳过剥帧 → 降级照常走完」。ADR 0002 否掉了那个 opt-out：它等于闸门可被
+    静默绕过，且下一段会带单图锚定行去声明一张并不存在的 Picture 1。现在非末段的视频
+    是必经环节，给不出就停（进度不推进）。
+    """
     brief, session = _session(tmp_path)
-    _silence(monkeypatch)  # confirm=False：跳过剥帧
+    _silence(monkeypatch)  # _prompt 恒返回 ""：用户拿不出视频
 
     snapshots: list[dict] = []
 
@@ -161,9 +166,10 @@ def test_v2_flow_skipping_bridge_capture_degrades_without_record(tmp_path, monke
 
     wizard._run_segmented_flow_v2(brief, session, _plans3(), {}, SimpleNamespace())
 
-    assert len(snapshots) == 3
+    assert len(snapshots) == 1, "拿不到视频就不得继续写下一段"
     assert all("bridge_frame_descriptions" not in s for s in snapshots), \
-        "跳过剥帧时不得伪造桥接帧描述"
+        "没有剥到帧时不得伪造桥接帧描述"
+    assert "没有拿到输出视频" in capsys.readouterr().out
 
 
 def test_v2_flow_reading_failure_degrades_loudly(tmp_path, monkeypatch, capsys):
