@@ -28,7 +28,9 @@ def _write_png(path, image):
     path.write_bytes(buf.tobytes())
 
 
-def _probe_from_tail(video, size=(1280, 736)):
+def _probe_from_tail(video, size=None):
+    if size is None:
+        size = EXPECTED_VIDEO_SIZE  # 默认跟预检常量走，别硬写方向（曾横竖写反过一次）
     tail = read_window(video, window="tail", k=1)[0]
     # read_window 返回 float32；PNG 编码器只收 8-bit，显式转换避免 OpenCV fallback 警告
     return cv2.cvtColor(cv2.resize(tail.astype(np.uint8), size,
@@ -37,7 +39,8 @@ def _probe_from_tail(video, size=(1280, 736)):
 
 
 def test_expected_size_matches_h3_output():
-    assert EXPECTED_VIDEO_SIZE == (1280, 736)
+    """2026-09-23 对 16 个真产物校准：H3 输出是 736×1280 竖版（旧常量 1280×736 横竖写反）。"""
+    assert EXPECTED_VIDEO_SIZE == (736, 1280)
 
 
 def test_correct_input_frame_passes(tmp_path, tmp_video):

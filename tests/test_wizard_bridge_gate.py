@@ -24,7 +24,11 @@ from minimax_h3_prompt.brief_parser import Brief
 from minimax_h3_prompt.segment_planner import SegmentPlan
 from minimax_h3_prompt.tools import reference_auditor
 from minimax_h3_prompt.tools.frame_match import video_meta
-from minimax_h3_prompt.tools.preflight import EXPECTED_VIDEO_SIZE, check_segment_video
+from minimax_h3_prompt.tools.preflight import (
+    EXPECTED_VIDEO_SIZE,
+    H3_TIER_FRAMES,
+    check_segment_video,
+)
 from minimax_h3_prompt.ui import wizard
 
 BRIDGE_DESC = "便利店收银台中景：玻璃店门完整关闭，画面中没有猫；店员右手平放在台面上。"
@@ -40,8 +44,8 @@ TWO_SHOT_PROMPT = (
 
 
 def _make_video(path: Path, seconds: float, *, size=EXPECTED_VIDEO_SIZE, fps: int = 24) -> Path:
-    """写一段真视频（时长可控）。时长由 帧数/fps 得出，故帧数取整。"""
-    frames = max(2, int(round(seconds * fps)))
+    """写一段真视频。帧数按 H3 实测档位取（H3 的「4s」产物实际是 107 帧 = 4.458s）。"""
+    frames = H3_TIER_FRAMES.get(int(round(seconds)), int(round(seconds * fps)))
     writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), fps, size)
     assert writer.isOpened(), "测试环境缺 MJPG 编码器"
     image = np.full((size[1], size[0], 3), 128, np.uint8)
@@ -80,22 +84,38 @@ def _plans2():
 # ---------------------------------------------------------------------------
 
 def test_matching_duration_passes(tmp_path):
+    """「4s」档真产物是 107 帧 ≈4.458s（从不是整数秒）——必须原样放行。"""
     video = _make_video(tmp_path / "seg.avi", 4.0)
     assert check_segment_video(video, expected_seconds=4.0) == []
 
 
 def test_wrong_duration_is_error(tmp_path):
-    """交错段 / 用了别的时长档 → 可证错误。"""
+    """交错段 / 用了别的时长档 → 可证错误（帧数表判档，非容差近似）。"""
     video = _make_video(tmp_path / "seg.avi", 4.0)
     issues = check_segment_video(video, expected_seconds=6.0)
     assert "segment_video_duration_mismatch" in {i.code for i in issues}
     assert {i.severity for i in issues} == {"error"}
 
 
+def test_real_gen005_product_would_pass(tmp_path):
+    """GEN005 段 1 实测回归：107 帧 4.458s 的真产物在旧闸门被误杀成 2 error，
+    新帧数表判据必须原样放行（尺寸 736×1280 也是真产物的方向）。"""
+    video = _make_video(tmp_path / "seg.avi", 4.0, size=(736, 1280))
+    assert check_segment_video(video, expected_seconds=4.0) == []
+
+
 def test_out_of_range_duration_is_error(tmp_path):
-    """3s 不在 H3 的 4–10 整数档内 → 复用既有 check_shot_duration 报错。"""
+    """3s 不在 H3 的 4–10 档内 → 报错。"""
     video = _make_video(tmp_path / "seg.avi", 3.0)
     assert "duration_out_of_range" in {i.code for i in check_segment_video(video)}
+
+
+def test_unknown_tier_in_range_is_warning_not_error(tmp_path):
+    """7–10s 档暂无帧数样本：区间内、表外 → 只警告不硬阻断（测不出事实就不许阻断）。"""
+    video = _make_video(tmp_path / "seg.avi", 7.0)  # 168 帧，不在 {107,124,158}
+    issues = check_segment_video(video, expected_seconds=7.0)
+    assert "segment_video_duration_unknown_tier" in {i.code for i in issues}
+    assert {i.severity for i in issues} == {"warning"}
 
 
 def test_unmeasurable_video_is_warning_not_error(tmp_path):

@@ -23,13 +23,20 @@ from pathlib import Path
 from .frame_match import MAD_MAYBE, imread_unicode, mad, read_window, to_gray, video_meta
 from .ledger import Ledger
 
-EXPECTED_VIDEO_SIZE = (1280, 736)
+EXPECTED_VIDEO_SIZE = (736, 1280)
 SEGMENT_MIN_S = 4.0
 SEGMENT_MAX_S = 10.0
 
-# 视频时长与标称整数秒的容差：fps 常报 23.976 之类名义值，``frames / fps`` 因此会偏离
-# 整数零点几个百分点。不设容差会把好视频判成「不是整数秒」而硬阻断。
-VIDEO_DURATION_TOLERANCE = 0.1
+# H3 实测产物帧数表（2026-09-23 全量探测 ComfyUI 真产物校准，736×1280@24fps）：
+# 「4s」档恒产 107 帧 = 4.458s——H3 产出**从不是整数秒**，旧的「整数秒 + 0.1s 容差」
+# 会把每一个真产物都误杀成硬阻断（GEN005 段 1 实测，16 个 09-22 产物帧数严格一致）。
+# 档间帧距不均（4→5s 差 17 帧、5→6s 差 34 帧，相邻档产物只差 0.7s），容差近似
+# 区分不了相邻档，必须按帧数精确匹配。
+H3_TIER_FRAMES = {4: 107, 5: 124, 6: 158}
+
+# 帧数匹配容差：16 个实测产物帧数与档位严格一致，但解码器数帧可能差一两帧。
+# ±2 仍远小于最近档距（17 帧），不影响分辨相邻档。
+FRAME_COUNT_TOLERANCE = 2
 
 
 @dataclass
@@ -94,17 +101,22 @@ def check_shot_duration(seconds: float) -> list[Issue]:
 
 
 def check_segment_video(video_path: Path, expected_seconds: float | None = None) -> list[Issue]:
-    """校验本段交上来的输出视频：读得到、时长是 H3 的整数档、且与本段计划时长一致。
+    """校验本段交上来的输出视频：读得到、帧数落在 H3 实测档位、且与本段计划时长一致。
 
     分段的交接物是「本段输出视频 + 由它剥出的锚帧」这一对。视频给错（拿错段、用了
     别的时长档、被插帧改过时长），下游整条接错，所以要在剥帧当轮判——这是**可证**的
     事实，错了就是错了，故报 ``error``。
 
+    判据是**实测帧数表**（``H3_TIER_FRAMES``，2026-09-23 对 16 个真产物校准），不是
+    「整数秒 + 容差」：H3 产出从不是整数秒（4s 档恒为 4.458s，档间帧距不均，容差
+    区分不了相邻档）。实测档位外的 7–10s 档暂无样本，首次遇到只警告不阻断——
+    测不出事实就不许阻断，攒到样本再固化。
+
     为什么不能拿 ``check_input_frame`` 当这一档用：向导的锚帧是**当场从这段视频剥出来
     的**，而那个函数比的正是**同一段视频**的尾窗（窗口最小 mad 必然 < ``MAD_MAYBE``），
     在这个调用点恒真。它的 MAD 档只在「用户回报实际投喂的那张图」时才有牙齿。
 
-    尺寸不符只报 ``warning``：H3 输出 1280×736 是我们的假设，用户可以改工作流。
+    尺寸不符只报 ``warning``：H3 输出 736×1280 是我们的假设，用户可以改工作流。
     """
     issues: list[Issue] = []
     meta = video_meta(video_path)
@@ -116,14 +128,31 @@ def check_segment_video(video_path: Path, expected_seconds: float | None = None)
         issues.append(Issue("warning", "segment_video_unmeasurable",
                             f"读不到本段视频的时长元数据：{video_path}（跳过时长校验）"))
     else:
-        nominal = round(seconds)
-        effective = float(nominal) if abs(seconds - nominal) <= VIDEO_DURATION_TOLERANCE else seconds
-        issues += check_shot_duration(effective)
-        if expected_seconds is not None and abs(effective - float(expected_seconds)) > VIDEO_DURATION_TOLERANCE:
+        frames = meta.get("frames")
+        tier = None
+        if isinstance(frames, (int, float)) and frames > 0:
+            for candidate in sorted(H3_TIER_FRAMES):
+                if abs(frames - H3_TIER_FRAMES[candidate]) <= FRAME_COUNT_TOLERANCE:
+                    tier = candidate
+                    break
+        if tier is not None:
+            # 帧数落在已知档位：以档位标称秒数判与本段计划是否一致
+            if expected_seconds is not None and tier != round(expected_seconds):
+                issues.append(Issue(
+                    "error", "segment_video_duration_mismatch",
+                    f"本段视频 {frames} 帧对应 H3 的 {tier}s 时长档，与本段计划时长 "
+                    f"{expected_seconds:g}s 不符——可能交错了段，或用错了时长档"))
+        elif seconds < SEGMENT_MIN_S or seconds > SEGMENT_MAX_S:
+            issues.append(Issue("error", "duration_out_of_range",
+                                f"段时长 {seconds:.2f}s 超出 H3 可选区间 "
+                                f"{SEGMENT_MIN_S:.0f}–{SEGMENT_MAX_S:.0f}s"))
+        elif expected_seconds is not None:
+            # 4–10s 区间内但不在帧数表（7–10s 档暂无样本）：无法确证档位，只警告
             issues.append(Issue(
-                "error", "segment_video_duration_mismatch",
-                f"本段输出视频 {seconds:.2f}s（≈{effective:g}s）与本段计划时长 "
-                f"{expected_seconds:g}s 不符——可能交错了段，或用错了时长档"))
+                "warning", "segment_video_duration_unknown_tier",
+                f"本段视频 {frames} 帧 ≈{seconds:.2f}s 不在 H3 实测帧数表 "
+                f"{max(H3_TIER_FRAMES)}s 档内（7–10s 档暂无样本），无法确证时长档，"
+                f"请人工核对是否本段计划 {expected_seconds:g}s 的产出"))
     if meta:
         size = (int(meta.get("width") or 0), int(meta.get("height") or 0))
         if size != EXPECTED_VIDEO_SIZE:
