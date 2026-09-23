@@ -18,9 +18,13 @@ _SCHEMA_VERSION = "wizard_session.v1"
 
 # status: awaiting_frames = 阶段 1 完成、等待用户提交帧图；completed = 视频提示词已产出
 # stage1_running = 阶段 1 跑到一半中断（每个节点完成时增量落盘），重启后可以从断点继续
+# segmented_running = 长视频分段陪跑进行中（阶段 2 已产出整条提示词，逐段人工生成中）。
+#   这一态必须存在：阶段 2 结束时写 completed 会让「陪跑中断 → 重跑向导」另开新 GEN，
+#   阶段 1/2 重做且 segments/progress.json 永远读不到（issue #17，GEN005 实测）。
 STATUS_AWAITING_FRAMES = "awaiting_frames"
 STATUS_COMPLETED = "completed"
 STATUS_STAGE1_RUNNING = "stage1_running"
+STATUS_SEGMENTED_RUNNING = "segmented_running"
 
 # state 中允许持久化的键；brief 对象单独序列化。`_progress` 是阶段 1 断点的元数据（哪个节点跑完了）。
 # `fl2va_frame_descriptions` 是用户提交帧图的读图结果——阶段 2 分段流程的唯一画面事实源，
@@ -143,19 +147,25 @@ def load_session(directory: str | Path) -> SessionState | None:
 
 
 def find_awaiting_sessions(root_dir: str | Path) -> list[SessionState]:
-    """扫描会话根目录下所有可续接的会话（阶段 1 中断的 + 等帧图的）。只读，不猜测内容归属。"""
+    """扫描会话根目录下所有可续接的会话（阶段 1 中断的 + 等帧图的 + 分段陪跑中的）。
+
+    只读，不猜测内容归属。``segmented_running`` 必须在内：分段陪跑的中断（硬阻断、
+    Ctrl-C、机器重启）代价原本是阶段 2 重做 + 已完成的所有段重来（issue #17）。
+    """
     root = Path(root_dir)
     results: list[SessionState] = []
     if not root.is_dir():
         return results
+    resumable = (STATUS_AWAITING_FRAMES, STATUS_STAGE1_RUNNING, STATUS_SEGMENTED_RUNNING)
     for session_file in sorted(root.glob("**/" + SESSION_FILENAME)):
         session = load_session(session_file.parent)
-        if session is not None and session.status in (STATUS_AWAITING_FRAMES, STATUS_STAGE1_RUNNING):
+        if session is not None and session.status in resumable:
             results.append(session)
     return results
 
 
 __all__ = [
     "SessionState", "SESSION_FILENAME", "STATUS_AWAITING_FRAMES", "STATUS_COMPLETED",
+    "STATUS_STAGE1_RUNNING", "STATUS_SEGMENTED_RUNNING",
     "save_session", "load_session", "find_awaiting_sessions",
 ]

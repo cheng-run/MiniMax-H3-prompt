@@ -20,6 +20,7 @@ from ..graph.pipeline import run_stage1, run_stage2
 from ..session_store import (
     STATUS_AWAITING_FRAMES,
     STATUS_COMPLETED,
+    STATUS_SEGMENTED_RUNNING,
     STATUS_STAGE1_RUNNING,
     SessionState,
     find_awaiting_sessions,
@@ -181,6 +182,10 @@ def run_wizard(config: Config) -> int:
         session = _resume_stage1(config, session)
         if session is None:
             return 1
+    # 分段陪跑中途退出：整条提示词与帧锚都已落盘，直接回到陪跑续接。
+    # 绝不能再走阶段 2——那正是 #17 的代价（重做阶段 2 + 已完成的所有段重来）。
+    if session.status == STATUS_SEGMENTED_RUNNING:
+        return _resume_segmented(config, session)
     # 阶段 1 完成后直接进入阶段 2（生图很快，无需暂停等人工确认）。
     return _phase2_collect_and_finish(config, session)
 
@@ -348,9 +353,14 @@ def _topic_slug(topic: str) -> str:
 def _session_dir(config: Config, topic: str) -> Path:
     """该主题的会话目录：``<sessions_root>/<topic_slug>/GEN00N``。
 
-    续接规则：最新 GEN 的会话未完成（阶段 1 中断 / 等帧图 / 分段进行中）→ 复用续接；
-    已完成（status=completed）或无会话文件 → 自动开下一个 GEN 编号
-    （同主题重新生成 = 新的一次验收运行，2026-09-22 裁定）。
+    续接规则：最新 GEN 的会话**未完成** → 复用续接；``completed`` 或无会话文件 →
+    自动开下一个 GEN 编号（同主题重新生成 = 新的一次验收运行，2026-09-22 裁定）。
+
+    「未完成」指 ``awaiting_frames`` / ``stage1_running`` / ``segmented_running`` 三态。
+    这里只按「不是 completed」判，所以新增未完成态自动获得续接语义——但前提是
+    **确实有代码在写那个态**：``segmented_running`` 曾长期只存在于本 docstring 里
+    （分段陪跑从不改会话状态），于是「分段进行中」这一态在运行时不存在，向导会另开
+    新 GEN、``progress.json`` 永远读不到（issue #17）。
     """
     from ..session_store import STATUS_COMPLETED, load_session
 
@@ -514,7 +524,11 @@ def _phase2_collect_and_finish(config: Config, session: SessionState) -> int:
     with _progress_scope("[阶段 2] 正在组装最终视频提示词并进行质检精修……（预计几分钟，期间无需输入）"):
         final_state, prompt = run_stage2(state, brief, config, on_node=_report_node, checkpoint_dir=generation_dir)
     _drain_stdin()
-    save_session(generation_dir, brief, final_state, status=STATUS_COMPLETED)
+    # 长视频接下来要进分段陪跑：此刻**不能**标 completed，否则陪跑中断后重跑向导会
+    # 另开新 GEN、阶段 2 重做（issue #17）。标成 segmented_running，跑完才转 completed。
+    long_form = brief.duration > 10
+    save_session(generation_dir, brief, final_state,
+                 status=STATUS_SEGMENTED_RUNNING if long_form else STATUS_COMPLETED)
     if downgraded:
         session_downgraded = downgraded
         _record_downgrade(generation_dir, session_downgraded)
@@ -547,7 +561,7 @@ def _phase2_collect_and_finish(config: Config, session: SessionState) -> int:
         # 必须传**阶段 2 之后的 state**：帧读图结果写在上面的局部副本里（旧 session 对象上没有），
         # 分段流程拿不到它就会退回照分镜表写（2026-09-22 首帧不锚定缺陷）。
         print(f"\n✓ 完整提示词已写入：{output_file}（供存档，长视频请按下方分段执行）")
-        _run_segmented_flow(brief, session, prompt, summary=summary_obj, state=final_state)
+        _run_long_form(brief, session, prompt, summary_obj, final_state, generation_dir)
     else:
         # 短视频：直接展示完整提示词，方便立即复制进 ComfyUI。
         print(f"\n✓ 最终视频提示词已写入：{output_file}")
@@ -667,9 +681,11 @@ def _capture_bridge_frame_until_clean(state: dict, position: int, generation_dir
 
     返回 True = 已拿到合格锚帧；False = 用户拿不出合格视频，流程必须**停在这里**。
 
-    出路做在会话内（改交一段正确的视频即可重剥），不是"从头重跑"：向导重跑会因会话
-    已被标成 ``completed``（阶段 2 结束时就写了）而**另开一个新 GEN**，阶段 2 得整条重做，
-    ``segments/progress.json`` 的续接在向导路径上根本不可达（已核实，见 #17）。
+    出路做在会话内（改交一段正确的视频即可重剥），不是"从头重跑"：这条出路过去其实
+    不成立——阶段 2 结束就把会话标成 ``completed``，向导重跑会**另开一个新 GEN**、
+    阶段 2 整条重做，``segments/progress.json`` 的续接在向导路径上不可达（已核实，见
+    #17）。#17 落地后会话在陪跑期间是 ``segmented_running``，重跑向导会落回同一 GEN
+    并从已完成段之后续接，这里返回 False 的代价才是「停在这一段」而不是「整条重来」。
     """
     while True:
         video_raw = _clean_path_input(_prompt(ask))
@@ -732,9 +748,73 @@ def _capture_bridge_frame(state: dict, video_path: str, position: int, generatio
     return []
 
 
+def _read_cached_summary(directory: Path):
+    """只读已落盘的中文摘要；续接不该为展示再烧一次 LLM（也不该依赖模型可达）。"""
+    import json
+
+    from ..summary import PromptSummary
+
+    json_path = directory / "summary-zh.json"
+    if not json_path.is_file():
+        return None
+    try:
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or not payload.get("overall"):
+        return None
+    shots = payload.get("shots")
+    return PromptSummary(overall=str(payload["overall"]),
+                         shots=shots if isinstance(shots, list) else [])
+
+
+def _run_long_form(brief: Brief, session: SessionState, prompt: str, summary, state: dict,
+                   directory: Path) -> None:
+    """长视频分段陪跑：跑之前标「分段进行中」，**全部段确认完成**才转「已完成」。
+
+    这两次状态写入就是 #17 的全部要点。标成未完成，中断（闸门硬阻断 / Ctrl-C / 重启）
+    之后重跑向导会落回**同一个 GEN**，并由 ``segments/progress.json`` 从第 N+1 段续接；
+    半途而废**不得**被标成完成——那会让下次重跑另开新 GEN、阶段 2 重做（实测可超
+    10 分钟）＋ 已完成的所有段重来，``progress.json`` 永远读不到。
+
+    ``state`` 必须是**阶段 2 之后的**那份：它带着 ``fl2va_frame_descriptions``（帧图
+    读图结果），拿旧 session 对象落盘会把它丢掉，分段提示词就退回照分镜表写
+    （2026-09-22 首帧不锚定缺陷）。
+    """
+    save_session(directory, brief, state, status=STATUS_SEGMENTED_RUNNING)
+    finished = _run_segmented_flow(brief, session, prompt, summary=summary, state=state)
+    if not finished:
+        print(f"\n[续接] 本次没有跑完全部段，会话保持「分段进行中」：下次重跑向导会落回 "
+              f"{directory.name}，从已完成的那一段之后继续（阶段 1/2 不重跑）。")
+        return
+    save_session(directory, brief, state, status=STATUS_COMPLETED)
+
+
+def _resume_segmented(config: Config, session: SessionState) -> int:
+    """分段陪跑续接：不碰阶段 1/2，用已落盘的整条提示词与帧锚直接回到陪跑。
+
+    阶段 2 的产物（``video-prompt.md``、``summary-zh.json``、带帧图读图结果的
+    ``stage_state``）都在会话目录里，所以这里零 LLM 调用就能续接。
+    """
+    directory = session.directory
+    prompt_file = directory / "video-prompt.md"
+    if prompt_file.is_file():
+        prompt = prompt_file.read_text(encoding="utf-8")
+    else:
+        # 走 v2 时 prompt 用不上（写段只用 plan + state）；纯回退路径才需要它，
+        # 那种情况下重跑一次阶段 2 是唯一的出路——把话说清楚，不静默降级。
+        prompt = ""
+        print(f"[警告] 找不到 {prompt_file}：若本次只能走机械拆分的回退路径，"
+              f"将无法续接（v2 规划路径不受影响）。")
+    print(f"\n[续接] 上一次分段陪跑没有跑完，回到 {directory.name} 继续（阶段 1/2 不重跑）。")
+    _run_long_form(session.brief, session, prompt, _read_cached_summary(directory),
+                   session.stage_state, directory)
+    return 0
+
+
 def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summary=None,
-                        state: dict | None = None) -> None:
-    """把整条提示词按 [Shot N] 拆成单镜头提示词，逐段陪跑。
+                        state: dict | None = None) -> bool:
+    """把整条提示词按 [Shot N] 拆成单镜头提示词，逐段陪跑。返回**是否跑完全部段**。
 
     state：阶段 2 之后的最终 state（含 ``fl2va_frame_descriptions`` 帧图读图结果）；
     省略时退回 ``session.stage_state``（续跑/测试兼容）。
@@ -743,6 +823,9 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
     失败自动回退机械拆分并明示）；显示信息卡（段号/Shot/时长/文件路径）→ 人工复制
     到 H3 生成 → 回车确认 → 才显示下一段；第 2 段起可提交上一段视频路径，自动剥尾帧
     作为本段首帧图；中断后由 progress.json 续接。
+
+    返回值是给调用方判「该不该把会话标成 completed」用的（issue #17）：闸门硬阻断、
+    Ctrl-C 都走不到正常结尾，那种情况必须保持「分段进行中」，否则下次重跑另开新 GEN。
     """
     import json
 
@@ -757,6 +840,14 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
 
     # ① 先走新流程：segment_planner 规划整秒分段边界 → 每段独立细写（官方英文格式，spec 2026-09-22）
     state = state if state is not None else session.stage_state
+    cached = _cached_plans(session.directory)
+    if cached and _segments_done(session.directory):
+        # 续接：必须用**产出 progress.json 的那套分段**。重跑 plan_segments 是 LLM 调用，
+        # 分段边界会变，``done=N`` 就会指向另一套分段（issue #17）。
+        llm = build_chat_model()
+        print(f"[续接] 复用已落盘的分段规划（{len(cached)} 段），不重跑规划。")
+        return _run_segmented_flow_v2(brief, session, cached, state, llm, summary=summary)
+
     plans = None
     try:
         llm = build_chat_model()
@@ -781,17 +872,12 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
         print("\n" + "=" * 60)
         print(prompt)
         print("=" * 60)
-        return
+        return False
 
     seg_dir = session.directory / "segments"
     seg_dir.mkdir(parents=True, exist_ok=True)
     progress_path = seg_dir / "progress.json"
-    done = 0
-    if progress_path.exists():
-        try:
-            done = int(json.loads(progress_path.read_text(encoding="utf-8")).get("done", 0))
-        except (OSError, json.JSONDecodeError, ValueError):
-            done = 0
+    done = _segments_done(session.directory)
     total = len(segments)
     print(f"\n已按镜头拆分为 {total} 段逐次执行（每段提示词同时存入 {seg_dir}）。")
     if done:
@@ -814,7 +900,7 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
                 ask="上一段输出视频路径（必填，用于剥尾帧作本段首帧）：",
                 segment_number=position + 1, total=total,
             ):
-                return  # 硬阻断（issue #13）
+                return False  # 硬阻断（issue #13）：交接物不合格，不能算「已跑完」
         # ② 每段重写：soundscape/music 为本段重写英文摘要句（官方 §4.6/§4.7）；失败回退机械拆分并明示
         rewritten: str | None = None
         if rewrite_llm is not None:
@@ -874,13 +960,63 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
         if position + 1 < total:
             print(f"[完成] 第 {position + 1}/{total} 段。下面给出第 {position + 2} 段……")
     print(f"\n✓ 全部 {total} 段已人工确认完成。可在剪辑工具中按顺序拼接 segments/ 下的各段输出。")
+    return True
 
 
-def _run_segmented_flow_v2(brief: Brief, session: SessionState, plans: list, state: dict, llm, summary=None) -> None:
+def _segments_done(directory: Path) -> int:
+    """``segments/progress.json`` 里已完成（**已过闸门并确认**）的段数；读不到即 0。
+
+    单一口径：进度只在闸门通过后才落盘（#13），所以这个数字就是「可以安全跳过的段数」。
+    """
+    import json
+
+    path = directory / "segments" / "progress.json"
+    if not path.is_file():
+        return 0
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    if not isinstance(raw, dict):
+        return 0
+    try:
+        return max(0, int(raw.get("done", 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _cached_plans(directory: Path) -> list | None:
+    """已落盘的分段规划（``segments/plan.json``）；缺失或损坏返回 None。
+
+    续接必须复用它：``plan_segments`` 是 LLM 调用，重跑会得到**另一套**分段边界，
+    而 ``progress.json`` 的 ``done=N`` 只对产出它的那套分段有意义——用旧进度去索引
+    新分段，会跳过没做过的段、重做做过的段。GEN005 当初靠手抄一份 ``plan.json``
+    绕过这个（``resume_gen005.py``，issue #17）。
+    """
+    import json
+
+    from ..segment_planner import SegmentPlan
+
+    path = directory / "segments" / "plan.json"
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, list) or not raw:
+        return None
+    try:
+        return [SegmentPlan.from_dict(item) for item in raw]
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _run_segmented_flow_v2(brief: Brief, session: SessionState, plans: list, state: dict, llm, summary=None) -> bool:
     """v2 陪跑：边生成边展示——当前段确认完成后，先剥本段尾帧读图（下一段的
     Picture 1 锚，issue #12），再后台预写下一段；用户看第 N 段提示词、去 ComfyUI
     生成、贴回尾帧，回车进入下一段时若已写完直接展示，否则等待。segments/shot-NN.md
-    逐段落盘，progress.json 支持中断续跑（已写入文件的段不重写）。
+    逐段落盘，progress.json 支持中断续跑（已写入文件的段不重写）。返回值＝是否跑完全部段。
 
     预取收益建立在「下一段的桥接帧已就位」之上：下一段桥接帧来自本段输出视频，
     本段完成前它不存在，所以预取必须在本段剥帧读图之后启动（正确性优先于并行）。
@@ -899,12 +1035,7 @@ def _run_segmented_flow_v2(brief: Brief, session: SessionState, plans: list, sta
         json.dumps([p.to_dict() for p in plans], ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    done = 0
-    if progress_path.exists():
-        try:
-            done = int(json.loads(progress_path.read_text(encoding="utf-8")).get("done", 0))
-        except (OSError, json.JSONDecodeError, ValueError):
-            done = 0
+    done = _segments_done(session.directory)
     total = len(plans)
     print(f"\n已规划为 {total} 段逐次执行（每段文件存入 {seg_dir}）。")
     if done:
@@ -1022,7 +1153,7 @@ def _run_segmented_flow_v2(brief: Brief, session: SessionState, plans: list, sta
                 ):
                     # 硬阻断（issue #13）：错误的交接物不得被当成下一段的事实喂下去。
                     # 进度也**不得**落盘——否则被拦下的这一段的锚会被续跑直接跳过。
-                    return
+                    return False
             # 闸门通过后才落盘进度：被拦下的段不能被记成已完成
             progress_path.write_text(
                 json.dumps({"done": position + 1, "total": total}, ensure_ascii=False, indent=2),
@@ -1036,6 +1167,7 @@ def _run_segmented_flow_v2(brief: Brief, session: SessionState, plans: list, sta
     finally:
         reporter.unsubscribe(loader)
     print(f"\n✓ 全部 {total} 段已人工确认完成。可在剪辑工具中按顺序拼接 segments/ 下的各段输出。")
+    return True
 
 
 def _store_frame(source: Path, generation_dir: Path, role: str) -> dict:

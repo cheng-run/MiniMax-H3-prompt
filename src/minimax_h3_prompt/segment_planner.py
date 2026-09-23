@@ -41,6 +41,24 @@ class SegmentPlan:
             "end_hook": self.end_hook,
         }
 
+    @classmethod
+    def from_dict(cls, raw: dict) -> "SegmentPlan":
+        """``to_dict`` 的逆操作，供**续接**读回已落盘的 ``segments/plan.json``。
+
+        为什么需要它：``plan_segments`` 是 LLM 调用，重跑会得到另一套分段边界，
+        而 ``progress.json`` 的 ``done=N`` 只对产出它的那套分段有意义。续接必须用
+        同一套分段，就得能把 plan.json 读回来——GEN005 当初是手抄一份绕过去的
+        （``resume_gen005.py``，issue #17）。
+        """
+        return cls(
+            index=int(raw["index"]),
+            start_s=int(raw["start_s"]),
+            end_s=int(raw["end_s"]),
+            shots_in_segment=tuple(int(s) for s in raw["shots_in_segment"]),
+            summary=str(raw["summary"]),
+            end_hook=str(raw["end_hook"]),
+        )
+
 
 def _load_instruction() -> str:
     path = PROMPTS_DIR / "segment_planner.md"
