@@ -87,3 +87,18 @@ _Avoid_: 断点续跑、恢复点
 ## 提示词格式纪律（2026-09-22 官方格式迁移）
 
 自创结构 GLOBAL_LOCK / BRIDGE_FROM / END_HOOK / 防波纹咒语（每个 Shot 块尾附加边缘稳定约束句）/ 首行时长句（`This is a N-second continuous shot.`）**已全部删除**：官方 base-en.txt 无这些字段，自创结构偏离模型训练分布导致服从度下降（validator 对其报 error）。段落一致性改由 Picture 1 锚定句 + 首次出场 Shot 内的实体定义 + 桥接帧图片承担。若未来剥尾帧人物识别率下降，**防波纹咒语的删除是第一嫌疑**（恢复一句的成本极低）。
+
+## 生成质量与采样配置
+
+**闪动量尺（flicker_std）**:
+逐帧平均亮度去掉慢趋势（9 帧滑动平均）后的残差标准差，判 H3 产出是否「闪动」的量尺（`tools/flicker_metric.py`）。**它的分档依赖采样配置**：4 步采样下稳段 0.09–0.17、坏段 3.6–4.9；8 步采样下同一批文本落在 0.87–1.19，两个旧档都套不上。
+_Avoid_: 拿跨采样配置的分数直接比较、把 0.09–0.17 当成通用的「稳」
+
+**采样步数（sampling steps）**:
+`BasicScheduler.steps`，H3 采样的总步数。2026-09-23 钉 seed 单变量实测：**4 步是闪动的独立主因**——同 seed 同文本同 LoRA，4 步 2.715 / 8 步 0.869（3.1 倍）；且它与 **LoRA 标称步数是否对齐无关**（4step LoRA + 4 步 = 4.420，8step LoRA + 4 步 = 4.473，同 seed 同文本）。生产配置建议取 **8 步**。
+_Avoid_: 把「这个 LoRA 是 N 步加速版」当成采样步数该怎么设的依据
+
+**快机位 + 多拍动作共存禁令（coexist ban）**:
+`segment_prompts.validate_segment` 的 error 级检查 `FAST_CAMERA_MULTI_BEAT_COEXIST`：同一段内快机位措辞（fast/rapid tracking、whip pan、`at fast speed`）与 ≥3 个动作节拍（正文 ≥3 个 `At 00:XX.XXX`）不得共存。
+**它的阈值量于 4 步采样**（2026-09-22 钉 seed 2×2：00016 0.78 / 00017 4.865）。2026-09-23 复测发现被判 error 的 armA 文本在 8 步下只有 0.869，与 4 步下的低运动对照（0.78）相当——**该内容组合并非固有致闪**。判定逻辑保持不变（4 步仍是会出现的配置），但**引用这条规则必须声明采样步数**。裁定见 `docs/adr/0003-flicker-threshold-is-config-dependent.md`。
+_Avoid_: 把「快机位 + 多拍必闪」当成与采样配置无关的内容性质
