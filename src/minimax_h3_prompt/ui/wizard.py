@@ -752,29 +752,58 @@ def _anchor_state(state: dict, position: int, description: str | None) -> None:
     )
 
 
-def _choose_gate_outcome(attempt: int) -> str:
-    """未达到末态时的出路。默认**停下**（劝阻），其余都是显式覆盖。
+def _promised_last_frame_description(state: dict) -> str | None:
+    """用户提交的**尾帧**读图结果；没有则 None。
+
+    这是 FL2VA/L2VA 的硬承诺：整条视频必须收在这张画面上。没有它就没有可核的东西——
+    无尾帧变体（I2VA / T2VA / 用户没交尾帧）**什么都不做**，凭空报一句「未达到」就是误报。
+    """
+    for item in state.get("fl2va_frame_descriptions") or []:
+        if not isinstance(item, dict) or str(item.get("role")) != "last":
+            continue
+        description = str(item.get("description", "")).strip()
+        if description:
+            return description
+    return None
+
+
+def _choose_gate_outcome(attempt: int, *, last_segment: bool = False) -> str:
+    """未达到时的出路。默认**停下**（劝阻），其余都是显式覆盖。
 
     #10 裁定：动作集**不含自动重掷**——重掷不是独立实验（同一载荷换个 seed 不算新证据）。
     「改用关键帧图另起」是 #10 的 B 方案，只作兜底不作常规路径，所以到第二次被拦才提示它。
+
+    ``last_segment=True`` 时菜单少掉「手工换帧／改用关键帧图另起」：那两条都是**换一个
+    下游锚**，而末段没有下游——整条视频已经结束，没有下一段的 Picture 1 可换。
     """
     print("\n" + "!" * 60)
-    print("[劝阻] 画面没有达到上一段的末态声明——默认**不继续**。")
-    print("  桥接链是逐段累积的：这一段的偏差会被下一段当成既成事实继承下去。")
-    print("  出路：")
-    print("    1. 停下（默认）——回 ComfyUI 重做本段，改好再来")
-    print("    2. 重跑本段——本段已重生成好，重新交一次输出视频")
-    print("    3. 手工换帧——自己换一张尾帧图（仍在桥接链上）")
-    print("    4. 改用关键帧图另起——放弃桥接链，用一张关键帧图作本段首帧（兜底）")
-    print("    5. 接受并继续——明知不一致仍继续（会记进 gate-log.jsonl）")
-    if attempt >= 2:
+    print("[劝阻] 画面没有达到上面那个声明——默认**不继续**。")
+    if last_segment:
+        print("  整条视频的最后画面就是承诺本身：这里不一致，成片就没有兑现承诺。")
+        print("  出路：")
+        print("    1. 停下（默认）——回 ComfyUI 重做末段，改好再来")
+        print("    2. 重跑末段——末段已重生成好，重新交一次输出视频")
+        print("    3. 接受并继续——明知没落在承诺的尾帧上仍继续（会记进 gate-log.jsonl）")
+        mapping = {"": GATE_STOP, "1": GATE_STOP, "2": GATE_RERUN, "3": GATE_ACCEPT}
+    else:
+        print("  桥接链是逐段累积的：这一段的偏差会被下一段当成既成事实继承下去。")
+        print("  出路：")
+        print("    1. 停下（默认）——回 ComfyUI 重做本段，改好再来")
+        print("    2. 重跑本段——本段已重生成好，重新交一次输出视频")
+        print("    3. 手工换帧——自己换一张尾帧图（仍在桥接链上）")
+        print("    4. 改用关键帧图另起——放弃桥接链，用一张关键帧图作本段首帧（兜底）")
+        print("    5. 接受并继续——明知不一致仍继续（会记进 gate-log.jsonl）")
+        mapping = {
+            "": GATE_STOP, "1": GATE_STOP, "2": GATE_RERUN, "3": GATE_MANUAL_FRAME,
+            "4": GATE_KEYFRAME_RESTART, "5": GATE_ACCEPT,
+        }
+    if attempt >= 2 and not last_segment:
         print(f"  ⚠ 同一段已被拦下 {attempt} 次：反复对不上时考虑第 4 条另起"
               "（#10 裁定的兜底路径，不作常规走法）。")
+    elif attempt >= 2:
+        print(f"  ⚠ 同一段已被拦下 {attempt} 次：末段没有下游锚可换，"
+              "这里只能整段重做或接受现状（换一段收尾属于整片级重做，不在本闸门范围内）。")
     print("!" * 60)
-    mapping = {
-        "": GATE_STOP, "1": GATE_STOP, "2": GATE_RERUN, "3": GATE_MANUAL_FRAME,
-        "4": GATE_KEYFRAME_RESTART, "5": GATE_ACCEPT,
-    }
     while True:
         raw = _prompt("选择出路（回车=1 停下）：").strip()
         if raw in mapping:
@@ -917,12 +946,17 @@ def _capture_bridge_frame_until_clean(state: dict, position: int, generation_dir
 
 
 def _capture_bridge_frame(video_path: str, position: int, generation_dir: Path, *,
-                          expected_seconds: float | None = None
+                          expected_seconds: float | None = None,
+                          frame_suffix: str = "start"
                           ) -> tuple[list, str | None, Path | None]:
-    """剥上一段尾帧 → 可证层交接校验 → 读图（issue #12 / #13）。
+    """剥一段视频的尾帧 → 可证层交接校验 → 读图（issue #12 / #13）。
 
     ``expected_seconds``＝交出这段视频的那一段的**计划时长**，供可证层校验（交错段、
     用错时长档都会在这里被拦下）。
+
+    ``frame_suffix``：段间桥接用 ``start``（``shot-NN-start.png``＝第 NN 段的开场锚）；
+    末段收尾核验（#16）用 ``end``——它没有下一段，核的是**整条视频的最后画面**，
+    放进 ``-start`` 会名不副实。
 
     **本函数只判与说，不写 state、不做流程决策**：语义层判定（#14）还在后面，判定之前
     就往 state 里写读图结果，一旦人判「重跑本段」，那段错锚就留在了 state 里
@@ -937,15 +971,17 @@ def _capture_bridge_frame(video_path: str, position: int, generation_dir: Path, 
     try:
         frame = extract_last_frame(
             Path(video_path),
-            Path(generation_dir) / "bridge_frames" / f"shot-{position + 1:02d}-start.png",
+            Path(generation_dir) / "bridge_frames" / f"shot-{position + 1:02d}-{frame_suffix}.png",
         )
         size_kb = frame.stat().st_size / 1024
         print("[桥接帧] ✓ 已从上一段视频提取尾帧：")
         print(f"  位置：{frame}")
         print(f"  大小：{size_kb:.0f} KB")
-        print("  → 请在 H3 中把这张图设为本段的 first frame 输入。")
+        if frame_suffix == "start":
+            print("  → 请在 H3 中把这张图设为本段的 first frame 输入。")
     except Exception as exc:  # noqa: BLE001 - 剥帧失败不阻塞人工流程
-        print(f"[警告] 剥尾帧失败（{exc}），可手动截图作为首帧图；本段提示词将不含桥接帧读图结果。")
+        print(f"[警告] 剥帧失败（{exc}）：本次没有取到帧，绝不伪造读图记录，"
+              "按「量不出来」降级（桥接帧可手动截图代替；末段核验本次跳过）。")
         return [], None, None
     # 可证层先判：不合格就不必再花一次读图调用，也绝不把错误的交接物喂进 state
     errors = _gate_segment_handoff(video_path, expected_seconds)
@@ -959,6 +995,93 @@ def _capture_bridge_frame(video_path: str, position: int, generation_dir: Path, 
     else:
         print("[提示] 本段提示词未携带桥接帧读图结果，开场一致性仅由图片本身锚定。")
     return [], description, frame
+
+
+def _judge_last_frame(*, directory: Path, segment_number: int, total: int,
+                      end_hook: str | None, promised: str, description: str | None,
+                      frame_path: Path | None, attempt: int) -> str:
+    """末段尾帧核验的判定块：**三方**并排（该段末态 / 承诺的尾帧画面 / 实际末帧画面）。
+
+    复用 #14 的对照机制与 ``gate-log.jsonl`` 记录形状（多一个 ``promised_last_frame_description``
+    字段把「承诺」与「末态声明」分开记）；差别在末段**没有下游锚可换**，故动作集只有
+    停下／重跑末段／接受并继续。
+    """
+    print("\n" + "-" * 60)
+    print(f"[末段尾帧核验] 第 {segment_number}/{total} 段的收尾（＝整条视频的最后画面）")
+    print("-" * 60)
+    print("  该段末态声明：")
+    print(f"    {end_hook or '（本路径没有 plan 末态声明）'}")
+    print("  用户提交的尾帧实际画面（**承诺的落点**）：")
+    print(f"    {promised}")
+    print("  末段实际末帧画面（读图结果）：")
+    print(f"    {description or '（读图失败：没有可对照的画面描述）'}")
+    print(f"  末帧图：{frame_path if frame_path else '（未取得）'}")
+    print("-" * 60)
+
+    reached = _confirm("整条视频的最后画面落在上面那张承诺的尾帧上了吗？", default=True)
+    outcome = GATE_CONTINUE if reached else _choose_gate_outcome(attempt, last_segment=True)
+    _log_gate(directory, {
+        "segment": segment_number,
+        "reference_label": "（末段收尾：承诺尾帧 vs 实际末帧）",
+        "end_hook": end_hook,
+        "promised_last_frame_description": promised,
+        "bridge_frame_description": description,
+        "bridge_frame_path": str(frame_path) if frame_path else None,
+        "verdict": "reached" if reached else "not_reached",
+        "action": outcome,
+        "action_label": _OUTCOME_LABELS[outcome],
+        "attempt": attempt,
+    })
+    return outcome
+
+
+def _verify_last_frame(state: dict, position: int, generation_dir: Path, *,
+                       end_hook: str | None, segment_number: int, total: int,
+                       expected_seconds: float | None) -> bool:
+    """末段尾帧核验（issue #16）：链的**另一端**，此前无人校验。
+
+    链式闸门只管**段间**（末段不剥帧：``if position + 1 < total``）。而 FL2VA/L2VA 下
+    末段必须收在用户提交的那张尾帧上——此前只有提示词里的一句**声明**
+    （``_frame_anchor_note``），没有任何校验，末段连输出视频路径都不会索要。整条视频的
+    最后画面是否真的落在承诺的那张尾帧上，是 FL2VA/L2VA 的核心承诺，不能只靠人自己盯。
+
+    没有 ``role: last`` 的读图结果（I2VA / T2VA / 用户没交尾帧）→ 什么都不做直接放行：
+    没有可核的承诺，凭空报一句「未达到」就是误报。
+
+    返回 True = 放行（含「没东西可核」与「量不出来」两种降级）；False = 停下。
+    """
+    promised = _promised_last_frame_description(state)
+    if promised is None:
+        return True
+    print(f"\n[末段尾帧核验] 本会话提交了尾帧：FL2VA/L2VA 下整条视频必须收在它上面，"
+          f"现在核第 {segment_number}/{total} 段的末帧。")
+    attempt = 0
+    while True:
+        video_raw = _clean_path_input(_prompt("末段输出视频路径（必填，用于核末帧）："))
+        if not video_raw:
+            print(f"\n⚠ 第 {segment_number}/{total} 段没有拿到输出视频：末帧核验是 "
+                  "FL2VA/L2VA 的核心承诺，已停在这里。", flush=True)
+            return False
+        errors, description, frame = _capture_bridge_frame(
+            video_raw, position, generation_dir, expected_seconds=expected_seconds,
+            frame_suffix="end")
+        if errors:
+            attempt += 1
+            print("→ 请**重新剥帧**：改交末段正确的输出视频（时长需与本段计划一致）；"
+                  "回车则放弃继续。", flush=True)
+            continue
+        outcome = _judge_last_frame(
+            directory=generation_dir, segment_number=segment_number, total=total,
+            end_hook=end_hook, promised=promised, description=description,
+            frame_path=frame, attempt=attempt + 1)
+        if outcome in (GATE_CONTINUE, GATE_ACCEPT):
+            return True
+        if outcome == GATE_RERUN:
+            attempt += 1
+            print(f"→ 重跑末段：回 ComfyUI 重做第 {segment_number}/{total} 段，"
+                  "然后把**新的**输出视频路径交上来。", flush=True)
+            continue
+        return False  # GATE_STOP
 
 
 def _read_cached_summary(directory: Path):
@@ -1176,6 +1299,13 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
         )
         if position + 1 < total:
             print(f"[完成] 第 {position + 1}/{total} 段。下面给出第 {position + 2} 段……")
+    # 链的另一端（#16）：末段没有下一段的锚可核，这里补上「是否收在承诺的尾帧上」。
+    if not _verify_last_frame(state, total - 1, session.directory,
+                              # 回退路径没有 plan 层，末态参照取末段**落盘那份**提示词的收尾句
+                              end_hook=_previous_segment_tail(seg_dir, total),
+                              segment_number=total, total=total,
+                              expected_seconds=segments[-1].duration_seconds):
+        return False
     print(f"\n✓ 全部 {total} 段已人工确认完成。可在剪辑工具中按顺序拼接 segments/ 下的各段输出。")
     return True
 
@@ -1388,6 +1518,13 @@ def _run_segmented_flow_v2(brief: Brief, session: SessionState, plans: list, sta
                 print(f"[完成] 第 {position + 1}/{total} 段。")
     finally:
         reporter.unsubscribe(loader)
+    # 链的另一端（#16）：末段不剥帧，所以段间闸门从没管过「整条视频是否收在承诺的尾帧上」。
+    # 放在宣布完成**之前**：没通过就不算跑完，会话保持「分段进行中」。
+    if not _verify_last_frame(state, total - 1, session.directory,
+                              end_hook=plans[-1].end_hook,
+                              segment_number=total, total=total,
+                              expected_seconds=float(plans[-1].duration_s)):
+        return False
     print(f"\n✓ 全部 {total} 段已人工确认完成。可在剪辑工具中按顺序拼接 segments/ 下的各段输出。")
     return True
 
