@@ -190,6 +190,50 @@ def test_both_segment_paths_carry_coexist_discipline():
         assert "降机位" in tpl, f"{name} 模板缺默认处置（降机位）"
 
 
+def test_both_segment_paths_require_edge_stability_sentence():
+    """两条分段路径的所有镜头块都必须以官方 edge-stability 原句收尾（issue #8）。
+
+    该句原先被模板列为禁令——2026-09-22 迁移把它误判为自创结构；官方 base-en.txt:92-96
+    明令要求，且给的理由正是本项目的桥接帧链（尾帧要留给下一段当首帧参考）。
+    模板层的锚：纪律句丢了会在此报红（两条路径都要改，别只改主路径）。
+    """
+    from minimax_h3_prompt.segment_prompts import (
+        _REWRITE_INSTRUCTION,
+        _SEGMENT_V2_INSTRUCTION,
+    )
+    from minimax_h3_prompt.tools.h3_validator import EDGE_STABILITY_SENTENCE
+
+    for name, tpl in (("v2", _SEGMENT_V2_INSTRUCTION), ("fallback", _REWRITE_INSTRUCTION)):
+        assert EDGE_STABILITY_SENTENCE in tpl, f"{name} 模板缺官方 edge-stability 原句"
+        assert "防波纹咒语" not in tpl, f"{name} 模板仍把官方要求列为禁令"
+        # 粒度必须是**逐块**，不是「只在段尾加一次」：v2 允许段内切镜，写成段尾粒度会让
+        # 照做的 LLM 只给最后一个块加句，前面的块被校验判 warning（遵守模板却被判违规）
+        assert "每个 Shot 块" in tpl, f"{name} 模板没把要求写成「每个 Shot 块」粒度"
+
+
+def test_edge_stability_reaches_both_segment_requests():
+    """接线断言写在**调用方**：两条路径真正发给 LLM 的请求都得带这句（issue #8）。
+
+    只断言模块常量是「被测物自身的单测」——常量对了、请求组装时漏掉，照样不报红。
+    本项目已犯过两次「规则在、接线不在」（threshold 未贯通 / validator 从未被调用），
+    故在调用点钉住。
+    """
+    from minimax_h3_prompt.segment_prompts import (
+        build_segment_v2_request,
+        rewrite_segment_prompt,
+    )
+    from minimax_h3_prompt.tools.h3_validator import EDGE_STABILITY_SENTENCE
+
+    plans = _v2_plans()
+    v2_request = build_segment_v2_request(plans[1], plans, {"shot_table": "x"}, None)
+    assert EDGE_STABILITY_SENTENCE in v2_request, "v2 请求（调用点）没带上 edge-stability 原句"
+
+    segments = split_shots_from_prompt(SAMPLE_PROMPT, total_duration=15.0)
+    llm = FakeLLM()
+    rewrite_segment_prompt(segments[1], SAMPLE_PROMPT, llm)
+    assert EDGE_STABILITY_SENTENCE in llm.last_request, "回退路径请求（调用点）没带上 edge-stability 原句"
+
+
 def test_segment_v2_request_english_summary_soundscape():
     """v2 主路径：字段 4/5 要求英文摘要句（1-4/1-3 句、无时间戳），不再裁时间窗。"""
     from minimax_h3_prompt.segment_planner import SegmentPlan
@@ -268,7 +312,9 @@ def test_write_segment_v2_output_official_shape():
         "integrated_multimodal_description: [Shot 1] Live-action, cinematic, "
         "a close shot frames an orange tabby cat landing on a checkout counter "
         "under warm light. At 00:02.000, the cat rubs its head against the "
-        "clerk's hand. The scene settles on the cat leaning into her palm.\n\n"
+        "clerk's hand. The scene settles on the cat leaning into her palm. "
+        "Keep every character's silhouette, facial outline, and clothing edges "
+        "crisp and stable throughout; no rippling, warping, or edge shimmer.\n\n"
         "overall_soundscape: A low refrigerator hum continues while soft purring "
         "rises near the counter. The clerk's sleeve rustles as the cat leans in.\n\n"
         "non_diegetic_music: N/A"

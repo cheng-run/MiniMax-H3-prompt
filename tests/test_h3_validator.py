@@ -2,9 +2,11 @@
 
 合法基准取自官方规范（base-en.txt Case 1、ref-en.txt 完整示例结构）；
 违规样例为针对性构造。
-2026-09-22 官方格式迁移（issue #2）：自创结构 GLOBAL_LOCK/BRIDGE_FROM/END_HOOK/
-防波纹咒语转为反向断言；新增 I2VA 出场节拍距段尾 ≥1s、单 Shot 默认；
+2026-09-22 官方格式迁移（issue #2）：自创结构 GLOBAL_LOCK/BRIDGE_FROM/END_HOOK
+转为反向断言；新增 I2VA 出场节拍距段尾 ≥1s、单 Shot 默认；
 正负样本 fixture 钉回归（tests/fixtures/）。
+2026-09-23（issue #8）：原判为「自创」的防波纹咒语实为官方 edge-stability 句的中文译文
+（base-en.txt:92-96 要求逐字符英文原句）——由 error 级禁令改为 warning 级要求。
 """
 from pathlib import Path
 
@@ -19,6 +21,14 @@ from minimax_h3_prompt.tools.h3_validator import (
 FIXTURES = Path(__file__).parent / "fixtures"
 LEGACY_SHOT01 = (FIXTURES / "legacy_shot01.md").read_text(encoding="utf-8")
 OFFICIAL_SHOT01_I2VA = (FIXTURES / "official_shot01_i2va.md").read_text(encoding="utf-8")
+BASE_EN_REF = (Path(__file__).parents[1] / "src" / "minimax_h3_prompt"
+               / "references" / "base-en.txt")
+
+# 官方原句，逐字符照抄 base-en.txt:92-96（段落 92 行起、原句在 95 行）
+OFFICIAL_EDGE_STABILITY = (
+    "Keep every character's silhouette, facial outline, and clothing edges "
+    "crisp and stable throughout; no rippling, warping, or edge shimmer."
+)
 
 REF_META = [
     (1, "白发仙师", "白发老妪，玄色长袍，手持拂尘"),
@@ -257,6 +267,69 @@ class TestDispatch:
         assert errors_of(issues) == []
 
 
+class TestEdgeStabilitySentence:
+    """官方要求每个镜头块以 edge-stability 原句收尾（issue #8）。
+
+    base-en.txt:92-96 给的理由就是本项目赖以串片的桥接帧链——「抽出的尾帧要留给
+    下一段当首帧参考」。缺失**报 warning**（2026-09-23 用户裁定）：本规则刚落地、
+    真实样本为零，不足以立 error 闸门（同 #11 的教训）。
+    """
+
+    def test_constant_matches_official_reference(self):
+        """production 常量必须与官方原文逐字符一致——判据只有 base-en.txt 一处。"""
+        from minimax_h3_prompt.tools.h3_validator import EDGE_STABILITY_SENTENCE
+
+        assert EDGE_STABILITY_SENTENCE in BASE_EN_REF.read_text(encoding="utf-8")
+        assert EDGE_STABILITY_SENTENCE == OFFICIAL_EDGE_STABILITY
+
+    def test_missing_sentence_is_warning_not_error(self):
+        text = base_prompt("[Shot 1] A woman dozes behind the counter.")
+        issues = validate_base(text, duration=4.0)
+        severity = {i.code: i.severity for i in issues}
+        assert severity.get("EDGE_STABILITY_MISSING") == "warning"
+        assert errors_of(issues) == []
+
+    def test_block_ending_with_sentence_passes(self):
+        text = base_prompt(f"[Shot 1] A woman dozes behind the counter. {OFFICIAL_EDGE_STABILITY}")
+        issues = validate_base(text, duration=4.0)
+        assert "EDGE_STABILITY_MISSING" not in codes(issues)
+
+    def test_sentence_inside_block_still_warns(self):
+        """官方是 end every shot block with——句中出现不算收尾。"""
+        text = base_prompt(
+            f"[Shot 1] A woman dozes. {OFFICIAL_EDGE_STABILITY} At 00:01.000 she stirs again."
+        )
+        issues = validate_base(text, duration=4.0)
+        assert "EDGE_STABILITY_MISSING" in codes(issues)
+
+    def test_each_shot_block_checked_separately(self):
+        text = base_prompt(
+            f"[Shot 1] A woman dozes. {OFFICIAL_EDGE_STABILITY} "
+            "[Shot 2] At 00:02.000, the camera cuts to a close-up of her hand."
+        )
+        issues = validate_base(text, duration=4.0)
+        missing = [i for i in issues if i.code == "EDGE_STABILITY_MISSING"]
+        assert len(missing) == 1, f"只该报缺句的 Shot 2，实际 {[i.message for i in missing]}"
+        assert "[Shot 2]" in missing[0].message
+
+    def test_multi_shot_all_blocks_compliant_passes(self):
+        """多镜段每块都带该句 → 零 warning。模板要求的是**逐块**，此处钉住校验侧的对应语义。"""
+        text = base_prompt(
+            f"[Shot 1] A woman dozes. {OFFICIAL_EDGE_STABILITY} "
+            f"[Shot 2] At 00:02.000, the camera cuts to her hand. {OFFICIAL_EDGE_STABILITY}"
+        )
+        issues = validate_base(text, duration=4.0)
+        assert "EDGE_STABILITY_MISSING" not in codes(issues)
+
+    def test_fires_on_segment_path_too(self):
+        """分段路径（validate_segment → validate_base）同样受此规则约束。"""
+        from minimax_h3_prompt.segment_prompts import validate_segment
+
+        text = base_prompt("[Shot 1] A woman dozes behind the counter.")
+        issues = validate_segment(text, duration=4.0)
+        assert "EDGE_STABILITY_MISSING" in codes(issues)
+
+
 class TestLegacyBannedStructures:
     """官方格式迁移（issue #2）：自创结构出现即报 error（反向规则）。"""
 
@@ -270,13 +343,19 @@ class TestLegacyBannedStructures:
         issues = validate_base(text, duration=4.0)
         assert marker_code in errors_of(issues)
 
-    def test_ripple_spell_banned(self):
+    def test_chinese_ripple_spell_is_not_self_invented(self):
+        """旧中文咒语不再算自创结构（issue #8）。
+
+        它是官方 edge-stability 句的中文译文，2026-09-22 迁移误判为自创并删掉。
+        现在不再报 error；它只是没满足「块尾为官方原句」这条要求，故报 warning。
+        """
         text = base_prompt(
             "[Shot 1] A woman dozes. 全程保持每个人物的轮廓、面部边缘与服装边缘清晰稳定，"
             "无波纹、扭曲或边缘抖动。"
         )
         issues = validate_base(text, duration=4.0)
-        assert "RIPPLE_SPELL_BANNED" in errors_of(issues)
+        assert "RIPPLE_SPELL_BANNED" not in codes(issues)
+        assert "EDGE_STABILITY_MISSING" in codes(issues)
 
     def test_first_line_duration_sentence_banned(self):
         text = "This is a 4-second continuous shot.\n\n" + base_prompt("[Shot 1] A woman dozes.")
@@ -290,14 +369,18 @@ class TestOfficialFormat:
     def test_legacy_fixture_reports_errors(self):
         """负样本：实测旧 shot-01.md 必须报错（自创结构 + 节拍压段尾）。"""
         issues = validate_base(LEGACY_SHOT01, duration=4.0)
-        codes = errors_of(issues)
+        error_codes = errors_of(issues)
         for expected in ("GLOBAL_LOCK_BANNED", "BRIDGE_FROM_BANNED", "END_HOOK_BANNED",
-                         "RIPPLE_SPELL_BANNED", "DURATION_SENTENCE_BANNED",
+                         "DURATION_SENTENCE_BANNED",
                          "LAST_TIMESTAMP_TOO_CLOSE_TO_END"):
-            assert expected in codes, f"缺少 {expected}，实际 {codes}"
+            assert expected in error_codes, f"缺少 {expected}，实际 {error_codes}"
+        # 两个 Shot 块收尾的旧中文咒语 = 官方句的译文，不再算自创结构（issue #8）；
+        # 但两块都缺官方英文原句 → 各报一条 warning
+        assert "RIPPLE_SPELL_BANNED" not in error_codes
+        assert codes(issues).count("EDGE_STABILITY_MISSING") == 2
 
     def test_official_fixture_passes(self):
-        """正样本：官方格式改写稿（I2VA 适配版）必须全绿。"""
+        """正样本：官方格式改写稿（I2VA 适配版）必须全绿（含 warning）。"""
         issues = validate_base(OFFICIAL_SHOT01_I2VA, duration=4.0, variant="I2VA")
         assert issues == []
 

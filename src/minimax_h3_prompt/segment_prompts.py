@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 from .tools.h3_validator import (
     ALIGN_TEMPLATES,
+    EDGE_STABILITY_SENTENCE,
     ValidationIssue,
     has_align_instruction,
     only_errors,
@@ -304,7 +305,10 @@ _REWRITE_INSTRUCTION = f"""你是 H3 视频提示词工程师。把整条视频�
 - integrated_multimodal_description: 只含本段的一个 [Shot 1] 块，英文；正文以 `[Shot 1] ` 标记紧跟字段名开头
   （官方逐字符格式，如 `integrated_multimodal_description: [Shot 1] Live-action, cinematic, a wide shot frames ...`）
   （沿用原 [Shot N] 的画面/运镜/表演描述，**时间戳归零＝相对本段起点计时，绝不得出现绝对片时**，不得虚构原镜头外的内容）；
-  实体外观只写在首次出场的 Shot；不写 GLOBAL_LOCK/BRIDGE_FROM/END_HOOK/防波纹咒语/时长句；
+  实体外观只写在首次出场的 Shot；不写 GLOBAL_LOCK/BRIDGE_FROM/END_HOOK/时长句；
+  **每个 Shot 块必须以官方 edge-stability 原句收尾**（逐字符照抄，不改写、不译文）：
+  `{EDGE_STABILITY_SENTENCE}`
+  官方要求它的理由就是本流程的桥接帧链——抽出的尾帧要保持轮廓锐利，留给下一段当首帧参考；
   **机位与节拍二选一**：快机位（fast/rapid tracking、whip pan、`at fast speed` 等）与 ≥3 个动作节拍
   （正文 ≥3 个 `At 00:XX.XXX`）不得同段共存，否则产出剧烈闪动；默认降机位为静态/慢速中景、节拍照写，
   剧情必须快镜时把本段节拍压到 2 个以内；
@@ -388,7 +392,10 @@ H3 是执行型模型：你写什么它就做什么，含糊等于失控；把**
    - 时间戳 `At 00:XX.XXX` 写进句子内，**且相对本段起点**（本段第 2.5 秒 → `At 00:02.500, the glass door is slowly pushed open...`）
    - **最后一个时间戳距段尾必须 ≥1s**——关键出场节拍要留展开空间，不许压在段尾
      （此处的「段尾」＝**本段时长**，不是整片时长）
-   - 段尾状态自然收在最后一个 Shot 的末句（画面停在自然落定的一瞬，不写"静止/定格"）
+   - **每个 Shot 块收尾**：先让画面自然落定（不写"静止/定格"），然后以官方 edge-stability 原句收尾——
+     它必须是**该块的最后一句**；**多镜段里每个 `[Shot N]` 块各加一次**，不是只在段尾加一次，
+     逐字符照抄、不改写不译文（官方 base-en.txt 2.1 硬要求；理由见下）：
+     `{EDGE_STABILITY_SENTENCE}`
    - **机位与节拍二选一（实测纪律）**：快机位（fast/rapid tracking、whip pan、`at fast speed` 等）
      与 **≥3 个动作节拍**（正文里 ≥3 个 `At 00:XX.XXX`）**不得同段共存**——同段共存会让 H3
      产出剧烈闪动的片段。默认**降机位**：改静态/慢速中景（`a static medium shot with small
@@ -402,7 +409,8 @@ H3 是执行型模型：你写什么它就做什么，含糊等于失控；把**
 - 不写 `BRIDGE_FROM:` 段首状态字段（段首由 Picture 1 锚定句表达）
 - 不写 `END_HOOK:` 段尾状态字段（段尾自然收句）
 - 不写 `This is a N-second continuous shot.` 时长句（时长由对齐指令承载）
-- 不写防波纹咒语（"保持轮廓…无波纹、扭曲或边缘抖动"之类）
+- 不要漏掉块尾的 edge-stability 原句——它**不是**自创结构：官方 base-en.txt 明令要求
+  每个镜头块以此句收尾，理由是抽出的尾帧要留给下一段当首帧参考（正是本流程的桥接帧链）
 - 不要把未来段的动作提前写进本段
 - 不要输出任何解释/markdown/前言；只输出提示词纯正文
 """
@@ -528,7 +536,8 @@ def _segment_shot_texts(plan, state: dict) -> tuple[list[str], bool]:
     同一根因早前已被诊断过并命名为 ``extract_segment_shots``
     （`docs/superpowers/specs/2026-09-17-segment-lock-scoping-design.md` 根因 4：
     「``shot_text_{n}`` 键根本不存在 → 回退整张分镜表」），但那份计划从未实现，
-    且其配套结构（GLOBAL_LOCK / 防波纹咒语）已被 2026-09-22 官方格式迁移废弃。
+    且其配套结构 GLOBAL_LOCK 已被 2026-09-22 官方格式迁移废弃（同批误删的 edge-stability
+    句已于 issue #8 恢复——它是官方硬要求，见 ``EDGE_STABILITY_SENTENCE``）。
     """
     table_map = _shot_text_map(state)
     texts: list[str] = []

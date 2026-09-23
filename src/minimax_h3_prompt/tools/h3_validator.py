@@ -5,7 +5,7 @@
 
 严重级别：
 - error   阻塞性问题，必须修（格式/标签/时间戳/段落顺序）
-- warning 建议性问题（词数、句子数、编号跳跃等）
+- warning 建议性问题（词数、句子数、编号跳跃、缺官方 edge-stability 句等）
 """
 from __future__ import annotations
 
@@ -29,12 +29,25 @@ _SENTENCE_RE = re.compile(r"[.!?]+")
 
 # 官方格式迁移（2026-09-22 spec / issue #2）：自创结构一律禁止（行首标记式）
 _BANNED_SECTION_MARKERS = ("GLOBAL_LOCK", "BRIDGE_FROM", "END_HOOK")
-# 防波纹咒语（自创，官方一致性靠 Picture 锚定句）
-_RIPPLE_SPELL_RE = re.compile(r"无波纹|边缘抖动")
 # 首行时长句（官方由帧变体指令行承载时长）
 _DURATION_SENTENCE_RE = re.compile(r"^This is a \d+(?:\.\d+)?-second continuous shot\.")
 # 关键节拍距段尾最小余量（spec 决策 Q1：出场动作需要展开空间）
 _END_MARGIN_S = 1.0
+
+# 官方 edge-stability 句，逐字符照抄 base-en.txt:92-96。官方给的理由正是本项目的桥接帧链：
+# 「end every shot block with this exact edge-stability sentence, so the extracted tail frame
+# keeps a crisp character outline for the next segment's first-frame reference」。
+#
+# **代码侧唯一来源**：写段模板（segment_prompts）从这里取，校验侧与模板侧不会各说各话。
+# 宿主选这里不是随意的——segment_prompts 已经从本模块导入（ALIGN_TEMPLATES 同理），
+# 常量若住 segment_prompts 而本模块要用，就成循环导入。校验器是裁判，判据随裁判走。
+# 另有两份无法插值的硬拷贝：`prompts/prompt_engineer.md`（人工文本）与正样本 fixture，
+# 由 tests/test_role_prompts.py 与 test_h3_validator.py 各自守着。
+# 2026-09-23（issue #8）：2026-09-22 迁移把它的中文译文当自创结构禁掉了，判断反了。
+EDGE_STABILITY_SENTENCE = (
+    "Keep every character's silhouette, facial outline, and clothing edges "
+    "crisp and stable throughout; no rippling, warping, or edge shimmer."
+)
 
 REF_SECTIONS = [
     "subject_definitions",
@@ -190,24 +203,22 @@ def _find_sections(text: str, headers: list[str]) -> dict[str, tuple[str, int]]:
 
 
 def _check_banned_structures(text: str, issues: list[ValidationIssue]) -> None:
-    """官方格式迁移：GLOBAL_LOCK/BRIDGE_FROM/END_HOOK/防波纹咒语/首行时长句出现即报 error。
+    """官方格式迁移：GLOBAL_LOCK/BRIDGE_FROM/END_HOOK/首行时长句出现即报 error。
 
-    结构标记按行首匹配（字段式自创结构）；防波纹咒语按行内关键词扫全文——
-    它历史上被附加在任意 Shot 块尾，不固定字段位置。
+    结构标记按行首匹配（字段式自创结构）。
+
+    **曾经的 RIPPLE_SPELL_BANNED 已移除**（issue #8）：那条规则把 Shot 块尾的中文
+    「全程保持…无波纹、扭曲或边缘抖动」判为自创结构，而它正是官方 edge-stability
+    句的译文（base-en.txt:92-96 要求的是同一句的英文原文）。要求与禁令指向同一句话，
+    自相矛盾；现由 `_check_edge_stability` 单向判「块尾是否为官方原句」。
     """
     for marker in _BANNED_SECTION_MARKERS:
         if re.search(rf"^{marker}\s*[:：]", text, re.MULTILINE):
             issues.append(ValidationIssue(
                 "error", f"{marker}_BANNED",
                 f"自创结构 {marker}: 不存在于官方 base-en.txt 规范，必须删除"
-                "（实体外观写进首次出场的 Shot；段首靠 Picture 1 锚定句；段尾自然收句）"))
-    ripple_lines = [i for i, line in enumerate(text.splitlines(), 1)
-                    if _RIPPLE_SPELL_RE.search(line)]
-    if ripple_lines:
-        issues.append(ValidationIssue(
-            "error", "RIPPLE_SPELL_BANNED",
-            f"行 {', '.join(map(str, ripple_lines))}：防波纹咒语（无波纹/边缘抖动）是自创结构，"
-            "官方一致性机制是 Picture 锚定句，必须删除"))
+                "（实体外观写进首次出场的 Shot；段首靠 Picture 1 锚定句；段尾收于官方 "
+                "edge-stability 句）"))
     first_nonempty = next((l for l in text.splitlines() if l.strip()), "")
     if _DURATION_SENTENCE_RE.match(first_nonempty.strip()):
         issues.append(ValidationIssue(
@@ -236,6 +247,27 @@ def _check_beat_and_shot_count(text: str, duration: float | None,
             "warning", "MULTI_SHOT_SEGMENT",
             f"段内含 {len(shot_nums)} 个 Shot——段内切镜是显式例外（仅景别跳变等确有必要时），"
             "单 Shot 让 I2VA 只锚定一个构图"))
+
+
+def _check_edge_stability(body: str, issues: list[ValidationIssue]) -> None:
+    """每个镜头块必须以官方 edge-stability 原句收尾（base-en.txt:92-96）。
+
+    缺失报 **warning**——2026-09-23 裁定：本条规则刚落地、合规真实样本为零，
+    不足以立 error 闸门（同 #11 的教训：n 不够就别急着让规则有牙齿）。
+
+    按块尾判，不按「全文出现过」判：官方措辞是 *end every shot block with*，
+    句中出现而块尾是别的话，尾帧照样拿不到那句约束。
+    没有 ``[Shot N]`` 标记时直接返回——那是 NO_SHOT（error）的辖区，不重复报。
+    """
+    marks = list(_SHOT_RE.finditer(body))
+    for idx, mark in enumerate(marks):
+        block_end = marks[idx + 1].start() if idx + 1 < len(marks) else len(body)
+        if not body[mark.start():block_end].strip().endswith(EDGE_STABILITY_SENTENCE):
+            issues.append(ValidationIssue(
+                "warning", "EDGE_STABILITY_MISSING",
+                f"[Shot {mark.group(1)}] 块尾缺官方 edge-stability 原句——官方要求每个镜头块"
+                "以此句收尾，理由是抽出的尾帧要保持轮廓锐利、留给下一段当首帧参考"
+                f"（base-en.txt 2.1）。逐字符应为：{EDGE_STABILITY_SENTENCE}"))
 
 
 def _check_shots(text: str, duration: float | None, issues: list[ValidationIssue]) -> None:
@@ -366,6 +398,7 @@ def validate_base(text: str, duration: float | None = None, variant: str = "T2VA
     _check_dialogues(body, issues)
     _check_speakers(body, issues)
     _check_beat_and_shot_count(body, duration, issues)
+    _check_edge_stability(body, issues)
     present_headers = list(sections.keys())
     if len(present_headers) != len(BASE_SECTIONS):
         missing = [h for h in BASE_SECTIONS if h not in sections]

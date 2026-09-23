@@ -2,8 +2,13 @@
 
 > ⚠️ **未实施 + 部分已废弃（2026-09-22 标注）——不要照本计划施工。**
 > 1. 本计划从未落成代码（全仓无 `segment_lock` / `segment_scope` / `extract_segment_shots`），且正文只写到 Task 2。
-> 2. 其核心结构 `GLOBAL_LOCK:` 与 `EDGE_STABILITY_SENTENCE`（防波纹咒语）已被 **2026-09-22 官方格式迁移明令删除**
->    （`tools/h3_validator` 对其报 error，见 `CONTEXT.md` 末节「提示词格式纪律」）；照做会把违规结构重新引入。
+> 2. 其核心结构 `GLOBAL_LOCK:` 已被 **2026-09-22 官方格式迁移明令删除**（`tools/h3_validator`
+>    对其报 error），照做会把违规结构重新引入。
+>    **更正（2026-09-23，issue #8）**：同批被删的 `EDGE_STABILITY_SENTENCE` **删错了、已恢复**——
+>    它并非自创结构，而是官方 `base-en.txt:92-96` 明令要求的 edge-stability 句。
+>    **本计划 §「约束」第 3 条（每个 `[Shot N]` 块结尾必须原样追加该句）当初是对的，照做即可**；
+>    该常量现居于 `tools/h3_validator.EDGE_STABILITY_SENTENCE`（不是本计划写的 `segment_prompts`——
+>    `segment_prompts` 已从 validator 导入，反向放置会成循环导入）。
 > 3. 仍然成立的部分：根因 4「`shot_text_{n}` 键根本不存在 → 回退整张分镜表」，已由 2026-09-22 的首帧锚定修复落地
 >    （`segment_prompts._segment_shot_texts`，缺陷编号 H4）。
 

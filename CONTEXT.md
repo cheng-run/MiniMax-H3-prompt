@@ -86,7 +86,13 @@ _Avoid_: 断点续跑、恢复点
 
 ## 提示词格式纪律（2026-09-22 官方格式迁移）
 
-自创结构 GLOBAL_LOCK / BRIDGE_FROM / END_HOOK / 防波纹咒语（每个 Shot 块尾附加边缘稳定约束句）/ 首行时长句（`This is a N-second continuous shot.`）**已全部删除**：官方 base-en.txt 无这些字段，自创结构偏离模型训练分布导致服从度下降（validator 对其报 error）。段落一致性改由 Picture 1 锚定句 + 首次出场 Shot 内的实体定义 + 桥接帧图片承担。若未来剥尾帧人物识别率下降，**防波纹咒语的删除是第一嫌疑**（恢复一句的成本极低）。
+自创结构 GLOBAL_LOCK / BRIDGE_FROM / END_HOOK / 首行时长句（`This is a N-second continuous shot.`）**已全部删除**：官方 base-en.txt 无这些字段，自创结构偏离模型训练分布导致服从度下降（validator 对其报 error）。段落一致性改由 Picture 1 锚定句 + 首次出场 Shot 内的实体定义 + 桥接帧图片承担。
+
+**例外（2026-09-23 更正，issue #8）**：同批被删的「防波纹咒语」**删错了，已恢复**。它并非自创结构，而是官方 edge-stability 句的中文译文；官方 `base-en.txt:92-96` **要求**每个镜头块以此句收尾，给的理由正是本项目的桥接帧链——「抽出的尾帧要保持轮廓锐利，留给下一段当首帧参考」。原判断把它当成自创结构，等于删掉了官方指定的尾帧质量防线。
+
+**edge-stability 句（edge-stability sentence）**:
+`Keep every character's silhouette, facial outline, and clothing edges crisp and stable throughout; no rippling, warping, or edge shimmer.` 每个镜头块必须以此句**逐字符**收尾（唯一来源：`h3_validator.EDGE_STABILITY_SENTENCE`，写段模板从它取）。缺失 validator 报 **warning**（`EDGE_STABILITY_MISSING`）——2026-09-23 裁定：规则刚落地、合规真实样本为零，不足以立 error 闸门。历史 9 份真实分段产物（GEN004/GEN005）**全部缺失此句**。
+_Avoid_: 把它当自创结构删除、改写成中文、或译文（官方要求逐字符英文原文）
 
 ## 生成质量与采样配置
 

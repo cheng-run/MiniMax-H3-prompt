@@ -1,9 +1,17 @@
 # Spec：提示词层迁移至官方 base-en.txt 格式
 
 - **日期**：2026-09-22
-- **状态**：待批准
+- **状态**：已实施；**有一处判断已被推翻（2026-09-23 标注，issue #8）**
 - **来源**：2026-09-21「深夜便利店橘猫」实测的 4 个问题诊断（根因链见对话记录，物证：first.png / 桥接帧 / v1_t2.5 抽帧 / audit 报告 `2026-09-21T104025.md`）
 - **决策记录**：grilling 会话 Q1–Q8，全部按推荐路线 A 执行
+
+> ⚠️ **更正（2026-09-23，issue #8）：本 spec 把「防波纹咒语」判为自创结构——判错了，已恢复。**
+> 它其实是**官方** `base-en.txt:92-96` 明令要求的 edge-stability 句的中文译文，官方给的理由
+> 正是本项目的桥接帧链（抽出的尾帧要保持轮廓锐利、留给下一段当首帧参考）。
+> 本文件下方 §2 的删除清单、§「改动范围」表的 validator 行、以及风险表中
+> 「删防波纹咒语后剥尾帧人物识别率下降」一行，均按此更正阅读——**那条风险已经应验**。
+> 现状以 `CONTEXT.md`「提示词格式纪律 / edge-stability 句」与
+> `h3_validator.EDGE_STABILITY_SENTENCE` 为准。其余迁移结论不受影响。
 
 ## 1. 背景与根因（为什么改）
 
@@ -29,7 +37,7 @@
 - `BRIDGE_FROM` —— 段首状态由 Picture 1 锚定句表达（Case 2：`preserving her appearance, clothing, seat position...`）
 - `END_HOOK` —— 段尾状态自然收在最后一个 Shot 的末句（不再复用进下一段文字）
 - `This is a N-second continuous shot.` —— 时长由 I2VA 指令行承载
-- 每个 Shot 块尾的防波纹咒语（「全程保持…无波纹、扭曲或边缘抖动」）
+- ~~每个 Shot 块尾的防波纹咒语（「全程保持…无波纹、扭曲或边缘抖动」）~~ —— **删错了，2026-09-23 恢复（issue #8）**：那是官方 `base-en.txt:92-96` 要求句的中文译文，见文首更正
 
 **新增/对齐的官方结构**：
 - 首行 I2VA 指令：`For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.`
@@ -47,7 +55,7 @@
 | 文件/模块 | 改动 |
 |---|---|
 | `src/minimax_h3_prompt/agents/prompt_engineer.py` 及相关提示词模板（prompts/*.md） | 输出格式指令重写为官方结构；新增「实体定义只在首次出场 Shot」纪律 |
-| `src/minimax_h3_prompt/tools/h3_validator.py` | 删除 GLOBAL_LOCK/BRIDGE_FROM/END_HOOK/防波纹 相关规则；新增：I2VA 指令行存在性、出场节拍距段尾 ≥1s、soundscape/music 句数上限 |
+| `src/minimax_h3_prompt/tools/h3_validator.py` | 删除 GLOBAL_LOCK/BRIDGE_FROM/END_HOOK 相关规则（**防波纹规则删错了，2026-09-23 改为「块尾缺官方 edge-stability 句」warning，见 issue #8**）；新增：I2VA 指令行存在性、出场节拍距段尾 ≥1s、soundscape/music 句数上限 |
 | 分段规划（segment plan）层 | plan.json 结构不变（summary/end_hook 保留）；soundscape/music **按段重写**（英文摘要句），删除时间窗裁切逻辑 |
 | `CONTEXT.md` | 术语表更新：段尾钩子降级为 plan 层概念（不进提示词）；删除「防波纹约束」条目；「中文 H3 提示词」→「英文 H3 提示词（附中文摘要）」 |
 | 测试 | 上述规则的增删对应单测 |
@@ -69,7 +77,7 @@
 
 | 风险 | 对策 |
 |---|---|
-| 删防波纹咒语后剥尾帧人物识别率下降 | 上下文标注：若下轮生成出现此问题，第一嫌疑即此项，恢复一句咒语成本极低 |
+| 删防波纹咒语后剥尾帧人物识别率下降 | ~~上下文标注：若下轮生成出现此问题，第一嫌疑即此项，恢复一句咒语成本极低~~ **→ 已应验：删掉的是官方要求句（见文首更正），2026-09-23 已恢复（issue #8）** |
 | 英文提示词对中文场景词（如「中华田园猫」）表达偏差 | 生成后由用户核对中文摘要与画面；发现偏差迭代 |
 | LLM 按段重写 soundscape 可能跨段风格不接 | plan 层的 summary 已约束每段情绪；真出问题再引入跨段音乐提示传递 |
 
