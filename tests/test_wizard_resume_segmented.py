@@ -211,7 +211,7 @@ def test_v2_flow_continues_from_progress_and_skips_written_segments(tmp_path, mo
         written.append(plan.index)
         return FIXTURE.read_text(encoding="utf-8")
 
-    monkeypatch.setattr(wizard, "_capture_bridge_frame_until_clean", lambda *a, **k: True)
+    monkeypatch.setattr(wizard, "_acquire_bridge_frame", lambda *a, **k: True)
     monkeypatch.setattr("minimax_h3_prompt.segment_prompts.write_segment_v2", fake_write)
 
     wizard._run_segmented_flow(session.brief, session, "prompt", None, session.stage_state)
@@ -219,6 +219,87 @@ def test_v2_flow_continues_from_progress_and_skips_written_segments(tmp_path, mo
     out = capsys.readouterr().out
     assert "检测到已完成 2/4 段" in out
     assert written == [2, 3], f"没有从第 3 段继续：{written}"
+
+
+def test_corrupt_plan_with_progress_refuses_to_continue(tmp_path, monkeypatch, capsys):
+    """plan.json 读不回来 + progress 说做过段 → **停下并报错**，不许静默重规划。
+
+    静默重规划的后果：新分段边界配旧 ``done`` → 跳过从没写过的段，而且全程不报错
+    （正是「续接必须复用 plan.json」那条注释要防的事）。也不能覆盖那份可能还能救回来的
+    plan.json。
+    """
+    from minimax_h3_prompt import segment_planner
+
+    gen = _interrupted_gen(tmp_path / "某主题", done=2, total=4)
+    broken = "{ 这不是合法 JSON"
+    (gen / "segments" / "plan.json").write_text(broken, encoding="utf-8")
+    session = session_store.load_session(gen)
+    _silence(monkeypatch)
+    replanned: list[int] = []
+    monkeypatch.setattr(segment_planner, "plan_segments",
+                        lambda *a, **k: replanned.append(1) or _plans())
+
+    finished = wizard._run_segmented_flow(session.brief, session, "prompt", None,
+                                          session.stage_state)
+
+    out = capsys.readouterr().out
+    assert finished is False, "落盘物对不上却继续跑了"
+    assert not replanned, "静默重规划了——旧 done 会去索引新分段"
+    assert "[错误]" in out and "对不上" in out
+    assert (gen / "segments" / "plan.json").read_text(encoding="utf-8") == broken, \
+        "把可能还能救回来的 plan.json 覆盖掉了"
+
+
+def test_progress_without_cached_plan_refuses_to_continue(tmp_path, monkeypatch, capsys):
+    """plan.json **整个丢了** + progress > 0 → 重规划成功也进不去。
+
+    这条不变量钉在 v2 里（``plans_from_cache``）：只要 ``done > 0``，就只允许用从盘上
+    读回来的那一份分段继续。
+    """
+    from minimax_h3_prompt import segment_planner
+
+    gen = _interrupted_gen(tmp_path / "某主题", done=2, total=4)
+    (gen / "segments" / "plan.json").unlink()
+    session = session_store.load_session(gen)
+    _silence(monkeypatch)
+    monkeypatch.setattr(segment_planner, "plan_segments", lambda *a, **k: _plans())
+
+    finished = wizard._run_segmented_flow(session.brief, session, "prompt", None,
+                                          session.stage_state)
+
+    out = capsys.readouterr().out
+    assert finished is False
+    assert "[错误]" in out and "跳过没写过的段" in out
+
+
+def test_resume_stops_loudly_when_the_model_cannot_be_built(tmp_path, monkeypatch, capsys):
+    """续接时模型构造失败要和兄弟分支同一套口径：显式报错停下，不是崩出去。"""
+    gen = _interrupted_gen(tmp_path / "某主题", done=2, total=4)
+    session = session_store.load_session(gen)
+    _silence(monkeypatch)
+
+    def boom():
+        raise RuntimeError("缺 API key")
+
+    monkeypatch.setattr(model_factory, "build_chat_model", boom)
+
+    finished = wizard._run_segmented_flow(session.brief, session, "prompt", None,
+                                          session.stage_state)
+
+    out = capsys.readouterr().out
+    assert finished is False
+    assert "续接时构造模型失败" in out and "[错误]" in out
+    assert "回到同一条续接路径" in out, "必须告诉用户重跑是安全的、不必重做任何段"
+
+
+def test_corrupt_progress_is_reported_not_silently_zero(tmp_path, capsys):
+    """progress.json 读不出来要显式告警——静默返回 0 与「一段都没做过」无法区分。"""
+    gen = tmp_path / "GEN001"
+    (gen / "segments").mkdir(parents=True)
+    (gen / "segments" / "progress.json").write_text("{{ 坏的", encoding="utf-8")
+
+    assert wizard._segments_done(gen) == 0
+    assert "[警告]" in capsys.readouterr().out
 
 
 def test_v2_flow_reuses_cached_plan_so_done_stays_meaningful(tmp_path, monkeypatch, capsys):
@@ -234,7 +315,7 @@ def test_v2_flow_reuses_cached_plan_so_done_stays_meaningful(tmp_path, monkeypat
         raise AssertionError("续接时重跑了分段规划——done=N 会指向另一套分段")
 
     monkeypatch.setattr(segment_planner, "plan_segments", boom)
-    monkeypatch.setattr(wizard, "_capture_bridge_frame_until_clean", lambda *a, **k: True)
+    monkeypatch.setattr(wizard, "_acquire_bridge_frame", lambda *a, **k: True)
     monkeypatch.setattr("minimax_h3_prompt.segment_prompts.write_segment_v2",
                         lambda *a, **k: FIXTURE.read_text(encoding="utf-8"))
 

@@ -93,7 +93,7 @@ def test_fallback_path_passes_frame_anchor(tmp_path, monkeypatch):
     monkeypatch.setattr(wizard, "_prompt", lambda *args, **kwargs: "")
     # 本测试的题目是「回退路径有没有把帧锚定上下文传下去」，不是交接校验本身：
     # 视频必经环节（issue #13）由 test_wizard_bridge_gate.py 覆盖，这里直接放行。
-    monkeypatch.setattr(wizard, "_capture_bridge_frame_until_clean", lambda *a, **k: True)
+    monkeypatch.setattr(wizard, "_acquire_bridge_frame", lambda *a, **k: True)
 
     calls: list[dict] = []
 

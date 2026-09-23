@@ -69,7 +69,7 @@ def test_evidence_is_printed_side_by_side(tmp_path, monkeypatch, capsys):
     _patch_strip(monkeypatch)
     _answers(monkeypatch, ["some_video.mp4"], reached=True)
 
-    wizard._capture_bridge_frame_until_clean(
+    wizard._acquire_bridge_frame(
         {}, 1, session.directory, expected_seconds=4.0, ask="视频路径：",
         segment_number=2, total=4, reference=END_HOOK)
 
@@ -118,7 +118,7 @@ def test_not_reached_defaults_to_stop(tmp_path, monkeypatch, capsys):
     _patch_strip(monkeypatch)
     _answers(monkeypatch, ["some_video.mp4", ""], reached=False)
 
-    allowed = wizard._capture_bridge_frame_until_clean(
+    allowed = wizard._acquire_bridge_frame(
         {}, 1, session.directory, expected_seconds=4.0, ask="视频路径：",
         segment_number=2, total=4, reference=END_HOOK)
 
@@ -134,7 +134,7 @@ def test_explicit_accept_overrides_and_continues(tmp_path, monkeypatch, capsys):
     _patch_strip(monkeypatch)
     _answers(monkeypatch, ["some_video.mp4", "5"], reached=False)
 
-    allowed = wizard._capture_bridge_frame_until_clean(
+    allowed = wizard._acquire_bridge_frame(
         {}, 1, session.directory, expected_seconds=4.0, ask="视频路径：",
         segment_number=2, total=4, reference=END_HOOK)
 
@@ -152,7 +152,7 @@ def test_rerun_asks_for_a_new_video_on_the_same_segment(tmp_path, monkeypatch, c
     monkeypatch.setattr(wizard, "_confirm",
                         lambda *a, **k: False if not _log(session) else True)
 
-    allowed = wizard._capture_bridge_frame_until_clean(
+    allowed = wizard._acquire_bridge_frame(
         {}, 1, session.directory, expected_seconds=4.0, ask="视频路径：",
         segment_number=2, total=4, reference=END_HOOK)
 
@@ -176,7 +176,7 @@ def test_manual_frame_uses_the_supplied_image(tmp_path, monkeypatch, capsys):
     _answers(monkeypatch, ["some_video.mp4", "3", str(supplied)], reached=False)
     state: dict = {}
 
-    allowed = wizard._capture_bridge_frame_until_clean(
+    allowed = wizard._acquire_bridge_frame(
         state, 1, session.directory, expected_seconds=4.0, ask="视频路径：",
         segment_number=2, total=4, reference=END_HOOK)
 
@@ -194,7 +194,7 @@ def test_keyframe_restart_hint_only_after_two_blocks(tmp_path, monkeypatch, caps
     # 第一次判不合格 → 选「重跑本段」回到判断题；第二次判不合格才看得到兜底提示
     _answers(monkeypatch, ["v.mp4", "2", "v.mp4", ""], reached=False)
 
-    wizard._capture_bridge_frame_until_clean(
+    wizard._acquire_bridge_frame(
         {}, 1, session.directory, expected_seconds=4.0, ask="视频路径：",
         segment_number=2, total=4, reference=END_HOOK)
 
@@ -216,7 +216,7 @@ def test_action_set_has_no_auto_reroll(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(reference_auditor, "describe_image",
                         lambda path, instruction=None: OTHER_DESC)
 
-    allowed = wizard._capture_bridge_frame_until_clean(
+    allowed = wizard._acquire_bridge_frame(
         {}, 1, session.directory, expected_seconds=4.0, ask="视频路径：",
         segment_number=2, total=4, reference=END_HOOK)
 
@@ -238,7 +238,7 @@ def test_gate_log_records_both_kinds_of_verdict_with_frame_path(tmp_path, monkey
     _answers(monkeypatch, ["a.mp4", "2", "b.mp4", ""], reached=False)
     monkeypatch.setattr(wizard, "_confirm", lambda *a, **k: bool(_log(session)))
 
-    wizard._capture_bridge_frame_until_clean(
+    wizard._acquire_bridge_frame(
         {}, 1, session.directory, expected_seconds=4.0, ask="视频路径：",
         segment_number=2, total=4, reference=END_HOOK)
 
@@ -264,7 +264,7 @@ def test_rerun_verdict_does_not_leave_a_stale_anchor_in_state(tmp_path, monkeypa
     monkeypatch.setattr(wizard, "_confirm", lambda *a, **k: bool(_log(session)))
     state: dict = {}
 
-    wizard._capture_bridge_frame_until_clean(
+    wizard._acquire_bridge_frame(
         state, 1, session.directory, expected_seconds=4.0, ask="视频路径：",
         segment_number=2, total=4, reference=END_HOOK)
 

@@ -881,16 +881,20 @@ def _use_supplied_frame(position: int, generation_dir: Path, *, outcome: str) ->
     return target
 
 
-def _capture_bridge_frame_until_clean(state: dict, position: int, generation_dir: Path, *,
+def _acquire_bridge_frame(state: dict, position: int, generation_dir: Path, *,
                                       expected_seconds: float | None, ask: str,
                                       segment_number: int, total: int,
                                       reference: str | None = None,
                                       reference_label: str = "（上一段 plan.end_hook）") -> bool:
-    """拿到合格锚帧：索要输出视频 → 剥帧 → **可证层**判定 → 读图 → **语义层**人判。
+    """拿到锚帧：索要输出视频 → 剥帧 → **可证层**判定 → 读图 → **语义层**人判。
 
     顺序按 #14 重排：**剥帧读图在前，「本段满意」的判断在后**——证据必须在决策时刻
     摆在人面前，而不是让人先去别处记一半、再回来凭记忆做决定。所以返回 True 的含义是
     「锚帧已就位**且**人看着并排证据判了继续」。
+
+    名字里的 acquire 是**拿到**，不是**验过**：人可以在判为「未达到」之后显式选
+    「接受并继续」（GATE_ACCEPT），那时返回的 True 带着一个明知不合格的帧。名字从前叫
+    ``..._until_clean``，那个词把这个覆盖行为藏起来了，反而更容易让人误判安全性。
 
     返回 True = 放行；False = 停下（默认出路，或用户交不出东西）。
 
@@ -1176,13 +1180,31 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
 
     # ① 先走新流程：segment_planner 规划整秒分段边界 → 每段独立细写（官方英文格式，spec 2026-09-22）
     state = state if state is not None else session.stage_state
-    cached = _cached_plans(session.directory)
-    if cached and _segments_done(session.directory):
+    done = _segments_done(session.directory)
+    try:
+        cached = _cached_plans(session.directory)
+    except ValueError as exc:
+        # 计划在、但读不回来，而进度说已经做过段：两个落盘物**对不上**。
+        # 静默重规划是最坏的选择——新分段边界 + 旧 done 会跳过从没写过的段，且全程不报错
+        # （正是紧邻注释要防的 bug）。停在这里，把选择权交回人。
+        print(f"[错误] {exc}")
+        if done:
+            print(f"  而 progress.json 说已完成 {done} 段——两者对不上，不能自动继续。")
+        print("  出路：恢复 segments/plan.json；或删掉 segments/progress.json 让它从第 1 段重做"
+              "（分段的 shot-NN.md 会按新分段逐段重写，不会被旧产物顶替）。")
+        return False
+    if cached and done:
         # 续接：必须用**产出 progress.json 的那套分段**。重跑 plan_segments 是 LLM 调用，
         # 分段边界会变，``done=N`` 就会指向另一套分段（issue #17）。
-        llm = build_chat_model()
+        try:
+            llm = build_chat_model()
+        except Exception as exc:  # noqa: BLE001 - 与下面兄弟分支同一套降级口径
+            print(f"[错误] 续接时构造模型失败（{exc}）：分段提示词写不出来，停在这里。"
+                  "计划与进度都已落盘，重跑向导会回到同一条续接路径（不必重做任何段）。")
+            return False
         print(f"[续接] 复用已落盘的分段规划（{len(cached)} 段），不重跑规划。")
-        return _run_segmented_flow_v2(brief, session, cached, state, llm, summary=summary)
+        return _run_segmented_flow_v2(brief, session, cached, state, llm, summary=summary,
+                                      plans_from_cache=True)
 
     plans = None
     try:
@@ -1230,7 +1252,7 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
         #    否则写段 LLM 在信息上不可能写出与桥接帧一致的开场状态；issue #12/#13）
         # 非末段必须交出上一段视频（同上：不给 opt-out，否则闸门可被静默绕过）
         if position > 0:
-            if not _capture_bridge_frame_until_clean(
+            if not _acquire_bridge_frame(
                 state, position, session.directory,
                 expected_seconds=segments[position - 1].duration_seconds,
                 ask="上一段输出视频路径（必填，用于剥尾帧作本段首帧）：",
@@ -1311,9 +1333,18 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
 
 
 def _segments_done(directory: Path) -> int:
-    """``segments/progress.json`` 里已完成（**已过闸门并确认**）的段数；读不到即 0。
+    """``segments/progress.json`` 里已完成（**该段提示词已交付并确认**）的段数。
 
-    单一口径：进度只在闸门通过后才落盘（#13），所以这个数字就是「可以安全跳过的段数」。
+    读不到文件即 0；**文件在但读不出来会显式告警**（静默返回 0 与「一段都没做过」
+    无法区分——那正是本票要消灭的形态）。
+
+    两条路径写入 ``done`` 的**时机不同**，别把它当成同一个东西：
+    - v2：闸门（+ 语义核验）通过之后才写，所以 ``done=N`` 同时意味着「前 N 段的交接物
+      已验过」；
+    - 回退：本段确认后立即写，而它输出视频的闸门要到**下一轮开头**才跑，所以
+      ``done=N`` 只保证「前 N 段的提示词已交付」。
+    两者都**可以安全跳过前 N 段**：回退路径跳过后立刻会补跑那一次闸门（它在
+    ``for position in range(done, total)`` 的第一件事），没有闸门被绕过。
     """
     import json
 
@@ -1322,23 +1353,29 @@ def _segments_done(directory: Path) -> int:
         return 0
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        print(f"[警告] 读不出 {path}（{exc}）：按「一段都没做过」处理。")
         return 0
     if not isinstance(raw, dict):
+        print(f"[警告] {path} 不是对象，按「一段都没做过」处理。")
         return 0
     try:
         return max(0, int(raw.get("done", 0)))
     except (TypeError, ValueError):
+        print(f"[警告] {path} 的 done 字段不是整数，按「一段都没做过」处理。")
         return 0
 
 
 def _cached_plans(directory: Path) -> list | None:
-    """已落盘的分段规划（``segments/plan.json``）；缺失或损坏返回 None。
+    """已落盘的分段规划（``segments/plan.json``）；**文件不在**返回 None。
 
     续接必须复用它：``plan_segments`` 是 LLM 调用，重跑会得到**另一套**分段边界，
     而 ``progress.json`` 的 ``done=N`` 只对产出它的那套分段有意义——用旧进度去索引
     新分段，会跳过没做过的段、重做做过的段。GEN005 当初靠手抄一份 ``plan.json``
     绕过这个（``resume_gen005.py``，issue #17）。
+
+    文件**在**但读不回来（截断、格式错、字段缺）会**抛出**——不能返回 None 让调用方
+    当成「没有缓存」去重规划：那会静默走进上面那个 bug。调用方按「落盘物不一致」处理。
     """
     import json
 
@@ -1349,21 +1386,27 @@ def _cached_plans(directory: Path) -> list | None:
         return None
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"分段规划读不出来（{path}）：{exc}") from exc
     if not isinstance(raw, list) or not raw:
-        return None
+        raise ValueError(f"分段规划不是非空列表（{path}）")
     try:
         return [SegmentPlan.from_dict(item) for item in raw]
-    except (KeyError, TypeError, ValueError):
-        return None
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"分段规划字段不全（{path}）：{exc}") from exc
 
 
-def _run_segmented_flow_v2(brief: Brief, session: SessionState, plans: list, state: dict, llm, summary=None) -> bool:
+def _run_segmented_flow_v2(brief: Brief, session: SessionState, plans: list, state: dict, llm,
+                           summary=None, *, plans_from_cache: bool = False) -> bool:
     """v2 陪跑：边生成边展示——当前段确认完成后，先剥本段尾帧读图（下一段的
     Picture 1 锚，issue #12），再后台预写下一段；用户看第 N 段提示词、去 ComfyUI
     生成、贴回尾帧，回车进入下一段时若已写完直接展示，否则等待。segments/shot-NN.md
     逐段落盘，progress.json 支持中断续跑（已写入文件的段不重写）。返回值＝是否跑完全部段。
+
+    ``plans_from_cache``：``plans`` 是否是从 ``segments/plan.json`` 读回来的。**这条
+    不变量是硬要求**：``progress.json`` 的 ``done=N`` 只对产出它那套分段有意义，所以
+    只要 ``done > 0``，就只允许用读回来的那一份继续；否则（重规划过／plan.json 被删）
+    新分段边界配旧进度会**跳过从没写过的段**，而且不报错。
 
     预取收益建立在「下一段的桥接帧已就位」之上：下一段桥接帧来自本段输出视频，
     本段完成前它不存在，所以预取必须在本段剥帧读图之后启动（正确性优先于并行）。
@@ -1378,11 +1421,20 @@ def _run_segmented_flow_v2(brief: Brief, session: SessionState, plans: list, sta
     seg_dir.mkdir(parents=True, exist_ok=True)
     progress_path = seg_dir / "progress.json"
     plan_cache = seg_dir / "plan.json"
+    done = _segments_done(session.directory)
+    if done and not plans_from_cache:
+        # 进度说做过 done 段，但这次的分段不是产出那份进度的分段。重规划换掉了边界，
+        # ``done`` 就不再指向同一批段——照旧从第 done+1 段开始会跳过没写过的段。
+        # 停在这里，并且**先不覆盖 plan.json**（它可能是唯一能救回正确分段的东西）。
+        print(f"[错误] progress.json 说已完成 {done} 段，但本次的分段规划不是产出它的那一份"
+              f"（重规划过，或 {plan_cache} 缺失）。拿旧进度索引新分段会跳过没写过的段，"
+              "所以不能继续。")
+        print("  出路：恢复 segments/plan.json 后重跑（走续接）；或删掉 segments/progress.json "
+              "让它从第 1 段重做。")
+        return False
     plan_cache.write_text(
         json.dumps([p.to_dict() for p in plans], ensure_ascii=False, indent=2), encoding="utf-8"
     )
-
-    done = _segments_done(session.directory)
     total = len(plans)
     print(f"\n已规划为 {total} 段逐次执行（每段文件存入 {seg_dir}）。")
     if done:
@@ -1494,7 +1546,7 @@ def _run_segmented_flow_v2(brief: Brief, session: SessionState, plans: list, sta
             # （ADR 0002：留 opt-out 等于闸门可被静默绕过，且下一段会去声明一张不存在的
             # Picture 1）。原「是否用本段尾帧…」开关与 #14 第 4 条重复，已在此一并落地。
             if position + 1 < total:
-                if not _capture_bridge_frame_until_clean(
+                if not _acquire_bridge_frame(
                     state, position + 1, session.directory,
                     expected_seconds=float(plan.duration_s),
                     ask="本段输出视频路径（必填，用于剥尾帧作下一段首帧）：",

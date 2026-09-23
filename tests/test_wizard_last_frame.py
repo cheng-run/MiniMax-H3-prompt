@@ -254,7 +254,7 @@ def test_v2_flow_runs_the_last_frame_check_after_the_loop(tmp_path, monkeypatch,
     ]
     state = _state()
     monkeypatch.setattr(segment_prompts, "write_segment_v2", lambda *a, **k: "SEG")
-    monkeypatch.setattr(wizard, "_capture_bridge_frame_until_clean", lambda *a, **k: True)
+    monkeypatch.setattr(wizard, "_acquire_bridge_frame", lambda *a, **k: True)
     _patch_strip(monkeypatch, tmp_path)
     _answers(monkeypatch, ["", "", "last_seg.mp4"], reached=True)
 
