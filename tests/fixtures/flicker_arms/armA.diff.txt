@@ -1,0 +1,12 @@
+--- original
++++ armA
+@@ -1 +1 @@
+-For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.
+
+integrated_multimodal_description: [Shot 1] Live-action, cinematic, a fast low tracking shot with small amplitude at fast speed frames the interior of a small convenience store at night; in the background the glass door is pushed ajar, night darkness outside raking in as side backlight, and a lean orange tabby cat with short dense fur and faint darker striping on its legs is already on the tiled floor past the doorway, body low and driven forward
++For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.
+
+integrated_multimodal_description: [Shot 1] Live-action, cinematic, a fast low tracking shot with small amplitude at fast speed frames the interior of a small convenience store at night; behind the checkout counter a young male clerk with slightly messy short black hair and a dark blue work jacket keeps his gaze lowered toward the marble counter top, his left hand lying flat on the surface and his right hand resting beside a black handheld barcode scanner that sits on the counter in its fixed place, and the glass storefront door in the background stays fully closed with the dark night street beyond the glass; no cat is visible in the frame
+@@ -4 +4 @@
+-At 00:03.000, a store clerk's right forearm and hand in a dark uniform sleeve swings into frame from the right and comes to a stop hanging in the air above the counter surface, the fingers open and motionless, the clerk's body gone rigid behind it
++At 00:03.000, the clerk's right hand lifts off the counter and comes to a stop hanging in the air above the marble surface, the fingers open and motionless, the clerk's body gone rigid behind it
