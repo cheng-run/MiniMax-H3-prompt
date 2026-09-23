@@ -65,6 +65,20 @@ ALIGN_TEMPLATES = {
     "FL2VA": "How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the 0.00-second mark of the target video; Picture 2 (from Shot N) aligns with the S.SS-second mark of the target video.",
     "L2VA": "How the reference pictures align with the target video — <Picture 1> (from [Shot N]) aligns with the S.SS-second mark of the target video.",
 }
+# 对齐指令行的检出标记：官方 base-en.txt 2.1 只有这两种句首形态。
+# 判据只此一份——分段路径识别「整片锚定行」时也调 has_align_instruction，
+# 两处各写一份会漂移（锚定行文本已于 issue #9 收敛到 ALIGN_TEMPLATES 单一来源）。
+_ALIGN_LINE_MARKERS = (
+    "For the target video",
+    "How the reference pictures align with the target video",
+)
+
+
+def has_align_instruction(line: str) -> bool:
+    """该行是否为一行图片对齐指令（首行锚定句的官方两种句首形态之一）。"""
+    return any(marker in line for marker in _ALIGN_LINE_MARKERS)
+
+
 _I2VA_INSTRUCTION_RE = re.compile(
     r"^For the target video, at 0\.00 seconds into the target video, "
     r"<Picture 1> \(from \[Shot (\d+)\]\) is fully referenced\.$"
@@ -364,8 +378,7 @@ def validate_base(text: str, duration: float | None = None, variant: str = "T2VA
 
     first_nonempty = next((l for l in text.splitlines() if l.strip()), "")
     if variant in ("I2VA", "FL2VA", "L2VA"):
-        if "How the reference pictures align with the target video" not in first_nonempty \
-           and "For the target video" not in first_nonempty:
+        if not has_align_instruction(first_nonempty):
             issues.append(ValidationIssue("error", "MISSING_ALIGN_INSTRUCTION",
                                           f"{variant} 模式首行必须有图片对齐指令（见 base-en.txt 2.1）"))
         _check_align_instruction(text, first_nonempty, body, variant, duration, issues)

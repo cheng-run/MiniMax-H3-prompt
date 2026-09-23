@@ -165,6 +165,18 @@ class TestVariants:
         issues = validate_base(text, variant="T2VA")
         assert "MISSING_ALIGN_INSTRUCTION" not in errors_of(issues)
 
+    def test_align_markers_cover_every_official_template(self):
+        """has_align_instruction 必须认得**每一个**官方锚定行。
+
+        segment_prompts 的机械拆分靠它定位「整片锚定行」再换成分段单图锚定行；
+        标记若与 ALIGN_TEMPLATES 措辞脱钩，识别静默失效 → 段 ≥2 断锚（issue #9 的原缺陷）。
+        """
+        from minimax_h3_prompt.tools.h3_validator import ALIGN_TEMPLATES, has_align_instruction
+
+        for variant, line in ALIGN_TEMPLATES.items():
+            assert has_align_instruction(line), f"{variant} 的官方锚定行未被标记识别"
+        assert not has_align_instruction("integrated_multimodal_description: [Shot 1] a cat sits.")
+
 
 class TestAlignInstruction:
     """帧变体首行指令必须逐字符符合官方模板（base-en.txt 2.1 / Case 3）。"""

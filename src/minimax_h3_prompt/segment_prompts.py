@@ -18,7 +18,9 @@ import re
 from dataclasses import dataclass
 
 from .tools.h3_validator import (
+    ALIGN_TEMPLATES,
     ValidationIssue,
+    has_align_instruction,
     only_errors,
     timestamps_seconds,
     validate_base,
@@ -41,6 +43,7 @@ _FAST_CAMERA_RE = re.compile(
 _TIMESTAMP_AFTER_TAG = re.compile(r"(\[Shot\s+\d+\])\s*At\s+(\d{2}):(\d{2})\.(\d{3}),?\s*", re.IGNORECASE)
 # 镜头区之后属于全局声音/配乐段落的标记（用于界定镜头区结尾）
 _SUFFIX_MARKERS = ("overall_soundscape:", "non_diegetic_music:")
+
 
 # 行首裸时间戳（无 [Shot N] 标记的镜头边界），用于"模型漏标镜头号"的兼容降级
 _BARE_TIMESTAMP_LINE = re.compile(r"^At\s+(\d{2}):(\d{2})\.(\d{3}),?\s*", re.IGNORECASE)
@@ -119,10 +122,29 @@ def _end_seconds_for(blocks: list[tuple[int, float, str]], index: int, total_dur
     return total_duration
 
 
+def _to_segment_header(header: str) -> str:
+    """整片头 → 分段头：把整片锚定行**原位换成**规范的单图开场锚。
+
+    每段只喂一张图，FL2VA/L2VA 的整片锚定行不能留（理由见 ``SEGMENT_ANCHOR_VARIANT``）。
+    反过来用「含 Picture 2 就剔」过滤会让整片 FL2VA/L2VA 的锚定行整行消失，段 ≥2
+    变成无锚定行——交付闸门随即用 I2VA 措辞报红（issue #9 实测）。
+    源提示词不含锚定行时（T2VA / ref 模式）不凭空注入。
+    """
+    lines = header.splitlines()
+    if not any(has_align_instruction(line) for line in lines):
+        return header
+    replaced = [
+        I2VA_ANCHOR_LINE if has_align_instruction(line) else line for line in lines
+    ]
+    return "\n".join(replaced).rstrip() + "\n\n"
+
+
 def split_shots_from_prompt(prompt: str, total_duration: float | None = None) -> list[ShotPrompt]:
     """把整条 H3 提示词机械拆成逐镜头提示词。
 
-    - 只有一个（或没有）镜头时原样返回单段（由调用方决定是否回退）。
+    - 只有一个（或没有）镜头时原样返回单段（由调用方决定是否回退）。这条路径
+      **不**过 ``_to_segment_header``：返回的是整片提示词、锚定行仍是整片形态；
+      向导在 ``len(segments) < 2`` 时直接回退为展示整段、不当作执行段交付。
     - 每段 = 全局前缀 + 该镜头块（时间戳归零）+ 全局声音/配乐后缀；
       给出 total_duration 时同时填好每段的时间窗（start/duration）。
     """
@@ -154,13 +176,7 @@ def split_shots_from_prompt(prompt: str, total_duration: float | None = None) ->
         end = inner[index + 1].start() if index + 1 < len(inner) else len(body)
         block = body[match.start():end].strip()
         block = _TIMESTAMP_AFTER_TAG.sub(r"\1 ", block)  # 单镜头视频从 0 秒开始
-        segment_header = header
-        if index > 0:
-            # 官方 I2VA 单图指令行（`For the target video... <Picture 1> (from [Shot 1]) is fully referenced.`）
-            # 保留——每段独立喂 H3 时它就是本段的对齐指令；
-            # 只剔多 Picture 布局行（FL2VA/L2VA 的 Picture 2 对齐，指向原整片布局，后续段头帧由桥接帧替代）
-            kept = [line for line in segment_header.splitlines() if "Picture 2" not in line]
-            segment_header = "\n".join(kept).rstrip() + "\n\n"
+        segment_header = _to_segment_header(header)
         text = segment_header + block + "\n\n" + suffix
 
         start_s = blocks[index][1] if index < len(blocks) else None
@@ -269,11 +285,15 @@ def is_degenerate_durations(durations: list[float]) -> bool:
 # 按段重写：soundscape/music 按段重写为英文摘要句，生成合规的独立单镜头提示词
 # ---------------------------------------------------------------------------
 
-# 官方 I2VA 对齐指令行（Picture 1 锚定句，逐字符固定，base-en.txt 2.1）
-I2VA_ANCHOR_LINE = (
-    "For the target video, at 0.00 seconds into the target video, "
-    "<Picture 1> (from [Shot 1]) is fully referenced."
-)
+# 分段的锚定行恒为「单图开场锚」形态（即官方 I2VA 行，逐字符固定，base-en.txt 2.1）。
+# 每段只喂一张图——段 1 是用户提交的那张，后续段是上一段剥出的桥接帧——且喂进本段
+# first frame 槽（wizard._capture_bridge_frame）。brief.variant 描述的是**整片**
+# （阶段 2 提示词 + 用户提交哪些帧），逐段执行时由桥接链取代，故分段不得按
+# brief.variant 套 ALIGN_TEMPLATES：FL2VA 行会声明用户不喂的 Picture 2，L2VA 行会
+# 把这张开场图声明成对齐 S.SS 的尾帧锚（issue #9 裁定 B，2026-09-23）。
+# 取值直接取自 validator 的官方模板：模板侧与校验侧同一来源，结构上不可能各说各话。
+SEGMENT_ANCHOR_VARIANT = "I2VA"
+I2VA_ANCHOR_LINE = ALIGN_TEMPLATES[SEGMENT_ANCHOR_VARIANT]
 
 _REWRITE_INSTRUCTION = f"""你是 H3 视频提示词工程师。把整条视频的提示词重写为**只覆盖指定时间窗的一段独立单镜头提示词**。
 
@@ -601,15 +621,18 @@ def validate_segment(text: str, duration: float | None = None,
 
     分段路径产出的是**本段自己的独立提示词**，它的 target video 就是这一条片段，
     所以时间戳必须落在 ``[0, duration)`` 内；正文缺 ``[Shot 1]`` 标记会让首行
-    ``(from [Shot 1])`` 引用悬空（validator 报 NO_SHOT）。模板固定用 I2VA 锚定行，
-    故 variant 固定 I2VA。
+    ``(from [Shot 1])`` 引用悬空（validator 报 NO_SHOT）。
+
+    校验口径与写段模板同源：分段恒为**单图开场锚**，故 variant 恒取
+    ``SEGMENT_ANCHOR_VARIANT``（理由见该常量）。跟着 ``brief.variant`` 走会让
+    「整片锚定行漏进段」的产出被判合格，用户直接粘进 H3。
 
     ``start_s`` 补一条 error 级检查**抓不到**的启发式警告：写成绝对片时的正文，只要绝对
     秒没超过片段长度，就与合法写法**完全同形**（``At 00:04.000`` 究竟是「片段第 4 秒」
     还是「整片第 4 秒」，正则无法区分）。故：本段不从 0 起（``start_s > 0``）却**所有**
     时间戳都 ≥ ``start_s`` → 高度可疑，报 warning（不阻塞，避免误伤合法写法）。
     """
-    issues = validate_base(text, duration=duration, variant="I2VA")
+    issues = validate_base(text, duration=duration, variant=SEGMENT_ANCHOR_VARIANT)
     stamps = timestamps_seconds(text)
     _check_fast_camera_multi_beat_coexist(text, stamps, issues)
     if start_s > 0 and stamps and min(stamps) >= start_s:

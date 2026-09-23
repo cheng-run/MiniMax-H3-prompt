@@ -47,7 +47,11 @@ _Avoid_: 把整片秒数写进正文时间戳（如本段 4-8s 却写 `At 00:05.
 主描述字段，含 `[Shot N]` 分镜块与时间戳，画面/动作/运镜/对白/同步声都写在这里。全文英文（官方 Output Rules）；实体外观只写在**首次出场的 Shot** 内，未出场实体只在句中否定（如 `No cat is visible in the frame`）或完全不提（官方无 GLOBAL_LOCK 集中定义区）。
 
 **Picture 1 锚定句（anchor sentence）**:
-帧变体（I2VA 等）提示词首行的官方对齐指令（如 `For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.`），配合正文里描述段首状态、让文字与桥接帧图片一致；段间衔接的文字侧机制。
+帧变体（I2VA 等）提示词首行的官方对齐指令（如 `For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.`），配合正文里描述段首状态、让文字与桥接帧图片一致；段间衔接的文字侧机制。**整片**提示词用本变体自己的官方形态；**分段**提示词一律用下面那条 **分段锚定行**。
+
+**分段锚定行**:
+分段提示词首行的锚定句**恒为单图开场锚形态**（官方 I2VA 行），与 `brief.variant` 无关：每段只喂一张图（段 1＝用户提交那张，后续段＝桥接帧），且喂进本段的 first frame 槽；`brief.variant` 描述的是**整片**（阶段 2 提示词 + 用户提交哪些帧），逐段执行时由桥接链取代。故分段**不得**按 variant 套用 `h3_validator.ALIGN_TEMPLATES`——FL2VA 行会声明用户不喂的 `Picture 2`，L2VA 行会把这张开场图声明成对齐 `S.SS` 的尾帧锚（issue #9 裁定，2026-09-23）。写段模板与交付校验同取 `segment_prompts.SEGMENT_ANCHOR_VARIANT`，两条产出路径（v2 规划式、规划失败回退式）一致。
+_Avoid_: 按 `brief.variant` 给分段挑锚定行
 
 **overall_soundscape**:
 本段环境声与动作声的英文摘要句（1-4 句连续段落，无时间戳，官方 §4.6）。分段规划时**按段重写**（整条时间轴裁切已废弃）。

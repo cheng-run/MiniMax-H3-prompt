@@ -289,6 +289,154 @@ def test_split_keeps_i2va_instruction_line_for_later_segments():
 
 
 # ---------------------------------------------------------------------------
+# 分段锚定行：每段只喂一张图（本段开场帧）→ 恒用单图锚定行（issue #9 裁定 B）
+#
+# 票面原提法（按 brief.variant 从 ALIGN_TEMPLATES 选行）经取证判为前提不成立；
+# 理由与裁定全文见 segment_prompts.SEGMENT_ANCHOR_VARIANT 与 CONTEXT.md。
+# 真缺陷在回退路径：整片 FL2VA/L2VA 的锚定行被整行剔掉，段 ≥2 变成无锚定行。
+# ---------------------------------------------------------------------------
+
+def _whole_video_prompt(align_line: str) -> str:
+    """整片帧变体提示词（两镜，共 12s）：锚定行的 S.SS 是**整片**时长。"""
+    return (
+        f"{align_line}\n\n"
+        "integrated_multimodal_description: [Shot 1] a cat sits by the glass door.\n"
+        "[Shot 2] At 00:06.000, the cat jumps onto the counter.\n\n"
+        "overall_soundscape: quiet room tone.\n\n"
+        "non_diegetic_music: N/A\n"
+    )
+
+
+def _whole_video_align_lines() -> dict:
+    """三种变体的整片锚定行（FL2VA/L2VA 的 S.SS=12.00 是整片时长，N=末镜 2）。"""
+    from minimax_h3_prompt.tools.h3_validator import ALIGN_TEMPLATES
+
+    return {
+        "I2VA": ALIGN_TEMPLATES["I2VA"],
+        "FL2VA": ALIGN_TEMPLATES["FL2VA"].replace("Shot N", "Shot 2").replace("S.SS", "12.00"),
+        "L2VA": ALIGN_TEMPLATES["L2VA"].replace("[Shot N]", "[Shot 2]").replace("S.SS", "12.00"),
+    }
+
+
+def _align_errors(text: str, duration: float | None) -> list:
+    """只取锚定行相关的 issue（分段语义下 variant 恒为单图锚定形态）。"""
+    from minimax_h3_prompt.tools.h3_validator import validate_base
+
+    issues = validate_base(text, duration, variant="I2VA")
+    return [i for i in issues if "ALIGN" in i.code]
+
+
+def test_segment_anchor_line_single_source_and_validates_clean():
+    """接线断言：模板实际发出的锚定行必须与 validator 的官方模板**同一来源**，且被判合格。
+
+    此前 segment_prompts 与 h3_validator 各写一份同字面量——两份字面量会漂移，
+    漂移后模板发出的行会被 validator 报 ALIGN_INSTRUCTION_FORMAT（模板与校验各说各话）。
+    """
+    from minimax_h3_prompt.segment_prompts import (
+        _REWRITE_INSTRUCTION,
+        _SEGMENT_V2_INSTRUCTION,
+        I2VA_ANCHOR_LINE,
+        SEGMENT_ANCHOR_VARIANT,
+    )
+    from minimax_h3_prompt.tools.h3_validator import ALIGN_TEMPLATES
+
+    assert I2VA_ANCHOR_LINE == ALIGN_TEMPLATES[SEGMENT_ANCHOR_VARIANT] == ALIGN_TEMPLATES["I2VA"]
+    # 两条路径的模板都必须内嵌这一行（改了一条漏另一条 = 本项目踩过的「只改主路径」坑）
+    assert I2VA_ANCHOR_LINE in _SEGMENT_V2_INSTRUCTION
+    assert I2VA_ANCHOR_LINE in _REWRITE_INSTRUCTION
+    # 模板发出的行必须能过 validator：不然重写循环会把合规产出反复判死
+    body = (
+        "integrated_multimodal_description: [Shot 1] a cat sits by the door.\n\n"
+        "overall_soundscape: quiet room tone.\n\n"
+        "non_diegetic_music: N/A"
+    )
+    assert _align_errors(f"{I2VA_ANCHOR_LINE}\n\n{body}", 6.0) == []
+
+
+@pytest.mark.parametrize("variant", ["I2VA", "FL2VA", "L2VA"])
+def test_split_replaces_whole_video_align_line_with_segment_anchor(variant):
+    """整片锚定行不得留在分段里：每段必须换成规范单图锚定行，且零 ALIGN issue。
+
+    FL2VA 的整片行声明 Picture 2（用户逐段不喂）；L2VA 的整片行把这张开场图
+    声明成对齐 S.SS 的尾帧锚。两者留在段里 = 给 H3 错误的输入声明。
+    """
+    from minimax_h3_prompt.segment_prompts import I2VA_ANCHOR_LINE
+
+    segments = split_shots_from_prompt(
+        _whole_video_prompt(_whole_video_align_lines()[variant]), total_duration=12.0
+    )
+    assert [s.shot_number for s in segments] == [1, 2]
+    for segment in segments:
+        assert segment.text.splitlines()[0] == I2VA_ANCHOR_LINE, (
+            f"{variant} 段 {segment.shot_number} 首行不是单图锚定行："
+            f"{segment.text.splitlines()[0]!r}"
+        )
+        assert "Picture 2" not in segment.text, f"{variant} 整片 Picture 2 声明漏进了段"
+        assert _align_errors(segment.text, segment.duration_seconds) == [], (
+            f"{variant} 段 {segment.shot_number} 锚定行校验不过"
+        )
+
+
+def test_split_does_not_invent_align_line_for_non_frame_prompt():
+    """非帧变体（无锚定行的提示词）不得被凭空注入锚定行。"""
+    from minimax_h3_prompt.segment_prompts import I2VA_ANCHOR_LINE
+
+    segments = split_shots_from_prompt(BARE_TIMESTAMP_SAMPLE, total_duration=12.0)
+    assert all(I2VA_ANCHOR_LINE not in s.text for s in segments)
+
+
+def test_split_keeps_reference_picture_lines_for_later_segments():
+    """ref 模式的 <Picture N> 定义行必须保留：参考图逐段都喂，与帧变体的整片布局行不同。
+
+    旧过滤条件是「行内含 Picture 2 就剔」，会把 `<Subject 2> is the young man in
+    <Picture 2>…` 这类**主体定义行**从段 ≥2 整行删掉（issue #9 顺带修掉）。
+    """
+    ref_prompt = (
+        "subject_definitions:\n"
+        "<Subject 1> is the white-haired old woman in <Picture 1>, wearing a dark robe.\n"
+        "<Subject 2> is the young man in <Picture 2>, in a green robe with a sword at his waist.\n\n"
+        "summary:\n[reference generation] the young man bows.\n\n"
+        "[Shot 1] A wide shot frames the two figures in the misty forest.\n"
+        "[Shot 2] At 00:06.000, the young man steps forward and bows.\n\n"
+        "overall_soundscape: wind through bamboo.\n\n"
+        "non_diegetic_music: N/A\n"
+    )
+    segments = split_shots_from_prompt(ref_prompt, total_duration=12.0)
+    assert len(segments) == 2
+    for segment in segments:
+        assert "<Subject 2> is the young man in <Picture 2>" in segment.text
+
+
+@pytest.mark.parametrize("variant", ["I2VA", "FL2VA", "L2VA"])
+def test_v2_request_anchor_line_is_variant_independent(variant):
+    """v2 路径：写段请求内嵌的锚定行与 brief.variant 无关（分段恒为单图开场锚）。"""
+    from minimax_h3_prompt.brief_parser import Brief
+    from minimax_h3_prompt.segment_prompts import I2VA_ANCHOR_LINE, build_segment_v2_request
+
+    brief = Brief(mode="base", variant=variant, duration=12.0, style="写实", plot="便利店橘猫")
+    request = build_segment_v2_request(_v2_plans()[0], _v2_plans(), _frame_state(shot_table=SHOT_TABLE), brief)
+    assert I2VA_ANCHOR_LINE in request
+    assert "Picture 2" not in request
+
+
+def test_gate_flags_whole_video_align_line_landing_in_segment():
+    """接线断言（负方向）：整片 FL2VA 锚定行若漏进段，交付闸门必须报红。
+
+    这是「模板与校验各说各话」的另一半：校验口径若跟着 brief.variant 走，
+    这种段就会被判合格，用户直接粘进 H3。
+    """
+    from minimax_h3_prompt.segment_prompts import validate_segment
+
+    body = (
+        "integrated_multimodal_description: [Shot 1] a cat sits by the door.\n\n"
+        "overall_soundscape: quiet room tone.\n\n"
+        "non_diegetic_music: N/A"
+    )
+    text = f"{_whole_video_align_lines()['FL2VA']}\n\n{body}"
+    assert "ALIGN_INSTRUCTION_FORMAT" in {i.code for i in validate_segment(text, 6.0)}
+
+
+# ---------------------------------------------------------------------------
 # 首帧锚定：分段请求必须以「图片实际画面」为准
 # bug：同一 GEN 里主提示词锚定了首帧真实画面，但喂给 H3 的 segments/shot-01.md
 # 写的是分镜表里的「空店 + 店员趴着 + 无猫」→ 与首帧图直接矛盾，首段崩。

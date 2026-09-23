@@ -602,6 +602,10 @@ def _gate_segment_text(position: int, text: str, duration: float | None,
 
     分段是唯一「产出即交付」的路径：不合格的提示词会被用户直接粘进 H3，
     所以必须显式告知坏在哪，绝不静默交付。两条分段路径（规划式与回退式）共用。
+
+    本函数**不收 variant**：分段恒为单图开场锚，校验口径与写段模板同源
+    （``segment_prompts.SEGMENT_ANCHOR_VARIANT``，理由见该常量）。跟着
+    ``brief.variant`` 走会让整片锚定行漏进段的产出被判合格。
     """
     from ..segment_prompts import validate_segment
     from ..tools.h3_validator import format_issues, only_errors
