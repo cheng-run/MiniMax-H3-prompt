@@ -183,6 +183,29 @@ def test_render_lists_sampling_and_refs(tmp_path):
     assert "lora.safetensors" in text
 
 
+def test_shared_references_are_not_double_counted_across_artifacts(tmp_path):
+    """两份产物引用同一套模型时，**每份只列自己那几条**。
+
+    曾经的做法是事后用 (name, node) 把解析结果反查回产物——两份产物共用同一 LoRA 时，
+    反查会把每条都归给每份产物，于是每份都多列一遍、计数翻倍（实测两份各报「引用 12 个」，
+    真值 6）。「每份产物实际跑了什么仪器」正是本工具的立意，计数错就没法信。
+    """
+    root = fake_comfy_root(tmp_path)
+    first = write_artifact(tmp_path / "a.png", payload())
+    second = write_artifact(tmp_path / "b.png", payload())
+
+    report = resolve_refs([extract_loadout(first), extract_loadout(second)], root,
+                          want_hash=False)
+    text = render_report(report)
+
+    per_artifact = len(extract_loadout(first).refs)
+    assert text.count(f"引用  {per_artifact} 个") == 2, "每份产物的引用计数不对"
+    # 按**引用行**统计：解析出的绝对路径里也含同名文件，直接 count 名字会把它算进去
+    assert text.count("      ✓ [") + text.count("      ✗ [") == 2 * per_artifact, \
+        "同一引用被重复列进了同一份产物"
+    assert text.count("[lora  ] MiniMax-H3\\lora.safetensors") == 2
+
+
 def test_cli_exit_zero_when_all_refs_resolve(tmp_path, capsys):
     root = fake_comfy_root(tmp_path)
     art = write_artifact(tmp_path / "a.png", payload())

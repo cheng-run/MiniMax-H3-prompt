@@ -105,6 +105,10 @@ class ResolvedRef:
     mtime: str | None = None
     sha256: str | None = None
     note: str | None = None
+    # 归属：这一条是**哪份产物**的引用。必须由解析时一路带下来，不能事后按 (name, node)
+    # 反查——两份产物引用同一套模型时，反查会把每条都归给每份产物，于是每份都多列一遍、
+    # 计数翻倍（实测：两份共用同一 LoRA 的产物各报「引用 12 个」，真值是 6）。
+    artifact: Path | None = None
 
     @property
     def resolved(self) -> bool:
@@ -181,9 +185,10 @@ def extract_loadout(path: Path | str) -> Loadout:
                 refs.append(ModelRef(kind=IMAGE_DIRS[key][0], name=value, node=class_type))
             elif key in MODEL_DIRS:
                 refs.append(ModelRef(kind=MODEL_DIRS[key][0], name=value, node=class_type))
-            elif key.endswith("_name") or value.lower().endswith(MODEL_SUFFIXES):
-                if value.lower().endswith(MODEL_SUFFIXES):
-                    refs.append(ModelRef(kind="其它模型", name=value, node=class_type))
+            elif value.lower().endswith(MODEL_SUFFIXES):
+                # 认不出字段名的加载器（PDDAcc 那类加速节点）：值是模型文件名就必须进清单
+                # ——「认不出」不能变成「不校验」。解析时会在四个模型目录里找它。
+                refs.append(ModelRef(kind="其它模型", name=value, node=class_type))
 
     return Loadout(
         path=path,
@@ -210,6 +215,7 @@ def resolve_refs(loadouts: list[Loadout], root: Path | str,
         for ref in loadout.refs:
             item = _resolve_one(ref, root, want_hash=want_hash and ref.kind != "image",
                                 progress=progress)
+            item.artifact = loadout.path
             (report.resolved if item.resolved else report.missing).append(item)
     return report
 
@@ -233,7 +239,7 @@ def render_report(report: Report) -> str:
             lines.append(f"    ✗ 读不出载荷：{loadout.error}")
             continue
         lines.append("    采样  " + _render_sampling(loadout.sampling))
-        mine = [r for r in report.resolved + report.missing if _belongs(r, loadout)]
+        mine = [r for r in report.resolved + report.missing if r.artifact == loadout.path]
         bad = [r for r in mine if not r.resolved]
         lines.append(f"    引用  {len(mine)} 个，解析 {len(mine) - len(bad)} 个"
                      + (f"，**{len(bad)} 个解析不到**" if bad else "，全部解析"))
@@ -306,10 +312,6 @@ def _progress_to_stderr(message: str) -> None:
 
 
 # --- 内部工具 -----------------------------------------------------------
-
-def _belongs(item: ResolvedRef, loadout: Loadout) -> bool:
-    return any(r.name == item.name and r.node == item.node for r in loadout.refs)
-
 
 def _resolve_one(ref: ModelRef, root: Path, *, want_hash: bool,
                  progress=None) -> ResolvedRef:
