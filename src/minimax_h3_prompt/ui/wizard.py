@@ -811,8 +811,8 @@ def _choose_gate_outcome(attempt: int, *, last_segment: bool = False) -> str:
         print("无效选项，重输。")
 
 
-def _judge_bridge_semantics(*, directory: Path, segment_number: int, total: int,
-                            reference: str | None, reference_label: str,
+def _judge_bridge_semantics(*, directory: Path, anchor_segment: int, judged_video_segment: int,
+                            total: int, reference: str | None, reference_label: str,
                             description: str | None, frame_path: Path | None,
                             attempt: int) -> str:
     """语义层主判定（#14）：把「该达到的末态」与「尾帧实际画面」**并排**摆给人判。
@@ -821,10 +821,16 @@ def _judge_bridge_semantics(*, directory: Path, segment_number: int, total: int,
     提示词时打印（比那张帧存在早约十分钟），剥帧当轮只打印读图结果——人得在两个时刻
     各记一半，再凭记忆判。所以这里必须**并排**打，且打在人做决定的那一刻。
 
+    **段号必须分开记**（``anchor_segment`` / ``judged_video_segment``）：两条分段路径
+    调用本闸门的**时机相反**——v2 在刚跑完那段末尾（交上来的是本段视频），回退在下一段
+    开头（交上来的是上一段视频）。用一个数字在两条路径上指不同的段，这份 log 就没法给
+    自动判据（#15）当素材用了。
+
     判不合格 → 劝阻（默认不继续，可显式覆盖）。返回值是 #14 动作集之一。
     """
     print("\n" + "-" * 60)
-    print(f"[锚帧语义核验] 第 {segment_number}/{total} 段的首帧锚（＝上一段尾帧）")
+    print(f"[锚帧语义核验] 第 {anchor_segment}/{total} 段的首帧锚"
+          f"（＝第 {judged_video_segment} 段的尾帧）")
     print("-" * 60)
     print(f"  该达到的末态{reference_label}：")
     print(f"    {reference or '（本段路径没有留下可用的末态声明）'}")
@@ -836,7 +842,10 @@ def _judge_bridge_semantics(*, directory: Path, segment_number: int, total: int,
     reached = _confirm("尾帧画面达到上面那个末态了吗？", default=True)
     outcome = GATE_CONTINUE if reached else _choose_gate_outcome(attempt)
     _log_gate(directory, {
-        "segment": segment_number,
+        # 这一帧**成了哪一段**的开场锚；以及被核的那段**输出视频**属于哪一段。
+        # 两个都留：只留一个，两条路径的含义就对不上（见 docstring）。
+        "anchor_segment": anchor_segment,
+        "judged_video_segment": judged_video_segment,
         "reference_label": reference_label,
         "end_hook": reference,
         "bridge_frame_description": description,
@@ -882,15 +891,22 @@ def _use_supplied_frame(position: int, generation_dir: Path, *, outcome: str) ->
 
 
 def _acquire_bridge_frame(state: dict, position: int, generation_dir: Path, *,
-                                      expected_seconds: float | None, ask: str,
-                                      segment_number: int, total: int,
-                                      reference: str | None = None,
-                                      reference_label: str = "（上一段 plan.end_hook）") -> bool:
+                          expected_seconds: float | None, ask: str,
+                          segment_number: int, total: int,
+                          anchor_segment: int, judged_video_segment: int,
+                          reference: str | None = None,
+                          reference_label: str = "（上一段 plan.end_hook）") -> bool:
     """拿到锚帧：索要输出视频 → 剥帧 → **可证层**判定 → 读图 → **语义层**人判。
 
     顺序按 #14 重排：**剥帧读图在前，「本段满意」的判断在后**——证据必须在决策时刻
     摆在人面前，而不是让人先去别处记一半、再回来凭记忆做决定。所以返回 True 的含义是
     「锚帧已就位**且**人看着并排证据判了继续」。
+
+    ``position``：这一帧要当**哪一段**（0-based）的开场锚，决定帧图文件名与 state 段号。
+    ``segment_number``：只用于**话术**（「第 N/M 段没有拿到输出视频」），两条路径各自
+    取与自己的提问措辞一致的那个段号。
+    ``anchor_segment`` / ``judged_video_segment``：写进 gate-log 的两个事实，由调用点
+    各自声明——两条路径调用本闸门的时机相反，用一个数字当「段号」会指向不同的段。
 
     名字里的 acquire 是**拿到**，不是**验过**：人可以在判为「未达到」之后显式选
     「接受并继续」（GATE_ACCEPT），那时返回的 True 带着一个明知不合格的帧。名字从前叫
@@ -924,7 +940,8 @@ def _acquire_bridge_frame(state: dict, position: int, generation_dir: Path, *,
                       flush=True)
             continue
         outcome = _judge_bridge_semantics(
-            directory=generation_dir, segment_number=segment_number, total=total,
+            directory=generation_dir, anchor_segment=anchor_segment,
+            judged_video_segment=judged_video_segment, total=total,
             reference=reference, reference_label=reference_label,
             description=description, frame_path=frame, attempt=attempt + 1)
         if outcome in (GATE_CONTINUE, GATE_ACCEPT):
@@ -1025,7 +1042,10 @@ def _judge_last_frame(*, directory: Path, segment_number: int, total: int,
     reached = _confirm("整条视频的最后画面落在上面那张承诺的尾帧上了吗？", default=True)
     outcome = GATE_CONTINUE if reached else _choose_gate_outcome(attempt, last_segment=True)
     _log_gate(directory, {
-        "segment": segment_number,
+        # 末帧核验核的是末段**自己**的收尾，不是下一段的开场锚 → 没有 anchor_segment。
+        # 字段仍保留（值为 None）而不是省略：两份 log 的记录形状保持一致，#15 才好统一消费。
+        "anchor_segment": None,
+        "judged_video_segment": segment_number,
         "reference_label": "（末段收尾：承诺尾帧 vs 实际末帧）",
         "end_hook": end_hook,
         "promised_last_frame_description": promised,
@@ -1257,6 +1277,9 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
                 expected_seconds=segments[position - 1].duration_seconds,
                 ask="上一段输出视频路径（必填，用于剥尾帧作本段首帧）：",
                 segment_number=position + 1, total=total,
+                # 回退路径在**本段开头**调闸门：交上来的是上一段的视频（judged＝position），
+                # 这一帧成为本段的开场锚（anchor＝position+1，1-based）
+                anchor_segment=position + 1, judged_video_segment=position,
                 # 回退路径没有 plan 层，末态参照取上一段**落盘那份**提示词的收尾句
                 reference=_previous_segment_tail(seg_dir, position),
                 reference_label="（上一段提示词收尾句；本路径无 plan 末态声明）",
@@ -1551,6 +1574,9 @@ def _run_segmented_flow_v2(brief: Brief, session: SessionState, plans: list, sta
                     expected_seconds=float(plan.duration_s),
                     ask="本段输出视频路径（必填，用于剥尾帧作下一段首帧）：",
                     segment_number=position + 1, total=total,
+                    # v2 在**本段末尾**调闸门：交上来的是本段的视频（judged＝position+1），
+                    # 这一帧成为下一段的开场锚（anchor＝position+2，1-based）
+                    anchor_segment=position + 2, judged_video_segment=position + 1,
                     # 语义层参照＝**本段**（刚跑完的这段）声明的末态，而锚帧正是它的尾帧
                     reference=plan.end_hook,
                     reference_label="（本段 plan.end_hook）",

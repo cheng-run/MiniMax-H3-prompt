@@ -212,7 +212,8 @@ def test_gate_log_records_the_last_frame_verdict(tmp_path, monkeypatch):
                               segment_number=2, total=2, expected_seconds=4.0)
 
     record = _log(session)[-1]
-    assert record["segment"] == 2
+    assert record["judged_video_segment"] == 2
+    assert record["anchor_segment"] is None, "末帧核验没有下游锚"
     assert record["end_hook"] == END_HOOK
     assert record["bridge_frame_description"] == WRONG
     assert record["promised_last_frame_description"] == PROMISED
@@ -266,7 +267,7 @@ def test_v2_flow_runs_the_last_frame_check_after_the_loop(tmp_path, monkeypatch,
     assert "[末段尾帧核验]" in out
     assert out.index("[末段尾帧核验]") < out.index("全部 2 段已人工确认完成"), \
         "末帧核验必须发生在宣布完成之前"
-    assert _log(session)[-1]["segment"] == 2
+    assert _log(session)[-1]["judged_video_segment"] == 2
 
 
 def test_v2_flow_stops_when_the_last_frame_verdict_is_stop(tmp_path, monkeypatch, capsys):

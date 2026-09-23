@@ -71,7 +71,8 @@ def test_evidence_is_printed_side_by_side(tmp_path, monkeypatch, capsys):
 
     wizard._acquire_bridge_frame(
         {}, 1, session.directory, expected_seconds=4.0, ask="视频路径：",
-        segment_number=2, total=4, reference=END_HOOK)
+        segment_number=2, total=4, anchor_segment=2, judged_video_segment=1,
+        reference=END_HOOK)
 
     out = capsys.readouterr().out
     assert "[锚帧语义核验]" in out
@@ -120,7 +121,8 @@ def test_not_reached_defaults_to_stop(tmp_path, monkeypatch, capsys):
 
     allowed = wizard._acquire_bridge_frame(
         {}, 1, session.directory, expected_seconds=4.0, ask="视频路径：",
-        segment_number=2, total=4, reference=END_HOOK)
+        segment_number=2, total=4, anchor_segment=2, judged_video_segment=1,
+        reference=END_HOOK)
 
     assert allowed is False, "判不合格却放行了"
     out = capsys.readouterr().out
@@ -136,7 +138,8 @@ def test_explicit_accept_overrides_and_continues(tmp_path, monkeypatch, capsys):
 
     allowed = wizard._acquire_bridge_frame(
         {}, 1, session.directory, expected_seconds=4.0, ask="视频路径：",
-        segment_number=2, total=4, reference=END_HOOK)
+        segment_number=2, total=4, anchor_segment=2, judged_video_segment=1,
+        reference=END_HOOK)
 
     assert allowed is True
     record = _log(session)[-1]
@@ -154,7 +157,8 @@ def test_rerun_asks_for_a_new_video_on_the_same_segment(tmp_path, monkeypatch, c
 
     allowed = wizard._acquire_bridge_frame(
         {}, 1, session.directory, expected_seconds=4.0, ask="视频路径：",
-        segment_number=2, total=4, reference=END_HOOK)
+        segment_number=2, total=4, anchor_segment=2, judged_video_segment=1,
+        reference=END_HOOK)
 
     assert allowed is True
     actions = [r["action"] for r in _log(session)]
@@ -178,7 +182,8 @@ def test_manual_frame_uses_the_supplied_image(tmp_path, monkeypatch, capsys):
 
     allowed = wizard._acquire_bridge_frame(
         state, 1, session.directory, expected_seconds=4.0, ask="视频路径：",
-        segment_number=2, total=4, reference=END_HOOK)
+        segment_number=2, total=4, anchor_segment=2, judged_video_segment=1,
+        reference=END_HOOK)
 
     assert allowed is True
     assert _log(session)[-1]["action"] == wizard.GATE_MANUAL_FRAME
@@ -196,7 +201,8 @@ def test_keyframe_restart_hint_only_after_two_blocks(tmp_path, monkeypatch, caps
 
     wizard._acquire_bridge_frame(
         {}, 1, session.directory, expected_seconds=4.0, ask="视频路径：",
-        segment_number=2, total=4, reference=END_HOOK)
+        segment_number=2, total=4, anchor_segment=2, judged_video_segment=1,
+        reference=END_HOOK)
 
     out = capsys.readouterr().out
     blocks = out.split("[劝阻]")[1:]
@@ -218,7 +224,8 @@ def test_action_set_has_no_auto_reroll(tmp_path, monkeypatch, capsys):
 
     allowed = wizard._acquire_bridge_frame(
         {}, 1, session.directory, expected_seconds=4.0, ask="视频路径：",
-        segment_number=2, total=4, reference=END_HOOK)
+        segment_number=2, total=4, anchor_segment=2, judged_video_segment=1,
+        reference=END_HOOK)
 
     assert allowed is True
     assert _log(session)[-1]["action"] == wizard.GATE_KEYFRAME_RESTART
@@ -240,7 +247,8 @@ def test_gate_log_records_both_kinds_of_verdict_with_frame_path(tmp_path, monkey
 
     wizard._acquire_bridge_frame(
         {}, 1, session.directory, expected_seconds=4.0, ask="视频路径：",
-        segment_number=2, total=4, reference=END_HOOK)
+        segment_number=2, total=4, anchor_segment=2, judged_video_segment=1,
+        reference=END_HOOK)
 
     records = _log(session)
     assert {r["action"] for r in records} == {wizard.GATE_RERUN, wizard.GATE_CONTINUE}, \
@@ -249,7 +257,10 @@ def test_gate_log_records_both_kinds_of_verdict_with_frame_path(tmp_path, monkey
         assert record["end_hook"] == END_HOOK
         assert record["bridge_frame_description"] == BRIDGE_DESC
         assert record["bridge_frame_path"] == str(frame), "缺尾帧图路径就无法事后复跑"
-        assert record["segment"] == 2, "段号必须 1-based，与其它话术一致"
+        # 段号必须无歧义：#14 的 AC 说这份 log 是 #15 取阈值的唯一素材
+        assert record["anchor_segment"] == 2, "这一帧成了第 2 段的开场锚"
+        assert record["judged_video_segment"] == 1, "被核的是第 1 段的输出视频"
+        assert "segment" not in record, "二义性的段号字段不许留着"
 
 
 def test_rerun_verdict_does_not_leave_a_stale_anchor_in_state(tmp_path, monkeypatch):
@@ -266,7 +277,8 @@ def test_rerun_verdict_does_not_leave_a_stale_anchor_in_state(tmp_path, monkeypa
 
     wizard._acquire_bridge_frame(
         state, 1, session.directory, expected_seconds=4.0, ask="视频路径：",
-        segment_number=2, total=4, reference=END_HOOK)
+        segment_number=2, total=4, anchor_segment=2, judged_video_segment=1,
+        reference=END_HOOK)
 
     anchors = state.get("bridge_frame_descriptions", [])
     assert len(anchors) == 1, f"重跑时写进了多余的锚：{anchors}"
