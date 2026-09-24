@@ -13,11 +13,11 @@ import re
 from .h3_validator import ValidationIssue
 
 _SCENE_REQUIREMENT_MAP = (
-    (("酒馆", "酒吧", "客栈", "tavern", "inn", "alehouse"), ("tavern", "inn", "alehouse")),
-    (("室内", "屋内", "室内场景", "indoor", "interior"), ("indoor", "interior", "inside")),
-    (("森林", "树林", "forest", "woodland"), ("forest", "woodland")),
-    (("街道", "街上", "street", "road"), ("street", "road")),
-    (("海边", "海滩", "beach", "seaside", "coast"), ("beach", "seaside", "coast")),
+    (("酒馆", "酒吧", "客栈", "tavern", "inn", "alehouse"), ("tavern", "inn", "alehouse", "酒馆", "酒吧", "客栈")),
+    (("室内", "屋内", "室内场景", "indoor", "interior"), ("indoor", "interior", "inside", "室内", "屋内")),
+    (("森林", "树林", "forest", "woodland"), ("forest", "woodland", "森林", "树林")),
+    (("街道", "街上", "street", "road"), ("street", "road", "街道", "街上")),
+    (("海边", "海滩", "beach", "seaside", "coast"), ("beach", "seaside", "coast", "海边", "海滩")),
 )
 
 _CONFLICTING_OUTDOOR_TERMS = ("forest clearing", "open field", "wilderness", "outdoor camp")

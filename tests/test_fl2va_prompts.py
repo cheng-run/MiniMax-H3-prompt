@@ -76,6 +76,26 @@ def test_window_view_of_forest_does_not_break_tavern_anchor():
     assert fl2va_bundle_from_dict(payload, brief).scene_anchor == "medieval tavern interior"
 
 
+def test_chinese_positive_prompt_passes_scene_guard():
+    """中文提示词（language=Chinese 时协议要求中文）必须能通过地点校验。
+
+    回归：地点词表要求词只有英文（forest/inn/...），中文管线输出的
+    「森林深处…」被判 FL2VA_SCENE_ANCHOR_MISMATCH/PROMPT_MISMATCH，
+    修复重试也拿不到可满足的中文词表，两次全挂（2026-09-24 用户实测）。
+    """
+    first = "远古森林深处，晨雾弥漫，一队冒险者围着一只正在睡觉的巨龙，写实电影感。"
+    payload = {
+        "scene_anchor": "远古森林深处，一队冒险者围着一只正在睡觉的巨龙",
+        "first": frame_payload(first),
+        "continuity_constraints": ["同一组人物、同一套服装"],
+    }
+    brief = Brief(variant="I2VA", duration=30, language="Chinese",
+                  plot="一队冒险者在远古森林探险的途中发现了一只正在睡觉的巨龙")
+    bundle = fl2va_bundle_from_dict(payload, brief)
+    assert "森林" in bundle.first[0].positive_prompt
+    assert validate_fl2va_bundle(bundle, duration=30, variant="I2VA") == []
+
+
 def test_fl2va_generation_persists_prompt_files(tmp_path):
     result = make_fl2va_result()
     directory = save_generation(result, tmp_path / "GEN001")

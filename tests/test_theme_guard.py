@@ -37,10 +37,11 @@ NO_TAVERN = "The young woman rides across a golden wheat field at dusk."
 
 
 def test_scene_requirement_groups_detect_chinese_and_english():
-    assert scene_requirement_groups("在酒馆喝酒") == (("tavern", "inn", "alehouse"),)
-    assert scene_requirement_groups("at a tavern drinking") == (("tavern", "inn", "alehouse"),)
-    assert scene_requirement_groups("深夜在街道独行") == (("street", "road"),)
-    assert scene_requirement_groups("一只猫走过海边") == (("beach", "seaside", "coast"),)
+    # 要求词侧中英双语：源词中文命中后，中文提示词（Chinese 语言协议）也要有可满足的词
+    assert scene_requirement_groups("在酒馆喝酒") == (("tavern", "inn", "alehouse", "酒馆", "酒吧", "客栈"),)
+    assert scene_requirement_groups("at a tavern drinking") == (("tavern", "inn", "alehouse", "酒馆", "酒吧", "客栈"),)
+    assert scene_requirement_groups("深夜在街道独行") == (("street", "road", "街道", "街上"),)
+    assert scene_requirement_groups("一只猫走过海边") == (("beach", "seaside", "coast", "海边", "海滩"),)
     # 未知地点不臆测
     assert scene_requirement_groups("机器人在太空漫游") == ()
 
