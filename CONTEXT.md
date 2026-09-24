@@ -114,5 +114,5 @@ _Avoid_: 把「这个 LoRA 是 N 步加速版」当成采样步数该怎么设�
 
 **快机位 + 多拍动作共存禁令（coexist ban）**:
 `segment_prompts.validate_segment` 的 error 级检查 `FAST_CAMERA_MULTI_BEAT_COEXIST`：同一段内快机位措辞（fast/rapid tracking、whip pan、`at fast speed`）与 ≥3 个动作节拍（正文 ≥3 个 `At 00:XX.XXX`）不得共存。
-**它的阈值量于 4 步采样**（2026-09-22 钉 seed 2×2：00016 0.78 / 00017 4.865）。2026-09-23 复测发现被判 error 的 armA 文本在 8 步下只有 0.869，与 4 步下的低运动对照（0.78）相当——**该内容组合并非固有致闪**。判定逻辑保持不变（4 步仍是会出现的配置），但**引用这条规则必须声明采样步数**。裁定见 `docs/adr/0003-flicker-threshold-is-config-dependent.md`。
+**它的阈值量于 4 步采样**（2026-09-22 钉 seed 2×2：00016 0.78 / 00017 4.865）。2026-09-23 复测发现被判 error 的 armA 文本在 8 步下只有 0.869，远低于 4 步坏档（3.6–4.9）——8 步档无独立刻度，此数不能与 4 步数字直接比较。判定逻辑保持不变（#22 裁定），但**引用这条规则必须声明采样步数**。裁定见 `docs/adr/0003-flicker-threshold-is-config-dependent.md`。
 _Avoid_: 把「快机位 + 多拍必闪」当成与采样配置无关的内容性质
