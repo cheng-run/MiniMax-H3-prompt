@@ -173,21 +173,24 @@ def run_wizard(config: Config) -> int:
         raise SystemExit("向导需要交互终端运行；脚本场景请用 --brief 快路径。")
 
     session = _offer_resume(config)
+    frames_shown = False
     if session is None:
         session = _phase1_new(config)
         if session is None:
             return 1
+        frames_shown = True  # _phase1_new 收尾已展示生图提示词
     # 阶段 1 完成（或完成了一半）后若断在阶段 1 中途，先从中断节点续跑完阶段 1
     if session.status == STATUS_STAGE1_RUNNING:
         session = _resume_stage1(config, session)
         if session is None:
             return 1
+        frames_shown = True  # _resume_stage1 收尾已展示生图提示词
     # 分段陪跑中途退出：整条提示词与帧锚都已落盘，直接回到陪跑续接。
     # 绝不能再走阶段 2——那正是 #17 的代价（重做阶段 2 + 已完成的所有段重来）。
     if session.status == STATUS_SEGMENTED_RUNNING:
         return _resume_segmented(config, session)
     # 阶段 1 完成后直接进入阶段 2（生图很快，无需暂停等人工确认）。
-    return _phase2_collect_and_finish(config, session)
+    return _phase2_collect_and_finish(config, session, show_frame_prompts=not frames_shown)
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +260,9 @@ def _resume_stage1(config: Config, session: SessionState) -> SessionState | None
         state.pop("_progress")
     save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
     print("\n阶段 1 已恢复完成。")
+    # 新跑路径（_phase1_new）在进阶段 2 前会展示生图提示词；续接路径漏了这一步，
+    # 用户没有提示词就无法生成关键帧图，阶段 2 的「首帧图片路径」无从提交（2026-09-24 实测）。
+    _show_frame_prompts(state, generation_dir)
     return load_session(generation_dir)
 
 
@@ -462,11 +468,18 @@ def _resolve_frame_file(raw: str, role: str) -> Path | None:
     return path
 
 
-def _phase2_collect_and_finish(config: Config, session: SessionState) -> int:
+def _phase2_collect_and_finish(
+    config: Config, session: SessionState, *, show_frame_prompts: bool = True
+) -> int:
     brief = session.brief
     state = dict(session.stage_state)
     generation_dir = session.directory
 
+    # 进入阶段 2 前展示生图提示词：续接一个已完成阶段 1 的会话时，用户手里没有提示词，
+    # 就无法生成关键帧图、也就没有路径可提交（2026-09-24 实测）。同进程内已展示过
+    # （新跑/续接阶段 1 的收尾）就不重复刷屏。
+    if show_frame_prompts:
+        _show_frame_prompts(state, generation_dir)
     print("\n[阶段 2] 请提交生成好的关键帧图片（回车=跳过该项）。")
     while True:
         try:
