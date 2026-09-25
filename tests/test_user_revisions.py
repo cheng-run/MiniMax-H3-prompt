@@ -14,15 +14,24 @@ import json
 
 import pytest
 
+from minimax_h3_prompt.graph.pipeline import _STAGE1_CHAIN
 from minimax_h3_prompt.user_revisions import (
     FRAME_ROUNDS_FILENAME,
+    LAYER_ART,
+    LAYER_CHARACTER,
     LAYER_FRAME,
+    LAYER_LABELS,
+    LAYER_STORY,
     active_revisions,
+    applied_revisions,
     begin_round,
     log_frame_round,
+    mark_revision_applied,
     next_round,
+    pending_revisions,
     record_user_revision,
     remove_user_revision,
+    render_applied_list,
     render_baseline_block,
     render_revision_block,
     render_revision_list,
@@ -229,6 +238,94 @@ def test_round_keeps_advancing_on_revoke_only_rounds():
     remove_user_revision(state, 1)
     assert state["user_revisions"] == []
     assert begin_round(state) == 5
+
+
+def test_four_layers_with_settings_ones_carrying_their_rerun_start():
+    """四档层次：只改画面 ＋ 三档设定级；设定级的**起点节点名**都在阶段 1 链上。
+
+    层次＝重跑起点，起点写错一个字（或链改了名）不会报错，只会让设定级重跑从错误的
+    位置截断——有测试拿链核对（``tests/test_wizard_setting_revisions.py``）。
+    """
+    from minimax_h3_prompt.user_revisions import LAYER_SPECS, SETTING_LAYERS
+
+    assert set(LAYER_LABELS) == {LAYER_FRAME, LAYER_CHARACTER, LAYER_ART, LAYER_STORY}
+    assert [spec.value for spec in SETTING_LAYERS] == [LAYER_CHARACTER, LAYER_ART, LAYER_STORY]
+    assert set(LAYER_SPECS) == {spec.value for spec in SETTING_LAYERS}
+    assert LAYER_FRAME not in LAYER_SPECS, "画面级不走截断重跑（它的重跑起点就是首帧节点本身）"
+    for spec in SETTING_LAYERS:
+        assert spec.resume_from in _STAGE1_CHAIN, f"{spec.value} 的重跑起点不在阶段 1 链上"
+
+
+def test_applied_revisions_leave_the_injection_channels():
+    """已落地＝不再注入：这是票面 AC-4 的真源侧那一半（接线侧在别处测）。
+
+    清单**全量**仍留着它（台账、屏幕要靠它读出「这条到底落地没有」），只是注入通道取的是
+    待落地那部分——两处共用一份清单、语义不同，正是要分开两个函数的原因。
+    """
+    state: dict = {}
+    landed = record_user_revision(state, layer=LAYER_CHARACTER, text="汉服改成现代审美")
+    pending = record_user_revision(state, layer=LAYER_FRAME, text="天空改成黄昏")
+    mark_revision_applied(state, landed)
+
+    assert [item["text"] for item in active_revisions(state)] == ["汉服改成现代审美", "天空改成黄昏"]
+    assert [item["text"] for item in pending_revisions(state)] == ["天空改成黄昏"]
+    assert [item["text"] for item in applied_revisions(state)] == ["汉服改成现代审美"]
+    assert "汉服改成现代审美" not in render_revision_block(pending_revisions(state))
+    assert "天空改成黄昏" in render_revision_block(pending_revisions(state))
+    assert pending.get("applied") is None, "画面级那条被误标了"
+
+
+def test_marking_a_revision_that_is_not_in_the_list_is_loud():
+    """定位不到就报错：state 与标记打架时静默返回，会让这条修订永远重复注入。"""
+    state: dict = {}
+    record_user_revision(state, layer=LAYER_CHARACTER, text="汉服改成现代审美")
+
+    with pytest.raises(ValueError):
+        mark_revision_applied(state, {"round": 9, "layer": LAYER_CHARACTER, "text": "不存在"})
+
+
+def test_applied_revisions_are_outside_the_revocation_numbering():
+    """已落地的条目不在带编号的清单里，故也**撤不掉**它——撤销按的是模型看到的编号。
+
+    它的改动已经写进设定产物：撤掉文本撤不掉产物（要改回得另提一条设定级修订）。
+    编号若把它算进去，屏幕上念的号与注入块就各指一条，撤错人也发现不了。
+    """
+    state: dict = {}
+    landed = record_user_revision(state, layer=LAYER_CHARACTER, text="汉服改成现代审美")
+    record_user_revision(state, layer=LAYER_FRAME, text="天空改成黄昏")
+    mark_revision_applied(state, landed)
+
+    listing = render_revision_list(pending_revisions(state))
+    assert listing == "1. [只改画面] 天空改成黄昏", "已落地的条目占用了编号"
+    assert remove_user_revision(state, 1)["text"] == "天空改成黄昏"
+    assert [item["text"] for item in active_revisions(state)] == ["汉服改成现代审美"], \
+        "撤一条时把已落地的那条也连带删了（它是「这条已落实」的唯一记录）"
+
+
+def test_applied_list_is_unnumbered_so_it_cannot_be_mistaken_for_revocable():
+    """已落地那段的行**不带编号**：带编号的行是「可以照号撤掉的」，这一段撤不掉。"""
+    listing = render_applied_list([{"round": 1, "layer": LAYER_CHARACTER,
+                                    "text": "汉服改成现代审美", "applied": True}])
+
+    assert "汉服改成现代审美" in listing
+    assert "人物设定" in listing, "屏幕上看不出这条属于哪一层"
+    assert "已落地" in listing
+    assert "1." not in listing, "已落地的行带了编号（会被照着号去撤）"
+    assert render_applied_list([]) == "" and render_applied_list(None) == ""
+
+
+def test_setting_revision_block_only_reaches_its_own_layer():
+    """设定级注入块按**层次**过滤：重跑起点是节点组，不过滤会把改人物的意见写进背景。"""
+    from minimax_h3_prompt.user_revisions import SETTING_REVISION_KEY, setting_revision_block
+
+    state = {SETTING_REVISION_KEY: {"layer": LAYER_CHARACTER, "text": "汉服太朴素"}}
+
+    block = setting_revision_block(state, LAYER_CHARACTER)
+    assert "汉服太朴素" in block and "人物设定" in block
+    assert "落实" in block, "没写明要落实进**产物本身**（模型会当成画面口味照旧只在画面里体现）"
+    assert setting_revision_block(state, LAYER_ART) == ""
+    assert setting_revision_block(state, LAYER_STORY) == ""
+    assert setting_revision_block({}, LAYER_CHARACTER) == "", "没有这个键时不该凭空造句"
 
 
 def test_screen_list_and_injected_block_share_one_numbering():

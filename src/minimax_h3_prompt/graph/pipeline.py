@@ -6,6 +6,8 @@ v0.1 采用线性执行：并行 fan-in 深度不对齐时 LangGraph 会重复�
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from langgraph.graph import END, START, StateGraph
 
 from ..agents import build_role_agents, run_agent
@@ -17,7 +19,7 @@ from ..output.assembler import assemble_and_repair
 from ..tools.h3_validator import format_issues, validate_prompt
 from ..tools.ref_metadata import to_tuple
 from ..tools.theme_guard import theme_fidelity_issues, theme_requirements_text
-from ..user_revisions import FRAME_BASELINE_KEY
+from ..user_revisions import FRAME_BASELINE_KEY, LAYER_SPECS, LayerSpec
 from .nodes import (
     make_creative_rt_node,
     make_identity_rt_node,
@@ -131,6 +133,67 @@ def _combined_node(name, nodes, shot_rt, identity_rt, creative_rt, model, brief)
     if name == "parallel_sound":
         return make_parallel(nodes["sound_designer"], nodes["composer"])
     return nodes[name]
+
+
+@dataclass(frozen=True)
+class Stage1RerunPlan:
+    """设定级重跑的落点：哪一层的、从哪个节点截断、将重跑几步、哪些产物会被替换。
+
+    确认门照它念（issue #28）：「将重跑 N 步 ＋ 下列产物会被替换」——被替换的是**用户
+    已经看过**的产物，且 LLM 生成不可复现同一版本，所以这份清单是用户判断值不值得跑的
+    唯一依据。
+
+    带上 ``spec`` 而不是只带它的字符串值：屏幕上要念的层次名（``spec.label``）与「回灌什么」
+    都在那份描述里，调用方手上就不必再并排多拿一个同源的参数。
+    """
+
+    spec: LayerSpec
+    start: str
+    nodes: tuple[str, ...]
+    artifacts: tuple[str, ...]
+
+
+# 链上节点产出的产物（人读标签）。**只列可能出现在重跑计划里的节点**：最早的设定级起点是
+# 编剧，之前的制作人/导演/创意圆桌永远不在截断链里，给它们编标签就又是一条没人读的接线。
+# 有测试核对「重跑计划能碰到的节点」与这张表逐一对应——链上加了节点而表没加，确认门会
+# **少报**一件被替换的产物，而用户是凭这份清单决定要不要跑的。
+_NODE_ARTIFACTS: dict[str, tuple[str, ...]] = {
+    "screenwriter": ("分场剧本",),
+    "parallel_designers": ("人物形象设计", "背景设计", "道具设计"),
+    "art_director": ("美术统筹",),
+    "storyboard": ("分镜表",),
+    "parallel_decisions": ("镜头评审锁定", "身份一致性锁定"),
+    "parallel_visual": ("画面细化", "参考一致性素材"),
+    "fl2va_frame_prompts": ("关键帧生图提示词（首/尾帧）",),
+    "parallel_sound": ("对白与环境声", "配乐"),
+}
+
+# base 模式下这两份根本不产出：身份评审与参考一致性节点直接返回空串
+# （nodes.make_identity_rt_node / _make_reference_consistency_node）。把它们列进
+# 「会被替换」就是对用户说谎——那是不存在、也就无所谓被替换的产物。
+_REF_ONLY_ARTIFACTS = frozenset({"身份一致性锁定", "参考一致性素材"})
+
+
+def stage1_rerun_plan(layer: str, *, mode: str = "base") -> Stage1RerunPlan:
+    """设定级层次 → 截断重跑计划（起点、步数、会被替换的产物）。
+
+    起点取自 ``user_revisions.LAYER_SPECS``（层次＝重跑起点，只有一张表）；「跑几步」与
+    「替换哪些产物」都从链上现推，不另手写——手写的清单在链变了之后不报错，只会让确认门
+    少报一件产物。
+    """
+    spec = LAYER_SPECS.get(str(layer))
+    if spec is None:
+        raise ValueError(f"不是设定级层次：{layer!r}")
+    if spec.resume_from not in _STAGE1_CHAIN:
+        raise ValueError(f"层次的起点不在阶段 1 链上：{spec.resume_from}")
+    nodes = tuple(_STAGE1_CHAIN[_STAGE1_CHAIN.index(spec.resume_from):])
+    artifacts = tuple(
+        label
+        for name in nodes
+        for label in _NODE_ARTIFACTS.get(name, ())
+        if str(mode) == "ref" or label not in _REF_ONLY_ARTIFACTS
+    )
+    return Stage1RerunPlan(spec=spec, start=spec.resume_from, nodes=nodes, artifacts=artifacts)
 
 
 def _build_stage_graph(model, brief: Brief, config: Config, chain: list[str]):

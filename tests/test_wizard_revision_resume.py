@@ -133,7 +133,8 @@ def test_resume_stage1_offers_the_revision_loop(tmp_path, monkeypatch, capsys):
     """AC-1：阶段 1 续接恢复完成后，累积清单仍在，并且能接着提意见、接着重出。"""
     session = _session(tmp_path, status=session_store.STATUS_STAGE1_RUNNING,
                        revisions=[_rev(1, EXISTING)])
-    _scripted(monkeypatch, prompts=["1", NEW], confirms=[True, False])
+    # 菜单 "1" → 意见正文 → 层次（空串＝回车＝只改画面，issue #28 起每次提意见都要声明）
+    _scripted(monkeypatch, prompts=["1", NEW, ""], confirms=[True, False])
     requests = _fake_llm(monkeypatch)
     # 续接的收尾节点（fl2va_frame_prompts 之后的链）不再真跑：本测试的题目是收尾后的循环。
     monkeypatch.setattr(
@@ -163,7 +164,7 @@ def test_resumed_awaiting_session_offers_the_revision_loop(tmp_path, monkeypatch
     """
     session = _session(tmp_path, status=session_store.STATUS_AWAITING_FRAMES,
                        revisions=[_rev(1, EXISTING)])
-    _scripted(monkeypatch, prompts=["1", NEW], confirms=[True, False])
+    _scripted(monkeypatch, prompts=["1", NEW, ""], confirms=[True, False])
     requests = _fake_llm(monkeypatch)
     _stub_agent_build(monkeypatch)
     monkeypatch.setattr(wizard.sys, "stdin", SimpleNamespace(isatty=lambda: True))
@@ -197,7 +198,7 @@ def test_resume_stage1_with_all_nodes_done_still_reaches_the_loop(tmp_path, monk
     """
     session = _session(tmp_path, status=session_store.STATUS_STAGE1_RUNNING,
                        revisions=[_rev(1, EXISTING)], last_node="parallel_sound")
-    _scripted(monkeypatch, prompts=["1", NEW], confirms=[True, False])
+    _scripted(monkeypatch, prompts=["1", NEW, ""], confirms=[True, False])
     requests = _fake_llm(monkeypatch)
     # 这条路径手上没有 run_stage1 的返回值 → 重出时**就地**建 model/agents，必须打桩：
     # 不打的话用例会去读环境里的真 API key，主树有 .env 时绿、干净检出里报「缺失
@@ -230,9 +231,9 @@ def test_restart_from_a_resume_entry_reruns_phase1_and_drops_the_old_list(tmp_pa
     """
     session = _session(tmp_path, status=session_store.STATUS_AWAITING_FRAMES,
                        revisions=[_rev(1, EXISTING)])
-    # 循环里先选「2 重来」；重来后 _phase1_new 重新问主题/时长/风格/变体（末尾那个 "1" 是
-    # 变体三选一），再进循环选「1 重出」并提一条新意见
-    _scripted(monkeypatch, prompts=["2", TOPIC, "", "", "1", "1", NEW],
+    # 循环里先选「2 重来」；重来后 _phase1_new 重新问主题/时长/风格/变体（那个 "1" 是
+    # 变体三选一），再进循环选「1 提意见并重出」、提一条新意见、答层次（空串＝只改画面）
+    _scripted(monkeypatch, prompts=["2", TOPIC, "", "", "1", "1", NEW, ""],
               confirms=[True, True, False])
     requests = _fake_llm(monkeypatch)
     _stub_agent_build(monkeypatch)

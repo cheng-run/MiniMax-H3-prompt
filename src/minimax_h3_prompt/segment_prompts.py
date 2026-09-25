@@ -26,7 +26,7 @@ from .tools.h3_validator import (
     timestamps_seconds,
     validate_base,
 )
-from .user_revisions import render_revision_block
+from .user_revisions import pending_revisions, render_revision_block
 
 # 镜头块标记：[Shot N]（允许中括号与数字间任意空白）
 _SHOT_BLOCK = re.compile(r"\[Shot\s+(\d+)\]")
@@ -328,13 +328,17 @@ def render_revision_context(state: dict) -> str:
     - 真源是 ``state["user_revisions"]``（阶段 1 人机循环写入、在持久化白名单里），
       从 state 读意味着**每一段**都拿得到，不必逐段传参。
 
+    取**待落地**的那部分（``user_revisions.pending_revisions``）：已落地的设定级修订
+    其要求已经写进设定产物，而设定产物本来就在分段请求里——再带一遍是拿同一条要求
+    叠加第二次（issue #28 / T6）。
+
     分段规划**不依赖 state**（它的入参是显式的），所以那条路径由调用方把本函数的
     返回值经 ``revision_context`` 传进去。
 
     与 ``user_revisions.render_revision_block`` 的分工：那个只产出**清单正文**，给阶段 1
     的首帧节点用（那里没有「段」这回事）；本函数在它外面加了分段用的标题与优先序声明。
     """
-    body = render_revision_block(state.get("user_revisions"))
+    body = render_revision_block(pending_revisions(state))
     if not body:
         return ""
     return f"{REVISION_CONTEXT_HEADER}\n{body}\n{REVISION_PRIORITY_NOTE}"

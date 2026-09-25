@@ -52,3 +52,13 @@ class PipelineState(TypedDict, total=False):
     qa_issues: list[str]
     iterations: int
     final_report: str
+
+    # 人的累积修订与它的一轮入参。**必须在这里声明**：LangGraph 只搬运 schema 里声明过的
+    # 键，未声明的键在图外传得进去、到节点手上却没了——静默、不报错。2026-09-25（issue #28）
+    # 实测：把 setting_revision 放进 run_stage1 的 initial_state 就以为接线完成，三个设计师
+    # 节点一个都没拿到它（打桩 run_stage1 的用例照样全绿，因为它们绕过了图）。
+    # 画面级那条循环直接调节点，本来不受影响；声明它们是为了**设定级截断重跑**——那条路是
+    # 走图跑的：重跑中的首帧节点要看得见累积修订，否则一次设定级重跑会把用户已经谈定的
+    # 画面级要求悄悄丢干净（新解出的提示词里一条都不剩）。
+    user_revisions: list[dict]  # 累积的用户修订（含已落地标记），真源见 user_revisions.py
+    setting_revision: dict  # 本轮那条设定级修订 {layer, text}，只在一次重跑内有效

@@ -12,11 +12,12 @@ import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Callable
 
 from ..brief_parser import Brief, RefItem
 from ..config import Config
 from ..generation import render_fl2va_frame_markdown
-from ..graph.pipeline import run_stage1, run_stage2
+from ..graph.pipeline import run_stage1, run_stage2, stage1_rerun_plan
 from ..session_store import (
     STATUS_AWAITING_FRAMES,
     STATUS_COMPLETED,
@@ -31,14 +32,21 @@ from ..user_revisions import (
     FRAME_BASELINE_KEY,
     FRAME_REVOKED_KEY,
     LAYER_FRAME,
+    LAYER_LABELS,
+    LAYER_SPECS,
+    SETTING_LAYERS,
+    SETTING_REVISION_KEY,
     active_revisions,
+    applied_revisions,
     begin_round,
     log_frame_round,
+    mark_revision_applied,
     next_round,
+    pending_revisions,
     record_user_revision,
     remove_user_revision,
+    render_applied_list,
     render_baseline_block,
-    render_revision_block,
     render_revision_list,
     render_revocation_block,
     revocation_note,
@@ -165,6 +173,21 @@ def _report_node(node_name: str) -> None:
     print(f"—— 环节：{label} ——", flush=True)
 
 
+def _progress_saver(generation_dir: Path, brief: Brief) -> Callable[[str, dict], None]:
+    """阶段 1 的增量落盘回调：每完成一个节点就把进度写进会话（崩溃可续接）。
+
+    抽出来是因为它有三个主人——新跑（``_phase1_new``）、阶段 1 断点续接（``_resume_stage1``）
+    与设定级截断重跑（``_rerun_setting_layer``）。三处各写一份正是本仓反复出现的形态：
+    某一处的断点标记改了名，另外两处不报错，只是那条路径上的续接从此读不到断点。
+    """
+    def _save(node_name: str, current_state: dict) -> None:
+        progress_state = dict(current_state)
+        progress_state["_progress"] = {"last_completed_node": node_name}
+        save_session(generation_dir, brief, progress_state, status=STATUS_STAGE1_RUNNING)
+
+    return _save
+
+
 @contextmanager
 def _progress_scope(title: str):
     """订阅事件总线，把各角色进度实时打到终端；退出（含异常）必解绑并报总用时。"""
@@ -269,19 +292,13 @@ def _resume_stage1(config: Config, session: SessionState) -> SessionState | None
         resume_node = _STAGE1_CHAIN[next_index]
         print(f"[续接] 上次跑到「{last_node}」，从「{resume_node}」继续阶段 1……")
         initial_state = dict(session.stage_state)
-
-        def _save_progress(node_name: str, current_state: dict) -> None:
-            progress_state = dict(current_state)
-            progress_state["_progress"] = {"last_completed_node": node_name}
-            save_session(generation_dir, brief, progress_state, status=STATUS_STAGE1_RUNNING)
-
         with _progress_scope(f"[阶段 1·续接] 从「{resume_node}」继续……"):
             state, model, agents = run_stage1(
                 brief, config,
                 on_node=_report_node,
                 resume_from_node=resume_node,
                 initial_state=initial_state,
-                on_step_done=_save_progress,
+                on_step_done=_progress_saver(generation_dir, brief),
             )
         _drain_stdin()
 
@@ -391,15 +408,10 @@ def _phase1_new(config: Config) -> SessionState | None:
     )
     generation_dir = _session_dir(config, topic)
 
-    # 阶段 1 断点：每完成一个节点就立刻落盘（含 _progress 记录跑到哪个节点）
-    def _save_progress(node_name: str, current_state: dict) -> None:
-        progress_state = dict(current_state)
-        progress_state["_progress"] = {"last_completed_node": node_name}
-        save_session(generation_dir, brief, progress_state, status=STATUS_STAGE1_RUNNING)
-
     with _progress_scope("[阶段 1] 正在生成剧本、设计与首尾帧生图提示词……（预计几分钟，期间无需输入）"):
         state, model, agents = run_stage1(
-            brief, config, on_node=_report_node, on_step_done=_save_progress
+            brief, config, on_node=_report_node,
+            on_step_done=_progress_saver(generation_dir, brief),
         )
     _drain_stdin()
     bundle = state.get("fl2va_prompt_bundle") or {}
@@ -485,11 +497,21 @@ def _show_revision_list(state: dict) -> None:
     首版（``frame_round`` 为 0）说「首版」而不是「第 0 轮」。
     """
     items = active_revisions(state)
+    landed = applied_revisions(state)
     done = int(state.get("frame_round") or 0)
     current = f"第 {done} 轮" if done else "首版（尚未重出）"
-    print(f"\n[用户修订] {current} · 累积 {len(items)} 条 · 下一次重出记为第 {next_round(state)} 轮")
-    listing = render_revision_list(items)
+    # 「累积 M 条」数的是**全部**（含已落地）：那是用户一共提过几条。已落地的另标一条，
+    # 于是「M 条里有 K 条不用再管」一眼可见（票面 AC-4）。
+    landed_note = f"（其中 {len(landed)} 条已落地）" if landed else ""
+    print(f"\n[用户修订] {current} · 累积 {len(items)} 条{landed_note} · "
+          f"下一次重出记为第 {next_round(state)} 轮")
+    listing = render_revision_list(pending_revisions(state))
     print(listing if listing else "  （清单为空：重出时不会带上任何修订）")
+    if landed:
+        # 单列一段且**不编号**：这几条撤不掉（改动已经在设定产物里），编进撤销编号会让人
+        # 照着念号撤错人——编号是「模型看到的第几条」与「撤销念的号」共用的那一套。
+        print(f"[已落地] {len(landed)} 条——改动已写进设定产物，此后各注入通道不再带它：")
+        print(render_applied_list(landed))
 
 
 def _set_round_input(target: dict, key: str, block: str) -> None:
@@ -514,13 +536,19 @@ def _revoke_revisions(state: dict, generation_dir: Path, brief: Brief) -> list[d
     """
     revoked: list[dict] = []
     while True:
-        items = active_revisions(state)
+        # 取**待落地**清单：撤销编号就是它（``remove_user_revision`` 同一份）。拿着全量
+        # 清单打屏幕，已落地的条目会占掉一个号，用户照屏幕念「2」撤掉的就是另一个人。
+        items = pending_revisions(state)
         if not items:
             # 空清单有两条来路，措辞必须分开：一进来就是空的（选错了），与**刚被撤空**。
             # 后者再说一句「没有可撤销的条目」，紧跟上一行的「[已撤销] 第 N 条」，
             # 会被读成「刚才那下没撤掉」——正是撤销这个功能最不能有的错觉。
-            print("[提示] 清单已撤空：本次重出不会带上任何修订。" if revoked
-                  else "[提示] 清单里没有可撤销的条目。")
+            # 已落地的条目另说一句：它们不在编号里（改动已写进设定产物），不提的话
+            # 「清单里明明还有一条」会让人以为撤销坏了。
+            landed = len(applied_revisions(state))
+            hint = f"（另有 {landed} 条已落地：改动已写进设定产物，撤不掉）" if landed else ""
+            print(("[提示] 清单已撤空：本次重出不会带上任何修订。" if revoked
+                   else "[提示] 清单里没有可撤销的条目。") + hint)
             return revoked
         print("\n[撤销修订] 输入要撤掉的编号（照下方清单念）；撤完直接回车，按当前清单重出。")
         print(render_revision_list(items))
@@ -539,6 +567,92 @@ def _revoke_revisions(state: dict, generation_dir: Path, brief: Brief) -> list[d
         save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
 
 
+def _ask_revision_layer() -> str:
+    """问本轮这条意见属于哪一层（层次＝重跑起点）；回车＝只改画面。
+
+    层次**必须由人声明**：只有人知道这条是画面口味还是设定变更，让机器猜是不可证启发式
+    （票面）。默认值是「只改画面」——回车走的就是与今天逐字相同的那条路（只重出首帧提示词
+    一个节点），设定级才要额外付一次重跑与一次确认。
+    """
+    top = len(SETTING_LAYERS) + 1  # 编号 1 是画面级，2..top 是设定级三档
+    print("\n这条意见属于哪一层？（层次＝重跑的起点，决定要重跑哪些步骤）")
+    print(f"  1. {LAYER_LABELS[LAYER_FRAME]}：只重出首帧提示词，代价最小（回车默认）")
+    for index, spec in enumerate(SETTING_LAYERS, 2):
+        print(f"  {index}. {spec.label}：{spec.note}（会替换你已经看过的产物）")
+    while True:
+        raw = _prompt(f"输入 1-{top}（回车=1 只改画面）：").strip()
+        if not raw or raw == "1":
+            return LAYER_FRAME
+        if raw.isdigit() and 2 <= int(raw) <= top:
+            return SETTING_LAYERS[int(raw) - 2].value
+        print(f"[提示] 请输入 1-{top} 之一（回车=1 只改画面）。")
+
+
+def _confirm_setting_rerun(plan) -> bool:
+    """重跑前的确认门：念清「将重跑 N 步」与「哪些已看过的产物会被替换」，默认**不跑**。
+
+    为什么必须问：重跑会替换用户已经看过、可能已经拿去生图的产物，而 LLM 生成**不可复现
+    同一版本**——这是不可逆动作（票面）。默认取「否」，回车不该是那个不可逆的选项。
+    """
+    print(f"\n[设定级重跑] 层次：{plan.spec.label}")
+    print(f"将重跑 {len(plan.nodes)} 步："
+          + " → ".join(_NODE_LABELS.get(name, name) for name in plan.nodes))
+    print("下列你已经看过的产物会被替换（LLM 生成不可复现同一版本，替换不可逆）：")
+    for label in plan.artifacts:
+        print(f"  - {label}")
+    return _confirm("确认重跑？", default=False)
+
+
+def _rerun_setting_layer(state: dict, generation_dir: Path, brief: Brief, config: Config, *,
+                         plan, revision: dict) -> None:
+    """把一条设定级修订**回灌**到对应产物层：从该层起点截断到链尾重跑，成功后标已落地。
+
+    重跑**复用续接路径的截断机制**（``run_stage1(resume_from_node=...)``），不另写一套：
+    「从某节点跑到链尾」在这仓里只有一个实现，链的顺序也只有一份——另写一份正是本仓反复
+    出现的「同一件事两处接线、改一处漏一处」。
+
+    **不上修订基线**：基线那句「用户没提过的部分原样保留」针对的是首帧画面，而设定级重跑
+    要改的正是设定产物本身，拿旧画面当基线会与新设定打架。台账如实记 ``base_used=False``。
+    """
+    spec = plan.spec
+    initial_state = dict(state)
+    # 本轮这条修订经**独立入参键**进重跑（唯一读者在 user_revisions.setting_revision_block）：
+    # 层次节点据此判断自己吃不吃它——重跑起点是节点组，三个设计师一次全跑。
+    # 只带 layer 与 text：轮次在台账那一列，块里带上它没有读者。
+    initial_state[SETTING_REVISION_KEY] = {"layer": spec.value, "text": str(revision["text"])}
+
+    with _progress_scope(f"[设定级重跑] 正在回灌「{spec.label}」并重跑其下游……"
+                         "（预计几分钟，期间无需输入）"):
+        rerun_state, _model, _agents = run_stage1(
+            brief, config,
+            on_node=_report_node,
+            resume_from_node=plan.start,
+            initial_state=initial_state,
+            on_step_done=_progress_saver(generation_dir, brief),
+        )
+
+    merged = dict(rerun_state)
+    # 断点元数据与本轮的入参块都不是产物：前者给续接看、后者只在这**一次**重跑里有效，
+    # 都不许顺着 state 流到阶段 2 或下一次重出上去（与基线/撤销同一条规矩）
+    merged.pop("_progress", None)
+    merged.pop(SETTING_REVISION_KEY, None)
+    state.clear()
+    state.update(merged)
+    # 先标已落地再落盘：清单与台账记的必须是同一个事实（这条到底落没落地）。
+    # 标在**重跑返回之后**——抛异常时走不到这里，清单不会谎报（票面 AC-6）。
+    mark_revision_applied(state, revision)
+    save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
+    log_frame_round(
+        generation_dir,
+        round_index=int(revision["round"]),
+        layer=spec.value,
+        feedback_this_round=str(revision["text"]),
+        active_revisions=active_revisions(state),
+        bundle=state.get("fl2va_prompt_bundle"),
+        base_used=False,  # 设定级重跑不上基线（它改的就是设定产物本身）
+    )
+
+
 # 「整个流程重来」：修改循环的返回值哨兵。循环自己不知道从哪一步重跑阶段 1（新跑路径与两条
 # 续接路径的重启起点不同），只把「用户要求推倒重来」这件事报给调用方。
 RESTART_FLOW = "restart"
@@ -551,7 +665,7 @@ _MENU_REDO, _MENU_RESTART, _MENU_REVOKE = "1", "2", "3"
 # 事后补一行「已清空」等于人已经踩进来才告知；而且「修订是不是全局财产」这件事只有这里说得清
 # ——不说，用户会以为重来之后旧要求仍在生效。
 _REVISION_MENU = (
-    f"输入 {_MENU_REDO} 只重出画面提示词（附意见），"
+    f"输入 {_MENU_REDO} 提修改意见并重出（下一步声明层次：只改画面／人物设定／美术场景道具／剧情分镜），"
     f"输入 {_MENU_RESTART} 整个流程重来（会清空当前累积的修订清单，回到起步重新生成），"
     f"输入 {_MENU_REVOKE} 撤销清单里的某条：")
 
@@ -577,6 +691,10 @@ def _user_revision_loop(state: dict, generation_dir: Path, brief: Brief, config:
     入口：新跑（``_phase1_new``）、阶段 1 断点续接（``_resume_stage1``）、续接到等帧图的
     会话（``_resume_awaiting_frames``）。抽成共享单元的理由是本仓反复出现的形态：同一件事
     的几处接线各写一份，改一处漏一处，最后表现成某条路径上「意见说了没人听」。
+
+    每轮先由用户**声明层次**（issue #28）：只改画面＝今天这条老路（只重出首帧提示词一个
+    节点）；设定级＝回灌该层产物并从该层起点截断到链尾重跑（``_rerun_setting_layer``），
+    重跑前有一道确认门——它会替换用户已经看过、可能已拿去生图的产物。
 
     返回 ``None``：用户说没有更多意见（产物与清单已落盘，收尾交给调用方）。
     返回 ``RESTART_FLOW``：用户选了「整个流程重来」（累积清单已就地清空并落盘）。
@@ -618,6 +736,26 @@ def _user_revision_loop(state: dict, generation_dir: Path, brief: Brief, config:
         else:
             feedback = _prompt("请输入修改意见：")
             if not feedback:
+                continue
+            # 层次由用户自己声明（票面）：只有人知道这条是画面口味还是设定变更。
+            # 回车＝只改画面，走的就是今天那条路。
+            layer = _ask_revision_layer()
+            spec = LAYER_SPECS.get(layer)
+            if spec is not None:
+                plan = stage1_rerun_plan(layer, mode=brief.mode)
+                if not _confirm_setting_rerun(plan):
+                    # 拒绝＝不跑也不留痕（票面 AC-3）：不记这条、不推轮次、不写台账——
+                    # 只有内存里的这条意见被丢掉，产物一个字节都没变。
+                    print("[提示] 已放弃本次设定级重跑：这条意见没有记录，任何产物也没有被改动。"
+                          "（要只改画面，可重新提一次并选「1 只改画面」）")
+                    continue
+                revision = record_user_revision(state, layer=layer, text=feedback)
+                # 先把这条意见落盘再重跑：重跑要几分钟，中途崩了也不能变成「用户说了系统
+                # 没听见」。此刻它还没标已落地——失败或中断就是不标（票面 AC-6）。
+                save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
+                _rerun_setting_layer(state, generation_dir, brief, config,
+                                     plan=plan, revision=revision)
+                print(f"[已落地] 这条「{spec.label}」修订已写进对应产物，此后各注入通道不再带它。")
                 continue
             # 意见进**独立真源**（state["user_revisions"]），按轮累积：说了就不忘。
             # 重出的上下文由首帧节点从 state 读（不是由这里拼进 brief.plot——plot 同时喂

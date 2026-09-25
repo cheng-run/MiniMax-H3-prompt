@@ -41,8 +41,9 @@ def _run_loop(tmp_path, monkeypatch, *, steps: list[tuple[str, Any]],
               initial_bundle: bool = True, on_stage1=None):
     """跑 _phase1_new 的修改循环；``steps`` 每项是一轮的脚本，最后答「没有更多意见」。
 
-    每轮脚本的三形态：
-    - ``("1", "意见文本")``：选「只重出画面提示词」，提这一条意见；
+    每轮脚本的三形态（``("1", …)`` 那一档在意见正文之后还要答一问**层次**，issue #28 起
+    每次提意见都要声明；脚本里补空串＝回车＝「只改画面」，即本文件考的那条老路）：
+    - ``("1", "意见文本")``：选「提修改意见并重出」，提这一条意见（层次＝只改画面）；
     - ``("2", None)``：选「整个流程重来」——循环把它交还给 ``_phase1_new``，于是重新问
       主题/时长/风格/变体，再进一轮（脚本里自动补上这四问的答案）；
     - ``("3", [编号, ...])``：选「撤销清单里的某条」，按顺序撤这些编号，回车结束撤销
@@ -57,7 +58,7 @@ def _run_loop(tmp_path, monkeypatch, *, steps: list[tuple[str, Any]],
     for kind, payload in steps:
         scripted.append(kind)
         if kind == "1":
-            scripted.append(str(payload))
+            scripted.extend([str(payload), ""])  # 意见正文 → 层次（回车=只改画面）
         elif kind == "2":
             # 重来回到起步：重新问主题/时长/风格/变体（澄清在配置里关掉了，不问）
             scripted.extend([TOPIC, "", "", "1"])

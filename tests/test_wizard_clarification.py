@@ -20,6 +20,7 @@ from minimax_h3_prompt.brief_parser import Brief
 from minimax_h3_prompt.graph import nodes
 from minimax_h3_prompt.session_store import load_session
 from minimax_h3_prompt.ui import wizard
+from minimax_h3_prompt.user_revisions import LAYER_CHARACTER
 
 TOPIC = "秋日庭院里的橘猫"
 QUESTIONS = ["庭院是哪个朝代？", "人物服装按哪个年代？"]
@@ -289,7 +290,9 @@ _TOPIC_NODE_CASES: list[tuple[str, Callable[[], Callable], dict, str]] = [
     ("director", lambda: nodes._make_director_node(_AGENTS), {}, "导演阐述正文"),
     ("screenwriter", lambda: nodes._make_screenwriter_node(_AGENTS), {}, "剧本正文"),
     ("character_designer",
-     lambda: nodes._make_design_node(_AGENTS, "character_designer", "character_design", "人物形象设计"),
+     # 最后一个参数是「本节点负责的层次」（issue #28 的设定级修订按它过滤）
+     lambda: nodes._make_design_node(
+         _AGENTS, "character_designer", "character_design", "人物形象设计", LAYER_CHARACTER),
      {}, "人物设计正文"),
     ("image_prompt_character",
      lambda: nodes._make_image_prompt_node(_AGENTS, "人物", "character_design", "character_image_prompts"),

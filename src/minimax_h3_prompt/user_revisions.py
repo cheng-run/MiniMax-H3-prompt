@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -31,12 +32,59 @@ FRAME_BASELINE_KEY = "frame_revision_baseline"
 # 没有上一版产物时也记成「上了基线」，而它是事后判定累积生效与否的唯一分组变量。
 FRAME_REVOKED_KEY = "frame_revision_revoked"
 
-# 层次＝重跑起点（CONTEXT.md「用户修订」）。本模块只定义**画面级**：它对应「只重跑
-# 首帧提示词节点」，是本票落地的唯一一档。设定级三档（人物设定／美术场景道具／
-# 剧情分镜）各自要回灌产物并重跑下游，由 T6 连同重跑路由一起加——先占位一个没有
-# 消费者的取值，正是本项目「写了没人读」那一族缺陷的形态。
+# 层次＝重跑起点（CONTEXT.md「用户修订」）。四档：只改画面 ＋ 三档设定级。
 LAYER_FRAME = "frame"
-LAYER_LABELS = {LAYER_FRAME: "只改画面"}
+LAYER_CHARACTER = "character"
+LAYER_ART = "art"
+LAYER_STORY = "story"
+# 标签逐字取自 ``CONTEXT.md``「用户修订」与票面那句「只改画面／人物设定／美术场景道具／
+# 剧情分镜」：这两处会被用户与后人对照着读，写得好看一点（如「美术/场景/道具」）就变成
+# 第三种写法，谁也说不清屏幕上那个词对应术语表里的哪一档。
+LAYER_LABELS = {
+    LAYER_FRAME: "只改画面",
+    LAYER_CHARACTER: "人物设定",
+    LAYER_ART: "美术场景道具",
+    LAYER_STORY: "剧情分镜",
+}
+
+
+@dataclass(frozen=True)
+class LayerSpec:
+    """一档**设定级**层次：回灌哪些产物、从阶段 1 链的哪个节点起跑。
+
+    ``resume_from`` 就是 ``graph.pipeline._STAGE1_CHAIN`` 里的节点名：层次**直接等于**
+    重跑起点，不另造一套映射（另造一套的话「重跑哪一段」要再判一次，两张表迟早对不上）。
+    在这里写字面量而不是导入链：本模块是项目最底层的域概念（管线反过来导入它），
+    导入会把依赖方向倒过来。有测试逐个核对起点确实在链上。
+
+    ``note`` 是屏幕上那句「回灌什么、重跑什么」——用户凭它选层次。
+    """
+
+    value: str
+    label: str
+    note: str
+    resume_from: str
+
+
+# 顺序＝屏幕上的编号（1/2/3）。只改画面**不在**这张表里：它的重跑起点就是首帧提示词节点
+# 本身，历史上是一次直接的节点调用（``wizard._user_revision_loop``），不走截断链——塞进来
+# 只会多出一个没人读的节点名，还会诱导后人把画面级也改成重跑整条链。
+SETTING_LAYERS: tuple[LayerSpec, ...] = (
+    LayerSpec(LAYER_CHARACTER, LAYER_LABELS[LAYER_CHARACTER],
+              "回灌人物形象设计，并重跑其下游", "parallel_designers"),
+    LayerSpec(LAYER_ART, LAYER_LABELS[LAYER_ART],
+              "回灌背景与道具设计，并重跑其下游", "parallel_designers"),
+    LayerSpec(LAYER_STORY, LAYER_LABELS[LAYER_STORY],
+              "回灌分场剧本与分镜表，并重跑其下游", "screenwriter"),
+)
+LAYER_SPECS = {spec.value: spec for spec in SETTING_LAYERS}
+
+# 本轮那条设定级修订的**独立入参键**（issue #28 / T6）。值是一个字典 ``{"layer", "text"}``：
+# 带来层次是为了让**节点自己**决定吃不吃它——重跑起点是
+# 节点组（``parallel_designers`` 一次跑三个设计师），不按层次过滤的话，一条「汉服改成
+# 现代审美」会连背景与道具设计一起改写。与基线、撤销同为「一轮的入参」：跑完即摘，
+# 不进持久化白名单。
+SETTING_REVISION_KEY = "setting_revision"
 
 
 def _entry_round(entry: Any) -> int:
@@ -109,31 +157,120 @@ def record_user_revision(state: dict[str, Any], *, layer: str, text: str) -> dic
 def remove_user_revision(state: dict[str, Any], screen_number: Any) -> dict[str, Any]:
     """按**屏幕编号**撤掉清单里的一条，返回被撤掉的条目（就地改 state）。
 
-    编号取**活动清单里 1 起的位置**，与注入块、屏幕清单同源（见 ``render_revision_list``）：
+    编号取**待落地清单里 1 起的位置**，与注入块、屏幕清单同源（见 ``render_revision_list``）：
     用户照着屏幕念编号即可，撤掉一条后其余条重排序，下一次念的就是重排后的编号。
     不取「提出时的轮次」——那个编号与屏幕上的序号对不上，人要撤第 3 条得先去查台账。
+
+    取待落地清单而不是全量清单：**已落地**的条目不在带编号的清单里（它的改动已经写进
+    设定产物，撤掉文本也撤不掉产物），若编号把它算进去，屏幕上念的号与注入块就各指一条。
 
     ``screen_number`` 收 ``Any`` 而不收 ``int``：调用方给的是用户原样敲进来的字符串，
     这里要的是**报错**而不是 TypeError——越界与非法编号一律声张、不静默忽略，否则用户
     以为撤掉了、实际没撤，随后「重出后被撤的改动还在」又变成一条不可证故障（本模块
     存在的理由）。
     """
-    entries = active_revisions(state)
+    stored = [_checked(item) for item in state.get("user_revisions") or []]
+    pending = [item for item in stored if not item.get("applied")]
     try:
         position = int(screen_number)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"撤销编号必须是数字：{screen_number!r}") from exc
-    if not 1 <= position <= len(entries):
-        raise ValueError(f"撤销编号超界：清单现有 {len(entries)} 条，收到 {position}")
-    state["user_revisions"] = [
-        entry for offset, entry in enumerate(entries, 1) if offset != position
-    ]
-    return entries[position - 1]
+    if not 1 <= position <= len(pending):
+        raise ValueError(f"撤销编号超界：清单现有 {len(pending)} 条，收到 {position}")
+    victim = pending[position - 1]
+    # 按对象身份摘那一条：已落地的条目要原样留着（它们是「这条已经落实过」的唯一记录）
+    state["user_revisions"] = [item for item in stored if item is not victim]
+    return victim
 
 
 def active_revisions(state: dict[str, Any]) -> list[dict[str, Any]]:
-    """当前活动清单的**快照**（副本；台账与展示都取它，不递内部对象出去）。"""
+    """当前清单的**全量快照**（副本；台账取它，不递内部对象出去）。
+
+    **注入通道不要直接用它**——用 ``pending_revisions``：已落地的条目在这份全量里，
+    但它们不该再进请求。两者分开正是「台账要全量、注入要待落地」这条分叉的落点。
+    """
     return [dict(_checked(item)) for item in state.get("user_revisions") or []]
+
+
+def pending_revisions(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """**还没落地**的修订：所有注入通道的真源（首帧节点、分段写段、分段规划）。
+
+    已落地的条目（设定级重跑成功那条）不再进去：它的要求已经写进设定产物本身，而那些
+    产物正在同一个请求里作为「人物设计／背景设计／分镜表」被注入——再带一遍就是拿同一条
+    要求叠加第二次，越滚越重（票面 AC-4）。
+    """
+    return [entry for entry in active_revisions(state) if not entry.get("applied")]
+
+
+def applied_revisions(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """**已落地**的修订：屏幕上单列一段，让用户看得见自己的要求去了哪里。
+
+    为什么不留在带编号的清单里：编号是「模型看到的第几条」与「撤销要念的号」共用的那一套
+    （T2）。已落地的条目既然不再注入，留在编号里就会让同一个号指向两条不同的话——用户
+    撤错人也发现不了。
+    """
+    return [entry for entry in active_revisions(state) if entry.get("applied")]
+
+
+def mark_revision_applied(state: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
+    """把一条修订标为**已落地**——只在设定级重跑**成功之后**调。
+
+    按 ``(round, layer, text)`` 在 state 里重新定位那一条再改，而不是直接改传进来的对象：
+    ``state`` 往往是从会话 JSON 载回来的，传进来的那份与 state 里存的那份早已不是同一个，
+    改游离的副本等于没标——而「标没标」正是「清单不得谎报」的唯一凭据。
+
+    定位不到就报错：state 与标记打架是 bug，静默返回会让这条修订永远重复注入。
+    """
+    target_round = _entry_round(entry)
+    for stored in state.get("user_revisions") or []:
+        _checked(stored)
+        if (int(stored["round"]) == target_round
+                and str(stored.get("layer") or "") == str(entry.get("layer") or "")
+                and str(stored.get("text")).strip() == str(entry.get("text")).strip()
+                and not stored.get("applied")):
+            stored["applied"] = True
+            return stored
+    raise ValueError(f"要标为已落地的修订不在清单里：{entry!r}")
+
+
+def render_applied_list(revisions: Iterable[dict[str, Any]] | None) -> str:
+    """已落地修订的屏幕段落（**不编号**，故不会与撤销编号混起来）。
+
+    用横线起头而不是数字：带编号的行是「可以照号撤掉的」，这一段的条目撤不掉（它的改动
+    已经在设定产物里），长得一样会让人以为自己能撤它。
+    """
+    entries = [_checked(entry) for entry in revisions or []]
+    if not entries:
+        return ""
+    return "\n".join(
+        f"- [{_layer_label(entry.get('layer'))}] {str(entry['text']).strip()}（已落地，不再注入）"
+        for entry in entries
+    )
+
+
+def setting_revision_block(state: dict[str, Any], layer: str) -> str:
+    """本轮那条设定级修订的注入块；**层次不匹配就是一个字都不进**（返回空串）。
+
+    按层次过滤的理由见 ``SETTING_REVISION_KEY``：重跑起点是节点组，三个设计师一次全跑，
+    不过滤就会把「改人物」的意见写进背景与道具设计。节点侧只报自己的层，判断全在这里
+    ——两处各判一次迟早有一处写成 ``in``。
+
+    措辞必须写明「落实进**你这一层重新产出的产物本身**」：这句话是设定级与画面级的分界，
+    少了它模型会把它当成画面口味，产出照旧只在画面里体现（票面根因 2）。
+    """
+    raw = state.get(SETTING_REVISION_KEY)
+    if not isinstance(raw, dict) or str(raw.get("layer") or "") != str(layer):
+        return ""
+    text = str(raw.get("text") or "").strip()
+    if not text:
+        return ""
+    spec = LAYER_SPECS.get(str(layer))
+    return "\n".join([
+        f"【本轮设定级修订（{spec.label if spec else layer}）】",
+        text,
+        "【落实要求】这条是**设定级**要求：请把它直接落实进你这一层负责重新产出的产物本身"
+        "（不是只在画面里体现），下游的产物会据此一并重跑。",
+    ])
 
 
 def _numbered_lines(entries: list[dict[str, Any]]) -> list[str]:
@@ -320,9 +457,12 @@ def log_frame_round(directory: str | Path, *, round_index: int, layer: str,
 
 
 __all__ = [
-    "FRAME_BASELINE_KEY", "FRAME_REVOKED_KEY", "FRAME_ROUNDS_FILENAME", "LAYER_FRAME",
-    "LAYER_LABELS", "active_revisions", "begin_round", "log_frame_round", "next_round",
-    "record_user_revision", "remove_user_revision", "render_baseline_block",
+    "FRAME_BASELINE_KEY", "FRAME_REVOKED_KEY", "FRAME_ROUNDS_FILENAME",
+    "LAYER_ART", "LAYER_CHARACTER", "LAYER_FRAME", "LAYER_LABELS", "LAYER_SPECS",
+    "LAYER_STORY", "LayerSpec", "SETTING_LAYERS", "SETTING_REVISION_KEY",
+    "active_revisions", "applied_revisions", "begin_round", "log_frame_round",
+    "mark_revision_applied", "next_round", "pending_revisions", "record_user_revision",
+    "remove_user_revision", "render_applied_list", "render_baseline_block",
     "render_revision_block", "render_revision_list", "render_revocation_block",
-    "revocation_note",
+    "revocation_note", "setting_revision_block",
 ]

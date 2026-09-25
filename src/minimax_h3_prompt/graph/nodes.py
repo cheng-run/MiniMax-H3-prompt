@@ -14,7 +14,16 @@ from ..config import Config
 from ..generation import fl2va_bundle_from_dict
 from ..tools.h3_validator import validate_prompt
 from ..tools.ref_metadata import format_ref_meta
-from ..user_revisions import FRAME_BASELINE_KEY, FRAME_REVOKED_KEY, render_revision_block
+from ..user_revisions import (
+    FRAME_BASELINE_KEY,
+    FRAME_REVOKED_KEY,
+    LAYER_ART,
+    LAYER_CHARACTER,
+    LAYER_STORY,
+    pending_revisions,
+    render_revision_block,
+    setting_revision_block,
+)
 from .state import PipelineState
 
 
@@ -66,6 +75,8 @@ def _make_screenwriter_node(agents: dict) -> Callable:
             + _ctx(
                 原始剧情=brief.plot,
                 起步澄清=brief.clarifications,
+                # 剧情层的设定级修订（issue #28）：层次不匹配时渲染成空串、被 _ctx 跳过
+                设定级修订=setting_revision_block(state, LAYER_STORY),
                 导演阐述=state.get("director_brief", ""),
                 创意锁定=state.get("creative_lock", ""),
             )
@@ -74,12 +85,19 @@ def _make_screenwriter_node(agents: dict) -> Callable:
     return node
 
 
-def _design_context(state: PipelineState, brief: Brief) -> str:
-    """为三类生图设计师提供同一份剧情约束，避免脱离故事自由发挥。"""
+def _design_context(state: PipelineState, brief: Brief, layer: str) -> str:
+    """为三类生图设计师提供同一份剧情约束，避免脱离故事自由发挥。
+
+    ``layer`` 是**本节点负责的那一层**：设定级重跑时只有该层的节点能拿到本轮那条修订
+    （``setting_revision_block`` 按层次过滤）。重跑起点是**节点组**——``parallel_designers``
+    一次跑三个设计师——不过滤的话一条「汉服改成现代审美」会把背景与道具设计一起改写，
+    用户没要求的产物被替换掉。
+    """
     refs = format_ref_meta(brief.refs) if brief.refs else "（无）"
     return _ctx(
         原始剧情=brief.plot,
         起步澄清=brief.clarifications,
+        设定级修订=setting_revision_block(state, layer),
         导演阐述=state.get("director_brief", ""),
         创意锁定=state.get("creative_lock", ""),
         分场剧本=state.get("script", ""),
@@ -88,10 +106,11 @@ def _design_context(state: PipelineState, brief: Brief) -> str:
     )
 
 
-def _make_design_node(agents: dict, role: str, output_field: str, label: str) -> Callable:
+def _make_design_node(agents: dict, role: str, output_field: str, label: str,
+                      layer: str) -> Callable:
     def node(state: PipelineState) -> dict:
         brief: Brief = state["brief"]
-        msg = f"请完成{label}，必须严格契合视频剧情：\n{_design_context(state, brief)}"
+        msg = f"请完成{label}，必须严格契合视频剧情：\n{_design_context(state, brief, layer)}"
         return {output_field: run_agent(agents[role], msg)}
     return node
 
@@ -175,7 +194,7 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
                 语言=brief.language,
                 # 累积的用户修订：人机修改循环每轮重出都把它带进上下文（issue #23）。
                 # 自动质检循环不设该键 → 空值被 _ctx 跳过，它的替换语义逐字不变。
-                用户修订=render_revision_block(state.get("user_revisions")),
+                用户修订=render_revision_block(pending_revisions(state)),
                 # 修订基线（issue #25）：上一轮**完整产物**渲染成的块，由人机修改循环经独立
                 # 入参键传入——没有它，用户没提过的细节每轮都会跟着重掷一起漂走。
                 修订基线=state.get(FRAME_BASELINE_KEY),
@@ -206,7 +225,7 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
             # 内层「转成 JSON」那条重试不管内容（原文随请求一并发给模型），故不在此列。
             rewrite = _ctx(
                 起步澄清=brief.clarifications,
-                用户修订=render_revision_block(state.get("user_revisions")),
+                用户修订=render_revision_block(pending_revisions(state)),
                 修订基线=state.get(FRAME_BASELINE_KEY),
                 本轮撤销=state.get(FRAME_REVOKED_KEY),
             )
@@ -301,6 +320,9 @@ def _make_storyboard_node(agents: dict) -> Callable:
             "请给出分镜镜头表（视频总时长 "
             + f"{brief.duration}s，{scale.describe()}）：\n"
             + _ctx(原始剧情=brief.plot, 起步澄清=brief.clarifications,
+                   # 剧情/分镜层的设定级修订（issue #28）：分镜表是这一层的产物之一，
+                   # 修订（如「镜头再碎一些」）必须到得了它，只喂剧本等于让它自生自灭
+                   设定级修订=setting_revision_block(state, LAYER_STORY),
                    分场剧本=state.get("script", ""), 美术设计=state.get("art_design", ""),
                    人物设计=state.get("character_design", ""),
                    背景设计=state.get("background_design", ""),
@@ -531,9 +553,13 @@ def make_nodes(agents: dict, model, brief: Brief, config: Config) -> dict[str, C
         "producer": _make_producer_node(agents),
         "director": _make_director_node(agents),
         "screenwriter": _make_screenwriter_node(agents),
-        "character_designer": _make_design_node(agents, "character_designer", "character_design", "人物形象设计"),
-        "background_designer": _make_design_node(agents, "background_designer", "background_design", "背景设计"),
-        "prop_designer": _make_design_node(agents, "prop_designer", "prop_design", "道具设计"),
+        # 每个设计师只认自己那一层的设定级修订（层次见 user_revisions.SETTING_LAYERS）
+        "character_designer": _make_design_node(
+            agents, "character_designer", "character_design", "人物形象设计", LAYER_CHARACTER),
+        "background_designer": _make_design_node(
+            agents, "background_designer", "background_design", "背景设计", LAYER_ART),
+        "prop_designer": _make_design_node(
+            agents, "prop_designer", "prop_design", "道具设计", LAYER_ART),
         "image_prompt_character": _make_image_prompt_node(agents, "人物", "character_design", "character_image_prompts"),
         "image_prompt_prop": _make_image_prompt_node(agents, "道具", "prop_design", "prop_image_prompts"),
         "image_prompt_scene": _make_image_prompt_node(agents, "场景", "background_design", "scene_image_prompts"),
