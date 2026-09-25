@@ -16,5 +16,7 @@ wheels/
 # Windows Zone Identifier 残留（同步 .env 时产生）
 *.Zone.Identifier
 
-# 运行产物
-output/
+# 运行产物（前导斜杠锚定仓库根：不带斜杠的 output/ 会连源码包
+# src/minimax_h3_prompt/output/ 一起忽略，那三个文件于是从未入库，
+# 全新 clone 在 import 阶段就 ModuleNotFoundError）
+/output/
