@@ -127,13 +127,13 @@ def test_v2_flow_describes_bridge_frame_before_writing_segment(tmp_path, monkeyp
 
     snapshots: list[dict] = []
 
-    def fake_write(plan, all_plans, state_arg, brief_arg, llm):
+    def fake_write(plan, all_plans, state_arg, llm):
         snapshots.append(copy.deepcopy(state_arg))
         return f"SEGMENT {plan.index + 1}"
 
     monkeypatch.setattr(segment_prompts, "write_segment_v2", fake_write)
 
-    wizard._run_segmented_flow_v2(brief, session, _plans3(), state, SimpleNamespace())
+    wizard._run_segmented_flow_v2(session, _plans3(), state, SimpleNamespace())
 
     assert len(snapshots) == 3, "三段都应被写出"
     assert "bridge_frame_descriptions" not in snapshots[0], "段 1 没有桥接帧，不得伪造记录"
@@ -158,13 +158,13 @@ def test_v2_flow_without_bridge_video_degrades_without_record(tmp_path, monkeypa
 
     snapshots: list[dict] = []
 
-    def fake_write(plan, all_plans, state_arg, brief_arg, llm):
+    def fake_write(plan, all_plans, state_arg, llm):
         snapshots.append(copy.deepcopy(state_arg))
         return f"SEGMENT {plan.index + 1}"
 
     monkeypatch.setattr(segment_prompts, "write_segment_v2", fake_write)
 
-    wizard._run_segmented_flow_v2(brief, session, _plans3(), {}, SimpleNamespace())
+    wizard._run_segmented_flow_v2(session, _plans3(), {}, SimpleNamespace())
 
     assert len(snapshots) == 1, "拿不到视频就不得继续写下一段"
     assert all("bridge_frame_descriptions" not in s for s in snapshots), \
@@ -198,13 +198,13 @@ def test_v2_flow_reading_failure_degrades_loudly(tmp_path, monkeypatch, capsys):
 
     snapshots: list[dict] = []
 
-    def fake_write(plan, all_plans, state_arg, brief_arg, llm):
+    def fake_write(plan, all_plans, state_arg, llm):
         snapshots.append(copy.deepcopy(state_arg))
         return f"SEGMENT {plan.index + 1}"
 
     monkeypatch.setattr(segment_prompts, "write_segment_v2", fake_write)
 
-    wizard._run_segmented_flow_v2(brief, session, _plans3(), {}, SimpleNamespace())
+    wizard._run_segmented_flow_v2(session, _plans3(), {}, SimpleNamespace())
 
     assert len(snapshots) == 3, "读图失败不得中断分段流程"
     assert all(not s.get("bridge_frame_descriptions") for s in snapshots), "失败时不得写入半截描述"

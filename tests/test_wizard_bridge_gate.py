@@ -152,7 +152,7 @@ def test_v2_flow_blocks_on_bad_handoff_and_keeps_progress(tmp_path, monkeypatch,
 
     written: list[int] = []
 
-    def fake_write(plan, all_plans, state_arg, brief_arg, llm):
+    def fake_write(plan, all_plans, state_arg, llm):
         written.append(plan.index)
         return f"SEGMENT {plan.index + 1}"
 
@@ -163,7 +163,7 @@ def test_v2_flow_blocks_on_bad_handoff_and_keeps_progress(tmp_path, monkeypatch,
     monkeypatch.setattr(wizard, "_confirm", lambda *a, **k: True)
     monkeypatch.setattr(wizard, "_prompt", lambda *a, **k: next(answers, ""))
 
-    wizard._run_segmented_flow_v2(brief, session, plans, state, SimpleNamespace())
+    wizard._run_segmented_flow_v2(session, plans, state, SimpleNamespace())
 
     assert written == [0], "闸门拦下后不得继续写下一段"
     assert not (session.directory / "segments" / "progress.json").exists(), \
@@ -184,7 +184,7 @@ def test_v2_flow_passes_good_handoff_and_writes_progress(tmp_path, monkeypatch):
 
     written: list[int] = []
 
-    def fake_write(plan, all_plans, state_arg, brief_arg, llm):
+    def fake_write(plan, all_plans, state_arg, llm):
         written.append(plan.index)
         return f"SEGMENT {plan.index + 1}"
 
@@ -196,7 +196,7 @@ def test_v2_flow_passes_good_handoff_and_writes_progress(tmp_path, monkeypatch):
     monkeypatch.setattr(wizard, "_confirm", lambda *a, **k: True)
     monkeypatch.setattr(wizard, "_prompt", lambda *a, **k: next(answers, ""))
 
-    wizard._run_segmented_flow_v2(brief, session, plans, state, SimpleNamespace())
+    wizard._run_segmented_flow_v2(session, plans, state, SimpleNamespace())
 
     assert written == [0, 1], "合规交接不得被拦"
     progress = json.loads((session.directory / "segments" / "progress.json").read_text(encoding="utf-8"))
@@ -212,7 +212,7 @@ def test_v2_flow_prints_size_warning_and_continues(tmp_path, monkeypatch, capsys
 
     written: list[int] = []
 
-    def fake_write(plan, all_plans, state_arg, brief_arg, llm):
+    def fake_write(plan, all_plans, state_arg, llm):
         written.append(plan.index)
         return f"SEGMENT {plan.index + 1}"
 
@@ -222,7 +222,7 @@ def test_v2_flow_prints_size_warning_and_continues(tmp_path, monkeypatch, capsys
     answers = iter(["", str(odd_size), ""])
     monkeypatch.setattr(wizard, "_prompt", lambda *a, **k: next(answers, ""))
 
-    wizard._run_segmented_flow_v2(brief, session, plans, state, SimpleNamespace())
+    wizard._run_segmented_flow_v2(session, plans, state, SimpleNamespace())
 
     out = capsys.readouterr().out
     assert "segment_video_size" in out, "启发式档必须显式打出，绝不静默"

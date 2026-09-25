@@ -252,7 +252,7 @@ def test_edge_stability_reaches_both_segment_requests():
     from minimax_h3_prompt.tools.h3_validator import EDGE_STABILITY_SENTENCE
 
     plans = _v2_plans()
-    v2_request = build_segment_v2_request(plans[1], plans, {"shot_table": "x"}, None)
+    v2_request = build_segment_v2_request(plans[1], plans, {"shot_table": "x"})
     assert EDGE_STABILITY_SENTENCE in v2_request, "v2 请求（调用点）没带上 edge-stability 原句"
 
     segments = split_shots_from_prompt(SAMPLE_PROMPT, total_duration=15.0)
@@ -268,7 +268,7 @@ def test_segment_v2_request_english_summary_soundscape():
 
     plan = SegmentPlan(index=1, start_s=4, end_s=10, shots_in_segment=(2,),
                        summary="猫进店跳上柜台", end_hook="猫前爪搭上柜台沿")
-    request = build_segment_v2_request(plan, [plan], {"shot_table": "x"}, None)
+    request = build_segment_v2_request(plan, [plan], {"shot_table": "x"})
     # soundscape/music 字段要求英文摘要句
     assert "1-4 句" in request and "1-3 句" in request
     assert "English" in request
@@ -298,7 +298,7 @@ def test_segment_v2_request_official_format_discipline():
     from minimax_h3_prompt.segment_prompts import build_segment_v2_request
 
     plans = _v2_plans()
-    request = build_segment_v2_request(plans[1], plans, {"shot_table": "x"}, None)
+    request = build_segment_v2_request(plans[1], plans, {"shot_table": "x"})
     # 官方结构要求出现：I2VA 指令行模板
     assert "For the target video, at 0.00 seconds into the target video," in request
     assert "<Picture 1> (from [Shot 1]) is fully referenced." in request
@@ -315,7 +315,7 @@ def test_segment_v2_request_no_legacy_structures():
     from minimax_h3_prompt.segment_prompts import build_segment_v2_request
 
     plans = _v2_plans()
-    request = build_segment_v2_request(plans[1], plans, {"shot_table": "x"}, None)
+    request = build_segment_v2_request(plans[1], plans, {"shot_table": "x"})
     # 组装块不再注入；模板「禁止」节的禁令说明（不写 `X:`）允许出现
     assert "GLOBAL_LOCK（" not in request
     assert "BRIDGE_FROM（" not in request
@@ -348,7 +348,7 @@ def test_write_segment_v2_output_official_shape():
     )
 
     plans = _v2_plans()
-    text = write_segment_v2(plans[1], plans, {"shot_table": "x"}, None, FakeLLM(official_reply))
+    text = write_segment_v2(plans[1], plans, {"shot_table": "x"}, FakeLLM(official_reply))
     assert text == official_reply
     issues = validate_base(text, duration=6.0, variant="I2VA")
     assert issues == []
@@ -487,7 +487,7 @@ def test_v2_request_anchor_line_is_variant_independent(variant):
     from minimax_h3_prompt.segment_prompts import I2VA_ANCHOR_LINE, build_segment_v2_request
 
     brief = Brief(mode="base", variant=variant, duration=12.0, style="写实", plot="便利店橘猫")
-    request = build_segment_v2_request(_v2_plans()[0], _v2_plans(), _frame_state(shot_table=SHOT_TABLE), brief)
+    request = build_segment_v2_request(_v2_plans()[0], _v2_plans(), _frame_state(shot_table=SHOT_TABLE))
     assert I2VA_ANCHOR_LINE in request
     assert "Picture 2" not in request
 
@@ -540,7 +540,7 @@ def test_segment_v2_request_carries_first_frame_description():
     from minimax_h3_prompt.segment_prompts import build_segment_v2_request
 
     plans = _v2_plans()
-    request = build_segment_v2_request(plans[0], plans, _frame_state(), None)
+    request = build_segment_v2_request(plans[0], plans, _frame_state())
     assert FIRST_FRAME_DESC in request, "分段请求未注入首帧实际画面 → 段 1 会照分镜表写错开场状态"
     assert "唯一事实源" in request
     # 冲突时的裁定方向：分镜表让位于图片
@@ -552,7 +552,7 @@ def test_segment_v2_request_carries_last_frame_description_for_final_segment():
     from minimax_h3_prompt.segment_prompts import build_segment_v2_request
 
     plans = _v2_plans()
-    request = build_segment_v2_request(plans[-1], plans, _frame_state(), None)
+    request = build_segment_v2_request(plans[-1], plans, _frame_state())
     assert LAST_FRAME_DESC in request
 
 
@@ -576,7 +576,7 @@ def test_segment_v2_request_scopes_shot_text_to_this_segment():
 
     plans = _v2_plans()
     state = _frame_state(shot_table=SHOT_TABLE)
-    request = build_segment_v2_request(plans[0], plans, state, None)
+    request = build_segment_v2_request(plans[0], plans, state)
     assert "白瓷碟小鱼干" in request         # 本段 Shot 1 原文在
     assert "四爪落上台面暖光锥中央" not in request  # Shot 3（其他时间窗）不在
     assert "只含本段覆盖的镜头" in request
@@ -591,7 +591,7 @@ def test_segment_v2_request_handles_last_frame_only_variant():
         "shot_table": SHOT_TABLE,
         "fl2va_frame_descriptions": [{"role": "last", "description": LAST_FRAME_DESC}],
     }
-    request = build_segment_v2_request(plans[0], plans, state, None)
+    request = build_segment_v2_request(plans[0], plans, state)
     assert "尾帧图" in request
     assert LAST_FRAME_DESC in request
 
@@ -600,7 +600,7 @@ def test_segment_v2_request_does_not_invite_negating_visible_entities():
     """模板不得把 `No cat is visible in the frame.` 当范例推荐——那正是首段跑偏的原句。"""
     from minimax_h3_prompt.segment_prompts import build_segment_v2_request
 
-    request = build_segment_v2_request(_v2_plans()[0], _v2_plans(), _frame_state(), None)
+    request = build_segment_v2_request(_v2_plans()[0], _v2_plans(), _frame_state())
     # 例句可以出现（说明「什么时候才该用」），但必须带上「首帧图里已有的实体绝不能否定」的限定
     assert "只有该实体在本段首帧（Picture 1）里确实不存在时" in request
     assert "绝不能" in request
@@ -612,7 +612,7 @@ def test_segment_v2_request_flags_unscoped_fallback():
 
     plans = _v2_plans()
     state = _frame_state(shot_table="整条分镜表但没有镜头标记：猫顶开门，跳上柜台。")
-    request = build_segment_v2_request(plans[0], plans, state, None)
+    request = build_segment_v2_request(plans[0], plans, state)
     assert "未能按 Shot 号定位本段镜头" in request
     assert "只准取本段时间窗内的内容" in request
 
@@ -717,7 +717,7 @@ def test_v2_request_declares_segment_relative_timebase():
     from minimax_h3_prompt.segment_prompts import build_segment_v2_request
 
     plans = _v2_plans()  # 第 2 段：4-10s，时长 6s
-    request = build_segment_v2_request(plans[1], plans, {"shot_table": "x"}, None)
+    request = build_segment_v2_request(plans[1], plans, {"shot_table": "x"})
     assert "0-6s" in request, "写段时间窗必须以本段 0 起，否则 LLM 会写绝对片时"
     assert "仅作剧情定位" in request, "绝对片时必须显式降级为「只用于定位、不得写进时间戳」"
 
@@ -727,7 +727,7 @@ def test_v2_request_teaches_shot1_marker():
     from minimax_h3_prompt.segment_prompts import build_segment_v2_request
 
     plans = _v2_plans()
-    request = build_segment_v2_request(plans[1], plans, {"shot_table": "x"}, None)
+    request = build_segment_v2_request(plans[1], plans, {"shot_table": "x"})
     assert "[Shot 1] Live-action" in request
 
 
@@ -797,7 +797,7 @@ def test_write_segment_v2_reasks_when_timestamps_overrun_segment():
 
     llm = SequencedLLM([_bad_segment_text(), _good_segment_text()])
     plans = _v2_plans()  # 第 2 段时长 6s
-    text = write_segment_v2(plans[1], plans, {"shot_table": "x"}, None, llm)
+    text = write_segment_v2(plans[1], plans, {"shot_table": "x"}, llm)
 
     assert llm.calls == 2, "首次产出不合格却没有重写"
     assert text == _good_segment_text()
@@ -810,7 +810,7 @@ def test_write_segment_v2_retry_is_bounded_and_never_silent():
 
     llm = SequencedLLM([_bad_segment_text()])
     plans = _v2_plans()
-    text = write_segment_v2(plans[1], plans, {"shot_table": "x"}, None, llm)
+    text = write_segment_v2(plans[1], plans, {"shot_table": "x"}, llm)
 
     assert llm.calls == MAX_SEGMENT_ATTEMPTS, "重试次数无界"
     assert text == _bad_segment_text()
@@ -891,7 +891,7 @@ def test_coexist_rewrites_segment_until_clean():
     good = _arm("executed_00014")
     llm = SequencedLLM([_arm("armA_H1_state_only"), good])
     plans = _v2_plans()  # 第 2 段时长 6s
-    text = write_segment_v2(plans[1], plans, {"shot_table": "x"}, None, llm)
+    text = write_segment_v2(plans[1], plans, {"shot_table": "x"}, llm)
 
     assert llm.calls == 2
     assert text == good
@@ -926,8 +926,73 @@ def test_gate_surfaces_coexist_issue_for_gen004_shot02(tmp_path, monkeypatch, ca
     monkeypatch.setattr(wizard, "_prompt", lambda *a, **k: "")
     monkeypatch.setattr(wizard, "_confirm", lambda *a, **k: False)
 
-    wizard._run_segmented_flow_v2(brief, session, plans, {}, SimpleNamespace())
+    wizard._run_segmented_flow_v2(session, plans, {}, SimpleNamespace())
 
     out = capsys.readouterr().out
     assert "FAST_CAMERA_MULTI_BEAT_COEXIST" in out, "闸门对新检查静默了"
     assert "可立即复制到 H3" not in out
+
+
+# ---------------------------------------------------------------------------
+# 用户修订进每一段（issue #26）
+# 缺陷形态：写段请求收了一个**从未被引用**的 brief 参数、分段规划函数根本没有这个
+# 入参——于是长视频（本项目主用途）的每一段都拿不到用户提过的修订。修法是从 state
+# 读修订 ＋ 把死参数**删掉**，不是给它派新活（设计稿 §5、§13）。
+# ---------------------------------------------------------------------------
+
+REVISION_TEXT = "汉服太朴素了，参考现代汉服，颜值高"
+REVISION_PRIORITY_MARKER = "首帧读图结果 > 用户累积修订 > 分镜表"
+
+
+def _revision_state(**extra):
+    """带累积修订的 state：``user_revisions`` 的形态与阶段 1 人机循环写入的一致。"""
+    state = _frame_state(
+        user_revisions=[{"round": 1, "layer": "frame", "text": REVISION_TEXT}],
+    )
+    state.update(extra)
+    return state
+
+
+def test_every_v2_segment_request_carries_the_revisions():
+    """**每一段**都要出现累积修订块与优先序声明——只落第一段等于没修。"""
+    from minimax_h3_prompt.segment_prompts import build_segment_v2_request
+
+    plans = _v2_plans()
+    state = _revision_state()
+    for plan in plans:
+        request = build_segment_v2_request(plan, plans, state)
+        assert REVISION_TEXT in request, f"第 {plan.index + 1} 段写段请求没带用户修订"
+        assert REVISION_PRIORITY_MARKER in request, f"第 {plan.index + 1} 段没声明注入优先序"
+
+
+def test_v2_request_without_revisions_omits_the_block():
+    """没有修订就不注入空块（与帧锚定块的既有口径一致）。"""
+    from minimax_h3_prompt.segment_prompts import (
+        REVISION_CONTEXT_HEADER,
+        build_segment_v2_request,
+    )
+
+    plans = _v2_plans()
+    request = build_segment_v2_request(plans[0], plans, _frame_state())
+    assert REVISION_CONTEXT_HEADER not in request
+    assert REVISION_PRIORITY_MARKER not in request
+
+
+def test_fallback_rewrite_request_carries_the_revisions():
+    """回退路径（规划失败）同样要带——「只改了主路径就以为改完了」本项目踩过一次。"""
+    segments = split_shots_from_prompt(SAMPLE_PROMPT, total_duration=15.0)
+    llm = FakeLLM()
+    rewrite_segment_prompt(segments[1], SAMPLE_PROMPT, llm,
+                           state=_revision_state(), position_index=1)
+    assert REVISION_TEXT in llm.last_request
+    assert REVISION_PRIORITY_MARKER in llm.last_request
+
+
+def test_write_segment_requests_no_longer_take_the_dead_brief_param():
+    """死参数必须**删掉**：修订从 state 读，写段请求里没有 brief 的读者。"""
+    import inspect
+
+    from minimax_h3_prompt.segment_prompts import build_segment_v2_request, write_segment_v2
+
+    for fn in (build_segment_v2_request, write_segment_v2):
+        assert "brief" not in inspect.signature(fn).parameters, f"{fn.__name__} 还收着死参数 brief"

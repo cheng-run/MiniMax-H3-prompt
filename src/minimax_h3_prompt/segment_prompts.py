@@ -26,6 +26,7 @@ from .tools.h3_validator import (
     timestamps_seconds,
     validate_base,
 )
+from .user_revisions import render_revision_block
 
 # 镜头块标记：[Shot N]（允许中括号与数字间任意空白）
 _SHOT_BLOCK = re.compile(r"\[Shot\s+(\d+)\]")
@@ -296,6 +297,60 @@ def is_degenerate_durations(durations: list[float]) -> bool:
 SEGMENT_ANCHOR_VARIANT = "I2VA"
 I2VA_ANCHOR_LINE = ALIGN_TEMPLATES[SEGMENT_ANCHOR_VARIANT]
 
+# ---------------------------------------------------------------------------
+# 用户累积修订进分段请求（issue #26）
+# ---------------------------------------------------------------------------
+
+# 「不是只落实最后一条」这句不再写进标题：``render_revision_block`` 的收尾句已经说了
+# 同一件事，一个块里说两遍只是噪声。
+REVISION_CONTEXT_HEADER = "【用户累积修订（长视频的**每一段**都要落实）】"
+
+# 注入优先序：图 > 修订 > 分镜表。图最高沿用既有教条——图是用户提交的**产物**，
+# 分镜表是**计划**，成片必须与图连续；修订压过分镜表，因为分镜表是模型按主题写的计划
+# 文本，用户的明确要求就是对它的否决。三者不冲突时都要落实。
+# 措辞里「首帧读图结果 > 用户累积修订 > 分镜表」是**判据字符串**：测试按它认这条声明，
+# 向导的写段前核对块把本块整块照打（用户看到的与模型看到的是同一块）——改措辞要同时
+# 改测试里那几处，grep 它。
+REVISION_PRIORITY_NOTE = (
+    "【注入优先序】三者冲突时一律按此裁定：首帧读图结果 > 用户累积修订 > 分镜表。"
+    "图是用户提交的产物、分镜表只是计划，成片必须与图连续；修订是用户的明确要求，"
+    "压过分镜表这类模型生成的计划文本。三者不冲突时都要落实。"
+)
+
+
+def render_revision_context(state: dict) -> str:
+    """分段请求共用的「累积用户修订 ＋ 注入优先序」块；没有修订时返回空串。
+
+    为什么做成**一个**函数而不是各拼各的：
+
+    - 分段有两条产出路径（v2 规划式、规划失败回退式），2026-09-22 只改了主路径、回退
+      路径的缺陷原样复发过一次（见 ``tests/test_wizard_bridge_anchor.py`` 文件头）；
+    - 真源是 ``state["user_revisions"]``（阶段 1 人机循环写入、在持久化白名单里），
+      从 state 读意味着**每一段**都拿得到，不必逐段传参。
+
+    分段规划**不依赖 state**（它的入参是显式的），所以那条路径由调用方把本函数的
+    返回值经 ``revision_context`` 传进去。
+
+    与 ``user_revisions.render_revision_block`` 的分工：那个只产出**清单正文**，给阶段 1
+    的首帧节点用（那里没有「段」这回事）；本函数在它外面加了分段用的标题与优先序声明。
+    """
+    body = render_revision_block(state.get("user_revisions"))
+    if not body:
+        return ""
+    return f"{REVISION_CONTEXT_HEADER}\n{body}\n{REVISION_PRIORITY_NOTE}"
+
+
+def _revision_block_for_request(state: dict) -> str:
+    """请求模板里用的修订块：没有修订时返回空串，块尾补一个换行。
+
+    补换行这件事**只在这里做**：两条路径的模板都是逐行 f-string 拼接，分头写「有没有
+    修订 + 要不要补换行」迟早漏一处——漏了就是把修订块和下一节黏在同一行，而请求文本
+    没有校验器看得住这种错。
+    """
+    block = render_revision_context(state)
+    return f"{block}\n" if block else ""
+
+
 _REWRITE_INSTRUCTION = f"""你是 H3 视频提示词工程师。把整条视频的提示词重写为**只覆盖指定时间窗的一段独立单镜头提示词**。
 
 输入：完整提示词（多镜头）+ 本段时间窗（秒）。
@@ -355,6 +410,7 @@ def rewrite_segment_prompt(
         f"{_REWRITE_INSTRUCTION}\n\n本段时间窗：{window}\n"
         f"目标镜头：[Shot {segment.shot_number}]\n"
         f"{anchor}\n"
+        f"{_revision_block_for_request(state or {})}"
         f"\n完整提示词：\n{full_prompt}"
     )
     try:
@@ -561,11 +617,14 @@ def build_segment_v2_request(
     plan,  # SegmentPlan
     all_plans: list,
     state: dict,
-    brief,
 ) -> str:
     """组装 v2 写段请求（官方英文格式模板）。
 
     plan：当前段的 SegmentPlan；all_plans：全部规划（用于未来段剧情红线与段落定位）。
+
+    累积修订与帧锚定一样**从 state 读**：state 是本请求的既有入参，每一段都会走这条
+    组装，于是修订对每一段都可见。这里原先还收一个 ``brief`` 参数——它从头到尾没有任何
+    读者，而修订正是被指望经它传进来的（issue #26 的断链）。死参数已删，不是派新用途。
     """
     shots_text, shots_exact = _segment_shot_texts(plan, state)
     if shots_exact:
@@ -597,6 +656,7 @@ def build_segment_v2_request(
         f"包含 Shot：{plan.shots_in_segment}\n"
         f"本段剧情概述（中文，仅供你理解剧情，不得写进提示词）：{plan.summary}\n"
         f"{_frame_anchor_note(plan.index == 0, plan.index == len(all_plans) - 1, state, segment_index=plan.index)}\n"
+        f"{_revision_block_for_request(state)}"
         f"{future_block}\n"
         f"\n{shots_block}"
     )
@@ -679,7 +739,6 @@ def write_segment_v2(
     plan,
     all_plans: list,
     state: dict,
-    brief,
     llm,
 ) -> str | None:
     """用 LLM 为该段写细颗粒度完整提示词（官方英文格式）。LLM 调用失败返回 None。
@@ -691,7 +750,7 @@ def write_segment_v2(
     """
     duration = float(plan.duration_s)
     start_s = float(plan.start_s)
-    base_request = build_segment_v2_request(plan, all_plans, state, brief)
+    base_request = build_segment_v2_request(plan, all_plans, state)
     request = base_request
     text: str | None = None
     for attempt in range(MAX_SEGMENT_ATTEMPTS):

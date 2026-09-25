@@ -84,7 +84,7 @@ def test_v2_records_the_anchor_segment_and_the_judged_video_segment(tmp_path, mo
     # 段1 已生成好 → 交段1 的输出视频 → 段2（末段）已生成好
     _answers(monkeypatch, ["", "video.mp4", ""])
 
-    wizard._run_segmented_flow_v2(session.brief, session, _plans(),
+    wizard._run_segmented_flow_v2(session, _plans(),
                                   {"shot_table": "[Shot 1] 深夜空店内……"}, SimpleNamespace())
 
     record = _log(session)[0]
@@ -102,7 +102,7 @@ def test_v2_judgement_title_names_the_anchor_segment(tmp_path, monkeypatch, caps
     _patch(monkeypatch, tmp_path)
     _answers(monkeypatch, ["", "video.mp4", ""])
 
-    wizard._run_segmented_flow_v2(session.brief, session, _plans(),
+    wizard._run_segmented_flow_v2(session, _plans(),
                                   {"shot_table": "[Shot 1] 深夜空店内……"}, SimpleNamespace())
 
     out = capsys.readouterr().out

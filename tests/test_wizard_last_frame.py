@@ -259,7 +259,7 @@ def test_v2_flow_runs_the_last_frame_check_after_the_loop(tmp_path, monkeypatch,
     _patch_strip(monkeypatch, tmp_path)
     _answers(monkeypatch, ["", "", "last_seg.mp4"], reached=True)
 
-    finished = wizard._run_segmented_flow_v2(session.brief, session, plans, state,
+    finished = wizard._run_segmented_flow_v2(session, plans, state,
                                              SimpleNamespace())
 
     out = capsys.readouterr().out
@@ -282,7 +282,7 @@ def test_v2_flow_stops_when_the_last_frame_verdict_is_stop(tmp_path, monkeypatch
     _patch_strip(monkeypatch, tmp_path, description=WRONG)
     _answers(monkeypatch, ["", "last_seg.mp4", ""], reached=False)
 
-    finished = wizard._run_segmented_flow_v2(session.brief, session, plans, _state(),
+    finished = wizard._run_segmented_flow_v2(session, plans, _state(),
                                              SimpleNamespace())
 
     assert finished is False

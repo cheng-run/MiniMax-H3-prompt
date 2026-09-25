@@ -59,7 +59,7 @@ def _anchor_block(request: str) -> str:
 
 def test_segment1_request_carries_frame_anchor():
     plans, state = _load_gen004()
-    req = build_segment_v2_request(plans[0], plans, state, None)
+    req = build_segment_v2_request(plans[0], plans, state)
     anchor = _anchor_block(req)
     assert FRAME_CONTENT_MARKER in anchor
     assert any(m in anchor for m in DISCIPLINE_MARKERS)
@@ -69,7 +69,7 @@ def test_middle_segments_request_carries_frame_anchor():
     """中间段写段请求必须携带桥接帧读图结果（运行时由向导剥帧后读图写入 state）。"""
     plans, state = _load_gen004(bridge={1: BRIDGE_SEG2_DESC, 2: BRIDGE_SEG3_DESC})
     for seg_index in (1, 2):
-        req = build_segment_v2_request(plans[seg_index], plans, state, None)
+        req = build_segment_v2_request(plans[seg_index], plans, state)
         anchor = _anchor_block(req)
         assert FRAME_CONTENT_MARKER in anchor, f"段 {seg_index + 1} 的请求没带桥接帧实际画面"
         assert any(m in anchor for m in DISCIPLINE_MARKERS), f"段 {seg_index + 1} 的请求没带一致性纪律句"
@@ -78,7 +78,7 @@ def test_middle_segments_request_carries_frame_anchor():
 def test_bridge_description_is_scoped_to_its_segment():
     """段 3 的请求不得误用段 2 的桥接帧描述（每段桥接帧不同，按段号取用）。"""
     plans, state = _load_gen004(bridge={1: BRIDGE_SEG2_DESC})
-    req = build_segment_v2_request(plans[2], plans, state, None)
+    req = build_segment_v2_request(plans[2], plans, state)
     assert BRIDGE_SEG2_DESC not in req
 
 
@@ -86,7 +86,7 @@ def test_middle_segments_without_reading_still_carry_discipline():
     """剥帧被跳过/读图失败时诚实降级：不带「实际画面」，但纪律句仍必须对所有段发出。"""
     plans, state = _load_gen004()
     for seg_index in (1, 2):
-        anchor = _anchor_block(build_segment_v2_request(plans[seg_index], plans, state, None))
+        anchor = _anchor_block(build_segment_v2_request(plans[seg_index], plans, state))
         assert FRAME_CONTENT_MARKER not in anchor, "没有读图结果不得假装有（fixture 物证形态）"
         assert any(m in anchor for m in DISCIPLINE_MARKERS), f"段 {seg_index + 1} 的纪律句缺失"
 
@@ -95,5 +95,5 @@ def test_anchor_discipline_covers_reverse_half_for_all_segments():
     """双向纪律：不只禁止「图中已有写成不存在」，也要禁止「图中没有写成已存在」——对所有段。"""
     plans, state = _load_gen004(bridge={1: BRIDGE_SEG2_DESC, 2: BRIDGE_SEG3_DESC})
     for seg_index in (0, 1, 2):
-        anchor = _anchor_block(build_segment_v2_request(plans[seg_index], plans, state, None))
+        anchor = _anchor_block(build_segment_v2_request(plans[seg_index], plans, state))
         assert REVERSE_DISCIPLINE_MARKER in anchor, f"段 {seg_index + 1} 缺反向纪律（图中没有的不得写成已存在）"

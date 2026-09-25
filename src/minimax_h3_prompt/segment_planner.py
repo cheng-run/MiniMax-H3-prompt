@@ -123,23 +123,29 @@ def parse_segment_plan(text: str, total_s: int) -> list[SegmentPlan] | None:
     return plans
 
 
-def plan_segments(shot_table: str, total_s: float, llm, *, frame_context: str = "") -> list[SegmentPlan] | None:
+def plan_segments(shot_table: str, total_s: float, llm, *, frame_context: str = "",
+                  revision_context: str = "") -> list[SegmentPlan] | None:
     """调 LLM 规划分段；任一失败返回 None（调用方回退机械拆分）。
 
     shot_table：阶段 1 的「分镜设计」文本（[Shot N] 描述 + 切点）。
     frame_context：真实关键帧图片的读图结果（``segment_prompts.frame_anchor_context``）。
     分镜表只是**计划**，用户可能复用/修改首帧图；两者冲突时以图片为准，否则
     plan 层会把「空店→猫进门」这类已被图片否定的状态固化进每一段。
+    revision_context：用户的累积修订 ＋ 注入优先序（``segment_prompts.render_revision_context``）。
+    本函数**不依赖 state**——修订与帧锚一样经显式入参进来，于是「规划层到底看到了什么」
+    在调用点一眼可见；issue #26 的断链正是「收了一个没人读的参数」那种形态。
     """
     total_int = int(round(total_s))
     frame_block = (
         f"\n{FRAME_CONTEXT_HEADER}\n{frame_context}\n"
         if frame_context.strip() else ""
     )
+    revision_block = f"\n{revision_context}\n" if revision_context.strip() else ""
     request = (
         f"{_load_instruction()}\n\n"
         f"视频总时长：{total_int}s\n"
         f"{frame_block}"
+        f"{revision_block}"
         f"\n分镜表：\n{shot_table}"
     )
     try:

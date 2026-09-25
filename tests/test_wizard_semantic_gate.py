@@ -301,7 +301,7 @@ def test_v2_flow_passes_the_current_segments_end_hook(tmp_path, monkeypatch, cap
     _patch_strip(monkeypatch)
     _answers(monkeypatch, ["", "a.mp4", ""], reached=True)
 
-    wizard._run_segmented_flow_v2(session.brief, session, plans, {"shot_table": "[Shot 1] x"},
+    wizard._run_segmented_flow_v2(session, plans, {"shot_table": "[Shot 1] x"},
                                   SimpleNamespace())
 
     out = capsys.readouterr().out

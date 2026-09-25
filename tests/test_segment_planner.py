@@ -129,3 +129,34 @@ def test_planner_instruction_treats_real_frame_as_truth():
     assert "以画面为准" in instruction
     # 图中已有的事物不得写成「尚未出现」
     assert "尚未出现" in instruction
+
+
+# ---------------------------------------------------------------------------
+# 用户修订进分段规划（issue #26）
+# 规划层产出段边界与每段剧情概述——它看不到修订，段划分就可能与用户要求矛盾。
+# 但**不依赖 state**：修订沿用 frame_context 的既有模式，经显式入参进来。
+# ---------------------------------------------------------------------------
+
+def test_plan_segments_passes_revision_context_to_planner():
+    """规划请求必须带上累积修订与注入优先序。"""
+    from minimax_h3_prompt.segment_prompts import render_revision_context
+
+    llm = FakeLLM()
+    ctx = render_revision_context(
+        {"user_revisions": [{"round": 1, "layer": "frame", "text": "汉服改成现代审美"}]})
+    plans = plan_segments("分镜表：[Shot 1] 深夜空店内……", 5, llm, revision_context=ctx)
+
+    assert plans is not None
+    assert "汉服改成现代审美" in llm.last_request
+    assert "首帧读图结果 > 用户累积修订 > 分镜表" in llm.last_request
+
+
+def test_plan_segments_without_revisions_omits_block_and_never_takes_state():
+    """没有修订时不注入空块；且规划函数**不依赖 state**——修订只能经显式入参进来。"""
+    import inspect
+
+    llm = FakeLLM()
+    plan_segments("分镜表：[Shot 1] ……", 5, llm)
+
+    assert "用户累积修订" not in llm.last_request
+    assert "state" not in inspect.signature(plan_segments).parameters

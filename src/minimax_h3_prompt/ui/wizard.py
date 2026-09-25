@@ -34,6 +34,7 @@ from ..user_revisions import (
     log_frame_round,
     record_user_revision,
     render_baseline_block,
+    render_revision_block,
 )
 from .progress import TextProgress
 
@@ -1265,6 +1266,36 @@ def _resume_segmented(config: Config, session: SessionState) -> int:
     return 0
 
 
+def _show_revisions_vs_frame(state: dict) -> None:
+    """写段前把「累积用户修订」与「关键帧读图结果」**并排**摆一次（issue #26）。
+
+    为什么并排摆而不是让机器判：图与修订是否矛盾要**语义对比**才判得出，不可证，项目
+    明令不做这类自动判定（设计稿 §6、ADR 0005）。而「提了修订却没重出图」这种冲突在
+    分段阶段真实存在——不摆出来，用户会以为修订已经落到图上，等到成片才发现。
+
+    摆的就是**写段请求里那块**（``render_revision_context`` 的原样输出，含优先序声明）：
+    用户看到的与模型看到的必须是同一份，否则「它为什么没听我的修订」就无从对账。
+    没有修订时整块不打：没有可冲突的对象，空块只是噪声。
+    """
+    from ..segment_prompts import frame_anchor_context, render_revision_context
+
+    revisions = render_revision_context(state)
+    if not revisions:
+        return
+    frames = frame_anchor_context(state) or "（没有关键帧读图结果：本片无关键帧，或读图未完成）"
+    print("\n" + "=" * 60)
+    print("[写段前核对] 下面两块并列摆出。系统**不判**它们是否矛盾（语义对比不可证）——")
+    print("             冲突请你现在发现并提出。")
+    print("-" * 60)
+    print(revisions)
+    print("-" * 60)
+    print("[关键帧读图结果]（用户提交的图，**唯一事实源**）")
+    print(frames)
+    print("注：第 2 段起锚定的是上一段剥出的**桥接帧**，此刻尚未产生，故不在此并列；")
+    print("    它们在每段剥帧后立刻读图，只进那一段自己的请求。")
+    print("=" * 60)
+
+
 def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summary=None,
                         state: dict | None = None) -> bool:
     """把整条提示词按 [Shot N] 拆成单镜头提示词，逐段陪跑。返回**是否跑完全部段**。
@@ -1286,6 +1317,7 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
     from ..segment_planner import plan_segments
     from ..segment_prompts import (
         frame_anchor_context,
+        render_revision_context,
         rewrite_segment_prompt,
         split_shots_from_prompt,
         write_segment_v2,
@@ -1293,6 +1325,9 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
 
     # ① 先走新流程：segment_planner 规划整秒分段边界 → 每段独立细写（官方英文格式，spec 2026-09-22）
     state = state if state is not None else session.stage_state
+    # 写段前核对（issue #26）：两条产出路径都在本函数内分叉，故摆块也只需这一处——
+    # 摆在分叉之前，v2 与回退路径都只看到一次。
+    _show_revisions_vs_frame(state)
     done = _segments_done(session.directory)
     try:
         cached = _cached_plans(session.directory)
@@ -1316,7 +1351,7 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
                   "计划与进度都已落盘，重跑向导会回到同一条续接路径（不必重做任何段）。")
             return False
         print(f"[续接] 复用已落盘的分段规划（{len(cached)} 段），不重跑规划。")
-        return _run_segmented_flow_v2(brief, session, cached, state, llm, summary=summary,
+        return _run_segmented_flow_v2(session, cached, state, llm, summary=summary,
                                       plans_from_cache=True)
 
     plans = None
@@ -1328,13 +1363,15 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
                 plans = plan_segments(
                     str(state.get("shot_table", "")), brief.duration, llm,
                     frame_context=frame_anchor_context(state),
+                    # 修订经**显式入参**交给规划层：它不依赖 state（issue #26 AC-4）
+                    revision_context=render_revision_context(state),
                 )
     except Exception as exc:  # noqa: BLE001 - 规划失败回退旧路径
         print(f"[提示] 分段规划失败（{exc}），回退到按 [Shot N] 机械拆分。")
 
     if plans:
         print(f"[分段规划] 规划了 {len(plans)} 段：" + ", ".join(f"{p.start_s}-{p.end_s}s" for p in plans))
-        return _run_segmented_flow_v2(brief, session, plans, state, llm, summary=summary)
+        return _run_segmented_flow_v2(session, plans, state, llm, summary=summary)
 
     # ② 回退：依旧按 [Shot N] 拆分
     segments = split_shots_from_prompt(prompt, total_duration=brief.duration)
@@ -1512,7 +1549,7 @@ def _cached_plans(directory: Path) -> list | None:
         raise ValueError(f"分段规划字段不全（{path}）：{exc}") from exc
 
 
-def _run_segmented_flow_v2(brief: Brief, session: SessionState, plans: list, state: dict, llm,
+def _run_segmented_flow_v2(session: SessionState, plans: list, state: dict, llm,
                            summary=None, *, plans_from_cache: bool = False) -> bool:
     """v2 陪跑：边生成边展示——当前段确认完成后，先剥本段尾帧读图（下一段的
     Picture 1 锚，issue #12），再后台预写下一段；用户看第 N 段提示词、去 ComfyUI
@@ -1526,6 +1563,9 @@ def _run_segmented_flow_v2(brief: Brief, session: SessionState, plans: list, sta
 
     预取收益建立在「下一段的桥接帧已就位」之上：下一段桥接帧来自本段输出视频，
     本段完成前它不存在，所以预取必须在本段剥帧读图之后启动（正确性优先于并行）。
+
+    不收 ``brief``（issue #26）：它只被转手喂给写段请求的那个死参数，写段改从 state 读
+    修订之后它就没有读者了——死接线留着，下一个人就会以为它是有用的。
     """
     import json
     import threading
@@ -1570,7 +1610,7 @@ def _run_segmented_flow_v2(brief: Brief, session: SessionState, plans: list, sta
         from ..observability import reporter
         reporter.emit({"type": "agent_start", "role": f"segment_{position + 1}_writer"})
         t0 = time.time()
-        text = write_segment_v2(plans[position], plans, state, brief, llm)
+        text = write_segment_v2(plans[position], plans, state, llm)
         reporter.emit({"type": "agent_done", "role": f"segment_{position + 1}_writer",
                        "duration": time.time() - t0, "out_len": len(text or "")})
         if text:

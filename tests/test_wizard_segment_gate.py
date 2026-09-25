@@ -63,7 +63,7 @@ def test_segmented_flow_surfaces_validator_errors(tmp_path, monkeypatch, capsys)
     monkeypatch.setattr(segment_prompts, "write_segment_v2", lambda *a, **k: _bad())
     _silence(monkeypatch)
 
-    wizard._run_segmented_flow_v2(brief, session, _plans(), {}, SimpleNamespace())
+    wizard._run_segmented_flow_v2(session, _plans(), {}, SimpleNamespace())
 
     out = capsys.readouterr().out
     assert "LAST_TIMESTAMP_TOO_CLOSE_TO_END" in out, "不合格提示词被静默交付了"
@@ -77,7 +77,7 @@ def test_segmented_flow_quiet_on_compliant_segment(tmp_path, monkeypatch, capsys
     monkeypatch.setattr(segment_prompts, "write_segment_v2", lambda *a, **k: _good())
     _silence(monkeypatch)
 
-    wizard._run_segmented_flow_v2(brief, session, _plans(), {}, SimpleNamespace())
+    wizard._run_segmented_flow_v2(session, _plans(), {}, SimpleNamespace())
 
     out = capsys.readouterr().out
     assert "校验未通过" not in out
@@ -112,7 +112,7 @@ def test_prefetch_exception_does_not_hang_the_flow(tmp_path, monkeypatch, capsys
     finished: list[bool] = []
     thread = threading.Thread(
         target=lambda: (
-            wizard._run_segmented_flow_v2(brief, session, _plans(), {}, SimpleNamespace()),
+            wizard._run_segmented_flow_v2(session, _plans(), {}, SimpleNamespace()),
             finished.append(True),
         ),
         daemon=True,
