@@ -39,3 +39,25 @@ def test_brief_and_status_survive_resume(tmp_path):
     assert loaded.brief.variant == "I2VA"
     assert loaded.brief.duration == 18.0
     assert loaded.awaiting_frames is True
+
+
+def test_user_revisions_survive_resume(tmp_path):
+    """累积的用户修订与轮次号必须活过重启（issue #23）。
+
+    与上面那条同族：真源不在 ``_STATE_KEYS`` 白名单里，save 时静默丢弃 →
+    用户重启后要说的话得再说一遍（这正是本票要消灭的行为）。
+    """
+    state = {
+        "user_revisions": [
+            {"round": 1, "layer": "frame", "text": "天空改成黄昏"},
+            {"round": 2, "layer": "frame", "text": "院中加红枫"},
+        ],
+        "frame_round": 2,
+    }
+    generation_dir = tmp_path / "GEN001"
+    save_session(generation_dir, _brief(), state)
+    loaded = load_session(generation_dir)
+    assert loaded is not None
+    assert [item["text"] for item in loaded.stage_state["user_revisions"]] == [
+        "天空改成黄昏", "院中加红枫"]
+    assert loaded.stage_state["frame_round"] == 2

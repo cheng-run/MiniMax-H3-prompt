@@ -14,6 +14,7 @@ from ..config import Config
 from ..generation import fl2va_bundle_from_dict
 from ..tools.h3_validator import validate_prompt
 from ..tools.ref_metadata import format_ref_meta
+from ..user_revisions import render_revision_block
 from .state import PipelineState
 
 
@@ -172,6 +173,9 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
                 时长=f"{brief.duration}s",
                 视觉风格=brief.style,
                 语言=brief.language,
+                # 累积的用户修订：人机修改循环每轮重出都把它带进上下文（issue #23）。
+                # 自动质检循环不设该键 → 空值被 _ctx 跳过，它的替换语义逐字不变。
+                用户修订=render_revision_block(state.get("user_revisions")),
                 分场剧本=state.get("script", ""),
                 人物设计=state.get("character_design", ""),
                 道具设计=state.get("prop_design", ""),

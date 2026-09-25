@@ -14,6 +14,7 @@ from minimax_h3_prompt.generation import (
 )
 from minimax_h3_prompt.graph import nodes, pipeline
 from minimax_h3_prompt.topic_generation import save_generation
+from minimax_h3_prompt.user_revisions import LAYER_FRAME
 
 
 def frame_payload(prompt: str) -> dict:
@@ -248,6 +249,51 @@ def test_result_from_state_single_frame_roundtrip():
     assert result.fl2va_prompt_bundle is not None
     assert result.fl2va_prompt_bundle.first and not result.fl2va_prompt_bundle.last
     assert GenerationResult.from_dict(result.to_dict()) == result
+
+
+def test_frame_node_injects_accumulated_user_revisions(monkeypatch):
+    """累积的用户修订必须进重出请求（issue #23 的反死接线口径：新字段要看得见）。
+
+    意见原本拼在 ``brief.plot`` 上走私（污染地点守卫与常识判官的判据），现在走
+    独立真源 ``state["user_revisions"]``——它若没被节点读走，这一票就等于没接线。
+    """
+    captured = {}
+
+    def fake_run_agent(agent, message):
+        captured["message"] = message
+        return json.dumps(bundle_payload())
+
+    monkeypatch.setattr(nodes, "run_agent", fake_run_agent)
+    node = nodes._make_fl2va_frame_prompt_node({"frame_prompt_engineer": object()})
+    brief = Brief(variant="FL2VA", duration=5, plot="中世纪酒馆室内")
+    node({
+        "brief": brief,
+        "shot_table": "start and end states",
+        "user_revisions": [
+            {"round": 1, "layer": LAYER_FRAME, "text": "天空改成黄昏，要暖金色"},
+            {"round": 2, "layer": LAYER_FRAME, "text": "院中加几片红枫"},
+        ],
+    })
+    message = captured["message"]
+    assert "用户修订" in message
+    assert "天空改成黄昏，要暖金色" in message
+    assert "院中加几片红枫" in message, "只带了最后一条——正是『说了就忘』的形态"
+    assert "每一条都必须落实" in message
+
+
+def test_frame_node_omits_revision_block_without_revisions(monkeypatch):
+    """没有修订请求逐字不变：自动质检循环不设该键，其替换语义不受影响。"""
+    captured = {}
+
+    def fake_run_agent(agent, message):
+        captured["message"] = message
+        return json.dumps(bundle_payload())
+
+    monkeypatch.setattr(nodes, "run_agent", fake_run_agent)
+    node = nodes._make_fl2va_frame_prompt_node({"frame_prompt_engineer": object()})
+    brief = Brief(variant="FL2VA", duration=5, plot="中世纪酒馆室内")
+    node({"brief": brief, "shot_table": "start and end states"})
+    assert "用户修订" not in captured["message"]
 
 
 def test_frame_node_i2va_emits_first_only(monkeypatch):

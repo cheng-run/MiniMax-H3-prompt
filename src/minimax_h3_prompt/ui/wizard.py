@@ -27,6 +27,12 @@ from ..session_store import (
     load_session,
     save_session,
 )
+from ..user_revisions import (
+    LAYER_FRAME,
+    active_revisions,
+    log_frame_round,
+    record_user_revision,
+)
 from .progress import TextProgress
 
 
@@ -370,20 +376,32 @@ def _phase1_new(config: Config) -> SessionState | None:
             continue
         from ..graph.nodes import make_nodes
 
-        brief_feedback = Brief(**{**brief.__dict__})
-        nodes = make_nodes(agents, model, brief_feedback, config)
+        # 意见进**独立真源**（state["user_revisions"]），按轮累积：说了就不忘。
+        # 重出的上下文由首帧节点从 state 读（不是由这里拼进 brief.plot——plot 同时喂
+        # 地点守卫的子串匹配与常识判官的判据，拼进去等于随机改写两条闸门，见 ADR 0005）。
+        revision = record_user_revision(state, layer=LAYER_FRAME, text=feedback)
+        nodes = make_nodes(agents, model, brief, config)
         frame_node = nodes["fl2va_frame_prompts"]
         updated = dict(state)
-        updated["frame_feedback"] = feedback
-        # 复用节点函数重出首尾帧；把意见注入其上下文最直接的方式是临时改写 plot 追加约束
-        brief_retry = Brief(**{**brief.__dict__, "plot": f"{brief.plot}\n（用户修改意见：{feedback}）"})
-        updated["brief"] = brief_retry
+        updated["brief"] = brief  # 主题字段只装主题：修订不再经它传递
         with _progress_scope("[重新生成] 正在按您的意见重出首尾帧生图提示词……（请稍候，期间无需输入）"):
             update = frame_node(updated)
-        updated.update(update)
+        if isinstance(update, dict):
+            updated.update(update)
         state.clear()
         state.update(updated)
-        save_session(generation_dir, brief_retry, state, status=STATUS_AWAITING_FRAMES)
+        # 先落会话、再写台账：这一轮的产物（花过 LLM 钱的那份）先保住，台账是它的证据。
+        # 两个写盘都不吞异常——写失败要声张，绝不静默留下「有产物没账」或「有账没产物」。
+        save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
+        log_frame_round(
+            generation_dir,
+            round_index=revision["round"],
+            layer=LAYER_FRAME,
+            feedback_this_round=feedback,
+            active_revisions=active_revisions(state),
+            bundle=state.get("fl2va_prompt_bundle"),
+            base_used=False,  # 基线（T3）尚未落地：重出仍是纯重掷，如实记
+        )
         print("[已更新] 请查看下方新版本的提示词。")
 
     print("\n阶段 1 完成。请复制上面的生图提示词到 ComfyUI（Z-Image）生成图片。")

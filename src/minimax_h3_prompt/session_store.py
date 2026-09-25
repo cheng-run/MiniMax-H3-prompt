@@ -29,6 +29,8 @@ STATUS_SEGMENTED_RUNNING = "segmented_running"
 # state 中允许持久化的键；brief 对象单独序列化。`_progress` 是阶段 1 断点的元数据（哪个节点跑完了）。
 # `fl2va_frame_descriptions` 是用户提交帧图的读图结果——阶段 2 分段流程的唯一画面事实源，
 # 续跑丢掉它，分段提示词就会退回照分镜表写（2026-09-22 首帧不锚定缺陷）。
+# `user_revisions` 是累积的用户修订（唯一真源）——丢掉等于用户要说的话得再说一遍；
+# `frame_round` 是它的轮次计数器（只增不减，撤条也不能回退，否则台账行号会重复）。
 _STATE_KEYS = (
     "production_plan", "director_brief", "creative_lock", "script",
     "character_design", "background_design", "prop_design", "art_design",
@@ -36,6 +38,7 @@ _STATE_KEYS = (
     "identity_lock", "shot_table", "shot_review_lock", "visual_design",
     "fl2va_prompt_bundle", "fl2va_frame_descriptions", "subject_defs",
     "sound_design", "music", "final_prompt", "final_report", "_progress",
+    "user_revisions", "frame_round",
 )
 
 
