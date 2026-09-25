@@ -61,6 +61,11 @@ class Brief:
     style: str = "Cinematic"
     language: str = "Chinese"
     plot: str = ""
+    # 起步前置澄清的结论（向导在主题之后、生成之前问出来的「钉具体」要求）。
+    # **必须是独立字段**：plot 同时喂着主题地点守卫的**子串**匹配与生图常识判官的判据，
+    # 把自由文本拼进去会随机改写两条闸门的判据（docs/adr/0005）。不走 brief 文件解析，
+    # 只由向导写入，故 parse_brief_text 不读它。
+    clarifications: str = ""
     refs: list[RefItem] = field(default_factory=list)
     draft: str = ""
     raw: str = ""

@@ -85,6 +85,9 @@ class Config:
 
         self.default_duration: float = float(pipeline.get("default_duration", 5.0))
         self.max_qa_iterations: int = int(pipeline.get("max_qa_iterations", 2))
+        # 起步前置澄清最多问几个问题（0 = 关闭澄清）。与质检轮数上限并列的第二个「轮数上限」；
+        # 向导每次提问时都从这个对象读，所以改 YAML 重启即生效，不存在第二处硬编码默认值。
+        self.max_clarification_rounds: int = int(pipeline.get("max_clarification_rounds", 3))
         self.roundtable_max_rounds: int = int(pipeline.get("roundtable_max_rounds", 2))
         self.output_path: Path = PROJECT_ROOT / pipeline.get("output_path", "output/final_prompt.txt")
         self.save_stages: bool = bool(pipeline.get("save_stages", True))

@@ -270,12 +270,55 @@ def _resume_stage1(config: Config, session: SessionState) -> SessionState | None
 # 阶段 1
 # ---------------------------------------------------------------------------
 
+def _ask_clarifications(config: Config, topic: str) -> str:
+    """起步前置澄清：总是问，一句话即可跳过；返回**独立澄清块**（空串=没有澄清）。
+
+    结论存进 ``Brief.clarifications``，**不**拼进 ``brief.plot``：``plot`` 同时喂着主题
+    地点守卫的子串匹配与生图常识判官的判据，拼进去会随机改写两条闸门的判据，且有否定句
+    反噬（docs/adr/0005）。
+
+    问题由主模型按主题现生成（固定清单问不出「钉具体」）。生成失败在这里**报出来再跳过**，
+    不静默——澄清是可选前置，不该让网络抖动把整条流程炸掉。
+    """
+    limit = int(config.max_clarification_rounds)
+    if limit <= 0:
+        print("[提示] 配置里澄清轮数上限为 0，本次不做起步澄清。")
+        return ""
+    from ..clarification import generate_clarifying_questions, is_skip, render_clarification_block
+    from ..model_factory import build_chat_model
+
+    try:
+        questions = generate_clarifying_questions(topic, build_chat_model(), limit)
+    except Exception as exc:  # noqa: BLE001 — 可选前置，报出来再跳过；绝不静默
+        print(f"[提示] 起步澄清问题生成失败（{exc}），本次跳过澄清，直接进入原流程。")
+        return ""
+    if not questions:
+        print("[提示] 这一步没有需要澄清的问题，直接进入原流程。")
+        return ""
+
+    print(f"\n开始前先问 {len(questions)} 个问题，把主题钉具体（输入「跳过」可随时结束澄清）：")
+    pairs: list[tuple[str, str]] = []
+    for index, question in enumerate(questions, 1):
+        answer = _prompt(f"[澄清 {index}/{len(questions)}] {question}\n"
+                         "（回车=不回答这条，输入 跳过=结束澄清直接开始）：")
+        if is_skip(answer):
+            print("[提示] 已结束澄清，按你已答的部分继续。")
+            break
+        if answer:
+            pairs.append((question, answer))
+    block = render_clarification_block(pairs)
+    if block:
+        print("\n[本次澄清结论]\n" + block)
+    return block
+
+
 def _phase1_new(config: Config) -> SessionState | None:
     topic = ""
     while not topic:
         topic = _prompt("请输入视频主题（必填）：")
         if not topic:
             print("视频主题不能为空。")
+    clarifications = _ask_clarifications(config, topic)
     duration_raw = _prompt(f"视频时长秒数（回车默认 {config.default_duration:.0f}）：")
     try:
         duration = float(duration_raw) if duration_raw else config.default_duration
@@ -294,6 +337,7 @@ def _phase1_new(config: Config) -> SessionState | None:
         style=style or "",
         language=config.default_language,
         plot=topic,
+        clarifications=clarifications,
         raw=topic,
     )
     generation_dir = _session_dir(config, topic)

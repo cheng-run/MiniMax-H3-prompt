@@ -17,6 +17,10 @@ from ..tools.ref_metadata import format_ref_meta
 from .state import PipelineState
 
 
+# 各节点的上下文标签一律写字面量（与既有的「原始剧情」「分镜表」同形，读起来就是请求本身）。
+# 其中「起步澄清」这个标签**必须逐字等于** clarification.BLOCK_LABEL（CONTEXT.md 的术语）：
+# 它与「用户修订」会在同一个请求里并排出现，两个名字指同一件事就会有后人把它们读成一件事。
+# 两者同形由 test_wizard_clarification 的标题一致性用例钉住。
 def _ctx(**kw: str) -> str:
     """把带标签的上下文拼成一段。空值跳过。"""
     parts = [f"【{k}】\n{v}" for k, v in kw.items() if v]
@@ -32,6 +36,7 @@ def _brief_block(brief: Brief) -> str:
         风格=brief.style,
         语言=brief.language,
         剧情=brief.plot,
+        起步澄清=brief.clarifications,
         参考资产=refs if brief_uses_refs(brief) else "",
         草稿=brief.draft or "",
     )
@@ -47,7 +52,7 @@ def _make_producer_node(agents: dict) -> Callable:
 def _make_director_node(agents: dict) -> Callable:
     def node(state: PipelineState) -> dict:
         brief: Brief = state["brief"]
-        msg = f"请给出导演阐述：\n{_ctx(原始剧情=brief.plot, 制作计划=state.get('production_plan', ''))}"
+        msg = f"请给出导演阐述：\n{_ctx(原始剧情=brief.plot, 起步澄清=brief.clarifications, 制作计划=state.get('production_plan', ''))}"
         return {"director_brief": run_agent(agents["director"], msg)}
     return node
 
@@ -59,6 +64,7 @@ def _make_screenwriter_node(agents: dict) -> Callable:
             "请写出分场剧本：\n"
             + _ctx(
                 原始剧情=brief.plot,
+                起步澄清=brief.clarifications,
                 导演阐述=state.get("director_brief", ""),
                 创意锁定=state.get("creative_lock", ""),
             )
@@ -72,6 +78,7 @@ def _design_context(state: PipelineState, brief: Brief) -> str:
     refs = format_ref_meta(brief.refs) if brief.refs else "（无）"
     return _ctx(
         原始剧情=brief.plot,
+        起步澄清=brief.clarifications,
         导演阐述=state.get("director_brief", ""),
         创意锁定=state.get("creative_lock", ""),
         分场剧本=state.get("script", ""),
@@ -96,6 +103,7 @@ def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_f
             f"请为{kind}生成 Z-Image 和 Flux.2 两个可直接复制的生图提示词。只输出 JSON。\n"
             + _ctx(
                 原始剧情=brief.plot,
+                起步澄清=brief.clarifications,
                 分场剧本=state.get("script", ""),
                 对应设计=state.get(design_field, ""),
                 美术统筹=state.get("art_design", ""),
@@ -160,6 +168,7 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
             + _ctx(
                 变体=brief.variant,
                 原始主题=brief.plot,
+                起步澄清=brief.clarifications,
                 时长=f"{brief.duration}s",
                 视觉风格=brief.style,
                 语言=brief.language,
@@ -182,7 +191,8 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
             repair = run_agent(
                 agents["frame_prompt_engineer"],
                 f"重写以下 {variant} JSON，{repair_hint}。不要 markdown。\n"
-                f"主题：{brief.plot}\n错误：{first_error}\n原始结果：{raw}",
+                f"主题：{brief.plot}\n{_ctx(起步澄清=brief.clarifications)}"
+                f"错误：{first_error}\n原始结果：{raw}",
             )
             try:
                 bundle = parse_bundle(repair, brief)
@@ -199,6 +209,7 @@ def _make_art_director_node(agents: dict) -> Callable:
         refs = format_ref_meta(brief.refs) if brief.refs else "（无）"
         msg = "请统筹并裁决最终美术设计：\n" + _ctx(
             原始剧情=brief.plot,
+            起步澄清=brief.clarifications,
             导演阐述=state.get("director_brief", ""),
             创意锁定=state.get("creative_lock", ""),
             分场剧本=state.get("script", ""),
@@ -267,7 +278,7 @@ def _make_storyboard_node(agents: dict) -> Callable:
         msg = (
             "请给出分镜镜头表（视频总时长 "
             + f"{brief.duration}s，{scale.describe()}）：\n"
-            + _ctx(原始剧情=brief.plot,
+            + _ctx(原始剧情=brief.plot, 起步澄清=brief.clarifications,
                    分场剧本=state.get("script", ""), 美术设计=state.get("art_design", ""),
                    人物设计=state.get("character_design", ""),
                    背景设计=state.get("background_design", ""),
@@ -313,6 +324,7 @@ def _make_cinematographer_node(agents: dict) -> Callable:
         brief: Brief = state["brief"]
         msg = "请细化每个镜头的画面描述：\n" + _ctx(
             原始剧情=brief.plot,
+            起步澄清=brief.clarifications,
             镜头表=state.get("shot_table", ""),
             镜头评审锁定=state.get("shot_review_lock", ""),
         )
@@ -414,7 +426,7 @@ def _make_prompt_engineer_node(agents: dict) -> Callable:
             + f"，时长 {brief.duration}s，{style_note} / 语言 {brief.language}）。"
             "【最高优先级】用户原始主题如下，人物、地点、动作必须完全忠于它，"
             "禁止引入主题中没有的新地点、新事件或新人物。\n"
-            + _ctx(用户原始主题=brief.plot)
+            + _ctx(用户原始主题=brief.plot, 起步澄清=brief.clarifications)
         )
         variant = str(brief.variant).upper()
         fl2va_ctx = _fl2va_frame_context(state) if variant in ("FL2VA", "I2VA", "L2VA") else ""
@@ -520,14 +532,14 @@ def make_nodes(agents: dict, model, brief: Brief, config: Config) -> dict[str, C
 def make_creative_rt_node(rt, model, brief) -> Callable:
     return _make_roundtable_node(
         rt, "creative_lock", "锁定创意方向、情绪基调、任务类型与叙事节奏",
-        lambda s: _ctx(原始剧情=brief.plot,
+        lambda s: _ctx(原始剧情=brief.plot, 起步澄清=brief.clarifications,
                        制作计划=s.get("production_plan", ""), 导演阐述=s.get("director_brief", "")))
 
 
 def make_shot_rt_node(rt, model, brief) -> Callable:
     return _make_roundtable_node(
         rt, "shot_review_lock", "评审镜头表的可生成性并锁定镜头方案",
-        lambda s: _ctx(原始剧情=brief.plot,
+        lambda s: _ctx(原始剧情=brief.plot, 起步澄清=brief.clarifications,
                        镜头表=s.get("shot_table", ""), 美术设计=s.get("art_design", ""),
                        时长=f"{s['duration']}s"))
 

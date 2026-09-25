@@ -10,6 +10,7 @@ from langgraph.graph import END, START, StateGraph
 
 from ..agents import build_role_agents, run_agent
 from ..brief_parser import FRAME_VARIANTS, Brief
+from ..clarification import as_block
 from ..config import Config
 from ..observability import stage_saver, token_meter
 from ..output.assembler import assemble_and_repair
@@ -43,8 +44,13 @@ def _theme_repair_injection(state: dict, brief: Brief) -> str:
         lines.append(req)
     if anchor and variant in FRAME_VARIANTS:
         lines.append(f"{variant} 场景锚点（正文全程不得离开）：{anchor}")
-    lines.append("【禁止无中生有】正文与画面中的每个细节必须可溯源到用户原始主题/分场剧本/镜头表/关键帧；"
-                 "不得新增主题中不存在的主体、地点或道具。")
+    # 起步澄清与主题并列，是**合法来源**：少了这条，质检精修会把澄清产出的细节当成
+    # 「无中生有」删掉——用户说出口的要求被机器的修复轮静默撤回（issue #29）。
+    clarify = as_block(brief.clarifications)
+    if clarify:
+        lines.append(clarify)
+    lines.append("【禁止无中生有】正文与画面中的每个细节必须可溯源到用户原始主题/起步澄清/分场剧本/镜头表/关键帧；"
+                 "不得新增这些来源里不存在的主体、地点或道具。")
     return "\n".join(lines)
 
 # 线性执行顺序（独立子任务在组合节点内并发，整图保持线性、每个节点恰好一次）

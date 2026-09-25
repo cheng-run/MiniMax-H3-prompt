@@ -51,6 +51,9 @@ def _brief_to_dict(brief: Brief) -> dict[str, Any]:
         "style": brief.style,
         "language": brief.language,
         "plot": brief.plot,
+        # 起步前置澄清的结论（issue #29）。brief 的字段是逐个显式列出的，新字段不加进
+        # 这里就是静默丢弃——用户重启后要重新答一遍澄清。
+        "clarifications": brief.clarifications,
         "refs": [
             {"picture": r.picture, "name": r.name, "description": r.description, "path": r.path}
             for r in brief.refs
@@ -67,6 +70,7 @@ def _brief_from_dict(raw: dict[str, Any]) -> Brief:
         style=str(raw.get("style", "")),
         language=str(raw.get("language", "Chinese")),
         plot=str(raw.get("plot", "")),
+        clarifications=str(raw.get("clarifications", "")),
         draft=str(raw.get("draft", "")),
     )
     for item in raw.get("refs", []):

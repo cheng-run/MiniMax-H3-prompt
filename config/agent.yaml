@@ -2,6 +2,7 @@
 pipeline:
   default_duration: 5        # 单段视频默认时长（秒），H3 常见单片段
   max_qa_iterations: 2       # 质检回退最大轮数
+  max_clarification_rounds: 3  # 起步前置澄清最多问几个问题（0 = 关闭澄清）
   roundtable_max_rounds: 2   # 圆桌讨论最大轮数
   output_path: output/final_prompt.txt
   save_stages: true          # 每个角色/阶段的产物落盘 output/stages/
