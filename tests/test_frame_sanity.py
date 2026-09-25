@@ -13,6 +13,7 @@ from minimax_h3_prompt.tools.frame_sanity import (
     prompt_common_sense_issues,
 )
 from minimax_h3_prompt.tools.h3_validator import ValidationIssue
+from minimax_h3_prompt.user_revisions import render_baseline_block
 
 
 def _brief():
@@ -92,6 +93,48 @@ def test_stage1_frame_qa_loop_regenerates(monkeypatch):
     assert calls["issues"] == 2
     assert out["fl2va_prompt_bundle"]["first"][0]["positive_prompt"] == "fixed"
     assert "frame_prompt_issues" not in out
+
+
+def test_stage1_qa_loop_never_uses_a_revision_baseline(monkeypatch):
+    """自动质检循环对**当前产物**重算（替换语义），不得被修订基线染色（issue #25 / ADR 0005）。
+
+    真实链路里这个键到不了这里（人机循环每轮跑完就摘），但它是「人的累积」那条循环的
+    入参：万一旧 state 或续接把它递进来，循环当场摘掉——替换语义逐字不变。
+    """
+    config = SimpleNamespace(common_sense_qa=True, max_qa_iterations=1)
+    brief = _brief()
+    state = {
+        "brief": brief,  # 真实链路里 run_stage1 把 brief 放进 state，真节点要读它
+        "fl2va_prompt_bundle": {"scene_anchor": "beach", "first": [], "last": []},
+        "script": "s",
+        nodes_mod.FRAME_BASELINE_KEY: render_baseline_block({
+            "scene_anchor": "上一版的沙滩与礁石",
+            "first": [{"model_family": "zimage", "positive_prompt": "首帧：沙滩上的女郎"}],
+        }),
+    }
+    monkeypatch.setattr(frame_sanity, "frame_common_sense_issues",
+                        lambda bundle, brief, agents: [
+                            ValidationIssue("error", "SHOOTING_PERSPECTIVE", "被拍人物手持相机")])
+    monkeypatch.setattr(pipeline, "stage_saver", SimpleNamespace(save=lambda *a, **k: None))
+    captured = {}
+
+    def fake_run_agent(agent, message):
+        captured["message"] = message
+        return json.dumps({
+            "scene_anchor": "a beach at sunset",
+            "first": {"zimage": {"positive_prompt": "A woman stands on a beach at sunset."}},
+            "last": {"zimage": {"positive_prompt": "The same woman walks away along the beach."}},
+            "continuity_constraints": ["Keep the same woman, clothing, and beach location."],
+        })
+
+    monkeypatch.setattr(nodes_mod, "run_agent", fake_run_agent)
+
+    pipeline._stage1_frame_qa_loop(state, brief, {"frame_prompt_engineer": object()},
+                                   model=None, config=config)
+
+    assert "质检问题" in captured["message"], "循环没走重生成路径，这条断言就成了空转"
+    assert "修订基线" not in captured["message"], "自动质检循环吃到了修订基线——替换语义被染色"
+    assert "上一版的沙滩与礁石" not in captured["message"]
 
 
 def test_stage2_qa_includes_common_sense(monkeypatch):

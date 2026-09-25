@@ -14,7 +14,7 @@ from minimax_h3_prompt.generation import (
 )
 from minimax_h3_prompt.graph import nodes, pipeline
 from minimax_h3_prompt.topic_generation import save_generation
-from minimax_h3_prompt.user_revisions import LAYER_FRAME
+from minimax_h3_prompt.user_revisions import LAYER_FRAME, render_baseline_block
 
 
 def frame_payload(prompt: str) -> dict:
@@ -294,6 +294,88 @@ def test_frame_node_omits_revision_block_without_revisions(monkeypatch):
     brief = Brief(variant="FL2VA", duration=5, plot="中世纪酒馆室内")
     node({"brief": brief, "shot_table": "start and end states"})
     assert "用户修订" not in captured["message"]
+
+
+def test_frame_node_injects_revision_baseline(monkeypatch):
+    """修订基线必须进重出请求（issue #25）：它是「上一版产物」的独立入参通道。
+
+    只喂正文文本不够——scene_anchor 与 continuity_constraints 是首尾帧连续性闸门校验的
+    字段，所以基线块由完整产物渲染（渲染质量由 tests/test_user_revisions.py 承担，这里
+    只证节点确实把它读走：不读，这一票就是没接线）。
+    """
+    captured = {}
+
+    def fake_run_agent(agent, message):
+        captured["message"] = message
+        return json.dumps(bundle_payload())
+
+    monkeypatch.setattr(nodes, "run_agent", fake_run_agent)
+    node = nodes._make_fl2va_frame_prompt_node({"frame_prompt_engineer": object()})
+    brief = Brief(variant="FL2VA", duration=5, plot="中世纪酒馆室内")
+    previous = {
+        "scene_anchor": "中世纪酒馆室内的橡木长桌与壁炉",
+        "first": [{"model_family": "zimage", "positive_prompt": "首帧：三人围坐，桌上有酒杯"}],
+        "last": [{"model_family": "zimage", "positive_prompt": "尾帧：三人举杯"}],
+        "continuity_constraints": ["同一张橡木长桌与同一组任务装备"],
+    }
+    node({
+        "brief": brief,
+        "shot_table": "start and end states",
+        "user_revisions": [{"round": 1, "layer": LAYER_FRAME, "text": "天空改成黄昏"}],
+        nodes.FRAME_BASELINE_KEY: render_baseline_block(previous),
+    })
+    message = captured["message"]
+    assert "修订基线" in message
+    assert "橡木长桌与壁炉" in message, "场景锚没进请求——基线在被校验的字段上失锚"
+    assert "首帧：三人围坐，桌上有酒杯" in message, "上一版的画面细节没进请求"
+    assert "以用户修订为准" in message, "没声明冲突时修订优先（AC-2）"
+
+
+def test_frame_node_omits_baseline_without_previous_product(monkeypatch):
+    """尚无上一版产物（首轮重出 / 自动质检循环）→ 请求里没有基线块，也不报错（AC-5）。"""
+    captured = {}
+
+    def fake_run_agent(agent, message):
+        captured["message"] = message
+        return json.dumps(bundle_payload())
+
+    monkeypatch.setattr(nodes, "run_agent", fake_run_agent)
+    node = nodes._make_fl2va_frame_prompt_node({"frame_prompt_engineer": object()})
+    brief = Brief(variant="FL2VA", duration=5, plot="中世纪酒馆室内")
+    node({"brief": brief, "shot_table": "start and end states"})
+    assert "修订基线" not in captured["message"]
+
+
+def test_rewrite_retry_also_carries_the_baseline_and_revisions(monkeypatch):
+    """bundle 过不了校验后的**改写**重试请求同样带基线与修订（issue #25）。
+
+    那条路只在首轮产物过不了校验时走，正常路径走不到——正是最容易漏接线的一处
+    （澄清当年就漏在这里，见 tests/test_wizard_clarification.py 的同形用例）。
+    首轮回复用合法 JSON 但缺尾帧与连续性约束，才落到**重写整份 JSON** 的外层分支；
+    坏 JSON 落到内层「转成 JSON」重试，那条只管格式转换，原始结果已在请求里。
+    """
+    replies = iter([
+        json.dumps({"scene_anchor": "medieval tavern interior",
+                    "first": {"zimage": {"positive_prompt": "三人围坐"}}}),
+        json.dumps(bundle_payload()),
+    ])
+    seen: list[str] = []
+    monkeypatch.setattr(nodes, "run_agent",
+                        lambda agent, message: seen.append(message) or next(replies))
+    node = nodes._make_fl2va_frame_prompt_node({"frame_prompt_engineer": object()})
+    brief = Brief(variant="FL2VA", duration=5, plot="中世纪酒馆室内")
+    node({
+        "brief": brief,
+        "user_revisions": [{"round": 1, "layer": LAYER_FRAME, "text": "天空改成黄昏"}],
+        nodes.FRAME_BASELINE_KEY: render_baseline_block({
+            "scene_anchor": "上一版的酒馆：橡木长桌与壁炉",
+            "first": [{"model_family": "zimage", "positive_prompt": "首帧：桌上有酒杯"}],
+        }),
+    })
+
+    assert len(seen) == 2, "首轮产物没触发改写重试，这条用例没测到重试路径"
+    assert "修订基线" in seen[1] and "橡木长桌与壁炉" in seen[1], "改写请求丢了基线"
+    assert "用户修订" in seen[1] and "天空改成黄昏" in seen[1], "改写请求丢了用户修订"
 
 
 def test_frame_node_i2va_emits_first_only(monkeypatch):

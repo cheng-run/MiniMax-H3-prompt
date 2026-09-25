@@ -17,6 +17,7 @@ from ..output.assembler import assemble_and_repair
 from ..tools.h3_validator import format_issues, validate_prompt
 from ..tools.ref_metadata import to_tuple
 from ..tools.theme_guard import theme_fidelity_issues, theme_requirements_text
+from ..user_revisions import FRAME_BASELINE_KEY
 from .nodes import (
     make_creative_rt_node,
     make_identity_rt_node,
@@ -203,6 +204,10 @@ def _stage1_frame_qa_loop(state: dict, brief: Brief, agents, model, config: Conf
     from ..tools.h3_validator import format_issues
     from .nodes import make_nodes
 
+    # 修订基线是**人的累积**那条循环的入参（ADR 0005 / issue #25）。本循环对当前产物重算，
+    # 语义是**替换**：万一上游把它递进来（旧 state、手工改过的会话、续接），当场摘掉——
+    # 替换语义不该因为 state 里多了一个键就滑成「以用户上一版为基线」。
+    state.pop(FRAME_BASELINE_KEY, None)
     for i in range(config.max_qa_iterations):
         bundle_dict = state.get("fl2va_prompt_bundle")
         if not isinstance(bundle_dict, dict):

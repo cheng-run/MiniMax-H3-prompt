@@ -28,10 +28,12 @@ from ..session_store import (
     save_session,
 )
 from ..user_revisions import (
+    FRAME_BASELINE_KEY,
     LAYER_FRAME,
     active_revisions,
     log_frame_round,
     record_user_revision,
+    render_baseline_block,
 )
 from .progress import TextProgress
 
@@ -384,10 +386,26 @@ def _phase1_new(config: Config) -> SessionState | None:
         frame_node = nodes["fl2va_frame_prompts"]
         updated = dict(state)
         updated["brief"] = brief  # 主题字段只装主题：修订不再经它传递
+        # 修订基线（#25）：以上一轮**完整产物**为基线重出，用户没提过的细节才不会跟着
+        # 重掷一起漂走（实测第 3 轮连第 1 轮就有的门环包浆都漂没了）。经**独立入参键**
+        # 传给节点——自动质检循环不设该键，它「对当前产物重算」的替换语义逐字不变。
+        # 尚无上一版产物时渲染成空串：不设键也不报错，台账如实记 False。
+        baseline = render_baseline_block(state.get("fl2va_prompt_bundle"))
+        if baseline:
+            updated[FRAME_BASELINE_KEY] = baseline
+        else:
+            updated.pop(FRAME_BASELINE_KEY, None)
         with _progress_scope("[重新生成] 正在按您的意见重出首尾帧生图提示词……（请稍候，期间无需输入）"):
             update = frame_node(updated)
+        # 台账的 base_used 取「节点**真的**拿到了基线」这件事，而不是再判一次渲染结果：
+        # 否则哪天这段接线断了，台账还会记 True——事后按它分组就分错了（它是判定累积
+        # 到底生效没有的唯一分组变量）。取在 update 合并之前，免得被节点输出影响。
+        base_used = FRAME_BASELINE_KEY in updated
         if isinstance(update, dict):
             updated.update(update)
+        # 基线块是**本轮的入参**，不是产物：跑完就摘掉，不让它顺着 state 流到阶段 2 或
+        # 续接路径上去——那些地方没有「本轮以上一版为基线」这回事。
+        updated.pop(FRAME_BASELINE_KEY, None)
         state.clear()
         state.update(updated)
         # 先落会话、再写台账：这一轮的产物（花过 LLM 钱的那份）先保住，台账是它的证据。
@@ -400,7 +418,7 @@ def _phase1_new(config: Config) -> SessionState | None:
             feedback_this_round=feedback,
             active_revisions=active_revisions(state),
             bundle=state.get("fl2va_prompt_bundle"),
-            base_used=False,  # 基线（T3）尚未落地：重出仍是纯重掷，如实记
+            base_used=base_used,  # 如实记：没有上一版产物（空基线）就是没上基线
         )
         print("[已更新] 请查看下方新版本的提示词。")
 

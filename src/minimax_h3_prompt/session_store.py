@@ -31,6 +31,9 @@ STATUS_SEGMENTED_RUNNING = "segmented_running"
 # 续跑丢掉它，分段提示词就会退回照分镜表写（2026-09-22 首帧不锚定缺陷）。
 # `user_revisions` 是累积的用户修订（唯一真源）——丢掉等于用户要说的话得再说一遍；
 # `frame_round` 是它的轮次计数器（只增不减，撤条也不能回退，否则台账行号会重复）。
+# **故意不在**这里的：`frame_revision_baseline`（修订基线，issue #25）。它是人机修改循环
+# **某一轮的入参**而不是产物，每轮由当时那一版产物现渲染、跑完即摘；持久化它等于把一份
+# 陈旧的基线喂给续接后的自动质检循环（那是对当前产物重算的替换语义）。
 _STATE_KEYS = (
     "production_plan", "director_brief", "creative_lock", "script",
     "character_design", "background_design", "prop_design", "art_design",

@@ -20,6 +20,7 @@ from minimax_h3_prompt.user_revisions import (
     active_revisions,
     log_frame_round,
     record_user_revision,
+    render_baseline_block,
     render_revision_block,
 )
 
@@ -89,6 +90,63 @@ def test_corrupt_entry_is_loud_instead_of_silently_dropped():
         render_revision_block([{"round": 1, "layer": LAYER_FRAME, "text": "  "}])
     with pytest.raises(ValueError):
         active_revisions({"user_revisions": ["这不是条目"]})
+
+
+def _baseline_bundle() -> dict:
+    """上一版完整产物（节点落盘的形态：帧是列表、每项带 model_family）。"""
+    return {
+        "scene_anchor": "秋日庭院：青石地、院角水缸、墙侧红枫",
+        "first": [
+            {"frame": "first", "model_family": "zimage",
+             "positive_prompt": "首帧-Z：橘猫蹲在青石上，门环有包浆"},
+            {"frame": "first", "model_family": "flux2",
+             "positive_prompt": "首帧-F：橘猫蹲在青石上，门环有包浆（Flux.2）"},
+        ],
+        "last": [
+            {"frame": "last", "model_family": "zimage", "positive_prompt": "尾帧-Z：橘猫抬头看红枫"},
+        ],
+        "continuity_constraints": ["同一只橘猫、同一庭院", "门环包浆与茶托位置不变"],
+    }
+
+
+def test_baseline_block_carries_the_whole_previous_product():
+    """基线取**完整**产物：首/尾帧正文 + 场景锚 + 连续性约束，不是只喂正文文本。
+
+    场景锚与 continuity_constraints 正是首尾帧连续性那几条 mismatch 闸门校验的字段，
+    只喂正文会让基线在被校验的字段上失锚（issue #25）。
+    """
+    block = render_baseline_block(_baseline_bundle())
+
+    assert "门环有包浆" in block, "基线丢了上一版的画面细节——『未提过的细节要保留』落空"
+    assert "橘猫抬头看红枫" in block, "只带了首帧，尾帧没进基线"
+    assert "青石地、院角水缸" in block, "场景锚没进基线（它正是连续性闸门校验的字段）"
+    assert "门环包浆与茶托位置不变" in block, "连续性约束没进基线"
+    assert "原样保留" in block, "没写明未提到的部分不许漂移，模型会当成重新创作（纯重掷）"
+    assert "以用户修订为准" in block, "没写明冲突时修订优先（票面 AC-2）"
+
+
+def test_baseline_block_is_empty_without_a_previous_product():
+    """首轮重出（尚无上一版产物）渲染成空串——调用方据此不设键、台账记 False，都不报错。"""
+    assert render_baseline_block(None) == ""
+    assert render_baseline_block({}) == ""
+    assert render_baseline_block("这不是产物") == ""
+
+
+def test_baseline_block_accepts_the_model_grouped_shape():
+    """模型原始输出是「模型名分组」的 dict，与落盘的列表形态并存；两种都要认得。
+
+    认不出来的后果不是报错而是**静默渲染成空块**——基线悄悄消失、台账还记着没上基线，
+    正是本模块要消灭的形态。
+    """
+    block = render_baseline_block({
+        "scene_anchor": "秋日庭院",
+        "first": {"zimage": {"positive_prompt": "首帧-Z：橘猫蹲在青石上"}},
+        "last": {"flux2": {"positive_prompt": "尾帧-F：橘猫抬头看红枫"}},
+    })
+
+    assert "首帧-Z：橘猫蹲在青石上" in block
+    assert "尾帧-F：橘猫抬头看红枫" in block
+    assert "秋日庭院" in block
 
 
 def test_ledger_appends_one_row_per_round_with_full_snapshot(tmp_path):

@@ -18,6 +18,13 @@ from typing import Any, Iterable
 # 修订台账文件名（``<generation_dir>/frame-rounds.jsonl``，CONTEXT.md「修订台账」）。
 FRAME_ROUNDS_FILENAME = "frame-rounds.jsonl"
 
+# 修订基线的**独立入参键**（issue #25）：人机修改循环每轮重出时，把上一轮完整产物渲染好的
+# 「修订基线」块放进 state 的这个键，首帧节点读它注入请求。独立的理由是语义分叉：基线与
+# 「人的修订累积」同属人机循环，而**自动质检循环不设它**（它是对当前产物重算的替换语义，
+# 不能滑成「以用户上一版为基线」，见 ADR 0005）。块由渲染函数产出而非节点自己拼，于是
+# 「有没有基线」这件事只有一个判据——台账的 base_used 取的就是「这个键在不在 node 的入参里」。
+FRAME_BASELINE_KEY = "frame_revision_baseline"
+
 # 层次＝重跑起点（CONTEXT.md「用户修订」）。本模块只定义**画面级**：它对应「只重跑
 # 首帧提示词节点」，是本票落地的唯一一档。设定级三档（人物设定／美术场景道具／
 # 剧情分镜）各自要回灌产物并重跑下游，由 T6 连同重跑路由一起加——先占位一个没有
@@ -104,6 +111,90 @@ def render_revision_block(revisions: Iterable[dict[str, Any]] | None) -> str:
     return "\n".join(lines)
 
 
+_FRAME_LABELS = (("first", "首帧"), ("last", "尾帧"))
+
+
+def _text_list(value: Any) -> list[str]:
+    """把「一条或多条文本」规整成清单。
+
+    字符串按**单条**处理而不是逐字符迭代：``continuity_constraints`` 在产物里是列表，
+    裸字符串一旦进来，按可迭代拆开就会往基线里塞一串单字——渲染出的块看着有内容，
+    实际全是噪声，而且不报错。
+    """
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _frame_entries(frames: Any) -> list[tuple[str, str]]:
+    """一帧的 ``(模型名, 正向提示词)`` 清单；模型名不知道就留空（渲染时省略标签）。
+
+    认的形态与 ``FL2VAPromptBundle.from_dict`` 一致：节点落盘的是 ``to_dict()`` 的列表
+    （每项带 ``model_family``），模型原始输出是「模型名分组」的 dict——同一份状态在仓里
+    本来就有这两种写法，认窄了会让渲染悄悄少认一种。
+
+    不复用 ``FL2VAPromptBundle.from_dict``：它缺锚点／空帧就抛，而这里「没有上一版产物」
+    是合法输入（票面 AC-5 要求不报错），容错边界不同。
+    """
+    if isinstance(frames, dict):
+        rows: list[tuple[str, Any]] = (
+            [("", frames)] if ("positive_prompt" in frames or "prompt" in frames)
+            else list(frames.items())
+        )
+    elif isinstance(frames, list):
+        rows = [("", item) for item in frames]
+    else:
+        return []
+    entries: list[tuple[str, str]] = []
+    for model, item in rows:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("positive_prompt") or item.get("prompt") or "").strip()
+        if text:
+            entries.append((str(item.get("model_family") or model or ""), text))
+    return entries
+
+
+def render_baseline_block(bundle: Any) -> str:
+    """把**上一轮完整产物**渲染成「修订基线」块；没有可用的上一版产物时返回空串。
+
+    为什么取完整产物而不是只喂正文文本：``scene_anchor`` 与 ``continuity_constraints``
+    正是首尾帧连续性那几条 mismatch 闸门校验的字段，只喂正文会让基线在被校验的字段上
+    失锚（issue #25）。返回空串就是「尚无上一版产物」，调用方据此不设键、台账记
+    ``base_used=False``，都不报错——首轮重出走的就是这条。
+    """
+    raw = bundle if isinstance(bundle, dict) else None
+    if not raw:
+        return ""
+    frames = [(label, _frame_entries(raw.get(name))) for name, label in _FRAME_LABELS]
+    anchor = str(raw.get("scene_anchor") or "").strip()
+    constraints = _text_list(raw.get("continuity_constraints"))
+    if not anchor and not constraints and not any(entries for _, entries in frames):
+        return ""
+    lines = [
+        "上一版（用户已看过的那一版）关键帧生图提示词如下。本次是在它基础上的定向修改，"
+        "不是重新创作：",
+        "- 用户修订没有提到的部分必须原样保留：人物、服装、道具、场景陈设、构图与光线"
+        "细节都不许漂移；",
+        "- 与用户修订冲突的地方，一律以用户修订为准；",
+        "- 场景锚点与连续性约束是首尾帧连续性校验的判据，除用户修订明确要求外必须保留。",
+    ]
+    if anchor:
+        lines.append(f"场景锚点：{anchor}")
+    for label, entries in frames:
+        if entries:
+            lines.append(f"{label}提示词：")
+            # 模型名不知道就只写提示词本身；不要往发给模型的提示词里塞「?」这种占位符
+            lines.extend(f"- {model}：{text}" if model else f"- {text}"
+                         for model, text in entries)
+    if constraints:
+        lines.append("连续性约束：")
+        lines.extend(f"- {item}" for item in constraints)
+    return "\n".join(lines)
+
+
 def log_frame_round(directory: str | Path, *, round_index: int, layer: str,
                     feedback_this_round: str, active_revisions: list[dict[str, Any]],
                     bundle: dict[str, Any] | None, base_used: bool) -> Path:
@@ -112,7 +203,8 @@ def log_frame_round(directory: str | Path, *, round_index: int, layer: str,
     ``active_revisions`` 取**当轮活动清单的全量快照**而非增量：于是「某条修订在第 N 轮
     被撤掉」可事后 diff 相邻两轮看出来，撤销本身不必单开一列。
     ``base_used`` 是日后判定「累积到底生效没有」的分组变量——缺它就无法把「上了上一版
-    做基线」与「纯重掷」的轮次分开看（基线本身由 T3 落地，此前恒为 False）。
+    做基线」与「纯重掷」的轮次分开看（基线由人机修改循环经 ``FRAME_BASELINE_KEY``
+    传入，见 issue #25；调用方按「键在不在传给节点的 state 里」如实记）。
     """
     record = {
         "round": int(round_index),
@@ -131,7 +223,7 @@ def log_frame_round(directory: str | Path, *, round_index: int, layer: str,
 
 
 __all__ = [
-    "FRAME_ROUNDS_FILENAME", "LAYER_FRAME", "LAYER_LABELS",
+    "FRAME_BASELINE_KEY", "FRAME_ROUNDS_FILENAME", "LAYER_FRAME", "LAYER_LABELS",
     "active_revisions", "log_frame_round", "next_round",
-    "record_user_revision", "render_revision_block",
+    "record_user_revision", "render_baseline_block", "render_revision_block",
 ]

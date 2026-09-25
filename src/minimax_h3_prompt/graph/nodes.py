@@ -14,7 +14,7 @@ from ..config import Config
 from ..generation import fl2va_bundle_from_dict
 from ..tools.h3_validator import validate_prompt
 from ..tools.ref_metadata import format_ref_meta
-from ..user_revisions import render_revision_block
+from ..user_revisions import FRAME_BASELINE_KEY, render_revision_block
 from .state import PipelineState
 
 
@@ -176,6 +176,9 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
                 # 累积的用户修订：人机修改循环每轮重出都把它带进上下文（issue #23）。
                 # 自动质检循环不设该键 → 空值被 _ctx 跳过，它的替换语义逐字不变。
                 用户修订=render_revision_block(state.get("user_revisions")),
+                # 修订基线（issue #25）：上一轮**完整产物**渲染成的块，由人机修改循环经独立
+                # 入参键传入——没有它，用户没提过的细节每轮都会跟着重掷一起漂走。
+                修订基线=state.get(FRAME_BASELINE_KEY),
                 分场剧本=state.get("script", ""),
                 人物设计=state.get("character_design", ""),
                 道具设计=state.get("prop_design", ""),
@@ -192,10 +195,20 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
         try:
             bundle = parse_bundle(raw, brief)
         except ValueError as first_error:
+            # 这条改写请求**重写整份 JSON**，所以它必须带上主请求的全部要求：少了修订与
+            # 基线，这一轮就退回纯重掷（用户没提过的细节漂走）并把用户说过的意见丢掉。
+            # 它只在产物过不了校验时走，正常路径走不到——最容易只接主请求那一处（澄清
+            # 当年就漏在这条路上，见 tests/test_wizard_clarification.py 的重试用例）。
+            # 内层「转成 JSON」那条重试不管内容（原文随请求一并发给模型），故不在此列。
+            rewrite = _ctx(
+                起步澄清=brief.clarifications,
+                用户修订=render_revision_block(state.get("user_revisions")),
+                修订基线=state.get(FRAME_BASELINE_KEY),
+            )
             repair = run_agent(
                 agents["frame_prompt_engineer"],
                 f"重写以下 {variant} JSON，{repair_hint}。不要 markdown。\n"
-                f"主题：{brief.plot}\n{_ctx(起步澄清=brief.clarifications)}"
+                f"主题：{brief.plot}\n{rewrite}"
                 f"错误：{first_error}\n原始结果：{raw}",
             )
             try:
