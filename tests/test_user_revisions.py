@@ -1,4 +1,4 @@
-"""用户修订真源与修订台账（issue #23 / T1）。
+"""用户修订真源与修订台账（#23 / T1；按编号撤销见 #24 / T2）。
 
 用户实测（ADR 0005 物证）：同一主题连提两次意见，第二次重出的产物里第一条的改动
 **整体消失**。根因是第 N 轮用循环外的原始 brief 重建，前 N-1 条被丢弃；而意见唯一
@@ -18,10 +18,16 @@ from minimax_h3_prompt.user_revisions import (
     FRAME_ROUNDS_FILENAME,
     LAYER_FRAME,
     active_revisions,
+    begin_round,
     log_frame_round,
+    next_round,
     record_user_revision,
+    remove_user_revision,
     render_baseline_block,
     render_revision_block,
+    render_revision_list,
+    render_revocation_block,
+    revocation_note,
 )
 
 
@@ -176,6 +182,103 @@ def test_ledger_appends_one_row_per_round_with_full_snapshot(tmp_path):
     # 层次既记机器值也记人读标签（与 gate-log 的 action/action_label 同一形状）
     assert rows[1]["layer"] == LAYER_FRAME
     assert rows[1]["layer_label"] == "只改画面"
+
+
+def test_any_revision_can_be_removed_by_its_screen_number():
+    """按编号撤**任意**一条，不必从末尾逐条撤（issue #24 / T2）。
+
+    票面场景：「先改成秋天、再加枫叶、再来个电影级镜头、最后改回春天」，此时要撤的是
+    **第 1 条**（秋天）；只能撤末尾的话得把 4→3→2→1 全撤掉再把后三条重说一遍。
+    """
+    state: dict = {}
+    for text in ("改成秋天", "加枫叶", "电影级镜头", "改回春天"):
+        record_user_revision(state, layer=LAYER_FRAME, text=text)
+
+    removed = remove_user_revision(state, 1)
+
+    assert removed["text"] == "改成秋天"
+    assert [item["text"] for item in active_revisions(state)] == ["加枫叶", "电影级镜头", "改回春天"]
+    # 撤中间与撤末尾同样可行——位置编号每次都对应当前清单
+    assert remove_user_revision(state, 2)["text"] == "电影级镜头"
+    assert remove_user_revision(state, 2)["text"] == "改回春天"
+    assert [item["text"] for item in active_revisions(state)] == ["加枫叶"]
+
+
+def test_out_of_range_revoke_is_loud_and_changes_nothing():
+    """编号超界必须报错：静默忽略会让用户以为撤掉了，随后「重出后改动还在」无法对账。"""
+    state: dict = {}
+    record_user_revision(state, layer=LAYER_FRAME, text="改成秋天")
+
+    for bad in (0, 2, -1, "第1条", None):
+        with pytest.raises(ValueError):
+            remove_user_revision(state, bad)
+    assert [item["text"] for item in active_revisions(state)] == ["改成秋天"], "报错时清单被改动了"
+
+
+def test_round_keeps_advancing_on_revoke_only_rounds():
+    """撤销轮没有新增条目，轮次计数器仍要往前推——否则连续两轮撤销共用同一个轮次号。"""
+    state: dict = {}
+    record_user_revision(state, layer=LAYER_FRAME, text="一")
+    record_user_revision(state, layer=LAYER_FRAME, text="二")
+
+    assert begin_round(state) == 3
+    remove_user_revision(state, 2)
+    assert begin_round(state) == 4
+    assert next_round(state) == 5
+    # 只增不减：撤到空清单也不回退（回退会让台账里出现两行 round 相同）
+    remove_user_revision(state, 1)
+    assert state["user_revisions"] == []
+    assert begin_round(state) == 5
+
+
+def test_screen_list_and_injected_block_share_one_numbering():
+    """屏幕清单与注入块必须同一套编号：撤的是「模型看到的第 2 条吗」由此可判。"""
+    state: dict = {}
+    record_user_revision(state, layer=LAYER_FRAME, text="改成秋天")
+    record_user_revision(state, layer=LAYER_FRAME, text="加枫叶")
+
+    listing = render_revision_list(active_revisions(state))
+    block = render_revision_block(active_revisions(state))
+
+    assert [line for line in listing.splitlines()] == [
+        "1. [只改画面] 改成秋天", "2. [只改画面] 加枫叶"]
+    assert listing.splitlines() == block.splitlines()[:2], "两处编号/顺序不一致"
+
+
+def test_revocation_block_tells_the_model_to_withdraw_the_change():
+    """撤销要说给模型听（AC-3）：只摘清单的话，基线的「原样保留」会把已落地的改动保住。
+
+    票面场景：撤掉被第 4 条覆盖掉的旧第 1 条「改成秋天」，第 4 条「改回春天」仍在生效——
+    末句把「其余修订为准」写死，正是为了这种同处一地的两条不打架。
+    """
+    block = render_revocation_block([{"round": 1, "layer": LAYER_FRAME, "text": "改成秋天"}])
+
+    assert "改成秋天" in block, "没写撤的是哪条，模型无从知道要撤回什么"
+    assert "不再生效" in block
+    assert "撤回" in block, "没要求撤回其造成的画面改动——那它就只会被基线原样保住"
+    assert "以其余修订为准" in block, "没写清与仍在生效的其余修订冲突时谁优先"
+
+
+def test_revocation_note_names_the_revoked_revisions_for_the_ledger():
+    """台账本轮记录记的是**文本**不是编号：编号是现念的位置号，撤一条后其余条重排序，
+    事后再看编号已经指不回原来那条。"""
+    note = revocation_note([{"round": 2, "layer": LAYER_FRAME, "text": "加枫叶"}])
+
+    assert "加枫叶" in note
+    assert "无新意见" in note, "撤销轮留白会被后来的人读成漏记"
+    assert revocation_note([]) == ""
+
+
+def test_revocation_block_is_empty_without_revocations():
+    """没撤任何条时渲染成空串（`_ctx` 空值跳过）——正常重出轮的消息逐字不变。"""
+    assert render_revocation_block(None) == ""
+    assert render_revocation_block([]) == ""
+
+
+def test_screen_list_is_empty_without_revisions():
+    """空清单渲染成空串（屏幕据此打「清单为空」），不报错——撤空后还要能重出（AC-6）。"""
+    assert render_revision_list(None) == ""
+    assert render_revision_list([]) == ""
 
 
 def test_ledger_snapshot_shows_a_revision_dropped_between_rounds(tmp_path):

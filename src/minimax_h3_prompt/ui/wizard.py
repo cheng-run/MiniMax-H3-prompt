@@ -29,12 +29,19 @@ from ..session_store import (
 )
 from ..user_revisions import (
     FRAME_BASELINE_KEY,
+    FRAME_REVOKED_KEY,
     LAYER_FRAME,
     active_revisions,
+    begin_round,
     log_frame_round,
+    next_round,
     record_user_revision,
+    remove_user_revision,
     render_baseline_block,
     render_revision_block,
+    render_revision_list,
+    render_revocation_block,
+    revocation_note,
 )
 from .progress import TextProgress
 
@@ -369,20 +376,35 @@ def _phase1_new(config: Config) -> SessionState | None:
 
     while True:
         _show_frame_prompts(state, generation_dir)
+        # 每轮重出**前后**都摆一次清单（重出后再回到循环顶端）：它是「我到底说过什么」的
+        # 唯一凭据，也是撤销时照着念编号的那张表——没摆出来，撤销就只剩「撤最后一条」。
+        _show_revision_list(state)
         if not _confirm("对生图提示词有修改意见？", default=False):
             break
-        mode = _prompt("输入 1 只重出画面提示词（附意见），输入 2 整个流程重来：")
-        if mode.strip() == "2":
+        mode = _prompt("输入 1 只重出画面提示词（附意见），输入 2 整个流程重来，"
+                       "输入 3 撤销清单里的某条：")
+        if mode == "2":
             return _phase1_new(config)
-        feedback = _prompt("请输入修改意见：")
-        if not feedback:
-            continue
+        revoked: list[dict] = []
+        if mode == "3":
+            revoked = _revoke_revisions(state, generation_dir, brief)
+            if not revoked:
+                continue  # 一条没撤＝没有要重出的东西，回上一步重看提示词
+            # 撤销轮没有新增条目，轮次号得自己推（连续两轮撤销不能共用同一个轮次号，
+            # 否则台账里出现两行 round 相同，事后无法按轮对齐）。
+            round_index = begin_round(state)
+            feedback = revocation_note(revoked)
+        else:
+            feedback = _prompt("请输入修改意见：")
+            if not feedback:
+                continue
+            # 意见进**独立真源**（state["user_revisions"]），按轮累积：说了就不忘。
+            # 重出的上下文由首帧节点从 state 读（不是由这里拼进 brief.plot——plot 同时喂
+            # 地点守卫的子串匹配与常识判官的判据，拼进去等于随机改写两条闸门，见 ADR 0005）。
+            revision = record_user_revision(state, layer=LAYER_FRAME, text=feedback)
+            round_index = revision["round"]
         from ..graph.nodes import make_nodes
 
-        # 意见进**独立真源**（state["user_revisions"]），按轮累积：说了就不忘。
-        # 重出的上下文由首帧节点从 state 读（不是由这里拼进 brief.plot——plot 同时喂
-        # 地点守卫的子串匹配与常识判官的判据，拼进去等于随机改写两条闸门，见 ADR 0005）。
-        revision = record_user_revision(state, layer=LAYER_FRAME, text=feedback)
         nodes = make_nodes(agents, model, brief, config)
         frame_node = nodes["fl2va_frame_prompts"]
         updated = dict(state)
@@ -392,10 +414,12 @@ def _phase1_new(config: Config) -> SessionState | None:
         # 传给节点——自动质检循环不设该键，它「对当前产物重算」的替换语义逐字不变。
         # 尚无上一版产物时渲染成空串：不设键也不报错，台账如实记 False。
         baseline = render_baseline_block(state.get("fl2va_prompt_bundle"))
-        if baseline:
-            updated[FRAME_BASELINE_KEY] = baseline
-        else:
-            updated.pop(FRAME_BASELINE_KEY, None)
+        _set_round_input(updated, FRAME_BASELINE_KEY, baseline)
+        # 本轮撤销（#24）：被撤的修订不再生效，其造成的画面改动要跟着撤回。只摘清单不够——
+        # 基线那句「未提到的部分原样保留」正是把上一版里已落地的改动保下来的那只手。
+        # 独立键、不混进基线块：台账的 base_used 只看基线的键在不在。非撤销轮 ``revoked``
+        # 是空列表，渲染成空串即摘键（与基线同走 _set_round_input 一条规则）。
+        _set_round_input(updated, FRAME_REVOKED_KEY, render_revocation_block(revoked))
         with _progress_scope("[重新生成] 正在按您的意见重出首尾帧生图提示词……（请稍候，期间无需输入）"):
             update = frame_node(updated)
         # 台账的 base_used 取「节点**真的**拿到了基线」这件事，而不是再判一次渲染结果：
@@ -404,9 +428,10 @@ def _phase1_new(config: Config) -> SessionState | None:
         base_used = FRAME_BASELINE_KEY in updated
         if isinstance(update, dict):
             updated.update(update)
-        # 基线块是**本轮的入参**，不是产物：跑完就摘掉，不让它顺着 state 流到阶段 2 或
-        # 续接路径上去——那些地方没有「本轮以上一版为基线」这回事。
+        # 基线块与本轮撤销都是**本轮的入参**，不是产物：跑完就摘掉，不让它们顺着 state 流到
+        # 阶段 2 或续接路径上去——那些地方没有「本轮以上一版为基线／撤了哪几条」这回事。
         updated.pop(FRAME_BASELINE_KEY, None)
+        updated.pop(FRAME_REVOKED_KEY, None)
         state.clear()
         state.update(updated)
         # 先落会话、再写台账：这一轮的产物（花过 LLM 钱的那份）先保住，台账是它的证据。
@@ -414,7 +439,7 @@ def _phase1_new(config: Config) -> SessionState | None:
         save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
         log_frame_round(
             generation_dir,
-            round_index=revision["round"],
+            round_index=round_index,
             layer=LAYER_FRAME,
             feedback_this_round=feedback,
             active_revisions=active_revisions(state),
@@ -482,6 +507,72 @@ def _show_frame_prompts(state: dict, generation_dir: Path) -> None:
         if rendered:
             print(rendered)
             print()
+
+
+def _show_revision_list(state: dict) -> None:
+    """展示带编号的累积修订清单 + 轮次与条数（T2 AC-1/AC-4）。
+
+    清单**空也照打**：撤空之后「现在一条都不剩」是用户必须看到的事实（否则他会以为
+    撤销没生效），而累积 0 条正是重出的合法输入。
+
+    **两个轮次号都打**（票面 AC-4 要「当前轮次」，撤销/台账对账要「下一次的轮次号」）：
+    只打当前轮次，用户撤完一条后无从知道这一轮会被记成第几轮；只打下一次轮次，屏幕上的
+    数字会指向一轮**可能根本不会发生**的重出（用户若当场说「没有意见了」，那个号就落空了）。
+    首版（``frame_round`` 为 0）说「首版」而不是「第 0 轮」。
+    """
+    items = active_revisions(state)
+    done = int(state.get("frame_round") or 0)
+    current = f"第 {done} 轮" if done else "首版（尚未重出）"
+    print(f"\n[用户修订] {current} · 累积 {len(items)} 条 · 下一次重出记为第 {next_round(state)} 轮")
+    listing = render_revision_list(items)
+    print(listing if listing else "  （清单为空：重出时不会带上任何修订）")
+
+
+def _set_round_input(target: dict, key: str, block: str) -> None:
+    """把「本轮的入参块」放进传参 dict；块为空就摘掉键。
+
+    基线（#25）与撤销（#24）走同一条规则，「有块就设键、没块就摘键」各写一遍迟早漏一处，
+    而台账的 ``base_used`` 只看基线的键在不在——漏摘会让「这轮没上基线」记成上了。
+    """
+    if block:
+        target[key] = block
+    else:
+        target.pop(key, None)
+
+
+def _revoke_revisions(state: dict, generation_dir: Path, brief: Brief) -> list[dict]:
+    """按屏幕编号撤销清单条目，返回被撤掉的条目（空列表＝用户一条都没撤）。
+
+    **一次可以连撤多条**（撤完回车），撤一条就立刻落盘：撤销是人对清单的修改，崩一次
+    就得重撤的话，续接路径上「我的意见还在吗」又要重新怀疑一遍。
+    每撤一条都重打清单——编号是位置号，撤掉一条后其余条重排序，不重打的话用户照着
+    上一屏的编号再撤就会撤错人（AC-1：「编号与删除操作一一对应」）。
+    """
+    revoked: list[dict] = []
+    while True:
+        items = active_revisions(state)
+        if not items:
+            # 空清单有两条来路，措辞必须分开：一进来就是空的（选错了），与**刚被撤空**。
+            # 后者再说一句「没有可撤销的条目」，紧跟上一行的「[已撤销] 第 N 条」，
+            # 会被读成「刚才那下没撤掉」——正是撤销这个功能最不能有的错觉。
+            print("[提示] 清单已撤空：本次重出不会带上任何修订。" if revoked
+                  else "[提示] 清单里没有可撤销的条目。")
+            return revoked
+        print("\n[撤销修订] 输入要撤掉的编号（照下方清单念）；撤完直接回车，按当前清单重出。")
+        print(render_revision_list(items))
+        raw = _prompt("要撤销的编号（回车=撤完）：").strip()
+        if not raw:
+            return revoked
+        try:
+            # 编号由这里原样转交、由真源校验（越界与非数字都在那一处报错）：两处各转一次
+            # 就有两种措辞，用户看到的到底是哪一条规则也说不清。
+            entry = remove_user_revision(state, raw)
+        except ValueError as exc:
+            print(f"[提示] {exc}")
+            continue
+        revoked.append(entry)
+        print(f"[已撤销] 第 {raw} 条：{entry['text']}")
+        save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
 
 
 def render_fl2va_frame_markdown_from_bundle(bundle, frame: str) -> str:

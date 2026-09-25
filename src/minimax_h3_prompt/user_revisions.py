@@ -25,6 +25,12 @@ FRAME_ROUNDS_FILENAME = "frame-rounds.jsonl"
 # 「有没有基线」这件事只有一个判据——台账的 base_used 取的就是「这个键在不在 node 的入参里」。
 FRAME_BASELINE_KEY = "frame_revision_baseline"
 
+# 本轮**被撤销**的修订块（issue #24 / T2）的独立入参键。同样是一轮的入参、跑完即摘：
+# 撤销是「这一轮谁不再生效」这件事，不是产物。与基线**分开成键**的理由是不能共用——
+# 台账的 base_used 取「基线的键在不在入参里」，若把撤销说明塞进基线块，撤销轮就会在
+# 没有上一版产物时也记成「上了基线」，而它是事后判定累积生效与否的唯一分组变量。
+FRAME_REVOKED_KEY = "frame_revision_revoked"
+
 # 层次＝重跑起点（CONTEXT.md「用户修订」）。本模块只定义**画面级**：它对应「只重跑
 # 首帧提示词节点」，是本票落地的唯一一档。设定级三档（人物设定／美术场景道具／
 # 剧情分镜）各自要回灌产物并重跑下游，由 T6 连同重跑路由一起加——先占位一个没有
@@ -75,6 +81,18 @@ def next_round(state: dict[str, Any]) -> int:
     return max(int(state.get("frame_round") or 0), recorded) + 1
 
 
+def begin_round(state: dict[str, Any]) -> int:
+    """开一个新轮次：返回本轮轮次号，并把计数器推上去（**只增不减**）。
+
+    为什么单独成一个函数：**撤销轮没有新增条目**（T2），轮次号得自己推。不推的话连续
+    两轮撤销会拿到同一个轮次号，台账里出现两行 ``round`` 相同——正是 ``next_round``
+    的 docstring 要防的那种事后无法按轮对齐。
+    """
+    index = next_round(state)
+    state["frame_round"] = index
+    return index
+
+
 def record_user_revision(state: dict[str, Any], *, layer: str, text: str) -> dict[str, Any]:
     """把一条意见追加进累积清单，返回写入的条目（就地改 state）。
 
@@ -83,10 +101,34 @@ def record_user_revision(state: dict[str, Any], *, layer: str, text: str) -> dic
     content = str(text).strip()
     if not content:
         raise ValueError("用户修订不能为空")
-    entry = {"round": next_round(state), "layer": str(layer), "text": content}
+    entry = {"round": begin_round(state), "layer": str(layer), "text": content}
     state["user_revisions"] = [*(state.get("user_revisions") or []), entry]
-    state["frame_round"] = entry["round"]
     return entry
+
+
+def remove_user_revision(state: dict[str, Any], screen_number: Any) -> dict[str, Any]:
+    """按**屏幕编号**撤掉清单里的一条，返回被撤掉的条目（就地改 state）。
+
+    编号取**活动清单里 1 起的位置**，与注入块、屏幕清单同源（见 ``render_revision_list``）：
+    用户照着屏幕念编号即可，撤掉一条后其余条重排序，下一次念的就是重排后的编号。
+    不取「提出时的轮次」——那个编号与屏幕上的序号对不上，人要撤第 3 条得先去查台账。
+
+    ``screen_number`` 收 ``Any`` 而不收 ``int``：调用方给的是用户原样敲进来的字符串，
+    这里要的是**报错**而不是 TypeError——越界与非法编号一律声张、不静默忽略，否则用户
+    以为撤掉了、实际没撤，随后「重出后被撤的改动还在」又变成一条不可证故障（本模块
+    存在的理由）。
+    """
+    entries = active_revisions(state)
+    try:
+        position = int(screen_number)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"撤销编号必须是数字：{screen_number!r}") from exc
+    if not 1 <= position <= len(entries):
+        raise ValueError(f"撤销编号超界：清单现有 {len(entries)} 条，收到 {position}")
+    state["user_revisions"] = [
+        entry for offset, entry in enumerate(entries, 1) if offset != position
+    ]
+    return entries[position - 1]
 
 
 def active_revisions(state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -94,21 +136,76 @@ def active_revisions(state: dict[str, Any]) -> list[dict[str, Any]]:
     return [dict(_checked(item)) for item in state.get("user_revisions") or []]
 
 
-def render_revision_block(revisions: Iterable[dict[str, Any]] | None) -> str:
-    """把累积清单渲染成注入块；空清单返回空串（调用方用 ``_ctx``，空值自动跳过）。
+def _numbered_lines(entries: list[dict[str, Any]]) -> list[str]:
+    """清单的带编号行（**唯一**的编号规则：注入块与屏幕清单都从这里取）。
 
     编号取**当前活动清单**的位置而不是提出时的轮次：按编号回收任意一条时，编号与
-    清单一一对应，回收后不必重排台账。
+    清单一一对应，回收后不必重排台账；两处共用同一份编号，「我撤的是模型看到的第 2 条
+    吗」才有确定答案（T2 AC-1）。
     """
-    entries = [_checked(entry) for entry in revisions or []]
-    if not entries:
-        return ""
-    lines = [
+    return [
         f"{index}. [{_layer_label(entry.get('layer'))}] {str(entry['text']).strip()}"
         for index, entry in enumerate(entries, 1)
     ]
+
+
+def render_revision_block(revisions: Iterable[dict[str, Any]] | None) -> str:
+    """把累积清单渲染成**给模型**的注入块；空清单返回空串（``_ctx`` 空值自动跳过）。"""
+    entries = [_checked(entry) for entry in revisions or []]
+    if not entries:
+        return ""
+    lines = _numbered_lines(entries)
     lines.append("（以上为用户累积提出的修订：每一条都必须落实，不是只落实最后一条。）")
     return "\n".join(lines)
+
+
+def render_revision_list(revisions: Iterable[dict[str, Any]] | None) -> str:
+    """把累积清单渲染成**屏幕清单**（带编号，供人对编号撤销）；空清单返回空串。
+
+    与注入块分开的是**话术**不是编号：注入块要多一句「每一条都必须落实」的累积语义声明
+    （那是给模型的），屏幕清单要的是干净的行、好让人一眼对上编号。两处的行必须逐字同源，
+    所以编号规则只写在 ``_numbered_lines`` 里。
+    """
+    return "\n".join(_numbered_lines([_checked(entry) for entry in revisions or []]))
+
+
+def render_revocation_block(revoked: Iterable[dict[str, Any]] | None) -> str:
+    """把本轮**被撤销的修订**渲染成注入块；没有撤销时返回空串。
+
+    为什么撤销必须说给模型听（票面 AC-3「被删那条的改动消失」）：只把条目从注入清单里
+    摘掉，模型手里还有**修订基线**那块——它明写「用户修订没提到的部分必须原样保留」，
+    于是上一版里因该条而落地的改动（票面场景里的「秋日庭院」）反倒被保住，撤销成了空动作。
+    所以撤销轮要显式告知「这几条不再生效、其造成的画面改动要撤回」。
+
+    与「撤掉被后条覆盖的旧条」相容：旧条本来就被后条压着，撤回它是 no-op；末句把
+    「其余修订仍在生效」写死，免得它与仍在清单里的要求打架时模型挑错边。
+    """
+    entries = [_checked(entry) for entry in revoked or []]
+    if not entries:
+        return ""
+    lines = [
+        "本轮用户**撤销**了以下修订，它们不再生效：",
+        *[f"- {str(entry['text']).strip()}" for entry in entries],
+        "请把上一版里**因这些修订而出现**的画面改动一并撤回；上一版中并非因它们出现的细节"
+        "仍然原样保留。若本轮其余修订也要求了同一处改动，以其余修订为准（它们仍在生效）。",
+    ]
+    return "\n".join(lines)
+
+
+def revocation_note(revoked: Iterable[dict[str, Any]] | None) -> str:
+    """撤销轮记进台账 ``feedback_this_round`` 的那句话（没有撤销时返回空串）。
+
+    放这里而不是放在 UI：它按条目抠 ``text``，与 ``_numbered_lines`` 是同一族的「条目
+    → 文本」规则，两处各写一份迟早对不上。
+
+    记文本而**不记编号**：编号是撤的时候现念的位置号，撤掉一条后其余条重排序，事后再看
+    编号已经指不回原来那条。也**不留空串**——票面 AC-5 说不必为撤销单开一列，但本轮到底
+    发生了什么必须可读，空串会被后来的人读成「漏记」而不是「这一轮只撤了条」。
+    """
+    entries = [_checked(entry) for entry in revoked or []]
+    if not entries:
+        return ""
+    return "（本轮无新意见，撤销：" + "；".join(str(entry["text"]).strip() for entry in entries) + "）"
 
 
 _FRAME_LABELS = (("first", "首帧"), ("last", "尾帧"))
@@ -223,7 +320,9 @@ def log_frame_round(directory: str | Path, *, round_index: int, layer: str,
 
 
 __all__ = [
-    "FRAME_BASELINE_KEY", "FRAME_ROUNDS_FILENAME", "LAYER_FRAME", "LAYER_LABELS",
-    "active_revisions", "log_frame_round", "next_round",
-    "record_user_revision", "render_baseline_block", "render_revision_block",
+    "FRAME_BASELINE_KEY", "FRAME_REVOKED_KEY", "FRAME_ROUNDS_FILENAME", "LAYER_FRAME",
+    "LAYER_LABELS", "active_revisions", "begin_round", "log_frame_round", "next_round",
+    "record_user_revision", "remove_user_revision", "render_baseline_block",
+    "render_revision_block", "render_revision_list", "render_revocation_block",
+    "revocation_note",
 ]
