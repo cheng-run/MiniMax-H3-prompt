@@ -205,6 +205,14 @@ def run_wizard(config: Config) -> int:
     # 绝不能再走阶段 2——那正是 #17 的代价（重做阶段 2 + 已完成的所有段重来）。
     if session.status == STATUS_SEGMENTED_RUNNING:
         return _resume_segmented(config, session)
+    # 续接到「阶段 1 已完成、等帧图」的会话：补上同一个修改循环（issue #27）。它原本直接
+    # 掉进阶段 2 的收图提问——累积清单看不到、意见提不了，而这条路径正是「重启后清单仍然
+    # 非空」的真实现场（用户在首帧循环里提过意见、还没提交帧图就退出）。
+    if session.status == STATUS_AWAITING_FRAMES and not frames_shown:
+        session = _resume_awaiting_frames(config, session)
+        if session is None:
+            return 1
+        frames_shown = True  # 修改循环里已展示过生图提示词
     # 阶段 1 完成后直接进入阶段 2（生图很快，无需暂停等人工确认）。
     return _phase2_collect_and_finish(config, session, show_frame_prompts=not frames_shown)
 
@@ -246,40 +254,65 @@ def _resume_stage1(config: Config, session: SessionState) -> SessionState | None
         print(f"[提示] 上次完成节点 {last_node} 不在阶段 1 链里，从头开始。")
         return _phase1_new(config)
     next_index = _STAGE1_CHAIN.index(last_node) + 1
-    if next_index >= len(_STAGE1_CHAIN):
-        # 阶段 1 已跑完但状态还是 running（比如写盘刚好中断在收尾），直接进阶段 2
-        return session
-    resume_node = _STAGE1_CHAIN[next_index]
-    print(f"[续接] 上次跑到「{last_node}」，从「{resume_node}」继续阶段 1……")
-
     brief = session.brief
     generation_dir = session.directory
-    initial_state = dict(session.stage_state)
+    model = agents = None
+    if next_index >= len(_STAGE1_CHAIN):
+        # 节点已全部跑完、只是状态还停在 running，就不重跑图：这种现场来自 `_save_progress`
+        # 在**最后一个节点**完成时就把窗口推到了链路尽头，而它之后还有常识质检循环
+        # （`common_sense_qa: true`，最多 2 轮 LLM，好几分钟）——在那期间中断就落在这一格。
+        # 此前这里直接 return：提示词不展示、意见提不了（连 2026-09-24 补的展示都没有），
+        # 状态还一直挂在 stage1_running 这个「可续接」态上。收尾与下面那条路径共用。
+        state = dict(session.stage_state)
+        print("[续接] 阶段 1 的节点已全部完成（只差收尾没落盘），直接进入生图提示词确认。")
+    else:
+        resume_node = _STAGE1_CHAIN[next_index]
+        print(f"[续接] 上次跑到「{last_node}」，从「{resume_node}」继续阶段 1……")
+        initial_state = dict(session.stage_state)
 
-    def _save_progress(node_name: str, current_state: dict) -> None:
-        progress_state = dict(current_state)
-        progress_state["_progress"] = {"last_completed_node": node_name}
-        save_session(generation_dir, brief, progress_state, status=STATUS_STAGE1_RUNNING)
+        def _save_progress(node_name: str, current_state: dict) -> None:
+            progress_state = dict(current_state)
+            progress_state["_progress"] = {"last_completed_node": node_name}
+            save_session(generation_dir, brief, progress_state, status=STATUS_STAGE1_RUNNING)
 
-    with _progress_scope(f"[阶段 1·续接] 从「{resume_node}」继续……"):
-        state, model, agents = run_stage1(
-            brief, config,
-            on_node=_report_node,
-            resume_from_node=resume_node,
-            initial_state=initial_state,
-            on_step_done=_save_progress,
-        )
-    _drain_stdin()
+        with _progress_scope(f"[阶段 1·续接] 从「{resume_node}」继续……"):
+            state, model, agents = run_stage1(
+                brief, config,
+                on_node=_report_node,
+                resume_from_node=resume_node,
+                initial_state=initial_state,
+                on_step_done=_save_progress,
+            )
+        _drain_stdin()
 
-    # 复用 _phase1_new 的收尾逻辑（这里不重跳生图提示词修改循环，沿用已有的 bundle）
+    # 复用 _phase1_new 的收尾逻辑
     if "_progress" in state:
         state.pop("_progress")
     save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
     print("\n阶段 1 已恢复完成。")
     # 新跑路径（_phase1_new）在进阶段 2 前会展示生图提示词；续接路径漏了这一步，
     # 用户没有提示词就无法生成关键帧图，阶段 2 的「首帧图片路径」无从提交（2026-09-24 实测）。
-    _show_frame_prompts(state, generation_dir)
+    # 修改入口走**同一个**循环（issue #27）：原本这里只展示提示词就走，用户断了线重跑
+    # 就再也提不了意见。提示词由循环自己展示（它是循环的第一步），这里不再单独调一次。
+    if _user_revision_loop(state, generation_dir, brief, config,
+                            model=model, agents=agents) == RESTART_FLOW:
+        return _phase1_new(config)
     return load_session(generation_dir)
+
+
+def _resume_awaiting_frames(config: Config, session: SessionState) -> SessionState | None:
+    """续接到「阶段 1 已完成、等帧图」的会话：补上同一个修改循环（issue #27）。
+
+    这条路径原本不展示清单也进不了循环——用户提过意见、还没提交帧图就退出，重跑向导后
+    直接掉进阶段 2 的收图提问。补上循环后「累积修订还在、还能接着提」。
+
+    model/agents 留给循环**按需就地构建**：这条路径手上没有 ``run_stage1`` 的返回值，
+    而它原本是零 LLM 成本的一步，不该为「看一眼提示词」先建一个客户端。
+    """
+    state = dict(session.stage_state)
+    if _user_revision_loop(state, session.directory, session.brief, config) == RESTART_FLOW:
+        return _phase1_new(config)
+    return load_session(session.directory)
 
 
 # ---------------------------------------------------------------------------
@@ -374,80 +407,11 @@ def _phase1_new(config: Config) -> SessionState | None:
     state.setdefault("frame_images", [])
     save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
 
-    while True:
-        _show_frame_prompts(state, generation_dir)
-        # 每轮重出**前后**都摆一次清单（重出后再回到循环顶端）：它是「我到底说过什么」的
-        # 唯一凭据，也是撤销时照着念编号的那张表——没摆出来，撤销就只剩「撤最后一条」。
-        _show_revision_list(state)
-        if not _confirm("对生图提示词有修改意见？", default=False):
-            break
-        mode = _prompt("输入 1 只重出画面提示词（附意见），输入 2 整个流程重来，"
-                       "输入 3 撤销清单里的某条：")
-        if mode == "2":
-            return _phase1_new(config)
-        revoked: list[dict] = []
-        if mode == "3":
-            revoked = _revoke_revisions(state, generation_dir, brief)
-            if not revoked:
-                continue  # 一条没撤＝没有要重出的东西，回上一步重看提示词
-            # 撤销轮没有新增条目，轮次号得自己推（连续两轮撤销不能共用同一个轮次号，
-            # 否则台账里出现两行 round 相同，事后无法按轮对齐）。
-            round_index = begin_round(state)
-            feedback = revocation_note(revoked)
-        else:
-            feedback = _prompt("请输入修改意见：")
-            if not feedback:
-                continue
-            # 意见进**独立真源**（state["user_revisions"]），按轮累积：说了就不忘。
-            # 重出的上下文由首帧节点从 state 读（不是由这里拼进 brief.plot——plot 同时喂
-            # 地点守卫的子串匹配与常识判官的判据，拼进去等于随机改写两条闸门，见 ADR 0005）。
-            revision = record_user_revision(state, layer=LAYER_FRAME, text=feedback)
-            round_index = revision["round"]
-        from ..graph.nodes import make_nodes
-
-        nodes = make_nodes(agents, model, brief, config)
-        frame_node = nodes["fl2va_frame_prompts"]
-        updated = dict(state)
-        updated["brief"] = brief  # 主题字段只装主题：修订不再经它传递
-        # 修订基线（#25）：以上一轮**完整产物**为基线重出，用户没提过的细节才不会跟着
-        # 重掷一起漂走（实测第 3 轮连第 1 轮就有的门环包浆都漂没了）。经**独立入参键**
-        # 传给节点——自动质检循环不设该键，它「对当前产物重算」的替换语义逐字不变。
-        # 尚无上一版产物时渲染成空串：不设键也不报错，台账如实记 False。
-        baseline = render_baseline_block(state.get("fl2va_prompt_bundle"))
-        _set_round_input(updated, FRAME_BASELINE_KEY, baseline)
-        # 本轮撤销（#24）：被撤的修订不再生效，其造成的画面改动要跟着撤回。只摘清单不够——
-        # 基线那句「未提到的部分原样保留」正是把上一版里已落地的改动保下来的那只手。
-        # 独立键、不混进基线块：台账的 base_used 只看基线的键在不在。非撤销轮 ``revoked``
-        # 是空列表，渲染成空串即摘键（与基线同走 _set_round_input 一条规则）。
-        _set_round_input(updated, FRAME_REVOKED_KEY, render_revocation_block(revoked))
-        with _progress_scope("[重新生成] 正在按您的意见重出首尾帧生图提示词……（请稍候，期间无需输入）"):
-            update = frame_node(updated)
-        # 台账的 base_used 取「节点**真的**拿到了基线」这件事，而不是再判一次渲染结果：
-        # 否则哪天这段接线断了，台账还会记 True——事后按它分组就分错了（它是判定累积
-        # 到底生效没有的唯一分组变量）。取在 update 合并之前，免得被节点输出影响。
-        base_used = FRAME_BASELINE_KEY in updated
-        if isinstance(update, dict):
-            updated.update(update)
-        # 基线块与本轮撤销都是**本轮的入参**，不是产物：跑完就摘掉，不让它们顺着 state 流到
-        # 阶段 2 或续接路径上去——那些地方没有「本轮以上一版为基线／撤了哪几条」这回事。
-        updated.pop(FRAME_BASELINE_KEY, None)
-        updated.pop(FRAME_REVOKED_KEY, None)
-        state.clear()
-        state.update(updated)
-        # 先落会话、再写台账：这一轮的产物（花过 LLM 钱的那份）先保住，台账是它的证据。
-        # 两个写盘都不吞异常——写失败要声张，绝不静默留下「有产物没账」或「有账没产物」。
-        save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
-        log_frame_round(
-            generation_dir,
-            round_index=round_index,
-            layer=LAYER_FRAME,
-            feedback_this_round=feedback,
-            active_revisions=active_revisions(state),
-            bundle=state.get("fl2va_prompt_bundle"),
-            base_used=base_used,  # 如实记：没有上一版产物（空基线）就是没上基线
-        )
-        print("[已更新] 请查看下方新版本的提示词。")
-
+    # 修改循环是与两条续接路径**共用**的那一份（issue #27）：三处各写一遍的代价本仓见过
+    # 太多次——改一处漏一处，最后表现成某条路径上「意见说了没人听」。
+    if _user_revision_loop(state, generation_dir, brief, config,
+                            model=model, agents=agents) == RESTART_FLOW:
+        return _phase1_new(config)
     print("\n阶段 1 完成。请复制上面的生图提示词到 ComfyUI（Z-Image）生成图片。")
     return load_session(generation_dir)
 
@@ -573,6 +537,137 @@ def _revoke_revisions(state: dict, generation_dir: Path, brief: Brief) -> list[d
         revoked.append(entry)
         print(f"[已撤销] 第 {raw} 条：{entry['text']}")
         save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
+
+
+# 「整个流程重来」：修改循环的返回值哨兵。循环自己不知道从哪一步重跑阶段 1（新跑路径与两条
+# 续接路径的重启起点不同），只把「用户要求推倒重来」这件事报给调用方。
+RESTART_FLOW = "restart"
+
+# 主菜单的三个编号：**文案与分支共用同一份编号**。各写一份的话，改了文案里的编号而忘了改
+# 分支（或反之）不会报错，只会静默把用户送进另一条路。
+_MENU_REDO, _MENU_RESTART, _MENU_REVOKE = "1", "2", "3"
+
+# 修改循环的主菜单文案。**「会清空」必须写进这句**（issue #27）：清空累积修订不可逆，只在
+# 事后补一行「已清空」等于人已经踩进来才告知；而且「修订是不是全局财产」这件事只有这里说得清
+# ——不说，用户会以为重来之后旧要求仍在生效。
+_REVISION_MENU = (
+    f"输入 {_MENU_REDO} 只重出画面提示词（附意见），"
+    f"输入 {_MENU_RESTART} 整个流程重来（会清空当前累积的修订清单，回到起步重新生成），"
+    f"输入 {_MENU_REVOKE} 撤销清单里的某条：")
+
+
+def _build_frame_agents(brief: Brief):
+    """就地构建重出首帧提示词需要的 model 与角色 agents（返回 ``(model, agents)``）。
+
+    为什么按需构建而不是进循环前一律先建好：续接到「等帧图」的会话手上没有 ``run_stage1``
+    的返回值，而那条路径原本是零 LLM 成本的——先建好的话，每个「其实没有意见要提」的续接
+    都要白付一次建客户端与 agent 的开销。
+    """
+    from ..agents import build_role_agents
+    from ..model_factory import build_chat_model
+
+    model = build_chat_model()
+    return model, build_role_agents(model, brief.refs, brief.mode, brief.duration, brief.variant)
+
+
+def _user_revision_loop(state: dict, generation_dir: Path, brief: Brief, config: Config,
+                        *, model=None, agents=None) -> str | None:
+    """阶段 1 首帧生图提示词的**人机修改循环**——三条入口共用这一份（issue #27）。
+
+    入口：新跑（``_phase1_new``）、阶段 1 断点续接（``_resume_stage1``）、续接到等帧图的
+    会话（``_resume_awaiting_frames``）。抽成共享单元的理由是本仓反复出现的形态：同一件事
+    的几处接线各写一份，改一处漏一处，最后表现成某条路径上「意见说了没人听」。
+
+    返回 ``None``：用户说没有更多意见（产物与清单已落盘，收尾交给调用方）。
+    返回 ``RESTART_FLOW``：用户选了「整个流程重来」（累积清单已就地清空并落盘）。
+
+    与它长得像的**自动常识质检循环**（``pipeline._stage1_frame_qa_loop``）语义不同、不可
+    合并：那是对当前产物重算的**替换**语义，本循环是**人说的话按轮累积**（ADR 0005）。
+
+    ``model`` / ``agents`` 由调用方给得出来就传（新跑与阶段 1 续接路径手上已有
+    ``run_stage1`` 的返回值），给不出来就留空，真要重出时才就地构建。
+    """
+    from ..graph.nodes import make_nodes
+
+    while True:
+        _show_frame_prompts(state, generation_dir)
+        # 每轮重出**前后**都摆一次清单（重出后再回到循环顶端）：它是「我到底说过什么」的
+        # 唯一凭据，也是撤销时照着念编号的那张表——没摆出来，撤销就只剩「撤最后一条」。
+        _show_revision_list(state)
+        if not _confirm("对生图提示词有修改意见？", default=False):
+            return None
+        mode = _prompt(_REVISION_MENU)
+        if mode == _MENU_RESTART:
+            # 「整个流程重来」＝这条路线整个不对：清空累积修订，否则被推翻路线上的约束会被
+            # 带进新一版，等于灌垃圾。**立刻落盘**——只在内存里清的话，重来后第一次生成就崩、
+            # 再续接一次，旧要求又会冒出来。提问文案已明说会清空（见 ``_REVISION_MENU``）。
+            state["user_revisions"] = []
+            save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
+            print("[提示] 已清空累积的修订清单——本次回到起步重新生成，"
+                  "新一版不会带上之前那些要求。")
+            return RESTART_FLOW
+        revoked: list[dict] = []
+        if mode == _MENU_REVOKE:
+            revoked = _revoke_revisions(state, generation_dir, brief)
+            if not revoked:
+                continue  # 一条没撤＝没有要重出的东西，回上一步重看提示词
+            # 撤销轮没有新增条目，轮次号得自己推（连续两轮撤销不能共用同一个轮次号，
+            # 否则台账里出现两行 round 相同，事后无法按轮对齐）。
+            round_index = begin_round(state)
+            feedback = revocation_note(revoked)
+        else:
+            feedback = _prompt("请输入修改意见：")
+            if not feedback:
+                continue
+            # 意见进**独立真源**（state["user_revisions"]），按轮累积：说了就不忘。
+            # 重出的上下文由首帧节点从 state 读（不是由这里拼进 brief.plot——plot 同时喂
+            # 地点守卫的子串匹配与常识判官的判据，拼进去等于随机改写两条闸门，见 ADR 0005）。
+            revision = record_user_revision(state, layer=LAYER_FRAME, text=feedback)
+            round_index = revision["round"]
+        if model is None or agents is None:
+            model, agents = _build_frame_agents(brief)
+        nodes = make_nodes(agents, model, brief, config)
+        frame_node = nodes["fl2va_frame_prompts"]
+        updated = dict(state)
+        updated["brief"] = brief  # 主题字段只装主题：修订不再经它传递
+        # 修订基线（#25）：以上一轮**完整产物**为基线重出，用户没提过的细节才不会跟着
+        # 重掷一起漂走（实测第 3 轮连第 1 轮就有的门环包浆都漂没了）。经**独立入参键**
+        # 传给节点——自动质检循环不设该键，它「对当前产物重算」的替换语义逐字不变。
+        # 尚无上一版产物时渲染成空串：不设键也不报错，台账如实记 False。
+        baseline = render_baseline_block(state.get("fl2va_prompt_bundle"))
+        _set_round_input(updated, FRAME_BASELINE_KEY, baseline)
+        # 本轮撤销（#24）：被撤的修订不再生效，其造成的画面改动要跟着撤回。只摘清单不够——
+        # 基线那句「未提到的部分原样保留」正是把上一版里已落地的改动保下来的那只手。
+        # 独立键、不混进基线块：台账的 base_used 只看基线的键在不在。非撤销轮 ``revoked``
+        # 是空列表，渲染成空串即摘键（与基线同走 _set_round_input 一条规则）。
+        _set_round_input(updated, FRAME_REVOKED_KEY, render_revocation_block(revoked))
+        with _progress_scope("[重新生成] 正在按您的意见重出首尾帧生图提示词……（请稍候，期间无需输入）"):
+            update = frame_node(updated)
+        # 台账的 base_used 取「节点**真的**拿到了基线」这件事，而不是再判一次渲染结果：
+        # 否则哪天这段接线断了，台账还会记 True——事后按它分组就分错了（它是判定累积
+        # 到底生效没有的唯一分组变量）。取在 update 合并之前，免得被节点输出影响。
+        base_used = FRAME_BASELINE_KEY in updated
+        if isinstance(update, dict):
+            updated.update(update)
+        # 基线块与本轮撤销都是**本轮的入参**，不是产物：跑完就摘掉，不让它们顺着 state 流到
+        # 阶段 2 或续接路径上去——那些地方没有「本轮以上一版为基线／撤了哪几条」这回事。
+        updated.pop(FRAME_BASELINE_KEY, None)
+        updated.pop(FRAME_REVOKED_KEY, None)
+        state.clear()
+        state.update(updated)
+        # 先落会话、再写台账：这一轮的产物（花过 LLM 钱的那份）先保住，台账是它的证据。
+        # 两个写盘都不吞异常——写失败要声张，绝不静默留下「有产物没账」或「有账没产物」。
+        save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
+        log_frame_round(
+            generation_dir,
+            round_index=round_index,
+            layer=LAYER_FRAME,
+            feedback_this_round=feedback,
+            active_revisions=active_revisions(state),
+            bundle=state.get("fl2va_prompt_bundle"),
+            base_used=base_used,  # 如实记：没有上一版产物（空基线）就是没上基线
+        )
+        print("[已更新] 请查看下方新版本的提示词。")
 
 
 def render_fl2va_frame_markdown_from_bundle(bundle, frame: str) -> str:

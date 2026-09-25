@@ -38,29 +38,43 @@ def _bundle_payload(label: str) -> dict:
 
 
 def _run_loop(tmp_path, monkeypatch, *, steps: list[tuple[str, Any]],
-              initial_bundle: bool = True):
+              initial_bundle: bool = True, on_stage1=None):
     """跑 _phase1_new 的修改循环；``steps`` 每项是一轮的脚本，最后答「没有更多意见」。
 
-    每轮脚本的两形态：
+    每轮脚本的三形态：
     - ``("1", "意见文本")``：选「只重出画面提示词」，提这一条意见；
+    - ``("2", None)``：选「整个流程重来」——循环把它交还给 ``_phase1_new``，于是重新问
+      主题/时长/风格/变体，再进一轮（脚本里自动补上这四问的答案）；
     - ``("3", [编号, ...])``：选「撤销清单里的某条」，按顺序撤这些编号，回车结束撤销
       （编号是**屏幕上当前清单的位置编号**，撤掉一条后其余条会重排序）。
 
     返回 ``(session, requests)``——requests 是每轮重出真正发给 frame agent 的请求文本。
     ``initial_bundle=False`` 模拟阶段 1 没产出关键帧产物（无上一版可作基线）。
+    ``on_stage1``：每次 ``run_stage1`` 被调用时的回调（重来那一刻磁盘上是什么样，只能
+    在**下一次阶段 1 开跑之前**看到）。
     """
     scripted = [TOPIC, "", "", "1"]
     for kind, payload in steps:
         scripted.append(kind)
         if kind == "1":
             scripted.append(str(payload))
+        elif kind == "2":
+            # 重来回到起步：重新问主题/时长/风格/变体（澄清在配置里关掉了，不问）
+            scripted.extend([TOPIC, "", "", "1"])
         else:
             scripted.extend(str(number) for number in payload)
             if payload:  # 空载荷＝选了撤销但没有可撤的条目，那一问根本不会出现
                 scripted.append("")  # 回车=撤完，按当前清单重出
     prompts = iter(scripted)
     confirms = iter([True] * len(steps) + [False])
-    monkeypatch.setattr(wizard, "_prompt", lambda *a, **k: next(prompts))
+
+    def fake_prompt(text, *a, **k):
+        # 真 ``_prompt`` 走 ``input(text)``、提示语会打到屏幕上；假的那份照做，于是「提问
+        # 文案里到底写了什么」也能从 capsys 里读到（票面要求文案明说会清空）。
+        print(str(text), end="")
+        return next(prompts)
+
+    monkeypatch.setattr(wizard, "_prompt", fake_prompt)
     monkeypatch.setattr(wizard, "_confirm", lambda *a, **k: next(confirms))
     monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
 
@@ -73,6 +87,8 @@ def _run_loop(tmp_path, monkeypatch, *, steps: list[tuple[str, Any]],
         return json.dumps(_bundle_payload(f"第{counter['n']}版"))
 
     def fake_run_stage1(brief, config, **kwargs):
+        if on_stage1 is not None:
+            on_stage1()
         state = {"shot_table": "[Shot 1] 庭院空镜"}
         if initial_bundle:
             state["fl2va_prompt_bundle"] = _bundle_payload("初版")
@@ -296,6 +312,41 @@ def test_choosing_revoke_with_an_empty_list_does_not_crash(tmp_path, monkeypatch
     out = capsys.readouterr().out
     assert "没有可撤销的条目" in out
     assert "清单已撤空" not in out, "一条都没撤，却说成了「已撤空」"
+
+
+def test_restart_clears_the_accumulated_list_and_says_so(tmp_path, monkeypatch, capsys):
+    """AC-3/AC-4：选「整个流程重来」后清单为空、文案明说会清空、重来后仍能提新意见。
+
+    「清空」必须**当场落盘**，所以这里在下一次阶段 1 开跑之前读一次磁盘：只在内存里清的话，
+    重来后第一次生成就崩、再续接一次，被推翻路线上的旧要求又会冒出来——那正是本票要根治的
+    「把垃圾带过去」。
+    """
+    snapshots: list[Any] = []
+
+    def snapshot() -> None:
+        gen = tmp_path / "sessions" / wizard._topic_slug(TOPIC) / "GEN001"
+        snapshots.append(load_session(gen))
+
+    session, requests = _run_loop(
+        tmp_path, monkeypatch,
+        steps=[("1", FIRST_FEEDBACK), ("2", None), ("1", SECOND_FEEDBACK)],
+        on_stage1=snapshot)
+
+    assert session is not None
+    assert len(requests) == 2, "重来后没能正常重出"
+    assert [item["text"] for item in session.stage_state["user_revisions"]] == [SECOND_FEEDBACK], \
+        "重来后旧修订还在清单里（被推翻路线上的要求被带进了新一版）"
+    assert FIRST_FEEDBACK not in requests[1], "重来后的重出请求里还带着被推翻的那条修订"
+    assert SECOND_FEEDBACK in requests[1], "重来后新提的意见没进重出请求"
+    assert snapshots[0] is None, "第一次跑阶段 1 之前不该已有会话文件"
+    assert snapshots[1] is not None and snapshots[1].stage_state["user_revisions"] == [], \
+        "重来那一刻清单没有清空落盘——重来后崩一次再续接，旧要求就又回来了"
+    out = capsys.readouterr().out
+    # 断言**菜单那句原文**而不是「清空」两个字：事后那行「[提示] 已清空累积的修订清单」也含
+    # 「清空」，按两个字判的话，把菜单里「会清空……」整句删掉测试照样全绿。
+    assert "会清空当前累积的修订清单" in out, \
+        "提问文案没有明说「整个流程重来」会清空累积修订（票面 AC-3 要求明说）"
+    assert "已清空累积的修订清单" in out, "清空之后屏幕没有确认这件事"
 
 
 def test_single_feedback_leaves_one_ledger_row(tmp_path, monkeypatch):

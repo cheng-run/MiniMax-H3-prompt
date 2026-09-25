@@ -67,6 +67,9 @@ def test_resume_stage1_shows_frame_prompts(tmp_path, monkeypatch, capsys):
     session = _interrupted_gen(tmp_path)
     _silence(monkeypatch)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: SimpleNamespace())
+    # 收尾之后接的是修改循环（issue #27），它第一件事就是展示提示词。这里答「没有意见」
+    # 让循环立刻收尾——本测试的题目是收尾展示，循环本身由 test_wizard_revision_resume.py 承担。
+    monkeypatch.setattr(wizard, "_confirm", lambda *a, **k: False)
 
     # fl2va_frame_prompts 及之后的节点不再真跑：断点在它前面，但本测试的题目是收尾展示
     monkeypatch.setattr(
