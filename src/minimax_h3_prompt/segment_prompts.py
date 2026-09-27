@@ -309,11 +309,15 @@ REVISION_CONTEXT_HEADER = "【用户累积修订（长视频的**每一段**都�
 # 注入优先序：图 > 修订 > 分镜表。图最高沿用既有教条——图是用户提交的**产物**，
 # 分镜表是**计划**，成片必须与图连续；修订压过分镜表，因为分镜表是模型按主题写的计划
 # 文本，用户的明确要求就是对它的否决。三者不冲突时都要落实。
-# 措辞里「首帧读图结果 > 用户累积修订 > 分镜表」是**判据字符串**：测试按它认这条声明，
-# 向导的写段前核对块把本块整块照打（用户看到的与模型看到的是同一块）——改措辞要同时
-# 改测试里那几处，grep 它。
+#
+# 这条**判据字符串**是全仓唯一一份常量：测试按它认这条声明
+# （`test_segment_prompts` / `test_segment_planner` / `test_wizard_segment_revisions`
+# 各有一处断言），向导的写段前核对块把修订块整块照打（用户看到的与模型看到的是同一块）。
+# 画面决策块（issue #34）也引它、不另写一句同义的话：同一裁定两套措辞，改一次要散改
+# 两处，而本仓已经吃过「同一句原文多份硬拷贝」的亏（#30）。改措辞要 grep 它。
+PRIORITY_TIERS = "首帧读图结果 > 用户累积修订 > 分镜表"
 REVISION_PRIORITY_NOTE = (
-    "【注入优先序】三者冲突时一律按此裁定：首帧读图结果 > 用户累积修订 > 分镜表。"
+    f"【注入优先序】三者冲突时一律按此裁定：{PRIORITY_TIERS}。"
     "图是用户提交的产物、分镜表只是计划，成片必须与图连续；修订是用户的明确要求，"
     "压过分镜表这类模型生成的计划文本。三者不冲突时都要落实。"
 )
@@ -354,6 +358,67 @@ def _revision_block_for_request(state: dict) -> str:
     """
     block = render_revision_context(state)
     return f"{block}\n" if block else ""
+
+
+# ---------------------------------------------------------------------------
+# 阶段 1 的画面决策进写段请求（issue #34）
+# ---------------------------------------------------------------------------
+
+VISUAL_DECISION_HEADER = "【阶段 1 已定的画面决策（本段落笔依据）】"
+
+
+def _visual_decision_block_for_request(state: dict, shots: tuple[int, ...] = ()) -> str:
+    """请求模板里用的画面决策块：无内容返回空串，有则**自带前后换行**。
+
+    ``shot_review_lock``（分镜圆桌的可生成性结论）与 ``visual_design``（摄影指导的逐镜
+    构图／机位运动／光线／景深）**本来就在 state 里、也在持久化白名单里**，此前只是没人
+    递给写段——长视频每一段只看到分镜表原文，于是「没水平」在长视频上是结构性的（#30
+    记录，``docs/research/2026-09-26-film-language-prompt-sources.md`` P4）。
+
+    两份一起、且**整份**注入，理由：
+
+    - 二者都是**全片**产物（视觉基调、全片硬约束、每个镜头的构图）。逐镜切片会把跨段
+      一致性所依据的那半切掉——「同一只猫、同一套色温」正是靠这份全片声明立住的。
+      故整份送入，靠块首那条「只取本段 Shot N」的纪律约束时间窗，与既有的
+      「时间窗外剧情禁区」同形。分镜表之所以逐镜切（``_segment_shot_texts``），是因为
+      它是**会被整段照抄的原文**，且那套切法只认 ``[Shot N]`` 标记；画面细化用 markdown
+      标题分镜，不在那套切法的适用面内。
+    - 缺任一份只注入另一份（圆桌与摄影指导谁先产出不保证）；两份都缺则整块不出现——
+      **不注入空块、不报错**（设定级重跑与降级路径都可能出现空值）。
+
+    前后换行在这里一并做完，不另拆一个「只出内容」的函数：本块只有这一个消费者
+    （``render_revision_context`` 之所以分成两层，是因为向导的写段前核对块是第二个读者）。
+    换行散到两个调用点去写才是真正的风险——两条写段路径各写一次「有没有块 + 补不补换行」，
+    漏一处就是把块和下一节黏在同一行，而请求文本没有校验器看得住这种错。
+
+    末尾那条层级声明引 ``PRIORITY_TIERS``（与修订块同一个常量），不是自己再写一句：
+    画面细化由分镜表细化而来、同属「模型生成的计划文本」，故那条裁定对它的细化版同样
+    成立。
+
+    **分段规划（segment_planner）不接本块**：本票只管写段。规划师的段尾钩子是锚帧语义
+    校验的可判定对照物，要不要给它画面决策得单独裁定——与「词表不进规划师」同一个理由
+    （ADR 0007 的「不做」清单）。
+    """
+    lock = str(state.get("shot_review_lock", "") or "").strip()
+    design = str(state.get("visual_design", "") or "").strip()
+    if not lock and not design:
+        return ""
+    scope = "、".join(f"Shot {int(n)}" for n in shots) if shots else "本段时间窗内的镜头"
+    lines = [
+        VISUAL_DECISION_HEADER,
+        f"下面两份是**全片**产物（含其他时间窗的镜头）：本段只取 {scope} 的内容，"
+        "其他镜头的事件、构图与机位一个字都不能写进正文（与「时间窗外剧情禁区」同一条纪律）。",
+    ]
+    if lock:
+        lines.append(f"镜头评审锁定（分镜圆桌的可生成性结论，含全片硬约束）：\n{lock}")
+    if design:
+        lines.append(f"画面细化（摄影指导：每镜的构图／机位运动／光线／景深）：\n{design}")
+    lines.append(
+        f"优先序照旧（{PRIORITY_TIERS}）：这两份与分镜表同属**计划侧**的细化，"
+        "故与首帧图冲突一律以画面为准、与修订冲突一律以修订为准。"
+    )
+    block = "\n".join(lines)
+    return f"\n{block}\n"
 
 
 # 落笔侧的电影语言切片（issue #32）：整片提示词工程师与两条写段路径拿的是**同一份**
@@ -427,6 +492,10 @@ def rewrite_segment_prompt(
         f"目标镜头：[Shot {segment.shot_number}]\n"
         f"{anchor}\n"
         f"{_revision_block_for_request(state or {})}"
+        # 画面决策同样要进回退路径（issue #34）：这条路径只在规划失败时才走，漏了它
+        # 「规划一失败就掉一个档次」——与 issue #26 的锚定/修订同一个坑。
+        # 段号取本段的镜头号：回退路径的段是单镜头机械拆分段。
+        f"{_visual_decision_block_for_request(state or {}, (segment.shot_number,))}"
         f"\n完整提示词：\n{full_prompt}"
     )
     try:
@@ -677,6 +746,12 @@ def build_segment_v2_request(
         f"{_revision_block_for_request(state)}"
         f"{future_block}\n"
         f"\n{shots_block}"
+        # 画面决策排在分镜表原文**之后**（判断，不是实测）：GEN004 的真实 state 里两者
+        # 互相打架——分镜表 Shot 2 写 `Tracking Shot…at fast speed`，而锁定与画面细化都
+        # 明令「取消高速跟踪」——而交付产物照抄了分镜表那条（见 output/issue34-evidence）。
+        # 原文在前、最终取舍在后，冲突时写段器最后读到的是**改过的那一版**。
+        # 层级不靠位置承载：块内引 PRIORITY_TIERS 明说它低于画面与修订。
+        f"{_visual_decision_block_for_request(state, plan.shots_in_segment)}"
     )
 
 

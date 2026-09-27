@@ -287,6 +287,146 @@ def test_cinematic_wordlist_reaches_both_segment_requests():
     assert "## 词表：景别" in llm.last_request, "回退写段请求只带了标题，词表正文没到"
 
 
+# ---------------------------------------------------------------------------
+# issue #34：阶段 1 的画面决策（镜头评审锁定 / 画面细化）进两条写段请求
+# ---------------------------------------------------------------------------
+
+# 两份产物的内容标记。真源是 state 的 ``shot_review_lock``（分镜圆桌）与 ``visual_design``
+# （摄影指导）——断标记串不断全文，内容会随角色提示词演进（与词表那条用例同一纪律）。
+SHOT_REVIEW_MARKER = "全片硬约束：取消 Shot 2 的快速跟拍"
+VISUAL_DESIGN_MARKER = "构图：主体压在画面右侧三分之一"
+
+
+def _visual_decisions_state(**extra) -> dict:
+    """带画面决策的 state（形状对齐真实会话产物：锁定是结论表，画面细化是逐镜 markdown）。"""
+    state = {
+        "shot_table": "x",
+        "shot_review_lock": f"**镜头评审结论**\n{SHOT_REVIEW_MARKER}",
+        "visual_design": f"## Shot 2：固定机位\n- **构图**：{VISUAL_DESIGN_MARKER}",
+    }
+    state.update(extra)
+    return state
+
+
+def test_segment_v2_request_carries_visual_decisions():
+    """v2 写段请求必须带上画面细化与镜头评审锁定（issue #34）。
+
+    这两份产物**本来就在 state 里、也在持久化白名单里**，只是没人递给写段——于是长视频
+    每一段只看到分镜表原文，摄影指导已经做出的构图/光线/景深取舍对落笔不可见（#30 记录的
+    结构性缺口）。本仓的高发病正是「规则在、接线不在」，故断言写在**真实请求字符串**上
+    （先例：上面 edge-stability 与词表两条到达性用例）。
+    """
+    from minimax_h3_prompt.segment_prompts import build_segment_v2_request
+
+    plans = _v2_plans()
+    request = build_segment_v2_request(plans[1], plans, _visual_decisions_state())
+    assert SHOT_REVIEW_MARKER in request, "v2 写段请求（调用点）没带上镜头评审锁定"
+    assert VISUAL_DESIGN_MARKER in request, "v2 写段请求（调用点）没带上画面细化"
+
+
+def test_segment_v2_request_scopes_visual_decisions_to_this_segment():
+    """两块产物都是**全片**的，必须同时声明「只取本段 Shot」——否则等于给时间窗纪律开洞。
+
+    画面细化与镜头评审锁定覆盖整条片子（本段之外的镜头也在里面），而整条分镜表灌进每一段
+    已被判定会「把其他时间窗的事件一起喂给 H3」（见 ``_segment_shot_texts`` 的注释）。
+    故注入时必须带上本段覆盖的 Shot 号，与既有的「时间窗外剧情禁区」同一条纪律。
+
+    用**多镜头段**断言（Shot 3＋Shot 4）：单镜头段只验得出「号对不对」，多镜头段还验得出
+    「有几个」——写死一个号或只写第一个的实现都会在这里红。
+    """
+    from minimax_h3_prompt.segment_planner import SegmentPlan
+    from minimax_h3_prompt.segment_prompts import build_segment_v2_request
+
+    plans = _v2_plans() + [SegmentPlan(index=2, start_s=10, end_s=16, shots_in_segment=(3, 4),
+                                       summary="猫蹭手后店员抚摸", end_hook="店员手停猫背上")]
+    request = build_segment_v2_request(plans[2], plans, _visual_decisions_state())
+    assert "只取 Shot 3、Shot 4" in request, "v2 请求没声明本段画面决策的作用范围（Shot 号）"
+    assert "只取 Shot 1" not in request and "只取 Shot 2" not in request, "注入了别段的 Shot 号"
+
+
+def test_fallback_segment_request_carries_visual_decisions():
+    """回退写段路径同样要带画面决策（issue #34）：两条路径不许「规划一失败就掉一个档次」。
+
+    分段有两条产出路径（v2 规划式、规划失败回退式），只在主路径接线过两次都复发过缺陷
+    （issue #26 的锚定与修订就掉在回退路径上，见 ``render_revision_context`` 的注释）。
+    本仓的处理办法是一条共享渲染函数 + 两条路径各自在**调用点**断言。
+    """
+    segments = split_shots_from_prompt(SAMPLE_PROMPT, total_duration=15.0)
+    llm = FakeLLM()
+    rewrite_segment_prompt(segments[1], SAMPLE_PROMPT, llm,
+                           state=_visual_decisions_state(), position_index=1)
+    assert SHOT_REVIEW_MARKER in llm.last_request, "回退写段请求（调用点）没带上镜头评审锁定"
+    assert VISUAL_DESIGN_MARKER in llm.last_request, "回退写段请求（调用点）没带上画面细化"
+    # 作用范围按**本段的镜头号**声明（回退路径的段＝单镜头机械拆分段）
+    assert f"只取 Shot {segments[1].shot_number}" in llm.last_request
+
+
+def test_visual_decisions_declare_their_place_in_the_priority_order():
+    """注入块必须写明它在既有优先序里的位置：**低于**画面与用户累积修订。
+
+    不写这句，画面细化会以「最细、离正文最近」的姿态挤掉用户修订——而优先序本身不是新
+    裁定：画面细化由分镜表细化而来、同属「模型生成的计划文本」，那条裁定对它的细化版同样
+    成立。这是纪律句，丢了没有校验器看得住。
+
+    断言按 ``PRIORITY_TIERS`` **常量**认，不另抄一份字面量：这句话在全仓是被三处测试与
+    向导核对块共用的判据字符串，块里再写一句同义的（复审 #34 前的形态：「低于 Picture 1
+    的实际画面与用户累积修订」）就是同一裁定两套措辞，改一次要散改两处。
+    """
+    from minimax_h3_prompt.segment_prompts import PRIORITY_TIERS, build_segment_v2_request
+
+    plans = _v2_plans()
+    request = build_segment_v2_request(plans[1], plans, _visual_decisions_state())
+    assert PRIORITY_TIERS in request, "画面决策块没声明它在优先序里的位置"
+    assert "以画面为准" in request and "以修订为准" in request
+
+
+def test_visual_decisions_degrade_when_missing():
+    """缺这两份产物时诚实降级：不报错、**不注入空块**（issue #34 验收第二条）。
+
+    真实链上两份都可能为空：``shot_review_lock`` 由分镜圆桌产出、``visual_design`` 由摄影
+    指导产出，设定级截断重跑与降级路径都会让它们缺席。空块比不写更坏——模型会读到
+    「本段落笔依据」这个标题，却拿不到任何依据。
+    """
+    from minimax_h3_prompt.segment_prompts import (
+        VISUAL_DECISION_HEADER,
+        build_segment_v2_request,
+    )
+
+    plans = _v2_plans()
+    # ① 两个键都不存在（多数既有 fixture 的形态）
+    request = build_segment_v2_request(plans[1], plans, {"shot_table": "x"})
+    assert VISUAL_DECISION_HEADER not in request, "state 里没有画面决策却注入了空块"
+    # ② 键存在但为空串／纯空白：同样不许注入
+    blank = build_segment_v2_request(
+        plans[1], plans, {"shot_table": "x", "visual_design": "   ", "shot_review_lock": ""})
+    assert VISUAL_DECISION_HEADER not in blank, "空白值被当成有内容注入了空块"
+    # ③ 回退路径同样降级——那条路只在规划失败时才走，缺陷要等规划真失败才现形；
+    #    它的 state 是「可能为 None」的入参（``state or {}``），故单独钉一次。
+    segments = split_shots_from_prompt(SAMPLE_PROMPT, total_duration=15.0)
+    llm = FakeLLM()
+    rewrite_segment_prompt(segments[1], SAMPLE_PROMPT, llm, state={"shot_table": "x"})
+    assert VISUAL_DECISION_HEADER not in llm.last_request, "回退写段请求注入了空块"
+    llm = FakeLLM()
+    rewrite_segment_prompt(segments[1], SAMPLE_PROMPT, llm)  # 完全不传 state
+    assert VISUAL_DECISION_HEADER not in llm.last_request, "没有 state 时回退写段请求注入了空块"
+
+
+def test_visual_decisions_inject_only_the_half_that_exists():
+    """只有一份时只注入那一份：另一份连**标签**都不许出现（不给读者一个空标题）。"""
+    from minimax_h3_prompt.segment_prompts import build_segment_v2_request
+
+    plans = _v2_plans()
+    only_design = build_segment_v2_request(
+        plans[1], plans, {"shot_table": "x", "visual_design": VISUAL_DESIGN_MARKER})
+    assert VISUAL_DESIGN_MARKER in only_design
+    assert "镜头评审锁定（分镜圆桌" not in only_design, "只有画面细化却把锁定的空标题也写了"
+
+    only_lock = build_segment_v2_request(
+        plans[1], plans, {"shot_table": "x", "shot_review_lock": SHOT_REVIEW_MARKER})
+    assert SHOT_REVIEW_MARKER in only_lock
+    assert "画面细化（摄影指导" not in only_lock, "只有镜头锁定却把画面细化的空标题也写了"
+
+
 def test_segment_v2_request_english_summary_soundscape():
     """v2 主路径：字段 4/5 要求英文摘要句（1-4/1-3 句、无时间戳），不再裁时间窗。"""
     from minimax_h3_prompt.segment_planner import SegmentPlan
