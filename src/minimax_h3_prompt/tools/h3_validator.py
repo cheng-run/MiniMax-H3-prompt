@@ -1,6 +1,9 @@
 """H3 提示词规则校验器。
 
-以官方规范（references/base-en.txt、ref-en.txt）为唯一依据做确定性检查。
+规则全部取自官方规范（``references/base-en.txt``、``ref-en.txt``）。那两份是**给人读的官方
+原文**、不是运行时输入（本模块不打开它们）：要逐字符照抄的部分在这里落成常量，由
+``tests/test_official_references.py`` 逐字钉回官方文件——**改常量不同步官方原文、或重新
+vendor 官方文件不同步常量，都会报红**。裁定与取舍见 ``docs/adr/0008``。
 供质检节点 / 提示词工程师 / agent 工具调用。
 
 严重级别：
@@ -38,11 +41,17 @@ _END_MARGIN_S = 1.0
 # 「end every shot block with this exact edge-stability sentence, so the extracted tail frame
 # keeps a crisp character outline for the next segment's first-frame reference」。
 #
-# **代码侧唯一来源**：写段模板（segment_prompts）从这里取，校验侧与模板侧不会各说各话。
+# **代码里唯一一处写死官方原文的地方**（2026-09-27，issue #35）：写段模板（segment_prompts）
+# 从这里插值，角色提示词由加载处（``agents.OFFICIAL_VERBATIM_ROLES``）注入，测试用例取常量
+# 而不另抄——原先那三处手抄已删。
+# 「唯一」的口径是**出站文本的来源**，不含文档引文与样本：CONTEXT.md / ADR / playbook 里的
+# 同句是引文，正样本 fixture 与各条用例里内联的同句是**样本**（样本本来就得长得像真实产出），
+# 它们与这里分叉时由下面的守卫报红，但改产出文本不需要动它们。
+# 唯一性由两侧守卫：常量与官方原文的逐字一致见 tests/test_official_references.py，
+# 角色 .md 里不得再出现原文、且白名单角色必须留指针见 tests/test_role_prompts.py。
 # 宿主选这里不是随意的——segment_prompts 已经从本模块导入（ALIGN_TEMPLATES 同理），
 # 常量若住 segment_prompts 而本模块要用，就成循环导入。校验器是裁判，判据随裁判走。
-# 另有两份无法插值的硬拷贝：`prompts/prompt_engineer.md`（人工文本）与正样本 fixture，
-# 由 tests/test_role_prompts.py 与 test_h3_validator.py 各自守着。
+# 正样本 fixture 里同样有原文，但那是**样本不是来源**（样本本来就得长得像真实产出）。
 # 2026-09-23（issue #8）：2026-09-22 迁移把它的中文译文当自创结构禁掉了，判断反了。
 EDGE_STABILITY_SENTENCE = (
     "Keep every character's silhouette, facial outline, and clothing edges "
@@ -72,7 +81,8 @@ RETENTION_MARKERS = (
     "reference",
 )
 
-# 帧变体首行对齐指令：官方模板逐字符固定（base-en.txt 2.1）
+# 帧变体首行对齐指令：官方模板逐字符固定（base-en.txt 2.1）。
+# 与 EDGE_STABILITY_SENTENCE 同属「全仓唯一一处写死官方原文的地方」，见那上面的注释。
 ALIGN_TEMPLATES = {
     "I2VA": "For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.",
     "FL2VA": "How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the 0.00-second mark of the target video; Picture 2 (from Shot N) aligns with the S.SS-second mark of the target video.",

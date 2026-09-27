@@ -133,9 +133,9 @@ The push-in reveals the tension in his face.
 | 切点必须**整秒**（毫秒位 `.000`），每镜隐含时长必须 **4-10 秒整数** | `[官方]` `base-en.txt:86` |
 | 时间戳相对**本段起点**，绝不许写绝对片时 | `[仓内]` `CONTEXT.md:97`（GEN003 坏片实测根因） |
 | 每镜块必须以官方 edge-stability 句**逐字符**收尾 | `[官方]` `base-en.txt:92-96` |
-| 默认**单镜头**；段内切镜是显式例外 | `[仓内]` `prompt_engineer.md:53` |
+| 默认**单镜头**；段内切镜是显式例外 | `[仓内]` `prompt_engineer.md:51` |
 | **快机位（fast/rapid/swift/whip + 机位词、`at fast speed`）+ ≥3 个动作节拍不得同段共存**（error）；默认处置是**降机位为静态/慢速**。引用时必须声明：该阈值量于 **4 步采样** | `[仓内]` `segment_prompts.py:35-41, 673-705`、ADR 0003 |
-| 最后一个节拍距段尾 **≥1s** | `[仓内]` `prompt_engineer.md:54` |
+| 最后一个节拍距段尾 **≥1s** | `[仓内]` `prompt_engineer.md:52` |
 | 禁止自创结构（`GLOBAL_LOCK:` / `BRIDGE_FROM:` / `END_HOOK:` / 首行时长句） | `[官方]` 无此结构；validator 报 error |
 
 **「节奏/剪辑」的物理天花板**：一个 4-10 秒的执行段装不下第二个 ≥4 秒的镜头（切点整秒 + 每镜 4-10 整数秒），所以**节奏只能靠运镜幅度速度 + 动作节拍做**，不能靠多切快切。
@@ -146,7 +146,7 @@ The push-in reveals the tension in his face.
 
 - **不在官方白名单的运镜名**：`crane`、`handheld`、`orbit`、`crash zoom`、`dolly zoom`、`whip pan`、`Steadicam`、`Gimbal` —— 官方只列了 13 个 motion type。尤其 `crash zoom` / `snap zoom` 语义就是极快，会绕过本仓快机位正则（快词表只有 `fast|rapid|swift|whip`），用了等于钻闸门空子。
 - **Hailuo 的方括号运镜指令**（`[Truck left]` 等）：那是 Hailuo **API 产品线**的能力；官方模型表只有 `MiniMax-Hailuo-2.3` / `MiniMax-Hailuo-02` / `T2V-01-Director` / `T2V-01`，**H3 不在其中**，方括号结构与 H3 的 ComfyUI 提示词格式是两套东西，照搬即自创结构。
-- **把景别/光线/镜头词写进静态生图提示词**：本仓明令禁止（`prompt_engineer.md:33`），生图侧和视频侧是两套词表。
+- **把景别/光线/镜头词写进静态生图提示词**：本仓明令禁止（`prompt_engineer.md:31`），生图侧和视频侧是两套词表。
 - **「一镜一运镜」当成通则**：Runway 原文明确说 `combining camera terms is encouraged`、`One move per clip is the reliable fallback, not the rule` —— 它论的是运镜**个数**，与本仓「机位速度 × 节拍数」不是同一个维度，**不能互相引证**。
 - 未能核实的源（Sora cookbook 403、Runway Gen-4 403、`ai.google.dev` 超时）的内容：**一律不引用**。
 

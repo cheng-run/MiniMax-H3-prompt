@@ -9,9 +9,7 @@
 - **ref 模式（六段式，严格按此顺序）**：
   `subject_definitions:` → `summary:`（以 `[任务类型]` 前缀开头）→ `retention_analysis:` → `detailed_description:`（350–500 英文词；首镜 `[Shot 1]` 无时间戳，后续 `At MM:SS.mmm`；`<Subject N>` / `<Picture N>` 标签在首次出现处标出；`(Sx)` 全局编号；对白 `<d>[语言] 原文</d>`）→ `overall_soundscape:` → `non_diegetic_music:`
 - **base 模式（三段式）**：`integrated_multimodal_description:` + `overall_soundscape:` + `non_diegetic_music:`；变体指令见下。
-  - I2VA 首行：`For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.`
-  - FL2VA 首行（`N`=最终镜头号，`S.SS`=时长两位小数）：`How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the 0.00-second mark of the target video; Picture 2 (from Shot N) aligns with the S.SS-second mark of the target video.`
-  - L2VA 首行：`How the reference pictures align with the target video — <Picture 1> (from [Shot N]) aligns with the S.SS-second mark of the target video.`
+  - 首行必须是与当前变体匹配的那一行**官方对齐指令**，逐字符照抄、不改写不译文——原文见文末【官方逐字符原文】，三种变体都在那里（`N`=最终镜头号，`S.SS`=时长两位小数）。
   - 首行指令之后空一行再接核心字段；FL2VA 默认单镜头连续插值（除非用户明确要求多镜）。
 - **镜头块标记格式（硬约束）**：`integrated_multimodal_description` 里每个镜头必须以 `[Shot N]` 标记开头；Shot 1 直接接正文，Shot 2 起在标记后紧跟 `At MM:SS.mmm` 时间戳。
   - ✅ 正确：`[Shot 2] At 00:05.000, the camera cuts to ...`
@@ -49,7 +47,7 @@
 - `overall_soundscape` 为 1-4 句英文连续段落、无时间戳（官方 §4.6）；`non_diegetic_music` 为 1-3 句英文或 `N/A`（官方 §4.7）。
 - **实体外观只写在它首次出场的 Shot 内**，一次写全；未出场的实体不写外观，必要时只用一句否定（如 `No cat is visible in the frame.`）。
 - **禁止自创结构**（官方 base-en.txt 不存在，validator 对其报 error）：`GLOBAL_LOCK:` 集中定义区、`BRIDGE_FROM:` 段首状态字段、`END_HOOK:` 段尾状态字段、首行时长句（`This is a N-second continuous shot.`）。段首状态由帧变体对齐指令 + 正文锚定表达。
-- **每个镜头块必须以官方 edge-stability 原句收尾**（官方 base-en.txt 2.1 硬要求，逐字符照抄、不改写不译文）：`Keep every character's silhouette, facial outline, and clothing edges crisp and stable throughout; no rippling, warping, or edge shimmer.` 官方给它的理由就是抽出的尾帧要保持轮廓锐利、留给下一段当首帧参考——即长视频的桥接帧链。缺失 validator 报 warning（不是自创结构，别删）。
+- **每个镜头块必须以官方 edge-stability 原句收尾**（官方 base-en.txt 硬要求，逐字符照抄、不改写不译文）：原句见文末【官方逐字符原文】。官方给它的理由就是抽出的尾帧要保持轮廓锐利、留给下一段当首帧参考——即长视频的桥接帧链。缺失 validator 报 warning（不是自创结构，别删）。
 - **默认单镜头**：一个执行段默认只有一个 `[Shot 1]` 块；段内切镜是显式例外（仅景别跳变等确有必要时），切点严格递增。
 - **关键节拍距段尾 ≥1s**：最后一个时间戳不许压在段尾，给出场动作留展开空间。
 - **只输出提示词本身**：不要任何前言、结尾说明、解释、`json`/`text` 代码围栏或 markdown 标记。

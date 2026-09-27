@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from minimax_h3_prompt.tools.h3_validator import (
+    EDGE_STABILITY_SENTENCE,
     validate_base,
     validate_prompt,
     validate_ref,
@@ -21,14 +22,9 @@ from minimax_h3_prompt.tools.h3_validator import (
 FIXTURES = Path(__file__).parent / "fixtures"
 LEGACY_SHOT01 = (FIXTURES / "legacy_shot01.md").read_text(encoding="utf-8")
 OFFICIAL_SHOT01_I2VA = (FIXTURES / "official_shot01_i2va.md").read_text(encoding="utf-8")
-BASE_EN_REF = (Path(__file__).parents[1] / "src" / "minimax_h3_prompt"
-               / "references" / "base-en.txt")
 
-# 官方原句，逐字符照抄 base-en.txt:92-96（段落 92 行起、原句在 95 行）
-OFFICIAL_EDGE_STABILITY = (
-    "Keep every character's silhouette, facial outline, and clothing edges "
-    "crisp and stable throughout; no rippling, warping, or edge shimmer."
-)
+# 用例里的「官方原句」直接取常量，不在这里另抄一份字面量（issue #35）：测试里抄的第三份
+# 与常量可以各自漂移。常量与**官方原文**的逐字一致由 tests/test_official_references.py 钉住。
 
 REF_META = [
     (1, "白发仙师", "白发老妪，玄色长袍，手持拂尘"),
@@ -275,12 +271,9 @@ class TestEdgeStabilitySentence:
     真实样本为零，不足以立 error 闸门（同 #11 的教训）。
     """
 
-    def test_constant_matches_official_reference(self):
-        """production 常量必须与官方原文逐字符一致——判据只有 base-en.txt 一处。"""
-        from minimax_h3_prompt.tools.h3_validator import EDGE_STABILITY_SENTENCE
-
-        assert EDGE_STABILITY_SENTENCE in BASE_EN_REF.read_text(encoding="utf-8")
-        assert EDGE_STABILITY_SENTENCE == OFFICIAL_EDGE_STABILITY
+    # 「常量 == 官方原文」的断言搬去 tests/test_official_references.py（issue #35）：
+    # 那条判据是**常量与官方文件**之间的关系，与校验器行为无关，且要和 ref 侧同类判据
+    # 放在一起读。留在这里会让「谁的判据」再一次散在文件里。
 
     def test_missing_sentence_is_warning_not_error(self):
         text = base_prompt("[Shot 1] A woman dozes behind the counter.")
@@ -290,21 +283,21 @@ class TestEdgeStabilitySentence:
         assert errors_of(issues) == []
 
     def test_block_ending_with_sentence_passes(self):
-        text = base_prompt(f"[Shot 1] A woman dozes behind the counter. {OFFICIAL_EDGE_STABILITY}")
+        text = base_prompt(f"[Shot 1] A woman dozes behind the counter. {EDGE_STABILITY_SENTENCE}")
         issues = validate_base(text, duration=4.0)
         assert "EDGE_STABILITY_MISSING" not in codes(issues)
 
     def test_sentence_inside_block_still_warns(self):
         """官方是 end every shot block with——句中出现不算收尾。"""
         text = base_prompt(
-            f"[Shot 1] A woman dozes. {OFFICIAL_EDGE_STABILITY} At 00:01.000 she stirs again."
+            f"[Shot 1] A woman dozes. {EDGE_STABILITY_SENTENCE} At 00:01.000 she stirs again."
         )
         issues = validate_base(text, duration=4.0)
         assert "EDGE_STABILITY_MISSING" in codes(issues)
 
     def test_each_shot_block_checked_separately(self):
         text = base_prompt(
-            f"[Shot 1] A woman dozes. {OFFICIAL_EDGE_STABILITY} "
+            f"[Shot 1] A woman dozes. {EDGE_STABILITY_SENTENCE} "
             "[Shot 2] At 00:02.000, the camera cuts to a close-up of her hand."
         )
         issues = validate_base(text, duration=4.0)
@@ -315,8 +308,8 @@ class TestEdgeStabilitySentence:
     def test_multi_shot_all_blocks_compliant_passes(self):
         """多镜段每块都带该句 → 零 warning。模板要求的是**逐块**，此处钉住校验侧的对应语义。"""
         text = base_prompt(
-            f"[Shot 1] A woman dozes. {OFFICIAL_EDGE_STABILITY} "
-            f"[Shot 2] At 00:02.000, the camera cuts to her hand. {OFFICIAL_EDGE_STABILITY}"
+            f"[Shot 1] A woman dozes. {EDGE_STABILITY_SENTENCE} "
+            f"[Shot 2] At 00:02.000, the camera cuts to her hand. {EDGE_STABILITY_SENTENCE}"
         )
         issues = validate_base(text, duration=4.0)
         assert "EDGE_STABILITY_MISSING" not in codes(issues)

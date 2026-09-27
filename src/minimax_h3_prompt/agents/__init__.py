@@ -18,10 +18,36 @@ from langchain_core.tools import tool
 from .. import film_language
 from ..brief_parser import FRAME_VARIANTS, RefItem
 from ..observability import record_agent_call, reporter
-from ..tools.h3_validator import format_issues, validate_prompt
+from ..tools.h3_validator import (
+    ALIGN_TEMPLATES,
+    EDGE_STABILITY_SENTENCE,
+    format_issues,
+    validate_prompt,
+)
 from ..tools.ref_metadata import format_ref_meta, to_tuple
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
+
+# 要逐字符照抄的官方原文，按角色声明；由加载处注入该角色提示词文末（issue #35）。
+#
+# 为什么注入而不写进 .md：官方原文在**代码里**的唯一可写来源是 ``tools/h3_validator`` 的两个
+# 常量（校验侧与两条写段模板都从那里取），角色 .md 里再抄一份就是又一处可写来源——改常量时
+# 它不会跟着动，而返回值里两份都在场，谁也看不出哪份是旧的（本仓吃过「同一句原文 3 份硬拷贝」
+# 的亏）。指针留在 .md 里，原文由这里送过去。
+#
+# 这是**搬位置，不是改内容**：改前那份 .md 的「I2VA / FL2VA / L2VA 首行」三条与「edge-stability
+# 原句」那一条逐字写着同样的四段原文，注入块里的字与它们逐字节相同（块本身不改写常量，
+# 见 ``_official_verbatim_block``；对照见 output/issue35-evidence/two_arm_check.log）。
+#
+# 白名单是显式的，与电影语言词表同一纪律：**不声明即拿不到**。除整片提示词工程师外没有
+# 别的角色需要它——写段那两条路径是代码拼的请求（``segment_prompts`` 直接插值常量），
+# 审查/质检角色是拿校验器工具去判，不是自己逐字符写。
+OFFICIAL_VERBATIM_ROLES = frozenset({"prompt_engineer"})
+
+# 注入块的标题，也是角色 .md 里指针句认的字。**只有这一处定义**：块标题、指针句、测试三处
+# 各写一遍就是又一个会各自漂移的字面量——本票正是来消这个的。测试会逐字比对 .md 里的指针，
+# 所以改标题时漏改某份 .md 会报红，改 .md 而不改这里也会。
+OFFICIAL_VERBATIM_MARKER = "【官方逐字符原文】"
 
 # 15 个角色，覆盖电影制作 + AIGC 双流程
 ROLE_KEYS = [
@@ -71,19 +97,43 @@ def _role_wordlist(role: str) -> str:
     return film_language.video_slice(role) or film_language.image_slice(role)
 
 
-def load_role_prompt(role: str) -> str:
-    """读角色提示词；命中的角色在文末附上电影语言词表切片（issue #31 / #33）。
+def _official_verbatim_block(role: str) -> str:
+    """该角色文末要附的「官方逐字符原文」块；不在 ``OFFICIAL_VERBATIM_ROLES`` 里返回空串。
 
-    切片附在**加载处**而不是各份 .md 里：词表是逐字读入的纯文本，抄进每个角色的 .md
-    就等于同一份词表有 N 份硬拷贝（本仓吃过「同一句官方原文 3 份硬拷贝」的亏）。
-    哪些角色拿哪几节由 ``film_language.VIDEO_SLICES`` / ``IMAGE_SLICES`` 声明，
+    文本逐字取自 ``h3_validator`` 的常量——本函数**只做搬运，不改写**（与电影语言切片
+    同一纪律），所以块里的每个字都能回常量比对。
+    """
+    if role not in OFFICIAL_VERBATIM_ROLES:
+        return ""
+    align_lines = "\n".join(
+        f"- {variant}：`{line}`" for variant, line in ALIGN_TEMPLATES.items()
+    )
+    return (
+        f"{OFFICIAL_VERBATIM_MARKER}（产出里必须逐字符出现，不得改写、翻译或换行）\n"
+        "- 帧变体首行对齐指令，按当前变体取对应那一行"
+        "（`N`=最终镜头号，`S.SS`=时长两位小数）：\n"
+        f"{align_lines}\n"
+        "- 每个镜头块的**最后一句**（多镜段里每块各加一次）：\n"
+        f"`{EDGE_STABILITY_SENTENCE}`"
+    )
+
+
+def load_role_prompt(role: str) -> str:
+    """读角色提示词；命中的角色在文末附上电影语言词表切片（issue #31 / #33）与官方原文块。
+
+    两种附加都发生在**加载处**而不是各份 .md 里：它们都是逐字读入的纯文本，抄进角色 .md
+    就等于同一份内容有 N 份硬拷贝（本仓吃过「同一句官方原文 3 份硬拷贝」的亏）。
+    哪些角色拿哪几节词表由 ``film_language.VIDEO_SLICES`` / ``IMAGE_SLICES`` 声明，
     不声明的角色拿到空串——分段规划师尤其不能拿到（段尾钩子要留作锚帧语义校验的
     可判定对照物），关键帧生图提示词工程师只能拿生图半（静态图不写运镜）。
+    哪些角色拿官方原文块由 ``OFFICIAL_VERBATIM_ROLES`` 声明（issue #35）。
     """
     prompt = (PROMPTS_DIR / f"{role}.md").read_text(encoding="utf-8")
     wordlist = _role_wordlist(role)
-    # 空串（白名单外的角色）不加空行：不声明词表的角色，提示词逐字与改动前一致
-    return f"{prompt}\n{wordlist}" if wordlist else prompt
+    # 原文块排在最后：角色 .md 里的指针写的是「见文末【官方逐字符原文】」
+    verbatim = _official_verbatim_block(role)
+    # 空块不加空行：不声明词表/原文的角色，提示词逐字与改动前一致
+    return "\n".join(part for part in (prompt, wordlist, verbatim) if part)
 
 
 def _make_tools(refs: list[RefItem], mode: str, duration: float, variant: str, role: str) -> list:

@@ -14,6 +14,8 @@
 
 仓里唯一一次「vendor 官方 skill 参考文件」的先例（`references/base-en.txt`、`ref-en.txt`）**从不被任何代码打开**——是先例性的空接线，不是成功先例。所以「装」在本仓没有对应形态；有价值的是**把知识接进那几个真被模型读到的文本**。
 
+> **2026-09-27 更正（issue #35）**：上面这句「从不被任何代码打开」写于当时的实况，但**当时就已经不全对**——`base-en.txt` 自 issue #8（`b70e421`）起被 `tests/test_h3_validator.py` 读过一条断言（实测见 `output/issue35-evidence/two_arm_check.log`；`git log -S BASE_EN_REF` 可复现）。现在两份都有消费者：`tests/test_official_references.py` 把它们当常量对照物逐字钉住，`ref-en.txt` 由此拿到第一个消费者。定位与取舍见 ADR 0008。本裁定（不做 skill 运行时）**不受影响**——本条更正的是「无人读」这个事实描述，不是裁定。
+
 `agents/__init__.py` 已记过同族的教训：deepagents 无条件注入 `ls` / `write_file` / `execute` 等内建工具，结果是「模型去调 `write_file` 而不是直接返回文本，导致空产出」。给角色配工具来「按需读词表」会重新踩进同一个坑。
 
 ## 裁定二：真源是内联的单一来源，由读取口按消费者取切片

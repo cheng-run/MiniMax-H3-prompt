@@ -9,7 +9,7 @@
 
 - 技术栈：**LangChain（`create_agent`）+ LangGraph（StateGraph 管线 + 有界圆桌子图）**
 - 输出流程：**主题 → 剧本 → FL2VA 融合首帧/尾帧提示词 → 视频提示词**；人物、道具、场景统一融入首尾帧
-- 格式唯一依据：仓库内 `references/` 的官方规范文档（`base-en.txt` / `ref-en.txt`）
+- 格式唯一依据：仓库内 `references/` 的官方规范文档（`base-en.txt` / `ref-en.txt`，**给人读的官方原文**，定位与维护见 `references/README.md`）
 
 ## ✅ 当前状态（2026-08-14）
 
@@ -162,7 +162,7 @@ src/minimax_h3_prompt/
 ├── generation.py        # 生成结果模型与渲染
 ├── summary.py           # 视频提示词中文摘要
 ├── segment_prompts.py   # 长视频按镜头拆段与逐段重写
-├── references/          # H3 官方规范（唯一格式依据）
+├── references/          # H3 官方规范原文（给人读；代码里的唯一可写来源是 h3_validator 常量）
 ├── prompts/             # 角色 system prompt
 ├── agents/              # create_agent 装配 + run_agent
 ├── graph/               # state / roundtable / nodes / pipeline
