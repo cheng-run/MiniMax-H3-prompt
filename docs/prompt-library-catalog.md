@@ -116,7 +116,7 @@ npx skills add agentara/skills@video-storyboard -g -y
 用任何外部库之前，先过这几关：
 
 **视频侧（H3）**
-- 运镜词**只在官方 13 个 motion type 白名单内**（`base-en.txt:100-121`）；`crane` / `handheld` / `orbit` / `crash zoom` / `whip pan` 都不在
+- 运镜词**只在官方 12 个 motion type 白名单内**（`base-en.txt:100-121`）；`crane` / `handheld` / `orbit` / `crash zoom` / `whip pan` 都不在
 - **不许句尾堆标签**，要写成镜头内的自然英文动作（`base-en.txt:123`）
 - **切点整秒、每镜 4-10 秒整数**，所以「多切/快切」类建议**不可用**
 - **快机位 + ≥3 动作节拍同段共存 = error**；处置是降机位；引用该规则**必须声明阈值量于 4 步采样**

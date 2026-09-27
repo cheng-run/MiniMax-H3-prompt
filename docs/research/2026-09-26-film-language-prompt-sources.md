@@ -38,7 +38,7 @@
 
 | # | 名称 | URL | 谁维护（权威性依据） | 内容类型 | 信息密度 | 本次抓取结果 | 对 H3 可否直接用 |
 |---|---|---|---|---|---|---|---|
-| S1 | MiniMax H3 官方 base 模式提示词规范 | 仓内 `src/minimax_h3_prompt/references/base-en.txt` | **MiniMax 官方**；本仓定为「官方规范唯一依据」（`CONTEXT.md:128-136`） | 提示词指南（官方规范） | 高：运镜三维表 18 行、切镜/音频衔接措辞全 | ✅ **逐字读到** | ✅ **直接可用**（同族同格式，是判断其他源可用性的基准） |
+| S1 | MiniMax H3 官方 base 模式提示词规范 | 仓内 `src/minimax_h3_prompt/references/base-en.txt` | **MiniMax 官方**；本仓定为「官方规范唯一依据」（`CONTEXT.md:128-136`） | 提示词指南（官方规范） | 高：运镜三维表 18 行（表格行数：表头＋分隔行＋16 数据行，其中 Motion type 12 行；2026-09-27 注明）、切镜/音频衔接措辞全 | ✅ **逐字读到** | ✅ **直接可用**（同族同格式，是判断其他源可用性的基准） |
 | S2 | MiniMax H3 官方 ref 模式提示词规范 | 仓内 `src/minimax_h3_prompt/references/ref-en.txt` | 同上 | 提示词指南（官方规范） | 高：含「每镜必须确立什么」清单（`:7`） | ✅ **逐字读到** | ✅ 直接可用 |
 | S3 | Google「Video generation prompt guide」（Gemini Omni Flash / Veo） | https://docs.cloud.google.com/vertex-ai/generative-ai/docs/video/video-gen-prompt-guide → **301 跳转至** https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/video/video-gen-prompt-guide | **Google（模型方一手）** | 提示词指南 | **很高**：机位 12 词 + 运镜 11 词 + 镜头 5 项 + 电影术语 + 负向提示 | ✅ **HTTP 200，已逐字核实**（425KB→26.7KB 正文） | ⚠️ 词表可作候选池，但**同页两处「not officially supported」免责**（§3B-2）；且落笔必须成 H3 自然句 |
 | S4 | Google AI for Developers — Veo 文档 | https://ai.google.dev/gemini-api/docs/veo | Google（模型方一手） | 提示词指南 | 未知 | ❌ **curl 超时**（exit 28，25s 无响应） | 未读到，不作依据 |
@@ -84,7 +84,7 @@
 | Amplitude | `with small amplitude` / `with large amplitude` | Small-range change / Large-range change |
 | Speed | `at slow speed` / `at fast speed` | Slow movement / Fast movement |
 
-**这就是运镜词白名单**：只有这 13 个 motion type + 2 个幅度 + 2 个速度。外部词表里不在此列的运镜名（crane / dolly / orbit / arc 之外的英文名、whip pan、handheld、crash zoom …）**都不是官方列出的表达**。
+**这就是运镜词白名单**：只有这 12 个 motion type + 2 个幅度 + 2 个速度。外部词表里不在此列的运镜名（crane / dolly / orbit / arc 之外的英文名、whip pan、handheld、crash zoom …）**都不是官方列出的表达**。
 
 ##### 运镜写法铁律 + 官方例句（`base-en.txt:123-129`）
 

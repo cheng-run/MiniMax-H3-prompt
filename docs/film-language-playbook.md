@@ -144,7 +144,7 @@ The push-in reveals the tension in his face.
 
 ## 七、我不会用的东西（都是一手证据支持「不用」）
 
-- **不在官方白名单的运镜名**：`crane`、`handheld`、`orbit`、`crash zoom`、`dolly zoom`、`whip pan`、`Steadicam`、`Gimbal` —— 官方只列了 13 个 motion type。尤其 `crash zoom` / `snap zoom` 语义就是极快，会绕过本仓快机位正则（快词表只有 `fast|rapid|swift|whip`），用了等于钻闸门空子。
+- **不在官方白名单的运镜名**：`crane`、`handheld`、`orbit`、`crash zoom`、`dolly zoom`、`whip pan`、`Steadicam`、`Gimbal` —— 官方只列了 12 个 motion type（`base-en.txt` §4.3 表里 `Motion type` 的行数；2026-09-27 更正，原写 13 是错数）。尤其 `crash zoom` / `snap zoom` 语义就是极快，会绕过本仓快机位正则（快词表只有 `fast|rapid|swift|whip`），用了等于钻闸门空子。
 - **Hailuo 的方括号运镜指令**（`[Truck left]` 等）：那是 Hailuo **API 产品线**的能力；官方模型表只有 `MiniMax-Hailuo-2.3` / `MiniMax-Hailuo-02` / `T2V-01-Director` / `T2V-01`，**H3 不在其中**，方括号结构与 H3 的 ComfyUI 提示词格式是两套东西，照搬即自创结构。
 - **把景别/光线/镜头词写进静态生图提示词**：本仓明令禁止（`prompt_engineer.md:31`），生图侧和视频侧是两套词表。
 - **「一镜一运镜」当成通则**：Runway 原文明确说 `combining camera terms is encouraged`、`One move per clip is the reliable fallback, not the rule` —— 它论的是运镜**个数**，与本仓「机位速度 × 节拍数」不是同一个维度，**不能互相引证**。

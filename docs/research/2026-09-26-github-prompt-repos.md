@@ -17,7 +17,7 @@
 
 4. **`smixs/visual-skills`（434★）的立场与本仓问题正面吻合。** 原文：`Model syntax is worth nothing until the dramaturgy is there. Editing, staging, camera, light, the objects allowed in frame — hard rules, all of them written into the skill.`（「戏剧构作优先，语法其次」）——这正是用户抱怨的「没有水平」的另一种说法：先有调度与光，再谈提示词。该仓库明确覆盖 **editing / staging / camera / light**，并援引 Murch 的剪辑理论。⚠️ 但它是**视频向**，其 camera/editing 部分**不能进本仓生图侧**。
 
-5. **中文源有一个，且它自带「运镜词典」与「公式」章节。** `cclank/lanshu-awesome-ai-video-kit`（**405★**，v0.9.0 / 2026-05）：**543 条 prompt**（433 单模型 + 110 跨模型对照）、15 模型、7 个 Claude Skill、**21 篇方法论 SOP**；其方法清单里明确列有 **「运镜词典」**、**「约束词清单」**、**「分镜时序」**、**「情绪外化表」**、**「三家独立公式」（Kling 三套写法 + 6 守则 / 跨 5 模型对比 / Sora 2 Shot List / Veo 3.1 8 元素）**。中文术语对生图侧（要求中文正文）**天然省转译**。⚠️ 但它是**视频**工具包，`运镜词典` 属视频侧，需按 H3 的 13 词白名单过滤。
+5. **中文源有一个，且它自带「运镜词典」与「公式」章节。** `cclank/lanshu-awesome-ai-video-kit`（**405★**，v0.9.0 / 2026-05）：**543 条 prompt**（433 单模型 + 110 跨模型对照）、15 模型、7 个 Claude Skill、**21 篇方法论 SOP**；其方法清单里明确列有 **「运镜词典」**、**「约束词清单」**、**「分镜时序」**、**「情绪外化表」**、**「三家独立公式」（Kling 三套写法 + 6 守则 / 跨 5 模型对比 / Sora 2 Shot List / Veo 3.1 8 元素）**。中文术语对生图侧（要求中文正文）**天然省转译**。⚠️ 但它是**视频**工具包，`运镜词典` 属视频侧，需按 H3 的 12 词白名单过滤。
 
 6. **一条系统性风险要写在这里**：本次普查到的所有提示词库，**没有一家是围绕 H3 的官方三段式格式**（`integrated_multimodal_description` + `overall_soundscape` + `non_diegetic_music`）组织的。它们绝大多数是 Seedance / Veo / Kling / Sora 的写法。→ **可借的是「词汇、分节、结构公式」，不可借的是「成品提示词」与「模型专属语法」**（尤其 Hailuo 系方括号 `[Truck left]`，本仓 `base-en.txt` 无此结构，**不可移植**）。
 
@@ -34,7 +34,7 @@
 | `snubroot/Veo-3-Prompting-Guide` | **320** | 自称 `GOOGLE VEO 3 MASTER PROMPTING GUIDE`，个人整理的 Veo 3 大而全指南（**非 Google 官方**） | ✅ **有，且已逐字核实**：8 要素公式表 + 质量分级；**`4.8 Master Camera Movement Library`（9 节）**、**`4.9 Advanced Shot Composition Mastery`**（内含 **`Shot Sizes and Framing`** 7 个景别 / `Advanced Framing Techniques` 4 条 / `Advanced Lens and Focus Effects` 7 词 / `Professional Color Palette Control` 7 词）、**`4.10 Professional Lighting Mastery`（3 节）**——三节标题均已 grep 证实存在，景别节词条已逐字取回（见 §2.5） | **视频** | ✅ 已读（142KB，206 标题）+ 三节真伪已核 | ✅ **本次唯一同时含「公式 + 景别 + 镜头/焦段 + 色彩 + 灯光」分节的外部源**；⚠️ 是 Veo 写法，落 H3 需改写；⚠️ 个人仓库、无出处标注、排版重度 emoji；⚠️ 它是「术语 + 示例句」而非纯词表，抄词时要自己剥出术语名 |
 | `LearnPrompt/awesome-seedance` | **1412** | 自称 evidence-led 的 Seedance 提示词库：463 案例追溯到原帖 + 跨模型重测 | ✅ **有**：**25 个分类模板**（Structural foundations 3 / Realism & UGC 4 / Commercial 4 / Narrative 5 / Stylized 3 / Action 6）；核心结构模板是「**按秒切连续时间段，每段一个镜头类型 + 一个主动作 + 自己的声音线**」 | **视频** | ✅ 已读（101KB，23 标题） | ✅ **价值最高**：① 结构模板与 H3 的 `At MM:SS.mmm` 分段**同构**；② **含 MiniMax H3 实测复现率**（见 §1-3）；⚠️ 是 Seedance 生态，模型专属语法不可搬；⚠️ 模板正文（`docs/templates/`）**未读** |
 | `smixs/visual-skills` | **434** | 「AI 电影导演」agent skill，主张 **dramaturgy first, syntax second**（戏剧构作优先，语法其次），援引 Murch 剪辑理论 | ✅ **有**（部分）：`formula` ×4、`vocab` ×2；覆盖 editing / staging / camera / light 的**硬规则** | **视频为主**（含 image skill） | ✅ 已读（16.7KB，12 标题） | ⚠️ **方法论立场与本仓问题最吻合**（先调度与光、再提示词）；但内容偏视频（camera/editing），**其运镜/剪辑部分不可进生图侧**；具体规则正文**未读** |
-| `cclank/lanshu-awesome-ai-video-kit` | **405** | 中文企业级 AI 视频工具包：543 prompt + 15 模型 + 7 skill + 21 篇方法论 SOP | ✅ **有**：方法清单含 **「运镜词典」**、**「约束词清单」**、**「分镜时序」**、**「情绪外化表」**、**「三家独立公式」**（Kling 三套写法 + 6 守则 / 跨 5 模型对比 / Sora 2 Shot List / Veo 3.1 8 元素） | **视频** | ✅ 已读（14.4KB，19 标题） | ⚠️ **中文，省转译**；但属视频侧，`运镜词典` 需按 H3 的 13 词白名单过滤；「公式」是别家模型的，只可借结构。具体条目**未读**（55+ 文件 ~640KB） |
+| `cclank/lanshu-awesome-ai-video-kit` | **405** | 中文企业级 AI 视频工具包：543 prompt + 15 模型 + 7 skill + 21 篇方法论 SOP | ✅ **有**：方法清单含 **「运镜词典」**、**「约束词清单」**、**「分镜时序」**、**「情绪外化表」**、**「三家独立公式」**（Kling 三套写法 + 6 守则 / 跨 5 模型对比 / Sora 2 Shot List / Veo 3.1 8 元素） | **视频** | ✅ 已读（14.4KB，19 标题） | ⚠️ **中文，省转译**；但属视频侧，`运镜词典` 需按 H3 的 12 词白名单过滤；「公式」是别家模型的，只可借结构。具体条目**未读**（55+ 文件 ~640KB） |
 | `zenstory-ai/drama-skills` | **2276** | 开源 AI 短剧/漫剧创作 skill 合集：剧本、角色资产、分镜 storyboard、图片/视频提示词、审查 | ⚠️ 未知（未读） | 视频 + 生图（短剧全流程） | ❌ 未读 | ⚠️ **流程形态与本仓最像**（剧本→角色→分镜→图片/视频提示词→审查），值得一读；但没有任何已核实内容 |
 | `OSideMedia/higgsfield-ai-prompt-skill` | **637** | Claude AI skill：32 个子技能，覆盖 Seedance 2.5 等的电影感提示词 | ⚠️ 未知（未读） | 视频 | ❌ 未读 | ⚠️ 子技能结构可能含分节词表；未核实 |
 | `beshuaxian/higgsfield-seedance2-jineng` | **864** | Seedance 2.0 × Higgsfield 技能集：15 个 Claude prompt skills（cinematic / 3D CGI / anim…） | ⚠️ 未知（未读） | 视频 | ❌ 未读 | ⚠️ 未核实 |
@@ -185,7 +185,7 @@
 
 | 冲突面 | 本次普查中踩线的具体情况 |
 |---|---|
-| **H3 视频侧只认官方 13 词运镜白名单** | 所有 Seedance/Veo/Kling 提示词库的运镜写法（`dolly zoom`、`whip pan`、`crash zoom`、`orbit`、`snorricam`…）**都不在白名单内**；`Veo-3-Prompting-Guide` 的 `4.8 Master Camera Movement Library` 九节里大部分词属于此类——**只可读其分节思路，不可搬词**。另注意本仓有 `FAST_CAMERA_MULTI_BEAT_COEXIST` **error 级**禁令（快机位 + ≥3 动作节拍同段共存），外部「运镜更丰富」的建议一律先过这道闸门 |
+| **H3 视频侧只认官方 12 词运镜白名单** | 所有 Seedance/Veo/Kling 提示词库的运镜写法（`dolly zoom`、`whip pan`、`crash zoom`、`orbit`、`snorricam`…）**都不在白名单内**；`Veo-3-Prompting-Guide` 的 `4.8 Master Camera Movement Library` 九节里大部分词属于此类——**只可读其分节思路，不可搬词**。另注意本仓有 `FAST_CAMERA_MULTI_BEAT_COEXIST` **error 级**禁令（快机位 + ≥3 动作节拍同段共存），外部「运镜更丰富」的建议一律先过这道闸门 |
 | **生图侧禁任何运镜/时间/剪辑词** | `smixs/visual-skills` 的核心（editing / staging / camera）与 `cclank` 的「运镜词典」**整块不可进生图侧**；`LearnPrompt` 的结构模板含「时间轴/按秒切段」，属**视频侧**结构，**不能进静态图提示词** |
 | **方括号 `[Truck left]` 类语法不可移植** | 本仓 `base-en.txt` 无方括号指令结构。Seedance 生态（`LearnPrompt`、`ZeroLu`、`YouMind-*`）与 Hailuo 系均有各自的模型专属语法标记，**一律不可移植** |
 | **正文语言：视频侧英文 / 生图侧中文** | 300★ 以上的库**几乎全英文**（`cclank` 405★ 是少数的中文源）；抄词仍需按语言侧分别转译。生图侧可优先看中文源 |
@@ -208,7 +208,7 @@
 
 ### 下次建议（按性价比排序）
 
-1. **读 `snubroot/Veo-3-Prompting-Guide` 的 `4.8` 与 `4.10` 正文**——`4.8 Master Camera Movement Library` 九节与 `4.10` 灯光三节（Classic/Mood/Natural）**已在同一次抓取里，只是本次未展开**，是**零边际成本**的下一步（该文件已在本地抓过一次，重抓 1 次即可）。⚠️ 但要记得：`4.8` 的运镜词多数不在 H3 的 13 词白名单内，**只可读分节思路**。
+1. **读 `snubroot/Veo-3-Prompting-Guide` 的 `4.8` 与 `4.10` 正文**——`4.8 Master Camera Movement Library` 九节与 `4.10` 灯光三节（Classic/Mood/Natural）**已在同一次抓取里，只是本次未展开**，是**零边际成本**的下一步（该文件已在本地抓过一次，重抓 1 次即可）。⚠️ 但要记得：`4.8` 的运镜词多数不在 H3 的 12 词白名单内，**只可读分节思路**。
 2. **读 `LearnPrompt/awesome-seedance` 的 `docs/templates/`**——25 个模板正文，重点看「Structural foundations」那 3 个，并核对其 H3 复现率数据的口径。
 3. 读 `cclank` 的「运镜词典」与中文术语条目（中文源省转译）。
 4. **`awesome video generation` 这个词以后不必再跑**（已被 ML 论文综述占满，与提示词库几乎不重叠，见 §2.4）。
