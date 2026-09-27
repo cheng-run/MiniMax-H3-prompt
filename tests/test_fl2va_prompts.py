@@ -178,6 +178,63 @@ def test_single_frame_bundle_l2va():
     assert validate_fl2va_bundle(bundle, duration=5) == []
 
 
+# 多返回的那张帧的内容标记：出现在任何产物/请求里都算没剥干净。
+_PHANTOM = "PHANTOM FRAME the model volunteered"
+
+
+@pytest.mark.parametrize(("variant", "required", "foreign"), [
+    ("I2VA", "first", "last"),
+    ("L2VA", "last", "first"),
+])
+def test_foreign_frame_is_stripped_from_the_bundle(variant, required, foreign):
+    """模型多返回的关键帧不进 bundle（issue #38）。
+
+    I2VA/L2VA 只认该变体自己的帧（``variant_frame_names``），但模型偶尔会多写一张
+    ——#37 那次运行两轮都自己多写了 ``last``。多出来的那张既不被校验、也不该进产物：
+    它会渲染成一份用户拿不到的提示词文件，还会被当成整片提示词的帧锚定（`_fl2va_frame_context`
+    对 I2VA 照样看 ``last``）。
+    """
+    payload = _single_frame_payload(required, "Three adventurers inside a medieval tavern interior.")
+    payload[foreign] = frame_payload(_PHANTOM)
+    brief = Brief(variant=variant, duration=5, plot="中世纪酒馆室内")
+
+    bundle = fl2va_bundle_from_dict(payload, brief)
+
+    assert getattr(bundle, foreign) == (), f"{variant} 保留了模型多返回的 {foreign} 帧"
+    assert getattr(bundle, required)
+
+
+def test_result_from_state_strips_foreign_frame(tmp_path):
+    """I2VA 落盘的产物里不得有模型多返回的那张尾帧（issue #38 票面复现的这条路径）。
+
+    它不经 ``fl2va_bundle_from_dict``（非 FL2VA 支路为了兼容旧 state 走的是宽松解析），
+    所以剥离得在支路里各做一次——不然票面那条复现照样能过。
+    """
+    payload = _single_frame_payload("first", "A woman stands on a terrace above the clouds.")
+    payload["last"] = frame_payload(_PHANTOM)
+    brief = Brief(variant="I2VA", duration=10, language="Chinese", plot="云上天宫的女子")
+    result = result_from_state(
+        {
+            "script": "s",
+            "final_prompt": "integrated_multimodal_description: [Shot 1] x.",
+            "character_design": "c",
+            "prop_design": "p",
+            "background_design": "b",
+            "fl2va_prompt_bundle": payload,
+        },
+        brief,
+        generation_id="GEN001",
+        topic_id="topic",
+        project_id="project",
+    )
+
+    assert result.fl2va_prompt_bundle.last == ()
+    directory = save_generation(result, tmp_path / "GEN001")
+    for name in ("last-frame-prompt.md", "fl2va-prompt.json", "generation.json"):
+        assert _PHANTOM not in (directory / name).read_text(encoding="utf-8"), \
+            f"多返回的尾帧进了 {name}"
+
+
 def test_fl2va_bundle_still_requires_both_frames():
     """FL2VA 请求但只给单帧 → 必须 raise（回归强校验，不能因单帧化放宽）。"""
     brief = Brief(variant="FL2VA", duration=5, plot="中世纪酒馆室内")
@@ -418,6 +475,86 @@ def test_rewrite_retry_also_carries_the_baseline_and_revisions(monkeypatch):
     assert len(seen) == 2, "首轮产物没触发改写重试，这条用例没测到重试路径"
     assert "修订基线" in seen[1] and "橡木长桌与壁炉" in seen[1], "改写请求丢了基线"
     assert "用户修订" in seen[1] and "天空改成黄昏" in seen[1], "改写请求丢了用户修订"
+
+
+@pytest.mark.parametrize(("variant", "kept", "foreign"), [
+    ("I2VA", "first", "last"),
+    ("L2VA", "last", "first"),
+])
+def test_json_repair_request_names_only_the_variants_frames(monkeypatch, variant, kept, foreign):
+    """转 JSON 那条重试的「必须保留哪些帧」按变体现拼（复审指出别在节点里再抄一张表）。
+
+    抄表的代价不只是重复：写死成「first、last」就等于让模型在 I2VA 里把多返回的尾帧
+    **保留下来**，与剥离正好对撞。
+    """
+    replies = iter([
+        "这不是 JSON",
+        json.dumps(_single_frame_payload(kept, "Three adventurers inside a medieval tavern interior.")),
+    ])
+    messages: list[str] = []
+
+    def fake_run_agent(agent, message):
+        messages.append(message)
+        return next(replies)
+
+    monkeypatch.setattr(nodes, "run_agent", fake_run_agent)
+    node = nodes._make_fl2va_frame_prompt_node({"frame_prompt_engineer": object()})
+    brief = Brief(variant=variant, duration=5, plot="中世纪酒馆室内")
+
+    node({"brief": brief, "shot_table": "start and end states"})
+
+    repair_request = messages[1]
+    assert f"必须保留 {kept}、" in repair_request
+    assert f"必须保留 {kept}、{foreign}" not in repair_request
+
+
+def test_frame_node_reports_the_stripped_foreign_frame(monkeypatch, capsys):
+    """剥离必须**看得见**（issue #38：「绝不静默失败」）。
+
+    静默丢弃模型产物在本仓是明文违规，所以多返回的帧被剥时节点要当场说清丢了哪张。
+    """
+    payload = json.dumps(_single_frame_payload(
+        "first", "Three adventurers inside a medieval tavern interior."))
+    monkeypatch.setattr(nodes, "run_agent", lambda agent, message: json.dumps({
+        **json.loads(payload), "last": frame_payload(_PHANTOM),
+    }))
+    node = nodes._make_fl2va_frame_prompt_node({"frame_prompt_engineer": object()})
+    brief = Brief(variant="I2VA", duration=5, plot="中世纪酒馆室内")
+
+    output = node({"brief": brief, "shot_table": "start and end states"})
+
+    assert not output["fl2va_prompt_bundle"]["last"]
+    warning = capsys.readouterr().out
+    assert "[警告]" in warning and "last" in warning, f"剥离没有告警：{warning!r}"
+
+
+def test_stripped_foreign_frame_never_anchors_the_video_prompt(monkeypatch):
+    """被剥的帧不许当整片提示词的帧锚定（issue #38 的第二个后果）。
+
+    真实运行里这条链是连着的：帧节点产出 bundle → 提示词工程师节点读它渲染
+    「关键帧锚定」块。而 `_fl2va_frame_context` 对 I2VA **照样读 last**——帧节点剥不干净
+    的话，正文会去收束到一张用户根本不会生成的图（这一危害不进任何票面清单，只有把两个
+    节点串起来跑才看得见）。
+    """
+    payload = json.dumps(_single_frame_payload(
+        "first", "Three adventurers inside a medieval tavern interior."))
+    monkeypatch.setattr(nodes, "run_agent", lambda agent, message: json.dumps({
+        **json.loads(payload), "last": frame_payload(_PHANTOM),
+    }))
+    brief = Brief(variant="I2VA", duration=5, plot="中世纪酒馆室内")
+    state = {"brief": brief, "script": "script"}
+    state.update(nodes._make_fl2va_frame_prompt_node({"frame_prompt_engineer": object()})(state))
+
+    captured: dict[str, str] = {}
+
+    def capture(agent, message):
+        captured["message"] = message
+        return "video prompt"
+
+    monkeypatch.setattr(nodes, "run_agent", capture)
+    nodes._make_prompt_engineer_node({"prompt_engineer": object()})(state)
+
+    assert _PHANTOM not in captured["message"], "多返回的帧当上了整片正文的帧锚定"
 
 
 def test_frame_node_i2va_emits_first_only(monkeypatch):

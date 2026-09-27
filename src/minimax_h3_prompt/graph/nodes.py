@@ -16,6 +16,8 @@ from ..generation import (
     IMAGE_PROFILE_DEFAULTS,
     fl2va_bundle_from_dict,
     image_canvas_size,
+    strip_foreign_frames,
+    variant_frame_names,
 )
 from ..tools.h3_validator import validate_prompt
 from ..tools.ref_metadata import format_ref_meta
@@ -212,7 +214,9 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
     """把完整镜头上下文转换为对应变体的关键帧生图提示词（FL2VA 双帧 / I2VA 仅首帧 / L2VA 仅尾帧）。"""
     def parse_bundle(raw: str, brief: Brief) -> dict:
         variant = str(brief.variant).upper()
-        required = {"FL2VA": "first、last", "I2VA": "first", "L2VA": "last"}[variant]
+        # 「必须保留哪些帧」现拼（复审指出）：变体→帧那份知识住在 `variant_frame_names`，
+        # 这里再抄一张表就是同一件事的两处真相——本仓「规则在、接线不在」的温床。
+        required = "、".join(variant_frame_names(variant))
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError:
@@ -233,6 +237,15 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
                 raise ValueError(f"{variant} 关键帧提示词不是有效 JSON") from exc
         if not isinstance(parsed, dict):
             raise ValueError(f"{variant} 关键帧提示词 JSON 顶层必须是对象")
+        # 模型多返回的关键帧在这里**看得见地**剥掉（issue #38）：剥离本身是确定性的
+        # （变体是用户的选择，见 `strip_foreign_frames`），但「模型产物被丢掉」这件事
+        # 不能静默——本仓的「绝不静默失败」。告警打在这个节点就够：真实运行都经过它。
+        # 随后的 `fl2va_bundle_from_dict` 里还会再剥一次，那一次是**不变量**（任何调用方
+        # 都绕不过），此处这一剥只为拿到帧名好说话。
+        parsed, dropped = strip_foreign_frames(parsed, variant)
+        if dropped:
+            print(f"[警告] {variant} 变体不含 {'、'.join(dropped)} 帧，"
+                  f"模型多返回的它已剥离，不会进入产物。")
         bundle = fl2va_bundle_from_dict(parsed, brief)
         return bundle.to_dict()
 

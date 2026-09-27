@@ -94,8 +94,28 @@ def _infer_frame_variant(first: tuple, last: tuple) -> str:
     return "FL2VA"
 
 
-def _variant_frame_names(variant: str) -> tuple[str, ...]:
-    return {"FL2VA": ("first", "last"), "I2VA": ("first",), "L2VA": ("last",)}[str(variant).upper()]
+# 变体 → 该变体自己的关键帧。**只此一份**：非帧变体（T2VA／未知）不在表里，
+# 它们是「没有关键帧」，不是「三选一的另一种」。
+_FRAME_NAMES_BY_VARIANT: dict[str, tuple[str, ...]] = {
+    "FL2VA": ("first", "last"),
+    "I2VA": ("first",),
+    "L2VA": ("last",),
+}
+
+# 关键帧槽位的全集，**从上面那张表推出来**（别手写第二份）：剥离要遍历它去找不该在的帧，
+# 写死一份的话，将来多一个槽位就是**静默不剥**——正是本票要消灭的那类缺陷。
+_ALL_FRAME_NAMES: tuple[str, ...] = tuple(
+    dict.fromkeys(name for names in _FRAME_NAMES_BY_VARIANT.values() for name in names)
+)
+
+
+def variant_frame_names(variant: str) -> tuple[str, ...]:
+    """该变体自己的关键帧名；非帧变体抛 KeyError（调用方只对帧变体用它）。
+
+    公开读取口：帧节点要用它现拼那句「必须保留 first、last」的改写清单——同一份知识
+    两处各写一张表，就是本仓反复出现的「规则在、接线不在」的温床（复审指出）。
+    """
+    return _FRAME_NAMES_BY_VARIANT[str(variant).upper()]
 
 
 @dataclass(frozen=True)
@@ -302,7 +322,7 @@ class FL2VAPromptBundle:
         variant = _infer_frame_variant(self.first, self.last)
         if variant == "FL2VA" and (not self.first or not self.last):
             raise ValueError("FL2VA 必须同时包含首帧和尾帧提示词")
-        for frame_name in _variant_frame_names(variant):
+        for frame_name in variant_frame_names(variant):
             rows = getattr(self, frame_name)
             models = {row.model_family for row in rows}
             if len(models) != len(rows):
@@ -411,11 +431,11 @@ def validate_fl2va_bundle(
     groups = [group for group in bundle.required_scene_terms if group]
     all_frame_text = " ".join(
         row.positive_prompt
-        for frame_name in _variant_frame_names(variant)
+        for frame_name in variant_frame_names(variant)
         for row in getattr(bundle, frame_name)
     ).lower()
     anchor_lower = bundle.scene_anchor.lower()
-    for frame_name in _variant_frame_names(variant):
+    for frame_name in variant_frame_names(variant):
         for row in getattr(bundle, frame_name):
             if row.scene_anchor != bundle.scene_anchor:
                 issues.append(f"FL2VA_{frame_name.upper()}_ANCHOR_MISMATCH")
@@ -437,9 +457,44 @@ def validate_fl2va_bundle(
     return list(dict.fromkeys(issues))
 
 
+def strip_foreign_frames(raw: dict[str, Any], variant: str) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """剥掉不属于该变体的关键帧，返回 ``(剥好的 raw, 被剥掉的帧名)``。
+
+    帧的归属由**变体**决定（变体是用户的选择，见 `resolve_effective_variant`），而模型
+    偶尔会多写一张不属于它的帧：issue #38 现场是 I2VA 运行里多出 ``last``，#37 那次运行
+    **两轮**都自己多写了它（当时在试图满足地点词校验）。多出来的那张无处可去——
+
+    - `validate_fl2va_bundle` 只认该变体自己的帧（ADR 0009 裁定一），所以它**不被校验**；
+    - 于是它会一路走到 `render_generation`，落成一份用户拿不到的提示词文件；
+    - 还会被 `_fl2va_frame_context` 当成整片提示词的帧锚定（它对 I2VA 照样读 ``last``），
+      让正文去收束到一张用户根本不会生成的图；`render_baseline_block`（改稿的「上一版产物」）
+      与常识质检判官 `frame_common_sense_issues` 同样两帧都读。
+
+    非帧变体（T2VA／未知）**原样返回**：帧节点对它们直接返回 ``{}``，本来就不存在帧
+    bundle；替一份产不出来的输入发明读法，只会让旧 state 多一种解释。剥离只在
+    **原始 dict** 上做（不是剥已建好的 bundle）：剥完再解析，`from_dict` 才会据实推出
+    该变体自己的 profile 默认值——否则 I2VA 会顶着 FL2VA 的 ``h3_fl2va_v2``。
+
+    「绝不静默失败」这条由**调用方**承担：帧节点在剥离处打告警（真实运行都经过它），
+    本函数只做确定性的剥离、不打印，好让 `result_from_state` 这类纯转换路径也能复用它。
+    """
+    frame_names = _FRAME_NAMES_BY_VARIANT.get(str(variant).upper())
+    if frame_names is None:
+        return raw, ()
+    dropped = tuple(
+        name for name in _ALL_FRAME_NAMES
+        if name not in frame_names and raw.get(name)
+    )
+    if not dropped:
+        return raw, ()
+    return {key: value for key, value in raw.items() if key not in dropped}, dropped
+
+
 def fl2va_bundle_from_dict(raw: dict[str, Any], brief: Brief) -> FL2VAPromptBundle:
-    """把模型 JSON 补齐为项目协议，并执行主题地点约束校验。"""
-    enriched = dict(raw)
+    """把模型 JSON 补齐为项目协议（只留该变体自己的帧），并执行主题地点约束校验。"""
+    # 这一剥是**不变量**：任何调用方都绕不过它。被剥掉的帧名在这里不报告——真实运行
+    # 都经过帧节点，告警由它打（见 `strip_foreign_frames`）。
+    enriched, _dropped = strip_foreign_frames(dict(raw), brief.variant)
     enriched["required_scene_terms"] = [list(group) for group in scene_requirement_groups(brief.plot)]
     for frame_name, default_time in (("first", 0.0), ("last", brief.duration)):
         value = enriched.get(frame_name)
@@ -628,9 +683,14 @@ def result_from_state(
             )
             for kind in ("video", "character", "prop", "scene")
         )
+        # 多返回的关键帧在这条支路也要剥（issue #38）：它不经 `fl2va_bundle_from_dict`
+        # ——那条函数顺带做地点校验与词表补齐，而这条支路为「读旧 state」特意保持宽松——
+        # 所以剥的动作得各做一次。剥完自己的帧一张不剩时留给 `from_dict` 报错：
+        # 那是「该变体连自己的帧都没有」，与「多了一张」不是一回事，不该被这次改动抹平。
+        raw_bundle = state.get("fl2va_prompt_bundle")
         image_bundle = (
-            FL2VAPromptBundle.from_dict(state["fl2va_prompt_bundle"])
-            if isinstance(state.get("fl2va_prompt_bundle"), dict)
+            FL2VAPromptBundle.from_dict(strip_foreign_frames(raw_bundle, brief.variant)[0])
+            if isinstance(raw_bundle, dict)
             else None
         )
         image_prompts = image_prompt_variants(state, brief)
@@ -835,7 +895,7 @@ __all__ = [
     "GenerationResult", "PromptArtifact", "PromptKind", "ImagePromptVariant",
     "FL2VAFramePrompt", "FL2VAPromptBundle", "brief_snapshot",
     "ImageProfile", "IMAGE_PROFILE_DEFAULTS", "IMAGE_FAMILY_LABELS", "image_canvas_size",
-    "fl2va_bundle_from_dict", "generation_directory", "render_generation",
-    "render_fl2va_frame_markdown", "render_fl2va_markdown", "result_from_state",
+    "fl2va_bundle_from_dict", "generation_directory", "render_generation", "strip_foreign_frames",
+    "render_fl2va_frame_markdown", "render_fl2va_markdown", "result_from_state", "variant_frame_names",
     "scene_requirement_groups", "validate_fl2va_bundle",
 ]
