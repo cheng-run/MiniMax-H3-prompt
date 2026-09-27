@@ -69,6 +69,10 @@ def test_wordlist_is_bilingual():
 
     本仓已有先例：中文输出下只给英文词表＝结构性必挂。三处抽查分别落在
     景别、机位角度、光线三个词表上。
+
+    为什么这里**可以**钉具体的词（与「不断言真源内部措辞」看似冲突）：中英对照本身就是
+    票面的验收标准（AC-3），它是**产物规格**不是内部措辞——词表里没有可断的「外部行为」，
+    只能抽样断内容；换成断小节标题则等于什么都没断（标题在、词没了照样绿）。
     """
     src = film_language.video_source_text()
     for zh, en in (("特写", "close-up"), ("仰拍", "low angle"), ("逆光", "backlight")):
@@ -80,9 +84,15 @@ def test_slice_is_per_consumer_not_the_whole_source():
 
     光线词表只给摄影指导（画面细化要写光线方向与强度／质感）；分镜师定的是景别与构图，
     拿到一整份是噪声。未知消费者返回空串——不加白名单就等于悄悄扩权。
+
+    探针取**小节标题**（它同时是 `VIDEO_SLICES` 的声明键），不取词表里的词：
+    钉具体的词会在真源换一个更准的词时误报，而「哪一节到了谁手里」才是这里要钉的行为。
     """
-    assert "golden hour backlight" in film_language.video_slice("cinematographer")
-    assert "golden hour backlight" not in film_language.video_slice("storyboard")
+    assert "## 词表：光线" in film_language.video_slice("cinematographer")
+    assert "## 词表：光线" not in film_language.video_slice("storyboard")
+    # 景别两边都要（分镜师定景别，摄影指导继承它）——反过来也证明切片不是按「分镜师拿全部」切
+    for role in CHOOSING_ROLES:
+        assert "## 词表：景别" in film_language.video_slice(role)
     assert film_language.video_slice("segment_planner") == ""
     assert film_language.video_slice("不存在的角色") == ""
 
