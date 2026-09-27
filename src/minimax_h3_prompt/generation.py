@@ -665,7 +665,14 @@ def generation_directory(project_directory: Path, generation_id: str) -> Path:
 
 
 def image_prompt_variants(state: dict[str, Any], brief: Brief) -> tuple[ImagePromptVariant, ...]:
-    """从结构化适配器结果构造六份可复制提示词；旧 state 缺少时保留兼容降级。"""
+    """从结构化适配器结果构造六份可复制提示词；旧 state 缺少时保留兼容降级。
+
+    那句 ``or state.get(设计字段)`` 是**给旧会话**留的降级：这个函数存在的那些年，三个资产图
+    节点根本没接进链（issue #36），设计正文是唯一出路——于是喂进 ComfyUI 的资产图提示词
+    实际是「人物／道具／场景的设计说明」。接通之后新跑的会话永远走不到那一支
+    （``tests/test_asset_image_prompts.py`` 钉住），它只剩「读一份 #36 之前的旧 session-state」
+    这一个用途：那种现场没有专门的生图提示词，回退到设计正文总比给空串强。
+    """
     variants: list[ImagePromptVariant] = []
     for kind, field in (("character", "character_image_prompts"), ("prop", "prop_image_prompts"), ("scene", "scene_image_prompts")):
         raw = state.get(field, {})

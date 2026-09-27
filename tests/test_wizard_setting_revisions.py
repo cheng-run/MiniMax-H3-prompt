@@ -63,6 +63,15 @@ def _bundle_payload(label: str) -> dict:
     }
 
 
+# 资产图那三个节点（issue #36 起在阶段 1 链上）的请求开头与它们要的 JSON 形态。
+_ASSET_PROMPT_HEAD = "生成 Z-Image 和 Flux.2 两个可直接复制的生图提示词"
+
+
+def _asset_payload() -> dict:
+    return {"zimage": {"positive_prompt": "资产图提示词"},
+            "flux2": {"positive_prompt": "资产图提示词（Flux.2）"}}
+
+
 # ---------------------------------------------------------------------------
 # 节点层：设定级修订进请求文本，且只进该层的节点
 # ---------------------------------------------------------------------------
@@ -206,9 +215,11 @@ def test_rerun_really_truncates_the_chain_from_the_layer_node(tmp_path, monkeypa
 
     def fake_run_agent(agent, message):
         requests.append(message)
-        # 链尾的关键帧节点要求 JSON；其余节点一句非空文本即可
+        # 要求 JSON 的两类节点：链尾的关键帧节点，以及资产图那三个（issue #36 起在链上）
         if "请为这一段" in message or "请只生成首帧" in message or "请只生成尾帧" in message:
             return json.dumps(_bundle_payload("重跑版"))
+        if _ASSET_PROMPT_HEAD in message:
+            return json.dumps(_asset_payload())
         return "产物"
 
     monkeypatch.setattr(nodes, "run_agent", fake_run_agent)
@@ -386,8 +397,9 @@ def test_gate_names_the_steps_and_the_products_it_will_replace(tmp_path, monkeyp
 
     out = capsys.readouterr().out
     assert f"将重跑 {_STEPS_FROM_DESIGNERS} 步" in out, "确认门没报「将重跑几步」"
-    for label in ("人物形象设计", "背景设计", "道具设计", "美术统筹", "分镜表",
-                  "关键帧生图提示词（首/尾帧）"):
+    for label in ("人物形象设计", "背景设计", "道具设计", "美术统筹",
+                  "人物资产图提示词", "道具资产图提示词", "场景资产图提示词",  # 链上新增的节点
+                  "分镜表", "关键帧生图提示词（首/尾帧）"):
         assert label in out, f"确认门没列出会被替换的产物：{label}"
     assert len(calls) == 2, "确认之后没有真的重跑阶段 1 的链"
     assert calls[1]["resume_from_node"] == "parallel_designers"

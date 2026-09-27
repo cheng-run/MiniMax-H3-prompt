@@ -8,7 +8,7 @@
 只断言模块常量是「被测物自身的单测」——常量对了、请求组装时漏掉，照样不报红）。
 
 1. **到达性**：切片真进了该拿的角色（选词侧：分镜师、摄影指导；落笔侧：整片提示词工程师；
-   生图侧：关键帧生图提示词工程师）。
+   生图侧：关键帧生图提示词工程师 ＋ 资产图提示词工程师）。
 2. **不外溢**：不该拿到的角色拿不到。分段规划师的段尾钩子是锚帧语义校验的对照物，
    掺审美词就没法人工判定了；美术统筹的风格基调已由 brief 给出；制作人不选词。
    **两份真源也不许互相串门**（issue #33）：运镜词表进了静态图就是直接违规。
@@ -26,10 +26,10 @@ CHOOSING_ROLES = ("storyboard", "cinematographer")
 # ``segment_prompts`` 拼），它们的到达性在 ``tests/test_segment_prompts.py`` 里钉，
 # 那里能断言真实请求字符串；此处只管角色加载口这一根。
 WRITING_ROLES = ("prompt_engineer",)
-# 生图侧（issue #33）：静态画面是**另一份真源**，目前只有一条出站路径读它。
-# `image_prompt_engineer`（资产图那条路）**不在**里面：它的三个节点在
-# `pipeline._FOLDED_NODES` 里从没接进链，接它属编排改动，见另一张票。
-IMAGE_ROLES = ("frame_prompt_engineer",)
+# 生图侧（issue #33 关键帧 / issue #36 资产图）：静态画面是**另一份真源**，两条出站路径读它。
+# `image_prompt_engineer`（资产图那条路）在 #36 之前**不在**里面——它的三个节点从没接进链，
+# 喂进 ComfyUI 的实际是设计正文；三个节点接通后那条理由消失，它随之进白名单。
+IMAGE_ROLES = ("frame_prompt_engineer", "image_prompt_engineer")
 # 视频侧的消费者（选词侧 + 落笔侧的角色；两条写段路径不是角色，不在这里）。
 VIDEO_ROLES = CHOOSING_ROLES + WRITING_ROLES
 
@@ -231,17 +231,29 @@ def test_source_is_plain_text_without_placeholders():
 # 或把生图半送给视频角色，都是结构性错误，而两者都不会让别的测试报红。
 # ---------------------------------------------------------------------------
 
-def test_image_wordlist_reaches_the_frame_prompt_engineer():
-    """关键帧生图提示词工程师拿到的是**生图半**切片（缝 1：角色提示词加载口）。
+def test_image_wordlist_reaches_every_declared_image_role():
+    """生图侧两个角色都拿到**生图半**切片（缝 1：角色提示词加载口）。
 
-    它是链上唯一真跑的生图角色（`_LINEAR_CHAIN` 里只有 `fl2va_frame_prompts` 一个
-    生图节点）；票面明说资产图那条路不做——`image_prompt_engineer` 的三个节点在
-    `_FOLDED_NODES` 里从没接进链，喂进 ComfyUI 的实际是设计正文，接它属编排改动。
+    - 关键帧生图提示词工程师：链上的 `fl2va_frame_prompts`（首/尾帧）；
+    - 资产图提示词工程师：链上的 `parallel_image_prompts`（人物‖道具‖场景参考图）。
+
+    第二条是 issue #36 的到达性验收：接通**之前**它的三个节点从没接进链、请求也从没发出过，
+    喂进 ComfyUI 的实际是设计正文，所以「词表到没到它手里」当时无从谈起。
     """
     marker = _image_marker()
     for role in IMAGE_ROLES:
         assert marker in load_role_prompt(role), \
             f"{role} 没拿到生图半词表——它手里没有选词依据"
+
+
+def test_image_side_declares_one_shared_slice():
+    """生图侧两条路径声明的是**同一个**元组（issue #36；同 ADR 0007 裁定一）。
+
+    关键帧与资产图写的是同一件事——静态画面的选词与写法。各声明各的会在改动时漂移，
+    而漂移的后果正是「一套有、一套没有」。
+    """
+    assert film_language.IMAGE_SLICES["frame_prompt_engineer"] == \
+        film_language.IMAGE_SLICES["image_prompt_engineer"]
 
 
 def test_the_two_wordlists_never_cross():
@@ -268,37 +280,40 @@ def test_the_two_wordlists_never_cross():
 
 
 def test_image_slice_takes_every_section_of_the_source():
-    """生图侧取**全份**：真源新增一节时不能静默漏掉（同 #32 那条集合相等断言）。
+    """生图侧每条路径都取**全份**：真源新增一节时不能静默漏掉（同 #32 那条集合相等断言）。
 
     `image_slice` 的静默失败方向与 `video_slice` 一样是「少给」——它只在**已声明**的
-    小节缺失时抛错。生图半目前只有一个消费者（它一个人要从景别写到风格），按节裁剪
-    没有意义；但「声明 == 真源小节」仍要钉住，将来给真源加一节必须是个显式决定。
-
-    小节头的识别在测试里**另写一遍**（不调 `film_language` 的私有解析）。
+    小节缺失时抛错。两个消费者都要从景别写到风格与材质，按节裁剪没有意义；但「声明 ==
+    真源小节」仍要钉住，将来给真源加一节必须是个显式决定（两个键共用同一元组，故这里的
+    循环是给「将来真要分家」留的闸门）。
     """
     heads = [
         line[len("## "):].strip()
         for line in film_language.image_source_text().splitlines()
         if line.startswith("## ")
     ]
-    declared = list(film_language.IMAGE_SLICES["frame_prompt_engineer"])
     assert heads, "生图半真源一个小节都没有——切片会退化成只剩前言"
-    assert sorted(heads) == sorted(declared), (
-        "生图侧的切片声明与真源的小节不一致——真源新增的小节不会自己进生图角色"
-        f"（真源 {sorted(heads)}／声明 {sorted(declared)}）"
-    )
+    for consumer in IMAGE_ROLES:
+        declared = list(film_language.IMAGE_SLICES[consumer])
+        assert sorted(heads) == sorted(declared), (
+            f"生图侧 {consumer} 的切片声明与真源的小节不一致——真源新增的小节不会自己进它手里"
+            f"（真源 {sorted(heads)}／声明 {sorted(declared)}）"
+        )
 
 
 def test_image_slice_needs_an_explicit_declaration():
-    """不声明即拿不到：资产图那条路的提示词工程师**故意不在**生图白名单里。
+    """不声明即拿不到：白名单外的消费者拿到空串（**结论**不是遗漏）。
 
-    它的三个节点在 ``graph.pipeline._FOLDED_NODES`` 里从没接进链（喂进 ComfyUI 的实际是
-    设计正文），接它属编排改动、另开票——所以它现在拿到空串是**结论**不是遗漏。
+    `image_prompt_engineer` 曾长期在这条断言里（issue #36 之前它的三个节点没接进链），
+    接通后它进了白名单——这条只剩下「白名单外的人拿不到」这个机制本身。
     视频侧的角色也不能从这个口子拿到生图半。
     """
-    for consumer in ("image_prompt_engineer", "storyboard", "不存在的角色"):
+    for consumer in ("storyboard", "segment_planner", "不存在的角色"):
         assert film_language.image_slice(consumer) == "", \
             f"{consumer} 没被声明，不该拿到生图半切片（不声明即拿不到）"
+    for consumer in IMAGE_ROLES:
+        assert film_language.image_slice(consumer) != "", \
+            f"{consumer} 声明了却拿到空串（声明与真源小节对不上）"
 
 
 def test_image_source_keeps_the_static_hard_constraints():

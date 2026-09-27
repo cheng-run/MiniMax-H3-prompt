@@ -121,7 +121,11 @@ def _make_design_node(agents: dict, role: str, output_field: str, label: str,
 
 
 def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_field: str) -> Callable:
-    """把模型无关设计资料翻译为 Z-Image/Flux.2 双版本提示词。"""
+    """把模型无关设计资料翻译为 Z-Image/Flux.2 双版本提示词。
+
+    这是**资产图**那条路（人物／道具／场景各一张参考图），与关键帧那条路
+    （``_make_fl2va_frame_prompt_node``）是两件事，但同属生图侧、用同一份词表切片。
+    """
     def node(state: PipelineState) -> dict:
         brief: Brief = state["brief"]
         message = (
@@ -134,13 +138,21 @@ def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_f
                 美术统筹=state.get("art_design", ""),
                 视觉风格=brief.style,
                 语言=brief.language,
+                # 画布是**本次请求的数据**（不住在系统提示词里）：构图那套词按画幅分两套，
+                # 而两个家族的画幅不是一个形状。词表里写着「哪个模型是哪种画幅见请求里的
+                # 【画布】块」——不带这块，那条指针就没有落点（issue #33 在帧节点踩过同一个坑）。
+                画布=_canvas_block(),
             )
         )
         raw = run_agent(agents["image_prompt_engineer"], message)
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError:
-            repair = run_agent(agents["image_prompt_engineer"], f"把以下内容转换为严格 JSON，不要 markdown：\n{raw}")
+            # 纯格式转换，但它同样用这份系统提示词——词表里的【画布】指针照样得在场。
+            repair = run_agent(
+                agents["image_prompt_engineer"],
+                f"把以下内容转换为严格 JSON，不要 markdown：\n{_ctx(画布=_canvas_block())}\n{raw}",
+            )
             try:
                 parsed = json.loads(repair)
             except json.JSONDecodeError as exc:

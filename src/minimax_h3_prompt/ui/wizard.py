@@ -158,6 +158,7 @@ _NODE_LABELS = {
     "screenwriter": "编剧",
     "parallel_designers": "人物/场景/道具设计",
     "art_director": "美术指导",
+    "parallel_image_prompts": "资产图生图提示词",
     "storyboard": "分镜设计",
     "parallel_decisions": "镜头/身份决策",
     "parallel_visual": "摄影与一致性校验",

@@ -65,6 +65,7 @@ _STAGE1_CHAIN = [
     "screenwriter",
     "parallel_designers",  # character ‖ background ‖ prop designers
     "art_director",
+    "parallel_image_prompts",  # 人物 ‖ 道具 ‖ 场景 资产图生图提示词（issue #36）
     "storyboard",
     "parallel_decisions",  # shot_rt ‖ identity_rt
     "parallel_visual",     # cinematographer ‖ reference_consistency
@@ -77,12 +78,25 @@ _STAGE2_CHAIN = [
 ]
 _LINEAR_CHAIN = _STAGE1_CHAIN + _STAGE2_CHAIN
 
-# 已折叠进并行组合节点、不再作为独立图节点的角色节点
-_FOLDED_NODES = {
-    "cinematographer", "reference_consistency", "sound_designer", "composer",
-    "character_designer", "background_designer", "prop_designer",
-    "image_prompt_character", "image_prompt_prop", "image_prompt_scene",
+# 组合节点 → 它折叠的子节点名（``make_nodes`` 里的键）。**折叠这件事只声明在这里一处**：
+# ``_combined_node`` 据此组装并行组合、``_FOLDED_NODES`` 由它现推。理由是这张清单曾经**说谎**：
+# 三个资产图节点写在 ``_FOLDED_NODES`` 里、注释声称「已折叠进并行组合节点」，而没有任何组合
+# 节点返回它们——清单与注释都是手写的第二份真相，谁也没跟着谁改（issue #36，本仓「规则在、
+# 接线不在」的第 8 次）。现推之后，「清单说折叠了」与「真的有组合节点跑它」不可能再分家。
+#
+# ``parallel_decisions`` 不在表里：它折的是**两场圆桌**（``make_shot_rt_node`` /
+# ``make_identity_rt_node``），不是 ``nodes`` 表里的角色节点，故它在 ``_combined_node`` 里单列。
+_PARALLEL_GROUPS: dict[str, tuple[str, ...]] = {
+    "parallel_designers": ("character_designer", "background_designer", "prop_designer"),
+    "parallel_image_prompts": ("image_prompt_character", "image_prompt_prop", "image_prompt_scene"),
+    "parallel_visual": ("cinematographer", "reference_consistency"),
+    "parallel_sound": ("sound_designer", "composer"),
 }
+
+# 已折叠进并行组合节点、不再作为独立图节点的角色节点（由上面那张表现推）。
+_FOLDED_NODES = frozenset(
+    name for group in _PARALLEL_GROUPS.values() for name in group
+)
 
 def build_pipeline_graph(model, brief: Brief, config: Config, *, stage: int = 0,
                          chain: list[str] | None = None):
@@ -116,22 +130,22 @@ def build_pipeline_graph(model, brief: Brief, config: Config, *, stage: int = 0,
 
 
 def _combined_node(name, nodes, shot_rt, identity_rt, creative_rt, model, brief):
-    """按链位名字返回对应节点实现；组合节点与全图构建共用。"""
+    """按链位名字返回对应节点实现；组合节点与全图构建共用。
+
+    并行组合按 ``_PARALLEL_GROUPS`` 现推（折叠声明只有那一处）；只有圆桌组合与普通节点
+    在这里单列。链位名写错（比如漏了某组的键）会在构建时就取不到实现，不会静默少跑一个
+    节点——这正是本仓「规则在、接线不在」要防的形态。
+    """
     if name == "creative_rt":
         return make_creative_rt_node(creative_rt, model, brief)
-    if name == "parallel_designers":
-        return make_parallel(
-            nodes["character_designer"], nodes["background_designer"], nodes["prop_designer"],
-        )
     if name == "parallel_decisions":
         return make_parallel(
             make_shot_rt_node(shot_rt, model, brief),
             make_identity_rt_node(identity_rt, model, brief),
         )
-    if name == "parallel_visual":
-        return make_parallel(nodes["cinematographer"], nodes["reference_consistency"])
-    if name == "parallel_sound":
-        return make_parallel(nodes["sound_designer"], nodes["composer"])
+    group = _PARALLEL_GROUPS.get(name)
+    if group is not None:
+        return make_parallel(*(nodes[sub] for sub in group))
     return nodes[name]
 
 
@@ -161,6 +175,9 @@ _NODE_ARTIFACTS: dict[str, tuple[str, ...]] = {
     "screenwriter": ("分场剧本",),
     "parallel_designers": ("人物形象设计", "背景设计", "道具设计"),
     "art_director": ("美术统筹",),
+    # 三类**资产图**的生图提示词（人物/道具/场景），与「关键帧生图提示词」是两件事：
+    # 前者是拿去生成资产参考图的，后者是视频首尾帧（人物/道具/场景已融合在一张里）。
+    "parallel_image_prompts": ("人物资产图提示词", "道具资产图提示词", "场景资产图提示词"),
     "storyboard": ("分镜表",),
     "parallel_decisions": ("镜头评审锁定", "身份一致性锁定"),
     "parallel_visual": ("画面细化", "参考一致性素材"),
