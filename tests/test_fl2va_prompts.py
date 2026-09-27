@@ -205,6 +205,46 @@ def test_validate_fl2va_bundle_variant_aware():
     assert "FL2VA_LAST_FRAME_TIME_EXCEEDS_DURATION" in validate_fl2va_bundle(bad, duration=5, variant="L2VA")
 
 
+def test_single_location_group_may_be_covered_by_the_scene_anchor():
+    """主题含两个地点、词表只命中一个时，帧画面不必画着那个地点（issue #37 实测）。
+
+    现场：主题「云上天宫的女子 → 人间高楼室内练琵琶的女孩」，「室内」由**后半句**命中，
+    而 I2VA / FL2VA 的**首帧画的是天宫**——画面里根本没有室内。旧判据走「单组 = 逐帧
+    严格」，要求每张帧提示词都含「室内」：模型两次都交不出（它的首帧实文是「云层之上的
+    天宫高台临空围栏处…」，一个室内词都没有），阶段 1 跑满 4 分 37 秒后整条抛错。
+    新判据：每组地点词被 scene_anchor 或任一帧覆盖即可。
+    """
+    brief = Brief(variant="I2VA", duration=10, language="Chinese",
+                  plot="位于云上的天宫中，一位女人倚靠围栏吹风；随后镜头切至人间，"
+                       "一位女孩在高楼的室内练习琵琶，透过打开的窗户看见的。")
+    payload = {
+        # 模型的改写重试**自己**就把锚点写成两地名对位（实测原文），所以锚点承担全片地点
+        "scene_anchor": "两个明确地点对位：①云海之上的天宫高台临空围栏段；②人间高楼室内一间临窗房间",
+        "first": frame_payload("竖幅全景写实摄影。云层之上的天宫高台临空围栏处，一位女性倚靠在栏板上。"),
+        "continuity_constraints": ["同一组人物与服装"],
+    }
+    bundle = fl2va_bundle_from_dict(payload, brief)
+    assert validate_fl2va_bundle(bundle, duration=10, variant="I2VA") == []
+
+
+def test_single_location_group_still_flagged_when_nothing_covers_it():
+    """覆盖式不是把守卫改没：整份产物（锚点 ＋ 全部帧）都不提该地点 → 仍然报错。
+
+    这条复刻的是**首轮**那次失败（模型的主请求回复里锚点与首帧都没有室内词）——
+    首轮该红，改写重试才有意义；改写重试现在拿到了词表（见请求侧用例），那条路才是可赢的。
+    """
+    brief = Brief(variant="I2VA", duration=10, language="Chinese",
+                  plot="位于云上的天宫中，一位女人倚靠围栏吹风；随后镜头切至人间，"
+                       "一位女孩在高楼的室内练习琵琶，透过打开的窗户看见的。")
+    payload = {
+        "scene_anchor": "云层之上的天宫高台临空围栏处，白昼正午前后；栏外是真实高空积云。",
+        "first": frame_payload("竖幅全景写实摄影。云层之上的天宫高台临空围栏处，一位女性倚靠在栏板上。"),
+        "continuity_constraints": ["同一组人物与服装"],
+    }
+    with pytest.raises(ValueError, match="FL2VA_SCENE_GROUP_UNCOVERED"):
+        fl2va_bundle_from_dict(payload, brief)
+
+
 def test_multi_scene_journey_bundle_passes():
     """穿越题材（森林→海边）：每组地点词只需被 anchor 或某个关键帧覆盖。"""
     brief = Brief(variant="FL2VA", duration=30, plot="黑夜森林徒步，黎明云海，傍晚海边日落")
@@ -416,7 +456,8 @@ def test_frame_node_i2va_emits_first_only(monkeypatch):
 # 那条到达性用例）：常量对了、请求组装时漏掉，测 helper 照样绿。
 # ---------------------------------------------------------------------------
 
-def _frame_node_request(monkeypatch, variant: str = "I2VA") -> str:
+def _frame_node_request(monkeypatch, variant: str = "I2VA",
+                        plot: str = "中世纪酒馆室内") -> str:
     """跑一次帧节点，返回它真正发出去的那条用户请求串。"""
     captured: dict[str, str] = {}
     payload = json.dumps(_single_frame_payload(
@@ -428,7 +469,7 @@ def _frame_node_request(monkeypatch, variant: str = "I2VA") -> str:
 
     monkeypatch.setattr(nodes, "run_agent", fake_run_agent)
     node = nodes._make_fl2va_frame_prompt_node({"frame_prompt_engineer": object()})
-    brief = Brief(variant=variant, duration=5, plot="中世纪酒馆室内")
+    brief = Brief(variant=variant, duration=5, plot=plot)
     node({"brief": brief, "shot_table": "start and end states"})
     return captured["message"]
 
@@ -454,6 +495,33 @@ def test_frame_bundle_roundtrips_composition_and_lighting():
     restored = FL2VAPromptBundle.from_dict(bundle.to_dict())
     assert (zimage_row(restored).composition, zimage_row(restored).lighting) \
         == (row.composition, row.lighting), "写回再读时两个字段丢了"
+
+
+def test_frame_node_request_names_the_required_scene_terms(monkeypatch):
+    """帧节点的请求里必须**点名**主题要求的地点词组（issue #37）。
+
+    校验器做的是字面子串判定，而请求里此前只有一句「主题地点是硬约束」——模型无从知道要的
+    是哪几个字面。实测该次运行的请求串：主请求与改写请求里既无「场景词」也无 indoor/inside，
+    两轮都交不出「室内」，改写重试那句「使其通过主题地点校验」在信息上**不可赢**。
+    整片路径早有这条接线（`pipeline._theme_repair_injection` → `theme_requirements_text`），
+    帧路径缺的正是它。
+    """
+    message = _frame_node_request(monkeypatch)  # plot = 中世纪酒馆室内 → 命中酒馆组 + 室内组
+    assert "【场景词】" in message, "帧节点请求里没有场景词块（角色提示词会指向一个不存在的块）"
+    for term in ("酒馆", "室内", "tavern", "indoor"):
+        assert term in message, f"请求里没点名必需地点词：{term}"
+
+
+def test_scene_term_block_is_present_even_without_a_lexicon_hit(monkeypatch):
+    """主题没命中词表时【场景词】块也必须在场，否则角色提示词指向一个不存在的块（#37 复审）。
+
+    角色提示词写着「主题要求的地点词见输入里的【场景词】块」；而 `_ctx` 会跳过空值，
+    无约束时（实测 plot＝「深夜便利店一只橘猫推门跳上柜台」）请求里根本没有这块——**悬空
+    指针**，正是本票在另外两处点名要避免的形态。同 #33 的【画布】块：那块是**恒在**的。
+    """
+    message = _frame_node_request(monkeypatch, plot="深夜便利店一只橘猫推门跳上柜台")
+    assert "【场景词】" in message, "无约束时请求里缺了场景词块（角色提示词的指针悬空）"
+    assert "主题未命中" in message, "块里没说清「本片无地点硬约束」，模型会以为漏看了词表"
 
 
 def test_frame_node_request_carries_both_canvases(monkeypatch):
@@ -593,6 +661,65 @@ def test_json_repair_retry_also_carries_the_canvas_and_the_two_fields(monkeypatc
     width, height = generation.image_canvas_size("zimage")
     assert f"{width} × {height}" in seen[1], "转换重试请求没带画布（角色提示词会指向一个不存在的块）"
     assert "composition" in seen[1] and "lighting" in seen[1], "转换重试请求的内容清单里没有这两个字段"
+
+
+def test_rewrite_retry_also_carries_the_scene_terms(monkeypatch):
+    """bundle 过不了校验后的**改写**重试请求同样要点名地点词组（issue #37）。
+
+    这条重试此前是最不可赢的一处：指令写着「使其通过主题地点校验」，却从不告诉模型校验器
+    要哪几个字面（实测该次运行两轮都没过）。与画布同理——词表是**本次请求的数据**，
+    不在角色系统提示词里，只能跟着请求走。
+    """
+    replies = iter([
+        json.dumps({"scene_anchor": "medieval tavern interior",
+                    "first": {"zimage": {"positive_prompt": "三人围坐"}}}),
+        json.dumps(bundle_payload()),
+    ])
+    seen: list[str] = []
+    monkeypatch.setattr(nodes, "run_agent",
+                        lambda agent, message: seen.append(message) or next(replies))
+    node = nodes._make_fl2va_frame_prompt_node({"frame_prompt_engineer": object()})
+    brief = Brief(variant="FL2VA", duration=5, plot="中世纪酒馆室内")
+    node({"brief": brief})
+
+    assert len(seen) == 2, "首轮产物没触发改写重试，这条用例没测到重试路径"
+    assert "【场景词】" in seen[1], "改写请求丢了场景词块"
+    assert "indoor" in seen[1], "改写请求没点名必需地点词"
+
+
+def test_json_repair_retry_also_carries_the_scene_terms(monkeypatch):
+    """首轮不是 JSON 时那条**转换**重试请求同样要点名地点词组（issue #37）。
+
+    同画布那次修正的理由：这条请求用的也是同一份角色系统提示词，而提示词现在指向
+    输入里的【场景词】块——不带那块就是一个**悬空指针**。
+    """
+    replies = iter([
+        "不是 JSON，随手写的一段话",
+        json.dumps(_single_frame_payload(
+            "first", "Three adventurers inside a medieval tavern interior.")),
+    ])
+    seen: list[str] = []
+    monkeypatch.setattr(nodes, "run_agent",
+                        lambda agent, message: seen.append(message) or next(replies))
+    node = nodes._make_fl2va_frame_prompt_node({"frame_prompt_engineer": object()})
+    brief = Brief(variant="I2VA", duration=5, plot="中世纪酒馆室内")
+    node({"brief": brief})
+
+    assert len(seen) == 2, "首轮坏 JSON 没触发转换重试，这条用例没测到重试路径"
+    assert "【场景词】" in seen[1], "转换重试请求没带场景词块（角色提示词会指向一个不存在的块）"
+    assert "indoor" in seen[1], "转换重试请求没点名必需地点词"
+
+
+def test_frame_prompt_engineer_points_at_the_scene_term_block():
+    """角色提示词的**指针**必须与节点实际发出去的块键一致（issue #37）。
+
+    原先规格里写的是「如果主题明确说『酒馆』或『室内』，必须直接写」，只举了两个族、
+    且读作「写进每个正向提示词」——正是误报的源头（天宫那一帧被要求含「室内」）。
+    改成指向输入里的块之后，规格不再复述词表（词表是请求里的数据，同画布）。
+    """
+    spec = _frame_prompt_spec()
+    assert "【场景词】" in spec, "角色提示词没有指向输入里的场景词块"
+    assert '必须直接写"酒馆"/"室内"' not in spec, "规格里仍留着「每个提示词都必须直接写」的旧口径"
 
 
 def test_frame_markdown_shows_composition_and_lighting(tmp_path):

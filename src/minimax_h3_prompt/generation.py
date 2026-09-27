@@ -396,11 +396,19 @@ def validate_fl2va_bundle(
         issues.append("FL2VA_PROMPT_NODE_MISMATCH")
     if not bundle.continuity_constraints:
         issues.append("FL2VA_CONTINUITY_MISSING")
-    # 单一要求地点组时：逐帧校验（防漂移语义）。
-    # 多场景穿越题材（森林→海边→星空）下"每帧都含全部地点词"不成立：
-    # 只要求每组地点词在 anchor 或至少一个关键帧里被覆盖（覆盖式校验）。
+    # 地点词一律**覆盖式**（issue #37）：每组地点词被 scene_anchor 或**任一帧**覆盖即可。
+    # 旧口径按组数分流（单组=逐帧严格、多组=覆盖式），其假设是「词表命中几组 = 主题有几个
+    # 地点」——不成立：词表是从**整条**主题里子串匹配出来的，而一张关键帧只画主题里的
+    # **一个**时刻。实测主题「云上天宫的女子 → 人间高楼室内练琵琶的女孩」只命中「室内」
+    # 一组（来自后半句），而 I2VA / FL2VA 的**首帧画的是天宫**：画面里写不出「室内」，
+    # 模型两轮都交不出，阶段 1 跑满 4 分 37 秒后整条抛错（output/issue37-evidence/）。
+    # 锚点是**全片**共享的环境锚点、帧才是具体画面，覆盖式正对上这个分工。
+    # 有意接受的代价：首帧酒馆、尾帧换到另一处这类「帧间换地点」这条不再拦。**没有兜底**
+    # ——实测（2026-09-27 复审）「首帧酒馆 + 尾帧『among tall trees in a forest』」在这条与
+    # 整片正文守卫（theme_fidelity_issues）下**双双放行**：后者只管「该地点在整片正文里
+    # 出现过」，而这段话在开场就出现过；_CONFLICTING_OUTDOOR_TERMS 只认 forest clearing /
+    # open field / wilderness / outdoor camp 四个词组，不含光秃的 forest。
     groups = [group for group in bundle.required_scene_terms if group]
-    multi_scene = len(groups) > 1
     all_frame_text = " ".join(
         row.positive_prompt
         for frame_name in _variant_frame_names(variant)
@@ -417,27 +425,15 @@ def validate_fl2va_bundle(
                 issues.append("FL2VA_FIRST_FRAME_TIME_MISMATCH")
             if duration is not None and frame_name == "last" and row.time_seconds > duration:
                 issues.append("FL2VA_LAST_FRAME_TIME_EXCEEDS_DURATION")
-            if multi_scene:
-                # 覆盖式：每组词至少在 anchor 或某帧出现
-                prompt_text = row.positive_prompt.lower()
-                for group in groups:
-                    if not any(term.lower() in anchor_lower for term in group) \
-                            and not any(term.lower() in all_frame_text for term in group):
-                        issues.append("FL2VA_SCENE_GROUP_UNCOVERED")
-                    elif not any(term.lower() in anchor_lower for term in group) \
-                            and not any(term.lower() in prompt_text for term in group) \
-                            and any(term.lower() in all_frame_text for term in group):
-                        pass  # 该组由其他帧覆盖：合法的多场景分布
-            else:
-                for group in groups:
-                    if not any(term.lower() in anchor_lower for term in group):
-                        issues.append("FL2VA_SCENE_ANCHOR_MISMATCH")
-                    if not any(term.lower() in row.positive_prompt.lower() for term in group):
-                        issues.append("FL2VA_SCENE_PROMPT_MISMATCH")
             if groups:
                 for term in _CONFLICTING_OUTDOOR_TERMS:
                     if _contains_unqualified_conflict(row.positive_prompt, term):
                         issues.append("FL2VA_SCENE_DRIFT")
+    for group in groups:
+        if any(term.lower() in anchor_lower for term in group) \
+                or any(term.lower() in all_frame_text for term in group):
+            continue
+        issues.append("FL2VA_SCENE_GROUP_UNCOVERED")
     return list(dict.fromkeys(issues))
 
 

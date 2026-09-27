@@ -98,8 +98,16 @@ def theme_fidelity_issues(
 def theme_requirements_text(
     plot: str,
     extra_groups: tuple[tuple[str, ...], ...] | list[list[str]] = (),
+    *,
+    target: str = "正文",
 ) -> str:
-    """把主题地点约束渲染成给修复 LLM 的明确指令文本；无约束时返回空。"""
+    """把主题地点约束渲染成给修复 LLM 的明确指令文本；无约束时返回空。
+
+    ``target``：这批词该出现在**哪儿**。整片正文用默认的「正文」；关键帧节点要的是
+    「scene_anchor 或画面确实处在该地点的那一帧」——词表是从**整条**主题抽的，而一张
+    关键帧只画主题里的一个时刻，写成「每帧都必须出现」就是一条不可满足的指令
+    （issue #37 实测：主题前半是天宫、后半是高楼室内，I2VA 首帧画天宫却要含「室内」）。
+    """
     groups = list(scene_requirement_groups(plot))
     groups.extend(tuple(str(term) for term in group) for group in extra_groups if group)
     if not groups:
@@ -107,7 +115,7 @@ def theme_requirements_text(
     required = "；".join("/".join(group) for group in groups)
     forbidden = "、".join(_CONFLICTING_OUTDOOR_TERMS)
     return (
-        f"正文必须出现的场景词（任一同组词即可）：{required}。"
+        f"{target}必须出现的场景词（任一同组词即可）：{required}。"
         f"禁止出现无场景限定的：{forbidden}（仅允许作为窗外/远景背景描述）。"
     )
 

@@ -19,6 +19,7 @@ from ..generation import (
 )
 from ..tools.h3_validator import validate_prompt
 from ..tools.ref_metadata import format_ref_meta
+from ..tools.theme_guard import theme_requirements_text
 from ..user_revisions import (
     FRAME_BASELINE_KEY,
     FRAME_REVOKED_KEY,
@@ -181,6 +182,32 @@ def _canvas_block() -> str:
     return "\n".join(lines)
 
 
+def _scene_terms_block(brief: Brief) -> str:
+    """渲染【场景词】块：主题要求的地点词组 ＋ 它们该落在哪儿。**恒为非空**。
+
+    这是帧节点的三条请求（主 / 转 JSON / 改写）在讲地点约束时的唯一一处真相，别处只指回它。
+
+    为什么必须明写：校验器（`generation.validate_fl2va_bundle`）做的是**字面子串**判定，
+    而请求里从前只有一句「主题地点是硬约束」——模型无从知道要哪几个字面。实测该次运行
+    两轮都没交出「室内」，改写重试那句「使其通过主题地点校验」在信息上**不可赢**
+    （issue #37，物证见 output/issue37-evidence/）。词表与整片路径同源，不另抄一份。
+
+    为什么落在「锚点或**确实处在该地点的那一帧**」而不是「每个正向提示词」：词表从**整条**
+    主题抽取，而一张关键帧只画主题里的一个时刻——主题前半在天宫、后半在高楼室内时，
+    硬要天宫那一帧含「室内」就是逼模型写假话。
+
+    为什么无约束时也要有一段：角色提示词无条件写着「主题要求的地点词见输入里的【场景词】
+    块」，空串会被 `_ctx` 跳过、指针就悬空了（复审实测 plot＝「深夜便利店一只橘猫…」）。
+    同【画布】块——那块也是恒在的。
+    """
+    text = theme_requirements_text(
+        brief.plot, target="scene_anchor 或画面确实在该地点的那一帧")
+    if text:
+        return text
+    return ("主题未命中本仓的地点词表，本片无地点硬约束；仍不得写入主题里没有的地点，"
+            "也不得改写成泛化的户外环境。")
+
+
 def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
     """把完整镜头上下文转换为对应变体的关键帧生图提示词（FL2VA 双帧 / I2VA 仅首帧 / L2VA 仅尾帧）。"""
     def parse_bundle(raw: str, brief: Brief) -> dict:
@@ -198,7 +225,7 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
                 agents["frame_prompt_engineer"],
                 f"把以下内容转换为严格 JSON，不要 markdown，必须保留 {required}、scene_anchor、"
                 f"continuity_constraints，以及每个模型的 composition 与 lighting 字段：\n"
-                f"{_ctx(画布=_canvas_block())}\n原始内容：\n{raw}",
+                f"{_ctx(画布=_canvas_block(), 场景词=_scene_terms_block(brief))}\n原始内容：\n{raw}",
             )
             try:
                 parsed = json.loads(repair)
@@ -225,9 +252,11 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
         repair_hint = {"FL2VA": "使其通过主题地点和首尾帧连续性校验",
                        "I2VA": "使其通过主题地点校验",
                        "L2VA": "使其通过主题地点校验"}[variant]
+        scene_terms = _scene_terms_block(brief)
         message = (
             requirement
-            + "人物、道具和场景必须同时出现在每张关键帧中；主题地点是硬约束。"
+            + "人物、道具和场景必须同时出现在每张关键帧中（不要拆成资产卡片）；"
+              "主题要求的地点词以输入里的【场景词】块为准。"
             # 构图/光线两个字段（issue #33）：解析器一直支持读写，却无人写——实测仓库里
             # 9 份真实产物（5 个会话）的 18 行全是空串。字段名进请求是「有生产者」的第一步。
             + "每个模型版本都必须给出 composition 与 lighting 两个字段"
@@ -236,6 +265,9 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
             + _ctx(
                 变体=brief.variant,
                 原始主题=brief.plot,
+                # 词表是**本次请求的数据**、不在系统提示词里，故三条请求各自带一份。
+                # 为什么、以及词该落在哪儿，见 `_scene_terms_block`。
+                场景词=scene_terms,
                 起步澄清=brief.clarifications,
                 时长=f"{brief.duration}s",
                 视觉风格=brief.style,
@@ -279,6 +311,8 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
                 # 相对地，composition / lighting 的字段要求住在角色系统提示词里（每次调用
                 # 都在场），不必在这里重复——同「起步澄清」与「内容规则」的分工。
                 画布=_canvas_block(),
+                # 场景词同画布：数据、不在系统提示词里。少了它这条重写在信息上不可赢。
+                场景词=scene_terms,
                 起步澄清=brief.clarifications,
                 用户修订=render_revision_block(pending_revisions(state)),
                 修订基线=state.get(FRAME_BASELINE_KEY),
