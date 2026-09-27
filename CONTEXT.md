@@ -135,6 +135,14 @@ _Avoid_: 断点续跑、恢复点
 `Keep every character's silhouette, facial outline, and clothing edges crisp and stable throughout; no rippling, warping, or edge shimmer.` 每个镜头块必须以此句**逐字符**收尾（唯一来源：`h3_validator.EDGE_STABILITY_SENTENCE`，写段模板从它取）。缺失 validator 报 **warning**（`EDGE_STABILITY_MISSING`）——2026-09-23 裁定：规则刚落地、合规真实样本为零，不足以立 error 闸门。历史 9 份真实分段产物（GEN004/GEN005）**全部缺失此句**。裁定见 `docs/adr/0004-edge-stability-sentence-restored.md`。
 _Avoid_: 把它当自创结构删除、改写成中文、或译文（官方要求逐字符英文原文）
 
+## 电影语言选词
+
+**电影语言词表（film-language word list）**:
+**选词与写法**的真源——「哪个词能选、句子怎么落」。视频半在 `src/minimax_h3_prompt/knowledge/film-language-video.md`（**双语**：中文术语 + 英文原文；中文输出的角色要选得到词，正文侧要拿到英文原文）；生图侧是**另一套**语言，另立一份。
+它按**消费者取切片**：读取口 `film_language.video_slice(consumer)` 由角色提示词**加载处**（`agents.load_role_prompt`）调用，附在角色提示词文末；**不声明即拿不到**——分段规划师尤其不能拿（它的段尾钩子是锚帧语义校验的可判定对照物，掺审美词会让人判不了）、美术统筹与制作人同理。
+与官方 **references**（`references/base-en.txt` / `ref-en.txt`）**分工不同、不可混用**：那两份是**格式规范**（字段、结构、句法，逐字符照抄用，且当前**无任何代码打开**），这份管选词与写法；格式问题一律以官方规范为唯一依据。真源是**逐字读入的纯文本**（加载链上没有模板与插值，故不使用占位符）；要**逐字符照抄的官方原文**（edge-stability 句、帧变体锚定行）在真源里**只留指针、不复述**。裁定见 `docs/adr/0006`。
+_Avoid_: 词库（会与外部第三方选词池混用）、本文件的术语表、把它当官方规范（它不定义格式）、单语词表（中文输出下只给英文＝结构性必挂）
+
 ## 生成质量与采样配置
 
 **闪动量尺（flicker_std）**:

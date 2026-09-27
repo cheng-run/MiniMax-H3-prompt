@@ -15,6 +15,7 @@ from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import tool
 
+from .. import film_language
 from ..brief_parser import FRAME_VARIANTS, RefItem
 from ..observability import record_agent_call, reporter
 from ..tools.h3_validator import format_issues, validate_prompt
@@ -60,7 +61,17 @@ REF_TOOL_ROLES = {
 
 
 def load_role_prompt(role: str) -> str:
-    return (PROMPTS_DIR / f"{role}.md").read_text(encoding="utf-8")
+    """读角色提示词；命中的角色在文末附上电影语言词表切片（issue #31）。
+
+    切片附在**加载处**而不是各份 .md 里：词表是逐字读入的纯文本，抄进每个角色的 .md
+    就等于同一份词表有 N 份硬拷贝（本仓吃过「同一句官方原文 3 份硬拷贝」的亏）。
+    哪些角色拿哪几节由 ``film_language.VIDEO_SLICES`` 声明，不声明的角色拿到空串——
+    分段规划师尤其不能拿到（段尾钩子要留作锚帧语义校验的可判定对照物）。
+    """
+    prompt = (PROMPTS_DIR / f"{role}.md").read_text(encoding="utf-8")
+    wordlist = film_language.video_slice(role)
+    # 空串（白名单外的角色）不加空行：不声明词表的角色，提示词逐字与改动前一致
+    return f"{prompt}\n{wordlist}" if wordlist else prompt
 
 
 def _make_tools(refs: list[RefItem], mode: str, duration: float, variant: str, role: str) -> list:

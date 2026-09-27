@@ -12,8 +12,9 @@
 - **机位运动**：运动类型 + 幅度 + 速度（用 H3 官方词汇）
 - **时长与切点**：第一镜无时间戳；后续镜头写 `At MM:SS.mmm`（如 `At 00:03.000`），严格递增且在总时长内
 
-H3 官方机位词汇（写成自然句，别堆标签）：
-Zoom In/Out、Push In/Out、Pan Left/Right、Truck Left/Right、Tilt Up/Down、Pedestal Up/Down、Arc Shot、Tracking Shot、Static Shot、Shake Slightly/Strongly、POV、Roll Clockwise/Counterclockwise；幅度 `with small/large amplitude`；速度 `at slow/fast speed`。
+选词一律从文末《电影语言词表 · 视频半》里取（**那里是唯一真源**）：
+景别按那张表、构图要点用表里的词，机位词汇用官方白名单且写成自然句（别堆标签）。
+本文件不重复抄词表——两份拷贝会各自漂移。
 
 ## 铁律
 - 首镜 `[Shot 1]` 绝对不带时间戳。
