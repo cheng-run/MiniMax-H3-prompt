@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from . import film_language
 from .tools.h3_validator import (
     ALIGN_TEMPLATES,
     EDGE_STABILITY_SENTENCE,
@@ -355,6 +356,15 @@ def _revision_block_for_request(state: dict) -> str:
     return f"{block}\n" if block else ""
 
 
+# 落笔侧的电影语言切片（issue #32）：整片提示词工程师与两条写段路径拿的是**同一份**
+# （``film_language._WRITING_SIDE_SLICES``，"segment_writer" 与 "prompt_engineer" 两个键共用）。
+# 这里只取一次、两个模板插同一个常量——两条写段路径各拼各的 f-string，
+# 各调一次 ``video_slice`` 迟早漏一处，而漏掉的那条（回退路径）只在规划失败时才走，
+# 缺陷要等到规划真的失败才现形（issue #26 的锚定与修订就这么掉过一次）。
+# 取不到会**报错**（真源小节标题改了就是改了），不静默少送——本仓的「规则在、接线不在」
+# 正是这类静默缺陷，不能靠人发现。
+_WRITING_WORDLIST = film_language.video_slice("segment_writer")
+
 _REWRITE_INSTRUCTION = f"""你是 H3 视频提示词工程师。把整条视频的提示词重写为**只覆盖指定时间窗的一段独立单镜头提示词**。
 
 输入：完整提示词（多镜头）+ 本段时间窗（秒）。
@@ -377,6 +387,8 @@ _REWRITE_INSTRUCTION = f"""你是 H3 视频提示词工程师。把整条视频�
 - overall_soundscape: **为本段重写**（不是从整条裁切，按段重写）：1-4 句 English 连续段落，
   描述本段时间窗内的环境声与动作声，无时间戳（官方 §4.6）；
 - non_diegetic_music: **为本段重写**：1-3 句 English，或无声时只写 N/A，无时间戳（官方 §4.7）。
+
+{_WRITING_WORDLIST}
 """
 
 
@@ -479,6 +491,8 @@ H3 是执行型模型：你写什么它就做什么，含糊等于失控；把**
   每个镜头块以此句收尾，理由是抽出的尾帧要留给下一段当首帧参考（正是本流程的桥接帧链）
 - 不要把未来段的动作提前写进本段
 - 不要输出任何解释/markdown/前言；只输出提示词纯正文
+
+{_WRITING_WORDLIST}
 """
 
 

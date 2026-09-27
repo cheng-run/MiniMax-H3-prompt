@@ -261,6 +261,32 @@ def test_edge_stability_reaches_both_segment_requests():
     assert EDGE_STABILITY_SENTENCE in llm.last_request, "回退路径请求（调用点）没带上 edge-stability 原句"
 
 
+def test_cinematic_wordlist_reaches_both_segment_requests():
+    """落笔侧词表接线（issue #32）：两条写段路径真正发给 LLM 的请求都得带真源切片。
+
+    与上面 edge-stability 那条同一个理由、同一副形状（接线断言写在**调用方**、
+    断言真实请求字符串而不是模板常量）。词表只接一条路径正是本票要防的
+    「规划失败掉一个档次」——两条路径各拼各的 f-string，一处分叉就静默掉档
+    （issue #26 的锚定与修订就在回退路径上掉过一次）。
+    """
+    from minimax_h3_prompt import film_language
+    from minimax_h3_prompt.segment_prompts import build_segment_v2_request
+
+    marker = film_language.video_source_headline().strip()
+    assert marker, "真源没有标题行——标记串取空会让这条断言永远为真"
+
+    plans = _v2_plans()
+    v2_request = build_segment_v2_request(plans[1], plans, {"shot_table": "x"})
+    assert marker in v2_request, "v2 写段请求（调用点）没带上电影语言词表切片"
+    assert "## 词表：景别" in v2_request, "v2 写段请求只带了标题，词表正文没到"
+
+    segments = split_shots_from_prompt(SAMPLE_PROMPT, total_duration=15.0)
+    llm = FakeLLM()
+    rewrite_segment_prompt(segments[1], SAMPLE_PROMPT, llm)
+    assert marker in llm.last_request, "回退写段请求（调用点）没带上电影语言词表切片"
+    assert "## 词表：景别" in llm.last_request, "回退写段请求只带了标题，词表正文没到"
+
+
 def test_segment_v2_request_english_summary_soundscape():
     """v2 主路径：字段 4/5 要求英文摘要句（1-4/1-3 句、无时间戳），不再裁时间窗。"""
     from minimax_h3_prompt.segment_planner import SegmentPlan

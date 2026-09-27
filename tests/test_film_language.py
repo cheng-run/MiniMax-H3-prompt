@@ -1,4 +1,4 @@
-"""电影语言真源（视频半）的接线与内容纪律（issue #31）。
+"""电影语言真源（视频半）的接线与内容纪律（issue #31 选词侧 / #32 落笔侧）。
 
 三个断言轴，都只断言**外部行为**（模型真的收到了什么）。**例外只有两处**——
 票面明文要求的中英对照与「按消费者取切片」，那是产物规格而不是内部措辞；
@@ -7,7 +7,7 @@
 ``test_edge_stability_reaches_both_segment_requests``（本仓到达性测试的祖宗：
 只断言模块常量是「被测物自身的单测」——常量对了、请求组装时漏掉，照样不报红）。
 
-1. **到达性**：切片真进了那两个选词角色（分镜师、摄影指导）的系统提示词。
+1. **到达性**：切片真进了该拿的角色（选词侧：分镜师、摄影指导；落笔侧：整片提示词工程师）。
 2. **不外溢**：不该拿到的角色拿不到。分段规划师的段尾钩子是锚帧语义校验的对照物，
    掺审美词就没法人工判定了；美术统筹的风格基调已由 brief 给出；制作人不选词。
 3. **不复述**：要逐字符照抄的官方原文（edge-stability 句、帧变体锚定行）在真源里
@@ -18,8 +18,12 @@ from __future__ import annotations
 from minimax_h3_prompt import film_language
 from minimax_h3_prompt.agents import ROLE_KEYS, load_role_prompt
 
-# 本票的消费者：选词真正发生的那两个角色
+# 选词侧（issue #31）：选词真正发生的那两个角色
 CHOOSING_ROLES = ("storyboard", "cinematographer")
+# 落笔侧（issue #32）：写最终正文的角色。两条写段路径不是角色（请求由
+# ``segment_prompts`` 拼），它们的到达性在 ``tests/test_segment_prompts.py`` 里钉，
+# 那里能断言真实请求字符串；此处只管角色加载口这一根。
+WRITING_ROLES = ("prompt_engineer",)
 
 
 def _marker() -> str:
@@ -44,13 +48,56 @@ def test_wordlist_reaches_the_two_choosing_roles():
 def test_wordlist_stays_out_of_roles_that_must_not_have_it():
     """不该拿到的角色一律不带切片（票面点名三个，其余白名单外的角色一并覆盖）。"""
     marker = _marker()
+    allowed = CHOOSING_ROLES + WRITING_ROLES
     for role in ("segment_planner", "art_director", "producer"):
         assert marker not in load_role_prompt(role), \
             f"{role} 不该拿到词表切片（分段规划师的段尾钩子要留作可判定的末态声明）"
     for role in ROLE_KEYS:
-        if role in CHOOSING_ROLES:
+        if role in allowed:
             continue
-        assert marker not in load_role_prompt(role), f"{role} 不在本票的消费者白名单里"
+        assert marker not in load_role_prompt(role), f"{role} 不在消费者白名单里"
+
+
+def test_wordlist_reaches_the_whole_video_prompt_engineer():
+    """落笔侧·整片（issue #32）：整片提示词工程师的系统提示词里必须有真源切片。
+
+    它是短视频唯一的落笔者，也是长视频整片提示词（阶段 2 的组装输入）的作者；
+    词表不到它手上，前面分镜师与摄影指导挑好的词就落不了地。
+    """
+    for role in WRITING_ROLES:
+        assert _marker() in load_role_prompt(role), \
+            f"{role}.md 的系统提示词没带上电影语言词表——落笔的角色手里没词"
+
+
+def test_writing_side_declares_one_shared_slice():
+    """落笔侧三条路径声明的是**同一个**元组（issue #32）。
+
+    整片（prompt_engineer）与两条写段路径（segment_prompts 经 "segment_writer" 取）
+    各声明各的会在改动时漂移，而漂移的后果正是本票要防的「一套有、一套没有」。
+    """
+    assert film_language.VIDEO_SLICES["prompt_engineer"] == \
+        film_language.VIDEO_SLICES["segment_writer"]
+
+
+def test_writing_side_slice_carries_the_sections_reserved_for_it():
+    """落笔侧拿到的是「落笔要用的那几张表」（含真源里点名留给落笔侧的两节）。
+
+    探针取**小节标题**（它同时是 ``VIDEO_SLICES`` 的声明键），不取词表里的词：
+    钉具体的词会在真源换一个更准的词时误报，而「哪一节到了谁手里」才是这里要钉的行为。
+    """
+    slice_text = film_language.video_slice("segment_writer")
+    for head in (
+        "## 运镜怎么写",
+        "## 每镜六要素",
+        "## 七格骨架",
+        "## 词表：景别",
+        "## 词表：机位角度",
+        "## 词表：构图与焦点",
+        "## 词表：光线",
+        "## 词表：风格",   # 真源里点名「留给落笔侧」，此前无人取
+        "## 写作纪律",     # 真源里点名「落笔侧一处都没提」
+    ):
+        assert head in slice_text, f"落笔侧切片里没有 {head}"
 
 
 def test_segment_planner_instruction_has_no_wordlist():
