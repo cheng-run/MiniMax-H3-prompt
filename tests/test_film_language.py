@@ -37,12 +37,19 @@ def _marker() -> str:
     return marker
 
 
-def test_wordlist_reaches_the_two_choosing_roles():
-    """分镜师与摄影指导的系统提示词里必须有真源切片（缝 1：角色提示词加载口）。"""
+def test_wordlist_reaches_every_declared_consumer_role():
+    """拿到切片的角色必须真的拿到（缝 1：角色提示词加载口）。
+
+    两轴一起钉（断言同形，分两条写只是两份要同步维护的副本）：选词侧的分镜师与
+    摄影指导——选词真正发生在它们手里；落笔侧的整片提示词工程师——短视频唯一的
+    落笔者、长视频整片提示词的作者，词表不到它手上，前面挑好的词就落不了地。
+    两条写段路径不是角色（请求由 ``segment_prompts`` 拼字符串），它们的到达性在
+    ``tests/test_segment_prompts.py`` 里钉，那里断言的是真实请求字符串。
+    """
     marker = _marker()
-    for role in CHOOSING_ROLES:
+    for role in CHOOSING_ROLES + WRITING_ROLES:
         assert marker in load_role_prompt(role), \
-            f"{role}.md 的系统提示词没带上电影语言词表——选词发生的角色手里没词"
+            f"{role}.md 的系统提示词没带上电影语言词表切片——这个消费者手里没词"
 
 
 def test_wordlist_stays_out_of_roles_that_must_not_have_it():
@@ -56,17 +63,6 @@ def test_wordlist_stays_out_of_roles_that_must_not_have_it():
         if role in allowed:
             continue
         assert marker not in load_role_prompt(role), f"{role} 不在消费者白名单里"
-
-
-def test_wordlist_reaches_the_whole_video_prompt_engineer():
-    """落笔侧·整片（issue #32）：整片提示词工程师的系统提示词里必须有真源切片。
-
-    它是短视频唯一的落笔者，也是长视频整片提示词（阶段 2 的组装输入）的作者；
-    词表不到它手上，前面分镜师与摄影指导挑好的词就落不了地。
-    """
-    for role in WRITING_ROLES:
-        assert _marker() in load_role_prompt(role), \
-            f"{role}.md 的系统提示词没带上电影语言词表——落笔的角色手里没词"
 
 
 def test_writing_side_declares_one_shared_slice():
@@ -100,6 +96,30 @@ def test_writing_side_slice_carries_the_sections_reserved_for_it():
         assert head in slice_text, f"落笔侧切片里没有 {head}"
 
 
+def test_writing_side_takes_every_section_of_the_source():
+    """落笔侧取**全份**：真源将来新增一节时它不能静默漏掉（issue #32 裁定二）。
+
+    ``video_slice`` 的静默失败方向是「**少给**」——它只在**已声明**的小节缺失时抛错，
+    声明里没写的小节会被安静地略过。落笔侧要的是整份真源（ADR 0007 裁定二），
+    所以「真源有哪些小节」与「声明了哪些小节」必须**集合相等**：将来给真源加一节，
+    这条立刻报红，逼出一个显式决定（收进落笔侧，还是明确不给），而不是让新纪律
+    悄悄到不了任何一个落笔者手上——本仓「规则在、接线不在」正是这类静默缺陷。
+
+    小节头的识别在测试里**另写一遍**（不调 film_language 的私有解析）：同一约定
+    的两份独立实现互相对照，比拿被测物自己的解析结果断言它自己更有意义。
+    """
+    heads = [
+        line[len("## "):].strip()
+        for line in film_language.video_source_text().splitlines()
+        if line.startswith("## ")
+    ]
+    declared = list(film_language.VIDEO_SLICES["segment_writer"])
+    assert sorted(heads) == sorted(declared), (
+        "落笔侧的切片声明与真源的小节不一致——真源新增的小节不会自己进落笔侧"
+        f"（真源 {sorted(heads)}／声明 {sorted(declared)}）"
+    )
+
+
 def test_segment_planner_instruction_has_no_wordlist():
     """分段规划师走的是**自己**的加载口，不是 load_role_prompt——两根都要钉。
 
@@ -126,11 +146,14 @@ def test_wordlist_is_bilingual():
         assert zh in src and en in src, f"词表缺中英对照：{zh} / {en}"
 
 
-def test_slice_is_per_consumer_not_the_whole_source():
-    """切片按消费者取，不是「整份真源灌给所有角色」。
+def test_choosing_slices_are_per_consumer_not_the_whole_source():
+    """**选词侧**的切片按消费者取，不是「整份真源灌给所有角色」。
 
     光线词表只给摄影指导（画面细化要写光线方向与强度／质感）；分镜师定的是景别与构图，
     拿到一整份是噪声。未知消费者返回空串——不加白名单就等于悄悄扩权。
+
+    名字里的限定词是必要的：#32 之后**落笔侧**恰恰相反（整份真源全取，见下一条），
+    老名字「切片按消费者取、不是整份」会被读成对全体消费者的断言。
 
     探针取**小节标题**（它同时是 `VIDEO_SLICES` 的声明键），不取词表里的词：
     钉具体的词会在真源换一个更准的词时误报，而「哪一节到了谁手里」才是这里要钉的行为。
