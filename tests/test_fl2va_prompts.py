@@ -10,6 +10,7 @@ from minimax_h3_prompt.generation import (
     FL2VAPromptBundle,
     GenerationResult,
     fl2va_bundle_from_dict,
+    render_fl2va_frame_markdown,
     result_from_state,
     validate_fl2va_bundle,
 )
@@ -487,8 +488,8 @@ def test_frame_node_canvas_follows_the_image_profile_table(monkeypatch):
 def test_frame_node_request_asks_for_composition_and_lighting(monkeypatch):
     """请求里点名 composition / lighting 两个字段（issue #33 AC-3）。
 
-    解析器一直支持读写这两个字段，却**没人写**：实测仓库里 5 份真实产物的 18 行
-    全是空串。字段名进请求是「有生产者」的第一步——请求里不提、规格里没位置，模型
+    解析器一直支持读写这两个字段，却**没人写**：实测仓库里 9 份真实产物（5 个会话）的
+    18 行全是空串。字段名进请求是「有生产者」的第一步——请求里不提、规格里没位置，模型
     只能把构图与光线全塞进 positive_prompt 的自然语言里，复跑同一张图就做不到
     「只改一个维度」。
     """
@@ -526,15 +527,106 @@ def test_rewrite_retry_also_carries_the_canvas(monkeypatch):
     assert f"{width} × {height}" in seen[1], "改写请求丢了画布尺寸"
 
 
-def test_frame_prompt_engineer_spec_owns_the_two_json_fields():
-    """输出 JSON 的字段位置写在**角色提示词正文**里（issue #33 AC-3）。
+def _frame_prompt_spec() -> str:
+    """帧提示词工程师的**角色提示词正文**（不含拼接上去的生图半真源）。
 
-    为什么直接读 .md 而不走 `load_role_prompt`：那条路会把生图半真源一并拼进来，而真源的
-    「结构化字段」一节同样提到这两个字段名——用加载口断言就分不清「规格里有没有」。输出
-    格式归角色提示词管（真源只讲选词与写法，见 ADR 0006），所以断言落在 .md 上。
+    为什么读 .md 而不走 `load_role_prompt`：那条路会把生图半真源一并拼进来，而真源的
+    「结构化字段」一节同样提到这两个字段名——用加载口断言就分不清「规格里有没有」。
+    输出格式与既有禁令都归角色提示词管（真源只讲选词与写法，见 ADR 0006）。
     """
     from minimax_h3_prompt.agents import PROMPTS_DIR
 
-    spec = (PROMPTS_DIR / "frame_prompt_engineer.md").read_text(encoding="utf-8")
+    return (PROMPTS_DIR / "frame_prompt_engineer.md").read_text(encoding="utf-8")
+
+
+def test_frame_prompt_engineer_spec_owns_the_two_json_fields():
+    """输出 JSON 的字段位置写在角色提示词正文里（issue #33 AC-3）。"""
+    spec = _frame_prompt_spec()
     for field in ('"composition"', '"lighting"'):
         assert field in spec, f"帧提示词工程师的输出规格里没有 {field} 的位置"
+
+
+def test_frame_prompt_engineer_keeps_its_existing_static_prohibitions():
+    """AC-4 的**既有**那半：角色提示词里原本就有的静态侧禁令不许被这次改动挤掉（#33 复审）。
+
+    该改动的 net 效果是「只增不删」，但这只靠 diff 恰好如此——没有东西拦得住后来者
+    在加/改构图光线规则时把这几条禁令顺手删掉。
+    """
+    spec = _frame_prompt_spec()
+    for prohibition in ("不写 camera movement", "剪辑", "时间码", "质量标签", "中文"):
+        assert prohibition in spec, f"帧提示词工程师丢了既有禁令：{prohibition}"
+
+
+def test_canvas_block_covers_every_model_in_the_profile_table(monkeypatch):
+    """【画布】块的行数跟着**生图 profile 默认表**走（issue #33 复审）。
+
+    家族清单若在本模块里另抄一份，将来加第三个生图家族时【画布】块会**静默少一行**
+    ——模型就不知道那张画布该按什么构图写。做法：往表里加一个第三家族，看块里有没有它。
+    """
+    monkeypatch.setitem(generation.IMAGE_PROFILE_DEFAULTS, "zimage_new",
+                        generation.ImageProfile("zimage_new_v1", "12", 768, 1344, "candidate"))
+    monkeypatch.setitem(generation.IMAGE_FAMILY_LABELS, "zimage_new", "Z-Image New")
+    message = _frame_node_request(monkeypatch)
+    assert "768 × 1344" in message, "加了第三个生图家族，【画布】块却没跟着多一行"
+
+
+def test_json_repair_retry_also_carries_the_canvas_and_the_two_fields(monkeypatch):
+    """首轮不是 JSON 时那条**转换**重试请求同样带画布与两个字段（issue #33 复审）。
+
+    它常被当成「纯格式转换」而豁免，但它的正文里有一句**内容清单**（要保留哪些键），
+    而且它用的是同一份角色系统提示词——提示词现在写着「画幅见输入里的【画布】块」，
+    这条请求不带那块就是一个**悬空指针**。
+    """
+    replies = iter([
+        "不是 JSON，随手写的一段话",
+        json.dumps(_single_frame_payload(
+            "first", "Three adventurers inside a medieval tavern interior.")),
+    ])
+    seen: list[str] = []
+    monkeypatch.setattr(nodes, "run_agent",
+                        lambda agent, message: seen.append(message) or next(replies))
+    node = nodes._make_fl2va_frame_prompt_node({"frame_prompt_engineer": object()})
+    brief = Brief(variant="I2VA", duration=5, plot="中世纪酒馆室内")
+    node({"brief": brief})
+
+    assert len(seen) == 2, "首轮坏 JSON 没触发转换重试，这条用例没测到重试路径"
+    width, height = generation.image_canvas_size("zimage")
+    assert f"{width} × {height}" in seen[1], "转换重试请求没带画布（角色提示词会指向一个不存在的块）"
+    assert "composition" in seen[1] and "lighting" in seen[1], "转换重试请求的内容清单里没有这两个字段"
+
+
+def test_frame_markdown_shows_composition_and_lighting(tmp_path):
+    """两个字段要**送到人看的文件里**（issue #33 复审）。
+
+    票面那句目的——「复跑同一张图时只改一个维度」——只有在 `first-frame-prompt.md` 里
+    看得见这两行时才成立；只落在 session-state JSON 里等于又要人去挖。
+    """
+    payload = bundle_payload()
+    payload["first"]["zimage"]["composition"] = "竖幅三段式，主体偏下"
+    payload["first"]["zimage"]["lighting"] = "暖光自右侧门缝低角度溢出"
+    brief = Brief(variant="FL2VA", duration=5, plot="中世纪酒馆室内")
+    result = result_from_state(
+        {
+            "script": "The adventurers celebrate in the tavern.",
+            "final_prompt": "How the reference pictures align with the target video — Picture 1 aligns with 0.00 seconds; Picture 2 aligns with 5.00 seconds.\n\nintegrated_multimodal_description: [Shot 1] The group celebrates.\n\noverall_soundscape: Tavern ambience.\n\nnon_diegetic_music: N/A",
+            "character_design": "three adventurers",
+            "prop_design": "wooden mugs and quest gear",
+            "background_design": "medieval tavern interior",
+            "fl2va_prompt_bundle": payload,
+        },
+        brief, generation_id="GEN001", topic_id="topic", project_id="project",
+    )
+    markdown = render_fl2va_frame_markdown(result, "first")
+    assert "竖幅三段式，主体偏下" in markdown, "构图字段没进人看的首帧提示词文件"
+    assert "暖光自右侧门缝低角度溢出" in markdown, "光线字段没进人看的首帧提示词文件"
+
+
+def test_frame_markdown_is_unchanged_when_the_two_fields_are_empty(tmp_path):
+    """两个字段为空时渲染结果与改动前逐字一致（老产物的 18 行都是空串）。
+
+    不做这个条件渲染的话，每份老产物都会多出两行空标题——那是噪声，也让「改了没有」
+    这件事在 diff 里变得不可读。
+    """
+    result = make_fl2va_result()
+    markdown = render_fl2va_frame_markdown(result, "first")
+    assert "构图：" not in markdown and "光线：" not in markdown

@@ -56,8 +56,8 @@
 
 ## 结构化字段
 
-Flux.2 官方推荐**结构化提示词**（原话：`Use JSON-structured prompts for precise control over
-generation`），官方示例给了六个字段：`subject`、`background`、`lighting`、`style`、
+Flux.2 官方推荐**结构化提示词**（原话全文：`Use JSON-structured prompts for precise control over
+generation — ideal for production workflows and automation.`），官方示例给了六个字段：`subject`、`background`、`lighting`、`style`、
 `camera_angle`、`composition`。本仓的口径是**英文键名 + 中文值**，其中两个已经落进输出 JSON：
 
 | 字段 | 写什么 |
@@ -163,7 +163,7 @@ generation`），官方示例给了六个字段：`subject`、`background`、`li
 ## hex 锁色
 
 **跨帧同色的硬办法**：关键色用 hex 写死，比「暗红色」这类形容词硬得多。BFL 官方原话是
-`Specify brand colors via hex codes with precision matching`。
+`Specify brand colors via hex codes with precision matching — no approximation.`
 
 用法：人物服装主色、关键道具色、场景主光色写成 `#ff0088` 这样的值；渐变可写成
 「从 `#02eb3c` 渐变到 `#edfa3c`」。**首尾帧跨帧一致性最需要这个**。

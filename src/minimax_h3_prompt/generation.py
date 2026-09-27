@@ -17,10 +17,10 @@ from .tools.theme_guard import (
 )
 
 PromptKind = Literal["script", "video", "character", "prop", "scene"]
-_FRAME_MODELS = ("zimage", "flux2")
 _PROMPT_KINDS = ("script", "video", "character", "prop", "scene")
 _GENERATION_ID = re.compile(r"^GEN\d{3}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
 
 class ImageProfile(NamedTuple):
     """生图 profile 默认表的一行。
@@ -44,11 +44,16 @@ IMAGE_PROFILE_DEFAULTS: dict[str, ImageProfile] = {
     "zimage": ImageProfile("zimage_t2i_v1", "10", 640, 1280, "candidate"),
     "flux2": ImageProfile("flux2_t2i_v1", "118", 1024, 1024, "candidate"),
 }
+# 本仓支持的帧生图模型家族。**从上面那张表派生**：家族清单另写一份的话，将来加第三个
+# 家族时【画布】块会静默少一行（issue #33 复审）。
+_FRAME_MODELS = tuple(IMAGE_PROFILE_DEFAULTS)
 
 # 生图模型键 → 给人看的显示名。渲染层与帧节点的【画布】块都用它，免得同一张对照表
 # 在三个地方各写一遍（issue #33 复审）。
 IMAGE_FAMILY_LABELS = {"zimage": "Z-Image", "flux2": "Flux.2"}
-# 未知模型家族的兜底档（旧产物里出现过表外的 model_family）：字段默认值退化成空/0。
+# 表外家族的兜底档。**它产不出对象**——真正拦下这种输入的是 ``FL2VAFramePrompt.__post_init__``
+# 的「生图模型类型无效」（实测 `from_dict({"model_family": "sdxl"})` 直接 ValueError）。
+# 之所以还留着这一档：抛错要来自字段校验那一处，而不是 from_dict 里的 AttributeError。
 _EMPTY_IMAGE_PROFILE = ImageProfile("", "", 0, 0, "candidate")
 
 
@@ -231,8 +236,11 @@ class FL2VAFramePrompt:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "FL2VAFramePrompt":
-        # 未知模型家族（旧产物）走空档：字段默认值退化成空/0，与改动前逐字一致。
-        profile = IMAGE_PROFILE_DEFAULTS.get(str(raw.get("model_family", "zimage")), _EMPTY_IMAGE_PROFILE)
+        # 表外家族走空档——它只在下面构造时被 ``__post_init__`` 拦下（见常量处的说明），
+        # 这一档取空值是为了让报错来自字段校验、而不是这里的 AttributeError。
+        profile = IMAGE_PROFILE_DEFAULTS.get(
+            str(raw.get("model_family", "zimage")), _EMPTY_IMAGE_PROFILE
+        )
         return cls(
             frame=str(raw.get("frame", "")),
             model_family=str(raw.get("model_family", "")),
@@ -737,8 +745,17 @@ def render_fl2va_frame_markdown(result: GenerationResult, frame: str) -> str:
             f"- 主提示词节点：`{item.prompt_node_id}`",
             f"- 推荐尺寸：`{item.width} × {item.height}`",
             f"- {variant} 输入槽：`{slot_id}`", "",
-            "### Positive Prompt", "", item.positive_prompt, "",
         ])
+        # 构图与光线单独成行（issue #33）：它们是**可单独替换的维度**——复跑同一张图时
+        # 换光不换构图靠的就是这两行。非空才渲染：老产物这两个字段是空串（实测 18/18），
+        # 那时多两行空标题只会是噪声，渲染结果与改动前逐字一致。
+        if item.composition:
+            parts.extend([f"- 构图：{item.composition}"])
+        if item.lighting:
+            parts.extend([f"- 光线：{item.lighting}"])
+        if item.composition or item.lighting:
+            parts.append("")
+        parts.extend(["### Positive Prompt", "", item.positive_prompt, ""])
         if item.negative_prompt:
             parts.extend(["### Negative Prompt", "", item.negative_prompt, ""])
         if item.instructions:

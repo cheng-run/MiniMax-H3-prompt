@@ -11,7 +11,12 @@ from langgraph.graph.state import CompiledStateGraph
 from ..agents import run_agent
 from ..brief_parser import FRAME_VARIANTS, Brief, brief_uses_refs
 from ..config import Config
-from ..generation import IMAGE_FAMILY_LABELS, fl2va_bundle_from_dict, image_canvas_size
+from ..generation import (
+    IMAGE_FAMILY_LABELS,
+    IMAGE_PROFILE_DEFAULTS,
+    fl2va_bundle_from_dict,
+    image_canvas_size,
+)
 from ..tools.h3_validator import validate_prompt
 from ..tools.ref_metadata import format_ref_meta
 from ..user_revisions import (
@@ -146,20 +151,18 @@ def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_f
     return node
 
 
-# 帧节点要写的两个生图模型。画布尺寸与显示名都不在这里写死——它们住在
-# generation.IMAGE_PROFILE_DEFAULTS / IMAGE_FAMILY_LABELS，同一份来源也喂着渲染层。
-_CANVAS_MODEL_FAMILIES = ("zimage", "flux2")
-
-
 def _canvas_block() -> str:
     """帧节点请求里的【画布】块（issue #33）。
 
     模型不知道自己在给哪个画幅写构图，就会按一种画幅的直觉安排主体位置——而两个模型的
     画布不是一个形状，同一条构图指令在两种画布上语义不同。画幅由宽高自己推，**这里不写
     模型与画幅的对应**：那是 `IMAGE_PROFILE_DEFAULTS` 的事，换画布时请求与渲染层一起跟着动。
+
+    行的来源就是**那张表本身**（家族清单、尺寸、显示名三样都从 `generation` 取）：
+    本模块里再抄一份家族元组的话，将来加第三个生图家族时【画布】块会**静默少一行**。
     """
     lines = []
-    for family in _CANVAS_MODEL_FAMILIES:
+    for family in IMAGE_PROFILE_DEFAULTS:
         width, height = image_canvas_size(family)
         shape = "竖幅" if height > width else "正方" if height == width else "横幅"
         lines.append(f"- {IMAGE_FAMILY_LABELS[family]}（{family}）：{width} × {height}（{shape}）")
@@ -174,9 +177,16 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError:
+            # 这条**不是**纯格式转换：它给出了一个要保留的**内容清单**，所以清单里的东西
+            # 一样都不能少——`composition` / `lighting` 是角色提示词明文要求的字段
+            # （issue #33），漏在清单外就等于这条路上没人要它们。
+            # 【画布】块也必须带：角色提示词现在写着「画幅见输入里的【画布】块」，
+            # 那次调用同样用这份系统提示词，不带就成了**悬空指针**。
             repair = run_agent(
                 agents["frame_prompt_engineer"],
-                f"把以下内容转换为严格 JSON，不要 markdown，必须保留 {required}、scene_anchor 和 continuity_constraints：\n{raw}",
+                f"把以下内容转换为严格 JSON，不要 markdown，必须保留 {required}、scene_anchor、"
+                f"continuity_constraints，以及每个模型的 composition 与 lighting 字段：\n"
+                f"{_ctx(画布=_canvas_block())}\n原始内容：\n{raw}",
             )
             try:
                 parsed = json.loads(repair)
@@ -207,7 +217,7 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
             requirement
             + "人物、道具和场景必须同时出现在每张关键帧中；主题地点是硬约束。"
             # 构图/光线两个字段（issue #33）：解析器一直支持读写，却无人写——实测仓库里
-            # 5 份真实产物的 18 行全是空串。字段名进请求是「有生产者」的第一步。
+            # 9 份真实产物（5 个会话）的 18 行全是空串。字段名进请求是「有生产者」的第一步。
             + "每个模型版本都必须给出 composition 与 lighting 两个字段"
               "（按本模型的画布写构图、按光线的方向/强度/质感写光）。"
             + "只输出 JSON。\n"
