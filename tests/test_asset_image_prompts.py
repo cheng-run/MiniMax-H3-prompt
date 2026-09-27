@@ -20,7 +20,11 @@ from types import SimpleNamespace
 
 from minimax_h3_prompt import model_factory
 from minimax_h3_prompt.brief_parser import Brief
-from minimax_h3_prompt.generation import image_prompt_variants
+from minimax_h3_prompt.generation import (
+    IMAGE_PROFILE_DEFAULTS,
+    image_canvas_size,
+    image_prompt_variants,
+)
 from minimax_h3_prompt.graph import nodes, pipeline, roundtable
 
 TOPIC = "秋日庭院里的橘猫"
@@ -146,12 +150,15 @@ def test_asset_prompts_are_not_the_design_text_anymore(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_asset_prompt_request_carries_the_canvas_block(monkeypatch):
-    """节点级：三个节点发出的请求都带【画布】块，两条画幅逐字在里面。
+    """节点级：三个节点发出的请求都带【画布】块，**每个生图家族**的画幅都在里面。
 
     生图词表里写着「哪个模型是哪种画幅、尺寸是多少，一律以请求里的【画布】块为准」——
     角色提示词被加载到这些调用上，不带这块那条指针就是**悬空**的（#33 在帧节点踩过
-    同一个坑）。画布的**来源**是 ``generation.IMAGE_PROFILE_DEFAULTS``，这里按它现取，
-    免得测试与那两行数字各存一份。
+    同一个坑）。
+
+    尺寸与家族清单都从 ``IMAGE_PROFILE_DEFAULTS`` **现取**（经 ``image_canvas_size``）：
+    测试里再抄一份数字就是第二份可写来源，换画布时它会静默失配——而且按家族清单遍历，
+    将来加第三个生图家族时这条会自己跟着断言，不会漏。
     """
     requests: list[str] = []
     monkeypatch.setattr(nodes, "run_agent",
@@ -166,8 +173,11 @@ def test_asset_prompt_request_carries_the_canvas_block(monkeypatch):
         assert len(requests) == 1
         assert "【画布】" in requests[0], f"{kind} 的请求里没有【画布】块"
 
-    for family, (width, height) in (("zimage", (640, 1280)), ("flux2", (1024, 1024))):
-        assert f"{width} × {height}" in requests[0], f"【画布】块里没有 {family} 的画布尺寸"
+    assert IMAGE_PROFILE_DEFAULTS, "生图默认表是空的——【画布】块会退化成空块"
+    for family in IMAGE_PROFILE_DEFAULTS:
+        width, height = image_canvas_size(family)
+        assert f"{width} × {height}" in requests[0], \
+            f"【画布】块里没有 {family} 的画布尺寸"
 
 
 # ---------------------------------------------------------------------------
@@ -175,25 +185,26 @@ def test_asset_prompt_request_carries_the_canvas_block(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_folded_node_list_matches_the_real_folding():
-    """``_FOLDED_NODES`` 不许再说反话：链上见的与清单说的必须是同一件事。
+    """折叠清单不许再说反话：**声明了折叠的组必须真的在链上跑**。
 
     这张清单曾经把三个资产图节点列为「已折叠」而没有任何组合节点跑它们（issue #36）。
-    现在它由 ``_PARALLEL_GROUPS`` 现推，于是这条测试盯的是剩下那半：
-    **每个声明了组合的组都得在链上**（不在链上＝声明了却没人跑，清单又在说谎），
-    **被折叠的子节点不许再作为独立图节点出现在链上**（两处都跑＝同一个角色跑两遍）。
-    """
-    assert pipeline._FOLDED_NODES == {
-        sub for group in pipeline._PARALLEL_GROUPS.values() for sub in group
-    }, "折叠清单与组合声明分家了"
+    现在「折叠」只声明在 ``_PARALLEL_GROUPS`` 一处、``_FOLDED_NODES`` 由它现推，
+    所以「清单 == 声明」是**定义**而不是待验证的性质（断言它等于把自己算一遍）；
+    要盯的是声明与**链**的关系：
 
+    - 每个声明了组合的组都得在链上——不在链上就是「声明了却没人跑」，与 #36 之前的
+      形态同型（说折叠了、实际没接）；
+    - 被折叠的子节点不许再作为独立图节点出现在链上——两处都跑等于同一个角色跑两遍。
+    """
     for group, subs in pipeline._PARALLEL_GROUPS.items():
         assert group in pipeline._STAGE1_CHAIN, f"{group} 没接进阶段 1 链——它折叠的节点没人跑"
         for sub in subs:
             assert sub not in pipeline._STAGE1_CHAIN, f"{sub} 既在组合里又独立成节点（会跑两遍）"
 
-    # 三个资产图节点在折叠清单里，且它们的组合真的在链上——本票那句话说到的位置
-    for node_name, *_ in _ASSETS:
-        assert node_name in pipeline._FOLDED_NODES
-        assert pipeline._STAGE1_CHAIN.index("parallel_image_prompts") > \
-            pipeline._STAGE1_CHAIN.index("art_director"), \
-            "资产图提示词跑在美术指导之前——它要读美术统筹这一轮的产出"
+    # 本票接的那三个：组合声明的就是这三个节点，且组合排在美术指导之后
+    # （它要读美术统筹这一轮的产出）——「真的跑到」由上面那条真图用例另证。
+    assert pipeline._PARALLEL_GROUPS["parallel_image_prompts"] == tuple(
+        node_name for node_name, *_ in _ASSETS)
+    assert pipeline._STAGE1_CHAIN.index("parallel_image_prompts") > \
+        pipeline._STAGE1_CHAIN.index("art_director"), \
+        "资产图提示词跑在美术指导之前——它要读美术统筹这一轮的产出"

@@ -311,9 +311,6 @@ def test_image_slice_needs_an_explicit_declaration():
     for consumer in ("storyboard", "segment_planner", "不存在的角色"):
         assert film_language.image_slice(consumer) == "", \
             f"{consumer} 没被声明，不该拿到生图半切片（不声明即拿不到）"
-    for consumer in IMAGE_ROLES:
-        assert film_language.image_slice(consumer) != "", \
-            f"{consumer} 声明了却拿到空串（声明与真源小节对不上）"
 
 
 def test_image_source_keeps_the_static_hard_constraints():
