@@ -60,16 +60,28 @@ REF_TOOL_ROLES = {
 }
 
 
+def _role_wordlist(role: str) -> str:
+    """该角色文末要附的词表切片；不在任何白名单里返回空串。
+
+    **两份真源、两个读取口**（#31 视频侧 / #33 生图侧）：视频半管 H3 正文的选词与写法，
+    生图半管静态画面。一个角色只属于其中一侧——同一个键同时出现在两张白名单里时，
+    这里按「先视频后生图」取第一份非空的，视频侧会**静默**赢，生图半那份永远送不出去。
+    两张白名单因此不许相交，由 ``tests/test_film_language.py`` 钉住。
+    """
+    return film_language.video_slice(role) or film_language.image_slice(role)
+
+
 def load_role_prompt(role: str) -> str:
-    """读角色提示词；命中的角色在文末附上电影语言词表切片（issue #31）。
+    """读角色提示词；命中的角色在文末附上电影语言词表切片（issue #31 / #33）。
 
     切片附在**加载处**而不是各份 .md 里：词表是逐字读入的纯文本，抄进每个角色的 .md
     就等于同一份词表有 N 份硬拷贝（本仓吃过「同一句官方原文 3 份硬拷贝」的亏）。
-    哪些角色拿哪几节由 ``film_language.VIDEO_SLICES`` 声明，不声明的角色拿到空串——
-    分段规划师尤其不能拿到（段尾钩子要留作锚帧语义校验的可判定对照物）。
+    哪些角色拿哪几节由 ``film_language.VIDEO_SLICES`` / ``IMAGE_SLICES`` 声明，
+    不声明的角色拿到空串——分段规划师尤其不能拿到（段尾钩子要留作锚帧语义校验的
+    可判定对照物），关键帧生图提示词工程师只能拿生图半（静态图不写运镜）。
     """
     prompt = (PROMPTS_DIR / f"{role}.md").read_text(encoding="utf-8")
-    wordlist = film_language.video_slice(role)
+    wordlist = _role_wordlist(role)
     # 空串（白名单外的角色）不加空行：不声明词表的角色，提示词逐字与改动前一致
     return f"{prompt}\n{wordlist}" if wordlist else prompt
 

@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from .brief_parser import Brief
 from .tools.theme_guard import (
@@ -22,10 +22,47 @@ _PROMPT_KINDS = ("script", "video", "character", "prop", "scene")
 _GENERATION_ID = re.compile(r"^GEN\d{3}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
-_IMAGE_PROFILE_DEFAULTS = {
-    "zimage": ("zimage_t2i_v1", "10", 640, 1280, "candidate"),
-    "flux2": ("flux2_t2i_v1", "118", 1024, 1024, "candidate"),
+class ImageProfile(NamedTuple):
+    """生图 profile 默认表的一行。
+
+    用具名字段而不是裸元组：这张表现在有多个消费者（渲染层、「推荐尺寸」、帧节点的画布、
+    ``FL2VAFramePrompt`` 的字段默认值），按下标取值时「第 3 位是宽还是高」只写在注释里，
+    错位了不会有任何东西报红（issue #33 复审：写测试时确实被这个下标绊过一次）。
+    """
+
+    profile_id: str
+    prompt_node_id: str
+    width: int
+    height: int
+    status: str
+
+
+# 生图 profile 默认表：模型 → 该模型在本仓的默认工作流参数。
+# 它以前只在渲染层被读（给人看「推荐尺寸」）；帧节点的请求现在也从这里取画布
+# （``image_canvas_size``，issue #33）——两处各写一份数就会漂，所以是**公开的单一来源**。
+IMAGE_PROFILE_DEFAULTS: dict[str, ImageProfile] = {
+    "zimage": ImageProfile("zimage_t2i_v1", "10", 640, 1280, "candidate"),
+    "flux2": ImageProfile("flux2_t2i_v1", "118", 1024, 1024, "candidate"),
 }
+
+# 生图模型键 → 给人看的显示名。渲染层与帧节点的【画布】块都用它，免得同一张对照表
+# 在三个地方各写一遍（issue #33 复审）。
+IMAGE_FAMILY_LABELS = {"zimage": "Z-Image", "flux2": "Flux.2"}
+# 未知模型家族的兜底档（旧产物里出现过表外的 model_family）：字段默认值退化成空/0。
+_EMPTY_IMAGE_PROFILE = ImageProfile("", "", 0, 0, "candidate")
+
+
+def image_canvas_size(model_family: str) -> tuple[int, int]:
+    """该生图模型的默认画布（宽, 高）。
+
+    构图按画布走：两个模型的画布不是一个形状（一竖一方），同一条构图指令在两种画布上
+    语义不同——这是「两模型必须分别重写」的物理依据，所以帧节点的请求要把画布一并送进
+    模型（issue #33）。**形状与数字只住在本表里**，请求与渲染层都从这里取。
+    """
+    profile = IMAGE_PROFILE_DEFAULTS.get(model_family)
+    if profile is None:
+        raise ValueError(f"未知生图模型：{model_family}")
+    return profile.width, profile.height
 
 
 def _now() -> str:
@@ -194,9 +231,8 @@ class FL2VAFramePrompt:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "FL2VAFramePrompt":
-        profile = _IMAGE_PROFILE_DEFAULTS.get(str(raw.get("model_family", "zimage")))
-        if profile is None:
-            profile = ("", "", 0, 0, "candidate")
+        # 未知模型家族（旧产物）走空档：字段默认值退化成空/0，与改动前逐字一致。
+        profile = IMAGE_PROFILE_DEFAULTS.get(str(raw.get("model_family", "zimage")), _EMPTY_IMAGE_PROFILE)
         return cls(
             frame=str(raw.get("frame", "")),
             model_family=str(raw.get("model_family", "")),
@@ -208,11 +244,11 @@ class FL2VAFramePrompt:
             subject_anchor=str(raw.get("subject_anchor", "")),
             composition=str(raw.get("composition", "")),
             lighting=str(raw.get("lighting", "")),
-            profile_id=str(raw.get("profile_id", profile[0])),
-            prompt_node_id=str(raw.get("prompt_node_id", profile[1])),
-            width=int(raw.get("width", profile[2]) or profile[2]),
-            height=int(raw.get("height", profile[3]) or profile[3]),
-            profile_status=str(raw.get("profile_status", profile[4])),
+            profile_id=str(raw.get("profile_id", profile.profile_id)),
+            prompt_node_id=str(raw.get("prompt_node_id", profile.prompt_node_id)),
+            width=int(raw.get("width", profile.width) or profile.width),
+            height=int(raw.get("height", profile.height) or profile.height),
+            profile_status=str(raw.get("profile_status", profile.status)),
             instructions=tuple(str(x) for x in raw.get("instructions", [])),
         )
 
@@ -622,10 +658,6 @@ def generation_directory(project_directory: Path, generation_id: str) -> Path:
 
 def image_prompt_variants(state: dict[str, Any], brief: Brief) -> tuple[ImagePromptVariant, ...]:
     """从结构化适配器结果构造六份可复制提示词；旧 state 缺少时保留兼容降级。"""
-    profile = {
-        "zimage": ("zimage_t2i_v1", "10", 640, 1280),
-        "flux2": ("flux2_t2i_v1", "118", 1024, 1024),
-    }
     variants: list[ImagePromptVariant] = []
     for kind, field in (("character", "character_image_prompts"), ("prop", "prop_image_prompts"), ("scene", "scene_image_prompts")):
         raw = state.get(field, {})
@@ -633,7 +665,11 @@ def image_prompt_variants(state: dict[str, Any], brief: Brief) -> tuple[ImagePro
             item = raw.get(model_family, {}) if isinstance(raw, dict) else {}
             if isinstance(item, str):
                 item = {"positive_prompt": item}
-            default_id, node, width, height = profile[model_family]
+            # profile 与画布都取**同一张**生图默认表：这里原先另抄了一份四元组，
+            # 换画布时就会与本表漂开（issue #33 把这张表扶正为单一来源）。
+            default = IMAGE_PROFILE_DEFAULTS[model_family]
+            default_id, node = default.profile_id, default.prompt_node_id
+            width, height = default.width, default.height
             variants.append(ImagePromptVariant(
                 model_family=model_family,
                 kind=kind,
@@ -658,7 +694,7 @@ def render_image_prompt_markdown(result: GenerationResult, kind: str) -> str:
     labels = {"character": "人物", "prop": "道具", "scene": "场景"}
     parts = [f"# {labels[kind]}生图提示词", "", "请选择对应模型版本复制。", ""]
     for item in rows:
-        title = "Z-Image" if item.model_family == "zimage" else "Flux.2"
+        title = IMAGE_FAMILY_LABELS[item.model_family]
         parts.extend([
             f"## {title}", "",
             f"- Workflow Profile: `{item.profile_id}`（状态：{item.profile_status}）",
@@ -694,7 +730,7 @@ def render_fl2va_frame_markdown(result: GenerationResult, frame: str) -> str:
     ]
     slot_id = bundle.first_frame_slot_id if frame == "first" else bundle.last_frame_slot_id
     for item in rows:
-        model_title = "Z-Image" if item.model_family == "zimage" else "Flux.2"
+        model_title = IMAGE_FAMILY_LABELS[item.model_family]
         parts.extend([
             f"## {model_title}", "",
             f"- 静态图 Workflow Profile：`{item.profile_id}`（状态：{item.profile_status}）",
@@ -778,6 +814,7 @@ def render_generation(result: GenerationResult) -> dict[str, str]:
 __all__ = [
     "GenerationResult", "PromptArtifact", "PromptKind", "ImagePromptVariant",
     "FL2VAFramePrompt", "FL2VAPromptBundle", "brief_snapshot",
+    "ImageProfile", "IMAGE_PROFILE_DEFAULTS", "IMAGE_FAMILY_LABELS", "image_canvas_size",
     "fl2va_bundle_from_dict", "generation_directory", "render_generation",
     "render_fl2va_frame_markdown", "render_fl2va_markdown", "result_from_state",
     "scene_requirement_groups", "validate_fl2va_bundle",

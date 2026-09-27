@@ -1,8 +1,13 @@
-"""电影语言真源的读取口：按消费者取切片（issue #31）。
+"""电影语言真源的读取口：按消费者取切片（#31 选词侧 / #32 落笔侧 / #33 生图侧）。
 
-**为什么要有这一层**：真源（``knowledge/film-language-video.md``）是一份给人读的连续文本，
+**为什么要有这一层**：真源（``knowledge/film-language-*.md``）是一份给人读的连续文本，
 而到达模型的应该是**按角色裁剪过的片段**——分镜师定的是景别与构图，摄影指导才写光线与机位角度。
 整份灌给所有角色既浪费上下文，也会让不写光线的角色去挑光线词。
+
+**两份真源，两个读取口**：视频半（H3 正文）与生图半（静态画面）是**两套语言**，
+各自一份文件、各自一张白名单（``VIDEO_SLICES`` / ``IMAGE_SLICES``）。两张白名单**不许相交**——
+``agents.load_role_prompt`` 按「先视频后生图」取第一份非空的，同一个键同时出现在两边时
+视频侧会静默赢。运镜词表进了静态图就是直接违规，所以这条由测试钉住。
 
 **为什么不做 skill 运行时**：流水线角色是一次纯 API 调用，没有工具、没有按需加载、没有
 「先看目录再决定读哪个」的机会。全仓只有三处会把**文件内容读进模型请求**（角色提示词目录、
@@ -23,6 +28,7 @@ from pathlib import Path
 
 KNOWLEDGE_DIR = Path(__file__).resolve().parent / "knowledge"
 VIDEO_SOURCE_PATH = KNOWLEDGE_DIR / "film-language-video.md"
+IMAGE_SOURCE_PATH = KNOWLEDGE_DIR / "film-language-image.md"
 
 # 小节以二级标题起行；key 与小节标题**全等**才算命中。
 # 为什么不用「标题含 key」的模糊匹配：模糊匹配下两个 key 可能落到同一节、一个 key 可能落到
@@ -100,10 +106,43 @@ VIDEO_SLICES: dict[str, tuple[str, ...]] = {
 # 现已随 _WRITING_SIDE_SLICES 归落笔侧——真源是视频半的单一来源，
 # 落笔侧要用到的词表不该另开一份。
 
+# 生图侧（issue #33）的切片。**生图半是另一份真源**，运镜词表一个字都不进这里。
+#
+# 目前只有一个消费者：关键帧生图提示词工程师（角色键 ``frame_prompt_engineer``）——
+# 它是链上唯一真跑的生图角色。资产图那条路的 ``image_prompt_engineer`` **故意不在**里面：
+# 它的三个节点在 ``graph.pipeline._FOLDED_NODES`` 里从没接进链，喂进 ComfyUI 的实际是
+# **设计正文**，接它属编排改动（另开票）。
+#
+# 取**全部小节**：这个消费者一个人要从景别、视角、构图、光线写到风格与材质，按节裁剪
+# 没有意义。声明仍然显式（收窄改这里一处），并有「声明 == 真源小节」的集合相等断言守着
+# —— ``image_slice`` 的静默失败方向同样是「少给」，真源将来新增一节不会自己送到。
+_IMAGE_SLICES: tuple[str, ...] = (
+    "四条硬约束",
+    "画布决定构图：两套",
+    "结构化字段",
+    "词表：景别",
+    "词表：视角与机位",
+    "词表：构图",
+    "词表：光线",
+    "词表：镜头与焦段",
+    "词表：风格与材质",
+    "hex 锁色",
+    "落笔前自查",
+)
+
+IMAGE_SLICES: dict[str, tuple[str, ...]] = {
+    "frame_prompt_engineer": _IMAGE_SLICES,
+}
+
 
 def video_source_text() -> str:
     """整份视频半真源（纯文本，逐字）。"""
     return VIDEO_SOURCE_PATH.read_text(encoding="utf-8")
+
+
+def image_source_text() -> str:
+    """整份生图半真源（纯文本，逐字）。"""
+    return IMAGE_SOURCE_PATH.read_text(encoding="utf-8")
 
 
 def video_source_headline() -> str:
@@ -113,6 +152,12 @@ def video_source_headline() -> str:
     于是「词表到了没有」的断言变成永远为真的空断言。
     """
     lines = video_source_text().lstrip().splitlines()
+    return lines[0] if lines else ""
+
+
+def image_source_headline() -> str:
+    """生图半真源第一行（标题）。标记串的取法同 ``video_source_headline``。"""
+    lines = image_source_text().lstrip().splitlines()
     return lines[0] if lines else ""
 
 
@@ -137,26 +182,40 @@ def _split_sections(text: str) -> tuple[str, list[tuple[str, str]]]:
     return "".join(preamble), sections
 
 
-def video_slice(consumer: str) -> str:
-    """取视频半真源里给该消费者的切片；消费者不在白名单里返回空串。
+def _slice(source_path: Path, declarations: dict[str, tuple[str, ...]], consumer: str) -> str:
+    """按声明的键取某份真源里的小节，逐字拼成切片；消费者不在白名单里返回空串。
 
     找不到声明的小节（标题被改过）、或真源里出现重名小节（取哪一节不唯一）都**报错**，
     而不是静默少给一节：「词表悄悄没送到」正是本仓「规则在、接线不在」那一类缺陷，
     不能靠人发现。
     """
-    keys = VIDEO_SLICES.get(consumer)
+    keys = declarations.get(consumer)
     if not keys:
         return ""
 
-    preamble, sections = _split_sections(video_source_text())
+    preamble, sections = _split_sections(source_path.read_text(encoding="utf-8"))
     heads = [head for head, _body in sections]
     duplicates = sorted({head for head in heads if heads.count(head) > 1})
     if duplicates:
-        raise ValueError(f"{VIDEO_SOURCE_PATH.name} 里有重名小节 {duplicates}——按标题取切片会取错")
+        raise ValueError(f"{source_path.name} 里有重名小节 {duplicates}——按标题取切片会取错")
     missing = [key for key in keys if key not in heads]
     if missing:
         raise ValueError(
-            f"{VIDEO_SOURCE_PATH.name} 里找不到小节 {missing}（消费者 {consumer}）——"
+            f"{source_path.name} 里找不到小节 {missing}（消费者 {consumer}）——"
             "真源的小节标题改了，切片声明要跟着改"
         )
     return preamble + "".join(body for head, body in sections if head in keys)
+
+
+def video_slice(consumer: str) -> str:
+    """取视频半真源里给该消费者的切片；消费者不在白名单里返回空串。"""
+    return _slice(VIDEO_SOURCE_PATH, VIDEO_SLICES, consumer)
+
+
+def image_slice(consumer: str) -> str:
+    """取生图半真源里给该消费者的切片；消费者不在白名单里返回空串。
+
+    与 ``video_slice`` 是**两个读取口**，不是同一个函数换参数：两份真源的消费者不同、
+    语言不同，谁都不该误用另一个的口子（``agents.load_role_prompt`` 也只按角色各取一次）。
+    """
+    return _slice(IMAGE_SOURCE_PATH, IMAGE_SLICES, consumer)

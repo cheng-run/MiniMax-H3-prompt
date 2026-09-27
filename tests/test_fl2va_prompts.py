@@ -3,6 +3,7 @@ import json
 
 import pytest
 
+from minimax_h3_prompt import generation
 from minimax_h3_prompt.brief_parser import Brief
 from minimax_h3_prompt.generation import (
     FL2VAFramePrompt,
@@ -404,3 +405,136 @@ def test_frame_node_i2va_emits_first_only(monkeypatch):
     assert output["fl2va_prompt_bundle"]["first"]
     assert not output["fl2va_prompt_bundle"]["last"]
     assert "I2VA" in captured["message"]
+
+
+# ---------------------------------------------------------------------------
+# 画布接线与构图/光线字段（issue #33 生图侧）
+#
+# 帧节点是链上唯一真跑的生图节点，所以它的**真实请求字符串**就是生图侧的那条缝。
+# 断言一律打在请求串上，不打在 helper 的返回值上——本仓的祖训（`test_segment_prompts`
+# 那条到达性用例）：常量对了、请求组装时漏掉，测 helper 照样绿。
+# ---------------------------------------------------------------------------
+
+def _frame_node_request(monkeypatch, variant: str = "I2VA") -> str:
+    """跑一次帧节点，返回它真正发出去的那条用户请求串。"""
+    captured: dict[str, str] = {}
+    payload = json.dumps(_single_frame_payload(
+        "first", "Three adventurers inside a medieval tavern interior."))
+
+    def fake_run_agent(agent, message):
+        captured["message"] = message
+        return payload
+
+    monkeypatch.setattr(nodes, "run_agent", fake_run_agent)
+    node = nodes._make_fl2va_frame_prompt_node({"frame_prompt_engineer": object()})
+    brief = Brief(variant=variant, duration=5, plot="中世纪酒馆室内")
+    node({"brief": brief, "shot_table": "start and end states"})
+    return captured["message"]
+
+
+def test_frame_bundle_roundtrips_composition_and_lighting():
+    """构图/光线字段能被解析器读进来、也能写回去（issue #33 AC-3 的括号那半）。
+
+    这两个字段一直存在却没人写；顺带确认「解析器已支持读取与写回」这句成立——
+    不成立的话，「让它们有值」也就没地方落。
+    """
+    payload = bundle_payload()
+    payload["first"]["zimage"]["composition"] = "竖幅三段式，主体偏下、天空留白在上"
+    payload["first"]["zimage"]["lighting"] = "暖光自右侧门缝低角度溢出，光比温和"
+    brief = Brief(variant="FL2VA", duration=5, plot="中世纪酒馆室内")
+    bundle = fl2va_bundle_from_dict(payload, brief)
+
+    def zimage_row(b):
+        return next(r for r in b.first if r.model_family == "zimage")
+
+    row = zimage_row(bundle)
+    assert row.composition == "竖幅三段式，主体偏下、天空留白在上"
+    assert row.lighting == "暖光自右侧门缝低角度溢出，光比温和"
+    restored = FL2VAPromptBundle.from_dict(bundle.to_dict())
+    assert (zimage_row(restored).composition, zimage_row(restored).lighting) \
+        == (row.composition, row.lighting), "写回再读时两个字段丢了"
+
+
+def test_frame_node_request_carries_both_canvases(monkeypatch):
+    """帧节点的请求里必须带**画布尺寸**（issue #33 AC-2）。
+
+    模型不知道自己在给哪个画幅写构图，就会按一种画幅的直觉安排主体位置；而 Z-Image 是
+    竖幅、Flux.2 是正方，同一条构图指令在两种画布上语义不同——这是既有纪律「两模型必须
+    分别重写」的物理依据，不只是纪律要求。
+
+    **两行各一条断言**，不合并：它们现在同住生图 profile 默认表，将来可能分叉，
+    合并成一条会在分叉时一起绿。
+    """
+    message = _frame_node_request(monkeypatch)
+    width, height = generation.image_canvas_size("zimage")
+    assert f"{width} × {height}" in message, "帧节点请求里没有 Z-Image 的画布尺寸（竖幅）"
+    width, height = generation.image_canvas_size("flux2")
+    assert f"{width} × {height}" in message, "帧节点请求里没有 Flux.2 的画布尺寸（正方）"
+
+
+def test_frame_node_canvas_follows_the_image_profile_table(monkeypatch):
+    """画布取自**生图 profile 默认表**，不是请求组装里另抄的一份常量（issue #33 AC-2）。
+
+    那张表以前只在渲染层被读（给人看「推荐尺寸」），从没进过任何 LLM 请求；现在它同时喂着
+    请求里的画布，两处各写一份数就会漂。做法：把表改成不可能巧合命中的尺寸，看请求跟不跟。
+    """
+    monkeypatch.setitem(generation.IMAGE_PROFILE_DEFAULTS, "zimage",
+                        generation.ImageProfile("zimage_t2i_v1", "10", 111, 222, "candidate"))
+    message = _frame_node_request(monkeypatch)
+    assert "111 × 222" in message, "请求里的画布不是从 profile 默认表取的（另抄了一份常量）"
+
+
+def test_frame_node_request_asks_for_composition_and_lighting(monkeypatch):
+    """请求里点名 composition / lighting 两个字段（issue #33 AC-3）。
+
+    解析器一直支持读写这两个字段，却**没人写**：实测仓库里 5 份真实产物的 18 行
+    全是空串。字段名进请求是「有生产者」的第一步——请求里不提、规格里没位置，模型
+    只能把构图与光线全塞进 positive_prompt 的自然语言里，复跑同一张图就做不到
+    「只改一个维度」。
+    """
+    message = _frame_node_request(monkeypatch)
+    assert "composition" in message, "帧节点请求里没点名 composition 字段"
+    assert "lighting" in message, "帧节点请求里没点名 lighting 字段"
+
+
+def test_rewrite_retry_also_carries_the_canvas(monkeypatch):
+    """bundle 过不了校验后的**改写**重试请求同样带画布（issue #33）。
+
+    那条路只在首轮产物过不了校验时走，正常路径走不到——本仓最容易漏接线的一处
+    （澄清、#25 的基线与修订都漏在这里过）。重写整份 JSON 却不提画布，等于让模型按
+    自己的直觉重新安排构图。
+
+    相对的，composition / lighting 的**字段要求**不必在这里重复：它住在角色系统提示词里
+    （每次调用都在场），而画布是**本次请求的数据**——同「起步澄清」「用户修订」，不在
+    系统提示词里，只能跟着请求走。
+    """
+    replies = iter([
+        json.dumps({"scene_anchor": "medieval tavern interior",
+                    "first": {"zimage": {"positive_prompt": "三人围坐"}}}),
+        json.dumps(_single_frame_payload(
+            "first", "Three adventurers inside a medieval tavern interior.")),
+    ])
+    seen: list[str] = []
+    monkeypatch.setattr(nodes, "run_agent",
+                        lambda agent, message: seen.append(message) or next(replies))
+    node = nodes._make_fl2va_frame_prompt_node({"frame_prompt_engineer": object()})
+    brief = Brief(variant="I2VA", duration=5, plot="中世纪酒馆室内")
+    node({"brief": brief})
+
+    assert len(seen) == 2, "首轮产物没触发改写重试，这条用例没测到重试路径"
+    width, height = generation.image_canvas_size("zimage")
+    assert f"{width} × {height}" in seen[1], "改写请求丢了画布尺寸"
+
+
+def test_frame_prompt_engineer_spec_owns_the_two_json_fields():
+    """输出 JSON 的字段位置写在**角色提示词正文**里（issue #33 AC-3）。
+
+    为什么直接读 .md 而不走 `load_role_prompt`：那条路会把生图半真源一并拼进来，而真源的
+    「结构化字段」一节同样提到这两个字段名——用加载口断言就分不清「规格里有没有」。输出
+    格式归角色提示词管（真源只讲选词与写法，见 ADR 0006），所以断言落在 .md 上。
+    """
+    from minimax_h3_prompt.agents import PROMPTS_DIR
+
+    spec = (PROMPTS_DIR / "frame_prompt_engineer.md").read_text(encoding="utf-8")
+    for field in ('"composition"', '"lighting"'):
+        assert field in spec, f"帧提示词工程师的输出规格里没有 {field} 的位置"

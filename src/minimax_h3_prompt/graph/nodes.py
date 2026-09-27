@@ -11,7 +11,7 @@ from langgraph.graph.state import CompiledStateGraph
 from ..agents import run_agent
 from ..brief_parser import FRAME_VARIANTS, Brief, brief_uses_refs
 from ..config import Config
-from ..generation import fl2va_bundle_from_dict
+from ..generation import IMAGE_FAMILY_LABELS, fl2va_bundle_from_dict, image_canvas_size
 from ..tools.h3_validator import validate_prompt
 from ..tools.ref_metadata import format_ref_meta
 from ..user_revisions import (
@@ -146,6 +146,26 @@ def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_f
     return node
 
 
+# 帧节点要写的两个生图模型。画布尺寸与显示名都不在这里写死——它们住在
+# generation.IMAGE_PROFILE_DEFAULTS / IMAGE_FAMILY_LABELS，同一份来源也喂着渲染层。
+_CANVAS_MODEL_FAMILIES = ("zimage", "flux2")
+
+
+def _canvas_block() -> str:
+    """帧节点请求里的【画布】块（issue #33）。
+
+    模型不知道自己在给哪个画幅写构图，就会按一种画幅的直觉安排主体位置——而两个模型的
+    画布不是一个形状，同一条构图指令在两种画布上语义不同。画幅由宽高自己推，**这里不写
+    模型与画幅的对应**：那是 `IMAGE_PROFILE_DEFAULTS` 的事，换画布时请求与渲染层一起跟着动。
+    """
+    lines = []
+    for family in _CANVAS_MODEL_FAMILIES:
+        width, height = image_canvas_size(family)
+        shape = "竖幅" if height > width else "正方" if height == width else "横幅"
+        lines.append(f"- {IMAGE_FAMILY_LABELS[family]}（{family}）：{width} × {height}（{shape}）")
+    return "\n".join(lines)
+
+
 def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
     """把完整镜头上下文转换为对应变体的关键帧生图提示词（FL2VA 双帧 / I2VA 仅首帧 / L2VA 仅尾帧）。"""
     def parse_bundle(raw: str, brief: Brief) -> dict:
@@ -184,7 +204,13 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
                        "I2VA": "使其通过主题地点校验",
                        "L2VA": "使其通过主题地点校验"}[variant]
         message = (
-            requirement + "人物、道具和场景必须同时出现在每张关键帧中；主题地点是硬约束。只输出 JSON。\n"
+            requirement
+            + "人物、道具和场景必须同时出现在每张关键帧中；主题地点是硬约束。"
+            # 构图/光线两个字段（issue #33）：解析器一直支持读写，却无人写——实测仓库里
+            # 5 份真实产物的 18 行全是空串。字段名进请求是「有生产者」的第一步。
+            + "每个模型版本都必须给出 composition 与 lighting 两个字段"
+              "（按本模型的画布写构图、按光线的方向/强度/质感写光）。"
+            + "只输出 JSON。\n"
             + _ctx(
                 变体=brief.variant,
                 原始主题=brief.plot,
@@ -192,6 +218,9 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
                 时长=f"{brief.duration}s",
                 视觉风格=brief.style,
                 语言=brief.language,
+                # 画布是**本次请求的数据**（不住在系统提示词里），所以主请求与下面的
+                # 改写重试都要带：少了它，模型只能按自己的直觉重新安排构图。
+                画布=_canvas_block(),
                 # 累积的用户修订：人机修改循环每轮重出都把它带进上下文（issue #23）。
                 # 自动质检循环不设该键 → 空值被 _ctx 跳过，它的替换语义逐字不变。
                 用户修订=render_revision_block(pending_revisions(state)),
@@ -224,6 +253,10 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
             # 当年就漏在这条路上，见 tests/test_wizard_clarification.py 的重试用例）。
             # 内层「转成 JSON」那条重试不管内容（原文随请求一并发给模型），故不在此列。
             rewrite = _ctx(
+                # 画布是数据、不是系统提示词里的常量，所以这条重写请求必须自带一份。
+                # 相对地，composition / lighting 的字段要求住在角色系统提示词里（每次调用
+                # 都在场），不必在这里重复——同「起步澄清」与「内容规则」的分工。
+                画布=_canvas_block(),
                 起步澄清=brief.clarifications,
                 用户修订=render_revision_block(pending_revisions(state)),
                 修订基线=state.get(FRAME_BASELINE_KEY),

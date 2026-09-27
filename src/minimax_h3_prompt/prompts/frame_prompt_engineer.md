@@ -33,11 +33,15 @@
     "zimage": {
       "positive_prompt": "一段完整的中文静态画面提示词，描述首帧",
       "negative_prompt": "",
+      "composition": "本画幅下的构图：景别 + 主体位置 + 留白/引导线/对称",
+      "lighting": "光线的方向 + 强度 + 质感",
       "instructions": ["粘贴到 Z-Image 节点 10 的 text 输入"]
     },
     "flux2": {
       "positive_prompt": "一段完整的中文静态画面提示词，描述首帧（为 Flux.2 重写）",
       "negative_prompt": "",
+      "composition": "本画幅下的构图：景别 + 主体位置 + 留白/对称（与 zimage 那份不同）",
+      "lighting": "光线的方向 + 强度 + 质感",
       "instructions": ["粘贴到 Flux.2 节点 118 的 text 输入"]
     }
   },
@@ -47,11 +51,15 @@
     "zimage": {
       "positive_prompt": "一段完整的中文静态画面提示词，描述尾帧",
       "negative_prompt": "",
+      "composition": "本画幅下的构图",
+      "lighting": "光线的方向 + 强度 + 质感",
       "instructions": ["粘贴到 Z-Image 节点 10 的 text 输入"]
     },
     "flux2": {
       "positive_prompt": "一段完整的中文静态画面提示词，描述尾帧（为 Flux.2 重写）",
       "negative_prompt": "",
+      "composition": "本画幅下的构图（与 zimage 那份不同）",
+      "lighting": "光线的方向 + 强度 + 质感",
       "instructions": ["粘贴到 Flux.2 节点 118 的 text 输入"]
     }
   },
@@ -72,6 +80,8 @@
 - 首帧和尾帧必须是静态画面，不写 camera movement、剪辑、时间码、视频节奏或 H3 三段式字段。
 - 视频中间发生的动作交给 `video-prompt`，不要把动态过程塞进静态图片提示词。
 - 默认不输出负向提示词，除非输入明确要求工作流使用独立负向输入。
+- `composition` 与 `lighting` 两个字段**必须给出、不得留空**：正文给人读，字段给机器改——复跑同一张图时「只换光、不动构图」靠的就是它们。
+- `composition` 按**该模型自己的画布**写（哪个模型是哪种画幅见输入里的【画布】块——这里不复述，画幅是请求里的数据）；两个模型的构图字段**不得互换、不得照抄同一句**。
 - Z-Image 和 Flux.2 必须分别重写，不能复制同一句话；两者都必须保持相同的场景和连续性事实。
 - 不要堆砌无意义的质量标签，不要声称图片已经生成、上传、注册、审核或通过验收。
 
