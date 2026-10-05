@@ -7,7 +7,7 @@
 
 ### Issue tracker
 
-Issues 活在 GitHub Issues（github.com/123456RRRRRRR/MiniMax-H3-prompt），用 `gh` CLI 操作。见 `docs/agents/issue-tracker.md`。
+Issues 活在 GitHub Issues（github.com/cheng-run/MiniMax-H3-prompt），用 `gh` CLI 操作。见 `docs/agents/issue-tracker.md`。
 
 ### Triage labels
 
