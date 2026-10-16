@@ -1,17 +1,16 @@
-"""资产图生图提示词三个节点接通阶段 1 链（issue #36）。
+"""资产图生图提示词：N 资产 × Z-Image 单版（issue #40）。
 
-票面缺陷：人物／道具／场景三个生图提示词节点**已注册、state 字段已声明、持久化白名单也收了**，
-却**从未被任何链调度**——折叠节点清单的注释声称它们「已折叠进并行组合节点」，而组合节点里
-没有任何分支返回它们，注释在说反话。后果不是「少一个功能」而是**产出是错的**：取不到专门的
-生图提示词时 ``generation.image_prompt_variants`` 回退到**设计正文**，于是喂进 ComfyUI 的
-资产图提示词实际上是「人物／道具／场景的设计说明」。
+issue #36 把三个资产图节点接进阶段 1 链；本票（#40，prefactor）把「固定 3 资产 × 2 模型」
+泛化为「按剧本设计动态 N 资产 × 1 模型」——**Flux.2 版全链取消**（含测试口径：3×2 断言改
+N×1），每个资产一版 Z-Image 提示词、带**语义名**（下游素材台账／注入卡要靠它对号）。
 
-四层，都只断言**外部行为**（链上真跑了什么、请求里真有什么、下游真取到了什么）：
+五层，都只断言**外部行为**（链上真跑了什么、请求里真有什么、下游真取到了什么）：
 
 1. **链上**：真图跑一遍阶段 1，三个节点各跑一次、请求里带的是**上游产物**（设计／美术统筹）；
-2. **不回退**：下游 ``image_prompt_variants`` 取到的是生图提示词本身，不是设计正文；
-3. **请求**：三个节点发出的真实请求带【画布】块（生图词表的指针指着它）；
-4. **折叠清单**：``_FOLDED_NODES``／组合节点声明／链三者一致（注释不再说反话）。
+2. **N×1**：每资产一条提示词、带语义名；多角色资产按资产数出条数，不按模型数翻倍；
+3. **不回退**：下游 ``image_prompt_variants`` 取到的是生图提示词本身，不是设计正文；
+4. **请求**：三个节点发出的真实请求带【画布】块（生图词表的指针指着它）；
+5. **折叠清单**：``_FOLDED_NODES``／组合节点声明／链三者一致（注释不再说反话）。
 """
 from __future__ import annotations
 
@@ -31,16 +30,20 @@ TOPIC = "秋日庭院里的橘猫"
 
 # 节点请求的开头（``nodes._make_image_prompt_node`` 里那句要求）。用它把资产图节点与
 # 关键帧节点、设计节点区分开——本文件考的是「请求真的发出去了」，不是角色提示词。
-_ASSET_HEAD = "生成 Z-Image 和 Flux.2 两个可直接复制的生图提示词"
+_ASSET_HEAD = "各生成一条 Z-Image 可直接复制的生图提示词"
 
-# 三类资产：节点名 → (请求里的资产名, 上游设计 state 键, 上游设计正文, 产物 state 键)
+# 三类资产：节点名 → (请求里的资产名, 上游设计 state 键, 上游设计正文, 产物 state 键, 资产清单)
+# 资产清单 = ((语义名, 正向提示词), ...)。人物给两条（多角色），道具／场景各一条（固定 3 资产场景）。
 _ASSETS = (
-    ("image_prompt_character", "人物", "character_design", "人物设计正文", "character_image_prompts"),
-    ("image_prompt_prop", "道具", "prop_design", "道具设计正文", "prop_image_prompts"),
-    ("image_prompt_scene", "场景", "background_design", "背景设计正文", "scene_image_prompts"),
+    ("image_prompt_character", "人物", "character_design", "人物设计正文", "character_image_prompts",
+     (("红裙女孩", "人物·红裙女孩专属生图提示词"), ("蓝衫少年", "人物·蓝衫少年专属生图提示词"))),
+    ("image_prompt_prop", "道具", "prop_design", "道具设计正文", "prop_image_prompts",
+     (("青铜钥匙", "道具·青铜钥匙专属生图提示词"),)),
+    ("image_prompt_scene", "场景", "background_design", "背景设计正文", "scene_image_prompts",
+     (("秋日庭院", "场景·秋日庭院专属生图提示词"),)),
 )
-# 产物标记：每个资产要认出**自己那三个标记**，才能证明三条路径没有互相串（都写进同一个键、
-# 或三个键写同一份产物，在「只断言产非空」的测试下都是绿的）。
+# 产物标记：每个资产要认出**自己那条标记**，才能证明各资产路径没有互相串（都写进同一个键、
+# 或各键写同一份产物，在「只断言产非空」的测试下都是绿的）。
 _MARK = "专属生图提示词"
 
 
@@ -48,12 +51,18 @@ def _brief() -> Brief:
     return Brief(mode="base", variant="I2VA", duration=5.0, style="写实", plot=TOPIC)
 
 
-def _asset_json(kind: str) -> str:
-    """资产图节点的假回复：两个模型键各一条正向提示词（形状同角色提示词的要求）。"""
-    return json.dumps({
-        "zimage": {"positive_prompt": f"{kind}{_MARK}", "instructions": ["粘贴到节点 10"]},
-        "flux2": {"positive_prompt": f"{kind}{_MARK}（Flux.2 版）"},
-    })
+def _assets_json(assets: tuple[tuple[str, str], ...]) -> str:
+    """资产图节点的假回复：JSON **数组**，每个资产一项（issue #40 单版形态）。
+
+    每项**故意带一个多余键**（``zimage``）：节点要把它归一成四键结构
+    （name / positive_prompt / negative_prompt / instructions），多余的键不许进 state——
+    夹具干净就咬不住「归一没做」的回归（变异检验实测过：不带脏键时放开归一照样绿）。
+    """
+    return json.dumps([
+        {"name": name, "positive_prompt": prompt, "instructions": ["粘贴到节点 10"],
+         "zimage": {"positive_prompt": "模型键残余不该进 state"}}
+        for name, prompt in assets
+    ])
 
 
 def _run_stage1(tmp_path, monkeypatch) -> tuple[dict, list[str]]:
@@ -71,9 +80,9 @@ def _run_stage1(tmp_path, monkeypatch) -> tuple[dict, list[str]]:
 
     def fake_run_agent(agent, message):
         requests.append(message)
-        for _node, kind, _design_field, _design, _out in _ASSETS:
+        for _node, kind, _design_field, _design, _out, assets in _ASSETS:
             if _ASSET_HEAD in message and f"请为{kind}" in message:
-                return _asset_json(kind)
+                return _assets_json(assets)
         if "请为这一段" in message or "请只生成首帧" in message or "请只生成尾帧" in message:
             return json.dumps({
                 "scene_anchor": "秋日庭院",
@@ -113,40 +122,98 @@ def test_the_three_asset_prompt_nodes_run_on_the_stage1_chain(tmp_path, monkeypa
     """
     state, requests = _run_stage1(tmp_path, monkeypatch)
 
-    for node_name, kind, _design_field, design_text, out_field in _ASSETS:
+    for node_name, kind, _design_field, design_text, out_field, assets in _ASSETS:
         sent = [r for r in requests if _ASSET_HEAD in r and f"请为{kind}" in r]
         assert len(sent) == 1, f"{node_name} 没有（或不止一次）发出请求：{len(sent)} 次"
         request = sent[0]
         assert design_text in request, f"{node_name} 的请求里没有对应设计正文（读空了）"
         assert "美术统筹正文" in request, f"{node_name} 的请求里没有美术统筹（跑在美术指导之前了）"
-        assert isinstance(state.get(out_field), dict), f"{node_name} 没有写回 {out_field}"
+        stored = state.get(out_field)
+        assert isinstance(stored, list), f"{node_name} 没有把资产列表写回 {out_field}"
+        assert [item["name"] for item in stored] == [name for name, _prompt in assets], \
+            f"{node_name} 写回的资产名与设计不符：{[item.get('name') for item in stored]}"
 
 
 # ---------------------------------------------------------------------------
-# 2. 资产图提示词不再回退到设计正文
+# 2. N×1：每资产一条 Z-Image 提示词、带语义名，不按模型数翻倍
+# ---------------------------------------------------------------------------
+
+def test_each_asset_gets_exactly_one_named_zimage_prompt(tmp_path, monkeypatch):
+    """下游取到的是 N 条（每资产一条），不是 N×2——Flux.2 版已全链取消。
+
+    语义名必须原样到达：素材台账／注入卡靠它对号（issue #40 的 N 化不止是条数，
+    还要认得出「这条是谁的」）。同时钉住归一结构**只有四键**——模型键（zimage/flux2）
+    不许再混进 state 形状里。
+    """
+    state, _ = _run_stage1(tmp_path, monkeypatch)
+
+    # 预期是**字面量**（不从 _ASSETS 现算）：从夹具推导就与实现同构，形状错了也一起绿。
+    expected = {
+        ("character", "红裙女孩"), ("character", "蓝衫少年"),
+        ("prop", "青铜钥匙"), ("scene", "秋日庭院"),
+    }
+    variants = image_prompt_variants(state)
+    assert {(v.kind, v.name) for v in variants} == expected
+    assert len(variants) == len(expected), "有资产出了多条（模型维度又回来了）"
+
+    by_key = {(v.kind, v.name): v for v in variants}
+    zh_to_kind = {"人物": "character", "道具": "prop", "场景": "scene"}
+    for _node, zh, _d, _t, _out, assets in _ASSETS:
+        for name, prompt in assets:
+            item = by_key[(zh_to_kind[zh], name)]
+            assert item.positive_prompt == prompt, f"{zh}/{name} 取到的不是本资产的提示词"
+            assert item.profile_id == IMAGE_PROFILE_DEFAULTS["zimage"].profile_id, \
+                f"{zh}/{name} 的 profile 不是 Z-Image 档"
+    for _node, _k, _d, _t, out_field, _a in _ASSETS:
+        for entry in state[out_field]:
+            assert set(entry) == {"name", "positive_prompt", "negative_prompt", "instructions"}, \
+                f"{out_field} 的条目混入了四键之外的字段：{sorted(entry)}"
+
+
+# ---------------------------------------------------------------------------
+# 3. 不回退到设计正文；旧 dict 形状 state 仍可读（读旧会话）
 # ---------------------------------------------------------------------------
 
 def test_asset_prompts_are_not_the_design_text_anymore(tmp_path, monkeypatch):
-    """下游取到的必须是生图提示词本身——回退到设计正文正是本票要消灭的形态。
+    """下游取到的必须是生图提示词本身——回退到设计正文正是 issue #36 要消灭的形态。
 
-    ``image_prompt_variants`` 里那句 ``item.get("positive_prompt") or state.get(设计字段)``
+    ``image_prompt_variants`` 里那句 ``positive_prompt or state.get(设计字段)``
     是给**旧会话**留的兼容降级：链上没这个节点时它是唯一出路，于是一路把设计说明喂进
     ComfyUI。接通之后新跑的会话永远取不到那条分支，这里钉的就是它。
     """
     state, _ = _run_stage1(tmp_path, monkeypatch)
 
-    variants = {(v.kind, v.model_family): v for v in image_prompt_variants(state, _brief())}
-    assert set(variants) == {(k, f) for k in ("character", "prop", "scene") for f in ("zimage", "flux2")}
+    variants = image_prompt_variants(state)
+    for v in variants:
+        assert _MARK in v.positive_prompt, f"{v.kind}/{v.name} 取到的不是生图提示词：{v.positive_prompt!r}"
+        assert "设计正文" not in v.positive_prompt, f"{v.kind}/{v.name} 又回退到设计正文了"
 
-    for kind, zh in (("character", "人物"), ("prop", "道具"), ("scene", "场景")):
-        for family in ("zimage", "flux2"):
-            text = variants[(kind, family)].positive_prompt
-            assert _MARK in text and zh in text, f"{kind}/{family} 取到的不是本资产的生图提示词：{text!r}"
-            assert "设计正文" not in text, f"{kind}/{family} 又回退到设计正文了：{text!r}"
+
+def test_legacy_dict_state_still_reads_one_prompt_per_kind(monkeypatch):
+    """旧 session-state 的 dict 形状（``{zimage:…, flux2:…}``）仍可读，但**只出 Z-Image 一条**。
+
+    Flux.2 版全链取消连旧数据也一并降级：读旧会话不再吐出 Flux.2 行（那是已取消的产物）。
+    语义名在旧形状里不存在，退化为类型标签——旧会话拿不到的东西不硬造。
+    """
+    legacy = {
+        "character_image_prompts": {
+            "zimage": {"positive_prompt": "旧人物提示词"},
+            "flux2": {"positive_prompt": "旧人物提示词（Flux.2 版）"},
+        },
+        "prop_image_prompts": {"zimage": {"positive_prompt": "旧道具提示词"}},
+        "scene_image_prompts": {"zimage": {"positive_prompt": "旧场景提示词"}},
+    }
+    variants = image_prompt_variants(legacy)
+
+    assert [(v.kind, v.name) for v in variants] == [
+        ("character", "人物"), ("prop", "道具"), ("scene", "场景"),
+    ]
+    assert [v.positive_prompt for v in variants] == ["旧人物提示词", "旧道具提示词", "旧场景提示词"]
+    assert all(v.profile_id == IMAGE_PROFILE_DEFAULTS["zimage"].profile_id for v in variants)
 
 
 # ---------------------------------------------------------------------------
-# 3. 请求里带【画布】块（生图词表的指针指着它）
+# 4. 请求里带【画布】块（生图词表的指针指着它）
 # ---------------------------------------------------------------------------
 
 def test_asset_prompt_request_carries_the_canvas_block(monkeypatch):
@@ -154,7 +221,8 @@ def test_asset_prompt_request_carries_the_canvas_block(monkeypatch):
 
     生图词表里写着「哪个模型是哪种画幅、尺寸是多少，一律以请求里的【画布】块为准」——
     角色提示词被加载到这些调用上，不带这块那条指针就是**悬空**的（#33 在帧节点踩过
-    同一个坑）。
+    同一个坑）。资产链只写 Z-Image，但【画布】块是词表指针的落点，行来源是
+    ``IMAGE_PROFILE_DEFAULTS`` 整表（与帧节点共用一块），不按消费者裁剪。
 
     尺寸与家族清单都从 ``IMAGE_PROFILE_DEFAULTS`` **现取**（经 ``image_canvas_size``）：
     测试里再抄一份数字就是第二份可写来源，换画布时它会静默失配——而且按家族清单遍历，
@@ -162,11 +230,11 @@ def test_asset_prompt_request_carries_the_canvas_block(monkeypatch):
     """
     requests: list[str] = []
     monkeypatch.setattr(nodes, "run_agent",
-                        lambda agent, message: requests.append(message) or _asset_json("人物"))
+                        lambda agent, message: requests.append(message) or _assets_json((("甲", "提示词"),)))
     brief = _brief()
     agents = {"image_prompt_engineer": object()}
 
-    for _node, kind, design_field, _design, out_field in _ASSETS:
+    for _node, kind, design_field, _design, out_field, _assets in _ASSETS:
         requests.clear()
         nodes._make_image_prompt_node(agents, kind, design_field, out_field)(
             {"brief": brief, design_field: "设计正文"})
@@ -181,7 +249,78 @@ def test_asset_prompt_request_carries_the_canvas_block(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 4. 折叠节点清单与实际折叠一致
+# 5. 出站交付：向导展示 + 产物落盘两处都拿得到全部资产提示词（issue #40 AC2）
+# ---------------------------------------------------------------------------
+
+def test_wizard_delivers_all_asset_prompts_on_screen_and_on_disk(tmp_path, monkeypatch, capsys):
+    """向导出站口：每条资产提示词都能在**打印与落盘**两处拿到（AC2）。
+
+    这是「提示词产出没展示」那类缺陷的守卫（「规则在、接线不在」家族第 7 次同族的
+    同型现场）：三个节点产了、用户拿不到＝白产。落盘文件名与非向导路径同名
+    （character-prompt.md 等）——两处各起一个名字就是第二份可写来源，迟早漂开。
+    """
+    state, _ = _run_stage1(tmp_path, monkeypatch)
+    generation_dir = tmp_path / "GEN001"
+    generation_dir.mkdir()
+    from minimax_h3_prompt.ui import wizard
+
+    wizard._show_asset_prompts(state, generation_dir)
+
+    out = capsys.readouterr().out
+    for _node, _zh, _d, _t, _out, assets in _ASSETS:
+        for name, prompt in assets:
+            assert name in out, f"展示里没有资产「{name}」"
+            assert prompt in out, f"展示里没有资产「{name}」的提示词"
+    for filename in ("character-prompt.md", "prop-prompt.md", "scene-prompt.md"):
+        path = generation_dir / filename
+        assert path.is_file(), f"落盘缺 {filename}"
+    for _node, _zh, _d, _t, _out, assets in _ASSETS:
+        filename = {
+            "character_image_prompts": "character-prompt.md",
+            "prop_image_prompts": "prop-prompt.md",
+            "scene_image_prompts": "scene-prompt.md",
+        }[_out]
+        text = (generation_dir / filename).read_text(encoding="utf-8")
+        for name, prompt in assets:
+            assert name in text and prompt in text, f"{filename} 里缺资产「{name}」"
+
+
+def test_fl2va_result_keeps_asset_prompts_for_delivery(tmp_path, monkeypatch):
+    """FL2VA 结果不许丢资产提示词（AC2「全部」）：帧变体也要拿得到资产图生图提示词。
+
+    ``result_from_state`` 的 FL2VA 分支曾把 ``image_prompts`` 直接置空——三个节点产了、
+    结果对象里却没有，下游谁也拿不到。两条渲染分支（有无首尾帧 bundle）都要带资产键。
+    """
+    state, _ = _run_stage1(tmp_path, monkeypatch)
+    # result_from_state 要求 script/video 齐全——阶段 1 只产到设计层，这里补上阶段 2 的产物。
+    state["final_prompt"] = "最终视频提示词"
+    state["fl2va_prompt_bundle"] = {
+        "scene_anchor": "秋日庭院",
+        "first": {"zimage": {"positive_prompt": "首帧：橘猫蹲在青石上"}},
+        "last": {"zimage": {"positive_prompt": "尾帧：橘猫抬头看红枫"}},
+        "continuity_constraints": ["保持同一只橘猫"],
+    }
+    brief = Brief(mode="base", variant="FL2VA", duration=5.0, style="写实", plot=TOPIC)
+    from minimax_h3_prompt.generation import render_generation, result_from_state
+
+    result = result_from_state(
+        state, brief, generation_id="GEN001", topic_id="t", project_id="p")
+    assert result.image_prompts, "FL2VA 分支把资产提示词丢了"
+
+    rendered = render_generation(result)
+    for key in ("character", "prop", "scene"):
+        assert key in rendered, f"FL2VA 渲染缺 {key} 键"
+    for _node, _zh, _d, _t, _out, assets in _ASSETS:
+        key = {"character_image_prompts": "character",
+               "prop_image_prompts": "prop",
+               "scene_image_prompts": "scene"}[_out]
+        for name, prompt in assets:
+            assert name in rendered[key] and prompt in rendered[key], \
+                f"FL2VA 渲染的 {key} 里缺资产「{name}」"
+
+
+# ---------------------------------------------------------------------------
+# 6. 折叠节点清单与实际折叠一致
 # ---------------------------------------------------------------------------
 
 def test_folded_node_list_matches_the_real_folding():
@@ -201,7 +340,7 @@ def test_folded_node_list_matches_the_real_folding():
         for sub in subs:
             assert sub not in pipeline._STAGE1_CHAIN, f"{sub} 既在组合里又独立成节点（会跑两遍）"
 
-    # 本票接的那三个：组合声明的就是这三个节点，且组合排在美术指导之后
+    # 本链上的那三个：组合声明的就是这三个节点，且组合排在美术指导之后
     # （它要读美术统筹这一轮的产出）——「真的跑到」由上面那条真图用例另证。
     assert pipeline._PARALLEL_GROUPS["parallel_image_prompts"] == tuple(
         node_name for node_name, *_ in _ASSETS)

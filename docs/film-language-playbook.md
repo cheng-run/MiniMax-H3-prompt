@@ -241,10 +241,12 @@ single sustained low note as the paws land and the hand freezes.
 |---|---|
 | 不写 video 镜头运动 / 剪辑 / 时间码 / H3 三段式 | `image_prompt_engineer.md:19`、`frame_prompt_engineer.md:72` |
 | 不堆砌无意义质量标签 | `image_prompt_engineer.md:20` |
-| 正文中文（模型不认识的专有名词可保留原文）；**两模型必须各自重写**，不能同一句 | `image_prompt_engineer.md:22-23` |
+| 正文中文（模型不认识的专有名词可保留原文） | `image_prompt_engineer.md:22` |
 | 默认不输出负向提示词（除非输入说明工作流有独立负向输入） | `image_prompt_engineer.md:21` |
 
-⚠️ 第 4 条**不是死参数**：`generation.py:669-670`、`:706-707` 会把**非空** `negative_prompt` 渲染成 `### Negative Prompt` 输出，实测确实会被消费。默认关是纪律，不是字段没人要。
+（2026-10-16 单版化后更正：「两模型必须各自重写，不能同一句」已从资产图链移除——那条链只剩 Z-Image 一版（issue #40）。该纪律仍适用于**关键帧链**，见 `frame_prompt_engineer.md:85`。）
+
+⚠️ 第 4 条**不是死参数**：`generation.py` 的 `render_asset_rows` 与 `render_fl2va_frame_markdown`（负向渲染各一处）会把**非空** `negative_prompt` 渲染成 `### Negative Prompt` 输出，实测确实会被消费。默认关是纪律，不是字段没人要。
 （另：Flux.2 官方两页**都没提**负向提示词——「官方支不支持负向」本次**未证实**，别拿它当依据。）
 
 ## 10.2 两个模型不是一回事：画布不同 → 构图词必须分两套
@@ -399,5 +401,5 @@ BFL 官方 `Exact Color Control` 原文：`Specify brand colors via hex codes wi
 4. 光线写了**来源 + 方向 + 质感**吗？
 5. 关键色要不要用 **hex** 锁死？光线方向/色温写进 `continuity_constraints` 了吗？
 6. 有没有堆无意义质量标签？
-7. 两模型版本**分别重写**了吗（不是同一句复制）？
+7. 两模型版本**分别重写**了吗（不是同一句复制）？**仅关键帧链适用**——资产图链已单版（Z-Image），无此维度（issue #40）。
 8. 首/尾帧共享 `scene_anchor` 了吗？有没有偷偷换地点？

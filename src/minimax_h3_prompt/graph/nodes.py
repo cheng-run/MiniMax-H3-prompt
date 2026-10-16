@@ -124,15 +124,17 @@ def _make_design_node(agents: dict, role: str, output_field: str, label: str,
 
 
 def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_field: str) -> Callable:
-    """把模型无关设计资料翻译为 Z-Image/Flux.2 双版本提示词。
+    """把模型无关设计资料翻译为 N 条 Z-Image 提示词（每资产一条，issue #40）。
 
-    这是**资产图**那条路（人物／道具／场景各一张参考图），与关键帧那条路
-    （``_make_fl2va_frame_prompt_node``）是两件事，但同属生图侧、用同一份词表切片。
+    这是**资产图**那条路（人物／道具／场景参考图，按剧本设计动态枚举 N 个资产），
+    与关键帧那条路（``_make_fl2va_frame_prompt_node``）是两件事，但同属生图侧、
+    用同一份词表切片。Flux.2 版已全链取消：单资产只出 Z-Image 一版。
     """
     def node(state: PipelineState) -> dict:
         brief: Brief = state["brief"]
         message = (
-            f"请为{kind}生成 Z-Image 和 Flux.2 两个可直接复制的生图提示词。只输出 JSON。\n"
+            f"请为{kind}设计中的每个资产各生成一条 Z-Image 可直接复制的生图提示词。"
+            f"设计里有几个{kind}资产就输出几条。只输出 JSON 数组。\n"
             + _ctx(
                 原始剧情=brief.plot,
                 起步澄清=brief.clarifications,
@@ -154,16 +156,42 @@ def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_f
             # 纯格式转换，但它同样用这份系统提示词——词表里的【画布】指针照样得在场。
             repair = run_agent(
                 agents["image_prompt_engineer"],
-                f"把以下内容转换为严格 JSON，不要 markdown：\n{_ctx(画布=_canvas_block())}\n{raw}",
+                f"把以下内容转换为严格 JSON 数组，不要 markdown：\n{_ctx(画布=_canvas_block())}\n{raw}",
             )
             try:
                 parsed = json.loads(repair)
             except json.JSONDecodeError as exc:
                 raise ValueError(f"{kind} 生图提示词不是有效 JSON") from exc
-        if not isinstance(parsed, dict):
-            raise ValueError(f"{kind} 生图提示词 JSON 顶层必须是对象")
-        return {output_field: parsed}
+        return {output_field: _normalize_asset_entries(parsed, kind)}
     return node
+
+
+def _normalize_asset_entries(parsed: object, kind: str) -> list[dict]:
+    """把资产图节点的 JSON 回复归一成四键资产条目列表（issue #40）。
+
+    只保留 ``name / positive_prompt / negative_prompt / instructions`` 四键：
+    多余的键（模型键 ``zimage``/``flux2`` 等）不进 state——那是被取消的维度，
+    放它进来会让下游再长出「按模型分叉」的读法。语义名必填：素材台账／注入卡靠它对号。
+    """
+    if not isinstance(parsed, list):
+        raise ValueError(f"{kind} 生图提示词 JSON 顶层必须是数组（每资产一项）")
+    entries: list[dict] = []
+    for index, item in enumerate(parsed):
+        if not isinstance(item, dict):
+            raise ValueError(f"{kind} 生图提示词第 {index + 1} 项不是对象")
+        name = str(item.get("name", "")).strip()
+        if not name:
+            raise ValueError(f"{kind} 生图提示词第 {index + 1} 项缺少资产语义名 name")
+        positive = str(item.get("positive_prompt", "")).strip()
+        if not positive:
+            raise ValueError(f"{kind} 资产「{name}」的 positive_prompt 为空")
+        entries.append({
+            "name": name,
+            "positive_prompt": positive,
+            "negative_prompt": str(item.get("negative_prompt", "")),
+            "instructions": [str(x) for x in item.get("instructions", [])],
+        })
+    return entries
 
 
 def _canvas_block() -> str:

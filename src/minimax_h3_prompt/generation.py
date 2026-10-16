@@ -170,9 +170,14 @@ class PromptArtifact:
 
 @dataclass(frozen=True)
 class ImagePromptVariant:
-    """一份针对具体生图模型、可直接复制的提示词。"""
+    """一份资产的 Z-Image 可直接复制提示词（issue #40：N 资产 × 单模型）。
 
-    model_family: Literal["zimage", "flux2"]
+    ``name`` 是资产语义名——素材台账／注入卡靠它对号，所以它是**产物的一部分**，
+    不是渲染层的标题。``model_family`` 已随 Flux.2 版全链取消而移除：资产链只剩
+    Z-Image（关键帧链的双模型在 ``FL2VAFramePrompt``，不受影响）。
+    """
+
+    name: str
     kind: Literal["character", "prop", "scene"]
     positive_prompt: str
     negative_prompt: str = ""
@@ -184,8 +189,6 @@ class ImagePromptVariant:
     instructions: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.model_family not in {"zimage", "flux2"}:
-            raise ValueError(f"生图模型类型无效：{self.model_family}")
         if self.kind not in {"character", "prop", "scene"}:
             raise ValueError(f"生图产物类型无效：{self.kind}")
         _require_text(self.positive_prompt, "positive_prompt")
@@ -195,7 +198,7 @@ class ImagePromptVariant:
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> ImagePromptVariant:
         return cls(
-            model_family=str(raw.get("model_family", "")),
+            name=str(raw.get("name", "")),
             kind=str(raw.get("kind", "")),
             positive_prompt=str(raw.get("positive_prompt", "")),
             negative_prompt=str(raw.get("negative_prompt", "")),
@@ -209,7 +212,7 @@ class ImagePromptVariant:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "model_family": self.model_family,
+            "name": self.name,
             "kind": self.kind,
             "positive_prompt": self.positive_prompt,
             "negative_prompt": self.negative_prompt,
@@ -668,7 +671,9 @@ def result_from_state(
                 created_at=_now(),
             ),
         )
-        image_prompts: tuple[ImagePromptVariant, ...] = ()
+        # 资产提示词不随变体被丢弃（issue #40）：帧变体也要拿得到全部资产图生图提示词，
+        # 曾经这里是空元组——三个节点产了、结果对象里却没有，下游谁也拿不到。
+        image_prompts: tuple[ImagePromptVariant, ...] = image_prompt_variants(state)
     else:
         missing = [kind for kind, content in values.items() if not str(content).strip()]
         if missing:
@@ -693,7 +698,7 @@ def result_from_state(
             if isinstance(raw_bundle, dict)
             else None
         )
-        image_prompts = image_prompt_variants(state, brief)
+        image_prompts = image_prompt_variants(state)
 
     return GenerationResult(
         generation_id=generation_id,
@@ -720,54 +725,78 @@ def generation_directory(project_directory: Path, generation_id: str) -> Path:
     return project_directory / "generations" / generation_id
 
 
-def image_prompt_variants(state: dict[str, Any], brief: Brief) -> tuple[ImagePromptVariant, ...]:
-    """从结构化适配器结果构造六份可复制提示词；旧 state 缺少时保留兼容降级。
+# 资产类型 → 渲染标题与旧形状 state 的语义名退化共用一份标签（两处各写一份就漂）。
+KIND_LABELS: dict[str, str] = {"character": "人物", "prop": "道具", "scene": "场景"}
 
-    那句 ``or state.get(设计字段)`` 是**给旧会话**留的降级：这个函数存在的那些年，三个资产图
-    节点根本没接进链（issue #36），设计正文是唯一出路——于是喂进 ComfyUI 的资产图提示词
-    实际是「人物／道具／场景的设计说明」。接通之后新跑的会话永远走不到那一支
-    （``tests/test_asset_image_prompts.py`` 钉住），它只剩「读一份 #36 之前的旧 session-state」
-    这一个用途：那种现场没有专门的生图提示词，回退到设计正文总比给空串强。
+
+def image_prompt_variants(state: dict[str, Any]) -> tuple[ImagePromptVariant, ...]:
+    """从结构化适配器结果构造 N 份可复制提示词（每资产一版 Z-Image）；旧 state 缺少时保留兼容降级。
+
+    state 里 ``{kind}_image_prompts`` 是**资产条目列表**（issue #40 N 化），每条四键
+    ``name / positive_prompt / negative_prompt / instructions``。两种旧形状照样可读：
+    **dict 形状**（#40 之前的会话：``{zimage:…, flux2:…}``）每类降级为一条 Z-Image——
+    Flux.2 版已全链取消，旧数据里的 flux2 一并弃读；**整键缺失**（#36 之前的会话）回退
+    设计正文——那种现场没有专门的生图提示词，回退到设计正文总比给空串强（那是设计正文
+    曾经当生图提示词喂 ComfyUI 的根源，新跑的会话永远走不到那支，``tests/test_asset_image_prompts.py`` 钉住）。
     """
     variants: list[ImagePromptVariant] = []
-    for kind, field in (("character", "character_image_prompts"), ("prop", "prop_image_prompts"), ("scene", "scene_image_prompts")):
-        raw = state.get(field, {})
-        for model_family in ("zimage", "flux2"):
-            item = raw.get(model_family, {}) if isinstance(raw, dict) else {}
+    kind_meta = {
+        "character": ("character_image_prompts", "character_design"),
+        "prop": ("prop_image_prompts", "prop_design"),
+        "scene": ("scene_image_prompts", "background_design"),
+    }
+    for kind, (field, design_field) in kind_meta.items():
+        label = KIND_LABELS[kind]
+        raw = state.get(field)
+        if isinstance(raw, list):
+            entries = raw
+        elif isinstance(raw, dict):
+            # 旧双模型形状：只取 zimage 一条（flux2 已取消）；旧条目无语义名，退化为类型标签。
+            # dict 里没有可用 zimage（如只剩 flux2）＝与整键缺失同待遇，回退设计正文，
+            # 不静默产空（Spec 复审 (c)）。
+            z = raw.get("zimage", {})
+            if isinstance(z, str):
+                z = {"positive_prompt": z}
+            entries = [dict(z, name=z.get("name", label))] if z else [{"name": label, "positive_prompt": ""}]
+        else:
+            entries = [{"name": label, "positive_prompt": ""}]
+        for item in entries:
             if isinstance(item, str):
-                item = {"positive_prompt": item}
-            # profile 与画布都取**同一张**生图默认表：这里原先另抄了一份四元组，
+                item = {"name": label, "positive_prompt": item}
+            positive = str(item.get("positive_prompt") or state.get(design_field, ""))
+            if not positive.strip():
+                # 资产键与设计正文都空＝这一类无货可交，跳过而不是构造非法对象——
+                # 向导展示会对任意精简 state 调到这里（issue #40），缺料不是错误。
+                continue
+            # profile 与画布都取**同一张**生图默认表的 Z-Image 行：这里原先另抄了一份四元组，
             # 换画布时就会与本表漂开（issue #33 把这张表扶正为单一来源）。
-            default = IMAGE_PROFILE_DEFAULTS[model_family]
-            default_id, node = default.profile_id, default.prompt_node_id
-            width, height = default.width, default.height
+            default = IMAGE_PROFILE_DEFAULTS["zimage"]
             variants.append(ImagePromptVariant(
-                model_family=model_family,
+                name=str(item.get("name", "") or label),
                 kind=kind,
-                positive_prompt=str(item.get("positive_prompt") or state.get({"character": "character_design", "prop": "prop_design", "scene": "background_design"}[kind], "")),
+                positive_prompt=positive,
                 negative_prompt=str(item.get("negative_prompt", "")),
-                profile_id=str(item.get("profile_id", default_id)),
-                prompt_node_id=str(item.get("prompt_node_id", node)),
-                width=int(item.get("width", width) or width),
-                height=int(item.get("height", height) or height),
+                profile_id=str(item.get("profile_id", default.profile_id)),
+                prompt_node_id=str(item.get("prompt_node_id", default.prompt_node_id)),
+                width=int(item.get("width", default.width) or default.width),
+                height=int(item.get("height", default.height) or default.height),
                 profile_status=str(item.get("profile_status", "candidate")),
                 instructions=tuple(item.get("instructions", ())),
             ))
     return tuple(variants)
 
 
-def render_image_prompt_markdown(result: GenerationResult, kind: str) -> str:
-    """渲染一个资产类型的 Z-Image/Flux.2 可复制提示词。"""
-    rows = [item for item in result.image_prompts if item.kind == kind]
-    if not rows:
-        # 旧 generation 没有双模型字段时，仍返回旧正文。
-        return result.artifact(kind).content
-    labels = {"character": "人物", "prop": "道具", "scene": "场景"}
-    parts = [f"# {labels[kind]}生图提示词", "", "请选择对应模型版本复制。", ""]
+def render_asset_rows(rows: list[ImagePromptVariant], kind: str) -> str:
+    """渲染一类资产的可复制提示词（N 个资产，每个一节，标题用语义名）。
+
+    向导出站与 ``render_generation`` 共用这一份排版：两处各写一份渲染就是
+    第二份可写来源，改一处漏一处（issue #40）。
+    """
+    labels = KIND_LABELS
+    parts = [f"# {labels[kind]}生图提示词", ""]
     for item in rows:
-        title = IMAGE_FAMILY_LABELS[item.model_family]
         parts.extend([
-            f"## {title}", "",
+            f"## {item.name}", "",
             f"- Workflow Profile: `{item.profile_id}`（状态：{item.profile_status}）",
             f"- 主提示词节点：`{item.prompt_node_id}`",
             f"- 推荐尺寸：`{item.width} × {item.height}`", "",
@@ -778,6 +807,15 @@ def render_image_prompt_markdown(result: GenerationResult, kind: str) -> str:
         if item.instructions:
             parts.extend(["### 操作说明", "", *[f"- {x}" for x in item.instructions], ""])
     return "\n".join(parts).rstrip() + "\n"
+
+
+def render_image_prompt_markdown(result: GenerationResult, kind: str) -> str:
+    """渲染一个资产类型的可复制提示词（N 个资产，每个一节）。"""
+    rows = [item for item in result.image_prompts if item.kind == kind]
+    if not rows:
+        # 旧 generation 没有资产字段时，仍返回旧正文。
+        return result.artifact(kind).content
+    return render_asset_rows(rows, kind)
 
 
 def render_fl2va_frame_markdown(result: GenerationResult, frame: str) -> str:
@@ -873,15 +911,24 @@ def render_fl2va_markdown(result: GenerationResult) -> str:
     parts.append("")
     return "\n".join(parts).rstrip() + "\n"
 def render_generation(result: GenerationResult) -> dict[str, str]:
-    """返回当前生成模式的可复制产物；FL2VA 只输出融合首尾帧。"""
+    """返回当前生成模式的可复制产物；FL2VA 输出融合首尾帧，但资产提示词两条路都带（issue #40）。"""
     if result.fl2va_prompt_bundle is not None:
-        return {
+        out = {
             "script": result.script,
             "video": result.artifact("video").content,
             "fl2va": render_fl2va_markdown(result),
             "first-frame": render_fl2va_frame_markdown(result, "first"),
             "last-frame": render_fl2va_frame_markdown(result, "last"),
         }
+        # 旧 FL2VA 产物的 image_prompts 是空元组（改动前的 result_from_state 丢弃过）：
+        # 那种现场无货可交，不硬塞空文件——也不能走 artifact 回退（FL2VA 的 artifacts
+        # 只有 video，按 kind 取会 KeyError）。逐类有货才带键：缺类跳过，不落仅标题的空壳。
+        if result.image_prompts:
+            for kind in ("character", "prop", "scene"):
+                rows = [item for item in result.image_prompts if item.kind == kind]
+                if rows:
+                    out[kind] = render_asset_rows(rows, kind)
+        return out
     return {
         "script": result.script,
         "video": result.artifact("video").content,

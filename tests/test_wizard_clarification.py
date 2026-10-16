@@ -281,8 +281,8 @@ _AGENTS = {
     )
 }
 
-_IMAGE_JSON = json.dumps({"zimage": {"positive_prompt": "庭院橘猫"},
-                          "flux2": {"positive_prompt": "庭院橘猫 cinematic"}})
+# issue #40 起资产图节点收 JSON 数组（每资产一项、Z-Image 单版）
+_IMAGE_JSON = json.dumps([{"name": "橘猫", "positive_prompt": "庭院橘猫"}])
 
 # (节点名, 造节点, 该节点要的 state 附加项, 假模型回复)
 _TOPIC_NODE_CASES: list[tuple[str, Callable[[], Callable], dict, str]] = [

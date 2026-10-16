@@ -63,13 +63,13 @@ def _bundle_payload(label: str) -> dict:
     }
 
 
-# 资产图那三个节点（issue #36 起在阶段 1 链上）的请求开头与它们要的 JSON 形态。
-_ASSET_PROMPT_HEAD = "生成 Z-Image 和 Flux.2 两个可直接复制的生图提示词"
+# 资产图那三个节点（issue #36 起在阶段 1 链上）的请求开头与它们要的 JSON 形态
+# （issue #40 起：JSON 数组、每资产一项、Z-Image 单版）。
+_ASSET_PROMPT_HEAD = "各生成一条 Z-Image 可直接复制的生图提示词"
 
 
-def _asset_payload() -> dict:
-    return {"zimage": {"positive_prompt": "资产图提示词"},
-            "flux2": {"positive_prompt": "资产图提示词（Flux.2）"}}
+def _asset_payload() -> list:
+    return [{"name": "示例资产", "positive_prompt": "资产图提示词"}]
 
 
 # ---------------------------------------------------------------------------

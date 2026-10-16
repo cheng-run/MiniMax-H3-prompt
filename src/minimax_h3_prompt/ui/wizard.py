@@ -486,6 +486,28 @@ def _show_frame_prompts(state: dict, generation_dir: Path) -> None:
             print()
 
 
+def _show_asset_prompts(state: dict, generation_dir: Path) -> None:
+    """资产图生图提示词的出站口：展示 + 落盘（issue #40 AC2）。
+
+    三个资产图节点的产物此前没有任何出站口——向导不展示、不落盘，用户根本拿不到。
+    这里把每类资产渲染成一份 Markdown，打印出来并写进生成目录。落盘文件名取
+    ``topic_generation._ARTIFACT_FILES``（与非向导路径同一份映射，两处各起一个名字
+    就是第二份可写来源）。
+    """
+    from ..generation import image_prompt_variants, render_asset_rows
+    from ..topic_generation import _ARTIFACT_FILES
+
+    variants = image_prompt_variants(state)
+    for kind in ("character", "prop", "scene"):
+        rows = [item for item in variants if item.kind == kind]
+        if not rows:
+            continue
+        rendered = render_asset_rows(rows, kind)
+        print(rendered)
+        print()
+        (generation_dir / _ARTIFACT_FILES[kind]).write_text(rendered, encoding="utf-8")
+
+
 def _show_revision_list(state: dict) -> None:
     """展示带编号的累积修订清单 + 轮次与条数（T2 AC-1/AC-4）。
 
@@ -710,6 +732,9 @@ def _user_revision_loop(state: dict, generation_dir: Path, brief: Brief, config:
 
     while True:
         _show_frame_prompts(state, generation_dir)
+        # 资产图提示词与关键帧提示词同批出站（issue #40）：它们都是给用户拿去生图的素材，
+        # 少展示一样用户就少拿一样——此前资产提示词在向导里根本不可见。
+        _show_asset_prompts(state, generation_dir)
         # 每轮重出**前后**都摆一次清单（重出后再回到循环顶端）：它是「我到底说过什么」的
         # 唯一凭据，也是撤销时照着念编号的那张表——没摆出来，撤销就只剩「撤最后一条」。
         _show_revision_list(state)
@@ -886,6 +911,7 @@ def _phase2_collect_and_finish(
     # （新跑/续接阶段 1 的收尾）就不重复刷屏。
     if show_frame_prompts:
         _show_frame_prompts(state, generation_dir)
+        _show_asset_prompts(state, generation_dir)
     print("\n[阶段 2] 请提交生成好的关键帧图片（回车=跳过该项）。")
     while True:
         try:

@@ -26,9 +26,9 @@ class PipelineState(TypedDict, total=False):
     background_design: str  # 背景设计师
     prop_design: str  # 道具设计师
     art_design: str  # 美术指导统筹结果
-    character_image_prompts: dict  # Z-Image/Flux.2 人物提示词
-    prop_image_prompts: dict  # Z-Image/Flux.2 道具提示词
-    scene_image_prompts: dict  # Z-Image/Flux.2 场景提示词
+    character_image_prompts: list  # 人物资产 Z-Image 提示词列表（每资产一条，issue #40）
+    prop_image_prompts: list  # 道具资产 Z-Image 提示词列表
+    scene_image_prompts: list  # 场景资产 Z-Image 提示词列表
     identity_lock: str  # 一致性对齐会（圆桌 3）锁定
 
     # 视觉（分镜 → 并行决策 → 并行制作）
