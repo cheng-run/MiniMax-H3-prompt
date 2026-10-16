@@ -62,12 +62,42 @@ def _brief_to_dict(brief: Brief) -> dict[str, Any]:
         # 起步前置澄清的结论（issue #29）。brief 的字段是逐个显式列出的，新字段不加进
         # 这里就是静默丢弃——用户重启后要重新答一遍澄清。
         "clarifications": brief.clarifications,
+        # 用户选定的画布（issue #42）：同上，漏登记就静默回落默认表。元组转列表
+        # 是 JSON 的口径，读回时再转回元组。
+        "canvases": {family: [width, height] for family, (width, height) in brief.canvases.items()},
         "refs": [
             {"picture": r.picture, "name": r.name, "description": r.description, "path": r.path}
             for r in brief.refs
         ],
         "draft": brief.draft,
     }
+
+
+def _canvases_from_dict(raw: Any) -> dict[str, tuple[int, int]]:
+    """读回用户选定画布；错形**大声报错**（issue #42 复审）。
+
+    静默过滤错形（旧实现的 `isinstance` 过滤）＝画布悄悄回落默认表——会话文件是我们
+    自己写的，错形只可能是损坏或外人改写，吞掉它就再也对不上账；与 `parse_canvas_size`
+    「画布是精确数据不是自由文本」同一口径。逐条口径（复审实测补严）：
+
+    - 键缺失 / JSON null → 空表（旧会话没有这个键，回落默认表是既定兜底）；
+    - 整字段是别的形状（[]、""、0、false、标量）→ 报错——falsy 错形不许被
+      ``or {}`` 悄悄洗成空表，那正是「整表丢失、回落默认」的静默危害；
+    - 条目值必须是**整数对**：``["700","1300"]`` 不许静默强转、``[700.9,…]``
+      不许静默截断——数据被改而不报错比丢弃更糟。
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"会话文件的画布字段错形：{raw!r}（应为 家族→[宽, 高] 的对象）")
+    result: dict[str, tuple[int, int]] = {}
+    for family, size in raw.items():
+        if not isinstance(size, (list, tuple)) or len(size) != 2:
+            raise ValueError(f"会话文件的画布条目错形：{family} = {size!r}（应为 [宽, 高]）")
+        if any(type(value) is not int for value in size):
+            raise ValueError(f"会话文件的画布条目非整数：{family} = {size!r}")
+        result[str(family)] = (size[0], size[1])
+    return result
 
 
 def _brief_from_dict(raw: dict[str, Any]) -> Brief:
@@ -79,6 +109,7 @@ def _brief_from_dict(raw: dict[str, Any]) -> Brief:
         language=str(raw.get("language", "Chinese")),
         plot=str(raw.get("plot", "")),
         clarifications=str(raw.get("clarifications", "")),
+        canvases=_canvases_from_dict(raw.get("canvases")),
         draft=str(raw.get("draft", "")),
     )
     for item in raw.get("refs", []):
@@ -136,7 +167,11 @@ def save_session(directory: str | Path, brief: Brief, stage_state: dict[str, Any
 
 
 def load_session(directory: str | Path) -> SessionState | None:
-    """加载会话；文件不存在或损坏返回 None（调用方决定回退到新建流程）。"""
+    """加载会话；文件不存在或 JSON 损坏返回 None（调用方决定回退到新建流程）。
+
+    **字段内容损坏**（如画布条目错形）不走 None、抛 ValueError——那类损坏若也吞成
+    None，就是「画布悄悄回落默认表」的静默危害（issue #42 复审）；精确数据坏了要响。
+    """
     target = Path(directory) / SESSION_FILENAME
     if not target.is_file():
         return None
@@ -170,7 +205,13 @@ def find_awaiting_sessions(root_dir: str | Path) -> list[SessionState]:
         return results
     resumable = (STATUS_AWAITING_FRAMES, STATUS_STAGE1_RUNNING, STATUS_SEGMENTED_RUNNING)
     for session_file in sorted(root.glob("**/" + SESSION_FILENAME)):
-        session = load_session(session_file.parent)
+        try:
+            session = load_session(session_file.parent)
+        except ValueError as exc:
+            # 单文件字段损坏（如画布错形）不许炸掉整个恢复扫描——但它也不许静默消失：
+            # 打印出来跳过，用户看得到哪个会话坏了（issue #42 复审：严格读回的连带面）。
+            print(f"[警告] 会话文件损坏，已跳过：{session_file}（{exc}）")
+            continue
         if session is not None and session.status in resumable:
             results.append(session)
     return results

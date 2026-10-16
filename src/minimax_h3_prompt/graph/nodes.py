@@ -14,6 +14,8 @@ from ..config import Config
 from ..generation import (
     IMAGE_FAMILY_LABELS,
     IMAGE_PROFILE_DEFAULTS,
+    canvas_display,
+    composition_hint,
     fl2va_bundle_from_dict,
     image_canvas_size,
     ref_asset_registry,
@@ -173,7 +175,7 @@ def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_f
                 # 画布是**本次请求的数据**（不住在系统提示词里）：构图那套词按画幅分两套，
                 # 而两个家族的画幅不是一个形状。词表里写着「哪个模型是哪种画幅见请求里的
                 # 【画布】块」——不带这块，那条指针就没有落点（issue #33 在帧节点踩过同一个坑）。
-                画布=_canvas_block(),
+                画布=_canvas_block(brief.canvases),
             )
         )
         raw = run_agent(agents["image_prompt_engineer"], message)
@@ -183,7 +185,7 @@ def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_f
             # 纯格式转换，但它同样用这份系统提示词——词表里的【画布】指针照样得在场。
             repair = run_agent(
                 agents["image_prompt_engineer"],
-                f"把以下内容转换为严格 JSON 数组，不要 markdown：\n{_ctx(画布=_canvas_block())}\n{raw}",
+                f"把以下内容转换为严格 JSON 数组，不要 markdown：\n{_ctx(画布=_canvas_block(brief.canvases))}\n{raw}",
             )
             try:
                 parsed = json.loads(repair)
@@ -221,21 +223,26 @@ def _normalize_asset_entries(parsed: object, kind: str) -> list[dict]:
     return entries
 
 
-def _canvas_block() -> str:
-    """帧节点请求里的【画布】块（issue #33）。
+def _canvas_block(canvases: dict[str, tuple[int, int]] | None = None) -> str:
+    """生图侧请求里的【画布】块（issue #33 接线，issue #42 改为用户选定）。
 
-    模型不知道自己在给哪个画幅写构图，就会按一种画幅的直觉安排主体位置——而两个模型的
-    画布不是一个形状，同一条构图指令在两种画布上语义不同。画幅由宽高自己推，**这里不写
-    模型与画幅的对应**：那是 `IMAGE_PROFILE_DEFAULTS` 的事，换画布时请求与渲染层一起跟着动。
+    模型不知道自己在给哪个画幅写构图，就会按一种画幅的直觉安排主体位置。每行带三样：
+    **用户选定的画布**（显示名+尺寸，与渲染层的画布行同取 ``canvas_display``）、
+    **画幅形状**与**构图分套指示**（``composition_hint``）——分套绑画幅族不绑模型
+    （Q21(c)），族外（横幅、极端比例）的指示明说「不用竖幅/正方任一套」，把
+    「横幅画面配竖幅构图词」的说反话堵在请求这一层。
 
-    行的来源就是**那张表本身**（家族清单、尺寸、显示名三样都从 `generation` 取）：
-    本模块里再抄一份家族元组的话，将来加第三个生图家族时【画布】块会**静默少一行**。
+    行的来源就是**生图 profile 默认表本身**（家族清单从 `generation` 取）：本模块里
+    再抄一份家族元组的话，将来加第三个生图家族时【画布】块会**静默少一行**。尺寸经
+    ``image_canvas_size(family, canvases)`` 解析——用户选定优先、未选回落默认表。
     """
     lines = []
     for family in IMAGE_PROFILE_DEFAULTS:
-        width, height = image_canvas_size(family)
-        shape = "竖幅" if height > width else "正方" if height == width else "横幅"
-        lines.append(f"- {IMAGE_FAMILY_LABELS[family]}（{family}）：{width} × {height}（{shape}）")
+        width, height = image_canvas_size(family, canvases)
+        lines.append(
+            f"- {IMAGE_FAMILY_LABELS[family]}（{family}）："
+            f"{canvas_display(width, height)}；{composition_hint(width, height)}"
+        )
     return "\n".join(lines)
 
 
@@ -284,7 +291,7 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
                 agents["frame_prompt_engineer"],
                 f"把以下内容转换为严格 JSON，不要 markdown，必须保留 {required}、scene_anchor、"
                 f"continuity_constraints，以及每个模型的 composition 与 lighting 字段：\n"
-                f"{_ctx(画布=_canvas_block(), 场景词=_scene_terms_block(brief))}\n原始内容：\n{raw}",
+                f"{_ctx(画布=_canvas_block(brief.canvases), 场景词=_scene_terms_block(brief))}\n原始内容：\n{raw}",
             )
             try:
                 parsed = json.loads(repair)
@@ -342,7 +349,7 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
                 语言=brief.language,
                 # 画布是**本次请求的数据**（不住在系统提示词里），所以主请求与下面的
                 # 改写重试都要带：少了它，模型只能按自己的直觉重新安排构图。
-                画布=_canvas_block(),
+                画布=_canvas_block(brief.canvases),
                 # 累积的用户修订：人机修改循环每轮重出都把它带进上下文（issue #23）。
                 # 自动质检循环不设该键 → 空值被 _ctx 跳过，它的替换语义逐字不变。
                 用户修订=render_revision_block(pending_revisions(state)),
@@ -378,7 +385,7 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
                 # 画布是数据、不是系统提示词里的常量，所以这条重写请求必须自带一份。
                 # 相对地，composition / lighting 的字段要求住在角色系统提示词里（每次调用
                 # 都在场），不必在这里重复——同「起步澄清」与「内容规则」的分工。
-                画布=_canvas_block(),
+                画布=_canvas_block(brief.canvases),
                 # 场景词同画布：数据、不在系统提示词里。少了它这条重写在信息上不可赢。
                 场景词=scene_terms,
                 起步澄清=brief.clarifications,

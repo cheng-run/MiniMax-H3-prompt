@@ -3,6 +3,8 @@
 bug（2026-09-22）：``fl2va_frame_descriptions``（首帧实际画面的读图结果）不在
 ``_STATE_KEYS`` 白名单里，save 时被静默丢弃 → 续跑后的分段流程不再锚定首帧图片。
 """
+import pytest
+
 from minimax_h3_prompt.brief_parser import Brief
 from minimax_h3_prompt.session_store import load_session, save_session
 
@@ -39,6 +41,72 @@ def test_brief_and_status_survive_resume(tmp_path):
     assert loaded.brief.variant == "I2VA"
     assert loaded.brief.duration == 18.0
     assert loaded.awaiting_frames is True
+
+
+def test_canvases_survive_resume(tmp_path):
+    """用户选定的画布必须活过重启（issue #42）。
+
+    brief 的持久化字段是**逐个显式列出**的（见 ``_brief_to_dict`` 的注释）——
+    新字段漏登记就静默丢，重启后画布悄悄回落默认表，用户看不出差别直到图出完。
+    """
+    brief = Brief(mode="base", variant="I2VA", duration=18.0, style="写实", plot="便利店橘猫",
+                  canvases={"zimage": (700, 1300), "flux2": (1024, 1024)})
+    generation_dir = tmp_path / "GEN001"
+    save_session(generation_dir, brief, {"shot_table": "表"})
+    loaded = load_session(generation_dir)
+    assert loaded is not None
+    assert loaded.brief.canvases == {"zimage": (700, 1300), "flux2": (1024, 1024)}
+
+
+def _corrupt_canvases(tmp_path, replacement: str) -> None:
+    generation_dir = tmp_path / "GEN001"
+    save_session(generation_dir, _brief(), {"shot_table": "表"})
+    session_file = generation_dir / "session-state.json"
+    raw = session_file.read_text(encoding="utf-8").replace('"canvases": {}', replacement)
+    session_file.write_text(raw, encoding="utf-8")
+
+
+@pytest.mark.parametrize("replacement", [
+    '"canvases": {"zimage": "700x1300"}',   # 条目是字符串（错形）
+    '"canvases": {"zimage": ["700", "1300"]}',  # 字符串数字——静默强转=数据被改
+    '"canvases": {"zimage": [700.9, 1300.1]}',  # 浮点——静默截断=数据被改
+    '"canvases": []',                        # 整字段错形（falsy 不许被 or {} 洗掉）
+    '"canvases": 5',                         # 整字段标量
+])
+def test_malformed_canvases_in_session_file_is_loud(tmp_path, replacement):
+    """会话文件里的错形画布必须报错，不许静默丢/静默改（issue #42 复审）。
+
+    静默丢＝重启后画布悄悄回落默认表；静默强转/截断＝数据被改而不报错，比丢弃更糟。
+    会话文件是系统自己写的，错形只可能是损坏。键缺失/null 仍合法（旧会话没有该键）。
+    """
+    _corrupt_canvases(tmp_path, replacement)
+
+    with pytest.raises(ValueError):
+        load_session(tmp_path / "GEN001")
+
+
+def test_missing_canvases_key_still_reads(tmp_path):
+    """键缺失/JSON null 是旧会话的既定形态——回落空表（默认兜底），不报错。"""
+    _corrupt_canvases(tmp_path, '"canvases": null')
+    assert load_session(tmp_path / "GEN001") is not None
+
+
+def test_find_awaiting_sessions_skips_damaged_file_with_warning(tmp_path, capsys):
+    """恢复扫描隔离单文件损坏：警告 + 跳过，不炸掉整个扫描（复审：此容错曾零守卫）。"""
+    from minimax_h3_prompt.session_store import STATUS_AWAITING_FRAMES, find_awaiting_sessions
+
+    root = tmp_path / "sessions"
+    bad_dir = root / "topic" / "GEN001"
+    good_dir = root / "topic" / "GEN002"
+    save_session(bad_dir, _brief(), {"shot_table": "表"}, status=STATUS_AWAITING_FRAMES)
+    save_session(good_dir, _brief(), {"shot_table": "表"}, status=STATUS_AWAITING_FRAMES)
+    bad_file = bad_dir / "session-state.json"
+    bad_file.write_text(bad_file.read_text(encoding="utf-8").replace(
+        '"canvases": {}', '"canvases": []'), encoding="utf-8")
+
+    found = find_awaiting_sessions(root)
+    assert [s.directory.name for s in found] == ["GEN002"], "损坏会话没被跳过（或好会话被误伤）"
+    assert "GEN001" in capsys.readouterr().out, "跳过损坏会话没有可见警告——静默消失也不行"
 
 
 def test_user_revisions_survive_resume(tmp_path):

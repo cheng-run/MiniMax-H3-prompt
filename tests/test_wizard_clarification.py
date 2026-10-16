@@ -97,13 +97,18 @@ def _run_phase1(tmp_path, monkeypatch, *, inputs: list[str],
     return wizard._phase1_new(cfg), captured, stub_llm, asked
 
 
+# 画布选择器四答（issue #42）：zimage 比例/尺寸、flux2 比例/尺寸——都取档 1，
+# 起步输入脚本在生成方式之后统一补上这段。
+_CANVAS_INPUTS = ["1", "1", "1", "1"]
+
+
 def _answer_path_inputs() -> list[str]:
-    # 主题 → 两条澄清回答 → 时长（默认）→ 风格（AI 定）→ 生成方式（1 首帧）
-    return [TOPIC, ANSWER_1, ANSWER_2, "", "", "1"]
+    # 主题 → 两条澄清回答 → 时长（默认）→ 风格（AI 定）→ 生成方式（1 首帧）→ 画布四答
+    return [TOPIC, ANSWER_1, ANSWER_2, "", "", "1", *_CANVAS_INPUTS]
 
 
 def _skip_path_inputs() -> list[str]:
-    return [TOPIC, "跳过", "", "", "1"]
+    return [TOPIC, "跳过", "", "", "1", *_CANVAS_INPUTS]
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +166,7 @@ def test_skip_word_ends_questioning_and_goes_straight_to_original_flow(tmp_path,
 def test_skip_after_one_answer_keeps_what_was_already_answered(tmp_path, monkeypatch):
     """答了一条再跳过：已答的那条照样生效（跳过只结束「还没问的」）。"""
     session, captured, _, _ = _run_phase1(
-        tmp_path, monkeypatch, inputs=[TOPIC, ANSWER_1, "跳过", "", "", "1"])
+        tmp_path, monkeypatch, inputs=[TOPIC, ANSWER_1, "跳过", "", "", "1", *_CANVAS_INPUTS])
 
     assert session is not None
     assert ANSWER_1 in captured["brief"].clarifications
@@ -171,7 +176,7 @@ def test_skip_after_one_answer_keeps_what_was_already_answered(tmp_path, monkeyp
 def test_unanswered_question_leaves_no_entry(tmp_path, monkeypatch):
     """回车=不回答这条：不该凭空造出一条「问 → （空）」的澄清。"""
     session, captured, _, _ = _run_phase1(
-        tmp_path, monkeypatch, inputs=[TOPIC, "", ANSWER_2, "", "", "1"])
+        tmp_path, monkeypatch, inputs=[TOPIC, "", ANSWER_2, "", "", "1", *_CANVAS_INPUTS])
 
     assert session is not None
     assert QUESTIONS[0] not in captured["brief"].clarifications
@@ -195,7 +200,7 @@ def test_zero_limit_disables_clarification(tmp_path, monkeypatch):
         sessions_root=tmp_path / "sessions", max_clarification_rounds=0,
     )
     session, captured, llm, asked = _run_phase1(
-        tmp_path, monkeypatch, inputs=[TOPIC, "", "", "1"], config=config)
+        tmp_path, monkeypatch, inputs=[TOPIC, "", "", "1", *_CANVAS_INPUTS], config=config)
 
     assert session is not None
     assert not [text for text in asked if "[澄清" in text]
@@ -214,7 +219,7 @@ def test_cap_follows_config_file(tmp_path, monkeypatch):
     assert cfg.max_clarification_rounds == 1
 
     session, captured, _, asked = _run_phase1(
-        tmp_path, monkeypatch, inputs=[TOPIC, ANSWER_1, "", "", "1"], config=cfg)
+        tmp_path, monkeypatch, inputs=[TOPIC, ANSWER_1, "", "", "1", *_CANVAS_INPUTS], config=cfg)
 
     assert session is not None
     assert len([text for text in asked if "[澄清" in text]) == 1
@@ -237,7 +242,7 @@ def test_question_generation_failure_is_reported_not_silent(tmp_path, monkeypatc
     """生成失败要报出来再跳过：可选前置不该炸掉整条流程，也不该静默。"""
     llm = _QuestionLLM(error=RuntimeError(FAKE_LLM_ERROR))
     session, captured, _, asked = _run_phase1(
-        tmp_path, monkeypatch, inputs=[TOPIC, "", "", "1"], llm=llm)
+        tmp_path, monkeypatch, inputs=[TOPIC, "", "", "1", *_CANVAS_INPUTS], llm=llm)
 
     assert session is not None, "澄清生成失败把阶段 1 一起炸了"
     assert captured["brief"].clarifications == ""
@@ -250,7 +255,7 @@ def test_model_saying_no_questions_skips_without_asking(tmp_path, monkeypatch, c
     """模型答「无需澄清」时不该把它当成一个问题去问用户。"""
     llm = _QuestionLLM("这个主题已经很清楚了，无需澄清。")
     session, captured, _, asked = _run_phase1(
-        tmp_path, monkeypatch, inputs=[TOPIC, "", "", "1"], llm=llm)
+        tmp_path, monkeypatch, inputs=[TOPIC, "", "", "1", *_CANVAS_INPUTS], llm=llm)
 
     assert session is not None
     assert not [text for text in asked if "[澄清" in text]

@@ -73,11 +73,15 @@ def create_video_from_topic(
     variant: str = "FL2VA",
     mode: str = "base",
     refs: list[RefItem] | tuple[RefItem, ...] = (),
+    canvases: dict[str, tuple[int, int]] | None = None,
 ) -> tuple[GenerationResult, Path]:
     """由主题生成剧本与提示词并落盘；不执行任何外部媒体工作流。
 
     ``mode="ref"`` 走多参路线（issue #41：brief 声明 ref 时不再强制 base），
     ``refs`` 是用户登记的参考素材（brief 文件里声明的 ``<Picture N>``）。
+    ``canvases`` 是用户选定画布（issue #42）：CLI 的 --brief 路径在解析出它之后必须
+    **递到这里**——本函数自建 Brief，少传一个参数就是「规则在、接线不在」（复审实测：
+    main.py 解析出 canvases 却在最后一跳丢掉，静默回落系统默认）。
     """
     if not topic or not topic.strip():
         raise ValueError("视频主题不能为空")
@@ -93,6 +97,7 @@ def create_video_from_topic(
         plot=topic,
         raw=topic,
         refs=list(refs),
+        canvases=dict(canvases or {}),
     )
     result = run_pipeline_structured(
         brief,

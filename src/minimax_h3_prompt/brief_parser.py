@@ -31,6 +31,13 @@ _KV_RE = re.compile(r"^([^#:#：]+)[:：]\s*(.*)$")
 _REF_RE = re.compile(r"^(?:[-*]\s*)?Picture\s+(\d+)\s*[:：]\s*(.*)$", re.IGNORECASE)
 _PATH_RE = re.compile(r"\(([^)]*)\)\s*$")  # 行尾 (路径)，路径含引号/反斜杠也能接
 _IMG_EXT_RE = re.compile(r"\.(?:png|jpe?g|webp|bmp|heic)\s*[\"']*\s*$", re.IGNORECASE)
+# 画布尺寸值：`640x1280` / `640×1280`（乘号）。x/× 两种都收——用户从渲染层抄回来的是乘号。
+_CANVAS_SIZE_RE = re.compile(r"^(\d+)\s*[x×]\s*(\d+)$", re.IGNORECASE)
+
+# 用户选定画布的载体类型：生图家族 → (宽, 高)。四处签名共用这一个名字
+# （brief / 读取口 / 请求组装 / 渲染层），裸写 dict[str, tuple[int, int]] 时
+# 「这坨是什么」只活在参数名里（复审点名的 Data Clump）。
+CanvasMap = dict[str, tuple[int, int]]
 
 
 def _normalize_path(p: str) -> str:
@@ -66,6 +73,10 @@ class Brief:
     # 把自由文本拼进去会随机改写两条闸门的判据（docs/adr/0005）。不走 brief 文件解析，
     # 只由向导写入，故 parse_brief_text 不读它。
     clarifications: str = ""
+    # 用户选定的生图侧画布（issue #42）：家族 → (宽, 高)。空 = 未选，消费方回落
+    # profile 默认表（`image_canvas_size` 的兜底）。选定值是**数据**：构图词分套与
+    # 画布显示都以它为准，不再用系统钦定的「推荐尺寸」。
+    canvases: CanvasMap = field(default_factory=dict)
     refs: list[RefItem] = field(default_factory=list)
     draft: str = ""
     raw: str = ""
@@ -95,6 +106,66 @@ def min_refs(brief: Brief) -> int:
     return 0  # T2VA 纯文字
 
 
+def parse_canvas_size(value: str) -> tuple[int, int]:
+    """解析画布尺寸值 `640x1280` / `640×1280`；坏值**大声报错**（issue #42）。
+
+    画布是精确数据不是自由文本：静默回落默认表的后果是「用户以为选了 700×1300、
+    实际按默认出图」——本仓「绝不静默失败」要消灭的正是这种形态。brief 文件的
+    画布键与向导自定义输入共用这一个解析口（两处各写一份正则就是第二份可写来源）。
+    """
+    m = _CANVAS_SIZE_RE.match(value.strip())
+    if not m:
+        raise ValueError(f"画布尺寸无效：{value!r}（应为 宽x高，如 640x1280）")
+    width, height = int(m.group(1)), int(m.group(2))
+    if width <= 0 or height <= 0:
+        raise ValueError(f"画布尺寸必须为正：{value!r}")
+    return width, height
+
+
+# 行首列表符（markdown 各家写法）：`- 画布 …`、`* 画布 …`、`+ 画布 …`、`> 画布 …`、
+# `1. 画布 …`。画布键归一前剥掉——键形态的手误不能成为「静默忽略、悄悄回落默认表」
+# 的门（issue #42 复审两轮都在这一类上开洞）。
+_LIST_MARKER_RE = re.compile(r"^(?:[-*+>]|\d+[.)])\s*")
+
+
+def _canvas_key_core(key: str) -> str:
+    """画布键的归一核：剥行首列表符与大小写，返回前缀后的家族段。
+
+    `画布 zimage` / `画布zimage` / `canvas_zimage` / `- 画布 zimage` / `1. 画布 …`
+    都归到同一入口。
+    """
+    normalized = _LIST_MARKER_RE.sub("", key.strip().lower()).strip()
+    for prefix in ("画布", "canvas"):
+        if normalized.startswith(prefix):
+            return normalized[len(prefix):].strip().lstrip("_-").strip()
+    return ""
+
+
+def _is_canvas_key(key: str) -> bool:
+    normalized = _LIST_MARKER_RE.sub("", key.strip().lower()).strip()
+    return normalized.startswith(("画布", "canvas"))
+
+
+def _apply_canvas_line(key: str, value: str, brief: Brief) -> None:
+    """应用一行画布键：裸 `画布: WxH` 套全部家族，`画布 <家族>: WxH` 单选一个。
+
+    家族名对照生图默认表**当场校验**：`画布 zimge:` 这类拼写错误必须在这里报，
+    否则它会被静默忽略、画布悄悄回落默认表。表格从 ``generation`` 函数级导入——
+    模块级是反向依赖（generation 顶部就 import 本模块的 Brief），加载期会成环。
+    """
+    from .generation import IMAGE_PROFILE_DEFAULTS
+
+    family = _canvas_key_core(key)
+    size = parse_canvas_size(value)
+    if not family:
+        for name in IMAGE_PROFILE_DEFAULTS:
+            brief.canvases[name] = size
+        return
+    if family not in IMAGE_PROFILE_DEFAULTS:
+        raise ValueError(f"未知生图模型：{family}（画布键只认 {', '.join(IMAGE_PROFILE_DEFAULTS)}）")
+    brief.canvases[family] = size
+
+
 def parse_brief(path: str | Path) -> Brief:
     text = Path(path).read_text(encoding="utf-8")
     return parse_brief_text(text)
@@ -119,10 +190,22 @@ def parse_brief_text(text: str) -> Brief:
     # 优先级：输入（首帧/尾帧/首尾帧/多参） > 模型（fl2va/ref2va） > 模式/变体
     input_seen = model_seen = False
     for line in section_buf["meta"]:
-        kv = _KV_RE.match(line.strip())
+        stripped = line.strip()
+        kv = _KV_RE.match(stripped)
         if not kv:
+            # 画布行**长得像画布行却解析不了**（缺冒号、`=` 分隔、空格分隔）要当场报：
+            # 沉默跳过就是「用户以为选了、实际回落默认表」（issue #42 复审）。
+            probe = _LIST_MARKER_RE.sub("", stripped.lower()).strip()
+            if probe.startswith(("画布", "canvas")):
+                raise ValueError(f"画布行无法解析：{stripped!r}（应为「画布 <家族>: 宽x高」）")
             continue
         key, value = kv.group(1).strip(), kv.group(2).strip()
+        # 画布行先于「空值跳过」处理：空值是坏值（parse_canvas_size 会报），不是「没写」
+        # ——通用的 `if not value: continue` 曾把 `画布 zimage:` 静默吞掉（复审点名）。
+        if _is_canvas_key(key):
+            value = re.split(r"\s+#", value, maxsplit=1)[0].strip()
+            _apply_canvas_line(key, value, brief)
+            continue
         if not value:
             continue
         value = re.split(r"\s+#", value, maxsplit=1)[0].strip()  # 去掉行内注释（空格+#）

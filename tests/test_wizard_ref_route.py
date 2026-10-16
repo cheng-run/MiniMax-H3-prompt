@@ -102,6 +102,9 @@ def test_choose_generation_mode_accepts_ref_route(tmp_path, monkeypatch):
 def test_phase1_new_ref_route_builds_ref_brief(tmp_path, monkeypatch):
     """选多参 → Brief(mode=ref)；选首尾帧 → mode=base 不受影响。"""
     _silence(monkeypatch)
+    # 画布问答是 issue #42 的题目（四答起步、无效还会重问），本文件钉的是 ref 路线——
+    # 打成空集免得绑死在画布菜单的题数上；「选择器→Brief」的接线由 test_wizard_canvas 专测。
+    monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
     # base 分支会进人机修改循环（首尾帧路线行为不变的现场）；一律答「没有意见」。
     monkeypatch.setattr(wizard, "_confirm", lambda *a, **k: False)
     captured: dict = {}
@@ -126,6 +129,8 @@ def test_phase1_new_ref_route_builds_ref_brief(tmp_path, monkeypatch):
 def test_ref_route_direct_prompt_end_to_end(tmp_path, monkeypatch, capsys):
     """run_wizard 全程：多参路线不收帧图，直出一份六段式写进 video-prompt.md。"""
     _silence(monkeypatch)
+    # 同上：画布问答属 #42，这里打桩为空集。
+    monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
     captured: dict = {}
     _stub_stage1(monkeypatch, captured)
     _stub_stage2(monkeypatch, captured)
@@ -152,6 +157,8 @@ def test_ref_route_direct_prompt_end_to_end(tmp_path, monkeypatch, capsys):
 def test_ref_route_over_15s_delivers_with_segment_ticket_notice(tmp_path, monkeypatch, capsys):
     """>15 秒：仍出整片六段式（存档），并明说拆段在票 #46——不静默装作已拆。"""
     _silence(monkeypatch)
+    # 同上：画布问答属 #42，这里打桩为空集。
+    monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
     _stub_stage1(monkeypatch)
     _stub_stage2(monkeypatch)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
