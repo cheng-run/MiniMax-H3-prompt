@@ -375,8 +375,11 @@ def _run_loop(tmp_path, monkeypatch, *, prompts: list[str], confirms: list[bool]
 
 
 def _startup() -> list[str]:
-    """起步四问：主题 → 时长（默认）→ 风格（默认）→ 生成方式（1 首帧）。"""
-    return [TOPIC, "", "", "1"]
+    """起步问答：主题 → 时长（默认）→ 风格（默认）→ 生成方式（1 首帧）→ 画布四答（issue #42）。
+
+    画布选择器逐家族两问（zimage/flux2 各比例→尺寸），这里都取档 1。
+    """
+    return [TOPIC, "", "", "1", "1", "1", "1", "1"]
 
 
 def _ledger_rows(session) -> list[dict]:

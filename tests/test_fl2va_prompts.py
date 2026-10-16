@@ -594,7 +594,7 @@ def test_frame_node_i2va_emits_first_only(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def _frame_node_request(monkeypatch, variant: str = "I2VA",
-                        plot: str = "中世纪酒馆室内") -> str:
+                        plot: str = "中世纪酒馆室内", canvases: dict | None = None) -> str:
     """跑一次帧节点，返回它真正发出去的那条用户请求串。"""
     captured: dict[str, str] = {}
     payload = json.dumps(_single_frame_payload(
@@ -606,7 +606,7 @@ def _frame_node_request(monkeypatch, variant: str = "I2VA",
 
     monkeypatch.setattr(nodes, "run_agent", fake_run_agent)
     node = nodes._make_fl2va_frame_prompt_node({"frame_prompt_engineer": object()})
-    brief = Brief(variant=variant, duration=5, plot=plot)
+    brief = Brief(variant=variant, duration=5, plot=plot, canvases=canvases or {})
     node({"brief": brief, "shot_table": "start and end states"})
     return captured["message"]
 
@@ -688,6 +688,116 @@ def test_frame_node_canvas_follows_the_image_profile_table(monkeypatch):
                         generation.ImageProfile("zimage_t2i_v1", "10", 111, 222, "candidate"))
     message = _frame_node_request(monkeypatch)
     assert "111 × 222" in message, "请求里的画布不是从 profile 默认表取的（另抄了一份常量）"
+
+
+def test_frame_node_request_carries_the_user_selected_canvases(monkeypatch):
+    """帧节点同样吃用户选定画布（issue #42）：选定值进请求，分套按画幅族给指示。
+
+    期望串是字面量（960×1152 约分为 5:6、1280×720 约分为 16:9）：Z-Image 选了近方 →
+    正方套；Flux.2 选了横幅 → 族外降通用。帧链与资产链共用【画布】块的组装口，这条
+    钉的是「用户选定辐射到帧节点」——它与上面那条默认表回落用例互补。
+    """
+    message = _frame_node_request(monkeypatch, canvases={"zimage": (960, 1152), "flux2": (1280, 720)})
+    assert "5:6 · 960 × 1152（近方）" in message, "帧节点请求里没有 Z-Image 的选定画布"
+    assert "16:9 · 1280 × 720（横幅）" in message, "帧节点请求里没有 Flux.2 的选定画布"
+    assert "构图用正方套" in message, "近方画布没拿到正方套指示"
+    assert "通用构图词" in message, "横幅画布没降通用构图词"
+    assert "640 × 1280" not in message and "1024 × 1024" not in message, \
+        "选定了画布却还带着系统钦定的推荐尺寸"
+
+
+def test_frame_products_carry_the_user_selected_canvas():
+    """帧产物行吃用户选定画布（issue #42 AC1/AC3）：行尺寸即选定值，画布行与请求同源。
+
+    bundle 的行尺寸在解析处就换成选定值（``fl2va_bundle_from_dict`` 认识 brief），
+    于是 state 往返、向导渲染、GenerationResult 渲染拿到的都是同一份数字；渲染的
+    画布行取 ``canvas_display``，与请求【画布】块逐字同源。
+    """
+    brief = Brief(variant="FL2VA", duration=5, style="live-action realism",
+                  plot="中世纪酒馆室内，冒险者团队庆祝",
+                  canvases={"zimage": (700, 1300), "flux2": (1280, 720)})
+    state = {"script": "分场剧本", "final_prompt": "视频提示词正文",
+             "fl2va_prompt_bundle": bundle_payload()}
+    result = result_from_state(state, brief, generation_id="GEN001",
+                               topic_id="topic", project_id="project")
+
+    rows = {r.model_family: r for r in result.fl2va_prompt_bundle.first}
+    assert (rows["zimage"].width, rows["zimage"].height) == (700, 1300)
+    assert (rows["flux2"].width, rows["flux2"].height) == (1280, 720)
+
+    rendered = render_fl2va_frame_markdown(result, "first")
+    assert "画布：`7:13 · 700 × 1300（近竖）`" in rendered, "产物没有 Z-Image 的选定画布行"
+    assert "画布：`16:9 · 1280 × 720（横幅）`" in rendered, "产物没有 Flux.2 的选定画布行"
+    assert "推荐尺寸" not in rendered, "「推荐尺寸」措辞还活着——系统钦定时代的旧标签"
+
+
+def test_model_hallucinated_size_cannot_beat_the_selected_canvas():
+    """模型 JSON 里幻觉出的 width/height **压不过**用户选定（issue #42 复审）。
+
+    `FL2VAFramePrompt.from_dict` 认这两个键；解析处若「有值就用」，产物尺寸就与请求
+    【画布】块漂开——画布是请求下发的数据，不是模型的自由发挥。
+    """
+    payload = bundle_payload()
+    payload["first"]["zimage"]["width"] = 111
+    payload["first"]["zimage"]["height"] = 222
+    brief = Brief(variant="FL2VA", duration=5, plot="中世纪酒馆室内，冒险者团队庆祝",
+                  canvases={"zimage": (700, 1300)})
+    bundle = fl2va_bundle_from_dict(payload, brief)
+    zrow = next(r for r in bundle.first if r.model_family == "zimage")
+    assert (zrow.width, zrow.height) == (700, 1300), \
+        f"模型幻觉尺寸赢了：{(zrow.width, zrow.height)}"
+
+
+def test_frame_level_fallback_shape_also_obeys_the_selected_canvas():
+    """帧级回退形状（帧 dict 无模型子键）同样被挡住——复审实测它绕过了家族子键覆盖。
+
+    该形状走 `FL2VAPromptBundle.from_dict` 的整帧展开回退，帧级 width/height 曾原样
+    直通产物：请求【画布】块写 700×1300、渲染出 111×222，全程无报错。尺寸权威解析
+    在 ``from_dict`` 层（传入 canvases 即无条件取读取口），任何形状都从同一层过。
+    """
+    payload = {
+        "scene_anchor": "medieval tavern interior",
+        "first": {"positive_prompt": "Three adventurers inside a medieval tavern interior.",
+                  "width": 111, "height": 222},
+        "continuity_constraints": ["Keep the same characters and tavern layout."],
+    }
+    brief = Brief(variant="I2VA", duration=5, plot="中世纪酒馆室内，冒险者团队庆祝",
+                  canvases={"zimage": (700, 1300)})
+    bundle = fl2va_bundle_from_dict(payload, brief)
+    assert len(bundle.first) == 1
+    row = bundle.first[0]
+    assert (row.width, row.height) == (700, 1300), \
+        f"帧级回退形状的幻觉尺寸赢了：{(row.width, row.height)}"
+
+
+def test_result_from_state_threads_canvases_into_prompts_and_bundle():
+    """``result_from_state`` 两支路都把选定画布送进产物（复审：删掉递参后全套照绿）。
+
+    CLI/主题路径的产物全走这里：`image_prompt_variants(state, brief.canvases)` 与
+    非 FL2VA 支路的 bundle 解析一旦被删参，产物画布行静默回落默认、与同份
+    generation.json 的 brief_snapshot.canvases 自相矛盾（AC1/AC3 可静默破坏）。
+    """
+    brief = Brief(variant="I2VA", duration=5, plot="漂浮的水母群与光斑",
+                  canvases={"zimage": (700, 1300)})
+    state = {
+        "script": "分场剧本", "final_prompt": "视频提示词正文",
+        "character_design": "人物设计", "prop_design": "道具设计", "background_design": "背景设计",
+        "character_image_prompts": [{"name": "红裙女孩", "positive_prompt": "人物提示词"}],
+        "fl2va_prompt_bundle": {
+            "scene_anchor": "光斑",
+            "first": {"positive_prompt": "水母群与光斑的第一帧画面", "width": 111, "height": 222},
+            "continuity_constraints": ["保持同一片水母群"],
+        },
+    }
+    result = result_from_state(state, brief, generation_id="GEN001",
+                               topic_id="topic", project_id="project")
+
+    assert result.image_prompts, "资产产物为空，断言落空"
+    assert all((v.width, v.height) == (700, 1300) for v in result.image_prompts), \
+        "result_from_state 的资产产物没带选定画布（那两个递参之一被删了）"
+    row = result.fl2va_prompt_bundle.first[0]
+    assert (row.width, row.height) == (700, 1300), \
+        "非 FL2VA 支路的 bundle 没按选定画布解析（幻觉尺寸赢了）"
 
 
 def test_frame_node_request_asks_for_composition_and_lighting(monkeypatch):

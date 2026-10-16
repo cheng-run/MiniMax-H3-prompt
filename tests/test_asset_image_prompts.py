@@ -23,6 +23,7 @@ from minimax_h3_prompt.generation import (
     IMAGE_PROFILE_DEFAULTS,
     image_canvas_size,
     image_prompt_variants,
+    render_asset_rows,
 )
 from minimax_h3_prompt.graph import nodes, pipeline, roundtable
 
@@ -248,6 +249,55 @@ def test_asset_prompt_request_carries_the_canvas_block(monkeypatch):
             f"【画布】块里没有 {family} 的画布尺寸"
 
 
+def _canvas_request(monkeypatch, canvases: dict) -> str:
+    """跑一次资产图节点，返回它真正发出去的请求串（请求是生图侧的缝，断言打在串上）。"""
+    captured: list[str] = []
+
+    def fake_run_agent(agent, message):
+        captured.append(message)
+        return _assets_json((("甲", "提示词"),))
+
+    monkeypatch.setattr(nodes, "run_agent", fake_run_agent)
+    brief = Brief(mode="base", variant="I2VA", duration=5.0, style="写实", plot=TOPIC,
+                  canvases=canvases)
+    agents = {"image_prompt_engineer": object()}
+    nodes._make_image_prompt_node(agents, "人物", "character_design", "character_image_prompts")(
+        {"brief": brief, "character_design": "设计正文"})
+    assert captured, "节点没有发出请求"
+    return captured[0]
+
+
+def test_canvas_block_carries_the_user_selected_canvas(monkeypatch):
+    """选定值进请求【画布】块（AC1）：显示名与尺寸逐字同取 ``canvas_display``，分套指示随行。
+
+    期望串是**字面量**（700×1300 约分为 7:13）：从实现函数现算就与实现同构，格式错了
+    也一起绿。系统默认的 640 × 1280 不许再出现——「取代系统钦定的推荐尺寸」的可证面。
+    """
+    request = _canvas_request(monkeypatch, {"zimage": (700, 1300), "flux2": (1024, 1024)})
+
+    assert "7:13 · 700 × 1300（近竖）" in request, "请求【画布】块没带 Z-Image 的选定画布"
+    assert "1:1 · 1024 × 1024（近方）" in request, "请求【画布】块没带 Flux.2 的选定画布"
+    assert "构图用竖幅套" in request, "Z-Image 行没有构图分套指示"
+    assert "构图用正方套" in request, "Flux.2 行没有构图分套指示"
+    assert "640 × 1280" not in request, "选定了画布却还带着系统钦定的推荐尺寸"
+
+
+def test_canvas_block_maps_composition_set_by_aspect_family_not_model(monkeypatch):
+    """Q21(c)：构图分套绑**画幅族**、不绑模型——给 Z-Image 选近方形比例，它就用正方套。
+
+    这是起草裁定原话的可证面（「你给 Z-Image 选近方形比例时仍用正方套」）：改动前
+    分套潜规则是「zimage=竖幅、flux2=正方」，用户换比例后再说反话。族外（此处 Flux.2
+    选的 9:21 极端竖）必须降通用构图词，且**明说不用两套**——只写「通用」两个字模型
+    仍可能硬套竖幅措辞。
+    """
+    request = _canvas_request(monkeypatch, {"zimage": (1024, 1024), "flux2": (540, 1260)})
+
+    assert "构图用正方套" in request, "Z-Image 选了 1:1，构图却没落到正方套（还绑着模型旧形状）"
+    assert "构图用竖幅套" not in request, "没人选竖幅族画布，请求里不该出现竖幅套"
+    assert "通用构图词" in request, "9:21 极端比例没降通用构图词"
+    assert "不用竖幅/正方任一套" in request, "族外降级没说清「不硬塞任一套」，模型会硬套"
+
+
 # ---------------------------------------------------------------------------
 # 5. 出站交付：向导展示 + 产物落盘两处都拿得到全部资产提示词（issue #40 AC2）
 # ---------------------------------------------------------------------------
@@ -347,3 +397,38 @@ def test_folded_node_list_matches_the_real_folding():
     assert pipeline._STAGE1_CHAIN.index("parallel_image_prompts") > \
         pipeline._STAGE1_CHAIN.index("art_director"), \
         "资产图提示词跑在美术指导之前——它要读美术统筹这一轮的产出"
+
+
+# ---------------------------------------------------------------------------
+# 7. 产物画布行：选定值写进产物，显示串与请求同取（issue #42 AC1/AC3）
+# ---------------------------------------------------------------------------
+
+def test_products_show_the_user_selected_canvas(tmp_path, monkeypatch):
+    """产物的画布行展示**用户选定**画布，显示串取 ``canvas_display``（与请求同源）。
+
+    「推荐尺寸」措辞随本票退役（CONTEXT.md 画布词条的 Avoid 词：那是系统钦定时代
+    的渲染层措辞）：改动前两处排版各写一份——请求块画「640 × 1280（竖幅）」、
+    产物写「推荐尺寸：640 × 1280」——正是 AC3 点名的两个来源。
+    """
+    state, _ = _run_stage1(tmp_path, monkeypatch)
+
+    variants = image_prompt_variants(state, {"zimage": (700, 1300)})
+    assert variants, "资产产物是空的"
+    for v in variants:
+        assert (v.width, v.height) == (700, 1300), f"{v.name} 的产物尺寸不是选定值"
+
+    rendered = render_asset_rows(list(variants), variants[0].kind)
+    assert "画布：`7:13 · 700 × 1300（近竖）`" in rendered, "产物没有画布行（或显示串不是单一来源那份）"
+    assert "推荐尺寸" not in rendered, "「推荐尺寸」措辞还活着——系统钦定时代的旧标签"
+
+
+def test_entry_width_height_cannot_beat_the_selected_canvas(tmp_path, monkeypatch):
+    """资产条目里混进的 width/height（四键契约外残留）压不过选定画布（issue #42 复审）。"""
+    state, _ = _run_stage1(tmp_path, monkeypatch)
+    for entry in state["character_image_prompts"]:
+        entry["width"] = 111
+        entry["height"] = 222
+
+    variants = image_prompt_variants(state, {"zimage": (700, 1300)})
+    assert all((v.width, v.height) == (700, 1300) for v in variants), \
+        "条目残留的尺寸赢了用户选定"

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
-from .brief_parser import Brief
+from .brief_parser import Brief, CanvasMap
 from .tools.theme_guard import (
     _CONFLICTING_OUTDOOR_TERMS,
     contains_unqualified_conflict as _contains_unqualified_conflict,
@@ -57,17 +57,127 @@ IMAGE_FAMILY_LABELS = {"zimage": "Z-Image", "flux2": "Flux.2"}
 _EMPTY_IMAGE_PROFILE = ImageProfile("", "", 0, 0, "candidate")
 
 
-def image_canvas_size(model_family: str) -> tuple[int, int]:
-    """该生图模型的默认画布（宽, 高）。
+def image_canvas_size(
+    model_family: str,
+    canvases: CanvasMap | None = None,
+) -> tuple[int, int]:
+    """该生图模型的生效画布（宽, 高）：用户选定优先，未选回落 profile 默认表。
 
-    构图按画布走：两个模型的画布不是一个形状（一竖一方），同一条构图指令在两种画布上
-    语义不同——这是「两模型必须分别重写」的物理依据，所以帧节点的请求要把画布一并送进
-    模型（issue #33）。**形状与数字只住在本表里**，请求与渲染层都从这里取。
+    构图按画布走：同一条构图指令在不同画幅上语义不同，所以帧节点的请求要把画布一并
+    送进模型（issue #33）。**形状与数字只住在这一个读取口后面**：2026-10-16 起尺寸由
+    用户选定（issue #42，选比例→选尺寸→不符可自定义），``canvases`` 是会话里用户的选择
+    （家族 → (宽, 高)）；没选的家族（含旧会话、--brief 无画布键）回落默认表——兜底
+    让改动前的行为逐字保留。
     """
+    # 家族合法性先于选定值：表外家族带一个选定值也照旧报错——报错要来自「这个家族
+    # 根本不存在」，而不是静默接受一个没有 profile/渲染行的幽灵家族。
     profile = IMAGE_PROFILE_DEFAULTS.get(model_family)
     if profile is None:
         raise ValueError(f"未知生图模型：{model_family}")
+    if canvases and model_family in canvases:
+        width, height = canvases[model_family]
+        return int(width), int(height)
     return profile.width, profile.height
+
+
+# 构图词分套的画幅族边界（issue #42，Q21(c) 裁定「族内就近归类，族外降通用」）。
+# r = 高/宽。划分的依据是**两套构图词的措辞前提**，不是拍脑袋的数字：
+# - 正方套说「横向留白受限」→ 只在宽≤高时成立 → 近方族下界到 1（r ≥ 1）；
+# - 竖幅套说「纵向分层、主体占满一列」→ 要明显高于宽 → 4:5（r=1.25）起才成立
+#   （起草裁定原话「4:5 的构图语义确实接近竖幅」，故 1.25 归近竖族）；
+# - 超过 1:2 的极端竖（9:21≈2.33）与极端横（21:9）是「极端」，一切横幅是「横幅」：
+#   二者都是族外，降为与画幅无关的通用构图词（起草裁定「横幅硬塞任一套都会说错话」）。
+# 1:2（r=2.0）必须留在近竖族：它是 zimage 的原生画布。
+_SQUARE_FAMILY_MAX = 1.25  # 近方族上界（不含）：1 ≤ r < 1.25
+_PORTRAIT_FAMILY_MAX = 2.0  # 近竖族上界（含）：1.25 ≤ r ≤ 2.0；再往外是极端
+
+# 画幅族 → 构图词套（Q21(c) 的映射表本身）：近竖→竖幅套、近方→正方套、族外→通用。
+# 分套绑**画幅族**、不绑模型身份——用户给 Z-Image 选了近方形比例，落笔就用正方套。
+_COMPOSITION_SET_BY_FAMILY = {"近竖": "竖幅套", "近方": "正方套", "横幅": "通用", "极端": "通用"}
+
+
+def canvas_family(width: int, height: int) -> str:
+    """该画布的画幅族类：``近竖`` / ``近方`` / ``横幅`` / ``极端``（分套的依据）。
+
+    这四类就是票面「近竖→竖幅套、近方→正方套（族内就近归类），横幅与极端比例
+    （如 9:21）降通用构图词」的四个归类；显示行里括号中的形状标签就是它。
+    """
+    if width <= 0 or height <= 0:
+        raise ValueError("画布尺寸必须为正")
+    ratio = height / width
+    if ratio > _PORTRAIT_FAMILY_MAX or ratio < 1 / _PORTRAIT_FAMILY_MAX:
+        return "极端"
+    if ratio < 1:
+        return "横幅"
+    if ratio < _SQUARE_FAMILY_MAX:
+        return "近方"
+    return "近竖"
+
+
+def composition_set(width: int, height: int) -> str:
+    """该画布的构图词套：``竖幅套`` / ``正方套`` / ``通用``（族外）。
+
+    两套不互换；族外（横幅、极端比例）不硬塞任一套——「横幅画面配竖幅构图词」的
+    说反话在分套这一层被堵死。
+    """
+    return _COMPOSITION_SET_BY_FAMILY[canvas_family(width, height)]
+
+
+def canvas_display(width: int, height: int) -> str:
+    """画布显示名与尺寸的**唯一**格式化口（issue #42 AC3）：``9:16 · 576 × 1024（近竖）``。
+
+    显示名=约分后的比例（由宽高导出，不另存标签——标签和尺寸是两个来源就会漂）；
+    括号里是**画幅族类**（不是朝向）：它才是构图词分套的依据，与行尾的分套指示同源，
+    不会出现「（竖幅）；构图用正方套」这种自相矛盾的行。请求的【画布】块与渲染层的
+    画布行都调这里，排版只写这一处。
+    """
+    from math import gcd
+
+    divisor = gcd(width, height)
+    name = f"{width // divisor}:{height // divisor}"
+    return f"{name} · {width} × {height}（{canvas_family(width, height)}）"
+
+
+class RatioPreset(NamedTuple):
+    """画布选择器的比例档（issue #42「选比例→选尺寸」的第一步）。
+
+    ``w_ratio / h_ratio`` 是比例的宽/高**份数**（不是像素——像素字段全仓叫 width/height，
+    同名会把「9:16 的 9」读成 9 像素，复审点名的撞名）。``sizes`` 是该比例下的预设像素
+    尺寸——**必须与 (w_ratio, h_ratio) 逐档约分一致**（tests/test_canvas.py 的表完整性
+    守卫钉着）：菜单显示 9:16 档却给出 4:5 的尺寸，用户按显示选、拿到的东西对不上号。
+    """
+
+    name: str
+    w_ratio: int
+    h_ratio: int
+    sizes: tuple[tuple[int, int], ...]
+
+
+# 画布比例档：覆盖两个构图词族（近竖/近方）与常见横幅；档外比例（如 9:21）走
+# 选择器的自定义入口。两个家族的原生画布（zimage 640×1280、flux2 1024×1024）
+# 都在档内——用户不改主意时按原样选得到，而不是「系统默认」。
+CANVAS_RATIO_PRESETS: tuple[RatioPreset, ...] = (
+    RatioPreset("1:2", 1, 2, ((640, 1280), (720, 1440))),
+    RatioPreset("9:16", 9, 16, ((576, 1024), (720, 1280))),
+    RatioPreset("2:3", 2, 3, ((768, 1152), (832, 1248))),
+    RatioPreset("3:4", 3, 4, ((768, 1024), (960, 1280))),
+    RatioPreset("4:5", 4, 5, ((1024, 1280), (832, 1040))),
+    RatioPreset("1:1", 1, 1, ((1024, 1024), (1280, 1280))),
+    RatioPreset("4:3", 4, 3, ((1024, 768), (1280, 960))),
+    RatioPreset("16:9", 16, 9, ((1280, 720), (1920, 1080))),
+)
+
+
+def composition_hint(width: int, height: int) -> str:
+    """请求行尾的构图分套指示：告诉模型这一行该用哪套构图词（issue #42 AC2）。
+
+    族外的指示是**完整的降级指令**（用通用词、且明说不用两套）——只写「通用」两个字，
+    模型仍可能按画幅直觉硬套竖幅/正方措辞，「横幅画面配竖幅构图词」的说反话就堵不死。
+    """
+    family = composition_set(width, height)
+    if family == "通用":
+        return "构图用与画幅无关的通用构图词（引导线/框中框/三分法等），不用竖幅/正方任一套"
+    return f"构图用{family}"
 
 
 def _now() -> str:
@@ -258,12 +368,26 @@ class FL2VAFramePrompt:
             raise ValueError("FL2VA 生图尺寸不能为负数")
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "FL2VAFramePrompt":
+    def from_dict(
+        cls, raw: dict[str, Any], canvases: CanvasMap | None = None,
+    ) -> "FL2VAFramePrompt":
+        """解析一行关键帧提示词；``canvases`` 给定时尺寸**无条件**取读取口（issue #42）。
+
+        画布是请求下发的数据，不是模型/文件的自由发挥：给了 ``canvases``（哪怕是空
+        dict＝回落默认表），raw 里带的 width/height 一律不认——模型幻觉尺寸、帧级
+        回退形状残留、错形 state 都从这一层被挡住（复审实测：只在 bundle 层按家族
+        子键覆盖时，帧级回退形状照样把 111×222 送进产物，与请求【画布】块漂开）。
+        不传 ``canvases``＝信任 raw 里的既有值（旧会话重展示走这条，保历史原样）。
+        """
         # 表外家族走空档——它只在下面构造时被 ``__post_init__`` 拦下（见常量处的说明），
         # 这一档取空值是为了让报错来自字段校验、而不是这里的 AttributeError。
-        profile = IMAGE_PROFILE_DEFAULTS.get(
-            str(raw.get("model_family", "zimage")), _EMPTY_IMAGE_PROFILE
-        )
+        family = str(raw.get("model_family", "zimage"))
+        profile = IMAGE_PROFILE_DEFAULTS.get(family, _EMPTY_IMAGE_PROFILE)
+        if canvases is None:
+            width = int(raw.get("width", profile.width) or profile.width)
+            height = int(raw.get("height", profile.height) or profile.height)
+        else:
+            width, height = image_canvas_size(family, canvases)
         return cls(
             frame=str(raw.get("frame", "")),
             model_family=str(raw.get("model_family", "")),
@@ -277,8 +401,8 @@ class FL2VAFramePrompt:
             lighting=str(raw.get("lighting", "")),
             profile_id=str(raw.get("profile_id", profile.profile_id)),
             prompt_node_id=str(raw.get("prompt_node_id", profile.prompt_node_id)),
-            width=int(raw.get("width", profile.width) or profile.width),
-            height=int(raw.get("height", profile.height) or profile.height),
+            width=width,
+            height=height,
             profile_status=str(raw.get("profile_status", profile.status)),
             instructions=tuple(str(x) for x in raw.get("instructions", [])),
         )
@@ -340,7 +464,10 @@ class FL2VAPromptBundle:
             raise ValueError("FL2VA 首尾帧输入槽不能为空")
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "FL2VAPromptBundle":
+    def from_dict(
+        cls, raw: dict[str, Any], canvases: CanvasMap | None = None,
+    ) -> "FL2VAPromptBundle":
+        """解析 bundle；``canvases`` 透传到每行的尺寸解析（帧级回退形状也走同一条）。"""
         def parse_frame(frame_name: str) -> tuple[FL2VAFramePrompt, ...]:
             value = raw.get(frame_name, [])
             if isinstance(value, dict):
@@ -353,15 +480,15 @@ class FL2VAPromptBundle:
                             "scene_anchor": str(item.get("scene_anchor") or raw.get("scene_anchor", "")),
                             "shot_id": str(item.get("shot_id") or value.get("shot_id", "SH001")),
                             "time_seconds": item.get("time_seconds", value.get("time_seconds", 0)),
-                        }))
+                        }, canvases))
                 if not rows and (value.get("positive_prompt") or value.get("prompt")):
                     rows.append(FL2VAFramePrompt.from_dict({
                         **value, "frame": frame_name, "model_family": value.get("model_family", "zimage"),
                         "scene_anchor": str(value.get("scene_anchor") or raw.get("scene_anchor", "")),
-                    }))
+                    }, canvases))
                 return tuple(rows)
             return tuple(
-                FL2VAFramePrompt.from_dict(item)
+                FL2VAFramePrompt.from_dict(item, canvases)
                 for item in value
                 if isinstance(item, dict)
             )
@@ -512,7 +639,10 @@ def fl2va_bundle_from_dict(raw: dict[str, Any], brief: Brief) -> FL2VAPromptBund
                 item_value.setdefault("time_seconds", default_time)
                 frame_value[model_family] = item_value
         enriched[frame_name] = frame_value
-    bundle = FL2VAPromptBundle.from_dict(enriched)
+    # 尺寸交给 from_dict 按 ``brief.canvases`` 权威解析（issue #42 AC1）：模型幻觉的
+    # width/height、帧级回退形状的残留一律不认——画布是请求下发的数据，不是模型的
+    # 自由发挥；不认它就成了「产物尺寸与请求【画布】块漂开」，AC3 的同源被破坏。
+    bundle = FL2VAPromptBundle.from_dict(enriched, brief.canvases)
     if str(brief.variant).upper() == "FL2VA" and (not bundle.first or not bundle.last):
         raise ValueError("FL2VA 必须同时包含首帧和尾帧提示词")
     issues = validate_fl2va_bundle(bundle, duration=brief.duration, variant=brief.variant)
@@ -636,6 +766,9 @@ def brief_snapshot(brief: Brief) -> dict[str, Any]:
         "style": brief.style,
         "language": brief.language,
         "plot": brief.plot,
+        # 用户选定画布（issue #42 复审）：本快照也是「逐字段显式列出」的清单，
+        # 漏登记的字段在 generation.json 里就没了——选定值是产物数据，必须留痕。
+        "canvases": {family: [width, height] for family, (width, height) in brief.canvases.items()},
         "refs": [
             {"picture": ref.picture, "name": ref.name, "description": ref.description}
             for ref in brief.refs
@@ -673,7 +806,7 @@ def result_from_state(
         )
         # 资产提示词不随变体被丢弃（issue #40）：帧变体也要拿得到全部资产图生图提示词，
         # 曾经这里是空元组——三个节点产了、结果对象里却没有，下游谁也拿不到。
-        image_prompts: tuple[ImagePromptVariant, ...] = image_prompt_variants(state)
+        image_prompts: tuple[ImagePromptVariant, ...] = image_prompt_variants(state, brief.canvases)
     else:
         missing = [kind for kind, content in values.items() if not str(content).strip()]
         if missing:
@@ -694,11 +827,12 @@ def result_from_state(
         # 那是「该变体连自己的帧都没有」，与「多了一张」不是一回事，不该被这次改动抹平。
         raw_bundle = state.get("fl2va_prompt_bundle")
         image_bundle = (
-            FL2VAPromptBundle.from_dict(strip_foreign_frames(raw_bundle, brief.variant)[0])
+            FL2VAPromptBundle.from_dict(
+                strip_foreign_frames(raw_bundle, brief.variant)[0], brief.canvases)
             if isinstance(raw_bundle, dict)
             else None
         )
-        image_prompts = image_prompt_variants(state)
+        image_prompts = image_prompt_variants(state, brief.canvases)
 
     return GenerationResult(
         generation_id=generation_id,
@@ -729,8 +863,14 @@ def generation_directory(project_directory: Path, generation_id: str) -> Path:
 KIND_LABELS: dict[str, str] = {"character": "人物", "prop": "道具", "scene": "场景"}
 
 
-def image_prompt_variants(state: dict[str, Any]) -> tuple[ImagePromptVariant, ...]:
+def image_prompt_variants(
+    state: dict[str, Any],
+    canvases: CanvasMap | None = None,
+) -> tuple[ImagePromptVariant, ...]:
     """从结构化适配器结果构造 N 份可复制提示词（每资产一版 Z-Image）；旧 state 缺少时保留兼容降级。
+
+    ``canvases`` 是用户选定画布（issue #42）：产物行的尺寸从它解析（未选回落默认表），
+    显示串在渲染处取 ``canvas_display``——与请求【画布】块同源。
 
     state 里 ``{kind}_image_prompts`` 是**资产条目列表**（issue #40 N 化），每条四键
     ``name / positive_prompt / negative_prompt / instructions``。两种旧形状照样可读：
@@ -768,9 +908,12 @@ def image_prompt_variants(state: dict[str, Any]) -> tuple[ImagePromptVariant, ..
                 # 资产键与设计正文都空＝这一类无货可交，跳过而不是构造非法对象——
                 # 向导展示会对任意精简 state 调到这里（issue #40），缺料不是错误。
                 continue
-            # profile 与画布都取**同一张**生图默认表的 Z-Image 行：这里原先另抄了一份四元组，
-            # 换画布时就会与本表漂开（issue #33 把这张表扶正为单一来源）。
+            # profile 行取生图默认表的 Z-Image 行，画布尺寸走 `image_canvas_size` 读取口
+            # （用户选定优先、未选回落同一张表）——issue #33 把这张表扶正为单一来源，
+            # issue #42 让选定值从同一读取口进来。尺寸**无条件**取读取口：条目里混进的
+            # width/height 一律不认（四键契约外的残留/幻觉不许压过用户选定，复审点名）。
             default = IMAGE_PROFILE_DEFAULTS["zimage"]
+            canvas_width, canvas_height = image_canvas_size("zimage", canvases)
             variants.append(ImagePromptVariant(
                 name=str(item.get("name", "") or label),
                 kind=kind,
@@ -778,8 +921,8 @@ def image_prompt_variants(state: dict[str, Any]) -> tuple[ImagePromptVariant, ..
                 negative_prompt=str(item.get("negative_prompt", "")),
                 profile_id=str(item.get("profile_id", default.profile_id)),
                 prompt_node_id=str(item.get("prompt_node_id", default.prompt_node_id)),
-                width=int(item.get("width", default.width) or default.width),
-                height=int(item.get("height", default.height) or default.height),
+                width=canvas_width,
+                height=canvas_height,
                 profile_status=str(item.get("profile_status", "candidate")),
                 instructions=tuple(item.get("instructions", ())),
             ))
@@ -799,7 +942,9 @@ def render_asset_rows(rows: list[ImagePromptVariant], kind: str) -> str:
             f"## {item.name}", "",
             f"- Workflow Profile: `{item.profile_id}`（状态：{item.profile_status}）",
             f"- 主提示词节点：`{item.prompt_node_id}`",
-            f"- 推荐尺寸：`{item.width} × {item.height}`", "",
+            # 画布行与请求【画布】块同取 `canvas_display`（issue #42 AC3）；
+            # 「推荐尺寸」措辞随本票退役——那是系统钦定时代的渲染层标签。
+            f"- 画布：`{canvas_display(item.width, item.height)}`", "",
             "### Positive Prompt", "", item.positive_prompt, "",
         ])
         if item.negative_prompt:
@@ -844,7 +989,8 @@ def render_fl2va_frame_markdown(result: GenerationResult, frame: str) -> str:
             f"## {model_title}", "",
             f"- 静态图 Workflow Profile：`{item.profile_id}`（状态：{item.profile_status}）",
             f"- 主提示词节点：`{item.prompt_node_id}`",
-            f"- 推荐尺寸：`{item.width} × {item.height}`",
+            # 画布行与请求【画布】块同取 `canvas_display`（issue #42 AC3）。
+            f"- 画布：`{canvas_display(item.width, item.height)}`",
             f"- {variant} 输入槽：`{slot_id}`", "",
         ])
         # 构图与光线单独成行（issue #33）：它们是**可单独替换的维度**——复跑同一张图时
@@ -942,6 +1088,8 @@ __all__ = [
     "GenerationResult", "PromptArtifact", "PromptKind", "ImagePromptVariant",
     "FL2VAFramePrompt", "FL2VAPromptBundle", "brief_snapshot",
     "ImageProfile", "IMAGE_PROFILE_DEFAULTS", "IMAGE_FAMILY_LABELS", "image_canvas_size",
+    "composition_set", "composition_hint", "canvas_family", "canvas_display",
+    "RatioPreset", "CANVAS_RATIO_PRESETS",
     "fl2va_bundle_from_dict", "generation_directory", "render_generation", "strip_foreign_frames",
     "render_fl2va_frame_markdown", "render_fl2va_markdown", "result_from_state", "variant_frame_names",
     "scene_requirement_groups", "validate_fl2va_bundle",

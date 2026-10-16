@@ -145,13 +145,19 @@ def _run_generate_prompts(args) -> int:
         if args.dry_run:
             print(json.dumps({
                 "brief": {"mode": brief.mode, "variant": brief.variant, "duration": brief.duration,
-                          "style": brief.style, "language": brief.language, "plot": brief.plot, "draft": brief.draft},
+                          "style": brief.style, "language": brief.language, "plot": brief.plot, "draft": brief.draft,
+                          # 画布回显（issue #42）：dry-run 的用途就是「看解析对不对」，
+                          # 选定画布不回显就无从发现画布键写错/没读到。
+                          "canvases": {family: [w, h] for family, (w, h) in brief.canvases.items()}},
                 "dry_run": True,
             }, ensure_ascii=False, indent=2))
             return 0
         result, directory = create_video_from_topic(
             brief.plot, config,
             duration=brief.duration, style=brief.style, language=brief.language, variant=brief.variant,
+            # 画布键解析出来就得递进来（issue #42 复审）：少这一参，brief 文件里的
+            # 选定画布在最后一跳被丢掉、静默回落系统默认——「规则在、接线不在」。
+            canvases=brief.canvases,
         )
         _print_generation_result(result, directory)
         return 0

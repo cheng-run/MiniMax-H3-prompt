@@ -16,7 +16,7 @@ from typing import Callable
 
 from ..brief_parser import Brief, RefItem
 from ..config import Config
-from ..generation import render_fl2va_frame_markdown
+from ..generation import canvas_display, render_fl2va_frame_markdown
 from ..graph.pipeline import run_stage1, run_stage2, stage1_rerun_plan
 from ..session_store import (
     STATUS_AWAITING_FRAMES,
@@ -148,6 +148,87 @@ def _choose_generation_mode() -> str:
         if raw in ("1", "2", "3"):
             return {1: "I2VA", 2: "L2VA", 3: "FL2VA"}[int(raw)]
         print("无效输入，请输入 1/2/3。")
+
+
+def _choose_canvases() -> dict[str, tuple[int, int]]:
+    """生图侧画布选择器（issue #42）：选比例→选尺寸→不符可自定义，**逐模型家族**。
+
+    「取代系统钦定的推荐尺寸」：比例没有回车默认档——必须显式选（坏输入重问），
+    尺寸档不符走自定义自由输入（保留兜底）。每个家族各走一遍三步：构图词分套绑
+    各家族选定画布的**画幅族**（Q21(c)），两家可以一竖一方。返回家族 → (宽, 高)，
+    落进 Brief.canvases，随请求【画布】块与产物画布行同源下发。
+    """
+    from ..generation import IMAGE_FAMILY_LABELS, IMAGE_PROFILE_DEFAULTS
+
+    return {
+        family: _choose_canvas(IMAGE_FAMILY_LABELS[family])
+        for family in IMAGE_PROFILE_DEFAULTS
+    }
+
+
+def _menu_pick(title: str, count: int) -> int:
+    """编号菜单的统一收口（选比例/选尺寸两步共用，复审点名的重复）。
+
+    返回选中的 1..count+1（count+1 = 自定义逃生口）。坏输入重问，不静默取默认——
+    画布是数据，错值必须当场拦（同 `parse_canvas_size` 的口径）。
+    """
+    custom = count + 1
+    while True:
+        raw = _prompt(f"{title}，输入 1-{custom}：").strip()
+        if raw.isdigit() and 1 <= int(raw) <= custom:
+            return int(raw)
+        print("无效输入，请重输。")
+
+
+def _choose_canvas(label: str) -> tuple[int, int]:
+    """单个家族的三步选择：第 1 步比例、第 2 步尺寸，档外/不符走自由输入。
+
+    选定后回显**最终**画布（显示名+族类+分套指示）：自定义尺寸可以不合第 1 步选的
+    比例（自由输入就是自由输入），菜单预告的构图后果以回显为准——不回显的话用户
+    以为选的是 9:16 的横幅通用词，实际落点却按 7:13 走了竖幅套（复审点名）。
+    """
+    from ..generation import (
+        CANVAS_RATIO_PRESETS,
+        canvas_display,
+        canvas_family,
+        composition_hint,
+    )
+
+    print(f"\n请选择 {label} 画布——第 1 步：比例")
+    for index, preset in enumerate(CANVAS_RATIO_PRESETS, 1):
+        # 菜单直接标画幅族：用户选比例时就看见构图词后果（近竖/近方/横幅→通用）。
+        print(f"  {index}. {preset.name}（{canvas_family(*preset.sizes[0])}）")
+    custom = len(CANVAS_RATIO_PRESETS) + 1
+    print(f"  {custom}. 自定义比例/尺寸（自由输入 宽x高，如 540x1260；9:21 这类档外比例走这里）")
+    choice = _menu_pick(f"[{label}] 第 1 步·比例", len(CANVAS_RATIO_PRESETS))
+    if choice == custom:
+        width, height = _ask_custom_canvas(label)
+    else:
+        preset = CANVAS_RATIO_PRESETS[choice - 1]
+        print(f"\n请选择 {label} 画布尺寸——第 2 步（比例 {preset.name}）：")
+        for index, (size_w, size_h) in enumerate(preset.sizes, 1):
+            print(f"  {index}. {size_w} × {size_h}")
+        size_custom = len(preset.sizes) + 1
+        print(f"  {size_custom}. 自定义尺寸（自由输入 宽x高，如 700x1300）")
+        size_choice = _menu_pick(f"[{label}] 第 2 步·尺寸（比例 {preset.name}）", len(preset.sizes))
+        if size_choice == size_custom:
+            width, height = _ask_custom_canvas(label)
+        else:
+            width, height = preset.sizes[size_choice - 1]
+    print(f"[已选] {label} 画布：{canvas_display(width, height)}；{composition_hint(width, height)}")
+    return width, height
+
+
+def _ask_custom_canvas(label: str) -> tuple[int, int]:
+    """自定义画布的自由输入：格式坏了当场重问，不静默回落默认表。"""
+    from ..brief_parser import parse_canvas_size
+
+    while True:
+        raw = _prompt(f"自定义尺寸（{label}，宽x高，如 700x1300）：").strip()
+        try:
+            return parse_canvas_size(raw)
+        except ValueError as exc:  # 坏值大声报错（画布是精确数据），但交互里重问而不是炸流程
+            print(f"[提示] {exc}，请重输。")
 
 
 # LangGraph 节点名 → 用户可读环节名（用于节点级进度）。
@@ -396,6 +477,8 @@ def _phase1_new(config: Config) -> SessionState | None:
         duration = config.default_duration
     style = _prompt("视觉风格（回车=AI 根据主题自行确定）：")
     variant = _choose_generation_mode()
+    # 画布选择器（issue #42）：选定值进 brief，请求【画布】块与产物画布行同取。
+    canvases = _choose_canvases()
 
     brief = Brief(
         mode="base",
@@ -405,6 +488,7 @@ def _phase1_new(config: Config) -> SessionState | None:
         language=config.default_language,
         plot=topic,
         clarifications=clarifications,
+        canvases=canvases,
         raw=topic,
     )
     generation_dir = _session_dir(config, topic)
@@ -457,11 +541,18 @@ def _session_dir(config: Config, topic: str) -> Path:
     existing = sorted(slug_dir.glob("GEN*"), key=lambda p: p.name)
     if existing:
         latest = existing[-1]
-        session = load_session(latest)
+        try:
+            session = load_session(latest)
+        except ValueError as exc:
+            # 字段损坏（如画布错形）与 JSON 损坏同待遇：警告 + 当它不存在（开新 GEN）。
+            # 不许裸抛——`_session_dir` 是重跑向导输已有主题的必经点，抛出去整个向导
+            # traceback，用户连绕开的机会都没有（issue #42 复审：严格读回的连带面）。
+            print(f"[警告] 最近的会话文件损坏，已跳过续接：{latest}（{exc}）")
+            session = None
         if session is not None and session.status != STATUS_COMPLETED:
             directory = latest  # 未完成 → 续接
         else:
-            directory = slug_dir / f"GEN{len(existing) + 1:03d}"  # 已完成/无会话 → 新 GEN
+            directory = slug_dir / f"GEN{len(existing) + 1:03d}"  # 已完成/无会话/损坏 → 新 GEN
     else:
         directory = slug_dir / "GEN001"
     directory.mkdir(parents=True, exist_ok=True)
@@ -486,18 +577,20 @@ def _show_frame_prompts(state: dict, generation_dir: Path) -> None:
             print()
 
 
-def _show_asset_prompts(state: dict, generation_dir: Path) -> None:
+def _show_asset_prompts(state: dict, generation_dir: Path,
+                        canvases: dict[str, tuple[int, int]] | None = None) -> None:
     """资产图生图提示词的出站口：展示 + 落盘（issue #40 AC2）。
 
     三个资产图节点的产物此前没有任何出站口——向导不展示、不落盘，用户根本拿不到。
     这里把每类资产渲染成一份 Markdown，打印出来并写进生成目录。落盘文件名取
     ``topic_generation._ARTIFACT_FILES``（与非向导路径同一份映射，两处各起一个名字
-    就是第二份可写来源）。
+    就是第二份可写来源）。``canvases`` 是用户选定画布（issue #42）——会话 state 里
+    不持久化 brief 对象，所以由调用方从手上那份 brief 递进来。
     """
     from ..generation import image_prompt_variants, render_asset_rows
     from ..topic_generation import _ARTIFACT_FILES
 
-    variants = image_prompt_variants(state)
+    variants = image_prompt_variants(state, canvases)
     for kind in ("character", "prop", "scene"):
         rows = [item for item in variants if item.kind == kind]
         if not rows:
@@ -734,7 +827,7 @@ def _user_revision_loop(state: dict, generation_dir: Path, brief: Brief, config:
         _show_frame_prompts(state, generation_dir)
         # 资产图提示词与关键帧提示词同批出站（issue #40）：它们都是给用户拿去生图的素材，
         # 少展示一样用户就少拿一样——此前资产提示词在向导里根本不可见。
-        _show_asset_prompts(state, generation_dir)
+        _show_asset_prompts(state, generation_dir, brief.canvases)
         # 每轮重出**前后**都摆一次清单（重出后再回到循环顶端）：它是「我到底说过什么」的
         # 唯一凭据，也是撤销时照着念编号的那张表——没摆出来，撤销就只剩「撤最后一条」。
         _show_revision_list(state)
@@ -847,7 +940,9 @@ def render_fl2va_frame_markdown_from_bundle(bundle, frame: str) -> str:
     parts = [f"# {variant} {title}生图提示词（Z-Image）", ""]
     for item in rows:
         parts.extend([
-            f"- 推荐尺寸：`{item.width} × {item.height}`",
+            # 画布行与请求【画布】块同取 `canvas_display`（issue #42 AC3）——本渲染器
+            # 曾自写一份「推荐尺寸」排版，与 generation 的渲染层构成两个可写来源。
+            f"- 画布：`{canvas_display(item.width, item.height)}`",
             f"- 提示词节点：`{item.prompt_node_id}`", "",
             "### Positive Prompt", "", item.positive_prompt, "",
         ])
@@ -911,7 +1006,7 @@ def _phase2_collect_and_finish(
     # （新跑/续接阶段 1 的收尾）就不重复刷屏。
     if show_frame_prompts:
         _show_frame_prompts(state, generation_dir)
-        _show_asset_prompts(state, generation_dir)
+        _show_asset_prompts(state, generation_dir, brief.canvases)
     print("\n[阶段 2] 请提交生成好的关键帧图片（回车=跳过该项）。")
     while True:
         try:
