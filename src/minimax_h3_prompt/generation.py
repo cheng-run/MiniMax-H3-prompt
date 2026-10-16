@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
-from .brief_parser import Brief
+from .brief_parser import Brief, RefItem
 from .tools.theme_guard import (
     _CONFLICTING_OUTDOOR_TERMS,
     contains_unqualified_conflict as _contains_unqualified_conflict,
@@ -20,6 +20,12 @@ PromptKind = Literal["script", "video", "character", "prop", "scene"]
 _PROMPT_KINDS = ("script", "video", "character", "prop", "scene")
 _GENERATION_ID = re.compile(r"^GEN\d{3}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+# 多参（ref2va）路线的登记工作流名。**唯一可写来源**（issue #41 AC6）：产物/菜单/注入卡
+# 的指称都要对得上「59-(多Lora改)MiniMax-H3 ref2va 多参生视频 V2」，两处各写一份就会
+# 漂成两个名字（用户按名字进 ComfyUI 找不到工作流）。文档引文与它的一致性由守卫测试
+# ``tests/test_ref_route_prompts.py`` 钉住；旧称「工作流 63」已废弃。
+REF_WORKFLOW_NAME = "59-(多Lora改)MiniMax-H3 ref2va 多参生视频 V2"
 
 
 class ImageProfile(NamedTuple):
@@ -786,6 +792,47 @@ def image_prompt_variants(state: dict[str, Any]) -> tuple[ImagePromptVariant, ..
     return tuple(variants)
 
 
+def ref_asset_registry(state: dict[str, Any], brief: Brief | None = None) -> list[RefItem]:
+    """多参路线的参考素材登记：语义名 + `<Picture N>` 编号 + 描述（生图提示词）。
+
+    编号按**剧本出场顺序**分配（编号即叙事顺序，2026-10-16 裁定，CONTEXT.md「参考素材」）：
+    语义名在剧本里的首次出现位置决定次序；找不到出场的资产排最后（保持人物→道具→场景的
+    枚举序）——编号钉的是叙事顺序，找不到出场就没有叙事位次，但**不静默丢弃**（丢掉的
+    资产会在素材台账／注入卡以「图生了却无处接线」的形态回来）。
+
+    ``brief.refs`` 非空时以**用户登记**为准：brief 文件流程里编号是用户自己声明的，
+    出场顺序不得改写它。
+
+    **mode 守卫**（issue #41 复审 F1）：base／帧变体不派生资产登记——base 的 Picture 1/2
+    是首尾帧，把资产图提示词派生成 `<Picture N>` 清单会给帧路线的 agent 挂错
+    ``list_reference_assets``（实测复审：帧路线 qa/prompt_engineer 多出该工具、报资产级编号，
+    AC1「首尾帧路线不受影响」软性回归）。派生只对 ``mode="ref"`` 发生。
+
+    描述取该资产的**生图提示词**（素材画面事实规则：以生图提示词为描述主体，它细节最全；
+    issue #41 阶段用户尚未交回素材图，读图纠偏／补漏在 #43/#44 落地）。
+    """
+    if brief is not None:
+        if brief.refs:
+            return sorted(brief.refs, key=lambda r: r.picture)
+        if brief.mode != "ref":
+            return []
+    script = str(state.get("script", ""))
+
+    def _appearance_key(pair: tuple[int, ImagePromptVariant]) -> tuple[int, int, int]:
+        order, item = pair
+        at = script.find(item.name) if item.name else -1
+        if at >= 0:
+            return (0, at, order)  # 有出场：按剧本首次出现位置
+        return (1, order, order)   # 无出场：排最后，保持枚举序（稳定）
+
+    variants = image_prompt_variants(state)
+    ordered = [item for _, item in sorted(enumerate(variants), key=_appearance_key)]
+    return [
+        RefItem(picture=number, name=item.name, description=item.positive_prompt)
+        for number, item in enumerate(ordered, 1)
+    ]
+
+
 def render_asset_rows(rows: list[ImagePromptVariant], kind: str) -> str:
     """渲染一类资产的可复制提示词（N 个资产，每个一节，标题用语义名）。
 
@@ -939,10 +986,12 @@ def render_generation(result: GenerationResult) -> dict[str, str]:
 
 
 __all__ = [
+    "REF_WORKFLOW_NAME",
     "GenerationResult", "PromptArtifact", "PromptKind", "ImagePromptVariant",
     "FL2VAFramePrompt", "FL2VAPromptBundle", "brief_snapshot",
     "ImageProfile", "IMAGE_PROFILE_DEFAULTS", "IMAGE_FAMILY_LABELS", "image_canvas_size",
-    "fl2va_bundle_from_dict", "generation_directory", "render_generation", "strip_foreign_frames",
+    "fl2va_bundle_from_dict", "generation_directory", "ref_asset_registry", "render_generation",
+    "strip_foreign_frames",
     "render_fl2va_frame_markdown", "render_fl2va_markdown", "result_from_state", "variant_frame_names",
     "scene_requirement_groups", "validate_fl2va_bundle",
 ]

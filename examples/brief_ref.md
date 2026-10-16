@@ -1,6 +1,6 @@
-# 视频 Brief — 多参考图出片（工作流 63）
+# 视频 Brief — 多参出片（59-(多Lora改)MiniMax-H3 ref2va 多参生视频 V2）
 
-输入: 多参考
+输入: 多参
 时长: 6
 风格: Cinematic 武侠电影质感
 语言: Chinese

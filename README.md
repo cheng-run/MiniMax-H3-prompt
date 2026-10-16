@@ -77,7 +77,7 @@ DASHSCOPE_API_KEY=xxx
 `examples/` 里有示例（模板 `examples/brief_template.md`）。**`输入` 键对应你喂工作流的参考方式**：
 
 ```markdown
-输入: 首尾帧     # 首帧（工作流62·1张图）| 尾帧（工作流62·1张图）| 首尾帧（工作流62·2张图）| 多参考（工作流63·N张图）
+输入: 首尾帧     # 首帧（工作流62·1张图）| 尾帧（工作流62·1张图）| 首尾帧（工作流62·2张图）| 多参（59-(多Lora改)MiniMax-H3 ref2va 多参生视频 V2·N 张素材）
 时长: 6          # 秒
 风格: Cinematic 武侠电影质感
 语言: Chinese
@@ -85,7 +85,7 @@ DASHSCOPE_API_KEY=xxx
 ## 剧情
 一段话描述创意……（核心输入）
 
-## 参考图          # 张数随输入：首帧/尾帧=1张；首尾帧=2张（Picture1=首帧 Picture2=尾帧）；多参考=N张（角色/场景）
+## 参考图          # 张数随输入：首帧/尾帧=1张；首尾帧=2张（Picture1=首帧 Picture2=尾帧）；多参=N 张（参考素材）
                   # 格式：Picture N: 名称 — 描述  (图片路径)；有路径 → 运行前用 qwen3.7-plus 读图自动出描述，人工确认后进管线
 - Picture 1: 首帧 — 白发仙师在竹林缓抬手  (D:\Comfyui\ComfyUI\output\图片\你的图.png)
 - Picture 2: 尾帧 — 青衫青年落地向仙师行礼

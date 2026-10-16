@@ -382,16 +382,39 @@ def _check_label_continuity(text: str, issues: list[ValidationIssue], prefix: st
 
 def _check_pictures_used(text: str, ref_meta: list[tuple[int, str, str]] | None,
                          issues: list[ValidationIssue]) -> None:
-    """ref 模式：定义过的 <Picture N> 应在正文中被引用（反之亦然）。"""
+    """ref 模式：N 张 <Picture N> 覆盖式校验（定义与引用双向对齐，issue #41）。
+
+    覆盖式（同地点词覆盖式校验的口径，ADR 0009）：每张登记图被**定义或引用任一处**
+    覆盖即可，不要求每段都出现。双向对齐的两条腿：
+
+    - **引用 → 定义**：全文出现的每个 ``<Picture N>`` 都要能在 ``subject_definitions``
+      对回定义（官方 ref-en.txt §2：标签的定义都住在那里）——正文引用没定义即报；
+    - **登记 ↔ 全文**：登记的每张图都要在提示词里出现、提示词不许引用登记外的图
+      （``PICTURE_UNUSED`` / ``PICTURE_UNDEFINED`` 这对，登记来自 N 张素材清单）。
+
+    「定义过的必须被正文再引用」**有意不查**：官方示例里图片只在 subject_definitions
+    被引（作为 subject 的来源），正文走语义名（素材指称体系，CONTEXT.md「参考素材」），
+    查它会把官方示例本身判红。
+    """
+    sections = _find_sections(text, REF_SECTIONS)
+    defs_text = sections.get("subject_definitions", ("", 0))[0]
+    defined = {int(m.group(1)) for m in _PICTURE_RE.finditer(defs_text)}
+    used = {int(m.group(1)) for m in _PICTURE_RE.finditer(text)}
+    dangling = used - defined
+    if dangling:
+        issues.append(ValidationIssue(
+            "error", "PICTURE_NO_DEFINITION",
+            f"提示词引用了未在 subject_definitions 定义的 <Picture "
+            f"{'>, <Picture '.join(map(str, sorted(dangling)))}>"
+            "（定义与引用双向对齐：每处引用都要能对回 subject_definitions 里的定义）"))
     if not ref_meta:
         return
-    defined = {p for p, _, _ in ref_meta}
-    used = {int(m.group(1)) for m in _PICTURE_RE.finditer(text)}
-    unused = defined - used
+    registry = {p for p, _, _ in ref_meta}
+    unused = registry - used
     if unused:
         issues.append(ValidationIssue("error", "PICTURE_UNUSED",
                                       f"参考图未在提示词中被引用：<Picture {'>, <Picture '.join(map(str, sorted(unused)))}>"))
-    undefined = used - defined
+    undefined = used - registry
     if undefined:
         issues.append(ValidationIssue("error", "PICTURE_UNDEFINED",
                                       f"提示词引用了未定义的 <Picture {'>, <Picture '.join(map(str, sorted(undefined)))}>"))

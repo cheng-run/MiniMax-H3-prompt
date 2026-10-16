@@ -16,6 +16,7 @@ from ..generation import (
     IMAGE_PROFILE_DEFAULTS,
     fl2va_bundle_from_dict,
     image_canvas_size,
+    ref_asset_registry,
     strip_foreign_frames,
     variant_frame_names,
 )
@@ -58,6 +59,32 @@ def _brief_block(brief: Brief) -> str:
         参考资产=refs if brief_uses_refs(brief) else "",
         草稿=brief.draft or "",
     )
+
+
+def _ref_assets_block(state: PipelineState, brief: Brief) -> str:
+    """渲染【参考资产】块：N 张素材的编号登记 + 指称纪律（issue #41）。
+
+    登记由 ``ref_asset_registry`` **现算**（编号按剧本出场顺序）——它依赖资产图提示词，
+    而那是链上 ``parallel_image_prompts`` 的产物，构造节点时还不存在；这正是三个消费者
+    （reference_consistency／身份圆桌／提示词工程师）都从这里取、不再各自抄一份的原因。
+
+    多参纪律只对 ``mode="ref"`` 说：帧变体的 refs 是首/尾帧登记，套「素材语义名指称」
+    会把两套指称体系搅在一起。多参纪律与角色提示词（prompt_engineer.md）互为表里：
+    这里钉**数据侧**（哪些编号、哪些名字、描述取自哪），角色提示词钉写法。
+    """
+    if brief.mode == "ref":
+        refs = ref_asset_registry(state, brief)
+        if not refs:
+            return ""
+        return (
+            "编号按剧本出场顺序分配（编号即叙事顺序，不得改号）。"
+            "破折号后的描述就是该素材的**生图提示词**（素材画面事实：画面描述以它为描述主体）。"
+            "素材指称以**语义名为主**，<Picture N> 官方标签在格式要求处兜底。\n"
+            + format_ref_meta(refs)
+        )
+    if brief_uses_refs(brief) and brief.refs:
+        return format_ref_meta(brief.refs)
+    return ""
 
 
 def _make_producer_node(agents: dict) -> Callable:
@@ -511,7 +538,9 @@ def _make_reference_consistency_node(agents: dict) -> Callable:
         brief: Brief = state["brief"]
         if brief.mode != "ref":
             return {"subject_defs": ""}  # base 模式不需要 subject 定义，跳过
-        refs = format_ref_meta(brief.refs) if brief.refs else "（无）"
+        # 登记现算（issue #41）：本节点跑在 parallel_image_prompts 之后，拿得到 N 资产；
+        # brief.refs 为空的向导多参路线正是靠它才有 <Picture N> 映射可锁。
+        refs = _ref_assets_block(state, brief) or "（无）"
         msg = "请给出 subject_definitions 与 retention_analysis 素材：\n" + _ctx(
             参考资产=refs, 美术设计=state.get("art_design", ""),
             人物设计=state.get("character_design", ""),
@@ -635,7 +664,9 @@ def _make_prompt_engineer_node(agents: dict) -> Callable:
             对白与环境声=state.get("sound_design", ""),
             配乐=state.get("music", ""),
             subject_definitions_素材=state.get("subject_defs", "") if brief.mode == "ref" else "",
-            参考资产=format_ref_meta(brief.refs) if (brief_uses_refs(brief) and brief.refs) else "",
+            # 编号登记 + 指称纪律（issue #41）：语义名为主、<Picture N> 格式处兜底、
+            # 画面描述以生图提示词为描述主体（素材画面事实）。
+            参考资产=_ref_assets_block(state, brief),
             质检问题=("\n".join(state.get("qa_issues") or []) or ""),
         )
 
@@ -725,13 +756,15 @@ def make_shot_rt_node(rt, model, brief) -> Callable:
 def make_identity_rt_node(rt, model, brief) -> Callable:
     if brief.mode != "ref":
         return lambda s: {"identity_lock": ""}  # base 模式不需要身份锁定
-    refs = format_ref_meta(brief.refs) if brief.refs else "（无）"
     return _make_roundtable_node(
         rt, "identity_lock", "锁定角色/场景身份定义与 <Picture N> 映射",
+        # 参考资产从 state 现算（issue #41）：<Picture N> 映射正是本圆桌的锁定对象，
+        # 向导多参路线的登记要到资产图提示词产出后才存在，构造时抄一份就是空的。
         lambda s: _ctx(统筹美术设计=s.get("art_design", ""),
                        人物设计=s.get("character_design", ""),
                        背景设计=s.get("background_design", ""),
-                       道具设计=s.get("prop_design", ""), 参考资产=refs))
+                       道具设计=s.get("prop_design", ""),
+                       参考资产=_ref_assets_block(s, brief) or "（无）"))
 
 
 def make_parallel(*nodes: Callable[[PipelineState], dict]) -> Callable[[PipelineState], dict]:

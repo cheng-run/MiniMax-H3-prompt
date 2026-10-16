@@ -78,6 +78,21 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _apply_frame_route_defaults(brief, args) -> None:
+    """帧路线的旧默认（强制 base + 缺省 FL2VA）；多参（mode=ref）不套帧变体（issue #41）。
+
+    两条 CLI 缝（_run_cli 与 _run_generate_prompts）共用这一份：级联各写一遍时
+    「--variant 对 ref 该不该生效」的答案会随缝而异（复审 Duplicated Code 项）。
+    """
+    if brief.mode == "ref":
+        return
+    brief.mode = "base"
+    if args.variant:
+        brief.variant = args.variant.upper()
+    elif brief.variant == "T2VA":
+        brief.variant = "FL2VA"
+
+
 def _topic_progress(event: dict) -> None:
     """把主题单入口的模型调用进度显示给最终用户。"""
     event_type = event.get("type")
@@ -137,11 +152,8 @@ def _run_generate_prompts(args) -> int:
 
     if args.brief:
         brief = parse_brief(args.brief)
-        brief.mode = "base"
-        if args.variant:
-            brief.variant = args.variant.upper()
-        elif brief.variant == "T2VA":
-            brief.variant = "FL2VA"
+        # 多参路线（issue #41）：brief 声明 ref 就走 ref，参考素材随 brief 一起传。
+        _apply_frame_route_defaults(brief, args)
         if args.dry_run:
             print(json.dumps({
                 "brief": {"mode": brief.mode, "variant": brief.variant, "duration": brief.duration,
@@ -151,7 +163,8 @@ def _run_generate_prompts(args) -> int:
             return 0
         result, directory = create_video_from_topic(
             brief.plot, config,
-            duration=brief.duration, style=brief.style, language=brief.language, variant=brief.variant,
+            duration=brief.duration, style=brief.style, language=brief.language,
+            variant=brief.variant, mode=brief.mode, refs=brief.refs,
         )
         _print_generation_result(result, directory)
         return 0
@@ -392,12 +405,8 @@ def _run_cli(args: argparse.Namespace) -> int:
     from .config import config
 
     brief = parse_brief(args.brief)
-    # 产品主流程固定 base 模式；生成方式默认 FL2VA，允许 brief 声明或 --variant 显式指定。
-    brief.mode = "base"
-    if args.variant:
-        brief.variant = args.variant.upper()
-    elif brief.variant == "T2VA":
-        brief.variant = "FL2VA"
+    # 多参路线（issue #41）：brief 声明 ref（输入: 多参）就走 ref——「不再强制 base」。
+    _apply_frame_route_defaults(brief, args)
     if args.model and args.model != "fl2va":
         raise ValueError("当前产品只支持 fl2va 模型")
     if args.mode and args.mode != "base":
@@ -424,6 +433,10 @@ def _run_cli(args: argparse.Namespace) -> int:
     final_prompt = run_pipeline(brief, config)
     config.output_path.parent.mkdir(parents=True, exist_ok=True)
     config.output_path.write_text(final_prompt, encoding="utf-8")
+    if brief.mode == "ref" and brief.duration > 15:
+        # 与向导 _phase2_ref_finish 同口径（issue #41 复审）：>15 秒拆段在票 #46 落地，
+        # 这条快路径先出整片也明说，不静默装作已拆。
+        print("[提示] 总时长 >15 秒：多参分段逐段提示词在票 #46 落地，本次输出为整片六段式（供存档）。")
     print(f"\n已完成，最终提示词已写入: {config.output_path}")
     print("=" * 60)
     print(final_prompt)

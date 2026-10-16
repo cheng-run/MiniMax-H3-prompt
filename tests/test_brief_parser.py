@@ -65,6 +65,19 @@ def test_input_ref2va():
     assert b.mode == "ref" and min_refs(b) == 1
 
 
+def test_input_duocan_alias():
+    # 「多参」是术语正名（issue #41），「多参考」旧写法继续可解析
+    b = parse_brief_text("输入: 多参\n## 剧情\nx")
+    assert b.mode == "ref" and min_refs(b) == 1
+
+
+def test_ref_mode_normalizes_variant_no_matter_key_order():
+    # 「变体」写在「输入: 多参」之前也不许把帧变体带进 ref 管线（issue #41 复审：
+    # 帧链只判 variant，残留 FL2VA 会让 ref 会话照跑关键帧节点、产物按 FL2VA 形状走）
+    b = parse_brief_text("变体: FL2VA\n输入: 多参\n## 剧情\nx")
+    assert b.mode == "ref" and b.variant == "T2VA"
+
+
 def test_input_overrides_model():
     # 输入键优先于模型键
     b = parse_brief_text("模型: fl2va\n输入: 尾帧\n## 剧情\nx")

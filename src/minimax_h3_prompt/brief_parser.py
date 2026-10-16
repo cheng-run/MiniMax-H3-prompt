@@ -116,7 +116,7 @@ def parse_brief_text(text: str) -> Brief:
         section_buf.setdefault(current_section, []).append(stripped)
 
     # --- 配置区（meta / 无标题的键值对）---
-    # 优先级：输入（首帧/尾帧/首尾帧/多参考） > 模型（fl2va/ref2va） > 模式/变体
+    # 优先级：输入（首帧/尾帧/首尾帧/多参） > 模型（fl2va/ref2va） > 模式/变体
     input_seen = model_seen = False
     for line in section_buf["meta"]:
         kv = _KV_RE.match(line.strip())
@@ -130,7 +130,7 @@ def parse_brief_text(text: str) -> Brief:
         if k in ("输入", "input"):
             input_seen = True
             m = value.strip().lower()
-            if m in ("多参考", "ref2va"):
+            if m in ("多参考", "多参", "ref2va"):  # 「多参考」是旧写法，「多参」是术语正名（issue #41）
                 brief.mode = "ref"
             elif m in ("首帧", "i2va"):
                 brief.mode = "base"
@@ -202,5 +202,11 @@ def parse_brief_text(text: str) -> Brief:
     # 若没有任何剧情，把整个文件作为剧情（兜底）
     if not brief.plot and brief.mode == "base":
         brief.plot = text.strip()
+
+    # 多参路线的 variant 无意义（issue #41 复审）：归一成 T2VA 占位——否则
+    # 「变体: FL2VA」写在「输入: 多参」之前的 brief 会带着 FL2VA 进 ref 管线，
+    # 帧链照跑（fl2va_frame_prompts 只判 variant）、产物按 FL2VA 形状走。
+    if brief.mode == "ref":
+        brief.variant = "T2VA"
 
     return brief

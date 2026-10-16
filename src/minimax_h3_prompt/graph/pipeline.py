@@ -99,11 +99,19 @@ _FOLDED_NODES = frozenset(
 )
 
 def build_pipeline_graph(model, brief: Brief, config: Config, *, stage: int = 0,
-                         chain: list[str] | None = None):
+                         chain: list[str] | None = None,
+                         refs: list | None = None):
     """构建并编译主管线。stage=0 全图；1 仅阶段 1；2 仅阶段 2。
     chain：可选显式指定节点列表（用于 resume_from_node 截断链）；不传则按 stage 推导。
+    refs：可选参考素材登记（issue #41 复审 F2）——图内 agent 的 ``validate_h3_prompt``
+    工具在装配期把 ref_meta 封进闭包，向导多参路线 brief.refs 为空时必须由调用方把
+    N 资产登记传进来，否则工具层的 N 张覆盖式校验在装配期全盲（外层 QA 轮才查得出）。
+    不传则沿用 brief.refs（帧路线与 brief 文件流程的既有行为）。
     返回 (编译图, agents)。"""
-    agents = build_role_agents(model, brief.refs, brief.mode, brief.duration, brief.variant)
+    agents = build_role_agents(
+        model, brief.refs if refs is None else refs,
+        brief.mode, brief.duration, brief.variant,
+    )
     nodes = make_nodes(agents, model, brief, config)
 
     creative_rt = build_roundtable(model, ["producer", "director", "screenwriter"], config.roundtable_max_rounds)
@@ -316,21 +324,27 @@ def run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_node
     checkpoint_dir：可选断点目录。若已有装组初稿断点，跳过组装直接进 QA 精修；
     组装完成后立刻落盘，质检每轮也更新，保证中途崩溃只重跑当前质检轮。
     """
+    from ..generation import ref_asset_registry
     from ..model_factory import build_chat_model
     from ..stage2_checkpoint import clear_checkpoint, load_checkpoint, save_checkpoint
 
     model = model or build_chat_model()
-    ref_meta = to_tuple(brief.refs)
+    # N 张素材登记（issue #41）：多参路线的 ref_meta 来自登记（编号按剧本出场顺序），
+    # 不是 brief.refs——向导路线的 brief 没有参考图段，登记是链上资产图提示词的衍生物。
+    # brief.refs 非空时登记以用户声明为准，行为与旧版逐字一致。
+    registry = ref_asset_registry(state, brief)
+    ref_meta = to_tuple(registry)
     # QA 精修循环需要 qa / prompt_engineer agent，即便是断点续跑也要先构建
-    agents = build_role_agents(model, brief.refs, brief.mode, brief.duration, brief.variant)
+    agents = build_role_agents(model, registry, brief.mode, brief.duration, brief.variant)
 
     checkpoint = load_checkpoint(checkpoint_dir) if checkpoint_dir else None
     if checkpoint is not None:
         merged = {k: v for k, v in state.items() if k not in ("final_prompt", "final_report")}
+        merged["ref_meta"] = ref_meta
         prompt = str(checkpoint["prompt_draft"])
         print("[续接] 检测到阶段 2 断点（组装已于此前完成），直接进入质检精修。", flush=True)
     else:
-        graph, _ = build_pipeline_graph(model, brief, config, stage=2)
+        graph, _ = build_pipeline_graph(model, brief, config, stage=2, refs=registry)
         initial: PipelineState = {
             "brief": brief,
             "mode": brief.mode,
@@ -338,7 +352,10 @@ def run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_node
             "duration": brief.duration,
             "ref_meta": ref_meta,
             "iterations": 0,
-            **{k: v for k, v in state.items() if k not in ("final_prompt", "final_report", "brief")},
+            # ref_meta 不从旧 state 继承：阶段 1 落下的那份是 brief.refs 的旧口径，
+            # 放它覆盖新登记，N 张覆盖式校验就静默退回空清单（issue #41 的接线点）。
+            **{k: v for k, v in state.items()
+               if k not in ("final_prompt", "final_report", "brief", "ref_meta")},
         }
         merged: dict = dict(initial)
         for chunk in graph.stream(initial, stream_mode="updates"):

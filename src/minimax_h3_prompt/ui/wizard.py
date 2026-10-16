@@ -136,18 +136,26 @@ def _confirm(text: str, default: bool = True) -> bool:
 
 
 def _choose_generation_mode() -> str:
-    """阶段 1 视频生成方式三选一：首帧(I2VA)/尾帧(L2VA)/首尾帧(FL2VA，默认)。"""
+    """阶段 1 视频生成方式四选一：首帧(I2VA)/尾帧(L2VA)/首尾帧(FL2VA，默认)/多参(REF2VA)。
+
+    多参（issue #41）：与首尾帧**并存**的另一条路线，参考素材＋文本驱动、无桥接帧。
+    返回 "REF2VA" 不是帧变体——由 ``_phase1_new`` 转成 ``Brief(mode="ref")``，
+    帧逻辑一律按 ``FRAME_VARIANTS`` 判，不看它。
+    """
+    from ..generation import REF_WORKFLOW_NAME
+
     print("请选择视频生成方式：")
     print("  1. 首帧生成视频（I2VA，以首帧图起笔，向前发展）")
     print("  2. 尾帧生成视频（L2VA，从合理开场逐步收敛到尾帧图）")
     print("  3. 首尾帧生成视频（FL2VA，首尾帧锚定，默认）")
+    print(f"  4. 多参生成视频（ref2va，参考素材＋文本驱动；登记工作流：{REF_WORKFLOW_NAME}）")
     while True:
-        raw = _prompt("输入 1/2/3（回车=3 首尾帧）：").strip()
+        raw = _prompt("输入 1/2/3/4（回车=3 首尾帧）：").strip()
         if not raw:
             return "FL2VA"
-        if raw in ("1", "2", "3"):
-            return {1: "I2VA", 2: "L2VA", 3: "FL2VA"}[int(raw)]
-        print("无效输入，请输入 1/2/3。")
+        if raw in ("1", "2", "3", "4"):
+            return {1: "I2VA", 2: "L2VA", 3: "FL2VA", 4: "REF2VA"}[int(raw)]
+        print("无效输入，请输入 1/2/3/4。")
 
 
 # LangGraph 节点名 → 用户可读环节名（用于节点级进度）。
@@ -236,8 +244,14 @@ def run_wizard(config: Config) -> int:
         session = _resume_awaiting_frames(config, session)
         if session is None:
             return 1
-        frames_shown = True  # 修改循环里已展示过生图提示词
+        # 两条路都真的展示过了才置 True：帧路线在修改循环首步展示，多参路线在
+        # _resume_awaiting_frames 的 ref 分支展示（issue #41 复审：此前无条件置 True，
+        # ref 续接的补展接线永远不触发）。
+        frames_shown = True
     # 阶段 1 完成后直接进入阶段 2（生图很快，无需暂停等人工确认）。
+    # 多参路线（issue #41）走直出：不收帧图、不进桥接链，≤15 秒一份 ref 六段式。
+    if session.brief.mode == "ref":
+        return _phase2_ref_finish(config, session, show_asset_prompts=not frames_shown)
     return _phase2_collect_and_finish(config, session, show_frame_prompts=not frames_shown)
 
 
@@ -308,6 +322,11 @@ def _resume_stage1(config: Config, session: SessionState) -> SessionState | None
         state.pop("_progress")
     save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
     print("\n阶段 1 已恢复完成。")
+    if brief.mode == "ref":
+        # 多参路线（issue #41）：与 _phase1_new 的 ref 收尾同待遇——展示资产图提示词
+        # 后直进阶段 2 直出，人机修改循环（画面级锚在帧提示词上）对它无意义。
+        _show_asset_prompts(state, generation_dir)
+        return load_session(generation_dir)
     # 新跑路径（_phase1_new）在进阶段 2 前会展示生图提示词；续接路径漏了这一步，
     # 用户没有提示词就无法生成关键帧图，阶段 2 的「首帧图片路径」无从提交（2026-09-24 实测）。
     # 修改入口走**同一个**循环（issue #27）：原本这里只展示提示词就走，用户断了线重跑
@@ -327,6 +346,15 @@ def _resume_awaiting_frames(config: Config, session: SessionState) -> SessionSta
     model/agents 留给循环**按需就地构建**：这条路径手上没有 ``run_stage1`` 的返回值，
     而它原本是零 LLM 成本的一步，不该为「看一眼提示词」先建一个客户端。
     """
+    if session.brief.mode == "ref":
+        # 多参路线（issue #41）：没有帧图可等、没有帧提示词可改，直接交回主流程
+        # 进 _phase2_ref_finish 直出视频提示词。
+        # **这里必须补展资产图提示词**（含落盘，issue #41 复审）：调用方随后把
+        # frames_shown 置 True、_phase2_ref_finish 就不再展——首跑若断在 save_session
+        # 与展示之间，续接的 ref 会话会全程拿不到资产提示词（复审实测复现：输出无
+        # 提示词标记、目录里也没有 character/prop/scene-prompt.md）。
+        _show_asset_prompts(session.stage_state, session.directory)
+        return load_session(session.directory)
     state = dict(session.stage_state)
     if _user_revision_loop(state, session.directory, session.brief, config) == RESTART_FLOW:
         return _phase1_new(config)
@@ -395,11 +423,14 @@ def _phase1_new(config: Config) -> SessionState | None:
         print(f"时长无效，使用默认 {config.default_duration:.0f}s。")
         duration = config.default_duration
     style = _prompt("视觉风格（回车=AI 根据主题自行确定）：")
-    variant = _choose_generation_mode()
+    route = _choose_generation_mode()
+    # 多参路线（issue #41）：mode=ref，与首尾帧并存。variant 对多参无意义，取 T2VA 占位
+    # ——帧逻辑一律按 FRAME_VARIANTS 判，不读它。
+    is_ref = route == "REF2VA"
 
     brief = Brief(
-        mode="base",
-        variant=variant,
+        mode="ref" if is_ref else "base",
+        variant="T2VA" if is_ref else route,
         duration=duration,
         style=style or "",
         language=config.default_language,
@@ -419,6 +450,15 @@ def _phase1_new(config: Config) -> SessionState | None:
     state.setdefault("fl2va_frame_descriptions", [])
     state.setdefault("frame_images", [])
     save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
+
+    if brief.mode == "ref":
+        # 多参路线（issue #41）：无关键帧提示词可改、无帧图可交——人机修改循环的
+        # 画面级重出锚在 fl2va_frame_prompts 上，对多参是空转；素材交回与读图校对
+        # 在票 #43/#44 落地。资产图提示词照常出站，随后直出视频提示词。
+        _show_asset_prompts(state, generation_dir)
+        print("\n阶段 1 完成。请复制上面的资产图提示词生成素材图"
+              "（交回入库与读图校对在后续票落地）。")
+        return load_session(generation_dir)
 
     # 修改循环是与两条续接路径**共用**的那一份（issue #27）：三处各写一遍的代价本仓见过
     # 太多次——改一处漏一处，最后表现成某条路径上「意见说了没人听」。
@@ -506,6 +546,28 @@ def _show_asset_prompts(state: dict, generation_dir: Path) -> None:
         print(rendered)
         print()
         (generation_dir / _ARTIFACT_FILES[kind]).write_text(rendered, encoding="utf-8")
+
+
+def _show_ref_registry(state: dict, brief: Brief) -> None:
+    """多参参考素材登记一览：语义名 → <Picture N>（编号按剧本出场顺序，issue #41）。"""
+    from ..generation import REF_WORKFLOW_NAME, ref_asset_registry
+
+    registry = ref_asset_registry(state, brief)
+    print(f"\n[参考素材登记] 编号按剧本出场顺序（登记工作流：{REF_WORKFLOW_NAME}）")
+    if not registry:
+        print("  （无）")
+        return
+    for item in registry:
+        print(f"  <Picture {item.picture}> {item.name}")
+    # 未在剧本出场的语义名会被登记函数排到尾部（稳定序）——这里必须点名（issue #41 复审
+    # F5，绝不静默失败）：语义名与剧本措辞稍有出入（「红裙女孩」vs「穿红裙的姑娘」）就会
+    # 落进这档，「编号即叙事顺序」就此落空，用户却看不见。brief.refs 用户登记的不算。
+    if not brief.refs:
+        script = str(state.get("script", ""))
+        unmatched = [item.name for item in registry if item.name and item.name not in script]
+        if unmatched:
+            print(f"  [提示] 以下语义名未在剧本中找到出场，编号排在最后"
+                  f"（素材照常登记，剧情不硬塞）：{'、'.join(unmatched)}")
 
 
 def _show_revision_list(state: dict) -> None:
@@ -859,6 +921,41 @@ def render_fl2va_frame_markdown_from_bundle(bundle, frame: str) -> str:
 # ---------------------------------------------------------------------------
 # 阶段 2
 # ---------------------------------------------------------------------------
+
+def _phase2_ref_finish(config: Config, session: SessionState, *,
+                       show_asset_prompts: bool = True) -> int:
+    """多参路线阶段 2（issue #41）：不收关键帧图，直出一份官方 ref 六段式视频提示词。
+
+    与首尾帧的阶段 2 是两件事：多参没有桥接帧／首尾帧可交，画面参考是**资产图**
+    （画面描述以生图提示词为描述主体，素材画面事实规则）。总时长 **≤15 秒直出一份**
+    （59- 工作流时长节点 max=15）；>15 秒按镜头边界拆段的逐段提示词在票 #46 落地——
+    本版先出整片供存档并**明说**拆段未做，不静默装作已拆。
+    """
+    brief = session.brief
+    state = dict(session.stage_state)
+    generation_dir = session.directory
+
+    if show_asset_prompts:
+        _show_asset_prompts(state, generation_dir)
+    _show_ref_registry(state, brief)
+
+    with _progress_scope("[阶段 2] 正在组装官方 ref 六段式视频提示词……（预计几分钟，期间无需输入）"):
+        final_state, prompt = run_stage2(state, brief, config,
+                                         on_node=_report_node, checkpoint_dir=generation_dir)
+    _drain_stdin()
+    save_session(generation_dir, brief, final_state, status=STATUS_COMPLETED)
+
+    output_file = generation_dir / "video-prompt.md"
+    output_file.write_text(prompt, encoding="utf-8")
+    if brief.duration > 15:
+        print("[提示] 总时长 >15 秒：按镜头边界拆成 4–15 秒执行段的逐段提示词在票 #46 落地；"
+              "本次先出整片六段式供存档/预览——单次生成仍受 59- 工作流 4–15 秒档约束。")
+    print(f"\n✓ ref 六段式视频提示词已写入：{output_file}")
+    print("\n" + "=" * 60)
+    print(prompt)
+    print("=" * 60)
+    return 0
+
 
 def _ask_optional_path(label: str) -> str:
     """询问可选的图片路径；空=跳过，但需二次确认，防止误触静默降级 T2VA。"""

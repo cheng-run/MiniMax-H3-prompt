@@ -18,13 +18,17 @@ console = Console()
 
 def choose_model() -> str:
     """返回 'i2va' | 'l2va' | 'fl2va' | 'ref2va' | 'polish' | 'dry-run' | 'exit'。"""
+    from ..generation import REF_WORKFLOW_NAME
+
+    # 多参路线登记名钉死 REF_WORKFLOW_NAME（issue #41 AC6）；旧的工作流编号称法已废弃。
+    ref_label = f"④ 多参生成视频（{REF_WORKFLOW_NAME} · 参考素材多张）"
     choice = questionary.select(
         "选择出片方式（对应你的 ComfyUI 工作流和参考输入）",
         choices=[
             "① 首帧生成视频（工作流 62 · 1 张首帧图）",
             "② 尾帧生成视频（工作流 62 · 1 张尾帧图）",
             "③ 首尾帧生成视频（工作流 62 · 首帧+尾帧）",
-            "④ 多参考图生成视频（工作流 63 · 角色/场景多张）",
+            ref_label,
             "⑤ 润色已有草稿（polish）",
             "⑥ 仅解析 brief 自检（dry-run）",
             "⑦ 退出",
@@ -36,7 +40,7 @@ def choose_model() -> str:
         "① 首帧生成视频（工作流 62 · 1 张首帧图）": "i2va",
         "② 尾帧生成视频（工作流 62 · 1 张尾帧图）": "l2va",
         "③ 首尾帧生成视频（工作流 62 · 首帧+尾帧）": "fl2va",
-        "④ 多参考图生成视频（工作流 63 · 角色/场景多张）": "ref2va",
+        ref_label: "ref2va",
         "⑤ 润色已有草稿（polish）": "polish",
         "⑥ 仅解析 brief 自检（dry-run）": "dry-run",
         "⑦ 退出": "exit",
@@ -109,6 +113,7 @@ def run_interactive() -> None:
             brief.variant = model.upper()
         elif model == "ref2va":
             brief.mode = "ref"
+            brief.variant = "T2VA"  # 多参无帧变体（issue #41 复审：防 brief 残留的帧变体混进 ref 管线）
         if model == "polish" and not brief.draft:
             console.print("[yellow]⚠ 该 brief 没有「草稿提示词」段落，将按全流程生成。[/]")
         need = min_refs(brief)

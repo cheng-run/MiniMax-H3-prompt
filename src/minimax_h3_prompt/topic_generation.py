@@ -71,16 +71,21 @@ def create_video_from_topic(
     style: str | None = None,
     language: str | None = None,
     variant: str = "FL2VA",
+    mode: str = "base",
     refs: list[RefItem] | tuple[RefItem, ...] = (),
 ) -> tuple[GenerationResult, Path]:
-    """由主题生成剧本与提示词并落盘；不执行任何外部媒体工作流。"""
+    """由主题生成剧本与提示词并落盘；不执行任何外部媒体工作流。
+
+    ``mode="ref"`` 走多参路线（issue #41：brief 声明 ref 时不再强制 base），
+    ``refs`` 是用户登记的参考素材（brief 文件里声明的 ``<Picture N>``）。
+    """
     if not topic or not topic.strip():
         raise ValueError("视频主题不能为空")
     topic = topic.strip()
     variant = variant.upper()
     directory = Path(config.sessions_root) / topic_slug(topic) / "GEN001"
     brief = Brief(
-        mode="base",
+        mode=mode,
         variant=variant,
         duration=duration or config.default_duration,
         style=style or config.default_style,
