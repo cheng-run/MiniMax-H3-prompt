@@ -265,11 +265,11 @@ class ProjectBible:
 
 @dataclass(frozen=True)
 class Segment:
-    """实际执行单元：一次 4-10s（整数秒）的 Workflow 生成。
+    """实际执行单元：一次 4-15s（整数秒）的 Workflow 生成。
 
     `Shot` 是叙事单元（纸飞机飞过麦田），`Segment` 是运行为单元
-    （单次 H3/FL2VA 生成）。当镜头时长超过 10s 时按 `split_shot_into_segments`
-    拆分为连续段，段间通过桥接帧（bridge frame）保证连续性。
+    （单次 H3/FL2VA 生成）。当镜头时长超过执行窗口时按 `split_shot_into_segments`
+    拆分为连续段；首尾帧链段间通过桥接帧（bridge frame）保证连续性。
     """
 
     segment_id: str
@@ -374,15 +374,15 @@ def _plan_segment_durations(
 def split_shot_into_segments(
     shot: Shot,
     *,
-    max_segment_seconds: float = 10.0,
+    max_segment_seconds: float = 15.0,
     min_segment_seconds: float = 4.0,
 ) -> tuple[Segment, ...]:
     """把单个 `Shot` 拆成连续执行段。
 
     - 时长 ≤ max 的镜头返回一个段（`a`）。
     - 时长超限的镜头按 `max_segment_seconds` 切分；段时长为整数秒
-      （ComfyUI H3 时长选项只有 4-10s 整数档），**末段吸收余数**（前面
-      各段取整，末段 = 总时长 − 各前段之和）。末段越界时递归增减段数拉回区间。
+      （ComfyUI H3 时长节点契约 min=4/max=15，issue #46 扩档），**末段吸收余数**
+      （前面各段取整，末段 = 总时长 − 各前段之和）。末段越界时递归增减段数拉回区间。
     - 段间前后指针自动接续；首段 prev_segment_id 为空。
     """
     durations = _plan_segment_durations(
@@ -434,7 +434,7 @@ class Shot:
     status: str = "planned"
     locked: bool = False
     review_records: tuple[ReviewRecord, ...] = field(default_factory=tuple)
-    # 执行段（4-10s 整数秒/段），由 split_shot_into_segments() 生成；为空表示未拆分
+    # 执行段（4-15s 整数秒/段），由 split_shot_into_segments() 生成；为空表示未拆分
     segments: tuple[Segment, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:

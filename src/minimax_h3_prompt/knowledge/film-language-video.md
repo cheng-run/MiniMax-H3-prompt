@@ -165,5 +165,6 @@ The push-in reveals the tension in his face.
    ✅ `The camera pushes in with small amplitude at slow speed toward the folded letter in her hands.`
    ❌ `Push In, small amplitude, slow speed.`
 2. **切点必须是整秒**：时间戳毫秒位写 `.000`（如 `At 00:04.000`），且严格递增。
-   官方给的理由是 ComfyUI 的 H3 时长档只有 **4-10 秒的整数档**——分镜阶段按情节节拍给镜头时长
-   （本仓允许长短不一），换算到执行段时由分段拆分吸收进整数档。
+   官方文本给的理由是 ComfyUI 的 H3 时长档只给整数秒（原文写 4-10；节点契约实测
+   min=4/max=15，见 ADR 0012——校验档 4–15，首尾帧链规划保守档仍 4-10、多参执行段 4-15）
+   ——分镜阶段按情节节拍给镜头时长（本仓允许长短不一），换算到执行段时由分段拆分吸收进整数档。

@@ -516,6 +516,15 @@ def validate_prompt(text: str, mode: str, duration: float | None = None, variant
     return validate_base(text, duration, variant, ref_meta)
 
 
+def split_ref_sections(text: str) -> dict[str, str]:
+    """ref 六段式 → ``{段名: 内容}``（只含出现的段）。
+
+    分段组装（issue #46）用它取整片提示词里的**定义性段落原文**逐段重复——
+    切段解析与校验器同用 ``_find_sections``，「哪段从哪到哪」不许有第二份口径。
+    """
+    return {h: body for h, (body, _ln) in _find_sections(text, REF_SECTIONS).items()}
+
+
 def format_issues(issues: list[ValidationIssue]) -> str:
     if not issues:
         return "通过：未发现格式问题。"

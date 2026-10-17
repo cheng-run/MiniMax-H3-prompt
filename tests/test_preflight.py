@@ -80,8 +80,16 @@ def test_duration_within_h3_grid_passes():
     assert check_shot_duration(10.0) == []
 
 
+def test_duration_grid_extended_to_15_seconds():
+    """时长校验档 4–10 扩到 4–15（issue #46 AC6）：59- 工作流时长节点 min=4/max=15 实测，
+    旧「下拉只有 4-10」说法对节点已过时；11–15s 落在节点档内，不得再判越界。"""
+    assert check_shot_duration(12.0) == []
+    assert check_shot_duration(15.0) == []
+    assert check_shot_duration(4.0) == []
+
+
 def test_duration_outside_grid_is_error():
-    assert check_shot_duration(12.0)[0].code == "duration_out_of_range"
+    assert check_shot_duration(16.0)[0].code == "duration_out_of_range"
     assert check_shot_duration(3.0)[0].code == "duration_out_of_range"
 
 
