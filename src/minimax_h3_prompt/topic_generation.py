@@ -74,6 +74,7 @@ def create_video_from_topic(
     mode: str = "base",
     refs: list[RefItem] | tuple[RefItem, ...] = (),
     canvases: dict[str, tuple[int, int]] | None = None,
+    video_output=None,
 ) -> tuple[GenerationResult, Path]:
     """由主题生成剧本与提示词并落盘；不执行任何外部媒体工作流。
 
@@ -82,6 +83,8 @@ def create_video_from_topic(
     ``canvases`` 是用户选定画布（issue #42）：CLI 的 --brief 路径在解析出它之后必须
     **递到这里**——本函数自建 Brief，少传一个参数就是「规则在、接线不在」（复审实测：
     main.py 解析出 canvases 却在最后一跳丢掉，静默回落系统默认）。
+    ``video_output`` 同待遇（issue #45）：视频输出三元组（``VideoOutputParams``），
+    注入卡记录的就是它；None ＝ 未声明，卡上回落默认三元组。
     """
     if not topic or not topic.strip():
         raise ValueError("视频主题不能为空")
@@ -98,6 +101,7 @@ def create_video_from_topic(
         raw=topic,
         refs=list(refs),
         canvases=dict(canvases or {}),
+        video_output=video_output,
     )
     # 素材交回入库（issue #43）：brief.refs 带路径的就是交回的素材图，建素材台账。
     # **只对 ref 模式**：base/帧变体的 refs 是首尾帧锚点，进台账就是把锚点冒充参考素材。
@@ -115,6 +119,15 @@ def create_video_from_topic(
         rendered = render_report(report)
         if rendered:
             print(rendered)
+    # 注入卡（issue #45）：台账→参考槽接线清单＋视频输出三元组。同在管线**之前**——
+    # 接线清单不依赖 LLM 产物，崩了也该拿得到；base（首尾帧链）没有参考槽，不越界。
+    if brief.mode == "ref":
+        from .injection_card import VideoOutputParams, write_injection_card
+
+        directory.mkdir(parents=True, exist_ok=True)
+        _card_path, card_text = write_injection_card(
+            directory, brief.video_output or VideoOutputParams())
+        print(card_text)
     result = run_pipeline_structured(
         brief,
         config,

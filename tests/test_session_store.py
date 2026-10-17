@@ -91,6 +91,53 @@ def test_missing_canvases_key_still_reads(tmp_path):
     assert load_session(tmp_path / "GEN001") is not None
 
 
+def test_video_output_survives_resume(tmp_path):
+    """用户选定的视频输出三元组必须活过重启（issue #45，画布同族：漏登记即静默丢）。"""
+    from minimax_h3_prompt.injection_card import VideoOutputParams
+
+    brief = Brief(mode="ref", variant="T2VA", duration=6.0, plot="主题",
+                  video_output=VideoOutputParams(ratio="3:2 (Photo)", megapixels=1.0, multiple=16))
+    generation_dir = tmp_path / "GEN001"
+    save_session(generation_dir, brief, {"shot_table": "表"})
+    loaded = load_session(generation_dir)
+    assert loaded is not None
+    assert (loaded.brief.video_output.ratio,
+            loaded.brief.video_output.megapixels,
+            loaded.brief.video_output.multiple) == ("3:2 (Photo)", 1.0, 16)
+
+
+def _corrupt_video_output(tmp_path, replacement: str) -> None:
+    generation_dir = tmp_path / "GEN001"
+    save_session(generation_dir, _brief(), {"shot_table": "表"})
+    session_file = generation_dir / "session-state.json"
+    raw = session_file.read_text(encoding="utf-8").replace('"video_output": null', replacement)
+    session_file.write_text(raw, encoding="utf-8")
+
+
+@pytest.mark.parametrize("replacement", [
+    '"video_output": ["9:16 (Portrait Widescreen)", 0.4, 32]',  # 整字段错形
+    '"video_output": {"ratio": "5:6", "megapixels": 0.4, "multiple": 32}',   # 档外比例
+    '"video_output": {"ratio": "9:16 (Portrait Widescreen)", "megapixels": "1.0", "multiple": 32}',
+    '"video_output": {"ratio": "9:16 (Portrait Widescreen)", "megapixels": 0.4, "multiple": 32.9}',
+])
+def test_malformed_video_output_in_session_file_is_loud(tmp_path, replacement):
+    """错形三元组必须报错，不许静默强转/截断（画布同纪律，issue #45 复审）。
+
+    `"1.0"` 被 float() 强转、32.9 被 int() 截断都是「数据被改而不报错」——
+    会话文件是系统自己写的，错形只可能是损坏或外人改写。
+    """
+    _corrupt_video_output(tmp_path, replacement)
+    with pytest.raises(ValueError):
+        load_session(tmp_path / "GEN001")
+
+
+def test_missing_video_output_key_still_reads(tmp_path):
+    """键缺失/null ＝ 未选定（旧会话没有该键）：消费方回落默认三元组，不报错。"""
+    _corrupt_video_output(tmp_path, '"video_output": null')
+    loaded = load_session(tmp_path / "GEN001")
+    assert loaded is not None and loaded.brief.video_output is None
+
+
 def test_find_awaiting_sessions_skips_damaged_file_with_warning(tmp_path, capsys):
     """恢复扫描隔离单文件损坏：警告 + 跳过，不炸掉整个扫描（复审：此容错曾零守卫）。"""
     from minimax_h3_prompt.session_store import STATUS_AWAITING_FRAMES, find_awaiting_sessions

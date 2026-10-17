@@ -41,6 +41,17 @@ _SIX_SECTION_PROMPT = (
 GIRL_PROMPT = "人物·红裙女孩专属生图提示词：红裙、黑发、银项链"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_injection_card(monkeypatch):
+    """注入卡（issue #45）不属本文件考题：其视频输出选择器会接着吃交互输入。
+
+    两票在 `_phase2_ref_finish` 里前后脚（读图校对→注入卡→阶段 2），合并后本文件
+    的假输入序列会被注入卡菜单多吃几答。打成空操作——「选择器→卡」由
+    test_wizard_injection_card 专测钉住。
+    """
+    monkeypatch.setattr(wizard, "_deliver_injection_card", lambda *a, **k: None)
+
+
 def _silence(monkeypatch) -> None:
     monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
     monkeypatch.setattr(wizard.sys, "stdin", SimpleNamespace(isatty=lambda: True))

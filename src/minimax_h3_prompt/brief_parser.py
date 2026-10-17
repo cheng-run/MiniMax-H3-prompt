@@ -24,6 +24,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # 防环：injection_card 顶层引 generation→本模块，只能单向
+    from .injection_card import VideoOutputParams
 
 _HEADING_RE = re.compile(r"^#{1,6}\s+(.*)$")
 _KV_RE = re.compile(r"^([^#:#：]+)[:：]\s*(.*)$")
@@ -77,6 +81,11 @@ class Brief:
     # profile 默认表（`image_canvas_size` 的兜底）。选定值是**数据**：构图词分套与
     # 画布显示都以它为准，不再用系统钦定的「推荐尺寸」。
     canvases: CanvasMap = field(default_factory=dict)
+    # 视频输出三元组（issue #45）：比例档 + megapixels + 对齐倍数（59- 节点 widgets
+    # 口径）。None = 未声明，消费方回落默认三元组（`VideoOutputParams()`）；写了
+    # 任一键即成三元组，缺的键取默认。W×H 不是输入（不支持任意宽高直填），由三元组
+    # 按节点公式推导。
+    video_output: VideoOutputParams | None = None
     refs: list[RefItem] = field(default_factory=list)
     draft: str = ""
     raw: str = ""
@@ -166,6 +175,62 @@ def _apply_canvas_line(key: str, value: str, brief: Brief) -> None:
     brief.canvases[family] = size
 
 
+# 视频输出三元组的 brief 键（issue #45）：比例档 + megapixels + 对齐倍数，中英双键。
+# 值口径全在 ``injection_card``（比例归一/区间校验一个门），这里只认键与派活。
+_VIDEO_OUTPUT_KEYS = {
+    "视频比例": "ratio",
+    "视频像素预算": "megapixels",
+    "视频对齐倍数": "multiple",
+    "video_ratio": "ratio",
+    "video_megapixels": "megapixels",
+    "video_multiple": "multiple",
+}
+
+
+def _video_output_field(key: str) -> str:
+    """键 → 三元组字段名；非视频输出键返回空串（行首列表符先剥，画布同款）。"""
+    normalized = _LIST_MARKER_RE.sub("", key.strip().lower()).strip()
+    return _VIDEO_OUTPUT_KEYS.get(normalized, "")
+
+
+def _video_output_line_error(stripped: str) -> ValueError:
+    """视频输出行解析失败的**唯一**报错构造（两处探针同文案——各拼一遍就会漂）。"""
+    return ValueError(f"视频输出行无法解析：{stripped!r}"
+                      "（应为「视频比例/视频像素预算/视频对齐倍数: 值」）")
+
+
+def _apply_video_output_line(key: str, value: str, brief: Brief) -> None:
+    """应用一行视频输出键：三元组按行累积，缺的键取默认（写任一键即成三元组）。
+
+    坏值**当场报**（画布同纪律）：`视频比例: 5:6` 静默回落就是「用户以为选了 5:6、
+    实际按默认 9:16 出片」。构造走 ``injection_card.VideoOutputParams`` 函数级导入
+    ——模块级会经 generation 成环（画布表同款防环口径）；``replace`` 保留未改字段，
+    校验照走 ``__post_init__`` 同一个门。
+    """
+    from dataclasses import replace
+
+    from .injection_card import VideoOutputParams
+
+    field_name = _video_output_field(key)
+    current = brief.video_output or VideoOutputParams()
+    text = value.strip()
+    if field_name == "ratio":
+        updated = replace(current, ratio=text)
+    elif field_name == "megapixels":
+        try:
+            megapixels = float(text)
+        except ValueError as exc:
+            raise ValueError(f"视频像素预算无效：{value!r}（应为数字，如 0.4）") from exc
+        updated = replace(current, megapixels=megapixels)
+    else:
+        try:
+            multiple = int(text)
+        except ValueError as exc:
+            raise ValueError(f"视频对齐倍数无效：{value!r}（应为整数，如 32）") from exc
+        updated = replace(current, multiple=multiple)
+    brief.video_output = updated
+
+
 def parse_brief(path: str | Path) -> Brief:
     text = Path(path).read_text(encoding="utf-8")
     return parse_brief_text(text)
@@ -191,21 +256,31 @@ def parse_brief_text(text: str) -> Brief:
     input_seen = model_seen = False
     for line in section_buf["meta"]:
         stripped = line.strip()
+        probe = _LIST_MARKER_RE.sub("", stripped.lower()).strip()
         kv = _KV_RE.match(stripped)
         if not kv:
-            # 画布行**长得像画布行却解析不了**（缺冒号、`=` 分隔、空格分隔）要当场报：
-            # 沉默跳过就是「用户以为选了、实际回落默认表」（issue #42 复审）。
-            probe = _LIST_MARKER_RE.sub("", stripped.lower()).strip()
+            # 画布行/视频输出行**长得像该键却解析不了**（缺冒号、`=` 分隔、空格分隔）
+            # 要当场报：沉默跳过就是「用户以为选了、实际回落默认」（issue #42 复审）。
             if probe.startswith(("画布", "canvas")):
                 raise ValueError(f"画布行无法解析：{stripped!r}（应为「画布 <家族>: 宽x高」）")
+            if any(probe.startswith(name) for name in _VIDEO_OUTPUT_KEYS):
+                raise _video_output_line_error(stripped)
             continue
         key, value = kv.group(1).strip(), kv.group(2).strip()
-        # 画布行先于「空值跳过」处理：空值是坏值（parse_canvas_size 会报），不是「没写」
+        # 画布行/视频输出行先于「空值跳过」处理：空值是坏值（解析口会报），不是「没写」
         # ——通用的 `if not value: continue` 曾把 `画布 zimage:` 静默吞掉（复审点名）。
         if _is_canvas_key(key):
             value = re.split(r"\s+#", value, maxsplit=1)[0].strip()
             _apply_canvas_line(key, value, brief)
             continue
+        if _video_output_field(key):
+            value = re.split(r"\s+#", value, maxsplit=1)[0].strip()
+            _apply_video_output_line(key, value, brief)
+            continue
+        # 形似视频输出键但键没归一（`视频比例=9:16` 会被 KV 正则截成键「视频比例=9」、
+        # 值「16」）：这种行进了别的分支就是静默吞——当场报。
+        if any(probe.startswith(name) for name in _VIDEO_OUTPUT_KEYS):
+            raise _video_output_line_error(stripped)
         if not value:
             continue
         value = re.split(r"\s+#", value, maxsplit=1)[0].strip()  # 去掉行内注释（空格+#）

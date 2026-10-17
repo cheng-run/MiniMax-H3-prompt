@@ -171,6 +171,8 @@ def _run_generate_prompts(args) -> int:
             # 画布键解析出来就得递进来（issue #42 复审）：少这一参，brief 文件里的
             # 选定画布在最后一跳被丢掉、静默回落系统默认——「规则在、接线不在」。
             canvases=brief.canvases,
+            # 视频输出三元组同待遇（issue #45）：解析出就得递到注入卡，不许中途丢。
+            video_output=brief.video_output,
         )
         _print_generation_result(result, directory)
         return 0
@@ -440,8 +442,9 @@ def _run_cli(args: argparse.Namespace) -> int:
         # 台账与正本复制没有落点——不静默装作已建账，指路两条有生成目录的产线
         # （同「绝不静默失败」：能力的可达边界要看得见，不许静默缺位）。
         if brief.mode == "ref" and any(r.path for r in brief.refs):
-            print("[提示] --brief 快路径不建素材台账（无生成目录）；需要台账"
-                  "（语义名/编号/路径/SHA256）请用 generate-prompts --brief 或两阶段向导交回入库。")
+            print("[提示] --brief 快路径不建素材台账与注入卡（无生成目录）；需要台账"
+                  "（语义名/编号/路径/SHA256）或注入卡请用 generate-prompts --brief"
+                  " 或两阶段向导交回入库。")
     if brief.draft:
         print(f"草稿: {brief.draft[:80]}{'…' if len(brief.draft) > 80 else ''}")
 
