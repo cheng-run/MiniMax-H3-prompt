@@ -62,3 +62,9 @@ class PipelineState(TypedDict, total=False):
     # 画面级要求悄悄丢干净（新解出的提示词里一条都不剩）。
     user_revisions: list[dict]  # 累积的用户修订（含已落地标记），真源见 user_revisions.py
     setting_revision: dict  # 本轮那条设定级修订 {layer, text}，只在一次重跑内有效
+
+    # 读图校对记录（issue #44）：语义名 → {sha256, status, description, …}。
+    # `description` 是合并后的素材画面事实，下游提示词写作经 ref_asset_registry 消费。
+    # **必须在这里声明**：提示词工程师/参考一致性节点读它（经 ref_asset_registry），
+    # LangGraph 只搬运声明过的键——漏声明就是「裁决结果到不了下游」的静默断链。
+    asset_proofreads: dict

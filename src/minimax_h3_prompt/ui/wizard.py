@@ -1116,6 +1116,170 @@ def _collect_ref_assets(state: dict, brief: Brief, generation_dir: Path) -> bool
     return True
 
 
+def _ask_deviation_choice(dev, idx: int, total: int) -> str:
+    """偏差三选（issue #44 AC2）：回车默认「按图改文案」；无效输入重问，不静默替人决定。"""
+    from ..asset_proofread import DECISION_KEEP, DECISION_REGENERATE, DECISION_REWRITE
+
+    print(f"  [偏差 {idx}/{total}] {dev.aspect}：描述「{dev.prompt_quote}」→ 图中「{dev.observed}」")
+    while True:
+        raw = _prompt(
+            "  裁决：1=按图改文案（改描述这一处）/ 2=重生成这张素材图 / "
+            "3=明知故犯保留原描述（回车=1）：").strip()
+        if raw in ("", "1"):
+            return DECISION_REWRITE
+        if raw == "2":
+            return DECISION_REGENERATE
+        if raw == "3":
+            return DECISION_KEEP
+        print("  [错误] 只认 1/2/3（回车=1）。")
+
+
+def _pin_rewrite_quote(dev, running: str, *, name: str) -> str:
+    """「按图改文案」落点钉锚：返回在 ``running`` 上唯一命中、语义名之外的引文；放弃返回空串。
+
+    失锚／多处命中／只命中语义名都引导补锚（粘贴正文原文把落点钉到唯一一处），
+    回车＝放弃补锚，由调用方回三选改选其他裁决——三选必须走得到底，不许未捕获崩溃
+    （评审：失锚引文的「按图改文案」路径名不副实）。补锚后的引文记进裁决记录：
+    ``prompt_quote`` ＝ 实际落笔的锚，不是模型原话。
+    """
+    from ..asset_proofread import locate_rewrite_span
+
+    quote = dev.prompt_quote
+    while True:
+        try:
+            locate_rewrite_span(running, quote, name)
+            return quote
+        except ValueError as exc:
+            print(f"  [提示] {exc}")
+            quote = _prompt(
+                "  补锚引文（粘贴描述正文里的原文把落点钉到唯一一处，回车=改选裁决）：").strip()
+            if not quote:
+                return ""
+
+
+def _proofread_ref_assets(state: dict, brief: Brief, generation_dir: Path) -> bool:
+    """读图校对（issue #44）：对照器出偏差/补漏清单，偏差三选裁决，并入素材画面事实。
+
+    返回 True ＝ 校对完成，继续阶段 2；False ＝ 有「重生成」裁决或读图失败——
+    **停在等交回，不静默把废图钉进成片**（票面 AC2）；会话保持可续接，重跑向导
+    换版交回新图后按新 sha 重新校对（已裁决同版不再重问）。
+    """
+    from ..asset_ledger import KIND_PICTURE, load_asset_ledger
+    from ..asset_proofread import (
+        DECISION_REGENERATE,
+        DECISION_REWRITE,
+        PROOFREADS_KEY,
+        STATUS_DONE,
+        STATUS_PENDING_REGEN,
+        Adjudication,
+        Deviation,
+        ProofreadRecord,
+        build_proofread_request,
+        compare_descriptions,
+        merge_asset_description,
+        parse_reading,
+        proofread_rows,
+        render_proofread_report,
+    )
+    from ..generation import image_prompt_variants
+    from ..tools.reference_auditor import describe_image
+
+    # 对照底本＝生图提示词（描述主体，永不被读图整体替换）。每个语义名恒以它为底
+    # 重新对照——换版重交的新图是按提示词重画的，不是按上一轮合并结果重画的。
+    bases = {v.name: v.positive_prompt for v in image_prompt_variants(state)}
+    if brief is not None:
+        for r in brief.refs:
+            bases.setdefault(r.name, r.description)
+    ledger = load_asset_ledger(generation_dir)
+    pictures = [e for e in ledger.entries if e.kind == KIND_PICTURE]
+    # 走共享响错口：错形不许被 or {} 洗成空表悄悄起新账（评审硬违规；#42 画布口径）
+    records = proofread_rows(state)
+
+    def _save() -> None:
+        state[PROOFREADS_KEY] = records
+        save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
+
+    regenerate_pending = False
+    for entry in pictures:
+        base = bases.get(entry.name)
+        if not base:
+            continue  # 无描述主体可对照（不在登记里的语义名，入库已点名）
+        old = records.get(entry.name)
+        if old is not None:
+            old_record = ProofreadRecord.from_dict(entry.name, old)  # 坏行响不吞
+            if old_record.sha256 == entry.sha256 and old_record.status == STATUS_DONE:
+                continue  # 同版正本已裁决完：不重读、不重问
+        print(f"\n[读图校对] {entry.name}（{entry.tag}）")
+        try:
+            raw = describe_image(generation_dir / entry.path, build_proofread_request(base))
+            reading = parse_reading(raw)
+        except Exception as exc:  # noqa: BLE001 — 读图失败要响且不放行（图跑偏无人纠）
+            print(f"[读图校对] {entry.name} 读图失败：{exc}")
+            print("已停在等交回：图没读成就不放行；重跑向导可重试。")
+            _save()
+            return False
+        report = compare_descriptions(base, reading)
+        print(render_proofread_report(report))
+
+        adjudications: list[Adjudication] = []
+        voided = False
+        running = base  # 补锚校验的落笔文本：merge 按序改它，锚要在演进文本上钉得住
+        for idx, dev in enumerate(report.deviations, 1):
+            while True:  # 补锚放弃＝回三选重选；三选必须走得到底（评审）
+                choice = _ask_deviation_choice(dev, idx, len(report.deviations))
+                if choice == DECISION_REGENERATE:
+                    # 图要重画：本轮其余裁决无意义（新图交回后重新校对），不并入任何改动
+                    adjudications.append(Adjudication(dev, choice))
+                    voided = True
+                    break
+                if choice != DECISION_REWRITE:
+                    adjudications.append(Adjudication(dev, choice))
+                    break
+                quote = _pin_rewrite_quote(dev, running, name=entry.name)
+                if not quote:
+                    continue  # 放弃补锚：回三选改选其他裁决
+                repl = _prompt(f"  改后文案（回车=用图中实见「{dev.observed}」）：").strip()
+                adj = Adjudication(Deviation(dev.aspect, quote, dev.observed), choice, repl)
+                adjudications.append(adj)
+                running = merge_asset_description(running, [adj], [], name=entry.name)
+                break
+            if voided:
+                break
+
+        accepted: list[str] = []
+        if report.omissions and not voided:
+            if _confirm(f"把 {len(report.omissions)} 条补漏事实并入素材画面事实？", default=True):
+                accepted = [o.fact for o in report.omissions]
+
+        if voided:
+            # 写账走 ProofreadRecord（读侧同型）：手拼 dict 是同一 schema 的第二写点
+            records[entry.name] = ProofreadRecord(
+                name=entry.name, sha256=entry.sha256, status=STATUS_PENDING_REGEN,
+                description=base, adjudications=tuple(adjudications),
+            ).to_dict()
+            regenerate_pending = True
+            _save()  # 逐张落盘：后面的图中途炸不丢这张的裁决（评审：崩溃丢账）
+            continue
+        # name=语义名：改写落点不许落在名字上（名字是 registry 键不是偏差处，
+        # 评审点名的缺陷场景——全局 replace 连名改会与登记名失同步）。
+        merged = merge_asset_description(base, adjudications, accepted, name=entry.name)
+        records[entry.name] = ProofreadRecord(
+            name=entry.name, sha256=entry.sha256, status=STATUS_DONE,
+            description=merged, adjudications=tuple(adjudications),
+            omissions=tuple(accepted),
+        ).to_dict()
+        _save()  # 逐张落盘（同上）
+        if merged != base:
+            print(f"  素材画面事实（合并后）：{merged}")
+
+    _save()
+    if regenerate_pending:
+        print("\n[读图校对] 有素材裁决为「重生成这张素材图」——先到这里，废图不进片。")
+        print("  请在 ComfyUI 重新生成该素材图后重跑向导交回（换版入库后自动重新校对）。")
+        return False
+    return True
+
+
 def _deliver_ref_segments(state: dict, brief: Brief, prompt: str,
                           generation_dir: Path) -> None:
     """>15 秒多参分段交付（issue #46）：薄接线——编排/文案全在 ref_segments 一份。"""
@@ -1145,6 +1309,10 @@ def _phase2_ref_finish(config: Config, session: SessionState, *,
     _show_ref_registry(state, brief)
     # 素材交回入库（issue #43）：缺项被用户选「稍后补交」就停在这，会话保持可续接。
     if not _collect_ref_assets(state, brief, generation_dir):
+        return 0
+    # 读图校对（issue #44）：偏差三选裁决 → 并入素材画面事实，下游写作消费；
+    # 有「重生成」裁决或读图失败就停在这——废图不静默进片。
+    if not _proofread_ref_assets(state, brief, generation_dir):
         return 0
 
     with _progress_scope("[阶段 2] 正在组装官方 ref 六段式视频提示词……（预计几分钟，期间无需输入）"):

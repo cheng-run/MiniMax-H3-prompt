@@ -34,6 +34,8 @@ STATUS_SEGMENTED_RUNNING = "segmented_running"
 # 续跑丢掉它，分段提示词就会退回照分镜表写（2026-09-22 首帧不锚定缺陷）。
 # `user_revisions` 是累积的用户修订（唯一真源）——丢掉等于用户要说的话得再说一遍；
 # `frame_round` 是它的轮次计数器（只增不减，撤条也不能回退，否则台账行号会重复）。
+# `asset_proofreads` 是读图校对记录（issue #44）——丢掉等于三选裁决白做、换版后
+# 旧裁决还冒充新版的裁决。
 # **故意不在**这里的：`frame_revision_baseline`（修订基线，issue #25）与
 # `setting_revision`（本轮那条设定级修订，issue #28）。两个都是人机修改循环**某一轮的
 # 入参**而不是产物：前者每轮由当时那一版产物现渲染，持久化它等于把一份陈旧的基线喂给
@@ -46,7 +48,7 @@ _STATE_KEYS = (
     "identity_lock", "shot_table", "shot_review_lock", "visual_design",
     "fl2va_prompt_bundle", "fl2va_frame_descriptions", "subject_defs",
     "sound_design", "music", "final_prompt", "final_report", "_progress",
-    "user_revisions", "frame_round",
+    "user_revisions", "frame_round", "asset_proofreads",
 )
 
 

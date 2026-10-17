@@ -115,6 +115,49 @@ def test_ref_asset_registry_prefers_brief_refs():
     ]
 
 
+def test_ref_asset_registry_prefers_image_prompt_over_ref_description():
+    """同名既有 brief.refs 登记描述又有生图提示词：描述取生图提示词（素材画面事实
+    规则：生图提示词为描述主体、细节最全），登记描述只在没有生图提示词时兜底——
+    与读图校对的对照底本同优先序（评审：双源不一致会让校对记录一来描述整体换源）。"""
+    state = {
+        "script": "红裙女孩在庭院。",
+        "character_image_prompts": [
+            {"name": "红裙女孩", "positive_prompt": "红裙、黑发、银项链的生图提示词正文"},
+        ],
+    }
+    brief = Brief(mode="ref", refs=[
+        RefItem(picture=1, name="红裙女孩", description="用户登记的旧描述"),
+        RefItem(picture=2, name="只有登记的名字", description="无生图提示词的描述"),
+    ])
+    by_name = {r.name: r.description for r in ref_asset_registry(state, brief)}
+    assert by_name["红裙女孩"] == "红裙、黑发、银项链的生图提示词正文"
+    assert by_name["只有登记的名字"] == "无生图提示词的描述"
+
+
+def test_ref_asset_registry_consumes_proofread_description():
+    """裁决并入后的素材画面事实回灌下游（issue #44 AC3）：描述取校对记录的合并结果。
+
+    没有这条，读图校对就成了「对照完就扔」——偏差裁决的结果到不了提示词写作手里。
+    """
+    state = {
+        "script": "红裙女孩在庭院。",
+        "character_image_prompts": [
+            {"name": "红裙女孩", "positive_prompt": "红裙、黑发、银项链的生图提示词正文"},
+        ],
+        "asset_proofreads": {
+            "红裙女孩": {
+                "sha256": "ab" * 32, "status": "done",
+                "description": "宝蓝色长裙、黑发、银项链的生图提示词正文；左腕银色腕表",
+                "deviations": [], "omissions": [],
+            },
+        },
+    }
+    registry = ref_asset_registry(state)
+    assert registry[0].description == (
+        "宝蓝色长裙、黑发、银项链的生图提示词正文；左腕银色腕表"
+    )
+
+
 def test_ref_asset_registry_tail_keeps_unmatched_stable():
     """语义名在剧本里找不到出场的资产排最后（稳定次序：人物→道具→场景枚举序）。
 

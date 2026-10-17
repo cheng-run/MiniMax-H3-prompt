@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
+from .asset_proofread import proofread_descriptions
 from .brief_parser import Brief, CanvasMap, RefItem
 from .tools.theme_guard import (
     _CONFLICTING_OUTDOOR_TERMS,
@@ -951,12 +952,13 @@ def ref_asset_registry(state: dict[str, Any], brief: Brief | None = None) -> lis
     ``list_reference_assets``（实测复审：帧路线 qa/prompt_engineer 多出该工具、报资产级编号，
     AC1「首尾帧路线不受影响」软性回归）。派生只对 ``mode="ref"`` 发生。
 
-    描述取该资产的**生图提示词**（素材画面事实规则：以生图提示词为描述主体，它细节最全；
-    素材交回入库在 issue #43 落地，读图纠偏／补漏在 #44——交回的素材图不改这里的描述）。
+    描述默认取该资产的**生图提示词**（素材画面事实规则：以生图提示词为描述主体，
+    它细节最全）；若该语义名有**读图校对**记录（issue #44），取裁决合并后的**素材画面
+    事实**——生图提示词为底、只定点改了不符的那处、尾部并入了补漏事实，细节不丢。
     """
     if brief is not None:
         if brief.refs:
-            return sorted(brief.refs, key=lambda r: r.picture)
+            return _with_merged_descriptions(sorted(brief.refs, key=lambda r: r.picture), state)
         if brief.mode != "ref":
             return []
     script = str(state.get("script", ""))
@@ -970,9 +972,26 @@ def ref_asset_registry(state: dict[str, Any], brief: Brief | None = None) -> lis
 
     variants = image_prompt_variants(state)
     ordered = [item for _, item in sorted(enumerate(variants), key=_appearance_key)]
-    return [
+    return _with_merged_descriptions([
         RefItem(picture=number, name=item.name, description=item.positive_prompt)
         for number, item in enumerate(ordered, 1)
+    ], state)
+
+
+def _with_merged_descriptions(refs: list[RefItem], state: dict[str, Any]) -> list[RefItem]:
+    """素材画面事实覆盖（issue #44 AC3）：描述取校对记录的合并结果。
+
+    合并结果＝生图提示词为底、定点纠偏 + 尾部补漏（``merge_asset_description``），
+    细节不丢。无记录时的默认优先序与校对对照底本**同源**（评审：双源不一致会让
+    校对记录一来、描述从登记文本整体换源）：合并结果 ＞ 生图提示词 ＞ 用户登记描述。
+    """
+    merged = proofread_descriptions(state)
+    prompts = {v.name: v.positive_prompt for v in image_prompt_variants(state)}
+    return [
+        RefItem(picture=r.picture, name=r.name,
+                description=merged.get(r.name) or prompts.get(r.name) or r.description,
+                path=r.path)
+        for r in refs
     ]
 
 

@@ -114,6 +114,14 @@ def _stub_stage1(monkeypatch) -> None:
                                                      {"prompt_engineer": object()}))
 
 
+def _stub_vision_clean(monkeypatch) -> None:
+    """读图校对（issue #44）在交回入库后必跑——打桩成无偏差读数，本文件只测入库。"""
+    from minimax_h3_prompt.tools import reference_auditor
+
+    monkeypatch.setattr(reference_auditor, "describe_image",
+                        lambda path, instruction=None: '{"claims": []}')
+
+
 def _write_source(tmp_path: Path, name: str, content: bytes) -> Path:
     source = tmp_path / "returned" / name
     source.parent.mkdir(parents=True, exist_ok=True)
@@ -131,6 +139,8 @@ def test_ref_flow_collects_pictures_and_writes_ledger(tmp_path, monkeypatch, cap
     monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
     _stub_stage1(monkeypatch)
     _stub_stage2(monkeypatch)
+
+    _stub_vision_clean(monkeypatch)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
     paths = {
         "红裙女孩": _write_source(tmp_path, "girl.png", b"girl"),
@@ -167,6 +177,8 @@ def test_three_kinds_via_video_audio_addflow(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
     _stub_stage1(monkeypatch)
     _stub_stage2(monkeypatch)
+
+    _stub_vision_clean(monkeypatch)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
     girl = _write_source(tmp_path, "girl.png", b"girl")
     video = _write_source(tmp_path, "cam.mp4", b"vid")
@@ -193,6 +205,8 @@ def test_incomplete_intake_pauses_and_stays_resumable(tmp_path, monkeypatch, cap
     monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
     _stub_stage1(monkeypatch)
     _stub_stage2(monkeypatch)
+
+    _stub_vision_clean(monkeypatch)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
     _fake_inputs(monkeypatch, [TOPIC, "", "", "4", "", "", "", ""])
     _fake_confirms(monkeypatch, [("视频/音频", False), ("继续", False)])
@@ -212,6 +226,8 @@ def test_complete_intake_proceeds_without_pause_question(tmp_path, monkeypatch):
     monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
     _stub_stage1(monkeypatch)
     _stub_stage2(monkeypatch)
+
+    _stub_vision_clean(monkeypatch)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
     paths = [_write_source(tmp_path, f"{i}.png", b"x") for i in range(4)]
     _fake_inputs(monkeypatch, [TOPIC, "", "", "4"] + [str(p) for p in paths])
@@ -236,6 +252,8 @@ def test_replacement_is_reported_and_needs_confirmation(tmp_path, monkeypatch, c
     monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
     _stub_stage1(monkeypatch)
     _stub_stage2(monkeypatch)
+
+    _stub_vision_clean(monkeypatch)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
     directory = tmp_path / "sessions" / "s" / "GEN001"
     directory.mkdir(parents=True)
