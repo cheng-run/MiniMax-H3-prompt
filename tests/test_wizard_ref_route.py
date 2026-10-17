@@ -140,8 +140,9 @@ def test_ref_route_direct_prompt_end_to_end(tmp_path, monkeypatch, capsys):
     _stub_stage1(monkeypatch, captured)
     _stub_stage2(monkeypatch, captured)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
-    # 主题/时长/风格/方式，随后素材交回四问全跳过（issue #43）——不收帧图路径
-    asked = _fake_inputs(monkeypatch, [TOPIC, "", "", "4", "", "", "", ""])
+    # 主题/时长/风格/方式，随后素材交回四问全跳过（issue #43）——不收帧图路径；
+    # 末两问是视频输出选择器（"8"=9:16 档、"1"=采用默认预算，issue #45）
+    asked = _fake_inputs(monkeypatch, [TOPIC, "", "", "4", "", "", "", "", "8", "1"])
     monkeypatch.setattr(wizard, "_confirm", _confirm_continue_only)
 
     code = wizard.run_wizard(_cfg(tmp_path))
@@ -169,7 +170,8 @@ def test_ref_route_over_15s_delivers_segment_prompts_and_order_card(tmp_path, mo
     _stub_stage1(monkeypatch)
     _stub_stage2(monkeypatch)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
-    _fake_inputs(monkeypatch, [TOPIC, "20", "", "4", "", "", "", ""])  # 素材交回四问全跳过
+    # 素材交回四问全跳过；末两问是视频输出选择器（issue #45）
+    _fake_inputs(monkeypatch, [TOPIC, "20", "", "4", "", "", "", "", "8", "1"])
     monkeypatch.setattr(wizard, "_confirm", _confirm_continue_only)
 
     code = wizard.run_wizard(_cfg(tmp_path))
@@ -210,7 +212,8 @@ def test_ref_resume_awaiting_still_delivers_asset_prompts(tmp_path, monkeypatch,
     save_session(directory, brief, _ref_stage1_state(), status=STATUS_AWAITING_FRAMES)
     session = load_session(directory)
     monkeypatch.setattr(wizard, "_offer_resume", lambda config: session)
-    _fake_inputs(monkeypatch, ["", "", "", ""])  # 素材交回四问全跳过（issue #43）
+    # 素材交回四问全跳过（issue #43）；末两问是视频输出选择器（issue #45）
+    _fake_inputs(monkeypatch, ["", "", "", "", "8", "1"])
     monkeypatch.setattr(wizard, "_confirm", _confirm_continue_only)
 
     code = wizard.run_wizard(_cfg(tmp_path))

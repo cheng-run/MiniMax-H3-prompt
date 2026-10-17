@@ -775,6 +775,13 @@ def brief_snapshot(brief: Brief) -> dict[str, Any]:
         # 用户选定画布（issue #42 复审）：本快照也是「逐字段显式列出」的清单，
         # 漏登记的字段在 generation.json 里就没了——选定值是产物数据，必须留痕。
         "canvases": {family: [width, height] for family, (width, height) in brief.canvases.items()},
+        # 视频输出三元组（issue #45）：比例档 + megapixels + 对齐倍数（注入卡同口径）。
+        "video_output": (
+            {"ratio": brief.video_output.ratio,
+             "megapixels": brief.video_output.megapixels,
+             "multiple": brief.video_output.multiple}
+            if brief.video_output else None
+        ),
         "refs": [
             {"picture": ref.picture, "name": ref.name, "description": ref.description}
             for ref in brief.refs

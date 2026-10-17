@@ -68,6 +68,14 @@ def _brief_to_dict(brief: Brief) -> dict[str, Any]:
         # 用户选定的画布（issue #42）：同上，漏登记就静默回落默认表。元组转列表
         # 是 JSON 的口径，读回时再转回元组。
         "canvases": {family: [width, height] for family, (width, height) in brief.canvases.items()},
+        # 视频输出三元组（issue #45）：向导选定后回写进 brief，漏登记同样静默丢——
+        # 重启续接后注入卡会按默认重出，与用户选定对不上账。
+        "video_output": (
+            {"ratio": brief.video_output.ratio,
+             "megapixels": brief.video_output.megapixels,
+             "multiple": brief.video_output.multiple}
+            if brief.video_output else None
+        ),
         "refs": [
             {"picture": r.picture, "name": r.name, "description": r.description, "path": r.path}
             for r in brief.refs
@@ -103,6 +111,28 @@ def _canvases_from_dict(raw: Any) -> dict[str, tuple[int, int]]:
     return result
 
 
+def _video_output_from_dict(raw: Any):
+    """读回视频输出三元组；None ＝ 未选定（消费方回落默认三元组）。
+
+    错形**大声报错**（画布同款口径）：会话文件是我们自己写的，错形只可能是损坏或
+    外人改写——吞掉它就「用户明明选了、续接后按默认重出」。值**不预强转**、原样
+    交给 ``VideoOutputParams`` 校验门（``"1.0"`` 强转、``32.9`` 截断都是静默改数据，
+    画布条目「不许静默强转/截断」同款纪律），函数级导入防环。
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"会话文件的视频输出字段错形：{raw!r}"
+                         "（应为 {ratio, megapixels, multiple} 对象）")
+    from .injection_card import VideoOutputParams
+
+    return VideoOutputParams(
+        ratio=raw.get("ratio", ""),
+        megapixels=raw.get("megapixels", 0),
+        multiple=raw.get("multiple", 0),
+    )
+
+
 def _brief_from_dict(raw: dict[str, Any]) -> Brief:
     brief = Brief(
         mode=str(raw.get("mode", "base")),
@@ -113,6 +143,7 @@ def _brief_from_dict(raw: dict[str, Any]) -> Brief:
         plot=str(raw.get("plot", "")),
         clarifications=str(raw.get("clarifications", "")),
         canvases=_canvases_from_dict(raw.get("canvases")),
+        video_output=_video_output_from_dict(raw.get("video_output")),
         draft=str(raw.get("draft", "")),
     )
     for item in raw.get("refs", []):

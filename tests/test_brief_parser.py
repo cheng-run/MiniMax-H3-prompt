@@ -199,3 +199,61 @@ def test_canvas_unparseable_line_is_loud():
                  "1. 画布zimage=700x1300"):
         with pytest.raises(ValueError):
             parse_brief_text(f"{line}\n## 剧情\nx")
+
+
+# ---------------------------------------------------------------------------
+# 视频输出键（issue #45）：比例档 + megapixels + 对齐倍数 三元组进 brief
+# ---------------------------------------------------------------------------
+
+def test_video_output_keys_parse_the_widget_triple():
+    """`视频比例/视频像素预算/视频对齐倍数` → 三元组（节点 widgets 口径）。"""
+    b = parse_brief_text(
+        "视频比例: 9:16 (Portrait Widescreen)\n视频像素预算: 0.4\n视频对齐倍数: 32\n## 剧情\nx")
+    assert b.video_output.ratio == "9:16 (Portrait Widescreen)"
+    assert (b.video_output.megapixels, b.video_output.multiple) == (0.4, 32)
+
+
+def test_video_ratio_accepts_shorthand_and_full_label():
+    """简写 `9:16` 与节点全标签同门——照抄进 widget 的是全标签（解析时归一）。"""
+    short = parse_brief_text("视频比例: 9:16\n## 剧情\nx")
+    full = parse_brief_text("视频比例: 9:16 (Portrait Widescreen)\n## 剧情\nx")
+    assert short.video_output.ratio == full.video_output.ratio == "9:16 (Portrait Widescreen)"
+
+
+def test_video_output_partial_keys_fill_defaults():
+    """只写一个键＝其余取默认（0.4MP / 32，登记工作流现值）；有键即成三元组。"""
+    b = parse_brief_text("视频像素预算: 1.0\n## 剧情\nx")
+    assert b.video_output.megapixels == 1.0
+    assert b.video_output.multiple == 32
+    assert b.video_output.ratio == "9:16 (Portrait Widescreen)"
+
+
+def test_video_output_absent_leaves_none():
+    """没写键 ＝ 未声明（video_output 为 None）：消费方回落默认三元组，不造假选定。"""
+    b = parse_brief_text("时长: 5\n## 剧情\nx")
+    assert b.video_output is None
+
+
+def test_video_output_bad_values_are_loud():
+    """档外比例/非数预算/越界倍数/空值都当场报（坏值不是「没写」）。"""
+    for line in ("视频比例: 5:6", "视频比例: 480x864",  # 无任意比例、宽高直填不收
+                 "视频像素预算: 大", "视频对齐倍数: 三十",
+                 "视频比例:", "视频像素预算:"):
+        with pytest.raises(ValueError):
+            parse_brief_text(f"{line}\n## 剧情\nx")
+
+
+def test_video_output_unparseable_line_is_loud():
+    """视频输出键的异形行（`=` 分隔、缺分隔符、列表符变体）当场报——画布同纪律。"""
+    for line in ("视频比例=9:16", "视频比例 9:16",
+                 "video_ratio=9:16", "- 视频比例 9:16"):
+        with pytest.raises(ValueError):
+            parse_brief_text(f"{line}\n## 剧情\nx")
+
+
+def test_video_output_english_keys_and_markers_read():
+    """英文键与行首列表符照读（画布键全家桶同款；键形态拼错不得静默作废）。"""
+    for line in ("video_ratio: 3:2", "- 视频比例: 3:2", "1. 视频像素预算: 0.6",
+                 "video_multiple: 16"):
+        b = parse_brief_text(f"{line}\n## 剧情\nx")
+        assert b.video_output is not None, f"键形态没读入：{line!r}"
