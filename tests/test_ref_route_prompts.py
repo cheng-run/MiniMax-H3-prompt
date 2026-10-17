@@ -386,6 +386,36 @@ def test_cli_brief_path_frame_route_unchanged(tmp_path, monkeypatch):
     assert captured["brief"].variant == "FL2VA"
 
 
+def test_cli_brief_path_declares_ledger_boundary(tmp_path, monkeypatch, capsys):
+    """--brief 快路径不建素材台账，但必须**声明**边界（issue #43，绝不静默）：
+
+    该路径只产提示词文本、没有生成目录，台账/正本没有落点——带路径 refs 走它时
+    要点名「不建台账」并指路 generate-prompts/向导；没有路径（还没交回）就不噪声。
+    """
+    from minimax_h3_prompt import config as config_module
+
+    main_module = _main_module()
+    monkeypatch.setattr(pipeline, "run_pipeline", lambda brief, cfg: "final")
+    monkeypatch.setattr(config_module, "config",
+                        SimpleNamespace(output_path=tmp_path / "out.md"))
+
+    brief_file = tmp_path / "brief.md"
+    brief_file.write_text(
+        "输入: 多参\n时长: 5\n## 剧情\n红裙女孩走进秋日庭院。\n"
+        "## 角色与参考图\n- Picture 1: 红裙女孩 — 红裙 (girl.png)\n",
+        encoding="utf-8")
+    assert main_module.main(["--brief", str(brief_file)]) == 0
+    out = capsys.readouterr().out
+    assert "不建素材台账" in out and "generate-prompts" in out
+
+    brief_file.write_text(
+        "输入: 多参\n时长: 5\n## 剧情\n红裙女孩走进秋日庭院。\n"
+        "## 角色与参考图\n- Picture 1: 红裙女孩 — 红裙\n",
+        encoding="utf-8")
+    assert main_module.main(["--brief", str(brief_file)]) == 0
+    assert "不建素材台账" not in capsys.readouterr().out  # 没路径＝尚无台账可建，不噪声
+
+
 def test_generate_prompts_threads_mode_and_refs(tmp_path, monkeypatch):
     """generate-prompts --brief 同样放行 ref，且 brief.refs 随调用传下去（完整性批判缺口 1）。"""
     from minimax_h3_prompt import config as config_module

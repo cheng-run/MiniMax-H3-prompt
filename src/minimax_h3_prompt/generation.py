@@ -952,7 +952,7 @@ def ref_asset_registry(state: dict[str, Any], brief: Brief | None = None) -> lis
     AC1「首尾帧路线不受影响」软性回归）。派生只对 ``mode="ref"`` 发生。
 
     描述取该资产的**生图提示词**（素材画面事实规则：以生图提示词为描述主体，它细节最全；
-    issue #41 阶段用户尚未交回素材图，读图纠偏／补漏在 #43/#44 落地）。
+    素材交回入库在 issue #43 落地，读图纠偏／补漏在 #44——交回的素材图不改这里的描述）。
     """
     if brief is not None:
         if brief.refs:

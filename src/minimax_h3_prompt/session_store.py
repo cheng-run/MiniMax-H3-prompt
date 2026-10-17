@@ -16,7 +16,10 @@ from .brief_parser import Brief, RefItem
 SESSION_FILENAME = "session-state.json"
 _SCHEMA_VERSION = "wizard_session.v1"
 
-# status: awaiting_frames = 阶段 1 完成、等待用户提交帧图；completed = 视频提示词已产出
+# status: awaiting_frames = 阶段 1 完成、等待用户交回产出物——首尾帧路线是关键帧图，
+#   多参路线是参考素材（素材交回，issue #43：缺项可停在这续接补交）。同一个「等交回」
+#   语义、两种交回物，不另开状态：续接/扫描口径只认「未完成」一种分叉（issue #17 教训）；
+#   completed = 视频提示词已产出
 # stage1_running = 阶段 1 跑到一半中断（每个节点完成时增量落盘），重启后可以从断点继续
 # segmented_running = 长视频分段陪跑进行中（阶段 2 已产出整条提示词，逐段人工生成中）。
 #   这一态必须存在：阶段 2 结束时写 completed 会让「陪跑中断 → 重跑向导」另开新 GEN，

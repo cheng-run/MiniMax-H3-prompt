@@ -429,7 +429,8 @@ def _resume_awaiting_frames(config: Config, session: SessionState) -> SessionSta
     """
     if session.brief.mode == "ref":
         # 多参路线（issue #41）：没有帧图可等、没有帧提示词可改，直接交回主流程
-        # 进 _phase2_ref_finish 直出视频提示词。
+        # 进 _phase2_ref_finish——先素材交回入库（issue #43，缺项可停在那续接补交），
+        # 再直出视频提示词。
         # **这里必须补展资产图提示词**（含落盘，issue #41 复审）：调用方随后把
         # frames_shown 置 True、_phase2_ref_finish 就不再展——首跑若断在 save_session
         # 与展示之间，续接的 ref 会话会全程拿不到资产提示词（复审实测复现：输出无
@@ -537,11 +538,11 @@ def _phase1_new(config: Config) -> SessionState | None:
 
     if brief.mode == "ref":
         # 多参路线（issue #41）：无关键帧提示词可改、无帧图可交——人机修改循环的
-        # 画面级重出锚在 fl2va_frame_prompts 上，对多参是空转；素材交回与读图校对
-        # 在票 #43/#44 落地。资产图提示词照常出站，随后直出视频提示词。
+        # 画面级重出锚在 fl2va_frame_prompts 上，对多参是空转。资产图提示词照常出站；
+        # 素材交回入库在阶段 2 入口（issue #43），读图校对在票 #44。
         _show_asset_prompts(state, generation_dir)
-        print("\n阶段 1 完成。请复制上面的资产图提示词生成素材图"
-              "（交回入库与读图校对在后续票落地）。")
+        print("\n阶段 1 完成。请复制上面的资产图提示词生成素材图；下一步交回入库"
+              "（读图校对在票 #44 落地）。")
         return load_session(generation_dir)
 
     # 修改循环是与两条续接路径**共用**的那一份（issue #27）：三处各写一遍的代价本仓见过
@@ -1017,11 +1018,109 @@ def render_fl2va_frame_markdown_from_bundle(bundle, frame: str) -> str:
 # 阶段 2
 # ---------------------------------------------------------------------------
 
+def _ask_asset_replacement(existing, incoming) -> bool:
+    """换版问人（issue #43 AC3）：新旧 SHA256 对照摆出来，默认保留原登记。
+
+    同名文件换版是 LoRA 可变文件名教训（issue #18）的原型场景——那时旧对照静默作废；
+    这里反过来：对照材料齐全、要不要换由人点头，没点头就守着原登记。
+    """
+    return _confirm(
+        f"[换版] {existing.name}（{existing.tag}）交回内容与登记不符："
+        f"旧 sha256={existing.sha256[:16]}… → 新 sha256={incoming.sha256[:16]}…。"
+        f"用新版替换登记？",
+        default=False)
+
+
+def _collect_ref_assets(state: dict, brief: Brief, generation_dir: Path) -> bool:
+    """素材交回入库（issue #43）：收素材图/按需视频音频，登记素材台账（含 SHA256）。
+
+    返回 True ＝ 继续阶段 2 直出视频提示词；False ＝ 先到这，会话保持「等交回」态、
+    重跑向导继续补交。**为什么有这个岔口**：会话一旦 completed 就不再续接，「出完
+    提示词再补交」没有门——缺项必须当场问人拿主意，不许静默装作交齐（票面 AC：
+    交回入库发生在完成之前；同 frames/ 交帧「回车=跳过」的既有口径，但缺项多一问）。
+    """
+    from ..asset_ledger import (
+        KIND_AUDIO, KIND_PICTURE, KIND_VIDEO,
+        AssetSubmission, IntakeReport, format_tag,
+        intake_assets, load_asset_ledger, render_ledger, render_report, verify_asset_ledger,
+    )
+    from ..generation import ref_asset_registry
+    from ..task_package import resolve_input_path
+
+    def _ask_file(label: str) -> str:
+        """问一个文件路径：空=跳过；路径不存在当场报并给重交机会（同帧图收图）。"""
+        while True:
+            raw = _clean_path_input(_prompt(label))
+            if not raw:
+                return ""
+            try:
+                if not resolve_input_path(raw).is_file():
+                    raise FileNotFoundError(f"文件不存在：{raw}")
+            except (OSError, ValueError) as exc:
+                print(f"[错误] {exc}")
+                if not _confirm("重新提交该项？", default=True):
+                    return ""
+                continue
+            return raw
+
+    registry = ref_asset_registry(state, brief)
+    ledger = load_asset_ledger(generation_dir)
+    drift = verify_asset_ledger(generation_dir)
+    print("\n[素材交回] 请提交生成好的参考素材（回车=跳过该项）；台账记 SHA256，换版可发现。")
+    if drift:
+        print(render_report(IntakeReport(ledger=ledger, drift=drift)))
+
+    submissions: list[AssetSubmission] = []
+    for item in registry:
+        mark = "（已入库）" if ledger.get(item.name, KIND_PICTURE) else ""
+        raw = _ask_file(f"{format_tag(KIND_PICTURE, item.picture)} {item.name} 素材图路径{mark}（回车=跳过）：")
+        if raw:
+            submissions.append(AssetSubmission(name=item.name, kind=KIND_PICTURE, source=raw))
+
+    # 素材视频/音频按需挂账（v1 只登记，指称语义细化在后续票）——多参三型对齐官方标签。
+    while _confirm("还要交回素材视频/音频吗？", default=False):
+        kind_raw = _prompt("类型（1=素材视频 2=素材音频，回车=取消）：").strip()
+        if not kind_raw:
+            break
+        if kind_raw not in ("1", "2"):
+            print("[错误] 只认 1（素材视频）/ 2（素材音频）。")
+            continue
+        name = _prompt("语义名（如「运镜参考」「红裙女孩音色」）：").strip()
+        if not name:
+            print("[错误] 语义名不能为空。")
+            continue
+        raw = _ask_file("文件路径：")
+        if not raw:
+            continue
+        kind = KIND_VIDEO if kind_raw == "1" else KIND_AUDIO
+        submissions.append(AssetSubmission(name=name, kind=kind, source=raw))
+
+    report = intake_assets(
+        generation_dir, submissions,
+        registry=registry, script=str(state.get("script", "")),
+        on_replace=_ask_asset_replacement,
+    )
+    rendered = render_report(report)
+    if rendered:
+        print(rendered)
+    if report.ledger.entries:
+        print(render_ledger(report.ledger))
+    else:
+        print("（本次未交回任何参考素材，素材台账未建立）")
+    if report.missing:
+        print(f"[素材交回] 还有 {len(report.missing)} 项未交回"
+              f"（{'、'.join(report.missing)}）；继续出视频提示词后本会话不再接受补交。")
+        if not _confirm("仍然继续？", default=False):
+            print("已保留交回进度（台账已落盘）；重跑向导可继续补交。")
+            return False
+    return True
+
+
 def _phase2_ref_finish(config: Config, session: SessionState, *,
                        show_asset_prompts: bool = True) -> int:
-    """多参路线阶段 2（issue #41）：不收关键帧图，直出一份官方 ref 六段式视频提示词。
+    """多参路线阶段 2（issue #41/#43）：先素材交回入库，再直出官方 ref 六段式视频提示词。
 
-    与首尾帧的阶段 2 是两件事：多参没有桥接帧／首尾帧可交，画面参考是**资产图**
+    与首尾帧的阶段 2 是两件事：多参没有桥接帧／首尾帧可交，画面参考是**素材图**
     （画面描述以生图提示词为描述主体，素材画面事实规则）。总时长 **≤15 秒直出一份**
     （59- 工作流时长节点 max=15）；>15 秒按镜头边界拆段的逐段提示词在票 #46 落地——
     本版先出整片供存档并**明说**拆段未做，不静默装作已拆。
@@ -1033,6 +1132,9 @@ def _phase2_ref_finish(config: Config, session: SessionState, *,
     if show_asset_prompts:
         _show_asset_prompts(state, generation_dir)
     _show_ref_registry(state, brief)
+    # 素材交回入库（issue #43）：缺项被用户选「稍后补交」就停在这，会话保持可续接。
+    if not _collect_ref_assets(state, brief, generation_dir):
+        return 0
 
     with _progress_scope("[阶段 2] 正在组装官方 ref 六段式视频提示词……（预计几分钟，期间无需输入）"):
         final_state, prompt = run_stage2(state, brief, config,

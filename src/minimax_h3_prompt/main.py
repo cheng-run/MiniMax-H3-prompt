@@ -427,6 +427,12 @@ def _run_cli(args: argparse.Namespace) -> int:
         print("参考图:")
         for r in brief.refs:
             print(f"  <Picture {r.picture}> {r.name} — {r.description[:60]}")
+        # 素材台账边界声明（issue #43）：本快路径只产提示词文本、没有生成目录，
+        # 台账与正本复制没有落点——不静默装作已建账，指路两条有生成目录的产线
+        # （同「绝不静默失败」：能力的可达边界要看得见，不许静默缺位）。
+        if brief.mode == "ref" and any(r.path for r in brief.refs):
+            print("[提示] --brief 快路径不建素材台账（无生成目录）；需要台账"
+                  "（语义名/编号/路径/SHA256）请用 generate-prompts --brief 或两阶段向导交回入库。")
     if brief.draft:
         print(f"草稿: {brief.draft[:80]}{'…' if len(brief.draft) > 80 else ''}")
 

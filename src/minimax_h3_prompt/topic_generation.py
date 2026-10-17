@@ -99,6 +99,22 @@ def create_video_from_topic(
         refs=list(refs),
         canvases=dict(canvases or {}),
     )
+    # 素材交回入库（issue #43）：brief.refs 带路径的就是交回的素材图，建素材台账。
+    # **只对 ref 模式**：base/帧变体的 refs 是首尾帧锚点，进台账就是把锚点冒充参考素材。
+    # 建账放在跑管线**之前**——缺文件/坏哈希要在烧 LLM 时间前就炸出来。
+    if brief.mode == "ref" and brief.refs:
+        from .asset_ledger import (
+            KIND_PICTURE, AssetSubmission, intake_assets, render_report,
+        )
+
+        submissions = [
+            AssetSubmission(name=item.name, kind=KIND_PICTURE, source=item.path)
+            for item in brief.refs if item.path
+        ]
+        report = intake_assets(directory, submissions, registry=brief.refs)
+        rendered = render_report(report)
+        if rendered:
+            print(rendered)
     result = run_pipeline_structured(
         brief,
         config,

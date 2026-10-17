@@ -41,6 +41,11 @@ def _fake_inputs(monkeypatch, inputs: list[str]) -> list[str]:
     return asked
 
 
+def _confirm_continue_only(text: str, default: bool = True) -> bool:
+    """确认桩：只有「继续出提示词」答是，其余（视频/音频附加等）一律跳过。"""
+    return "继续" in text
+
+
 def _ref_stage1_state() -> dict:
     return {
         "script": TOPIC,
@@ -135,12 +140,14 @@ def test_ref_route_direct_prompt_end_to_end(tmp_path, monkeypatch, capsys):
     _stub_stage1(monkeypatch, captured)
     _stub_stage2(monkeypatch, captured)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
-    asked = _fake_inputs(monkeypatch, [TOPIC, "", "", "4"])  # 主题/时长/风格/方式，无帧图路径
+    # 主题/时长/风格/方式，随后素材交回四问全跳过（issue #43）——不收帧图路径
+    asked = _fake_inputs(monkeypatch, [TOPIC, "", "", "4", "", "", "", ""])
+    monkeypatch.setattr(wizard, "_confirm", _confirm_continue_only)
 
     code = wizard.run_wizard(_cfg(tmp_path))
     assert code == 0
     assert captured["brief"].mode == "ref"
-    assert not any("图片路径" in text for text in asked), f"多参路线不该收帧图：{asked}"
+    assert not any("首帧图片" in text or "尾帧图片" in text for text in asked), f"多参路线不该收帧图：{asked}"
 
     outputs = list((tmp_path / "sessions").rglob("video-prompt.md"))
     assert len(outputs) == 1
@@ -162,7 +169,8 @@ def test_ref_route_over_15s_delivers_with_segment_ticket_notice(tmp_path, monkey
     _stub_stage1(monkeypatch)
     _stub_stage2(monkeypatch)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
-    _fake_inputs(monkeypatch, [TOPIC, "20", "", "4"])
+    _fake_inputs(monkeypatch, [TOPIC, "20", "", "4", "", "", "", ""])  # 素材交回四问全跳过
+    monkeypatch.setattr(wizard, "_confirm", _confirm_continue_only)
 
     code = wizard.run_wizard(_cfg(tmp_path))
     assert code == 0
@@ -197,6 +205,8 @@ def test_ref_resume_awaiting_still_delivers_asset_prompts(tmp_path, monkeypatch,
     save_session(directory, brief, _ref_stage1_state(), status=STATUS_AWAITING_FRAMES)
     session = load_session(directory)
     monkeypatch.setattr(wizard, "_offer_resume", lambda config: session)
+    _fake_inputs(monkeypatch, ["", "", "", ""])  # 素材交回四问全跳过（issue #43）
+    monkeypatch.setattr(wizard, "_confirm", _confirm_continue_only)
 
     code = wizard.run_wizard(_cfg(tmp_path))
     assert code == 0
