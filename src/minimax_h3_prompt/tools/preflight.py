@@ -24,8 +24,13 @@ from .frame_match import MAD_MAYBE, imread_unicode, mad, read_window, to_gray, v
 from .ledger import Ledger
 
 EXPECTED_VIDEO_SIZE = (736, 1280)
+# 执行段/交接校验的时长档：4–15 整数秒（issue #46 AC6 从 4–10 扩档）。
+# 依据是 2026-10-16 读 59- 工作流自定义节点源码实测的契约 min=4 / max=15——
+# 旧「时长下拉只有 4-10」对该节点已过时；校验口径跟节点真实能力走，
+# 不能再把 11–15s 的合法产出判成越界。首尾帧链的规划侧仍按 4–10 保守档出段
+# （规划师指令层约束，见 segment_planner），校验层只负责不误杀节点档内的产物。
 SEGMENT_MIN_S = 4.0
-SEGMENT_MAX_S = 10.0
+SEGMENT_MAX_S = 15.0
 
 # H3 实测产物帧数表（2026-09-23 全量探测 ComfyUI 真产物校准，736×1280@24fps）：
 # 「4s」档恒产 107 帧 = 4.458s——H3 产出**从不是整数秒**，旧的「整数秒 + 0.1s 容差」
@@ -89,7 +94,7 @@ def check_input_frame(frame_path: Path, prev_video: Path | None) -> list[Issue]:
 
 
 def check_shot_duration(seconds: float) -> list[Issue]:
-    """段时长必须落在 ComfyUI 的 H3 整数档 4–10 秒内。"""
+    """段时长必须落在 ComfyUI 的 H3 整数档 4–15 秒内（issue #46 扩档）。"""
     if seconds < SEGMENT_MIN_S or seconds > SEGMENT_MAX_S:
         return [Issue("error", "duration_out_of_range",
                       f"段时长 {seconds}s 超出 H3 可选区间 "
@@ -109,7 +114,7 @@ def check_segment_video(video_path: Path, expected_seconds: float | None = None)
 
     判据是**实测帧数表**（``H3_TIER_FRAMES``，2026-09-23 对 16 个真产物校准），不是
     「整数秒 + 容差」：H3 产出从不是整数秒（4s 档恒为 4.458s，档间帧距不均，容差
-    区分不了相邻档）。实测档位外的 7–10s 档暂无样本，首次遇到只警告不阻断——
+    区分不了相邻档）。实测档位外的 7–15s 档暂无样本，首次遇到只警告不阻断——
     测不出事实就不许阻断，攒到样本再固化。
 
     为什么不能拿 ``check_input_frame`` 当这一档用：向导的锚帧是**当场从这段视频剥出来
@@ -147,11 +152,11 @@ def check_segment_video(video_path: Path, expected_seconds: float | None = None)
                                 f"段时长 {seconds:.2f}s 超出 H3 可选区间 "
                                 f"{SEGMENT_MIN_S:.0f}–{SEGMENT_MAX_S:.0f}s"))
         elif expected_seconds is not None:
-            # 4–10s 区间内但不在帧数表（7–10s 档暂无样本）：无法确证档位，只警告
+            # 区间内但不在帧数表（7–15s 档暂无样本）：无法确证档位，只警告
             issues.append(Issue(
                 "warning", "segment_video_duration_unknown_tier",
                 f"本段视频 {frames} 帧 ≈{seconds:.2f}s 不在 H3 实测帧数表 "
-                f"{max(H3_TIER_FRAMES)}s 档内（7–10s 档暂无样本），无法确证时长档，"
+                f"{max(H3_TIER_FRAMES)}s 档内（7–15s 档暂无样本），无法确证时长档，"
                 f"请人工核对是否本段计划 {expected_seconds:g}s 的产出"))
     if meta:
         size = (int(meta.get("width") or 0), int(meta.get("height") or 0))

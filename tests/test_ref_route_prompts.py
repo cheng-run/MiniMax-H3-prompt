@@ -342,8 +342,9 @@ def _main_module():
 
 def test_cli_brief_path_honors_declared_ref_mode(tmp_path, monkeypatch, capsys):
     """--brief 快路径不再强制 base（复审 F3）：brief 声明 ref 就以 mode=ref 进管线，
-    不套 FL2VA 帧变体默认；>15 秒与向导同口径明说拆段在票 #46。"""
+    不套 FL2VA 帧变体默认；>15 秒落逐段提示词＋拼接顺序卡（issue #46，与向导同口径）。"""
     from minimax_h3_prompt import config as config_module
+    from minimax_h3_prompt import model_factory
 
     main_module = _main_module()
 
@@ -356,12 +357,16 @@ def test_cli_brief_path_honors_declared_ref_mode(tmp_path, monkeypatch, capsys):
         return "final"
 
     monkeypatch.setattr(pipeline, "run_pipeline", fake_run_pipeline)
+    monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
     monkeypatch.setattr(config_module, "config",
                         SimpleNamespace(output_path=tmp_path / "out.md"))
     assert main_module.main(["--brief", str(brief_file)]) == 0
     assert captured["brief"].mode == "ref"
     assert captured["brief"].variant == "T2VA"
-    assert "#46" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "#46" not in out  # 占位提示已退役
+    assert list((tmp_path / "segments").glob("segment-*.md")), "段提示词必须落盘"
+    assert (tmp_path / "segments" / "order-card.md").is_file(), "拼接顺序卡必须落盘"
 
 
 def test_cli_brief_path_frame_route_unchanged(tmp_path, monkeypatch):

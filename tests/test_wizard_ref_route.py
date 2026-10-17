@@ -154,8 +154,8 @@ def test_ref_route_direct_prompt_end_to_end(tmp_path, monkeypatch, capsys):
     assert "59-(多Lora改)MiniMax-H3 ref2va 多参生视频 V2" in out  # 登记名
 
 
-def test_ref_route_over_15s_delivers_with_segment_ticket_notice(tmp_path, monkeypatch, capsys):
-    """>15 秒：仍出整片六段式（存档），并明说拆段在票 #46——不静默装作已拆。"""
+def test_ref_route_over_15s_delivers_segment_prompts_and_order_card(tmp_path, monkeypatch, capsys):
+    """>15 秒（issue #46）：整片六段式仍存档，另出逐段自包含提示词＋段清单/拼接顺序卡。"""
     _silence(monkeypatch)
     # 同上：画布问答属 #42，这里打桩为空集。
     monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
@@ -167,8 +167,13 @@ def test_ref_route_over_15s_delivers_with_segment_ticket_notice(tmp_path, monkey
     code = wizard.run_wizard(_cfg(tmp_path))
     assert code == 0
     outputs = list((tmp_path / "sessions").rglob("video-prompt.md"))
-    assert len(outputs) == 1
-    assert "#46" in capsys.readouterr().out
+    assert len(outputs) == 1  # 整片存档不撤
+    seg_files = list((tmp_path / "sessions").rglob("segment-*.md"))
+    assert len(seg_files) >= 2, f"20s 应拆出 ≥2 个执行段：{seg_files}"
+    cards = list((tmp_path / "sessions").rglob("order-card.md"))
+    assert len(cards) == 1, "段清单+拼接顺序卡必须落盘"
+    out = capsys.readouterr().out
+    assert "#46" not in out  # 「拆段在票 #46」占位提示已退役
 
 
 def test_unmatched_semantic_name_is_flagged(tmp_path, monkeypatch, capsys):

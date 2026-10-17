@@ -13,12 +13,14 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = PROJECT_ROOT / "config" / "agent.yaml"
 
-# 执行段（Segment）拆分约束：ComfyUI 的 H3 时长选项只有 4-10 秒整数档，
-# 段时长必须为 4-10s 的整数，小数段/越界段在工作流里根本选不了。
+# 执行段（Segment）拆分约束：段时长必须为整数秒。**首尾帧链规划保守档 4–10**
+# （ADR 0012；节点网格实测 4–15，工作流 62 未复核前规划不放宽——旧注释
+# 「时长选项只有 4-10」是已过时的说法，别照抄回去）。多参规划档 4–15 见
+# segment_planner.MIN_SEG_S/MAX_SEG_S；执行段/交接校验档见 preflight。
 SEGMENT_CONFIG: dict[str, float | int] = {
-    "default_segment_seconds": 10.0,  # ComfyUI H3 时长选项上限
-    "min_segment_seconds": 4.0,       # ComfyUI H3 时长选项下限
-    "max_segment_seconds": 10.0,      # H3 可执行窗口上限；Shot 超过即拆分
+    "default_segment_seconds": 10.0,  # 首尾帧链规划保守档上限
+    "min_segment_seconds": 4.0,       # 执行段时长下限（两路线同）
+    "max_segment_seconds": 10.0,      # 首尾帧链规划保守档上限；Shot 超过即拆分
     "shot_seconds_ceiling": 10.0,     # > 10s 的镜头自动拆成连续段
     "warn_shot_count_below": 8,       # 60s 项目镜头少于 8 个时给出提示
 }

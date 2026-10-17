@@ -405,6 +405,15 @@ def main(argv: list[str] | None = None) -> int:
     return _run_cli(args)
 
 
+def _deliver_ref_segments_cli(brief, prompt: str, out_dir) -> None:
+    """--brief 快路径的多参分段交付（issue #46）：薄接线，编排/文案与向导同一份。"""
+    from .ref_segments import deliver_ref_segments
+
+    _result, report = deliver_ref_segments(
+        whole_prompt=prompt, total_s=brief.duration, out_dir=out_dir, brief=brief)
+    print(report)
+
+
 def _run_cli(args: argparse.Namespace) -> int:
     """非交互快路径：--brief 必填，直接跑。"""
     from .brief_parser import parse_brief
@@ -440,9 +449,9 @@ def _run_cli(args: argparse.Namespace) -> int:
     config.output_path.parent.mkdir(parents=True, exist_ok=True)
     config.output_path.write_text(final_prompt, encoding="utf-8")
     if brief.mode == "ref" and brief.duration > 15:
-        # 与向导 _phase2_ref_finish 同口径（issue #41 复审）：>15 秒拆段在票 #46 落地，
-        # 这条快路径先出整片也明说，不静默装作已拆。
-        print("[提示] 总时长 >15 秒：多参分段逐段提示词在票 #46 落地，本次输出为整片六段式（供存档）。")
+        # 与向导 _phase2_ref_finish 同口径（issue #46）：>15 秒按镜头边界拆段，
+        # 逐段自包含六段式＋段清单/拼接顺序卡落盘；整片六段式仍存档供预览。
+        _deliver_ref_segments_cli(brief, final_prompt, config.output_path.parent)
     print(f"\n已完成，最终提示词已写入: {config.output_path}")
     print("=" * 60)
     print(final_prompt)

@@ -1017,14 +1017,25 @@ def render_fl2va_frame_markdown_from_bundle(bundle, frame: str) -> str:
 # 阶段 2
 # ---------------------------------------------------------------------------
 
+def _deliver_ref_segments(state: dict, brief: Brief, prompt: str,
+                          generation_dir: Path) -> None:
+    """>15 秒多参分段交付（issue #46）：薄接线——编排/文案全在 ref_segments 一份。"""
+    from ..ref_segments import deliver_ref_segments
+
+    _result, report = deliver_ref_segments(
+        whole_prompt=prompt, total_s=brief.duration, out_dir=generation_dir,
+        state=state, brief=brief)
+    print(report)
+
+
 def _phase2_ref_finish(config: Config, session: SessionState, *,
                        show_asset_prompts: bool = True) -> int:
-    """多参路线阶段 2（issue #41）：不收关键帧图，直出一份官方 ref 六段式视频提示词。
+    """多参路线阶段 2（issue #41/#46）：不收关键帧图，直出官方 ref 六段式视频提示词。
 
     与首尾帧的阶段 2 是两件事：多参没有桥接帧／首尾帧可交，画面参考是**资产图**
     （画面描述以生图提示词为描述主体，素材画面事实规则）。总时长 **≤15 秒直出一份**
-    （59- 工作流时长节点 max=15）；>15 秒按镜头边界拆段的逐段提示词在票 #46 落地——
-    本版先出整片供存档并**明说**拆段未做，不静默装作已拆。
+    （59- 工作流时长节点 max=15）；>15 秒按镜头边界拆成 4–15s 整数执行段，逐段出自
+    包含六段式＋段清单/拼接顺序卡（issue #46；整片六段式仍落盘存档，拆段从它取材）。
     """
     brief = session.brief
     state = dict(session.stage_state)
@@ -1043,8 +1054,7 @@ def _phase2_ref_finish(config: Config, session: SessionState, *,
     output_file = generation_dir / "video-prompt.md"
     output_file.write_text(prompt, encoding="utf-8")
     if brief.duration > 15:
-        print("[提示] 总时长 >15 秒：按镜头边界拆成 4–15 秒执行段的逐段提示词在票 #46 落地；"
-              "本次先出整片六段式供存档/预览——单次生成仍受 59- 工作流 4–15 秒档约束。")
+        _deliver_ref_segments(state, brief, prompt, generation_dir)
     print(f"\n✓ ref 六段式视频提示词已写入：{output_file}")
     print("\n" + "=" * 60)
     print(prompt)
