@@ -1,9 +1,11 @@
-"""向导·注入卡接线（issue #45）：视频输出三元组选择器、卡落盘、正文不带槽位名。
+"""向导·注入卡接线（issue #45/#49）：视频输出自动推导（不再提问）、卡落盘、正文不带槽位名。
 
 薄接线：走真实调用链（``run_wizard`` / ``_phase2_ref_finish``），只打桩 LLM 与交互
 输入，断言全落在外部行为上——问过哪些问题、打出哪些菜单、写出哪些文件。
 注入卡文本与尺寸契约的规格在 ``tests/test_injection_card.py``，brief 键在
-``tests/test_brief_parser.py``。
+``tests/test_brief_parser.py``。issue #49 起视频尺寸**不再单独提问**：三元组由
+画布自动推导（比例档继承画布比例、megapixels 按面积反推取档），原「必须问」断言
+反转为「不得出现」。
 """
 from __future__ import annotations
 
@@ -113,72 +115,100 @@ def _write_source(tmp_path: Path, name: str, content: bytes) -> Path:
     return source
 
 
-def _run_full_flow(tmp_path, monkeypatch, tail_inputs: list[str]):
-    """四张素材图全交回 + 「不加视频音频」+ 尾部输入（选择器问答）。"""
+def _run_full_flow(tmp_path, monkeypatch, canvases: dict | None = None):
+    """四张素材图全交回 + 「不加视频音频」；视频输出**无问答**（issue #49 自动推导）。
+
+    返回 ``(注入卡路径, 全部提问文案)``——提问文案供「不得再问视频尺寸」类断言用。
+    """
     _silence(monkeypatch)
-    monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
+    monkeypatch.setattr(wizard, "_choose_canvases", lambda: dict(canvases or {}))
     _stub_stage1(monkeypatch)
     _stub_stage2(monkeypatch)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
     names = ["girl", "garden", "key", "boy"]
     paths = [_write_source(tmp_path, f"{n}.png", n.encode()) for n in names]
-    # 提问次序：主题/澄清跳过/路线 4 → 四张图路径 → 选择器（比例档/预算档/…）
-    _fake_inputs(monkeypatch, [TOPIC, "", "", "4"] + [str(p) for p in paths] + tail_inputs)
-    _fake_confirms(monkeypatch, [("视频/音频", False)])
+    # 提问次序：主题/时长/风格/路线 4 → 四张图路径（此后到注入卡无任何视频尺寸问答）
+    asked = _fake_inputs(monkeypatch, [TOPIC, "", "", "4"] + [str(p) for p in paths])
+    asked += _fake_confirms(monkeypatch, [("视频/音频", False)])
     code = wizard.run_wizard(_cfg(tmp_path))
     assert code == 0
-    return next((tmp_path / "sessions").rglob(CARD_FILENAME))
+    return next((tmp_path / "sessions").rglob(CARD_FILENAME)), asked
 
 
 # ---------------------------------------------------------------------------
-# 选择器 + 卡落盘（AC1/AC2/AC3）
+# 自动推导 + 卡落盘（AC1/AC2）
 # ---------------------------------------------------------------------------
 
-def test_wizard_writes_injection_card_with_default_budget(tmp_path, monkeypatch):
-    """素材交回后问视频输出三元组：选比例 → 采用默认预算 → 卡落盘、三元组可照抄。
-
-    「8」＝第 8 档 9:16 (Portrait Widescreen)；「1」＝采用默认（0.4MP · 对齐 32）。
-    """
-    card = _run_full_flow(tmp_path, monkeypatch, ["8", "1"])
+def test_wizard_derives_video_output_without_asking(tmp_path, monkeypatch):
+    """AC1/AC2：向导不再出现视频尺寸问答；三元组由画布自动推导并复现当日手选值
+    ——画布 1280×720 推出 16:9 · 0.9MP · 32 → 1280×736。"""
+    card, asked = _run_full_flow(tmp_path, monkeypatch, {"zimage": (1280, 720)})
+    for question in asked:
+        assert "视频输出" not in question and "生成尺寸" not in question, question
     text = card.read_text(encoding="utf-8")
     assert "红裙女孩" in text and "ref_image_0" in text     # AC1 映射
-    assert "9:16 (Portrait Widescreen)" in text             # AC2 比例档（widget 值）
-    assert "megapixels：0.4" in text and "对齐倍数：32" in text
-    assert "480" in text and "864" in text                  # AC2 最终 W×H
+    assert "16:9 (Widescreen)" in text                      # AC2 比例档（继承画布）
+    assert "megapixels：0.9" in text and "对齐倍数：32" in text
+    assert "1280 × 736" in text                             # AC2 最终 W×H
     assert "59-(多Lora改)MiniMax-H3 ref2va 多参生视频 V2" in text  # AC3 登记名
 
 
-def test_custom_budget_is_hand_input_megapixels_and_multiple(tmp_path, monkeypatch):
-    """「自定义」＝手输 megapixels/对齐倍数（坏值重问不静默）；宽高直填没有入口。"""
-    # 「2」=自定义；第一轮 megapixels「大」是坏值 → 整对重问；第二轮 1.0/16 落卡。
-    card = _run_full_flow(tmp_path, monkeypatch, ["8", "2", "大", "16", "1.0", "16"])
-    text = card.read_text(encoding="utf-8")
-    assert "megapixels：1" in text          # :g 格式 1.0 → 1
-    assert "对齐倍数：16" in text
-    assert "768" in text and "1360" in text  # 9:16 · 1.0MP · 对齐 16 的推导值
-
-
-def test_selected_triple_lands_in_the_session_brief(tmp_path, monkeypatch):
-    """选定三元组回写 brief 并随会话落盘（复审：只落卡不回写＝快照与卡两处对不上账）。"""
+def test_derived_triple_lands_in_the_session_brief(tmp_path, monkeypatch):
+    """推导三元组回写 brief 并随会话落盘（复审：只落卡不回写＝快照与卡两处对不上账）。"""
     from minimax_h3_prompt.session_store import load_session
 
-    card = _run_full_flow(tmp_path, monkeypatch, ["8", "2", "1.0", "16"])
+    card, _asked = _run_full_flow(tmp_path, monkeypatch, {"zimage": (1280, 720)})
     session = load_session(card.parent)
     assert session.brief.video_output is not None
     assert (session.brief.video_output.ratio,
             session.brief.video_output.megapixels,
-            session.brief.video_output.multiple) == ("9:16 (Portrait Widescreen)", 1.0, 16)
+            session.brief.video_output.multiple) == ("16:9 (Widescreen)", 0.9, 32)
 
 
-def test_ratio_menu_is_the_ten_node_labels_without_arbitrary_entry(tmp_path, monkeypatch,
-                                                                   capsys):
-    """比例档菜单＝节点 10 档标签，无任意比例/宽高直填逃生口（AC2 的 UI 面）。"""
-    _run_full_flow(tmp_path, monkeypatch, ["8", "1"])
+def test_video_size_questions_and_ratio_menu_are_gone(tmp_path, monkeypatch, capsys):
+    """AC1 的 UI 面：视频尺寸问答与 10 档比例菜单整段消失（issue #47 断言反转——
+    原「必须问/必须选」的钉子翻成「不得出现」）。"""
+    _card, asked = _run_full_flow(tmp_path, monkeypatch, {"zimage": (1280, 720)})
     out = capsys.readouterr().out
-    for label in ("1:1 (Square)", "9:16 (Portrait Widescreen)", "21:9 (Ultrawide)"):
-        assert label in out, f"比例菜单缺节点档位：{label}"
-    assert "无任意比例" in out
-    assert "不支持宽高直填" in out
+    for ghost in ("请选择生成尺寸", "无任意比例", "不支持宽高直填", "视频输出·比例",
+                  "视频输出·像素预算"):
+        assert ghost not in out, f"已删问题还在出声：{ghost}"
+    assert not any("视频输出" in q or "生成尺寸" in q for q in asked)
+
+
+def test_resume_keeps_explicit_video_output_over_derivation(tmp_path, monkeypatch):
+    """续接会话里已定案的三元组优先于画布推导（issue #49 AC3 的向导面）：
+    画布 1280×720 推得出 16:9·0.9MP，但既定案的 21:9·0.4MP 不得被回写重算。"""
+    from minimax_h3_prompt.brief_parser import Brief
+    from minimax_h3_prompt.injection_card import VideoOutputParams
+    from minimax_h3_prompt.session_store import (
+        STATUS_AWAITING_FRAMES,
+        load_session,
+        save_session,
+    )
+
+    _silence(monkeypatch)
+    monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
+    _stub_stage2(monkeypatch)
+    monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
+    brief = Brief(mode="ref", variant="T2VA", duration=5.0, plot=TOPIC,
+                  canvases={"zimage": (1280, 720)},
+                  video_output=VideoOutputParams(ratio="21:9 (Ultrawide)", megapixels=0.4))
+    directory = tmp_path / "sessions" / "s" / "GEN001"
+    directory.mkdir(parents=True)
+    save_session(directory, brief, _ref_stage1_state(), status=STATUS_AWAITING_FRAMES)
+    session = load_session(directory)
+    monkeypatch.setattr(wizard, "_offer_resume", lambda config: session)
+    # 素材交回四问全跳过（issue #43）；「继续」放行进阶段 2（视频输出无问答，#49）
+    _fake_inputs(monkeypatch, ["", "", "", ""])
+    _fake_confirms(monkeypatch, [("视频/音频", False), ("继续", True)])
+
+    code = wizard.run_wizard(_cfg(tmp_path))
+    assert code == 0
+    card = next((tmp_path / "sessions").rglob(CARD_FILENAME))
+    text = card.read_text(encoding="utf-8")
+    assert "21:9 (Ultrawide)" in text and "megapixels：0.4" in text
+    assert "16:9" not in text and "0.9" not in text  # 推导值不得顶掉既定案值
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +217,7 @@ def test_ratio_menu_is_the_ten_node_labels_without_arbitrary_entry(tmp_path, mon
 
 def test_prompt_bodies_carry_no_slot_names_or_asset_files(tmp_path, monkeypatch):
     """注入卡有槽位/正本名，提示词正文一个都不带——两处不许串味。"""
-    card = _run_full_flow(tmp_path, monkeypatch, ["8", "1"])
+    card, _asked = _run_full_flow(tmp_path, monkeypatch, {"zimage": (1280, 720)})
     card_text = card.read_text(encoding="utf-8")
     assert "ref_image_0" in card_text and "picture-01" in card_text  # 卡带槽位与正本名
     prompt = next((tmp_path / "sessions").rglob("video-prompt.md")).read_text(encoding="utf-8")

@@ -16,6 +16,11 @@ ComfyUI-JZL-MiniMax-H3/nodes_hailuo_video.py 实测）：
   ``scale = √(total / (w_ratio × h_ratio))``，宽高各 ``round(比率 × scale / 倍数)
   × 倍数``。对齐倍数默认 32（节点默认值）；megapixels 默认 0.4（登记工作流 59-
   的存档 widget 现值，2026-10-17 用户拍板）。
+
+视频输出参数**不再单独提问**（issue #49，2026-10-18 裁定）：由画布自动推导
+（``derive_video_output``）——比例档继承画布比例、megapixels 预算按画布像素面积
+反推取档、对齐倍数取默认；brief 显式声明优先于推导；特殊需求在卡上手改，
+写卡不覆盖手改（``write_injection_card``）。
 """
 from __future__ import annotations
 
@@ -35,7 +40,7 @@ from .asset_ledger import (
     format_tag,
     load_asset_ledger,
 )
-from .generation import REF_WORKFLOW_NAME
+from .generation import REF_WORKFLOW_NAME, image_canvas_size
 
 # 注入卡落盘文件名（生成目录根上，与 asset-ledger.json 同级）。
 CARD_FILENAME = "injection-card.md"
@@ -157,6 +162,103 @@ class VideoOutputParams:
         return derive_video_size(self.ratio, self.megapixels, self.multiple)
 
 
+# megapixels 反推取档的粒度（issue #49）：画布面积是连续值，取到 0.1 MP 档才成
+# 「档」——当日手选 0.9MP 就是 1280×720（0.879MP）取 0.1 档的结果（票面金值）。
+MEGAPIXELS_TIER = 0.1
+
+
+class VideoOutputDerivation(NamedTuple):
+    """画布 → 视频输出参数的推导结果（issue #49）。
+
+    ``params`` 是节点 widgets 三元组；``notes`` 是推导过程的说破行（比例档外回退、
+    面积夹档），进向导回显与注入卡附注——偏离画布直觉的选择绝不静默。逐项直取时为空。
+    ``canvas`` 是推导源画布（回显「由画布 W×H 推导」的出处）；None ＝ 显式声明分支，
+    未经推导。
+    """
+
+    params: VideoOutputParams
+    notes: tuple[str, ...]
+    canvas: tuple[int, int] | None = None
+
+
+def derive_video_output(canvas_width: int, canvas_height: int) -> VideoOutputDerivation:
+    """纯函数：画布 → 视频输出参数（issue #49，视频尺寸不再单独提问）。
+
+    三条规则（票面）：比例档继承画布比例、megapixels 预算按画布像素面积反推取档、
+    对齐倍数取默认。金值复现当日手选：画布 1280×720 → 16:9 · 0.9MP · 32 → 1280×736。
+
+    - 比例档：画布约分后与 10 档**精确**对上即继承（自定义画布同待遇——继承看比例
+      不看菜单）；档外/极端比例**回退最近档**（|宽/高 − 档宽/档高| 最小，同距取表序）
+      ——视频节点 10 档没有「通用」可降，回退也得贴着画布形状走，特殊需求走卡上手改。
+    - megapixels：面积（w×h/1024²）四舍五入到 0.1 档（半值向上，预算不缩），再夹到
+      节点契约区间——极端画布反推值越界时夹档不静默（notes 说破）。
+    - 对齐倍数：取默认 32（票面「取默认」，不随画布猜）。
+
+    ``notes`` 只记**偏离画布直觉**的两处（比例档外回退、面积夹档）；逐项直取时为空。
+    """
+    if (isinstance(canvas_width, bool) or not isinstance(canvas_width, int)
+            or isinstance(canvas_height, bool) or not isinstance(canvas_height, int)
+            or canvas_width <= 0 or canvas_height <= 0):
+        raise ValueError(f"画布尺寸必须为正整数：{canvas_width!r} × {canvas_height!r}")
+    notes: list[str] = []
+    reduced = _reduce_pair(canvas_width, canvas_height)
+    # 精确对档**两边同约分**：21:9 档存的是节点 widget 值的原样份数 (21, 9)（十档里
+    # 唯一没约简的一对），只约画布不约档的话，正 21:9 画布（约分成 7:3）会错走回退
+    # 分支、打印假说破（issue #49 复审硬伤）。
+    preset = next(
+        (p for p in VIDEO_RATIO_PRESETS
+         if _reduce_pair(p.w_ratio, p.h_ratio) == reduced), None)
+    if preset is not None:
+        ratio = preset.label
+    else:
+        # 回退最近档：绝对比例距离（min 对同距按表序取先——结果确定，不掷硬币）。
+        target = canvas_width / canvas_height
+        preset = min(
+            VIDEO_RATIO_PRESETS,
+            key=lambda p: abs(target - p.w_ratio / p.h_ratio))
+        ratio = preset.label
+        notes.append(
+            f"画布比例 {reduced[0]}:{reduced[1]} 无对应比例档，回退最近档 {ratio}")
+    # 面积反推取档：w×h/1024² MP 四舍五入到 MEGAPIXELS_TIER 档（半值向上，预算不缩）。
+    # 落回档值 round 一次杀浮点噪声：乘 0.1 自带噪声（3*0.1 = 0.30000000000000004，
+    # 与字面 0.3 不等，复审实测），归零后与手输/声明值才可逐字对账。
+    area_mp = canvas_width * canvas_height / (1024 * 1024)
+    tiers = math.floor(area_mp / MEGAPIXELS_TIER + 0.5)
+    megapixels = round(tiers * MEGAPIXELS_TIER, 10)
+    if megapixels < MEGAPIXELS_MIN:
+        megapixels = MEGAPIXELS_MIN
+        notes.append(f"画布面积 {area_mp:.4g} MP 反推低于节点下限，取档 {megapixels:g} MP")
+    elif megapixels > MEGAPIXELS_MAX:
+        megapixels = MEGAPIXELS_MAX
+        notes.append(f"画布面积 {area_mp:.4g} MP 反推超出节点上限，取档 {megapixels:g} MP")
+    return VideoOutputDerivation(
+        VideoOutputParams(ratio=ratio, megapixels=megapixels), tuple(notes),
+        (canvas_width, canvas_height))
+
+
+def resolve_video_output(video_output: VideoOutputParams | None,
+                         canvases: dict[str, tuple[int, int]] | None,
+                         ) -> VideoOutputDerivation:
+    """三元组定案（issue #49）：brief 显式声明（含续接已定案）优先于画布推导。
+
+    两条消费路径（向导 ``_deliver_injection_card``、``topic_generation``）共用这一份
+    「先声明后推导」的接线——各写一份就是本仓反复出现的「改一处漏一处」形态
+    （进度落盘三处同款教训）。推导源取 **zimage 画布**：资产图生图提示词就用它出图
+    （``image_prompt_variants``），视频跟自己的参考图对齐尺寸才有意义。返回值
+    ``canvas`` 为空 ＝ 声明分支（未经推导）。
+    """
+    if video_output is not None:
+        return VideoOutputDerivation(video_output, (), None)
+    canvas = image_canvas_size("zimage", canvases)
+    return derive_video_output(*canvas)
+
+
+def _reduce_pair(w_ratio: int, h_ratio: int) -> tuple[int, int]:
+    """比例份数对的约分核（画布与档共用一个口径——两边各约各的就是第二份来源）。"""
+    divisor = math.gcd(w_ratio, h_ratio)
+    return w_ratio // divisor, h_ratio // divisor
+
+
 # 素材类型 → 工作流槽位前缀（0 起编号，节点端口名逐字）：9 图槽 + 3 视频槽 +
 # 3 视频音频（随视频走，非独立素材）+ 3 音频槽。
 _SLOT_PREFIX = {
@@ -212,12 +314,14 @@ def _missing_slots(entries: tuple[AssetRecord, ...]) -> list[str]:
     return missing
 
 
-def render_injection_card(ledger: AssetLedger, params: VideoOutputParams) -> str:
+def render_injection_card(ledger: AssetLedger, params: VideoOutputParams,
+                          notes: tuple[str, ...] = ()) -> str:
     """注入卡全文（纯文本，AC1/AC2/AC3）：接线表 + 三元组 + 登记工作流名 + 附注。
 
     卡是给人照抄的对照清单，**不是可执行载荷**——槽位与正本文件名只住在这里，
     提示词正文一个都不许进（AC4）。缺号、槽位越界、视频音轨配对这三类「接线会
-    错位/接空」的坑在附注里说破（绝不静默）。
+    错位/接空」的坑在附注里说破（绝不静默）。``notes`` 是画布推导的说破行（issue #49
+    比例回退/面积夹档），跟在三元组块下——推导替用户做的非常规选择要留底。
     """
     width, height = params.size
     lines = [
@@ -251,6 +355,10 @@ def render_injection_card(ledger: AssetLedger, params: VideoOutputParams) -> str
         f"- megapixels：{params.megapixels:g}",
         f"- 对齐倍数：{params.multiple}",
         f"- 最终 W×H：{width} × {height}（由上面三元组按节点公式推导，可对账）",
+    ]
+    for note in notes:
+        lines.append(f"- 推导注记：{note}（要改就在本卡手改三元组，不被系统回写覆盖）")
+    lines += [
         "",
         "## 附注",
     ]
@@ -295,15 +403,31 @@ def render_injection_card(ledger: AssetLedger, params: VideoOutputParams) -> str
     return "\n".join(lines) + "\n"
 
 
-def write_injection_card(directory: str | Path, params: VideoOutputParams) -> tuple[Path, str]:
+class CardWrite(NamedTuple):
+    """``write_injection_card`` 的结果：``written=False`` ＝ 卡已存在（可能含手改），
+    保留原卡原文——``text`` 永远是**盘上**那份（不是将写未写的渲染稿）。"""
+
+    path: Path
+    text: str
+    written: bool
+
+
+def write_injection_card(directory: str | Path, params: VideoOutputParams,
+                         notes: tuple[str, ...] = ()) -> CardWrite:
     """渲染并落盘注入卡（向导与结构化产物出口共用这一份，issue #45）。
 
     台账从生成目录读回（``asset-ledger.json``，没有就当空台账——映射区写「无登记
-    素材」而参数区照出，视频输出参数本身可照抄）。返回 ``(路径, 全文)``：调用方
-    打印全文，排版不再各拼一份。
+    素材」而参数区照出，视频输出参数本身可照抄）。``notes`` 是推导说破行，进参数
+    块附注（issue #49）。
+
+    **已存在不覆盖**（issue #49 AC4）：卡是手改出口，用户改完系统再渲染回写＝把手改
+    抹掉。要重出新卡，用户删除 ``injection-card.md`` 后重跑——删除是显式动作，与
+    「不许静默覆盖」同口径。
     """
     base = Path(directory)
-    text = render_injection_card(load_asset_ledger(base), params)
     path = base / CARD_FILENAME
+    if path.exists():
+        return CardWrite(path, path.read_text(encoding="utf-8"), False)
+    text = render_injection_card(load_asset_ledger(base), params, notes=notes)
     path.write_text(text, encoding="utf-8")
-    return path, text
+    return CardWrite(path, text, True)

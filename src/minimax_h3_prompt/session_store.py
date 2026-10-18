@@ -70,7 +70,8 @@ def _brief_to_dict(brief: Brief) -> dict[str, Any]:
         # 用户选定的画布（issue #42）：同上，漏登记就静默回落默认表。元组转列表
         # 是 JSON 的口径，读回时再转回元组。
         "canvases": {family: [width, height] for family, (width, height) in brief.canvases.items()},
-        # 视频输出三元组（issue #45）：向导选定后回写进 brief，漏登记同样静默丢——
+        # 视频输出三元组（issue #45）：定案后（推导/声明，issue #49）回写进 brief，
+        # 漏登记同样静默丢——
         # 重启续接后注入卡会按默认重出，与用户选定对不上账。
         "video_output": (
             {"ratio": brief.video_output.ratio,
@@ -114,7 +115,7 @@ def _canvases_from_dict(raw: Any) -> dict[str, tuple[int, int]]:
 
 
 def _video_output_from_dict(raw: Any):
-    """读回视频输出三元组；None ＝ 未选定（消费方回落默认三元组）。
+    """读回视频输出三元组；None ＝ 未定案（消费方按画布自动推导，issue #49）。
 
     错形**大声报错**（画布同款口径）：会话文件是我们自己写的，错形只可能是损坏或
     外人改写——吞掉它就「用户明明选了、续接后按默认重出」。值**不预强转**、原样

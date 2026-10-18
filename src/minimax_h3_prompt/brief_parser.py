@@ -82,9 +82,9 @@ class Brief:
     # 画布显示都以它为准，不再用系统钦定的「推荐尺寸」。
     canvases: CanvasMap = field(default_factory=dict)
     # 视频输出三元组（issue #45）：比例档 + megapixels + 对齐倍数（59- 节点 widgets
-    # 口径）。None = 未声明，消费方回落默认三元组（`VideoOutputParams()`）；写了
-    # 任一键即成三元组，缺的键取默认。W×H 不是输入（不支持任意宽高直填），由三元组
-    # 按节点公式推导。
+    # 口径）。None = 未声明，消费方按画布自动推导（issue #49：比例档继承画布比例、
+    # megapixels 按面积反推取档）；写了任一键即成三元组，缺的键取默认——显式声明
+    # 始终优先于推导。W×H 不是输入（不支持任意宽高直填），由三元组按节点公式推导。
     video_output: VideoOutputParams | None = None
     refs: list[RefItem] = field(default_factory=list)
     draft: str = ""

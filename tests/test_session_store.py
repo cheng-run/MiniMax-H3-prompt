@@ -132,7 +132,8 @@ def test_malformed_video_output_in_session_file_is_loud(tmp_path, replacement):
 
 
 def test_missing_video_output_key_still_reads(tmp_path):
-    """键缺失/null ＝ 未选定（旧会话没有该键）：消费方回落默认三元组，不报错。"""
+    """键缺失/null ＝ 未定案（旧会话没有该键）：消费方按画布自动推导（issue #49），
+    不报错。"""
     _corrupt_video_output(tmp_path, '"video_output": null')
     loaded = load_session(tmp_path / "GEN001")
     assert loaded is not None and loaded.brief.video_output is None
