@@ -48,6 +48,8 @@ def test_canvases_survive_resume(tmp_path):
 
     brief 的持久化字段是**逐个显式列出**的（见 ``_brief_to_dict`` 的注释）——
     新字段漏登记就静默丢，重启后画布悄悄回落默认表，用户看不出差别直到图出完。
+    canvases 里的 flux2 键是旧会话残留（ADR 0013 全链退役）：**原样往返、无人读**，
+    载入不校验不报错——历史数据按弃读惯例处理（issue #48）。
     """
     brief = Brief(mode="base", variant="I2VA", duration=18.0, style="写实", plot="便利店橘猫",
                   canvases={"zimage": (700, 1300), "flux2": (1024, 1024)})

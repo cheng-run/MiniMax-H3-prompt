@@ -165,9 +165,10 @@ def _choose_canvases() -> dict[str, tuple[int, int]]:
     """生图侧画布选择器（issue #42）：选比例→选尺寸→不符可自定义，**逐模型家族**。
 
     「取代系统钦定的推荐尺寸」：比例没有回车默认档——必须显式选（坏输入重问），
-    尺寸档不符走自定义自由输入（保留兜底）。每个家族各走一遍三步：构图词分套绑
-    各家族选定画布的**画幅族**（Q21(c)），两家可以一竖一方。返回家族 → (宽, 高)，
-    落进 Brief.canvases，随请求【画布】块与产物画布行同源下发。
+    尺寸档不符走自定义自由输入（保留兜底）。每个现存家族各走一遍三步（Flux.2 全链
+    退役后只剩 zimage 一家，issue #48——家族清单从默认表取，随表自动收缩）：
+    构图词分套绑选定画布的**画幅族**（Q21(c)）。返回家族 → (宽, 高)，落进
+    Brief.canvases，随请求【画布】块与产物画布行同源下发。
     """
     from ..generation import IMAGE_FAMILY_LABELS, IMAGE_PROFILE_DEFAULTS
 
@@ -1056,11 +1057,14 @@ def _user_revision_loop(state: dict, generation_dir: Path, brief: Brief, config:
 
 
 def render_fl2va_frame_markdown_from_bundle(bundle, frame: str) -> str:
-    """渲染单帧双模型提示词（不依赖 GenerationResult）；空帧返回空串。"""
+    """渲染单帧提示词（单模型 Z-Image，不依赖 GenerationResult）；空帧返回空串。
+
+    Flux.2 已全链退役（issue #48）：旧产物里的 flux2 行在 bundle 解析处就弃读了，
+    这里不再做第二道静默过滤——展示层只管渲染拿到的行。
+    """
     if frame not in {"first", "last"}:
         raise ValueError(f"帧类型无效：{frame}")
     rows = bundle.first if frame == "first" else bundle.last
-    rows = [item for item in rows if item.model_family == "zimage"]  # 只展示 Z-Image
     if not rows:
         return ""
     title = "首帧" if frame == "first" else "尾帧"

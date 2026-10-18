@@ -108,14 +108,16 @@ def test_corrupt_entry_is_loud_instead_of_silently_dropped():
 
 
 def _baseline_bundle() -> dict:
-    """上一版完整产物（节点落盘的形态：帧是列表、每项带 model_family）。"""
+    """上一版完整产物（节点落盘的形态：帧是列表、每项带 model_family）。
+
+    只带 zimage 行——Flux.2 全链退役（issue #48）后这是现行形状；旧产物里的 flux2 行
+    由 ``test_baseline_block_skips_retired_model_rows`` 单独钉弃读。
+    """
     return {
         "scene_anchor": "秋日庭院：青石地、院角水缸、墙侧红枫",
         "first": [
             {"frame": "first", "model_family": "zimage",
              "positive_prompt": "首帧-Z：橘猫蹲在青石上，门环有包浆"},
-            {"frame": "first", "model_family": "flux2",
-             "positive_prompt": "首帧-F：橘猫蹲在青石上，门环有包浆（Flux.2）"},
         ],
         "last": [
             {"frame": "last", "model_family": "zimage", "positive_prompt": "尾帧-Z：橘猫抬头看红枫"},
@@ -151,17 +153,36 @@ def test_baseline_block_accepts_the_model_grouped_shape():
     """模型原始输出是「模型名分组」的 dict，与落盘的列表形态并存；两种都要认得。
 
     认不出来的后果不是报错而是**静默渲染成空块**——基线悄悄消失、台账还记着没上基线，
-    正是本模块要消灭的形态。
+    正是本模块要消灭的形态。旧产物里的 flux2 组按**弃读**处理（issue #48，ADR 0013）：
+    不回流进修订基线——基线是喂回模型的上下文，带上它就把 Flux.2 字样重新引进提示词。
     """
     block = render_baseline_block({
         "scene_anchor": "秋日庭院",
         "first": {"zimage": {"positive_prompt": "首帧-Z：橘猫蹲在青石上"}},
-        "last": {"flux2": {"positive_prompt": "尾帧-F：橘猫抬头看红枫"}},
+        "last": {"zimage": {"positive_prompt": "尾帧-Z：橘猫抬头看红枫"},
+                 "flux2": {"positive_prompt": "旧 Flux.2 版尾帧（不该进基线）"}},
     })
 
     assert "首帧-Z：橘猫蹲在青石上" in block
-    assert "尾帧-F：橘猫抬头看红枫" in block
+    assert "尾帧-Z：橘猫抬头看红枫" in block
     assert "秋日庭院" in block
+    assert "旧 Flux.2 版" not in block, "退役家族的旧产物行应弃读，不得回流进修订基线"
+
+
+def test_baseline_block_skips_retired_model_rows():
+    """列表形态（节点落盘 to_dict()）里的 flux2 行同样弃读（issue #48）。
+
+    会话 state 的产物帧是列表、每项带 model_family——旧会话续接重出走的就是这条读法。
+    """
+    bundle = _baseline_bundle()
+    bundle["first"].append(
+        {"frame": "first", "model_family": "flux2",
+         "positive_prompt": "旧 Flux.2 版首帧（不该进基线）"})
+    block = render_baseline_block(bundle)
+
+    assert "首帧-Z：橘猫蹲在青石上" in block
+    assert "旧 Flux.2 版" not in block and "flux2" not in block.lower(), \
+        "退役家族的旧产物行应弃读，不得回流进修订基线"
 
 
 def test_ledger_appends_one_row_per_round_with_full_snapshot(tmp_path):

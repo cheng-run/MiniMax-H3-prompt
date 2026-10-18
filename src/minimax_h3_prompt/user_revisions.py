@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from .generation import is_retired_image_family
+
 # 修订台账文件名（``<generation_dir>/frame-rounds.jsonl``，CONTEXT.md「修订台账」）。
 FRAME_ROUNDS_FILENAME = "frame-rounds.jsonl"
 
@@ -371,6 +373,10 @@ def _frame_entries(frames: Any) -> list[tuple[str, str]]:
 
     不复用 ``FL2VAPromptBundle.from_dict``：它缺锚点／空帧就抛，而这里「没有上一版产物」
     是合法输入（票面 AC-5 要求不报错），容错边界不同。
+
+    已退役家族（Flux.2）的行/组按**弃读**惯例跳过（issue #48，ADR 0013）：旧产物里的
+    flux2 版本不再回流进修订基线——基线是喂回模型的上下文，带上它就把 Flux.2 字样
+    重新引进提示词。清单形/分组形两条读法同挡。
     """
     if isinstance(frames, dict):
         rows: list[tuple[str, Any]] = (
@@ -384,6 +390,8 @@ def _frame_entries(frames: Any) -> list[tuple[str, str]]:
     entries: list[tuple[str, str]] = []
     for model, item in rows:
         if not isinstance(item, dict):
+            continue
+        if is_retired_image_family(item.get("model_family") or model):
             continue
         text = str(item.get("positive_prompt") or item.get("prompt") or "").strip()
         if text:

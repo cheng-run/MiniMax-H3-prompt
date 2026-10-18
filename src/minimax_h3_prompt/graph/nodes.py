@@ -172,9 +172,10 @@ def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_f
                 美术统筹=state.get("art_design", ""),
                 视觉风格=brief.style,
                 语言=brief.language,
-                # 画布是**本次请求的数据**（不住在系统提示词里）：构图那套词按画幅分两套，
-                # 而两个家族的画幅不是一个形状。词表里写着「哪个模型是哪种画幅见请求里的
-                # 【画布】块」——不带这块，那条指针就没有落点（issue #33 在帧节点踩过同一个坑）。
+                # 画布是**本次请求的数据**（不住在系统提示词里）：构图那套词按画幅族分
+                # 两套，而用户选定的画布形状各案不同。词表里写着「画布与尺寸一律以请求里的
+                # 【画布】块为准」——不带这块，那条指针就没有落点（issue #33 在帧节点踩过
+                # 同一个坑）。
                 画布=_canvas_block(brief.canvases),
             )
         )
@@ -290,7 +291,7 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
             repair = run_agent(
                 agents["frame_prompt_engineer"],
                 f"把以下内容转换为严格 JSON，不要 markdown，必须保留 {required}、scene_anchor、"
-                f"continuity_constraints，以及每个模型的 composition 与 lighting 字段：\n"
+                f"continuity_constraints，以及 composition 与 lighting 字段：\n"
                 f"{_ctx(画布=_canvas_block(brief.canvases), 场景词=_scene_terms_block(brief))}\n原始内容：\n{raw}",
             )
             try:
@@ -334,8 +335,8 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
               "主题要求的地点词以输入里的【场景词】块为准。"
             # 构图/光线两个字段（issue #33）：解析器一直支持读写，却无人写——实测仓库里
             # 9 份真实产物（5 个会话）的 18 行全是空串。字段名进请求是「有生产者」的第一步。
-            + "每个模型版本都必须给出 composition 与 lighting 两个字段"
-              "（按本模型的画布写构图、按光线的方向/强度/质感写光）。"
+            + "必须给出 composition 与 lighting 两个字段"
+              "（按画布写构图、按光线的方向/强度/质感写光）。"
             + "只输出 JSON。\n"
             + _ctx(
                 变体=brief.variant,

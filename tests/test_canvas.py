@@ -18,6 +18,7 @@ import pytest
 from minimax_h3_prompt.generation import (
     CANVAS_RATIO_PRESETS,
     IMAGE_PROFILE_DEFAULTS,
+    ImageProfile,
     canvas_display,
     composition_set,
     image_canvas_size,
@@ -109,11 +110,17 @@ def test_canvas_display_labels_extreme_ratios_as_extreme():
 # 3. 读取口：用户选定优先，未选回落默认表（AC1）
 # ---------------------------------------------------------------------------
 
-def test_image_canvas_size_prefers_the_user_selection():
-    """选定值是数据不是默认值的装饰：传了就用它，不用 profile 默认表。"""
+def test_image_canvas_size_prefers_the_user_selection(monkeypatch):
+    """选定值是数据不是默认值的装饰：传了就用它，不用 profile 默认表。
+
+    「没选的家族不能跟着别的家族跑」用临时加的第二家族验证（Flux.2 退役后只剩一家，
+    原样本是 flux2；家族清单从表派生，测试加行与生产加行同一条路）。
+    """
     assert image_canvas_size("zimage", {"zimage": (700, 1300)}) == (700, 1300)
-    assert image_canvas_size("flux2", {"zimage": (700, 1300)}) == \
-        image_canvas_size("flux2"), "没选的家族必须回落默认表，不能跟着别的家族跑"
+    monkeypatch.setitem(IMAGE_PROFILE_DEFAULTS, "zimage_wide",
+                        ImageProfile("zimage_wide_v1", "12", 768, 768, "candidate"))
+    assert image_canvas_size("zimage_wide", {"zimage": (700, 1300)}) == (768, 768), \
+        "没选的家族必须回落默认表，不能跟着别的家族跑"
 
 
 def test_image_canvas_size_falls_back_to_the_profile_table():
@@ -123,11 +130,19 @@ def test_image_canvas_size_falls_back_to_the_profile_table():
 
 
 def test_image_canvas_size_rejects_unknown_family():
-    """表外家族照旧报错（沿用改动前的可证失败形态）。"""
+    """表外家族照旧报错；flux2 随全链退役进「未知生图模型」档（issue #48 AC6）。
+
+    读取口与 brief 画布键同款报错：家族合法性先于选定值，带了选定值也照报——
+    「画布 flux2: …」与 `image_canvas_size("flux2", …)` 都不得静默回落默认表。
+    """
     with pytest.raises(ValueError):
         image_canvas_size("sdxl")
     with pytest.raises(ValueError):
         image_canvas_size("sdxl", {"sdxl": (512, 512)})
+    with pytest.raises(ValueError, match="未知生图模型"):
+        image_canvas_size("flux2")
+    with pytest.raises(ValueError, match="未知生图模型"):
+        image_canvas_size("flux2", {"flux2": (512, 512)})
 
 
 def test_ratio_preset_sizes_match_their_ratio_exactly():
@@ -171,6 +186,23 @@ def test_composition_hints_have_their_definitions_in_the_wordlist():
         "词表对照表的近方→正方套没了/反了"
     # 措辞纪律（AC4）也在真源里活着：不写比例数字、只写构图关系。
     assert "不写比例数字" in source and "构图关系" in source
+
+
+def test_image_wordlist_uses_aspect_family_wording_without_model_pairs():
+    """生图词表按画幅族口径表述（issue #48 AC4）：「按模型分两套」旧叙述已更正。
+
+    正方构图套必须**仍在**（它绑画幅族不绑模型，ADR 0013 明文不跟着删）；
+    「多模型版本分别重写」的双模型纪律与 Flux.2 字样不得再出现在真源里——真源是
+    逐字喂给模型的，带着它就等于把退役模型重新引进提示词。变异检验：把旧叙述或
+    Flux.2 字样放回词表，这条会红（已实测）。
+    """
+    from minimax_h3_prompt.film_language import image_source_text
+
+    source = image_source_text()
+    assert "正方套" in source, "正方构图套必须保留（绑画幅族不绑模型）"
+    assert "分别重写" not in source, "「多模型分别重写」旧叙述应更正为画幅族口径"
+    assert "Flux.2" not in source and "flux.2" not in source.lower(), \
+        "生图词表真源不得再出现 Flux.2 字样"
 
 
 # ---------------------------------------------------------------------------

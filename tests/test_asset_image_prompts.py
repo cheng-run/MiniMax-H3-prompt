@@ -272,30 +272,37 @@ def test_canvas_block_carries_the_user_selected_canvas(monkeypatch):
 
     期望串是**字面量**（700×1300 约分为 7:13）：从实现函数现算就与实现同构，格式错了
     也一起绿。系统默认的 640 × 1280 不许再出现——「取代系统钦定的推荐尺寸」的可证面。
+    Flux.2 已全链退役（issue #48 AC3）：【画布】块只渲染现存家族，请求里不得再有
+    Flux.2 行——变异检验：把 flux2 行放回家族表，这条会红（已实测）。
     """
-    request = _canvas_request(monkeypatch, {"zimage": (700, 1300), "flux2": (1024, 1024)})
+    request = _canvas_request(monkeypatch, {"zimage": (700, 1300)})
 
     assert "7:13 · 700 × 1300（近竖）" in request, "请求【画布】块没带 Z-Image 的选定画布"
-    assert "1:1 · 1024 × 1024（近方）" in request, "请求【画布】块没带 Flux.2 的选定画布"
     assert "构图用竖幅套" in request, "Z-Image 行没有构图分套指示"
-    assert "构图用正方套" in request, "Flux.2 行没有构图分套指示"
+    assert "Flux.2" not in request and "flux2" not in request, \
+        "Flux.2 已退役，请求【画布】块不得再渲染 Flux.2 行"
     assert "640 × 1280" not in request, "选定了画布却还带着系统钦定的推荐尺寸"
 
 
 def test_canvas_block_maps_composition_set_by_aspect_family_not_model(monkeypatch):
     """Q21(c)：构图分套绑**画幅族**、不绑模型——给 Z-Image 选近方形比例，它就用正方套。
 
-    这是起草裁定原话的可证面（「你给 Z-Image 选近方形比例时仍用正方套」）：改动前
-    分套潜规则是「zimage=竖幅、flux2=正方」，用户换比例后再说反话。族外（此处 Flux.2
-    选的 9:21 极端竖）必须降通用构图词，且**明说不用两套**——只写「通用」两个字模型
-    仍可能硬套竖幅措辞。
+    这是起草裁定原话的可证面（「你给 Z-Image 选近方形比例时仍用正方套」）：分套潜规则
+    曾是「zimage=竖幅」的模型旧形状，用户换比例后就说反话。族外（此处 9:21 极端竖）
+    必须降通用构图词，且**明说不用两套**——只写「通用」两个字模型仍可能硬套竖幅措辞。
+    两次请求、同一模型：分套只看选定画布的画幅族（issue #48 后单模型，靠换比例翻族验证）。
     """
-    request = _canvas_request(monkeypatch, {"zimage": (1024, 1024), "flux2": (540, 1260)})
+    square = _canvas_request(monkeypatch, {"zimage": (1024, 1024)})
 
-    assert "构图用正方套" in request, "Z-Image 选了 1:1，构图却没落到正方套（还绑着模型旧形状）"
-    assert "构图用竖幅套" not in request, "没人选竖幅族画布，请求里不该出现竖幅套"
-    assert "通用构图词" in request, "9:21 极端比例没降通用构图词"
-    assert "不用竖幅/正方任一套" in request, "族外降级没说清「不硬塞任一套」，模型会硬套"
+    assert "构图用正方套" in square, "Z-Image 选了 1:1，构图却没落到正方套（还绑着模型旧形状）"
+    assert "构图用竖幅套" not in square, "没人选竖幅族画布，请求里不该出现竖幅套"
+
+    extreme = _canvas_request(monkeypatch, {"zimage": (540, 1260)})
+
+    assert "通用构图词" in extreme, "9:21 极端比例没降通用构图词"
+    assert "不用竖幅/正方任一套" in extreme, "族外降级没说清「不硬塞任一套」，模型会硬套"
+    assert "构图用竖幅套" not in extreme and "构图用正方套" not in extreme, \
+        "族外画布不许硬塞任一专用词套"
 
 
 # ---------------------------------------------------------------------------
