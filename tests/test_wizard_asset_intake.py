@@ -148,11 +148,10 @@ def test_ref_flow_collects_pictures_and_writes_ledger(tmp_path, monkeypatch, cap
         "青铜钥匙": _write_source(tmp_path, "key.png", b"key"),
         "蓝衫少年": _write_source(tmp_path, "boy.png", b"boy"),
     }
-    # 提问次序＝参考素材登记次序（剧本出场序）：女孩/庭院/钥匙/少年；随后不再加视频/音频；
-    # 末两问是视频输出选择器（"8"=9:16 档、"1"=采用默认预算，issue #45）
+    # 提问次序＝参考素材登记次序（剧本出场序）：女孩/庭院/钥匙/少年；随后不再加视频/音频。
+    # 视频输出无问答（issue #49 自动推导），故无尾部选择器输入。
     asked = _fake_inputs(monkeypatch, [TOPIC, "", "", "4"] +
-                         [str(paths[name]) for name, _n in EXPECTED_NUMBERING] +
-                         ["8", "1"])
+                         [str(paths[name]) for name, _n in EXPECTED_NUMBERING])
     confirms = _fake_confirms(monkeypatch, [("视频/音频", False)])
 
     code = wizard.run_wizard(_cfg(tmp_path))
@@ -186,8 +185,7 @@ def test_three_kinds_via_video_audio_addflow(tmp_path, monkeypatch, capsys):
     video = _write_source(tmp_path, "cam.mp4", b"vid")
     audio = _write_source(tmp_path, "voice.wav", b"aud")
     _fake_inputs(monkeypatch, [TOPIC, "", "", "4"] + [str(girl), "", "", ""] +
-                 ["1", "运镜参考", str(video), "2", "红裙女孩音色", str(audio)] +
-                 ["8", "1"])  # 视频输出选择器：9:16 档 + 采用默认预算（issue #45）
+                 ["1", "运镜参考", str(video), "2", "红裙女孩音色", str(audio)])
     _fake_confirms(monkeypatch, [("视频/音频", True), ("视频/音频", True), ("视频/音频", False)])
 
     code = wizard.run_wizard(_cfg(tmp_path))
@@ -233,8 +231,7 @@ def test_complete_intake_proceeds_without_pause_question(tmp_path, monkeypatch):
     _stub_vision_clean(monkeypatch)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
     paths = [_write_source(tmp_path, f"{i}.png", b"x") for i in range(4)]
-    _fake_inputs(monkeypatch, [TOPIC, "", "", "4"] + [str(p) for p in paths] +
-                 ["8", "1"])  # 视频输出选择器：9:16 档 + 采用默认预算（issue #45）
+    _fake_inputs(monkeypatch, [TOPIC, "", "", "4"] + [str(p) for p in paths])
     # 「继续」规则答 False：若被问到就会中断，video-prompt.md 不会出现
     confirms = _fake_confirms(monkeypatch, [("视频/音频", False), ("继续", False)])
 
@@ -270,8 +267,8 @@ def test_replacement_is_reported_and_needs_confirmation(tmp_path, monkeypatch, c
 
     v2 = _write_source(tmp_path, "girl-v2.png", b"content-v2-different")
     monkeypatch.setattr(wizard, "_offer_resume", lambda config: load_session(directory))
-    # 只交红裙女孩的新版，其余跳过；末两问是视频输出选择器（issue #45）
-    _fake_inputs(monkeypatch, [str(v2), "", "", "", "8", "1"])
+    # 只交红裙女孩的新版，其余跳过（视频输出无问答，issue #49）
+    _fake_inputs(monkeypatch, [str(v2), "", "", ""])
     confirms = _fake_confirms(monkeypatch, [
         ("视频/音频", False), ("替换", False), ("继续", True),  # 换版不换；缺项但继续
     ])

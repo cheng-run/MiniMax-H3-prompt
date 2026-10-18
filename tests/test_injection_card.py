@@ -26,6 +26,7 @@ from minimax_h3_prompt.injection_card import (
     CARD_FILENAME,
     VIDEO_RATIO_PRESETS,
     VideoOutputParams,
+    derive_video_output,
     render_injection_card,
     slot_name,
     write_injection_card,
@@ -58,6 +59,67 @@ def test_video_size_derivation_matches_the_workflow_node(ratio, megapixels, mult
     """「比例档 + megapixels + 对齐倍数 → 最终 W×H」逐档与节点推导口径一致。"""
     params = VideoOutputParams(ratio=ratio, megapixels=megapixels, multiple=multiple)
     assert params.size == (width, height)
+
+
+# ---------------------------------------------------------------------------
+# 1b. 画布 → 视频输出参数推导（issue #49：比例继承画布、面积反推取档）
+# ---------------------------------------------------------------------------
+
+def test_derive_video_output_reproduces_the_manual_pick():
+    """当日手选值可复现（issue #49 AC2 金值，独立来源＝票面记录的实测现场）：
+    画布 1280×720 → 16:9 · 0.9MP · 32 → 1280×736。"""
+    derivation = derive_video_output(1280, 720)
+    params = derivation.params
+    assert (params.ratio, params.megapixels, params.multiple) == (
+        "16:9 (Widescreen)", 0.9, 32)
+    assert params.size == (1280, 736)  # 与 2026-10-18 手选落卡的最终 W×H 逐字一致
+    assert derivation.notes == ()  # 逐项直取：无回退/夹档可说破
+
+
+def test_derive_inherits_ratio_from_custom_canvas_by_reduction():
+    """自定义画布按约分继承比例档（issue #49 AC5）：尺寸不在菜单上，比例对得上就继承。
+    1600×900 约分 16:9 → 同档；面积 1.373MP 取 0.1 档 → 1.4。"""
+    derivation = derive_video_output(1600, 900)
+    params = derivation.params
+    assert params.ratio == "16:9 (Widescreen)"
+    assert params.megapixels == 1.4
+    assert params.multiple == 32  # 对齐倍数取默认（票面）
+    assert derivation.notes == ()
+
+
+def test_derive_extreme_ratio_falls_back_to_the_nearest_preset():
+    """极端/档外比例回退最近档（issue #49 AC5）：540×1260（9:21，向导自定义入口的
+    票面样例）最近的是 9:16（0.429 对 0.5625 距 0.134，对 2:3 距 0.238）；
+    极宽 2560×720（32:9）回退 21:9——回退不是无脑塞 9:16，仍要贴画布形状。
+    回退必须说破（notes 非空），绝不静默。"""
+    portrait = derive_video_output(540, 1260)
+    assert portrait.params.ratio == "9:16 (Portrait Widescreen)"
+    assert any("回退" in note for note in portrait.notes)
+    wide = derive_video_output(2560, 720)
+    assert wide.params.ratio == "21:9 (Ultrawide)"
+    assert any("回退" in note for note in wide.notes)
+
+
+def test_derive_exact_match_reduces_both_sides_so_21x9_inherits_silently():
+    """21:9 档存的是未约分份数 (21, 9)（节点 widget 值的原样拼写）——精确对档必须
+    两边同约分（issue #49 复审硬伤）：正 21:9 画布 2520×1080 约分成 7:3，若只约
+    画布不约档，档内画布会错走回退分支、打印假说破（「无对应比例档」）。
+    """
+    derivation = derive_video_output(2520, 1080)
+    assert derivation.params.ratio == "21:9 (Ultrawide)"
+    assert derivation.notes == (), "档内画布不得报「回退」——那是假说破"
+
+
+def test_derive_megapixels_tier_rounds_half_up_and_clamps_to_node_bounds():
+    """面积反推取档：0.1 档四舍五入、半值向上（预算不缩），越界夹到节点契约并说破。
+    512×512＝0.25MP 半值 → 0.3；64×64＝0.004MP → 夹下限 0.1；8192×8192＝64MP → 夹上限 16。"""
+    assert derive_video_output(512, 512).params.megapixels == 0.3
+    low = derive_video_output(64, 64)
+    assert low.params.megapixels == 0.1
+    assert any("夹" in note or "节点" in note for note in low.notes)
+    high = derive_video_output(8192, 8192)
+    assert high.params.megapixels == 16.0
+    assert any("夹" in note or "节点" in note for note in high.notes)
 
 
 # 三元组的字段就是节点 widget 名（aspect_ratio / megapixels / multiple），
@@ -222,10 +284,29 @@ def test_write_card_persists_text_next_to_the_ledger(tmp_path):
 
     save_asset_ledger(tmp_path, _ledger_with(
         _entry("红裙女孩", KIND_PICTURE, 1, "assets/picture-01.png")))
-    path, text = write_injection_card(tmp_path, VideoOutputParams())
-    assert path == tmp_path / CARD_FILENAME
-    assert path.read_text(encoding="utf-8") == text
-    assert "红裙女孩" in text and "ref_image_0" in text
+    result = write_injection_card(tmp_path, VideoOutputParams())
+    assert result.path == tmp_path / CARD_FILENAME
+    assert result.written is True
+    assert result.path.read_text(encoding="utf-8") == result.text
+    assert "红裙女孩" in result.text and "ref_image_0" in result.text
+
+
+def test_write_card_never_overwrites_hand_edits(tmp_path):
+    """卡是手改出口（issue #49 AC4）：用户手改不被系统回写覆盖。
+
+    第二次写卡（重跑交付/续接）时卡已存在——可能是用户改过的正本：覆盖＝把手改
+    抹掉。已存在一律保留原文并报告 ``written=False``；要重出新卡，用户删文件后重跑
+    （删除是显式动作，与「不许静默覆盖」同一口径）。
+    """
+    first = write_injection_card(tmp_path, VideoOutputParams())
+    assert first.written is True
+    edited = first.text.replace("megapixels：0.4", "megapixels：2.5")
+    first.path.write_text(edited, encoding="utf-8")
+    second = write_injection_card(
+        tmp_path, VideoOutputParams(ratio="21:9 (Ultrawide)", megapixels=8.0))
+    assert second.written is False
+    assert second.text == edited, "手改后的卡不得被系统回写覆盖"
+    assert "21:9" not in second.text  # 新渲染稿不得混进盘上正文
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +382,46 @@ def test_create_video_from_topic_puts_video_output_into_the_brief(tmp_path, monk
         topic_generation.create_video_from_topic(
             "主题", _cfg(tmp_path), mode="ref", video_output=params)
     assert captured["video_output"] is params
+
+
+def test_brief_path_derives_from_canvas_when_video_output_absent(tmp_path, monkeypatch):
+    """brief 未声明视频参数 → 按画布自动推导（issue #49）：画布 1280×720 → 16:9 · 0.9MP · 32。
+
+    推导值回写进 Brief——卡与 brief 快照必须同源（复审「两处对不上账」的教训）。
+    """
+    from minimax_h3_prompt.topic_generation import create_video_from_topic
+
+    _stub_pipeline(monkeypatch)
+    _result, directory = create_video_from_topic(
+        "测试主题", _cfg(tmp_path), mode="ref", canvases={"zimage": (1280, 720)})
+    text = (directory / CARD_FILENAME).read_text(encoding="utf-8")
+    assert "16:9 (Widescreen)" in text
+    assert "megapixels：0.9" in text and "对齐倍数：32" in text
+    assert "1280 × 736" in text
+
+
+def test_brief_declaration_wins_over_canvas_derivation(tmp_path, monkeypatch):
+    """brief 显式声明优先于推导（issue #49 AC3）：声明 1:1·1.0MP·16，画布 1280×720
+    推得出 16:9·0.9MP 也得让路——显式声明是用户的决定，推导只是缺省。"""
+    from minimax_h3_prompt.topic_generation import create_video_from_topic
+
+    _stub_pipeline(monkeypatch)
+    _result, directory = create_video_from_topic(
+        "测试主题", _cfg(tmp_path), mode="ref", canvases={"zimage": (1280, 720)},
+        video_output=VideoOutputParams(ratio="1:1 (Square)", megapixels=1.0, multiple=16))
+    text = (directory / CARD_FILENAME).read_text(encoding="utf-8")
+    assert "1:1 (Square)" in text and "megapixels：1" in text and "对齐倍数：16" in text
+    assert "16:9" not in text  # 推导值不得混进声明值的卡
+
+
+def test_card_renders_derivation_notes_next_to_the_triple():
+    """推导注记（比例回退/面积夹档）落卡说破（issue #49，绝不静默）；
+    无注记＝注记行不出现（老卡排版逐字保留）。"""
+    text = render_injection_card(_ledger_with(), VideoOutputParams(),
+                                 notes=("画布比例 9:21 无对应比例档，回退最近档 9:16",))
+    assert "推导注记" in text and "回退最近档" in text
+    plain = render_injection_card(_ledger_with(), VideoOutputParams())
+    assert "推导注记" not in plain
 
 
 def test_cli_brief_path_forwards_video_output_to_generation(tmp_path, monkeypatch):

@@ -12,10 +12,7 @@ import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
-
-if TYPE_CHECKING:  # 返回注解用；运行时经函数级导入取（防环，brief_parser 同款）
-    from ..injection_card import VideoOutputParams
+from typing import Callable
 
 from ..brief_parser import Brief, RefItem
 from ..config import Config
@@ -178,14 +175,13 @@ def _choose_canvases() -> dict[str, tuple[int, int]]:
     }
 
 
-def _menu_pick(title: str, count: int, *, allow_custom: bool = True) -> int:
+def _menu_pick(title: str, count: int) -> int:
     """编号菜单的统一收口（选比例/选尺寸两步共用，复审点名的重复）。
 
-    返回选中的 1..count+1（count+1 = 自定义逃生口；``allow_custom=False`` 时只收
-    1..count——视频输出比例档无任意比例，档外没有逃生口，只许重问）。坏输入重问，
-    不静默取默认——画布是数据，错值必须当场拦（同 `parse_canvas_size` 的口径）。
+    返回选中的 1..count+1（count+1 = 自定义逃生口）。坏输入重问，不静默取默认——
+    画布是数据，错值必须当场拦（同 `parse_canvas_size` 的口径）。
     """
-    top = count + 1 if allow_custom else count
+    top = count + 1
     while True:
         raw = _prompt(f"{title}，输入 1-{top}：").strip()
         if raw.isdigit() and 1 <= int(raw) <= top:
@@ -241,67 +237,6 @@ def _ask_custom_canvas(label: str) -> tuple[int, int]:
         try:
             return parse_canvas_size(raw)
         except ValueError as exc:  # 坏值大声报错（画布是精确数据），但交互里重问而不是炸流程
-            print(f"[提示] {exc}，请重输。")
-
-
-def _choose_video_output() -> VideoOutputParams:
-    """视频输出三元组选择器（issue #45）：选比例→默认预算预览→不符可自定义。
-
-    贴合 59- 节点契约：比例只认 10 档预设（**无任意比例**、无宽高直填——"自定义"
-    只指手输 megapixels/对齐倍数）；比例没有回车默认档（画布同纪律，必须显式选），
-    预算步回车默认＝登记工作流现值（0.4MP · 对齐 32）。选定值进注入卡，照抄 widgets。
-    """
-    from ..injection_card import (
-        DEFAULT_MEGAPIXELS,
-        DEFAULT_MULTIPLE,
-        VIDEO_RATIO_PRESETS,
-        VideoOutputParams,
-    )
-
-    print("\n[视频输出] 请选择生成尺寸（贴 59- 节点契约：10 档比例 + megapixels 预算推导宽高）")
-    print("请选择视频输出比例——10 档预设比例（无任意比例，必须显式选）：")
-    for index, preset in enumerate(VIDEO_RATIO_PRESETS, 1):
-        print(f"  {index}. {preset.label}")
-    choice = _menu_pick("视频输出·比例", len(VIDEO_RATIO_PRESETS), allow_custom=False)
-    ratio = VIDEO_RATIO_PRESETS[choice - 1].label
-    default_params = VideoOutputParams(ratio=ratio)
-    width, height = default_params.size
-    print(f"\n默认像素预算 {DEFAULT_MEGAPIXELS:g} MP → {width} × {height}（对齐 {DEFAULT_MULTIPLE}）")
-    print("  1. 采用默认（三元组照抄进 widgets 即可）")
-    print("  2. 自定义（手输 megapixels/对齐倍数——不支持宽高直填）")
-    pick = _menu_pick("视频输出·像素预算", 1)
-    if pick == 1:
-        params = default_params
-    else:
-        params = _ask_custom_video_output(ratio)
-    width, height = params.size
-    print(f"[已选] 视频输出：{params.ratio} · {params.megapixels:g} MP · "
-          f"对齐 {params.multiple} → {width} × {height}")
-    return params
-
-
-def _ask_custom_video_output(ratio: str) -> VideoOutputParams:
-    """自定义像素预算：megapixels 与对齐倍数手输（回车=默认），坏值成对重问不静默。"""
-    from ..injection_card import (
-        DEFAULT_MEGAPIXELS,
-        DEFAULT_MULTIPLE,
-        MEGAPIXELS_MAX,
-        MEGAPIXELS_MIN,
-        MULTIPLE_MAX,
-        MULTIPLE_MIN,
-        VideoOutputParams,
-    )
-
-    while True:
-        raw_mp = _prompt(
-            f"megapixels（{MEGAPIXELS_MIN}–{MEGAPIXELS_MAX}，回车={DEFAULT_MEGAPIXELS:g}）：").strip()
-        raw_multiple = _prompt(
-            f"对齐倍数（{MULTIPLE_MIN}–{MULTIPLE_MAX}，回车={DEFAULT_MULTIPLE}）：").strip()
-        try:
-            megapixels = float(raw_mp) if raw_mp else DEFAULT_MEGAPIXELS
-            multiple = int(raw_multiple) if raw_multiple else DEFAULT_MULTIPLE
-            return VideoOutputParams(ratio=ratio, megapixels=megapixels, multiple=multiple)
-        except ValueError as exc:
             print(f"[提示] {exc}，请重输。")
 
 
@@ -1361,20 +1296,37 @@ def _deliver_ref_segments(state: dict, brief: Brief, prompt: str,
 
 
 def _deliver_injection_card(generation_dir: Path, brief: Brief) -> None:
-    """注入卡交付（issue #45）：问视频输出三元组 → 回写 brief → 落盘接线清单，薄接线。
+    """注入卡交付（issue #45/#49）：视频输出定案 → 回写 brief → 落盘接线清单。
 
-    排版/推导/槽位映射全在 ``injection_card`` 一份；这里只接问答与展示。放在
-    素材交回之后、阶段 2 之前——参数问答是秒级的，别等模型烧几分钟才想起尺寸没定。
-    三元组**回写 brief**（复审：只落卡不回写，快照记 null、卡上有值，两处对不上账）：
-    随后 ``save_session``/``brief_snapshot`` 的逐字段清单就带着选定值。
+    视频尺寸**不再单独提问**（issue #49，2026-10-18 裁定）——用户在画布已经选过
+    尺寸，第二遍问答就是实测反馈里的「重复问」。定案规则（声明优先/画布推导）全在
+    ``resolve_video_output`` 一份；特殊需求在卡上手改（写卡不覆盖手改，见
+    ``write_injection_card``）。三元组**回写 brief**（复审：只落卡不回写，快照记
+    null、卡上有值，两处对不上账）：随后 ``save_session``/``brief_snapshot`` 的
+    逐字段清单就带着定案值。
     """
-    from ..injection_card import write_injection_card
+    from ..injection_card import resolve_video_output, write_injection_card
 
-    params = _choose_video_output()
+    resolution = resolve_video_output(brief.video_output, brief.canvases)
+    params, notes = resolution.params, resolution.notes
     brief.video_output = params
-    path, text = write_injection_card(generation_dir, params)
-    print(text)
-    print(f"✓ 注入卡已写入：{path}")
+    width, height = params.size
+    if resolution.canvas is None:
+        print(f"\n[视频输出] 采用既有声明（优先于画布推导）：{params.ratio} · "
+              f"{params.megapixels:g} MP · 对齐 {params.multiple} → {width} × {height}")
+    else:
+        canvas_w, canvas_h = resolution.canvas
+        print(f"\n[视频输出] 由画布 {canvas_w} × {canvas_h} 推导：{params.ratio} · "
+              f"{params.megapixels:g} MP · 对齐 {params.multiple} → {width} × {height}")
+        for note in notes:
+            print(f"[提示] {note}（特殊需求可在卡上手改）")
+    result = write_injection_card(generation_dir, params, notes=notes)
+    print(result.text)
+    if result.written:
+        print(f"✓ 注入卡已写入：{result.path}")
+    else:
+        print(f"✓ 注入卡已存在（可能含手改），保留原卡：{result.path}"
+              "（需重出请删除该文件后重跑）")
 
 
 def _phase2_ref_finish(config: Config, session: SessionState, *,

@@ -239,7 +239,8 @@ def test_video_output_partial_keys_fill_defaults():
 
 
 def test_video_output_absent_leaves_none():
-    """没写键 ＝ 未声明（video_output 为 None）：消费方回落默认三元组，不造假选定。"""
+    """没写键 ＝ 未声明（video_output 为 None）：消费方按画布自动推导（issue #49），
+    不造假选定。"""
     b = parse_brief_text("时长: 5\n## 剧情\nx")
     assert b.video_output is None
 
