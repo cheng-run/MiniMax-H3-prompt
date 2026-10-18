@@ -20,3 +20,7 @@ wheels/
 # src/minimax_h3_prompt/output/ 一起忽略，那三个文件于是从未入库，
 # 全新 clone 在 import 阶段就 ModuleNotFoundError）
 /output/
+
+# 并行票据工作树（git worktree add worktree/ticket-NN），只登记在 .git/worktrees，
+# 目录本身不入库——同 output/ 的教训，锚定仓库根防止误吞源码包
+/worktree/
