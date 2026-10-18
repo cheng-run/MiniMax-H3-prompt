@@ -15,6 +15,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from minimax_h3_prompt import model_factory
 from minimax_h3_prompt.asset_ledger import load_asset_ledger
 from minimax_h3_prompt.asset_loop import ASSET_ROUNDS_FILENAME
@@ -231,8 +233,8 @@ def test_queue_supports_skip_and_specify_next(tmp_path, monkeypatch, capsys):
     tail: list[str] = [
         "3",              # 队列菜单：跳号，先出 3 号（秋日庭院）
         "1", str(paths["秋日庭院"]),
-        "", "4",          # 出队首（蓝衫少年？不——红裙女孩是队首），放弃
-        "", "4",
+        "", "4",          # 回队首（红裙女孩）→ 放弃
+        "", "4",          # 蓝衫少年 → 放弃
         "4",              # 最后一张自动出，放弃
         "8", "1",
     ]
@@ -276,9 +278,8 @@ def test_abandon_keeps_asset_out_of_ledger_and_marks_state(tmp_path, monkeypatch
     tail = ["", "4", "", "4", "", "4", "4", "8", "1"]  # 四张全放弃
     asked, code, _ = _run_loop(tmp_path, monkeypatch, tail)
     assert code == 0
-    ledger_dir = next((tmp_path / "sessions").rglob("asset-ledger.json"), None)
-    if ledger_dir is not None:
-        assert not load_asset_ledger(ledger_dir.parent).entries, "放弃了的资产不许入库"
+    # 四张全放弃＝一张都没交回：台账文件根本不该存在（不是「存在但为空」）
+    assert not list((tmp_path / "sessions").rglob("asset-ledger.json")), "放弃的资产不许入库"
     session = load_session(next((tmp_path / "sessions").rglob("session-state.json")).parent)
     assert sorted(session.stage_state["asset_loop"]["abandoned"]) == sorted(QUEUE_ORDER)
 
@@ -476,6 +477,25 @@ def test_externally_replaced_asset_returns_to_queue(tmp_path, monkeypatch, capsy
     wizard.run_wizard(_cfg(tmp_path))
     assert calls, "换版后旧裁决冒充了新版——没有退回重新读图"
     assert any("当前待办：红裙女孩" in text or "素材图路径" in text for text in asked2)
+
+
+def test_wrong_shaped_loop_state_is_not_laundered():
+    """asset_loop 错形**响**（不许被 or {} / or [] 洗成空表悄悄起新账）——本仓会话字段口径。"""
+    from minimax_h3_prompt.asset_loop import loop_state
+
+    with pytest.raises(ValueError, match="素材循环进度"):
+        loop_state({"asset_loop": ["红裙女孩"]})          # 应为对象
+    with pytest.raises(ValueError, match="released"):
+        loop_state({"asset_loop": {"released": "红裙女孩"}})  # 应为列表
+    with pytest.raises(ValueError, match="current"):
+        loop_state({"asset_loop": {"current": 3}})         # 应为语义名
+
+    # 键缺失＝新会话：补出完整形状并**落回 state**（调用方改的那个就是它）
+    state: dict = {}
+    loop = loop_state(state)
+    assert loop == {"released": [], "abandoned": []}
+    loop["released"].append("红裙女孩")
+    assert state["asset_loop"]["released"] == ["红裙女孩"]
 
 
 def test_ledger_drift_is_reported_at_loop_entry(tmp_path, monkeypatch, capsys):

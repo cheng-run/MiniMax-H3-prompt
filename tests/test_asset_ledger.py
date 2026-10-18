@@ -24,6 +24,7 @@ from minimax_h3_prompt.asset_ledger import (
     AssetSubmission,
     intake_assets,
     load_asset_ledger,
+    remove_asset,
     render_ledger,
     render_report,
     verify_asset_ledger,
@@ -467,3 +468,32 @@ def test_brief_reintake_swapped_file_replaces_and_reports(tmp_path, monkeypatch,
 
 def _gen_dir(tmp_path: Path) -> Path:
     return next((tmp_path / "sessions").rglob("asset-ledger.json")).parent
+
+
+# ---------------------------------------------------------------------------
+# 撤下登记（issue #50「显式放弃」问过人才撤）
+# ---------------------------------------------------------------------------
+
+def test_remove_asset_drops_entry_and_copy_but_keeps_replacement_history(tmp_path, monkeypatch):
+    """撤下＝台账行与正本复制一起走（废图不留槽）；换版史留着，二次撤返回 None 不报错。"""
+    from minimax_h3_prompt.topic_generation import create_video_from_topic
+
+    _stub_pipeline(monkeypatch)
+    girl = _write_source(tmp_path, "girl.png", b"content-v1")
+    refs = [RefItem(picture=1, name="红裙女孩", description="红裙", path=str(girl))]
+    create_video_from_topic("测试主题", _cfg(tmp_path), mode="ref", refs=refs)
+    directory = _gen_dir(tmp_path)
+    entry = load_asset_ledger(directory).entries[0]
+
+    girl.write_bytes(b"content-v2-different")
+    create_video_from_topic("测试主题", _cfg(tmp_path), mode="ref", refs=refs)
+    history = load_asset_ledger(directory).replacements
+    assert history, "换版史没记上，本用例前提不成立"
+
+    removed = remove_asset(directory, "红裙女孩", KIND_PICTURE)
+    assert removed is not None and removed.name == "红裙女孩"
+    after = load_asset_ledger(directory)
+    assert not after.entries, "撤下后台账还留着这条登记"
+    assert after.replacements == history, "撤下把换版史一起抹了（旧产物就不可复测了）"
+    assert not (directory / removed.path).is_file(), "正本复制没跟着撤"
+    assert remove_asset(directory, "红裙女孩", KIND_PICTURE) is None, "二次撤该是空操作"

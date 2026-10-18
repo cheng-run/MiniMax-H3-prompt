@@ -20,6 +20,9 @@ from typing import Any, NamedTuple, Sequence
 # 这本管资产图提示词的改写轮次，混一本会让「一轮」指代两种节奏。
 ASSET_ROUNDS_FILENAME = "asset-rounds.jsonl"
 
+# 队列进度在 state 里的键（会话持久化白名单同此名，见 session_store._STATE_KEYS）。
+ASSET_LOOP_KEY = "asset_loop"
+
 # 队列默认顺序（issue #50 AC4）：人物→场景→道具。**不是** KIND_LABELS 的
 # 枚举序（人物/道具/场景）——那是渲染标题的顺序；这里是出题节奏的裁定。
 _KIND_QUEUE_ORDER = {"character": 0, "scene": 1, "prop": 2}
@@ -35,6 +38,58 @@ TRIGGER_REGEN_REROLL = "regen_reroll"
 
 # 打回「外部重掷」**不留痕**（issue #50 明确「不登记」）：它不是这本账的触发口，
 # 故此处不设常量——写进轮次账就等于给被拒图记了名。
+
+
+def loop_state(state: dict) -> dict:
+    """队列进度的**唯一读口**：``{released: [...], abandoned: [...], current?: str}``。
+
+    坏形状**响**（ValueError）——本仓口径：falsy 错形不许被 ``or {}`` / ``or []`` 洗成
+    空表悄悄起新账（同 ``asset_proofread.proofread_rows`` 与画布字段）。返回的是 state 里
+    **那个活的 dict**（调用方改它即落回 state），所以这里的错形检查是唯一闸门。
+    """
+    raw = state.setdefault(ASSET_LOOP_KEY, {})
+    if not isinstance(raw, dict):
+        raise ValueError(f"素材循环进度字段错形：{raw!r}（应为队列进度对象）")
+    for key in ("released", "abandoned"):
+        value = raw.get(key)
+        if value is None:
+            raw[key] = []
+        elif not isinstance(value, list):
+            raise ValueError(f"素材循环进度 {key} 错形：{value!r}（应为语义名列表）")
+    current = raw.get("current")
+    if current is not None and not isinstance(current, str):
+        raise ValueError(f"素材循环进度 current 错形：{current!r}（应为语义名）")
+    return raw
+
+
+def note_name(state: dict, key: str, name: str) -> list[str]:
+    """往 ``released`` / ``abandoned`` 里记一个语义名（幂等，保序）。返回该列表。"""
+    if key not in ("released", "abandoned"):
+        raise ValueError(f"素材循环进度没有 {key!r} 这一列")
+    names = loop_state(state)[key]
+    text = str(name)
+    if text not in names:
+        names.append(text)
+    return names
+
+
+def note_released(state: dict, name: str) -> list[str]:
+    """记「这张已出过词」（出站节奏与落盘的依据）。"""
+    return note_name(state, "released", name)
+
+
+def note_abandoned(state: dict, name: str) -> list[str]:
+    """记「这张被显式放弃」（续接据此不再排它）。"""
+    return note_name(state, "abandoned", name)
+
+
+def set_current(state: dict, name: str | None) -> None:
+    """记/清「当前待办」——系统始终只维持一张，续接从它接上。"""
+    loop = loop_state(state)
+    if name is None:
+        loop.pop("current", None)
+    else:
+        loop["current"] = str(name)
 
 
 class QueueItem(NamedTuple):
@@ -170,7 +225,8 @@ def rewrite_asset_prompt(old_prompt: str, feedback: str, llm) -> str:
 
 
 __all__ = [
-    "ASSET_ROUNDS_FILENAME", "QueueItem",
+    "ASSET_LOOP_KEY", "ASSET_ROUNDS_FILENAME", "QueueItem",
     "TRIGGER_REGEN_REROLL", "TRIGGER_REGEN_REWORD", "TRIGGER_REVIEW_REWORD",
-    "asset_queue", "log_asset_round", "read_asset_rounds", "rewrite_asset_prompt",
+    "asset_queue", "log_asset_round", "loop_state", "note_abandoned", "note_released",
+    "read_asset_rounds", "rewrite_asset_prompt", "set_current",
 ]

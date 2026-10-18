@@ -15,6 +15,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:  # 返回注解用；运行时经函数级导入取（防环，brief_parser 同款）
+    from collections.abc import Sequence
+
+    from ..asset_loop import QueueItem
     from ..injection_card import VideoOutputParams
 
 from ..brief_parser import Brief, RefItem
@@ -1090,8 +1093,15 @@ def _ask_asset_replacement(existing, incoming) -> bool:
         default=False)
 
 
+# 单张闭环的两个去向集合（issue #50）：裸字符串信令会被打错字且无处对账，
+# 与本仓 STATUS_* 的口径一致按常量走。
+LOOP_SETTLED, LOOP_ABANDONED, LOOP_PAUSED = "settled", "abandoned", "paused"
+PROOFREAD_DONE, PROOFREAD_REGEN, PROOFREAD_FAILED = "done", "regen", "failed"
+
+
 def _ask_asset_path(label: str) -> str:
-    """问一个素材文件路径：空=跳过；路径不存在当场报并给重交机会（同帧图收图）。"""
+    """问一个素材文件路径：空由**调用方**决定怎么接（循环里＝回审查菜单，补交里＝跳过）；
+    路径不存在当场报并给重交机会（同帧图收图）。"""
     from ..task_package import resolve_input_path
 
     while True:
@@ -1109,7 +1119,7 @@ def _ask_asset_path(label: str) -> str:
         return raw
 
 
-def _pick_next_asset(pending) -> object | None:
+def _pick_next_asset(pending: Sequence[QueueItem]) -> QueueItem | None:
     """队列菜单（issue #50 AC4）：回车=默认队首；序号=跳号/指定下一个出谁；q=暂停。
 
     「跳号」与「指定下一个」是同一问的两张脸：打一个序号就既跳过了默认那张、又指定了
@@ -1143,21 +1153,18 @@ def _sync_released_asset_files(state: dict, brief: Brief, generation_dir: Path,
     （用户照着文件就能全生完）。已落账的资产也算已出站：它们在上一次运行里出过词，
     整篇重写时不许把它们截掉（续接场景）。改写提示词后重进本函数即刷成最新版。
     """
+    from ..asset_loop import note_released
     from ..asset_proofread import STATUS_DONE, ProofreadRecord, proofread_rows
-    from ..generation import image_prompt_variants, render_asset_rows
+    from ..generation import KIND_LABELS, image_prompt_variants, render_asset_rows
     from ..topic_generation import _ARTIFACT_FILES
 
-    loop_state = state.setdefault("asset_loop", {"released": [], "abandoned": []})
-    released = [str(x) for x in loop_state.get("released") or []]
-    if name not in released:
-        released.append(name)
-        loop_state["released"] = released
-    variants = image_prompt_variants(state, brief.canvases)
-    released_set = set(released)
+    released_set = set(note_released(state, name))
     for settled_name, row in proofread_rows(state).items():
         if ProofreadRecord.from_dict(str(settled_name), row).status == STATUS_DONE:
             released_set.add(str(settled_name))
-    for kind in ("character", "prop", "scene"):
+    variants = image_prompt_variants(state, brief.canvases)
+    # 类型枚举取 KIND_LABELS 一份真源（不再硬编字符型元组——它与队列序常量会各漂各的）
+    for kind in KIND_LABELS:
         rows = [v for v in variants if v.kind == kind and v.name in released_set]
         if not rows:
             continue
@@ -1165,7 +1172,7 @@ def _sync_released_asset_files(state: dict, brief: Brief, generation_dir: Path,
         (generation_dir / _ARTIFACT_FILES[kind]).write_text(rendered, encoding="utf-8")
 
 
-def _issue_asset_prompt(state: dict, brief: Brief, generation_dir: Path, item) -> None:
+def _issue_asset_prompt(state: dict, brief: Brief, generation_dir: Path, item: QueueItem) -> None:
     """出一张生图提示词（issue #50 AC1）：单张展示 + 已出站行落盘。
 
     画布行走 ``brief.canvases``（issue #50 AC5）：与请求【画布】块同源，不再回落默认表。
@@ -1182,28 +1189,27 @@ def _issue_asset_prompt(state: dict, brief: Brief, generation_dir: Path, item) -
     _sync_released_asset_files(state, brief, generation_dir, item.name)
 
 
-def _current_prompt_text(state: dict, item) -> str:
-    """取该资产当前的 positive_prompt（改写后即最新版）；找不到响错不吞。"""
+def _find_prompt_entry(state: dict, item: QueueItem) -> dict:
+    """按语义名定位 state 里的资产条目（读/写两处共用这一遍走法）；找不到响错不吞。"""
     rows = state.get(f"{item.kind}_image_prompts")
     if isinstance(rows, list):
         for entry in rows:
             if isinstance(entry, dict) and entry.get("name") == item.name:
-                return str(entry.get("positive_prompt") or "")
+                return entry
     raise ValueError(f"找不到资产提示词条目：{item.kind}/{item.name!r}")
 
 
-def _update_prompt_text(state: dict, item, new_text: str) -> None:
+def _current_prompt_text(state: dict, item: QueueItem) -> str:
+    """取该资产当前的 positive_prompt（改写后即最新版）。"""
+    return str(_find_prompt_entry(state, item).get("positive_prompt") or "")
+
+
+def _update_prompt_text(state: dict, item: QueueItem, new_text: str) -> None:
     """把改写后的提示词写回 state 的资产条目（下游对照底本/登记描述同源最新版）。"""
-    rows = state.get(f"{item.kind}_image_prompts")
-    if isinstance(rows, list):
-        for entry in rows:
-            if isinstance(entry, dict) and entry.get("name") == item.name:
-                entry["positive_prompt"] = new_text
-                return
-    raise ValueError(f"找不到资产提示词条目：{item.kind}/{item.name!r}")
+    _find_prompt_entry(state, item)["positive_prompt"] = new_text
 
 
-def _rewrite_asset_prompt_round(state: dict, brief: Brief, generation_dir: Path, item,
+def _rewrite_asset_prompt_round(state: dict, brief: Brief, generation_dir: Path, item: QueueItem,
                                 *, trigger: str) -> bool:
     """「改写提示词」/「改词再掷」一轮（issue #50 AC2/AC3）：问意见 → LLM 改写一条
     → 追加式留痕 → 更新 state 并重新出词。
@@ -1235,7 +1241,7 @@ def _rewrite_asset_prompt_round(state: dict, brief: Brief, generation_dir: Path,
     return True
 
 
-def _abandon_asset(state: dict, brief: Brief, generation_dir: Path, item) -> None:
+def _abandon_asset(state: dict, brief: Brief, generation_dir: Path, item: QueueItem) -> None:
     """显式放弃这张资产（issue #50 AC1 的另一出口）：不再出图，队列前进。
 
     若此前已交回过一版（只可能来自「重生成」后的弃坑），撤不撤登记**问人**——撤＝
@@ -1245,45 +1251,22 @@ def _abandon_asset(state: dict, brief: Brief, generation_dir: Path, item) -> Non
     **不写轮次账**：轮次账记的是「改写」修订轮，放弃不是修订；放弃事实落在
     ``asset_loop.abandoned`` 与屏幕交代上，续接据此跳过。
     """
-    from ..asset_ledger import KIND_PICTURE, load_asset_ledger
+    from ..asset_ledger import KIND_PICTURE, load_asset_ledger, remove_asset
+    from ..asset_loop import note_abandoned, set_current
 
     entry = load_asset_ledger(generation_dir).get(item.name, KIND_PICTURE)
     tail = ""
     if entry is not None:
         if _confirm(f"这张此前已交回过（{entry.tag}）。放弃时把这版从素材台账一并撤下"
                     "（废图不进片）？", default=True):
-            _withdraw_rejected_image(generation_dir, item)
+            remove_asset(generation_dir, item.name, KIND_PICTURE)
             tail = "（已一并撤下此前交回的登记）"
         else:
             tail = "（登记保留：注入卡仍会按它接线）"
-    loop_state = state.setdefault("asset_loop", {"released": [], "abandoned": []})
-    abandoned = [str(x) for x in loop_state.get("abandoned") or []]
-    if item.name not in abandoned:
-        abandoned.append(item.name)
-        loop_state["abandoned"] = abandoned
-    loop_state.pop("current", None)
+    note_abandoned(state, item.name)
+    set_current(state, None)
     save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
     print(f"[放弃] {item.name}：不再出图，出下一张{tail}。")
-
-
-def _withdraw_rejected_image(generation_dir: Path, item) -> bool:
-    """撤下该资产的台账登记与正本复制（废图不进片）。返回是否真有登记被撤。
-
-    只删会话目录里的正本复制，用户原始文件不动；校对记录（含 sha256 与裁决）留着
-    当证据，轮次账不受影响。
-    """
-    from ..asset_ledger import KIND_PICTURE, load_asset_ledger, save_asset_ledger
-
-    ledger = load_asset_ledger(generation_dir)
-    entry = ledger.get(item.name, KIND_PICTURE)
-    if entry is None:
-        return False
-    kept = tuple(e for e in ledger.entries if (e.name, e.kind) != (item.name, KIND_PICTURE))
-    save_asset_ledger(generation_dir, type(ledger)(entries=kept, replacements=ledger.replacements))
-    copied = generation_dir / entry.path
-    if copied.is_file():
-        copied.unlink()
-    return True
 
 
 def _ask_deviation_choice(dev, idx: int, total: int) -> str:
@@ -1330,7 +1313,7 @@ def _pin_rewrite_quote(dev, running: str, *, name: str) -> str:
 def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: str):
     """读图校对**一张**（issue #44 机制，issue #50 逐张闭环调用）。
 
-    返回 ``"done"``（裁决落账）/ ``"regen"``（该张裁了「重生成」）/ ``"failed"``（读图
+    返回 ``PROOFREAD_DONE``（裁决落账）/ ``PROOFREAD_REGEN``（该张裁了「重生成」）/ ``PROOFREAD_FAILED``（读图
     失败——不放行，图跑偏无人纠）。对照底本恒取生图提示词最新版：换版重交/改词再掷的
     新图是按**当前词**画的，不是按上一轮合并结果画的。
     """
@@ -1354,7 +1337,7 @@ def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: 
     from ..generation import image_prompt_variants
     from ..tools.reference_auditor import describe_image
 
-    bases = {v.name: v.positive_prompt for v in image_prompt_variants(state)}
+    bases = {v.name: v.positive_prompt for v in image_prompt_variants(state, brief.canvases)}
     if brief is not None:
         for r in brief.refs:
             bases.setdefault(r.name, r.description)
@@ -1377,7 +1360,7 @@ def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: 
         print(f"[读图校对] {entry.name} 读图失败：{exc}")
         print("已停在等交回：图没读成就不放行；重跑向导可重试。")
         _save()
-        return "failed"
+        return PROOFREAD_FAILED
     report = compare_descriptions(base, reading)
     print(render_proofread_report(report))
 
@@ -1418,7 +1401,7 @@ def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: 
             description=base, adjudications=tuple(adjudications),
         ).to_dict()
         _save()  # 逐张落盘：后面的张中途炸不丢这张的裁决（评审：崩溃丢账）
-        return "regen"
+        return PROOFREAD_REGEN
     # name=语义名：改写落点不许落在名字上（名字是 registry 键不是偏差处，
     # 评审点名的缺陷场景——全局 replace 连名改会与登记名失同步）。
     merged = merge_asset_description(base, adjudications, accepted, name=entry.name)
@@ -1430,13 +1413,13 @@ def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: 
     _save()  # 逐张落盘（同上）
     if merged != base:
         print(f"  素材画面事实（合并后）：{merged}")
-    return "done"
+    return PROOFREAD_DONE
 
 
-def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item) -> str:
+def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item: QueueItem) -> str:
     """一张资产的单张闭环（issue #50）：出词→审查→交回→校对→裁决。
 
-    返回 ``"settled"``（裁决落账）/ ``"abandoned"``（显式放弃）/ ``"paused"``（用户
+    返回 ``LOOP_SETTLED``（裁决落账）/ ``LOOP_ABANDONED``（显式放弃）/ ``LOOP_PAUSED``（用户
     先到这）。**审查在填路径之前**——打回两出口都不入库：外部重掷系统连看都不看
     （不登记被拒图），改写提示词只动词、留痕一轮修订。校对裁了「重生成」走重掷菜单：
     默认原词再掷、另留改词再掷（词图皆错时连词一起换）。
@@ -1446,6 +1429,7 @@ def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item) -> str:
         TRIGGER_REGEN_REWORD,
         TRIGGER_REVIEW_REWORD,
         log_asset_round,
+        set_current,
     )
     from ..asset_ledger import (
         KIND_PICTURE,
@@ -1502,21 +1486,20 @@ def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item) -> str:
                 continue
             if choice == "4":
                 _abandon_asset(state, brief, generation_dir, item)
-                return "abandoned"
+                return LOOP_ABANDONED
             if choice.lower() == "q":
-                return "paused"
+                return LOOP_PAUSED
             print("无效输入，请选 1/2/3/4/q。")
 
         if outcome is None:
             continue  # 改写成功：新词重新出站再审
-        if outcome == "failed":
-            return "paused"
-        if outcome == "done":
-            loop_state = state.setdefault("asset_loop", {"released": [], "abandoned": []})
-            loop_state.pop("current", None)
+        if outcome == PROOFREAD_FAILED:
+            return LOOP_PAUSED
+        if outcome == PROOFREAD_DONE:
+            set_current(state, None)
             save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
-            return "settled"
-        # outcome == "regen"：重生成菜单（issue #50 AC3）
+            return LOOP_SETTLED
+        # outcome == PROOFREAD_REGEN：重生成菜单（issue #50 AC3）
         while True:
             regen = _prompt(
                 f"[重生成·{item.name}] 图要重画：\n"
@@ -1542,9 +1525,9 @@ def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item) -> str:
                 continue
             if regen == "3":
                 _abandon_asset(state, brief, generation_dir, item)
-                return "abandoned"
+                return LOOP_ABANDONED
             if regen.lower() == "q":
-                return "paused"
+                return LOOP_PAUSED
             print("无效输入，请选 1/2/3/q。")
 
 
@@ -1556,7 +1539,7 @@ def _asset_loop(state: dict, brief: Brief, generation_dir: Path) -> bool:
     False ＝ 用户「先到这里」，会话保持可续接（进度已逐张落盘）。
     """
     from ..asset_ledger import KIND_PICTURE, IntakeReport, load_asset_ledger, render_report, verify_asset_ledger
-    from ..asset_loop import asset_queue
+    from ..asset_loop import asset_queue, loop_state, set_current
     from ..asset_proofread import STATUS_DONE, ProofreadRecord, proofread_rows
     from ..generation import image_prompt_variants, ref_asset_registry
 
@@ -1577,8 +1560,8 @@ def _asset_loop(state: dict, brief: Brief, generation_dir: Path) -> bool:
         print("\n[素材循环] 本次没有资产图要出（队列为空）。")
         return True
 
-    loop_state = state.setdefault("asset_loop", {"released": [], "abandoned": []})
-    abandoned = {str(x) for x in loop_state.get("abandoned") or []}
+    loop = loop_state(state)  # 唯一读口：错形在这里响，不许被 or {} 洗成空表
+    abandoned = {str(x) for x in loop["abandoned"]}
     records = proofread_rows(state)
 
     def _settled(name: str) -> bool:
@@ -1599,12 +1582,12 @@ def _asset_loop(state: dict, brief: Brief, generation_dir: Path) -> bool:
     while True:
         pending = _pending()
         if not pending:
-            loop_state.pop("current", None)
+            set_current(state, None)
             save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
             print(f"\n[素材循环] 队列清空：{len(queue)} 张全部落账/放弃。")
             return True
         # 续接时「当前待办」直接接上，不再问一遍出谁（系统只维持一张当前待办）
-        current_name = str(loop_state.get("current") or "")
+        current_name = str(loop.get("current") or "")
         item = None
         if current_name:
             item = next((q for q in pending if q.name == current_name), None)
@@ -1615,15 +1598,15 @@ def _asset_loop(state: dict, brief: Brief, generation_dir: Path) -> bool:
                 save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
                 print("[素材循环] 已保留进度；重跑向导从当前待办继续。")
                 return False
-        loop_state["current"] = item.name
+        set_current(state, item.name)
         save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
         outcome = _asset_cycle(state, brief, generation_dir, item)
-        if outcome == "paused":
+        if outcome == LOOP_PAUSED:
             save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
             print("[素材循环] 已保留进度；重跑向导从当前待办继续。")
             return False
-        # settled/abandoned：已落账/已放弃，继续出下一张
-        abandoned = {str(x) for x in (state.get("asset_loop") or {}).get("abandoned") or []}
+        # LOOP_SETTLED / LOOP_ABANDONED：已落账/已放弃，继续出下一张
+        abandoned = {str(x) for x in loop["abandoned"]}
         records = proofread_rows(state)
 
 
@@ -1641,7 +1624,7 @@ def _collect_extra_media(state: dict, brief: Brief, generation_dir: Path) -> Non
     from ..generation import image_prompt_variants, ref_asset_registry
 
     registry = ref_asset_registry(state, brief)
-    prompted = {v.name for v in image_prompt_variants(state)}
+    prompted = {v.name for v in image_prompt_variants(state, brief.canvases)}
     promptless = [r for r in registry if r.name not in prompted]
 
     submissions: list[AssetSubmission] = []

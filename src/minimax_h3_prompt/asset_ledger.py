@@ -264,6 +264,26 @@ def save_asset_ledger(directory: str | Path, ledger: AssetLedger) -> Path:
     return target
 
 
+def remove_asset(directory: str | Path, name: str, kind: str) -> AssetRecord | None:
+    """撤下一条登记（连同会话目录里的正本复制）；没有该登记返回 None。
+
+    台账的增删只由本模块做——调用方拿 ``entries`` 自己重建是「第二处可写来源」，
+    换版记录（``replacements``）也会跟着丢。撤下是**人的显式决定**（issue #50
+    「显式放弃」问过人才撤），换版史照旧留着。
+    """
+    base = Path(directory)
+    ledger = load_asset_ledger(base)
+    entry = ledger.get(name, kind)
+    if entry is None:
+        return None
+    kept = tuple(e for e in ledger.entries if (e.name, e.kind) != (name, kind))
+    save_asset_ledger(base, AssetLedger(entries=kept, replacements=ledger.replacements))
+    copied = base / entry.path
+    if copied.is_file():
+        copied.unlink()
+    return entry
+
+
 @dataclass(frozen=True)
 class AssetSubmission:
     """一次交回：语义名 + 类型 + 用户交回的文件路径。"""
@@ -531,6 +551,7 @@ __all__ = [
     "LEDGER_FILENAME", "format_tag",
     "AssetRecord", "AssetLedger", "AssetSubmission", "Replacement", "Drift",
     "IntakeReport",
-    "intake_assets", "load_asset_ledger", "save_asset_ledger", "verify_asset_ledger",
+    "intake_assets", "load_asset_ledger", "remove_asset", "save_asset_ledger",
+    "verify_asset_ledger",
     "render_ledger", "render_report",
 ]
