@@ -36,6 +36,9 @@ STATUS_SEGMENTED_RUNNING = "segmented_running"
 # `frame_round` 是它的轮次计数器（只增不减，撤条也不能回退，否则台账行号会重复）。
 # `asset_proofreads` 是读图校对记录（issue #44）——丢掉等于三选裁决白做、换版后
 # 旧裁决还冒充新版的裁决。
+# `asset_loop` 是素材循环的队列进度（issue #50）——released 记「已出过词」的语义名
+# （逐张出站的落盘节奏靠它续）、abandoned 记显式放弃的语义名；丢掉会让续接把
+# 已放弃的资产重新排进待办、把出过的词再出一遍。
 # **故意不在**这里的：`frame_revision_baseline`（修订基线，issue #25）与
 # `setting_revision`（本轮那条设定级修订，issue #28）。两个都是人机修改循环**某一轮的
 # 入参**而不是产物：前者每轮由当时那一版产物现渲染，持久化它等于把一份陈旧的基线喂给
@@ -48,7 +51,7 @@ _STATE_KEYS = (
     "identity_lock", "shot_table", "shot_review_lock", "visual_design",
     "fl2va_prompt_bundle", "fl2va_frame_descriptions", "subject_defs",
     "sound_design", "music", "final_prompt", "final_report", "_progress",
-    "user_revisions", "frame_round", "asset_proofreads",
+    "user_revisions", "frame_round", "asset_proofreads", "asset_loop",
 )
 
 

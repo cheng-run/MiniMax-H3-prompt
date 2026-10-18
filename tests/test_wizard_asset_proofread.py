@@ -161,7 +161,11 @@ def _run_one_picture_flow(tmp_path, monkeypatch, reading: str,
                           extra_inputs: list[str], *,
                           confirms: list[tuple[str, bool]] | None = None,
                           run2_captured: dict | None = None):
-    """全程：只交回红裙女孩一张图（picture-01），其余跳过；返回 (asked, code, calls)。"""
+    """全程：素材循环里只交回红裙女孩一张图（picture-01，队首），其余三张显式放弃。
+
+    ``extra_inputs`` 落在「交回之后、校对裁决之间」——三选/补锚等答问按序消耗。
+    返回 ``(asked, code, calls)``。
+    """
     _silence(monkeypatch)
     monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
     _stub_stage1(monkeypatch)
@@ -169,10 +173,10 @@ def _run_one_picture_flow(tmp_path, monkeypatch, reading: str,
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
     calls = _stub_describe(monkeypatch, {"picture-01": reading})
     girl = _write_source(tmp_path, "girl.png", b"girl")
-    # 主题/时长/风格/方式 + 交回：女孩→图路径，庭院/钥匙/少年→跳过
-    asked = _fake_inputs(
-        monkeypatch, [TOPIC, "", "", "4", str(girl), "", "", ""] + list(extra_inputs))
-    _fake_confirms(monkeypatch, confirms or [("视频/音频", False), ("继续", True)])
+    # 主题/时长/风格/方式 → 素材循环：女孩（出词/审查/路径）→ 裁决答问 → 其余三张放弃
+    loop = ["", "1", str(girl)] + list(extra_inputs) + ["", "4", "", "4", "4"]
+    asked = _fake_inputs(monkeypatch, [TOPIC, "", "", "4"] + loop + ["8", "1"])
+    _fake_confirms(monkeypatch, confirms or [("视频/音频", False)])
     code = wizard.run_wizard(_cfg(tmp_path))
     return asked, code, calls
 
@@ -272,16 +276,18 @@ def test_mid_adjudication_crash_keeps_earlier_records(tmp_path, monkeypatch):
     })
     girl = _write_source(tmp_path, "girl.png", b"girl")
     key = _write_source(tmp_path, "key.png", b"key")
-    # 交回：红裙女孩→girl（picture-01）、庭院跳过、青铜钥匙→key（picture-03）、少年跳过
-    intake = iter([TOPIC, "", "", "4", str(girl), "", str(key), ""])
+    # 素材循环：红裙女孩→girl（picture-01，干净落账）；少年/庭院放弃；
+    # 青铜钥匙→key（picture-03）→ 三选时炸
+    wire = iter([TOPIC, "", "", "4", "", "1", str(girl),
+                 "", "4", "", "4", "1", str(key)])
 
     def boom_on_adjudication(text: str) -> str:
         if "裁决" in text:
             raise RuntimeError("模拟中途崩溃")
-        return next(intake)
+        return next(wire)
 
     monkeypatch.setattr(wizard, "_prompt", boom_on_adjudication)
-    _fake_confirms(monkeypatch, [("视频/音频", False), ("继续", True)])
+    _fake_confirms(monkeypatch, [("视频/音频", False)])
 
     with pytest.raises(RuntimeError):
         wizard.run_wizard(_cfg(tmp_path))
@@ -318,7 +324,7 @@ def test_clean_reading_asks_no_adjudication_and_proceeds(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_regenerate_choice_blocks_stage2_and_stays_resumable(tmp_path, monkeypatch, capsys):
-    """选「重生成」→ run_stage2 不跑、video-prompt.md 不写、会话停在等交回。"""
+    """选「重生成」后先到这里（q）→ run_stage2 不跑、video-prompt.md 不写、会话可续接。"""
     reading = _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])
     captured: dict = {"ran": False}
 
@@ -333,16 +339,17 @@ def test_regenerate_choice_blocks_stage2_and_stays_resumable(tmp_path, monkeypat
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
     _stub_describe(monkeypatch, {"picture-01": reading})
     girl = _write_source(tmp_path, "girl.png", b"girl")
-    _fake_inputs(monkeypatch, [TOPIC, "", "", "4", str(girl), "", "", "", "2"])  # 裁决=重生成
-    _fake_confirms(monkeypatch, [("视频/音频", False), ("继续", True)])
+    # 素材循环：女孩交回 → 裁决=重生成 → 重生成菜单 q=先到这里（issue #50）
+    asked = _fake_inputs(monkeypatch, [TOPIC, "", "", "4", "", "1", str(girl), "2", "q"])
+    _fake_confirms(monkeypatch, [("视频/音频", False)])
 
     code = wizard.run_wizard(_cfg(tmp_path))
 
     assert code == 0
     assert not captured["ran"], "「重生成」被绕过——废图钉进成片了"
     assert not list((tmp_path / "sessions").rglob("video-prompt.md"))
-    out = capsys.readouterr().out
-    assert "重生成" in out, "重生成裁决没有可见交代"
+    assert any("重生成" in text for text in asked), "重生成裁决没有可见交代"
+    capsys.readouterr()
     assert find_awaiting_sessions(tmp_path / "sessions"), "会话必须停在可续接态"
     # 裁决记录在场：重跑续接时按 sha 复用/重问，不丢
     session = find_awaiting_sessions(tmp_path / "sessions")[0]
@@ -355,10 +362,14 @@ def test_regenerate_skips_omission_merge_for_that_image(tmp_path, monkeypatch):
     """图要重画，本轮补漏不并入（那是旧图的事实）——新图交回后重新校对。"""
     reading = _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")],
                       omissions=[("腕表", "左腕银色腕表")])
-    # 只给裁决输入（2=重生成）；若补漏确认被问，会消耗掉不存在的输入而炸
+    # 裁决=重生成（2）→ 重生成菜单 q=先到这里收尾
     _asked, _code, _ = _run_one_picture_flow(
-        tmp_path, monkeypatch, reading, extra_inputs=["2"])
-    # 走到这里即证明补漏确认没问（输入序列没被多消费）
+        tmp_path, monkeypatch, reading, extra_inputs=["2", "q"])
+    # 走到这里即证明补漏确认没问（重掷的图标废，旧图的补漏不该并入）
+    session = find_awaiting_sessions(tmp_path / "sessions")[0]
+    record = session.stage_state["asset_proofreads"]["红裙女孩"]
+    assert record["status"] == "pending_regen"
+    assert not record["omissions"], "重生成图中途仍并入了旧图的补漏事实"
 
 
 # ---------------------------------------------------------------------------
@@ -423,68 +434,65 @@ def test_registry_description_prefers_merged_over_prompt():
 # ---------------------------------------------------------------------------
 
 def test_done_record_at_same_sha_skips_reread(tmp_path, monkeypatch):
-    """同 sha 已裁决 → 不再读图、不再问（防重跑把裁决再问一遍）。"""
+    """同 sha 已裁决 → 续接不再出这张的词、不再读图（防重跑把裁决再问一遍）。"""
     _silence(monkeypatch)
     girl = _write_source(tmp_path, "girl.png", b"girl")
-    # 先跑一遍完整入库拿到正本 sha
     monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
     _stub_stage1(monkeypatch)
     _stub_stage2(monkeypatch)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
     calls = _stub_describe(monkeypatch, {"picture-01": '{"claims": []}'})
-    _fake_inputs(monkeypatch, [TOPIC, "", "", "4", str(girl), "", "", ""])
-    _fake_confirms(monkeypatch, [("视频/音频", False), ("继续", True)])
+    # 首跑：女孩交回落账，其余三张放弃
+    _fake_inputs(monkeypatch, [TOPIC, "", "", "4", "", "1", str(girl),
+                               "", "4", "", "4", "4", "8", "1"])
+    _fake_confirms(monkeypatch, [("视频/音频", False)])
     wizard.run_wizard(_cfg(tmp_path))
     assert len(calls) == 1
 
-    # 会话已完成？——改成手工构造 awaiting 会话重进，验证跳过逻辑
-    sessions = list((tmp_path / "sessions").rglob("asset-ledger.json"))
-    ledger_dir = sessions[0].parent
+    # 手工把会话改回「可续接」态重进，验证跳过逻辑
+    ledger_dir = next((tmp_path / "sessions").rglob("asset-ledger.json")).parent
     entry = load_asset_ledger(ledger_dir).entries[0]
     session = load_session(ledger_dir)
     assert session is not None
-    # 续接前把状态改回「等交回」，模拟重跑向导
     save_session(ledger_dir, session.brief, session.stage_state, status=STATUS_AWAITING_FRAMES)
     session = load_session(ledger_dir)
     monkeypatch.setattr(wizard, "_offer_resume", lambda config: session)
     calls.clear()
-    _fake_inputs(monkeypatch, ["", "", "", ""])
-    _fake_confirms(monkeypatch, [("视频/音频", False), ("继续", True)])
+    # 已落账的红裙女孩不再进队列——续接只剩三张待办，全部放弃收尾
+    _fake_inputs(monkeypatch, ["", "4", "", "4", "4", "8", "1"])
+    _fake_confirms(monkeypatch, [("视频/音频", False)])
     wizard.run_wizard(_cfg(tmp_path))
     assert not calls, "同 sha 已裁决还重读图——裁决被重复劳动/重问"
     assert entry.sha256
 
 
 def test_new_sha_rereads_and_readjudicates(tmp_path, monkeypatch):
-    """换版（正本 sha 变）→ 重新读图裁决；旧裁决不冒充新版的。"""
+    """重生成后换版交回（正本 sha 变）→ 重新读图裁决；旧裁决不冒充新版的。"""
     _silence(monkeypatch)
     girl = _write_source(tmp_path, "girl.png", b"girl")
+    girl2 = _write_source(tmp_path, "girl2.png", b"girl-v2")
     monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
     _stub_stage1(monkeypatch)
     captured: dict = {}
     _stub_stage2(monkeypatch, captured)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
+    # 两轮都读出同一条偏差：第一轮裁重生成，第二轮裁明知故犯收尾
     calls = _stub_describe(monkeypatch, {"picture-01": _claims(
         deviations=[("裙色", "红裙", "宝蓝色长裙")])})
-    _fake_inputs(monkeypatch, [TOPIC, "", "", "4", str(girl), "", "", "", "3"])
-    _fake_confirms(monkeypatch, [("视频/音频", False), ("继续", True)])
+    _fake_inputs(monkeypatch, [TOPIC, "", "", "4",
+                               "", "1", str(girl),   # 交回第一版
+                               "2", "",              # 裁决重生成 → 原词再掷
+                               "1", str(girl2),      # 换版交回新版（sha 变）
+                               "3",                  # 明知故犯保住原描述
+                               "", "4", "", "4", "4", "8", "1"])
+    _fake_confirms(monkeypatch, [("换版", True), ("视频/音频", False)])
     wizard.run_wizard(_cfg(tmp_path))
-    assert len(calls) == 1
-    assert captured["state"]["asset_proofreads"]["红裙女孩"]["status"] == "done"
-
-    # 换版交回：同名新内容 → 换版确认走起 → 重新校对（这次干净读数）
-    girl2 = _write_source(tmp_path, "girl2.png", b"girl-v2")
+    assert len(calls) == 2, "换版后没重新读图——旧裁决冒充了新版"
+    record = captured["state"]["asset_proofreads"]["红裙女孩"]
+    assert record["status"] == "done"
     ledger_dir = next((tmp_path / "sessions").rglob("asset-ledger.json")).parent
-    session = load_session(ledger_dir)
-    save_session(ledger_dir, session.brief, session.stage_state, status=STATUS_AWAITING_FRAMES)
-    session = load_session(ledger_dir)
-    monkeypatch.setattr(wizard, "_offer_resume", lambda config: session)
-    calls.clear()
-    _stub_describe(monkeypatch, {"picture-01": '{"claims": []}'}, calls=calls)
-    _fake_inputs(monkeypatch, ["", str(girl2), "", "", ""])
-    _fake_confirms(monkeypatch, [("视频/音频", False), ("继续", True), ("换版", True)])
-    wizard.run_wizard(_cfg(tmp_path))
-    assert calls, "换版后没重新读图——旧裁决冒充了新版"
+    entry = load_asset_ledger(ledger_dir).get("红裙女孩", "picture")
+    assert record["sha256"] == entry.sha256, "裁决钉的不是换版后的正本"
 
 
 # ---------------------------------------------------------------------------
@@ -504,8 +512,9 @@ def test_reading_failure_pauses_instead_of_skipping(tmp_path, monkeypatch, capsy
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
     monkeypatch.setattr(reference_auditor, "describe_image", boom)
     girl = _write_source(tmp_path, "girl.png", b"girl")
-    _fake_inputs(monkeypatch, [TOPIC, "", "", "4", str(girl), "", "", ""])
-    _fake_confirms(monkeypatch, [("视频/音频", False), ("继续", True)])
+    # 素材循环：女孩交回后读图失败 → 停在可续接态（后续答问不再消耗）
+    _fake_inputs(monkeypatch, [TOPIC, "", "", "4", "", "1", str(girl)])
+    _fake_confirms(monkeypatch, [("视频/音频", False)])
 
     wizard.run_wizard(_cfg(tmp_path))
 

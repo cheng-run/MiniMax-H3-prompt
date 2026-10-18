@@ -140,9 +140,11 @@ def test_ref_route_direct_prompt_end_to_end(tmp_path, monkeypatch, capsys):
     _stub_stage1(monkeypatch, captured)
     _stub_stage2(monkeypatch, captured)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
-    # 主题/时长/风格/方式，随后素材交回四问全跳过（issue #43）——不收帧图路径；
-    # 末两问是视频输出选择器（"8"=9:16 档、"1"=采用默认预算，issue #45）
-    asked = _fake_inputs(monkeypatch, [TOPIC, "", "", "4", "", "", "", "", "8", "1"])
+    # 主题/时长/风格/方式，随后素材循环四张全放弃（issue #50：审查菜单 4=显式放弃，
+    # 队列菜单回车=出队首）——不收帧图路径；末两问是视频输出选择器（issue #45）
+    asked = _fake_inputs(
+        monkeypatch,
+        [TOPIC, "", "", "4", "", "4", "", "4", "", "4", "4", "8", "1"])
     monkeypatch.setattr(wizard, "_confirm", _confirm_continue_only)
 
     code = wizard.run_wizard(_cfg(tmp_path))
@@ -170,8 +172,9 @@ def test_ref_route_over_15s_delivers_segment_prompts_and_order_card(tmp_path, mo
     _stub_stage1(monkeypatch)
     _stub_stage2(monkeypatch)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
-    # 素材交回四问全跳过；末两问是视频输出选择器（issue #45）
-    _fake_inputs(monkeypatch, [TOPIC, "20", "", "4", "", "", "", "", "8", "1"])
+    # 素材循环四张全放弃（issue #50）；末两问是视频输出选择器（issue #45）
+    _fake_inputs(monkeypatch,
+                 [TOPIC, "20", "", "4", "", "4", "", "4", "", "4", "4", "8", "1"])
     monkeypatch.setattr(wizard, "_confirm", _confirm_continue_only)
 
     code = wizard.run_wizard(_cfg(tmp_path))
@@ -198,10 +201,11 @@ def test_unmatched_semantic_name_is_flagged(tmp_path, monkeypatch, capsys):
 
 
 def test_ref_resume_awaiting_still_delivers_asset_prompts(tmp_path, monkeypatch, capsys):
-    """续接 awaiting 的 ref 会话必须补展资产图提示词并落盘（issue #41 复审）。
+    """续接 awaiting 的 ref 会话必须把资产图提示词交到用户手里（issue #41 复审）。
 
-    修复前：_resume_awaiting_frames 的 ref 分支直接早退，run_wizard 却置 frames_shown=True
-    ——补展接线永远不触发，续接的 ref 会话全程拿不到资产提示词（复审实测复现）。
+    修复前：_resume_awaiting_frames 的 ref 分支直接早退、展示接线不触发，续接的 ref
+    会话全程拿不到资产提示词。issue #50 起交付出在**素材循环的逐张出词**里：续接后
+    当前待办（红裙女孩是队首）当场出词并落盘。
     """
     _silence(monkeypatch)
     _stub_stage2(monkeypatch)
@@ -212,13 +216,13 @@ def test_ref_resume_awaiting_still_delivers_asset_prompts(tmp_path, monkeypatch,
     save_session(directory, brief, _ref_stage1_state(), status=STATUS_AWAITING_FRAMES)
     session = load_session(directory)
     monkeypatch.setattr(wizard, "_offer_resume", lambda config: session)
-    # 素材交回四问全跳过（issue #43）；末两问是视频输出选择器（issue #45）
-    _fake_inputs(monkeypatch, ["", "", "", "", "8", "1"])
+    # 素材循环四张全放弃（issue #50）；末两问是视频输出选择器（issue #45）
+    _fake_inputs(monkeypatch, ["", "4", "", "4", "", "4", "4", "8", "1"])
     monkeypatch.setattr(wizard, "_confirm", _confirm_continue_only)
 
     code = wizard.run_wizard(_cfg(tmp_path))
     assert code == 0
     out = capsys.readouterr().out
-    assert "人物·红裙女孩专属生图提示词" in out, "续接后资产图提示词没有补展"
-    assert (directory / "character-prompt.md").is_file(), "补展没有落盘"
+    assert "人物·红裙女孩专属生图提示词" in out, "续接后资产图提示词没有出站"
+    assert (directory / "character-prompt.md").is_file(), "出词没有落盘"
     assert (directory / "video-prompt.md").is_file()

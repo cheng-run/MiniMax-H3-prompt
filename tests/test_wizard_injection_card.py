@@ -32,11 +32,14 @@ _SIX_SECTION_PROMPT = (
 def _isolate_proofread(monkeypatch):
     """读图校对（issue #44）不属本文件考题：它会去读素材真图，假 png 一读就截停流程。
 
-    两票在 `_phase2_ref_finish` 里前后脚（读图校对→注入卡→阶段 2），本文件的夹具
-    素材不是真图片，读图失败会停在「等交回」走不到注入卡。打桩放行——偏差三选
-    由 test_wizard_asset_proofread 专测钉住。
+    素材循环（issue #50）里校对紧跟在交回之后，本文件的夹具素材不是真图片，读图失败
+    会停在「等交回」走不到注入卡。只打桩视觉读图返回**干净读数**——循环节奏本身是真的
+    （四张逐张交回归档），偏差三选由 test_wizard_asset_proofread 专测钉住。
     """
-    monkeypatch.setattr(wizard, "_proofread_ref_assets", lambda *a, **k: True)
+    from minimax_h3_prompt.tools import reference_auditor
+
+    monkeypatch.setattr(reference_auditor, "describe_image",
+                        lambda path, instruction=None: '{"claims": []}')
 
 
 def _silence(monkeypatch) -> None:
@@ -114,16 +117,22 @@ def _write_source(tmp_path: Path, name: str, content: bytes) -> Path:
 
 
 def _run_full_flow(tmp_path, monkeypatch, tail_inputs: list[str]):
-    """四张素材图全交回 + 「不加视频音频」+ 尾部输入（选择器问答）。"""
+    """四张素材图按素材循环逐张交回 + 「不加视频音频」+ 尾部输入（选择器问答）。"""
     _silence(monkeypatch)
     monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
     _stub_stage1(monkeypatch)
     _stub_stage2(monkeypatch)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
-    names = ["girl", "garden", "key", "boy"]
-    paths = [_write_source(tmp_path, f"{n}.png", n.encode()) for n in names]
-    # 提问次序：主题/澄清跳过/路线 4 → 四张图路径 → 选择器（比例档/预算档/…）
-    _fake_inputs(monkeypatch, [TOPIC, "", "", "4"] + [str(p) for p in paths] + tail_inputs)
+    # 素材循环队列序（issue #50 AC4：人物→场景→道具、组内剧本出场序）
+    queue = ["红裙女孩", "蓝衫少年", "秋日庭院", "青铜钥匙"]
+    paths = {name: _write_source(tmp_path, f"{name}.png", name.encode()) for name in queue}
+    loop: list[str] = []
+    for index, name in enumerate(queue):
+        if index < len(queue) - 1:
+            loop.append("")          # 队列菜单：回车=出队首
+        loop += ["1", str(paths[name])]  # 审查满意 → 交回路径
+    # 提问次序：主题/澄清跳过/路线 4 → 素材循环脚本 → 选择器（比例档/预算档/…）
+    _fake_inputs(monkeypatch, [TOPIC, "", "", "4"] + loop + tail_inputs)
     _fake_confirms(monkeypatch, [("视频/音频", False)])
     code = wizard.run_wizard(_cfg(tmp_path))
     assert code == 0

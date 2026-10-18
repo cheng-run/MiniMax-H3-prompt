@@ -148,11 +148,16 @@ def test_ref_flow_collects_pictures_and_writes_ledger(tmp_path, monkeypatch, cap
         "青铜钥匙": _write_source(tmp_path, "key.png", b"key"),
         "蓝衫少年": _write_source(tmp_path, "boy.png", b"boy"),
     }
-    # 提问次序＝参考素材登记次序（剧本出场序）：女孩/庭院/钥匙/少年；随后不再加视频/音频；
+    # 素材循环（issue #50）逐张交回：队列序=人物→场景→道具（组内剧本出场序）；
+    # 每张「队列菜单回车=出队首 → 审查回车/1=满意 → 填路径」；随后不再加视频/音频；
     # 末两问是视频输出选择器（"8"=9:16 档、"1"=采用默认预算，issue #45）
-    asked = _fake_inputs(monkeypatch, [TOPIC, "", "", "4"] +
-                         [str(paths[name]) for name, _n in EXPECTED_NUMBERING] +
-                         ["8", "1"])
+    queue = ["红裙女孩", "蓝衫少年", "秋日庭院", "青铜钥匙"]
+    loop: list[str] = []
+    for index, name in enumerate(queue):
+        if index < len(queue) - 1:
+            loop.append("")
+        loop += ["1", str(paths[name])]
+    asked = _fake_inputs(monkeypatch, [TOPIC, "", "", "4"] + loop + ["8", "1"])
     confirms = _fake_confirms(monkeypatch, [("视频/音频", False)])
 
     code = wizard.run_wizard(_cfg(tmp_path))
@@ -163,7 +168,9 @@ def test_ref_flow_collects_pictures_and_writes_ledger(tmp_path, monkeypatch, cap
 
     ledger_dir = next((tmp_path / "sessions").rglob("asset-ledger.json")).parent
     ledger = load_asset_ledger(ledger_dir)
-    assert [(e.name, e.number) for e in ledger.entries] == EXPECTED_NUMBERING
+    # 编号仍取参考素材登记的剧本出场序（交回次序变了，编号不许跟着变）
+    assert sorted(((e.name, e.number) for e in ledger.entries), key=lambda t: t[1]) \
+        == EXPECTED_NUMBERING
     assert all(e.kind == KIND_PICTURE for e in ledger.entries)
     # 正本复制进会话目录（可复测：生成目录自包含）
     for entry in ledger.entries:
@@ -185,8 +192,11 @@ def test_three_kinds_via_video_audio_addflow(tmp_path, monkeypatch, capsys):
     girl = _write_source(tmp_path, "girl.png", b"girl")
     video = _write_source(tmp_path, "cam.mp4", b"vid")
     audio = _write_source(tmp_path, "voice.wav", b"aud")
-    _fake_inputs(monkeypatch, [TOPIC, "", "", "4"] + [str(girl), "", "", ""] +
-                 ["1", "运镜参考", str(video), "2", "红裙女孩音色", str(audio)] +
+    # 素材循环：红裙女孩交回，其余三张显式放弃（issue #50）；随后视频/音频按需挂账
+    _fake_inputs(monkeypatch, [TOPIC, "", "", "4",
+                               "", "1", str(girl),
+                               "", "4", "", "4", "4",
+                               "1", "运镜参考", str(video), "2", "红裙女孩音色", str(audio)] +
                  ["8", "1"])  # 视频输出选择器：9:16 档 + 采用默认预算（issue #45）
     _fake_confirms(monkeypatch, [("视频/音频", True), ("视频/音频", True), ("视频/音频", False)])
 
@@ -199,11 +209,11 @@ def test_three_kinds_via_video_audio_addflow(tmp_path, monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------------------
-# 不完整可中断续接：还没生成完参考素材就不硬闯阶段 2（交回在完成前必须能补）
+# 中途收工可续接：还没生成完参考素材就不硬闯阶段 2（进度在完成前必须能接）
 # ---------------------------------------------------------------------------
 
-def test_incomplete_intake_pauses_and_stays_resumable(tmp_path, monkeypatch, capsys):
-    """全跳过 + 不继续 → 不写 video-prompt.md，会话保持可续接（稍后补交）。"""
+def test_pause_at_review_stays_resumable(tmp_path, monkeypatch, capsys):
+    """审查菜单 q=先到这里 → 不写 video-prompt.md，会话保持可续接（重跑接着出这张）。"""
     _silence(monkeypatch)
     monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
     _stub_stage1(monkeypatch)
@@ -211,20 +221,20 @@ def test_incomplete_intake_pauses_and_stays_resumable(tmp_path, monkeypatch, cap
 
     _stub_vision_clean(monkeypatch)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
-    _fake_inputs(monkeypatch, [TOPIC, "", "", "4", "", "", "", ""])
-    _fake_confirms(monkeypatch, [("视频/音频", False), ("继续", False)])
+    _fake_inputs(monkeypatch, [TOPIC, "", "", "4", "", "q"])
+    _fake_confirms(monkeypatch, [("视频/音频", False)])
 
     code = wizard.run_wizard(_cfg(tmp_path))
     assert code == 0
     assert not list((tmp_path / "sessions").rglob("video-prompt.md"))
     out = capsys.readouterr().out
-    assert "补交" in out
-    # 会话仍是「等交回」态：重跑向导能续接补交
+    assert "已保留进度" in out
+    # 会话仍是可续接态：重跑向导从当前待办继续
     assert find_awaiting_sessions(tmp_path / "sessions")
 
 
-def test_complete_intake_proceeds_without_pause_question(tmp_path, monkeypatch):
-    """全交齐 → 不再问「继续吗」，直接出视频提示词——完整时不添无谓一问。"""
+def test_complete_loop_proceeds_without_pause_question(tmp_path, monkeypatch):
+    """四张全落账 → 不问「继续吗」，直接出注入卡与视频提示词——完整时不添无谓一问。"""
     _silence(monkeypatch)
     monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
     _stub_stage1(monkeypatch)
@@ -232,16 +242,21 @@ def test_complete_intake_proceeds_without_pause_question(tmp_path, monkeypatch):
 
     _stub_vision_clean(monkeypatch)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
-    paths = [_write_source(tmp_path, f"{i}.png", b"x") for i in range(4)]
-    _fake_inputs(monkeypatch, [TOPIC, "", "", "4"] + [str(p) for p in paths] +
+    queue = ["红裙女孩", "蓝衫少年", "秋日庭院", "青铜钥匙"]
+    paths = {name: _write_source(tmp_path, f"{name}.png", name.encode()) for name in queue}
+    loop: list[str] = []
+    for index, name in enumerate(queue):
+        if index < len(queue) - 1:
+            loop.append("")
+        loop += ["1", str(paths[name])]
+    _fake_inputs(monkeypatch, [TOPIC, "", "", "4"] + loop +
                  ["8", "1"])  # 视频输出选择器：9:16 档 + 采用默认预算（issue #45）
-    # 「继续」规则答 False：若被问到就会中断，video-prompt.md 不会出现
     confirms = _fake_confirms(monkeypatch, [("视频/音频", False), ("继续", False)])
 
     code = wizard.run_wizard(_cfg(tmp_path))
     assert code == 0
     assert list((tmp_path / "sessions").rglob("video-prompt.md"))
-    assert not any("继续" in text for text in confirms), "交齐后不该问「继续吗」"
+    assert not any("继续" in text for text in confirms), "齐了后不该问「继续吗」"
 
 
 # ---------------------------------------------------------------------------
@@ -270,10 +285,11 @@ def test_replacement_is_reported_and_needs_confirmation(tmp_path, monkeypatch, c
 
     v2 = _write_source(tmp_path, "girl-v2.png", b"content-v2-different")
     monkeypatch.setattr(wizard, "_offer_resume", lambda config: load_session(directory))
-    # 只交红裙女孩的新版，其余跳过；末两问是视频输出选择器（issue #45）
-    _fake_inputs(monkeypatch, [str(v2), "", "", "", "8", "1"])
+    # 素材循环：红裙女孩交回新版（换版问人→不换），其余三张显式放弃；
+    # 末两问是视频输出选择器（issue #45）
+    _fake_inputs(monkeypatch, ["", "1", str(v2), "", "4", "", "4", "4", "8", "1"])
     confirms = _fake_confirms(monkeypatch, [
-        ("视频/音频", False), ("替换", False), ("继续", True),  # 换版不换；缺项但继续
+        ("替换", False), ("视频/音频", False),   # 换版不换；不加视频/音频
     ])
 
     code = wizard.run_wizard(_cfg(tmp_path))
