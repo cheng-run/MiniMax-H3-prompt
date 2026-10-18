@@ -116,21 +116,31 @@ def test_windows_path_normalized():
 # ---------------------------------------------------------------------------
 
 def test_canvas_key_per_family():
-    """`画布 <家族>: WxH` 按家族选定——构图词分套跟着各家族的画幅族走。"""
-    b = parse_brief_text("画布 zimage: 640x1280\n画布 flux2: 1024x1024\n## 剧情\nx")
-    assert b.canvases == {"zimage": (640, 1280), "flux2": (1024, 1024)}
+    """`画布 <家族>: WxH` 按家族选定——构图词分套跟着该家族选定画布的画幅族走。"""
+    b = parse_brief_text("画布 zimage: 640x1280\n## 剧情\nx")
+    assert b.canvases == {"zimage": (640, 1280)}
+
+
+def test_canvas_key_flux2_is_loud_after_retirement():
+    """brief 同义键 `画布 flux2:` 明确报「未知生图模型」（issue #48 AC6，ADR 0013）。
+
+    Flux.2 已全链退役：家族表里没有它，键名当场报错，不做静默兼容——静默忽略
+    等于「用户以为选了 1024×1024、实际回落默认表」。报错文案含「未知生图模型」。
+    """
+    with pytest.raises(ValueError, match="未知生图模型"):
+        parse_brief_text("画布 flux2: 1024x1024\n## 剧情\nx")
 
 
 def test_canvas_key_bare_applies_to_every_family():
-    """裸 `画布: WxH` 是快捷式：一份选定套用到全部家族（spec 测试缝「用户选定尺寸」的形态）。"""
+    """裸 `画布: WxH` 是快捷式：一份选定套用到全部现存家族（现只剩 zimage）。"""
     b = parse_brief_text("画布: 700x1300\n## 剧情\nx")
-    assert b.canvases["zimage"] == (700, 1300) and b.canvases["flux2"] == (700, 1300)
+    assert b.canvases == {"zimage": (700, 1300)}
 
 
 def test_canvas_per_family_overrides_bare():
     """家族行覆盖快捷式：先给全局、再单独改一个家族，各得其所。"""
-    b = parse_brief_text("画布: 700x1300\n画布 flux2: 1024x1024\n## 剧情\nx")
-    assert b.canvases == {"zimage": (700, 1300), "flux2": (1024, 1024)}
+    b = parse_brief_text("画布: 700x1300\n画布 zimage: 640x1280\n## 剧情\nx")
+    assert b.canvases == {"zimage": (640, 1280)}
 
 
 def test_canvas_value_accepts_times_sign():

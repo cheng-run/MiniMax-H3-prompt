@@ -47,17 +47,33 @@ class ImageProfile(NamedTuple):
 # 生图 profile 默认表：模型 → 该模型在本仓的默认工作流参数。
 # 它以前只在渲染层被读（给人看「推荐尺寸」）；帧节点的请求现在也从这里取画布
 # （``image_canvas_size``，issue #33）——两处各写一份数就会漂，所以是**公开的单一来源**。
+# Flux.2 行已删（issue #48，ADR 0013 全链退役）：选择器、【画布】块、帧产物都随这张表
+# 自动收缩，家族清单不另抄第二份。旧产物/载荷里的 flux2 键走**弃读**（见
+# ``RETIRED_IMAGE_FAMILIES``），不做静默兼容。
 IMAGE_PROFILE_DEFAULTS: dict[str, ImageProfile] = {
     "zimage": ImageProfile("zimage_t2i_v1", "10", 640, 1280, "candidate"),
-    "flux2": ImageProfile("flux2_t2i_v1", "118", 1024, 1024, "candidate"),
 }
+# 已退役的生图模型家族（issue #48）：**只用于读旧数据时的弃读**——旧产物/载荷里
+# 的 flux2 键/行照常载入但不产出、不渲染（修订基线同款，见 `user_revisions`）；
+# 活输入（brief 画布键、直接构造）则照旧报「未知生图模型/生图模型类型无效」，两者不混。
+RETIRED_IMAGE_FAMILIES = frozenset({"flux2"})
+
+
+def is_retired_image_family(name: object) -> bool:
+    """该家族名是否点名了已退役家族——三处弃读口共用的**唯一**谓词（issue #48）。
+
+    缺省/空值按现行默认家族 zimage 处理：只有**显式点名**退役家族才算弃读对象，
+    没写家族的旧数据不是弃读对象（它走各自读法的默认逻辑）。判定默认值只住这里，
+    三处各写一份「or zimage」就是漂的开始。
+    """
+    return str(name or "zimage") in RETIRED_IMAGE_FAMILIES
 # 本仓支持的帧生图模型家族。**从上面那张表派生**：家族清单另写一份的话，将来加第三个
 # 家族时【画布】块会静默少一行（issue #33 复审）。
 _FRAME_MODELS = tuple(IMAGE_PROFILE_DEFAULTS)
 
 # 生图模型键 → 给人看的显示名。渲染层与帧节点的【画布】块都用它，免得同一张对照表
 # 在三个地方各写一遍（issue #33 复审）。
-IMAGE_FAMILY_LABELS = {"zimage": "Z-Image", "flux2": "Flux.2"}
+IMAGE_FAMILY_LABELS = {"zimage": "Z-Image"}
 # 表外家族的兜底档。**它产不出对象**——真正拦下这种输入的是 ``FL2VAFramePrompt.__post_init__``
 # 的「生图模型类型无效」（实测 `from_dict({"model_family": "sdxl"})` 直接 ValueError）。
 # 之所以还留着这一档：抛错要来自字段校验那一处，而不是 from_dict 里的 AttributeError。
@@ -161,8 +177,8 @@ class RatioPreset(NamedTuple):
 
 
 # 画布比例档：覆盖两个构图词族（近竖/近方）与常见横幅；档外比例（如 9:21）走
-# 选择器的自定义入口。两个家族的原生画布（zimage 640×1280、flux2 1024×1024）
-# 都在档内——用户不改主意时按原样选得到，而不是「系统默认」。
+# 选择器的自定义入口。zimage 的原生画布（640×1280）在档内——用户不改主意时按原样
+# 选得到，而不是「系统默认」。
 CANVAS_RATIO_PRESETS: tuple[RatioPreset, ...] = (
     RatioPreset("1:2", 1, 2, ((640, 1280), (720, 1440))),
     RatioPreset("9:16", 9, 16, ((576, 1024), (720, 1280))),
@@ -291,7 +307,8 @@ class ImagePromptVariant:
 
     ``name`` 是资产语义名——素材台账／注入卡靠它对号，所以它是**产物的一部分**，
     不是渲染层的标题。``model_family`` 已随 Flux.2 版全链取消而移除：资产链只剩
-    Z-Image（关键帧链的双模型在 ``FL2VAFramePrompt``，不受影响）。
+    Z-Image（帧链的双模型也在 issue #48 / ADR 0013 一并退役，``FL2VAFramePrompt``
+    现在同样只出 Z-Image 一版）。
     """
 
     name: str
@@ -347,7 +364,9 @@ class FL2VAFramePrompt:
     """一张 FL2VA 首帧或尾帧的静态生图提示词。"""
 
     frame: Literal["first", "last"]
-    model_family: Literal["zimage", "flux2"]
+    # 家族合法性由 ``__post_init__`` 对 ``_FRAME_MODELS`` 校验（单一来源在默认表），
+    # 不在类型里再抄一份家族清单；Flux.2 已随 issue #48 退役。
+    model_family: str
     positive_prompt: str
     negative_prompt: str = ""
     shot_id: str = "SH001"
@@ -488,16 +507,24 @@ class FL2VAPromptBundle:
                             "shot_id": str(item.get("shot_id") or value.get("shot_id", "SH001")),
                             "time_seconds": item.get("time_seconds", value.get("time_seconds", 0)),
                         }, canvases))
-                if not rows and (value.get("positive_prompt") or value.get("prompt")):
+                # 帧级回退形状：模型没写家族子键、直接把提示词铺在帧上。显式点名
+                # 已退役家族的（旧载荷）在这里弃读——家族子键那条路靠 `_FRAME_MODELS`
+                # 遍历天然跳过 flux2，这条路得自己挡。
+                if not rows and (value.get("positive_prompt") or value.get("prompt")) \
+                        and not is_retired_image_family(value.get("model_family")):
                     rows.append(FL2VAFramePrompt.from_dict({
                         **value, "frame": frame_name, "model_family": value.get("model_family", "zimage"),
                         "scene_anchor": str(value.get("scene_anchor") or raw.get("scene_anchor", "")),
                     }, canvases))
                 return tuple(rows)
+            # 列表形（节点落盘的 to_dict()）：旧产物里的退役家族行**弃读**（issue #48，
+            # ADR 0013）——历史数据不当报错也不续用；表外家族（如 sdxl）仍走构造处
+            # 的「生图模型类型无效」，活数据不静默。
             return tuple(
                 FL2VAFramePrompt.from_dict(item, canvases)
                 for item in value
                 if isinstance(item, dict)
+                and not is_retired_image_family(item.get("model_family"))
             )
 
         first = parse_frame("first")
@@ -1037,7 +1064,7 @@ def render_image_prompt_markdown(result: GenerationResult, kind: str) -> str:
 
 
 def render_fl2va_frame_markdown(result: GenerationResult, frame: str) -> str:
-    """渲染首帧或尾帧的双模型可复制提示词。"""
+    """渲染首帧或尾帧的可复制提示词（单模型 Z-Image：issue #48 全链退役）。"""
     if result.fl2va_prompt_bundle is None:
         raise KeyError("生成结果中不存在 FL2VA 首尾帧提示词")
     if frame not in {"first", "last"}:
@@ -1050,7 +1077,7 @@ def render_fl2va_frame_markdown(result: GenerationResult, frame: str) -> str:
         return f"# {variant} {title}生图提示词\n\n（{variant} 变体未生成{title}提示词）\n"
     parts = [
         f"# {variant} {title}生图提示词", "",
-        "人物、道具和场景已经融合在同一张关键帧画面中。请选择对应模型版本复制。", "",
+        "人物、道具和场景已经融合在同一张关键帧画面中。可直接复制使用。", "",
         f"- 场景锚点：{bundle.scene_anchor}",
         f"- {variant} 视频 Profile：`{bundle.profile_id}`",
         f"- 视频提示词节点：`{bundle.prompt_node_id}`", "",
@@ -1161,7 +1188,8 @@ __all__ = [
     "REF_WORKFLOW_NAME",
     "GenerationResult", "PromptArtifact", "PromptKind", "ImagePromptVariant",
     "FL2VAFramePrompt", "FL2VAPromptBundle", "brief_snapshot",
-    "ImageProfile", "IMAGE_PROFILE_DEFAULTS", "IMAGE_FAMILY_LABELS", "image_canvas_size",
+    "ImageProfile", "IMAGE_PROFILE_DEFAULTS", "IMAGE_FAMILY_LABELS", "RETIRED_IMAGE_FAMILIES",
+    "is_retired_image_family", "image_canvas_size",
     "composition_set", "composition_hint", "canvas_family", "canvas_display",
     "RatioPreset", "CANVAS_RATIO_PRESETS",
     "fl2va_bundle_from_dict", "generation_directory", "ref_asset_registry", "render_generation",

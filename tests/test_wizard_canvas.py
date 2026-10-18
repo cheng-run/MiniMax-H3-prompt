@@ -30,22 +30,26 @@ def _run_selector(monkeypatch, inputs: list[str]) -> tuple[dict, list[str]]:
 # 预设路径：选比例 → 选尺寸
 # ---------------------------------------------------------------------------
 
-def test_preset_ratio_then_preset_size_fills_both_families(monkeypatch):
-    """两家族各走一遍三步：zimage 取 1:2 档 640×1280，flux2 取 1:1 档 1024×1024。
+def test_preset_ratio_then_preset_size_fills_the_only_family(monkeypatch):
+    """现存唯一家族走一遍三步：zimage 取 1:2 档 640×1280（ADR 0013 Flux.2 全链退役）。
 
     期望值是**字面量**（不是从预设表算的）：表换了档位而选择器没跟上时这条会红。
-    家族顺序取生图默认表的遍历序——与【画布】块的行序同源。
+    「不得再问 Flux.2」是退役的可证面（issue #48 AC1/AC5）：把 flux2 行放回家族表，
+    这条会红——变异检验已实测。
     """
-    canvases, asked = _run_selector(monkeypatch, ["1", "1", "6", "1"])
+    canvases, asked = _run_selector(monkeypatch, ["1", "1"])
 
-    assert canvases == {"zimage": (640, 1280), "flux2": (1024, 1024)}
+    assert canvases == {"zimage": (640, 1280)}
     assert any("Z-Image" in q for q in asked), "没按家族提问（Z-Image 缺席）"
-    assert any("Flux.2" in q for q in asked), "没按家族提问（Flux.2 缺席）"
+    assert not any("Flux.2" in q or "flux2" in q for q in asked), \
+        "Flux.2 已全链退役，向导不得再出现 Flux.2 字样提问"
+    assert len([q for q in asked if "第 1 步" in q]) == 1, \
+        "家族表应随退役收缩为一家——还在按多家提问"
 
 
 def test_ratio_menu_shows_the_composition_family(monkeypatch, capsys):
     """比例菜单带画幅族标注——用户选比例时就看见构图词后果（近竖/近方/横幅）。"""
-    _run_selector(monkeypatch, ["1", "1", "1", "1"])
+    _run_selector(monkeypatch, ["1", "1"])
     screen = capsys.readouterr().out
     for label in ("近竖", "近方", "横幅"):
         assert label in screen, f"比例菜单没标画幅族：{label}"
@@ -57,7 +61,7 @@ def test_ratio_menu_shows_the_composition_family(monkeypatch, capsys):
 
 def test_custom_size_is_free_input(monkeypatch):
     """尺寸档不符时的自定义是自由输入（AC1「自定义为自由输入，保留兜底」）。"""
-    canvases, _ = _run_selector(monkeypatch, ["2", "3", "700x1300", "1", "1"])
+    canvases, _ = _run_selector(monkeypatch, ["2", "3", "700x1300"])
     assert canvases["zimage"] == (700, 1300), "自定义尺寸没按自由输入落定"
 
 
@@ -67,7 +71,7 @@ def test_custom_ratio_entry_takes_free_dimensions(monkeypatch):
     自定义比例时构图词按画幅族就近归类是纯函数层的事（test_canvas.py），
     这里只钉「档外比例进得来」。
     """
-    canvases, _ = _run_selector(monkeypatch, ["9", "540x1260", "1", "1"])
+    canvases, _ = _run_selector(monkeypatch, ["9", "540x1260"])
     assert canvases["zimage"] == (540, 1260), "自定义比例入口没吃到自由输入"
 
 
@@ -78,7 +82,7 @@ def test_final_echo_shows_the_actual_family_after_mismatched_custom(monkeypatch,
     700×1300（近竖→竖幅套的实际落点）。此前的样本 9:16→700×1300 两头都是近竖，
     预告与落点同族——「回显误按预设族而非最终宽高」这一可错形态测不红（复审点名）。
     """
-    canvases, _ = _run_selector(monkeypatch, ["8", "3", "700x1300", "1", "1"])
+    canvases, _ = _run_selector(monkeypatch, ["8", "3", "700x1300"])
     assert canvases["zimage"] == (700, 1300)
     screen = capsys.readouterr().out
     assert "7:13 · 700 × 1300（近竖）" in screen, "回显没有按实际落点展示画布"
@@ -87,7 +91,7 @@ def test_final_echo_shows_the_actual_family_after_mismatched_custom(monkeypatch,
 
 def test_times_sign_accepted_in_custom_input(monkeypatch):
     """自定义输入收 `700×1300`（乘号）——用户从产物上抄回来的就是乘号。"""
-    canvases, _ = _run_selector(monkeypatch, ["9", "700×1300", "1", "1"])
+    canvases, _ = _run_selector(monkeypatch, ["9", "700×1300"])
     assert canvases["zimage"] == (700, 1300)
 
 
@@ -97,7 +101,7 @@ def test_times_sign_accepted_in_custom_input(monkeypatch):
 
 def test_invalid_entries_reask_instead_of_silently_defaulting(monkeypatch):
     """0/99/乱码都重问，不静默落默认——画布是数据，错值必须当场拦。"""
-    canvases, asked = _run_selector(monkeypatch, ["0", "x", "1", "99", "1", "1", "1"])
+    canvases, asked = _run_selector(monkeypatch, ["0", "x", "1", "99", "1"])
     assert canvases["zimage"] == (640, 1280), "坏输入后没回到正轨"
     ratio_asks = [q for q in asked if "第 1 步" in q]
     size_asks = [q for q in asked if "第 2 步" in q]
@@ -107,7 +111,7 @@ def test_invalid_entries_reask_instead_of_silently_defaulting(monkeypatch):
 
 def test_custom_size_rejects_garbage_and_reasks(monkeypatch):
     """自定义尺寸的自由输入也校验格式：`宽六百` 重问，不静默回落默认表。"""
-    canvases, asked = _run_selector(monkeypatch, ["1", "3", "宽六百", "700x1300", "1", "1"])
+    canvases, asked = _run_selector(monkeypatch, ["1", "3", "宽六百", "700x1300"])
     assert canvases["zimage"] == (700, 1300)
     custom_asks = [q for q in asked if "自定义" in q and "宽" in q]
     assert len(custom_asks) >= 2, "坏自定义尺寸没有重问"
@@ -123,8 +127,8 @@ def test_phase1_new_puts_the_selected_canvases_into_the_brief(tmp_path, monkeypa
     上面的用例只测选择器本身：把 ``_choose_canvases`` 从 ``_phase1_new`` 里删掉，
     它们照样绿（只是脚本输入多出四答没人吃）。这条钉的就是那一行接线。
     """
-    # 主题/时长/风格/变体/画布四答（zimage 取 1:2 档，flux2 取 1:1 档）
-    inputs = iter(["主题", "", "", "1", "1", "1", "6", "1"])
+    # 主题/时长/风格/变体/画布两答（zimage 取 1:2 档；Flux.2 退役后只剩一家）
+    inputs = iter(["主题", "", "", "1", "1", "1"])
     monkeypatch.setattr(wizard, "_prompt", lambda text, *a, **k: next(inputs))
     monkeypatch.setattr(wizard, "_confirm", lambda *a, **k: False)
     monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
@@ -145,7 +149,7 @@ def test_phase1_new_puts_the_selected_canvases_into_the_brief(tmp_path, monkeypa
                           sessions_root=tmp_path / "sessions", max_clarification_rounds=0)
     wizard._phase1_new(cfg)
 
-    assert captured["brief"].canvases == {"zimage": (640, 1280), "flux2": (1024, 1024)}, \
+    assert captured["brief"].canvases == {"zimage": (640, 1280)}, \
         "选择器的选定值没进 brief——那一行接线丢了"
 
 
@@ -162,7 +166,7 @@ def test_both_asset_outlet_call_sites_forward_the_canvases(tmp_path, monkeypatch
                         lambda state, directory, canvases=None: seen.append(canvases))
     monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
     brief = Brief(mode="base", variant="I2VA", duration=5.0, plot="主题",
-                  canvases={"zimage": (700, 1300), "flux2": (1280, 720)})
+                  canvases={"zimage": (700, 1300)})
     state = {"fl2va_prompt_bundle": {}, "shot_table": "[Shot 1] 庭院"}
     generation_dir = tmp_path / "GEN001"
     generation_dir.mkdir()
@@ -200,12 +204,11 @@ def test_wizard_frame_renderer_shows_the_selected_canvas():
 
     payload = {
         "scene_anchor": "光斑",
-        "first": {"zimage": {"positive_prompt": "水母群与光斑的第一帧画面"},
-                  "flux2": {"positive_prompt": "水母群与光斑的第一帧画面"}},
+        "first": {"zimage": {"positive_prompt": "水母群与光斑的第一帧画面"}},
         "continuity_constraints": ["保持同一片水母群"],
     }
     brief = Brief(variant="I2VA", duration=5, plot="漂浮的水母群与光斑",
-                  canvases={"zimage": (700, 1300), "flux2": (1280, 720)})
+                  canvases={"zimage": (700, 1300)})
     bundle = fl2va_bundle_from_dict(payload, brief)
 
     rendered = render_fl2va_frame_markdown_from_bundle(bundle, "first")

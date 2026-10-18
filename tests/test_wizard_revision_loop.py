@@ -54,15 +54,15 @@ def _run_loop(tmp_path, monkeypatch, *, steps: list[tuple[str, Any]],
     ``on_stage1``：每次 ``run_stage1`` 被调用时的回调（重来那一刻磁盘上是什么样，只能
     在**下一次阶段 1 开跑之前**看到）。
     """
-    scripted = [TOPIC, "", "", "1", "1", "1", "1", "1"]
+    scripted = [TOPIC, "", "", "1", "1", "1"]
     for kind, payload in steps:
         scripted.append(kind)
         if kind == "1":
             scripted.extend([str(payload), ""])  # 意见正文 → 层次（回车=只改画面）
         elif kind == "2":
-            # 重来回到起步：重新问主题/时长/风格/变体＋画布四问（issue #42 选择器，
-            # 澄清在配置里关掉了，不问）
-            scripted.extend([TOPIC, "", "", "1", "1", "1", "1", "1"])
+            # 重来回到起步：重新问主题/时长/风格/变体＋画布两问（issue #42 选择器，
+            # Flux.2 退役后只剩 zimage 一家；澄清在配置里关掉了，不问）
+            scripted.extend([TOPIC, "", "", "1", "1", "1"])
         else:
             scripted.extend(str(number) for number in payload)
             if payload:  # 空载荷＝选了撤销但没有可撤的条目，那一问根本不会出现

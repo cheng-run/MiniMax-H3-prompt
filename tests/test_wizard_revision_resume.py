@@ -232,9 +232,9 @@ def test_restart_from_a_resume_entry_reruns_phase1_and_drops_the_old_list(tmp_pa
     session = _session(tmp_path, status=session_store.STATUS_AWAITING_FRAMES,
                        revisions=[_rev(1, EXISTING)])
     # 循环里先选「2 重来」；重来后 _phase1_new 重新问主题/时长/风格/变体（那个 "1" 是
-    # 变体三选一），再答画布四问（issue #42 选择器，逐家族比例→尺寸），然后进循环选
-    # 「1 提意见并重出」、提一条新意见、答层次（空串＝只改画面）
-    _scripted(monkeypatch, prompts=["2", TOPIC, "", "", "1", "1", "1", "1", "1", "1", NEW, ""],
+    # 变体三选一），再答画布两问（issue #42 选择器，比例→尺寸；Flux.2 退役后只剩一家），
+    # 然后进循环选「1 提意见并重出」、提一条新意见、答层次（空串＝只改画面）
+    _scripted(monkeypatch, prompts=["2", TOPIC, "", "", "1", "1", "1", "1", NEW, ""],
               confirms=[True, True, False])
     requests = _fake_llm(monkeypatch)
     _stub_agent_build(monkeypatch)
@@ -332,7 +332,7 @@ def test_both_resume_paths_run_the_same_loop(tmp_path, monkeypatch):
         wizard.run_wizard(_config(tmp_path / "b"))
 
     # ③ 新跑路径
-    _scripted(monkeypatch, prompts=[TOPIC, "", "", "1", "1", "1", "1", "1"], confirms=[False])
+    _scripted(monkeypatch, prompts=[TOPIC, "", "", "1", "1", "1"], confirms=[False])
     wizard._phase1_new(_config(tmp_path / "c"))
 
     assert len(calls) == 3, f"有入口没走共享的修改循环（{len(calls)}/3）——多半是又复制了一份"

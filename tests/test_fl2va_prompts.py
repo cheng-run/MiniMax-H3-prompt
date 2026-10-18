@@ -20,9 +20,9 @@ from minimax_h3_prompt.user_revisions import LAYER_FRAME, render_baseline_block
 
 
 def frame_payload(prompt: str) -> dict:
+    """一帧的模型载荷（现行形状）：只有 zimage 一份——ADR 0013 全链退役后单模型输出。"""
     return {
         "zimage": {"positive_prompt": prompt, "instructions": ["paste to node 10"]},
-        "flux2": {"positive_prompt": prompt + " Flux.2 cinematic rendering.", "instructions": ["paste to node 118"]},
     }
 
 
@@ -253,8 +253,6 @@ def test_validate_fl2va_bundle_variant_aware():
     assert validate_fl2va_bundle(bundle, duration=5, variant="I2VA") == []
     bad_last = (
         FL2VAFramePrompt(frame="last", model_family="zimage", positive_prompt="x",
-                         time_seconds=9.0, scene_anchor="medieval tavern interior"),
-        FL2VAFramePrompt(frame="last", model_family="flux2", positive_prompt="y",
                          time_seconds=9.0, scene_anchor="medieval tavern interior"),
     )
     bad = FL2VAPromptBundle(scene_anchor="medieval tavern interior", first=(), last=bad_last,
@@ -661,21 +659,20 @@ def test_scene_term_block_is_present_even_without_a_lexicon_hit(monkeypatch):
     assert "主题未命中" in message, "块里没说清「本片无地点硬约束」，模型会以为漏看了词表"
 
 
-def test_frame_node_request_carries_both_canvases(monkeypatch):
-    """帧节点的请求里必须带**画布尺寸**（issue #33 AC-2）。
+def test_frame_node_request_carries_the_canvas_without_flux2(monkeypatch):
+    """帧节点的请求里必须带**画布尺寸**，且**不得出现 Flux.2 行**（issue #48 AC3）。
 
-    模型不知道自己在给哪个画幅写构图，就会按一种画幅的直觉安排主体位置；而 Z-Image 是
-    竖幅、Flux.2 是正方，同一条构图指令在两种画布上语义不同——这是既有纪律「两模型必须
-    分别重写」的物理依据，不只是纪律要求。
-
-    **两行各一条断言**，不合并：它们现在同住生图 profile 默认表，将来可能分叉，
-    合并成一条会在分叉时一起绿。
+    模型不知道自己在给哪个画幅写构图，就会按一种画幅的直觉安排主体位置——同一条
+    构图指令在不同画幅上语义不同。Flux.2 已全链退役（ADR 0013）：【画布】块只渲染
+    现存家族，请求里连「Flux.2」字样都不该再有。变异检验：把 flux2 行放回家族表，
+    这条会红（已实测）。
     """
     message = _frame_node_request(monkeypatch)
-    width, height = generation.image_canvas_size("zimage")
-    assert f"{width} × {height}" in message, "帧节点请求里没有 Z-Image 的画布尺寸（竖幅）"
-    width, height = generation.image_canvas_size("flux2")
-    assert f"{width} × {height}" in message, "帧节点请求里没有 Flux.2 的画布尺寸（正方）"
+    # 期望串是**字面量**（zimage 默认画布）：从 `image_canvas_size` 现算就与实现同构，
+    # 组装断线也一起绿——「真的从表里取数」由下面的 profile 表用例钉。
+    assert "640 × 1280" in message, "帧节点请求里没有 Z-Image 的画布尺寸"
+    assert "Flux.2" not in message and "flux2" not in message, \
+        "Flux.2 已退役，请求里不得再出现 Flux.2 行"
 
 
 def test_frame_node_canvas_follows_the_image_profile_table(monkeypatch):
@@ -693,17 +690,15 @@ def test_frame_node_canvas_follows_the_image_profile_table(monkeypatch):
 def test_frame_node_request_carries_the_user_selected_canvases(monkeypatch):
     """帧节点同样吃用户选定画布（issue #42）：选定值进请求，分套按画幅族给指示。
 
-    期望串是字面量（960×1152 约分为 5:6、1280×720 约分为 16:9）：Z-Image 选了近方 →
-    正方套；Flux.2 选了横幅 → 族外降通用。帧链与资产链共用【画布】块的组装口，这条
-    钉的是「用户选定辐射到帧节点」——它与上面那条默认表回落用例互补。
+    期望串是字面量（960×1152 约分为 5:6）：Z-Image 选了近方 → 正方套——分套绑
+    **画幅族**、不绑模型身份。帧链与资产链共用【画布】块的组装口，这条钉的是
+    「用户选定辐射到帧节点」——它与上面那条默认表回落用例互补。族外降通用的指示
+    由 ``tests/test_asset_image_prompts.py`` 的同名用例在资产侧钉住（同一组装口）。
     """
-    message = _frame_node_request(monkeypatch, canvases={"zimage": (960, 1152), "flux2": (1280, 720)})
+    message = _frame_node_request(monkeypatch, canvases={"zimage": (960, 1152)})
     assert "5:6 · 960 × 1152（近方）" in message, "帧节点请求里没有 Z-Image 的选定画布"
-    assert "16:9 · 1280 × 720（横幅）" in message, "帧节点请求里没有 Flux.2 的选定画布"
     assert "构图用正方套" in message, "近方画布没拿到正方套指示"
-    assert "通用构图词" in message, "横幅画布没降通用构图词"
-    assert "640 × 1280" not in message and "1024 × 1024" not in message, \
-        "选定了画布却还带着系统钦定的推荐尺寸"
+    assert "640 × 1280" not in message, "选定了画布却还带着系统钦定的推荐尺寸"
 
 
 def test_frame_products_carry_the_user_selected_canvas():
@@ -715,19 +710,20 @@ def test_frame_products_carry_the_user_selected_canvas():
     """
     brief = Brief(variant="FL2VA", duration=5, style="live-action realism",
                   plot="中世纪酒馆室内，冒险者团队庆祝",
-                  canvases={"zimage": (700, 1300), "flux2": (1280, 720)})
+                  canvases={"zimage": (700, 1300)})
     state = {"script": "分场剧本", "final_prompt": "视频提示词正文",
              "fl2va_prompt_bundle": bundle_payload()}
     result = result_from_state(state, brief, generation_id="GEN001",
                                topic_id="topic", project_id="project")
 
     rows = {r.model_family: r for r in result.fl2va_prompt_bundle.first}
+    assert set(rows) == {"zimage"}, f"产物该只出 Z-Image 一版，实际行：{sorted(rows)}"
     assert (rows["zimage"].width, rows["zimage"].height) == (700, 1300)
-    assert (rows["flux2"].width, rows["flux2"].height) == (1280, 720)
 
     rendered = render_fl2va_frame_markdown(result, "first")
     assert "画布：`7:13 · 700 × 1300（近竖）`" in rendered, "产物没有 Z-Image 的选定画布行"
-    assert "画布：`16:9 · 1280 × 720（横幅）`" in rendered, "产物没有 Flux.2 的选定画布行"
+    assert "Flux.2" not in rendered and "flux2" not in rendered, \
+        "Flux.2 已退役，产物展示不得再出现 Flux.2 行"
     assert "推荐尺寸" not in rendered, "「推荐尺寸」措辞还活着——系统钦定时代的旧标签"
 
 
@@ -870,6 +866,66 @@ def test_frame_prompt_engineer_keeps_its_existing_static_prohibitions():
     spec = _frame_prompt_spec()
     for prohibition in ("不写 camera movement", "剪辑", "时间码", "质量标签", "中文"):
         assert prohibition in spec, f"帧提示词工程师丢了既有禁令：{prohibition}"
+
+
+def test_frame_prompt_engineer_outputs_a_single_zimage_version():
+    """帧链角色提示词只出 Z-Image 一版（issue #48 AC2）：无 flux2 输出键、无双模型纪律。
+
+    「两模型分别重写」的纪律随 Flux.2 全链退役（ADR 0013）从角色提示词移除——
+    变异检验：把 flux2 输出块或纪律句放回 .md，这条会红（已实测）。
+    """
+    spec = _frame_prompt_spec()
+    assert '"zimage"' in spec, "输出规格里应保留 zimage 版本层"
+    assert "flux2" not in spec.lower() and "flux.2" not in spec.lower(), \
+        "帧链角色提示词不得再有 flux2 输出键"
+    assert "分别重写" not in spec, "「两模型分别重写」纪律应随 Flux.2 退役删除"
+
+
+def test_legacy_flux2_keys_in_payloads_are_read_as_absent():
+    """旧载荷的 flux2 子键按弃读惯例处理（issue #48，ADR 0013）：仍可读，只出 Z-Image 一条。
+
+    不做静默兼容——不是把 flux2 当 zimage 改名续用，而是当它不存在：产物里没有任何
+    flux2 痕迹。
+    """
+    payload = {
+        "scene_anchor": "medieval tavern interior",
+        "first": {
+            "zimage": {"positive_prompt": "Three adventurers inside a medieval tavern interior."},
+            "flux2": {"positive_prompt": "旧 Flux.2 版首帧（不该进产物）"},
+        },
+        "continuity_constraints": ["Keep the same characters and tavern layout."],
+    }
+    brief = Brief(variant="I2VA", duration=5, plot="中世纪酒馆室内")
+    bundle = fl2va_bundle_from_dict(payload, brief)
+
+    assert [r.model_family for r in bundle.first] == ["zimage"]
+    assert "旧 Flux.2 版" not in bundle.first[0].positive_prompt
+    assert "Flux.2" not in json.dumps(bundle.to_dict(), ensure_ascii=False)
+
+
+def test_legacy_flux2_rows_in_list_shape_are_dropped():
+    """旧产物（to_dict 列表形）里的 flux2 行弃读：载入不报错、不进产物（issue #48）。
+
+    会话/落盘产物的帧是列表、每项带 model_family（节点落盘即 ``bundle.to_dict()``）；
+    旧会话里躺着 flux2 行，续接重展示走的就是这条读法。
+    """
+    raw = {
+        "scene_anchor": "medieval tavern interior",
+        "first": [
+            {"frame": "first", "model_family": "zimage",
+             "scene_anchor": "medieval tavern interior",
+             "positive_prompt": "Three adventurers inside a medieval tavern interior."},
+            {"frame": "first", "model_family": "flux2",
+             "scene_anchor": "medieval tavern interior",
+             "positive_prompt": "旧 Flux.2 版首帧（不该进产物）"},
+        ],
+        "continuity_constraints": ["Keep the same characters and tavern layout."],
+    }
+    brief = Brief(variant="I2VA", duration=5, plot="中世纪酒馆室内")
+    bundle = fl2va_bundle_from_dict(raw, brief)
+
+    assert [r.model_family for r in bundle.first] == ["zimage"]
+    assert "旧 Flux.2 版" not in bundle.first[0].positive_prompt
 
 
 def test_canvas_block_covers_every_model_in_the_profile_table(monkeypatch):

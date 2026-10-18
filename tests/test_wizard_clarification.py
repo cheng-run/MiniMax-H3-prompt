@@ -97,13 +97,13 @@ def _run_phase1(tmp_path, monkeypatch, *, inputs: list[str],
     return wizard._phase1_new(cfg), captured, stub_llm, asked
 
 
-# 画布选择器四答（issue #42）：zimage 比例/尺寸、flux2 比例/尺寸——都取档 1，
+# 画布选择器两答（issue #42，Flux.2 退役后只剩 zimage 一家）：比例/尺寸都取档 1，
 # 起步输入脚本在生成方式之后统一补上这段。
-_CANVAS_INPUTS = ["1", "1", "1", "1"]
+_CANVAS_INPUTS = ["1", "1"]
 
 
 def _answer_path_inputs() -> list[str]:
-    # 主题 → 两条澄清回答 → 时长（默认）→ 风格（AI 定）→ 生成方式（1 首帧）→ 画布四答
+    # 主题 → 两条澄清回答 → 时长（默认）→ 风格（AI 定）→ 生成方式（1 首帧）→ 画布两答
     return [TOPIC, ANSWER_1, ANSWER_2, "", "", "1", *_CANVAS_INPUTS]
 
 
