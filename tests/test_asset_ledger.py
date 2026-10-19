@@ -96,7 +96,12 @@ def test_ledger_persists_as_json_artifact_and_roundtrips(tmp_path):
     raw = json.loads((directory / "asset-ledger.json").read_text(encoding="utf-8"))
     assert raw["schema_version"] == "asset-ledger.v1"
     assert len(raw["entries"]) == 1
-    assert set(raw["entries"][0]) == {"name", "kind", "number", "path", "sha256", "source"}
+    # 六字段 = 票面五字段 + 溯源 source；外部成本两字段是 issue #52 的显式 schema 扩展
+    # （schema 变了就必须动这条守卫，否则扩展会从后门溜进产物而没人核）
+    assert set(raw["entries"][0]) == {
+        "name", "kind", "number", "path", "sha256", "source",
+        "external_seconds", "external_attempts",
+    }
 
     ledger = load_asset_ledger(directory)
     assert ledger.entries[0].name == "青铜钥匙"
@@ -497,3 +502,137 @@ def test_remove_asset_drops_entry_and_copy_but_keeps_replacement_history(tmp_pat
     assert after.replacements == history, "撤下把换版史一起抹了（旧产物就不可复测了）"
     assert not (directory / removed.path).is_file(), "正本复制没跟着撤"
     assert remove_asset(directory, "红裙女孩", KIND_PICTURE) is None, "二次撤该是空操作"
+
+
+# ---------------------------------------------------------------------------
+# 外部生成成本（issue #52）：ComfyUI 出图耗时/次数，可选登记
+# ---------------------------------------------------------------------------
+
+def test_external_cost_rides_the_registration_and_survives_reload(tmp_path):
+    """交回时登记的外部成本进台账并落盘（AC4）：耗时与次数都是可选字段。"""
+    directory = tmp_path / "GEN001"
+    source = _write_source(tmp_path, "girl.png", b"v1")
+
+    intake_assets(directory, [
+        AssetSubmission(name="红裙女孩", kind=KIND_PICTURE, source=str(source),
+                        external_seconds=92.5, external_attempts=3),
+    ], registry=_registry((1, "红裙女孩")))
+
+    entry = load_asset_ledger(directory).get("红裙女孩", KIND_PICTURE)
+    assert (entry.external_seconds, entry.external_attempts) == (92.5, 3)
+    raw = json.loads((directory / "asset-ledger.json").read_text(encoding="utf-8"))
+    assert raw["entries"][0]["external_seconds"] == 92.5
+    assert raw["entries"][0]["external_attempts"] == 3
+
+
+def test_ledger_without_external_cost_fields_still_loads(tmp_path):
+    """旧台账没有这两个字段＝没登记（缺省 0），读回不报错（AC4「缺省不填不报错」）。"""
+    directory = tmp_path / "GEN001"
+    directory.mkdir()
+    (directory / "asset-ledger.json").write_text(json.dumps({
+        "schema_version": "asset-ledger.v1",
+        "entries": [{
+            "name": "红裙女孩", "kind": "picture", "number": 1,
+            "path": "assets/picture-01.png", "sha256": "a" * 64, "source": "",
+        }],
+        "replacements": [],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    entry = load_asset_ledger(directory).get("红裙女孩", KIND_PICTURE)
+    assert (entry.external_seconds, entry.external_attempts) == (0.0, 0)
+
+
+def test_record_external_cost_updates_a_registered_asset(tmp_path):
+    """事后补登记：已入库的那一版单独挂成本，其余登记不动。"""
+    from minimax_h3_prompt.asset_ledger import record_external_cost
+
+    directory = tmp_path / "GEN001"
+    girl = _write_source(tmp_path, "girl.png", b"v1")
+    key = _write_source(tmp_path, "key.png", b"k")
+    intake_assets(directory, [
+        AssetSubmission(name="红裙女孩", kind=KIND_PICTURE, source=str(girl)),
+        AssetSubmission(name="青铜钥匙", kind=KIND_PICTURE, source=str(key)),
+    ], registry=_registry((1, "红裙女孩"), (2, "青铜钥匙")))
+
+    updated = record_external_cost(directory, "红裙女孩", KIND_PICTURE,
+                                   seconds=90, attempts=2)
+
+    assert (updated.external_seconds, updated.external_attempts) == (90.0, 2)
+    ledger = load_asset_ledger(directory)
+    assert ledger.get("红裙女孩", KIND_PICTURE).external_seconds == 90.0
+    untouched = ledger.get("青铜钥匙", KIND_PICTURE)
+    assert (untouched.external_seconds, untouched.external_attempts) == (0.0, 0), \
+        "补登记顺手改了别的资产"
+
+
+def test_record_external_cost_on_unregistered_asset_is_loud(tmp_path):
+    """没有登记就没有「这一版」可挂：报错，不造空壳行（产物要么有货要么不存在）。"""
+    from minimax_h3_prompt.asset_ledger import record_external_cost
+
+    directory = tmp_path / "GEN001"
+    directory.mkdir()
+    with pytest.raises(ValueError):
+        record_external_cost(directory, "红裙女孩", KIND_PICTURE, seconds=90, attempts=2)
+    assert not (directory / "asset-ledger.json").exists(), "报错了却留下了空壳台账"
+
+
+@pytest.mark.parametrize("seconds, attempts", [
+    (-1, 2),          # 负耗时
+    (90, -1),         # 负次数
+    (90.5, 2.5),      # 次数是小数（次数只认整数）
+    (True, 2),        # bool 混进数值
+    ("90", 2),        # 字符串数字：静默强转＝数据被改而不报错
+])
+def test_external_cost_rejects_nonsense(tmp_path, seconds, attempts):
+    """错值要响（同画布/三元组的严格读回纪律）：静默截断或强转比丢弃更糟。"""
+    directory = tmp_path / "GEN001"
+    source = _write_source(tmp_path, "girl.png", b"v1")
+    with pytest.raises(ValueError):
+        intake_assets(directory, [
+            AssetSubmission(name="红裙女孩", kind=KIND_PICTURE, source=str(source),
+                            external_seconds=seconds, external_attempts=attempts),
+        ], registry=_registry((1, "红裙女孩")))
+
+
+def test_ledger_render_shows_external_cost_when_recorded(tmp_path):
+    """「外部生成成本有账可查」：出站清单里看得见，没登记就不占版面。"""
+    directory = tmp_path / "GEN001"
+    girl = _write_source(tmp_path, "girl.png", b"v1")
+    key = _write_source(tmp_path, "key.png", b"k")
+    intake_assets(directory, [
+        AssetSubmission(name="红裙女孩", kind=KIND_PICTURE, source=str(girl),
+                        external_seconds=90, external_attempts=2),
+        AssetSubmission(name="青铜钥匙", kind=KIND_PICTURE, source=str(key)),
+    ], registry=_registry((1, "红裙女孩"), (2, "青铜钥匙")))
+
+    out = render_ledger(load_asset_ledger(directory))
+    girl_line = next(line for line in out.splitlines() if "红裙女孩" in line)
+    key_line = next(line for line in out.splitlines() if "青铜钥匙" in line)
+    assert "外部成本" in girl_line and "90" in girl_line and "2 次" in girl_line
+    assert "外部成本" not in key_line, "没登记的那条也占了成本版面"
+
+
+def test_replacement_inherits_cost_until_re_recorded(tmp_path):
+    """换版没重新登记成本 → 沿用上一版那笔（不静默清空）；重新登记则以新的为准。"""
+    directory = tmp_path / "GEN001"
+    girl = _write_source(tmp_path, "girl.png", b"v1")
+    intake_assets(directory, [
+        AssetSubmission(name="红裙女孩", kind=KIND_PICTURE, source=str(girl),
+                        external_seconds=90, external_attempts=2),
+    ], registry=_registry((1, "红裙女孩")))
+
+    girl.write_bytes(b"v2-different")
+    intake_assets(directory, [
+        AssetSubmission(name="红裙女孩", kind=KIND_PICTURE, source=str(girl)),
+    ], registry=_registry((1, "红裙女孩")))
+    entry = load_asset_ledger(directory).get("红裙女孩", KIND_PICTURE)
+    assert (entry.external_seconds, entry.external_attempts) == (90.0, 2), \
+        "换版把上一版的外部成本静默清空了"
+
+    girl.write_bytes(b"v3-different")
+    intake_assets(directory, [
+        AssetSubmission(name="红裙女孩", kind=KIND_PICTURE, source=str(girl),
+                        external_seconds=45, external_attempts=1),
+    ], registry=_registry((1, "红裙女孩")))
+    entry = load_asset_ledger(directory).get("红裙女孩", KIND_PICTURE)
+    assert (entry.external_seconds, entry.external_attempts) == (45.0, 1)

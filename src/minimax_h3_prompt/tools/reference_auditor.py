@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import io
+import time
 from pathlib import Path
 
 from langchain_core.messages import HumanMessage
@@ -14,6 +15,7 @@ from langchain_openai import ChatOpenAI
 from PIL import Image
 
 from ..config import config
+from ..observability import record_vision_call
 
 
 def _build_vision_model() -> ChatOpenAI:
@@ -65,8 +67,13 @@ def describe_image(path: str | Path, instruction: str | None = None) -> str:
         {"type": "text", "text": text},
         {"type": "image_url", "image_url": {"url": _downscale_to_jpeg(p)}},
     ])
+    start = time.time()
     resp = model.invoke([msg])
-    return resp.content if isinstance(resp.content, str) else str(resp.content)
+    content = resp.content if isinstance(resp.content, str) else str(resp.content)
+    # 读图是一次真实计费调用（issue #52）：不进成本表，「跑完的成本」就永远少一块
+    # （素材循环一次读 8 张、桥接帧每段读一张，那是整条流程里最容易被忽略的开销）。
+    record_vision_call(resp, content, time.time() - start)
+    return content
 
 
 def audit_refs(refs) -> list[dict]:

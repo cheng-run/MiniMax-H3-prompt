@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .brief_parser import Brief, RefItem
+from .observability import COST_TABLE_KEY, token_meter
 
 SESSION_FILENAME = "session-state.json"
 _SCHEMA_VERSION = "wizard_session.v1"
@@ -191,11 +192,18 @@ class SessionState:
         return self.status == STATUS_AWAITING_FRAMES
 
     def save(self) -> Path:
+        stage_state = {k: self.stage_state[k] for k in _STATE_KEYS if k in self.stage_state}
+        # 成本表每次保存都取计量表**此刻**的全量账（issue #52）：续跑点＝落盘时机，
+        # 所以它不必进白名单、也不该由各条保存路径自己记得写——手写就会漏，漏的那条
+        # 路径上「跑完的成本」照旧蒸发（本仓「规则在、接线不在」的老形态）。
+        # 取活账而不是照抄 state 里的那份：续跑窗口里 LLM/读图还在花钱，state 里带的
+        # 是上一次保存时的旧数，照抄它就是把这段时间的成本抹掉。
+        stage_state[COST_TABLE_KEY] = token_meter.snapshot()
         payload: dict[str, Any] = {
             "schema_version": _SCHEMA_VERSION,
             "status": self.status,
             "brief": _brief_to_dict(self.brief),
-            "stage_state": {k: self.stage_state[k] for k in _STATE_KEYS if k in self.stage_state},
+            "stage_state": stage_state,
             "variant_downgraded": self.variant_downgraded,
             "frame_images": [dict(item) for item in self.frame_images],
             "created_at": self.created_at or _now(),

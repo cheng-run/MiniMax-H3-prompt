@@ -28,7 +28,7 @@ import hashlib
 import json
 import re
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Sequence
@@ -37,6 +37,9 @@ from .brief_parser import RefItem
 from .task_package import resolve_input_path
 
 LEDGER_FILENAME = "asset-ledger.json"
+# 版本号**不因可选字段而升**（issue #52 的外部成本）：读回是宽松的（缺键＝0）、写回是
+# 完整的，升版会让盘上所有旧台账在读到的那一刻报「不支持的 schema_version」——为了
+# 两个可选字段把旧产物的可复测性砸掉，正好违背台账存在的理由。
 _SCHEMA_VERSION = "asset-ledger.v1"
 
 # 参考素材三型：对齐官方标签（Picture / Video / Audio），值是机器口径，渲染再转中文。
@@ -82,9 +85,29 @@ def _require_relative_asset_path(value: str, label: str) -> str:
     return str(pure)
 
 
+def _require_external_cost(seconds: Any, attempts: Any) -> tuple[float, int]:
+    """校验外部生成成本（ComfyUI 出图耗时秒数/次数），issue #52。
+
+    两个字段都是**可选**：没登记就是 0（缺省不填不报错）。登记了就得是像样的数：
+    负数、字符串数字、bool、小数次数一律报错——静默强转/截断＝数据被改而不报错，
+    与画布、视频输出三元组的严格读回同一条纪律。
+    """
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or seconds < 0:
+        raise ValueError(f"外部生成耗时必须是 >=0 的秒数：{seconds!r}")
+    if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 0:
+        raise ValueError(f"外部生成次数必须是 >=0 的整数：{attempts!r}")
+    return float(seconds), attempts
+
+
 @dataclass(frozen=True)
 class AssetRecord:
-    """台账一条登记：五字段是票面契约，``source`` 是交回时的原始路径（溯源）。"""
+    """台账一条登记：五字段是票面契约，``source`` 是交回时的原始路径（溯源）。
+
+    ``external_seconds`` / ``external_attempts`` 是**可选**的外部生成成本（issue #52）：
+    ComfyUI 出图耗时（秒）与出图次数。系统看不到外部生成，这两个数只能由人登记；
+    0 ＝ 没登记（缺省不填不报错）。账要能回答「这一版花了多少」，否则「跑完的成本」
+    只算得清 token、算不清图。
+    """
 
     name: str
     kind: str
@@ -92,6 +115,8 @@ class AssetRecord:
     path: str
     sha256: str
     source: str = ""
+    external_seconds: float = 0.0
+    external_attempts: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip():
@@ -103,6 +128,9 @@ class AssetRecord:
         object.__setattr__(self, "path", _require_relative_asset_path(self.path, "path"))
         if not _SHA256_RE.fullmatch(str(self.sha256)):
             raise ValueError(f"sha256 必须是 64 位小写 SHA-256：{self.sha256!r}")
+        seconds, attempts = _require_external_cost(self.external_seconds, self.external_attempts)
+        object.__setattr__(self, "external_seconds", seconds)
+        object.__setattr__(self, "external_attempts", attempts)
 
     @property
     def tag(self) -> str:
@@ -113,7 +141,10 @@ class AssetRecord:
     def from_dict(cls, raw: dict[str, Any]) -> AssetRecord:
         if not isinstance(raw, dict):
             raise ValueError("台账条目必须是对象")
-        unknown = set(raw) - {"name", "kind", "number", "path", "sha256", "source"}
+        unknown = set(raw) - {
+            "name", "kind", "number", "path", "sha256", "source",
+            "external_seconds", "external_attempts",
+        }
         if unknown:
             raise ValueError(f"台账条目包含未知字段：{', '.join(sorted(unknown))}")
         return cls(
@@ -123,6 +154,9 @@ class AssetRecord:
             path=str(raw.get("path", "")),
             sha256=str(raw.get("sha256", "")),
             source=str(raw.get("source", "")),
+            # 旧台账没有这两个键 ＝ 没登记（缺省 0），不报错
+            external_seconds=raw.get("external_seconds", 0),
+            external_attempts=raw.get("external_attempts", 0),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -133,6 +167,8 @@ class AssetRecord:
             "path": self.path,
             "sha256": self.sha256,
             "source": self.source,
+            "external_seconds": self.external_seconds,
+            "external_attempts": self.external_attempts,
         }
 
 
@@ -264,6 +300,30 @@ def save_asset_ledger(directory: str | Path, ledger: AssetLedger) -> Path:
     return target
 
 
+def record_external_cost(directory: str | Path, name: str, kind: str, *,
+                         seconds: float = 0, attempts: int = 0) -> AssetRecord:
+    """给**已登记**的那一版挂外部生成成本（ComfyUI 出图耗时/次数，issue #52）。
+
+    这是事后补登记的口（向导审查菜单第 5 项走它）：图已经在盘上、成本才想起来记。
+    没有这条登记就报错、不造空壳行——成本必须挂在某个正本上才有意义（「产物要么有货
+    要么不存在」）。只改这一条的这两个字段，其余字段与换版史原样保留。
+    """
+    base = Path(directory)
+    ledger = load_asset_ledger(base)
+    entry = ledger.get(name, kind)
+    if entry is None:
+        raise ValueError(f"素材台账里没有这条登记，无法登记外部成本：{kind}/{name!r}")
+    seconds, attempts = _require_external_cost(seconds, attempts)
+    updated = replace(entry, external_seconds=seconds, external_attempts=attempts)
+    save_asset_ledger(base, AssetLedger(
+        entries=tuple(
+            updated if (e.name, e.kind) == (name, kind) else e for e in ledger.entries
+        ),
+        replacements=ledger.replacements,
+    ))
+    return updated
+
+
 def remove_asset(directory: str | Path, name: str, kind: str) -> AssetRecord | None:
     """撤下一条登记（连同会话目录里的正本复制）；没有该登记返回 None。
 
@@ -286,11 +346,28 @@ def remove_asset(directory: str | Path, name: str, kind: str) -> AssetRecord | N
 
 @dataclass(frozen=True)
 class AssetSubmission:
-    """一次交回：语义名 + 类型 + 用户交回的文件路径。"""
+    """一次交回：语义名 + 类型 + 用户交回的文件路径。
+
+    ``external_seconds`` / ``external_attempts`` 是这次交回**顺带登记**的外部生成成本
+    （issue #52，可选，0 ＝ 没登记）。放在交回里而不是另开一次写台账的动作：成本说的
+    就是「这一版图是怎么来的」，与正本、SHA256 同一次落盘才不会被劈成两本账。
+    """
 
     name: str
     kind: str
     source: str
+    external_seconds: float = 0.0
+    external_attempts: int = 0
+
+    def __post_init__(self) -> None:
+        seconds, attempts = _require_external_cost(self.external_seconds, self.external_attempts)
+        object.__setattr__(self, "external_seconds", seconds)
+        object.__setattr__(self, "external_attempts", attempts)
+
+    @property
+    def external_cost_given(self) -> bool:
+        """这次交回有没有带着成本（0 是「未登记」，不是「登记成 0」）。"""
+        return bool(self.external_seconds or self.external_attempts)
 
 
 @dataclass(frozen=True)
@@ -405,15 +482,43 @@ def intake_assets(
             raise FileNotFoundError(f"交回的文件不存在：{source}")
         digest = _sha256_file(source)
         existing = ledger_mut.get(sub.name, sub.kind)
+
+        def _cost(prev: AssetRecord | None) -> tuple[float, int]:
+            """这一版的外部成本：这次交回带了就用它，没带就沿用上一版那笔。
+
+            沿用而不是清零（issue #52）：换版大多是「重掷一张」，成本是这张图的知识；
+            清零会让「已经登记过」这件事静默消失，而账本里最难发现的就是少了一笔。
+            """
+            if sub.external_cost_given:
+                return sub.external_seconds, sub.external_attempts
+            if prev is not None:
+                return prev.external_seconds, prev.external_attempts
+            return 0.0, 0
+
         if existing is not None:
             if existing.sha256 == digest:
+                seconds, attempts = _cost(existing)
+                if (seconds, attempts) != (existing.external_seconds, existing.external_attempts):
+                    updated = replace(existing, external_seconds=seconds,
+                                      external_attempts=attempts)
+                    ledger_mut = AssetLedger(
+                        entries=tuple(
+                            updated if (e.name, e.kind) == (sub.name, sub.kind) else e
+                            for e in ledger_mut.entries
+                        ),
+                        replacements=ledger_mut.replacements,
+                    )
+                    unchanged.append(f"{sub.name}（{existing.tag}，外部成本已更新）")
+                    return
                 unchanged.append(f"{sub.name}（{existing.tag}）")
                 return
             # 换版：默认保留原登记（不静默接受），调用方点头才替换；两头都进报告。
+            seconds, attempts = _cost(existing)
             candidate = AssetRecord(
                 name=sub.name, kind=sub.kind, number=existing.number,
                 path=_target_name(existing.number, sub.kind, source),
                 sha256=digest, source=str(source),
+                external_seconds=seconds, external_attempts=attempts,
             )
             event = Replacement(
                 name=sub.name, kind=sub.kind, number=existing.number,
@@ -450,6 +555,8 @@ def intake_assets(
             name=sub.name, kind=sub.kind, number=number,
             path=_target_name(number, sub.kind, source),
             sha256=digest, source=str(source),
+            external_seconds=sub.external_seconds,
+            external_attempts=sub.external_attempts,
         )
         ledger_mut = AssetLedger(
             entries=ledger_mut.entries + (entry,),
@@ -496,10 +603,11 @@ def intake_assets(
 # ---------------------------------------------------------------------------
 
 def render_ledger(ledger: AssetLedger) -> str:
-    """素材台账权威清单（用户故事 12）：五字段 + 换版史。
+    """素材台账权威清单（用户故事 12）：五字段 + 换版史 + 登记过的外部成本。
 
     终端 SHA256 取前 16 位（同 loadout_manifest 口径），**全量在 JSON**——显示层
-    不是对照物，要逐位核对读 ``asset-ledger.json``。
+    不是对照物，要逐位核对读 ``asset-ledger.json``。外部生成成本只在登记过时出现
+    （0 ＝ 没登记，见 issue #52）。
     """
     counts = {kind: sum(1 for e in ledger.entries if e.kind == kind) for kind in KINDS}
     head = (f"[素材台账] {len(ledger.entries)} 条"
@@ -508,8 +616,17 @@ def render_ledger(ledger: AssetLedger) -> str:
     if not ledger.entries:
         lines.append("  （空）")
     for entry in ledger.entries:
-        lines.append(f"  {entry.tag} {KIND_LABELS[entry.kind]} · {entry.name} · "
-                     f"{entry.path} · sha256={entry.sha256[:16]}…")
+        line = (f"  {entry.tag} {KIND_LABELS[entry.kind]} · {entry.name} · "
+                f"{entry.path} · sha256={entry.sha256[:16]}…")
+        # 外部生成成本只在登记过时才占版面（0 ＝ 没登记）：没登记的行不该多一截噪音
+        cost = []
+        if entry.external_seconds:
+            cost.append(f"{entry.external_seconds:g}s")
+        if entry.external_attempts:
+            cost.append(f"{entry.external_attempts} 次")
+        if cost:
+            line += f" · 外部成本 {'/'.join(cost)}"
+        lines.append(line)
     for record in ledger.replacements:
         lines.append(f"  [换版史] {record.name} {record.tag}："
                      f"{record.old_sha256[:16]}… → {record.new_sha256[:16]}…"
@@ -551,7 +668,8 @@ __all__ = [
     "LEDGER_FILENAME", "format_tag",
     "AssetRecord", "AssetLedger", "AssetSubmission", "Replacement", "Drift",
     "IntakeReport",
-    "intake_assets", "load_asset_ledger", "remove_asset", "save_asset_ledger",
+    "intake_assets", "load_asset_ledger", "remove_asset", "record_external_cost",
+    "save_asset_ledger",
     "verify_asset_ledger",
     "render_ledger", "render_report",
 ]

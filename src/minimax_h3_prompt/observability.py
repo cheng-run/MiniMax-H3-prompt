@@ -10,6 +10,15 @@ from pathlib import Path
 
 from .config import config
 
+# 成本表在会话 state 里的键（issue #52）。CONTEXT.md「续跑点」：成本表随续跑点持久化，
+# 不随进程蒸发。写入方只有 ``session_store``（每次保存带 live 快照）与两个阶段入口
+# （把 stage 跑完后的活账写回 state），恢复口只有一个：续跑入口 ``TokenMeter.restore``。
+COST_TABLE_KEY = "cost_table"
+
+# 读图（视觉调用）在成本表里的角色名。带 ``role_`` 前缀与各 agent 的命名同形
+# （``agents`` 建的 agent 都叫 ``role_<角色>``），进度面板的 ``role_label`` 一视同仁。
+VISION_ROLE = "role_vision"
+
 
 class Reporter:
     """线程安全事件总线。事件为 dict，必须含 type。"""
@@ -63,6 +72,36 @@ class TokenMeter:
     def snapshot(self) -> dict:
         with self._lock:
             return {r: dict(v) for r, v in self._per_role.items()}
+
+    def restore(self, snapshot: dict | None) -> None:
+        """把一份成本表快照接回计量表（issue #52：续跑接着累计，不归零）。
+
+        ``None`` ＝ 旧会话没有这张表——空操作，**不是清零**：本进程已经累计的账照旧
+        （把它当清零会让「阶段入口不清零」这条本轮裁定从后门被推翻）。
+
+        快照是**替换**语义（文件里那张就是当时全量账），只在续跑入口调。错形要响：
+        会话文件是我们自己写的，错形只可能是损坏或外人改写，吞掉就是账被悄悄清零——
+        与画布/视频输出三元组的严格读回同一条纪律（``session_store``）。
+        """
+        if snapshot is None:
+            return
+        if not isinstance(snapshot, dict):
+            raise ValueError(
+                f"成本表快照错形：{snapshot!r}（应为 角色→{{calls,input,output}} 的对象）")
+        rows: dict[str, dict] = {}
+        for role, row in snapshot.items():
+            if not isinstance(role, str) or not isinstance(row, dict):
+                raise ValueError(f"成本表快照条目错形：{role!r} → {row!r}")
+            fields: dict[str, int] = {}
+            for key in ("calls", "input", "output"):
+                value = row.get(key, 0)
+                # bool 是 int 的子类：True 混进 token 数比报错更难查，显式挡掉
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise ValueError(f"成本表快照条目错形：{role}[{key}] = {value!r}")
+                fields[key] = value
+            rows[role] = fields
+        with self._lock:
+            self._per_role = rows
 
     def totals(self) -> dict:
         s = self.snapshot()
@@ -143,3 +182,14 @@ def record_agent_call(role: str, messages, out: str, duration: float) -> None:
         "input": usage["input"],
         "output": usage["output"],
     })
+
+
+def record_vision_call(response, out: str, duration: float) -> None:
+    """记录一次读图（视觉调用）——issue #52：读图也是真实计费，不许留在账外。
+
+    走 ``record_agent_call`` 同一条路（计量 + agent_done 事件）：读图和 agent 调用在
+    「花了多少钱」这件事上没有区别，各写一套计量就是第二份可写来源。视觉模型与文本
+    模型不同价，但本仓的计价口径是**单一单价估算**（spec #47 Out of Scope：不做精确
+    计价），故沿用同一张单价，只把角色单列成 ``role_vision`` 以便看出贵在哪。
+    """
+    record_agent_call(VISION_ROLE, [response], out, duration)

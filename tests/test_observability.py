@@ -94,6 +94,43 @@ class TestTokenMeter:
         assert "导演" in tm.snapshot()
 
 
+class TestCostTable:
+    """成本表快照/恢复（issue #52）：跨中断续跑累计，不归零。
+
+    表就是「角色 → {calls, input, output}」这一张；期望值逐项手写，
+    不从实现反推（否则测的是自己）。
+    """
+
+    def test_snapshot_restores_accumulation(self):
+        """快照接回新进程（空账）后接着累计：老账在、新账往上加。"""
+        before = TokenMeter(0.5, 1.5)
+        before.add("导演", 1000, 200)
+        saved = before.snapshot()
+
+        resumed = TokenMeter(0.5, 1.5)  # ＝重启后的空进程
+        resumed.restore(saved)
+        assert resumed.totals()["input"] == 1000, "恢复后老账蒸发了"
+        resumed.add("导演", 500, 100)   # 续跑接着花的钱
+        assert resumed.totals()["input"] == 1500
+        assert resumed.totals()["output"] == 300
+        assert resumed.snapshot()["导演"] == {"calls": 2, "input": 1500, "output": 300}
+
+    def test_restore_missing_table_is_noop(self):
+        """旧会话没有这张表（None）＝ 空操作，不是清零：本进程已有的账照旧。"""
+        meter = TokenMeter(0.5, 1.5)
+        meter.add("导演", 10, 5)
+        meter.restore(None)
+        assert meter.totals()["input"] == 10
+
+    def test_restore_malformed_is_loud(self):
+        """错形要响（会话文件是我们自己写的，错形只可能是损坏）：吞掉＝账被悄悄清零。"""
+        meter = TokenMeter(0.5, 1.5)
+        for bad in ("nope", ["导演"], {"导演": "10"}, {"导演": {"calls": "1", "input": 1, "output": 1}},
+                    {"导演": {"calls": 1, "input": -1, "output": 0}}):
+            with pytest.raises(ValueError):
+                meter.restore(bad)
+
+
 class TestExtractUsage:
     def test_single_message(self):
         m = AIMessage(content="x", usage_metadata={"input_tokens": 7, "output_tokens": 3, "total_tokens": 10})

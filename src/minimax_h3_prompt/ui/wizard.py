@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import math
 import sys
 import time
 from contextlib import contextmanager
@@ -24,6 +25,7 @@ from ..brief_parser import Brief, RefItem
 from ..config import Config
 from ..generation import canvas_display, render_fl2va_frame_markdown
 from ..graph.pipeline import run_stage1, run_stage2, stage1_rerun_plan
+from ..observability import COST_TABLE_KEY, token_meter
 from ..resume_point import forget as forget_answer
 from ..resume_point import recall as recall_answer
 from ..resume_point import remember as remember_answer
@@ -133,6 +135,81 @@ def _record_answer(state: dict, key: str, value: str, *, generation_dir: Path,
 def _asset_path_key(name: str) -> str:
     """素材交回路径的答案键（按语义名区分：一张一条，换版时各走各的）。"""
     return f"asset_path:{name}"
+
+
+def _asset_cost_keys(name: str) -> tuple[str, str]:
+    """外部生成成本（耗时秒/次数）的答案键（issue #52）：两个数各记一条，不拼串。
+
+    拼成 ``90/3`` 那种串就要在两头各写一遍解析，格式一漂就对不上账；答案账本来就装
+    字符串，分两条最省事。答过但还没入库的那笔成本住在这里，入库时挂到台账上再作废。
+    """
+    return f"asset_cost_seconds:{name}", f"asset_cost_attempts:{name}"
+
+
+def _ask_asset_external_cost(name: str) -> tuple[float, int]:
+    """问外部生成成本（ComfyUI 出图耗时秒/次数），两问都可留空＝不登记。
+
+    系统看不到外部生成，这两个数只能由人报；每问独立跳过（只记得起耗时的人不必编次数）。
+    非法输入重问，不静默当 0——静默吞掉就是账本上少一笔而没人知道。
+    """
+    seconds = 0.0
+    while True:
+        raw = _prompt(f"[素材成本·{name}] 出图耗时（秒，回车=跳过）：").strip()
+        if not raw:
+            break
+        try:
+            seconds = float(raw)
+            # float() 会收下 inf/nan：它们进台账就不是「像样的数」了（同 bool 挡法）
+            if seconds < 0 or not math.isfinite(seconds):
+                raise ValueError
+            break
+        except ValueError:
+            print("  耗时要填非负数字（单张图的生成秒数），或回车跳过。")
+    attempts = 0
+    while True:
+        raw = _prompt(f"[素材成本·{name}] 出图次数（回车=跳过）：").strip()
+        if not raw:
+            break
+        if raw.isdigit():
+            attempts = int(raw)
+            break
+        print("  次数要填非负整数（这张图掷了几次才满意），或回车跳过。")
+    return seconds, attempts
+
+
+def _pending_asset_cost(state: dict, name: str) -> tuple[float, int]:
+    """读回答案账里这张图待挂的外部成本；没登记过返回 (0.0, 0)。"""
+    seconds_key, attempts_key = _asset_cost_keys(name)
+    seconds = float(recall_answer(state, seconds_key) or 0)
+    attempts = int(recall_answer(state, attempts_key) or 0)
+    return seconds, attempts
+
+
+def _register_asset_external_cost(state: dict, brief: Brief, generation_dir: Path,
+                                  item: QueueItem) -> None:
+    """审查菜单第 5 项（issue #52）：登记这张图的外部生成成本。
+
+    落点随产物走：**已入库** → 直接写台账（盘上那一版就是这里说的「这一版」，事后
+    补登记走这条）；**还没入库** → 记进答案账，交回入库时随正本一起挂上（产物接答案
+    的班）。再登记一次就是覆盖这次登记的成本，不问人「要不要清空」——那是把一句话
+    拆成两问。
+    """
+    from ..asset_ledger import KIND_PICTURE, load_asset_ledger, record_external_cost
+
+    seconds, attempts = _ask_asset_external_cost(item.name)
+    if not (seconds or attempts):
+        print(f"[素材成本·{item.name}] 未登记（两问都跳过了）。")
+        return
+    if load_asset_ledger(generation_dir).get(item.name, KIND_PICTURE) is not None:
+        record_external_cost(generation_dir, item.name, KIND_PICTURE,
+                             seconds=seconds, attempts=attempts)
+        print(f"[素材成本·{item.name}] 已登记到台账（耗时 {seconds:g}s / 次数 {attempts}）。")
+        return
+    seconds_key, attempts_key = _asset_cost_keys(item.name)
+    remember_answer(state, seconds_key, f"{seconds:g}")
+    remember_answer(state, attempts_key, str(attempts))
+    save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
+    print(f"[素材成本·{item.name}] 已记下，交回入库时挂到这一版上。")
 
 
 def _clean_path_input(raw: str) -> str:
@@ -330,6 +407,11 @@ def run_wizard(config: Config) -> int:
 
     session = _offer_resume(config)
     frames_shown = False
+    if session is not None:
+        # 续跑入口把上一次的成本表接回来（issue #52）：新进程的计量表是空表，不接就
+        # 「跑完的成本」归零。快照替换语义——文件里那张就是当时全量账；只在进程刚起
+        # 的这一处接（阶段入口不清零，见 ``graph.pipeline.run_stage1``）。
+        token_meter.restore(session.stage_state.get(COST_TABLE_KEY))
     if session is None:
         session = _phase1_new(config)
         if session is None:
@@ -512,6 +594,10 @@ def _ask_clarifications(config: Config, topic: str) -> str:
 
 
 def _phase1_new(config: Config) -> SessionState | None:
+    # 新开一份生成＝新开一本成本账（issue #52）：上一条废弃/重启流程里攒下的累计
+    # 成本不许串进来（菜单上那句「估算费用」说的是**这一份**的钱）。清零点放在这里
+    # 而不是阶段入口：阶段入口清零会把阶段 1 的账在阶段 2 前抹掉。
+    token_meter.reset()
     topic = ""
     while not topic:
         topic = _prompt("请输入视频主题（必填）：")
@@ -1568,7 +1654,7 @@ def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item: QueueIte
                 f"[审查·{item.name}] 这张图满意吗？{mark}\n"
                 "  1=满意，交回这张（下一步填路径）  2=打回：外部重掷（不登记被拒图）\n"
                 "  3=打回：改写提示词（留痕一轮修订）  4=显式放弃这张资产\n"
-                "  q=先到这里（回车=1）："
+                "  5=登记外部生成成本（耗时/次数）  q=先到这里（回车=1）："
             ).strip()
             if choice in ("", "1"):
                 remembered = recall_answer(state, _asset_path_key(item.name)) or ""
@@ -1581,7 +1667,13 @@ def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item: QueueIte
                     # 续跑按这条答案接着走，用户不必重敲整个路径。
                     _record_answer(state, _asset_path_key(item.name), raw,
                                    generation_dir=generation_dir, brief=brief)
-                submissions = [AssetSubmission(name=item.name, kind=KIND_PICTURE, source=raw)]
+                cost_seconds, cost_attempts = _pending_asset_cost(state, item.name)
+                submissions = [AssetSubmission(
+                    name=item.name, kind=KIND_PICTURE, source=raw,
+                    # 审查菜单里登记过就随正本一起挂上（issue #52）：成本与 SHA256 同一次
+                    # 落盘，才不会出现「登记在答案账、产物在台账」的两本账。
+                    external_seconds=cost_seconds, external_attempts=cost_attempts,
+                )]
                 report = intake_assets(
                     generation_dir, submissions,
                     registry=registry, script=str(state.get("script", "")),
@@ -1594,6 +1686,9 @@ def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item: QueueIte
                     print(render_ledger(report.ledger))
                 # 产物接答案的班：正本与台账已落盘，答案账里那条不再有信息量
                 forget_answer(state, _asset_path_key(item.name))
+                cost_seconds_key, cost_attempts_key = _asset_cost_keys(item.name)
+                forget_answer(state, cost_seconds_key)
+                forget_answer(state, cost_attempts_key)
                 save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
                 outcome = _proofread_one_asset(state, brief, generation_dir, item.name)
                 break
@@ -1609,9 +1704,12 @@ def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item: QueueIte
             if choice == "4":
                 _abandon_asset(state, brief, generation_dir, item)
                 return LOOP_ABANDONED
+            if choice == "5":
+                _register_asset_external_cost(state, brief, generation_dir, item)
+                continue
             if choice.lower() == "q":
                 return LOOP_PAUSED
-            print("无效输入，请选 1/2/3/4/q。")
+            print("无效输入，请选 1/2/3/4/5/q。")
 
         if outcome is None:
             continue  # 改写成功：新词重新出站再审

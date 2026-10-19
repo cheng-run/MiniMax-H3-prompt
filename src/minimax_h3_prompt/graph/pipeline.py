@@ -14,7 +14,7 @@ from ..agents import build_role_agents, run_agent
 from ..brief_parser import FRAME_VARIANTS, Brief
 from ..clarification import as_block
 from ..config import Config
-from ..observability import stage_saver, token_meter
+from ..observability import COST_TABLE_KEY, stage_saver, token_meter
 from ..output.assembler import assemble_and_repair
 from ..tools.h3_validator import format_issues, validate_prompt
 from ..tools.ref_metadata import to_tuple
@@ -268,7 +268,9 @@ def run_stage1(brief: Brief, config: Config, *, on_node=None,
         "qa_issues": [],
         **base_state,  # 续跑时的已有产物
     }
-    token_meter.reset()
+    # 这里**不清零**计量表（issue #52）：阶段入口清零＝进阶段 2 就把阶段 1 的成本抹掉，
+    # 而「跑完的成本」正是指整条流程的累计。账的边界是**一份生成**（换新生成由向导开新账），
+    # 不是阶段；续跑进程则先在续跑入口把上一次的成本表接回来（``TokenMeter.restore``）。
     stage_saver.base.mkdir(parents=True, exist_ok=True)
     graph, agents = build_pipeline_graph(model, brief, config, stage=1, chain=chain)
     state: dict = dict(initial)
@@ -283,6 +285,10 @@ def run_stage1(brief: Brief, config: Config, *, on_node=None,
                     on_step_done(node_name, dict(state))
     if config.common_sense_qa:
         state = _stage1_frame_qa_loop(state, brief, agents, model, config)
+    # 把活账写回 state（issue #52）：阶段 1 期间花的钱（含常识质检轮）跟着 state 走，
+    # 下一阶段与落盘都拿得到。落盘侧还会再取一次活账（session_store），这里管的是
+    # 「同进程内阶段 2 拿到的是最新账」——照抄 initial_state 里的旧快照就等于抹账。
+    state[COST_TABLE_KEY] = token_meter.snapshot()
     return state, model, agents
 
 
@@ -342,6 +348,9 @@ def run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_node
         merged = {k: v for k, v in state.items() if k not in ("final_prompt", "final_report")}
         merged["ref_meta"] = ref_meta
         prompt = str(checkpoint["prompt_draft"])
+        # 断点里带着组装那一刻的成本表（issue #52）：组装的钱花在上一个进程里，而它
+        # 跑完只落这个断点——不接回来，跳过组装的那次续跑就永远少记这一笔。
+        token_meter.restore(checkpoint.get("cost_table"))
         print("[续接] 检测到阶段 2 断点（组装已于此前完成），直接进入质检精修。", flush=True)
     else:
         graph, _ = build_pipeline_graph(model, brief, config, stage=2, refs=registry)
@@ -369,7 +378,8 @@ def run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_node
         prompt = merged.get("final_prompt", "")
         prompt, _ = assemble_and_repair(prompt, brief.mode, brief.variant)
         if checkpoint_dir:
-            save_checkpoint(checkpoint_dir, prompt_draft=prompt)
+            save_checkpoint(checkpoint_dir, prompt_draft=prompt,
+                            cost_table=token_meter.snapshot())
 
     # 有界质检精修：确定性校验 → 有 error 则 qa 给建议 + prompt_engineer 修正
     for i in range(config.max_qa_iterations):
@@ -406,10 +416,12 @@ def run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_node
         prompt, _ = assemble_and_repair(prompt, brief.mode, brief.variant)
         stage_saver.save(f"qa_refine_{i}", {"质检建议": review, "重出提示词": prompt, "主题忠实度校验": format_issues(theme_issues)})
         if checkpoint_dir:
-            save_checkpoint(checkpoint_dir, prompt_draft=prompt, status=f"qa_round_{i + 1}")
+            save_checkpoint(checkpoint_dir, prompt_draft=prompt, status=f"qa_round_{i + 1}",
+                            cost_table=token_meter.snapshot())
 
     prompt, _ = assemble_and_repair(prompt, brief.mode, brief.variant)
     merged["final_prompt"] = prompt
+    merged[COST_TABLE_KEY] = token_meter.snapshot()  # 同上：阶段 2 的账也随 state 走
     if checkpoint_dir:
         clear_checkpoint(checkpoint_dir)
     return merged, prompt

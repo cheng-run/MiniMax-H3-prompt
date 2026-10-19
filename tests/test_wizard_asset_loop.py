@@ -566,3 +566,80 @@ def test_canvas_rows_follow_user_selection(tmp_path, monkeypatch, capsys):
     # 落盘文件同样同源
     files = list((tmp_path / "sessions").rglob("character-prompt.md"))
     assert files and "700 × 1300" in files[0].read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# 外部生成成本（issue #52）：审查菜单第 5 项，可选登记 ComfyUI 耗时/次数
+# ---------------------------------------------------------------------------
+
+def _ledger_dir(tmp_path: Path) -> Path:
+    return next((tmp_path / "sessions").rglob("asset-ledger.json")).parent
+
+
+def test_review_menu_records_external_cost_before_intake(tmp_path, monkeypatch, capsys):
+    """还没入库时登记：成本先进答案账，交回时随正本一起挂到台账上。
+
+    「可选」是说它可以跳过（留空＝不登记），不是说它没有入口：成本说的就是「这一版图
+    是怎么来的」，得和正本、SHA256 同时落盘才不会被劈成两本账。
+    """
+    from minimax_h3_prompt.resume_point import ANSWERS_KEY
+
+    girl = _write_source(tmp_path, "girl.png", b"girl")
+    tail = [
+        "",                     # 队列菜单：默认队首（红裙女孩）
+        "5",                    # 审查菜单：登记外部生成成本
+        "90", "3",              # 耗时 90 秒、3 次
+        "1", str(girl),         # 满意→交回
+        "", "4", "", "4", "4",  # 其余三张放弃
+        "8", "1",               # 视频输出选择器（issue #45）
+    ]
+    asked, code, _ = _run_loop(tmp_path, monkeypatch, tail)
+
+    assert code == 0
+    assert any("5=登记外部生成成本" in text for text in asked), "审查菜单缺外部成本入口"
+    entry = load_asset_ledger(_ledger_dir(tmp_path)).get("红裙女孩", "picture")
+    assert (entry.external_seconds, entry.external_attempts) == (90.0, 3)
+    session = load_session(_ledger_dir(tmp_path))
+    answers = session.stage_state.get(ANSWERS_KEY) or {}
+    assert not [k for k in answers if k.startswith("asset_cost")], \
+        f"入库后待挂成本没作废（答案会冒充事实）：{answers}"
+
+
+def test_review_menu_records_external_cost_on_an_intaken_asset(tmp_path, monkeypatch, capsys):
+    """已入库时登记：直接写台账（不用等下一次交回）——事后补登记就是这个口。"""
+    from minimax_h3_prompt.resume_point import ANSWERS_KEY
+
+    vision = {"picture-01": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
+    girl = _write_source(tmp_path, "girl.png", b"girl")
+    tail = [
+        "",                 # 队列菜单：默认队首
+        "1", str(girl),     # 审查：满意→交回（已入库）
+        "2",                # 偏差裁决：重生成
+        "1",                # 重掷菜单：原词再掷 → 外层重出词 → 审查菜单（此时已入库）
+        "5", "90", "3",     # 登记外部成本
+        "q",                # 先到这里（会话保持可续接）
+    ]
+    asked, code, _ = _run_loop(tmp_path, monkeypatch, tail, vision=vision)
+
+    assert code == 0
+    entry = load_asset_ledger(_ledger_dir(tmp_path)).get("红裙女孩", "picture")
+    assert (entry.external_seconds, entry.external_attempts) == (90.0, 3), \
+        "已入库的那一版没登记上（或又被顶掉了）"
+    session = load_session(_ledger_dir(tmp_path))
+    answers = session.stage_state.get(ANSWERS_KEY) or {}
+    assert not [k for k in answers if k.startswith("asset_cost")], \
+        f"已入库时该直接写台账，不该在答案账里留一手：{answers}"
+
+
+def test_external_cost_can_be_skipped_by_leaving_both_blank(tmp_path, monkeypatch, capsys):
+    """两问都留空＝不登记，也不往台账里塞 0 元行（可选字段的「缺省不填」）。"""
+    girl = _write_source(tmp_path, "girl.png", b"girl")
+    tail = [
+        "", "5", "", "", "1", str(girl),  # 登记入口两问都空 → 照常交回
+        "", "4", "", "4", "4", "8", "1",
+    ]
+    asked, code, _ = _run_loop(tmp_path, monkeypatch, tail)
+
+    assert code == 0
+    entry = load_asset_ledger(_ledger_dir(tmp_path)).get("红裙女孩", "picture")
+    assert (entry.external_seconds, entry.external_attempts) == (0.0, 0)

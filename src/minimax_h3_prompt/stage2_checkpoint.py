@@ -16,7 +16,14 @@ def checkpoint_path(directory: str | Path) -> Path:
     return Path(directory) / FILENAME
 
 
-def save_checkpoint(directory: str | Path, *, prompt_draft: str, status: str = "assemble_done") -> Path:
+def save_checkpoint(directory: str | Path, *, prompt_draft: str, status: str = "assemble_done",
+                    cost_table: dict | None = None) -> Path:
+    """落盘组装初稿；``cost_table`` 给成本表快照（issue #52）。
+
+    组装是整条流程最贵的一步（可能烧十几分钟、一次大调用），而它跑完**只落这个断点、
+    不落会话**——成本表不跟着断点走，续跑（断点会跳过组装）之后这笔钱就再也补不回来，
+    正是「跑完的成本蒸发」里最大的一块。故断点与成本快照同写一处。
+    """
     path = checkpoint_path(directory)
     payload = {
         "schema_version": _SCHEMA_VERSION,
@@ -24,8 +31,11 @@ def save_checkpoint(directory: str | Path, *, prompt_draft: str, status: str = "
         "prompt_draft": prompt_draft,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    if cost_table is not None:
+        payload["cost_table"] = cost_table
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
+
 
 
 def load_checkpoint(directory: str | Path) -> dict | None:

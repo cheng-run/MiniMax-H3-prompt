@@ -179,3 +179,54 @@ def test_user_revisions_survive_resume(tmp_path):
     assert [item["text"] for item in loaded.stage_state["user_revisions"]] == [
         "天空改成黄昏", "院中加红枫"]
     assert loaded.stage_state["frame_round"] == 2
+
+
+# ---------------------------------------------------------------------------
+# 成本表随续跑点落盘（issue #52）
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def _clean_meter():
+    """计量表是模块级单例：用例前后都清空，免得别的用例的账混进这里的断言。"""
+    from minimax_h3_prompt.observability import token_meter
+
+    token_meter.reset()
+    yield token_meter
+    token_meter.reset()
+
+
+def test_cost_table_rides_every_session_save(tmp_path, _clean_meter):
+    """会话一存，成本表的当前快照就在里面（issue #52 AC3：随续跑点持久化）。
+
+    快照不是产品给的另一份数据，而是计量表当下的全量账——落盘时机就是续跑点，
+    所以它在 ``save_session`` 里自动带上，任何一条保存路径都不必自己记得写。
+    """
+    from minimax_h3_prompt.observability import COST_TABLE_KEY
+
+    _clean_meter.add("导演", 1200, 300)
+    generation_dir = tmp_path / "GEN001"
+    save_session(generation_dir, _brief(), {"shot_table": "表"})
+
+    loaded = load_session(generation_dir)
+    assert loaded is not None
+    assert loaded.stage_state[COST_TABLE_KEY]["导演"] == {
+        "calls": 1, "input": 1200, "output": 300}
+
+
+def test_saved_cost_table_is_the_live_account_not_the_stale_copy(tmp_path, _clean_meter):
+    """state 里那份旧快照不许覆盖活账：落盘取的是计量表**此刻**的数。
+
+    这条守的是「落盘 ≈ 续跑点」这个承诺的成色——续跑窗口里 LLM/读图还在花钱，
+    state 里带的快照却是上一次保存时的旧数；照抄它就等于把这段时间的成本抹掉。
+    """
+    from minimax_h3_prompt.observability import COST_TABLE_KEY
+
+    stale = {COST_TABLE_KEY: {"导演": {"calls": 9, "input": 900, "output": 900}}}
+    _clean_meter.add("导演", 100, 20)
+    generation_dir = tmp_path / "GEN001"
+    save_session(generation_dir, _brief(), {"shot_table": "表", **stale})
+
+    loaded = load_session(generation_dir)
+    assert loaded is not None
+    assert loaded.stage_state[COST_TABLE_KEY]["导演"] == {
+        "calls": 1, "input": 100, "output": 20}, "旧快照盖过了活账（成本被抹掉）"
