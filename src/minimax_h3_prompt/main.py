@@ -402,7 +402,9 @@ def main(argv: list[str] | None = None) -> int:
         try:
             return run_wizard(config)
         except (KeyboardInterrupt, EOFError):
-            print("\n已取消。")
+            # 续跑点（issue #51）：已答的内容与已做的裁决都逐条落了盘。措辞只说
+            # **已落盘的**——阶段 1 中途断掉时还没有任何答案账可写，承诺过头同样是谎报。
+            print("\n已取消。已落盘的进度会保留：重跑向导从续跑点继续，已答的不必重答。")
             return 1
     return _run_cli(args)
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Sequence
 
 
@@ -173,6 +173,14 @@ DECISION_REGENERATE = "regenerate"
 DECISION_KEEP = "keep"
 DECISIONS = (DECISION_REWRITE, DECISION_REGENERATE, DECISION_KEEP)
 DEFAULT_DECISION = DECISION_REWRITE
+
+# 三选的屏幕名（续跑时的「沿用上次裁决：…」要念得出话；裸常量名等于没念）。
+# 与 ``ui.wizard._ask_deviation_choice`` 的菜单同源同序——两处各写一份必然漂。
+DECISION_LABELS = {
+    DECISION_REWRITE: "按图改文案",
+    DECISION_REGENERATE: "重生成这张素材图",
+    DECISION_KEEP: "明知故犯保留原描述",
+}
 
 
 @dataclass(frozen=True)
@@ -383,6 +391,145 @@ class ProofreadRecord:
         )
 
 
+# ---------------------------------------------------------------------------
+# 续跑点：读图校对的中途进度（issue #51）
+# ---------------------------------------------------------------------------
+
+# 中途进度在 state 里的键（会话持久化白名单同此名）。它与 `asset_proofreads`（**落定**
+# 的记录）是两件事：记录是产物，进度是「这道题问到哪了」——落定时进度即作废。
+PROGRESS_KEY = "asset_proofread_progress"
+
+
+@dataclass(frozen=True)
+class ProofreadProgress:
+    """一张资产读图校对的**中途**进度（issue #51 续跑点）。
+
+    为什么连读图结果（``claims``）一起存：人裁的条目是**对着那一份清单**选的。
+    续跑时若重新读图，视觉模型交回的偏差清单会换个样子，于是「已裁决的 3 条」既
+    认不回来、也说不定已不存在——只存裁决不存清单，「已裁决项不重答」是句空话。
+    故 ``sha256``（图未换版）与 ``base``（词未改写）三者对上才复用，否则整份作废
+    重读：它记的是另一张图或另一版词，复用等于拿旧清单判新图。
+    """
+
+    name: str
+    sha256: str
+    base: str
+    claims: tuple[Claim, ...] = ()
+    decisions: tuple[Adjudication, ...] = ()
+    # 补漏并入这个回答：None ＝ 还没问过（与「答了不并入」区分开——那是有效答案，
+    # 续跑不该再问一遍）。
+    omissions: bool | None = None
+
+    def __post_init__(self) -> None:
+        if not str(self.name).strip():
+            raise ValueError("校对进度缺语义名")
+        if not str(self.sha256).strip():
+            raise ValueError(f"校对进度缺 sha256（{self.name!r}）")
+
+    def reading(self) -> Reading:
+        """把存下来的 claims 还原成读图结果（对照器输入），供复用。"""
+        return Reading(claims=self.claims)
+
+    def with_decision(self, adjudication: Adjudication) -> "ProofreadProgress":
+        """追加一条已裁决条目（frozen：返回新对象，调用方写回 state 再落盘）。"""
+        return replace(self, decisions=(*self.decisions, adjudication))
+
+    def with_omissions(self, take: bool) -> "ProofreadProgress":
+        return replace(self, omissions=bool(take))
+
+    def to_dict(self) -> dict:
+        return {
+            "sha256": self.sha256,
+            "base": self.base,
+            "claims": [
+                {"aspect": c.aspect, "prompt_quote": c.prompt_quote, "observed": c.observed}
+                for c in self.claims
+            ],
+            "decisions": [a.to_dict() for a in self.decisions],
+            "omissions": self.omissions,
+        }
+
+    @classmethod
+    def from_dict(cls, name: str, raw: object) -> "ProofreadProgress":
+        if not isinstance(raw, dict):
+            raise ValueError(f"校对进度必须是对象（{name!r}）：{raw!r}")
+        unknown = set(raw) - {"sha256", "base", "claims", "decisions", "omissions"}
+        if unknown:
+            raise ValueError(f"校对进度（{name!r}）包含未知字段：{', '.join(sorted(unknown))}")
+        omissions = raw.get("omissions")
+        if omissions is not None and not isinstance(omissions, bool):
+            raise ValueError(
+                f"校对进度（{name!r}）的补漏回答错形：{omissions!r}（应为 true/false/null）")
+        return cls(
+            name=name,
+            sha256=str(raw.get("sha256", "")),
+            base=str(raw.get("base", "")),
+            claims=tuple(Claim.from_dict(x) for x in raw.get("claims") or ()),
+            decisions=tuple(Adjudication.from_dict(x) for x in raw.get("decisions") or ()),
+            omissions=omissions,
+        )
+
+
+def progress_rows(state: dict) -> dict:
+    """state 里的校对进度（``{语义名: 进度}``）；键缺失／null → 空表。
+
+    坏形状**响**（ValueError），口径同 ``proofread_rows``：falsy 错形不许被
+    ``or {}`` 洗成空表，那等于「已有的裁决凭空消失、重问一遍」。
+
+    返回的是**浅拷贝**（读用），与 ``resume_point.answer_book`` 返回活 dict 不同：
+    进度只经 ``store_progress`` / ``clear_progress`` 写入，读侧改它不该生效——两处
+    读口都自称「唯一读口」，写路径的差别写在这里而不是留给下一个人去猜。
+    """
+    raw = (state or {}).get(PROGRESS_KEY)
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"校对进度字段错形：{raw!r}（应为 语义名→进度 的对象）")
+    return dict(raw)
+
+
+def load_progress(state: dict, name: str, *, sha256: str, base: str) -> ProofreadProgress | None:
+    """取这张资产**可复用**的中途进度；图换版／词改写／没记录时返回 None。"""
+    raw = progress_rows(state).get(str(name))
+    if raw is None:
+        return None
+    progress = ProofreadProgress.from_dict(str(name), raw)
+    if progress.sha256 != str(sha256) or progress.base != str(base):
+        return None
+    return progress
+
+
+def store_progress(state: dict, progress: ProofreadProgress) -> None:
+    """写回一张资产的中途进度（调用方随后落盘＝一个续跑点）。"""
+    rows = state.setdefault(PROGRESS_KEY, {})
+    if not isinstance(rows, dict):
+        raise ValueError(f"校对进度字段错形：{rows!r}（应为 语义名→进度 的对象）")
+    rows[progress.name] = progress.to_dict()
+
+
+def clear_progress(state: dict, name: str) -> None:
+    """作废一张资产的中途进度（裁决落定或作废时调：产物接它的班）。"""
+    rows = state.get(PROGRESS_KEY)
+    if isinstance(rows, dict):
+        rows.pop(str(name), None)
+
+
+def pop_decision(pool: list[Adjudication], deviation: Deviation) -> Adjudication | None:
+    """从「上次已裁决」池里**取走**这一条偏差对应的裁决；三字段全等才认。
+
+    ``pool`` 是可变的副本：取走保证同一条裁决不会被两条一模一样的偏差重复认领。
+    三字段全等是刻意的严格判据——只比 aspect 会把「同一条偏差被补锚改写过引文」
+    的两轮混为一谈。
+    """
+    target = (deviation.aspect, deviation.prompt_quote, deviation.observed)
+    for index, adjudication in enumerate(pool):
+        found = adjudication.deviation
+        if (found.aspect, found.prompt_quote, found.observed) == target:
+            pool.pop(index)
+            return adjudication
+    return None
+
+
 def proofread_rows(state: dict) -> dict:
     """state 里的校对记录原始行（写账侧与取材口共用的形状口）：键缺失／null → 空表。
 
@@ -416,11 +563,13 @@ def proofread_descriptions(state: dict) -> dict[str, str]:
 
 
 __all__ = [
-    "DECISIONS", "DECISION_KEEP", "DECISION_REGENERATE", "DECISION_REWRITE",
-    "DEFAULT_DECISION", "PROOFREADS_KEY", "STATUS_DONE", "STATUS_PENDING_REGEN",
-    "Adjudication", "Claim", "Deviation", "Omission", "ProofreadRecord",
-    "ProofreadReport", "Reading",
-    "build_proofread_request", "compare_descriptions", "locate_rewrite_span",
-    "merge_asset_description", "parse_reading", "proofread_descriptions",
-    "proofread_rows", "render_proofread_report",
+    "DECISIONS", "DECISION_KEEP", "DECISION_LABELS", "DECISION_REGENERATE",
+    "DECISION_REWRITE", "DEFAULT_DECISION", "PROGRESS_KEY", "PROOFREADS_KEY",
+    "STATUS_DONE", "STATUS_PENDING_REGEN",
+    "Adjudication", "Claim", "Deviation", "Omission", "ProofreadProgress",
+    "ProofreadRecord", "ProofreadReport", "Reading",
+    "build_proofread_request", "clear_progress", "compare_descriptions",
+    "load_progress", "locate_rewrite_span", "merge_asset_description",
+    "parse_reading", "pop_decision", "progress_rows", "proofread_descriptions",
+    "proofread_rows", "render_proofread_report", "store_progress",
 ]

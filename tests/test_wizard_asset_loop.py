@@ -471,12 +471,15 @@ def test_externally_replaced_asset_returns_to_queue(tmp_path, monkeypatch, capsy
     session = load_session(ledger_dir)
     monkeypatch.setattr(wizard, "_offer_resume", lambda config: session)
     calls.clear()
-    # 续接：红裙女孩重新回到待办（其余三张已落账/放弃）
-    asked2 = _fake_inputs(monkeypatch, ["", "1", str(girl2), "", "4", "", "4", "4", "8", "1"])
+    # 续接：红裙女孩重新回到待办（其余三张已落账/放弃）。这张图已入库、裁决钉的是旧
+    # sha，续跑（issue #51）认出「已入库但没落定」，问的是「接着校对这一版」，不再重问
+    # 审查与路径。
+    asked2 = _fake_inputs(monkeypatch, ["", "1", "", "4", "", "4", "4", "8", "1"])
     _fake_confirms(monkeypatch, [("视频/音频", False)])
     wizard.run_wizard(_cfg(tmp_path))
     assert calls, "换版后旧裁决冒充了新版——没有退回重新读图"
-    assert any("当前待办：红裙女孩" in text or "素材图路径" in text for text in asked2)
+    assert any("接着校对这一版" in text for text in asked2), \
+        f"续跑没认出这张已入库：{asked2}"
 
 
 def test_wrong_shaped_loop_state_is_not_laundered():

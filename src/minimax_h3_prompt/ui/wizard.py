@@ -24,6 +24,9 @@ from ..brief_parser import Brief, RefItem
 from ..config import Config
 from ..generation import canvas_display, render_fl2va_frame_markdown
 from ..graph.pipeline import run_stage1, run_stage2, stage1_rerun_plan
+from ..resume_point import forget as forget_answer
+from ..resume_point import recall as recall_answer
+from ..resume_point import remember as remember_answer
 from ..session_store import (
     STATUS_AWAITING_FRAMES,
     STATUS_COMPLETED,
@@ -113,6 +116,23 @@ def _prompt(text: str) -> str:
     # 每次提问前先排水：清掉阻塞期间滞留的旧按键，提示出现后的新输入不受影响。
     _drain_stdin()
     return input(text).strip()
+
+
+def _record_answer(state: dict, key: str, value: str, *, generation_dir: Path,
+                   brief: Brief) -> None:
+    """记一条答案并**立刻写盘**（issue #51 续跑点：每答一问即落盘）。
+
+    「中断后只补真正缺的部分」的全部机制就是这个函数：答案只要落进会话文件，
+    重跑向导时 `_ask_*` 那一族就能把同一道题换成「沿用上次」。答完马上写、不等
+    产物落定——窗口就在「答了但还没变成产物」那一段。
+    """
+    remember_answer(state, key, value)
+    save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
+
+
+def _asset_path_key(name: str) -> str:
+    """素材交回路径的答案键（按语义名区分：一张一条，换版时各走各的）。"""
+    return f"asset_path:{name}"
 
 
 def _clean_path_input(raw: str) -> str:
@@ -1041,13 +1061,28 @@ LOOP_SETTLED, LOOP_ABANDONED, LOOP_PAUSED = "settled", "abandoned", "paused"
 PROOFREAD_DONE, PROOFREAD_REGEN, PROOFREAD_FAILED = "done", "regen", "failed"
 
 
-def _ask_asset_path(label: str) -> str:
+# 单张闭环的续跑走向（issue #51）：这张图上次已交回、裁决还没落定，续跑给它三条路。
+# 与 LOOP_* 同为信令常量——裸字符串会被打错字且无处对账。
+RESUME_REPROOFREAD, RESUME_REPLACE = "reproofread", "replace"
+
+
+def _ask_asset_path(label: str, *, remembered: str = "",
+                    empty_hint: str = "（回车=回审查菜单）") -> str:
     """问一个素材文件路径：空由**调用方**决定怎么接（循环里＝回审查菜单，补交里＝跳过）；
-    路径不存在当场报并给重交机会（同帧图收图）。"""
+    路径不存在当场报并给重交机会（同帧图收图）。
+
+    ``remembered`` 是上次已答的路径（issue #51 续跑点）：回车即沿用，不必重敲一遍；
+    敲了新路径就用新的——已答不等于锁死。**回车被「沿用」占了，就必须另留一个空出口**
+    （输 `-`）：否则续跑后这一问再也回不到审查菜单／跳过，等于把「已答」变成「锁死」。
+    """
     from ..task_package import resolve_input_path
 
+    hint = f"（回车=沿用上次：{remembered}；输 - 改填）" if remembered else empty_hint
     while True:
-        raw = _clean_path_input(_prompt(label))
+        raw = _clean_path_input(_prompt(f"{label}{hint}："))
+        if raw == "-":
+            return ""  # 显式清空：这是回车被「沿用」占掉之后唯一的空出口
+        raw = raw or remembered
         if not raw:
             return ""
         try:
@@ -1212,14 +1247,23 @@ def _abandon_asset(state: dict, brief: Brief, generation_dir: Path, item: QueueI
 
 
 def _ask_deviation_choice(dev, idx: int, total: int) -> str:
-    """偏差三选（issue #44 AC2）：回车默认「按图改文案」；无效输入重问，不静默替人决定。"""
-    from ..asset_proofread import DECISION_KEEP, DECISION_REGENERATE, DECISION_REWRITE
+    """偏差三选（issue #44 AC2）：回车默认「按图改文案」；无效输入重问，不静默替人决定。
+
+    菜单文案从 ``DECISION_LABELS`` 现拼（issue #51 复审）：续跑提示要念同一批名字，
+    两处各写一份必然漂——顺序也取 ``DECISIONS``，号码与裁决的对应关系只有一处。
+    """
+    from ..asset_proofread import (
+        DECISION_KEEP,
+        DECISION_LABELS,
+        DECISION_REGENERATE,
+        DECISION_REWRITE,
+        DECISIONS,
+    )
 
     print(f"  [偏差 {idx}/{total}] {dev.aspect}：描述「{dev.prompt_quote}」→ 图中「{dev.observed}」")
+    menu = " / ".join(f"{i}={DECISION_LABELS[d]}" for i, d in enumerate(DECISIONS, 1))
     while True:
-        raw = _prompt(
-            "  裁决：1=按图改文案（改描述这一处）/ 2=重生成这张素材图 / "
-            "3=明知故犯保留原描述（回车=1）：").strip()
+        raw = _prompt(f"  裁决：{menu}（回车=1）：").strip()
         if raw in ("", "1"):
             return DECISION_REWRITE
         if raw == "2":
@@ -1261,6 +1305,7 @@ def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: 
     """
     from ..asset_ledger import KIND_PICTURE, load_asset_ledger
     from ..asset_proofread import (
+        DECISION_LABELS,
         DECISION_REGENERATE,
         DECISION_REWRITE,
         PROOFREADS_KEY,
@@ -1268,13 +1313,18 @@ def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: 
         STATUS_PENDING_REGEN,
         Adjudication,
         Deviation,
+        ProofreadProgress,
         ProofreadRecord,
         build_proofread_request,
+        clear_progress,
         compare_descriptions,
+        load_progress,
         merge_asset_description,
         parse_reading,
+        pop_decision,
         proofread_rows,
         render_proofread_report,
+        store_progress,
     )
     from ..generation import image_prompt_variants
     from ..tools.reference_auditor import describe_image
@@ -1294,31 +1344,72 @@ def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: 
         state[PROOFREADS_KEY] = records
         save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
 
-    print(f"\n[读图校对] {entry.name}（{entry.tag}）")
-    try:
-        raw = describe_image(generation_dir / entry.path, build_proofread_request(base))
-        reading = parse_reading(raw)
-    except Exception as exc:  # noqa: BLE001 — 读图失败要响且不放行
-        print(f"[读图校对] {entry.name} 读图失败：{exc}")
-        print("已停在等交回：图没读成就不放行；重跑向导可重试。")
+    def _checkpoint(updated: ProofreadProgress) -> ProofreadProgress:
+        """一条裁决一个续跑点（issue #51 AC1）：写完立刻落盘。
+
+        人裁是这张图最贵的一步——每条偏差都要人读、可能补锚、可能改替换文案；
+        攒到最后才写，中途断一次就全白问。读图结果一起存，续跑连视觉调用都不重付。
+        """
+        store_progress(state, updated)
         _save()
-        return PROOFREAD_FAILED
-    report = compare_descriptions(base, reading)
+        return updated
+
+    print(f"\n[读图校对] {entry.name}（{entry.tag}）")
+    progress = load_progress(state, entry.name, sha256=entry.sha256, base=base)
+    if progress is not None:
+        # 图未换版、词未改写 → 上次那份读图结果与已裁条目仍然成立
+        print(f"[续跑] 沿用上次的读图结果（{entry.tag} 未换版），只问没裁过的条目。")
+        report = compare_descriptions(base, progress.reading())
+    else:
+        try:
+            raw = describe_image(generation_dir / entry.path, build_proofread_request(base))
+            reading = parse_reading(raw)
+        except Exception as exc:  # noqa: BLE001 — 读图失败要响且不放行
+            print(f"[读图校对] {entry.name} 读图失败：{exc}")
+            print("已停在等交回：图没读成就不放行；重跑向导可重试。")
+            _save()
+            return PROOFREAD_FAILED
+        report = compare_descriptions(base, reading)
+        # 读图结果**先落盘**再问裁决：这张的视觉调用不该因为中间断了重付一次
+        progress = _checkpoint(ProofreadProgress(
+            name=entry.name, sha256=entry.sha256, base=base, claims=reading.claims))
     print(render_proofread_report(report))
 
     adjudications: list[Adjudication] = []
     voided = False
     running = base  # 补锚校验的落笔文本：merge 按序改它，锚要在演进文本上钉得住
+    decided = list(progress.decisions)  # 上次已裁的条目池：认领一条少一条
     for idx, dev in enumerate(report.deviations, 1):
+        reused = pop_decision(decided, dev)
+        if reused is not None:
+            if reused.decision == DECISION_REWRITE:
+                try:
+                    running = merge_asset_description(running, [reused], [], name=entry.name)
+                except ValueError as exc:
+                    # 落点对不上了（读图这次给的清单与上次不同）：宁可重问，不许乱改
+                    print(f"  [续跑] 上次这条裁决的落点对不上（{exc}），重问这一条。")
+                    reused = None
+            if reused is not None:
+                print(f"  [续跑·偏差 {idx}/{len(report.deviations)}] 沿用上次裁决："
+                      f"{DECISION_LABELS.get(reused.decision, reused.decision)}")
+                adjudications.append(reused)
+                if reused.decision == DECISION_REGENERATE:
+                    voided = True
+                    break
+                continue
         while True:  # 补锚放弃＝回三选重选；三选必须走得到底（评审）
             choice = _ask_deviation_choice(dev, idx, len(report.deviations))
             if choice == DECISION_REGENERATE:
                 # 图要重画：本轮其余裁决无意义（新图交回后重新校对），不并入任何改动
-                adjudications.append(Adjudication(dev, choice))
+                adj = Adjudication(dev, choice)
+                adjudications.append(adj)
+                progress = _checkpoint(progress.with_decision(adj))
                 voided = True
                 break
             if choice != DECISION_REWRITE:
-                adjudications.append(Adjudication(dev, choice))
+                adj = Adjudication(dev, choice)
+                adjudications.append(adj)
+                progress = _checkpoint(progress.with_decision(adj))
                 break
             quote = _pin_rewrite_quote(dev, running, name=entry.name)
             if not quote:
@@ -1327,14 +1418,22 @@ def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: 
             adj = Adjudication(Deviation(dev.aspect, quote, dev.observed), choice, repl)
             adjudications.append(adj)
             running = merge_asset_description(running, [adj], [], name=entry.name)
+            progress = _checkpoint(progress.with_decision(adj))
             break
         if voided:
             break
 
     accepted: list[str] = []
     if report.omissions and not voided:
-        if _confirm(f"把 {len(report.omissions)} 条补漏事实并入素材画面事实？", default=True):
-            accepted = [o.fact for o in report.omissions]
+        if progress.omissions is not None:
+            # 这个回答也是答案（答过就不重问）；不并入是有效答案，不是「没答」
+            accepted = [o.fact for o in report.omissions] if progress.omissions else []
+            print(f"[续跑] 补漏沿用上次的回答：{'并入' if progress.omissions else '不并入'}"
+                  f" {len(report.omissions)} 条。")
+        else:
+            take = _confirm(f"把 {len(report.omissions)} 条补漏事实并入素材画面事实？", default=True)
+            progress = _checkpoint(progress.with_omissions(take))
+            accepted = [o.fact for o in report.omissions] if take else []
 
     if voided:
         # 写账走 ProofreadRecord（读侧同型）：手拼 dict 是同一 schema 的第二写点
@@ -1342,6 +1441,7 @@ def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: 
             name=entry.name, sha256=entry.sha256, status=STATUS_PENDING_REGEN,
             description=base, adjudications=tuple(adjudications),
         ).to_dict()
+        clear_progress(state, entry.name)  # 记录接进度班的时刻：进度此后只剩旧话
         _save()  # 逐张落盘：后面的张中途炸不丢这张的裁决（评审：崩溃丢账）
         return PROOFREAD_REGEN
     # name=语义名：改写落点不许落在名字上（名字是 registry 键不是偏差处，
@@ -1352,10 +1452,57 @@ def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: 
         description=merged, adjudications=tuple(adjudications),
         omissions=tuple(accepted),
     ).to_dict()
+    clear_progress(state, entry.name)
     _save()  # 逐张落盘（同上）
     if merged != base:
         print(f"  素材画面事实（合并后）：{merged}")
     return PROOFREAD_DONE
+
+
+def _resume_returned_asset(state: dict, item: QueueItem, entry) -> str:
+    """这张图**已入库**、裁决还没落定（issue #51 AC2 的续跑菜单）。
+
+    返回 ``RESUME_REPROOFREAD``（接着校对这一版）/ ``RESUME_REPLACE``（换一张图重新交回）/
+    ``LOOP_SETTLED``（其实已落账，防御分支）/ ``LOOP_ABANDONED`` / ``LOOP_PAUSED``。
+
+    为什么不默默跳过：已入库不等于锁死——图是既成事实，人可能就是想换一张。
+    但也不该拿「满意吗/路径是多少」重问一遍：那两问的产物（正本 + 台账）已经在盘上。
+
+    已裁「重生成」的那张（``pending_regen``）走 ``RESUME_REPLACE`` 进审查菜单而不是回
+    重掷菜单：重掷菜单已经把话说完（原词再掷），续跑回来时人手上正拿着**新图**要交，
+    再让他看一遍「原词再掷/改词再掷」等于把已经做过的事重做一遍。
+    """
+    from ..asset_proofread import STATUS_DONE, STATUS_PENDING_REGEN, ProofreadRecord, proofread_rows
+
+    row = proofread_rows(state).get(item.name)
+    record = None
+    if row is not None:
+        record = ProofreadRecord.from_dict(item.name, row)
+        if record.sha256 != entry.sha256:
+            record = None  # 换版后的新图还没被裁过，旧记录不冒充
+    if record is not None and record.status == STATUS_DONE:
+        print(f"[续跑·{item.name}] 这一版已裁决落定（{entry.tag}），跳过。")
+        return LOOP_SETTLED
+    if record is not None and record.status == STATUS_PENDING_REGEN:
+        print(f"[续跑·{item.name}] 上次裁了「重生成」（{entry.tag}）：请交回重掷后的新图。")
+        return RESUME_REPLACE
+
+    print(f"\n[续跑·{item.name}] 这一版图已入库（{entry.tag} · sha {entry.sha256[:12]}…），"
+          "上次停在这张，裁决还没落定。")
+    while True:
+        raw = _prompt(
+            "  1=接着校对这一版（默认，不重填路径）  2=换一张图重新交回\n"
+            "  3=显式放弃这张资产  q=先到这里（回车=1）："
+        ).strip()
+        if raw in ("", "1"):
+            return RESUME_REPROOFREAD
+        if raw == "2":
+            return RESUME_REPLACE
+        if raw == "3":
+            return LOOP_ABANDONED
+        if raw.lower() == "q":
+            return LOOP_PAUSED
+        print("无效输入，请选 1/2/3/q。")
 
 
 def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item: QueueItem) -> str:
@@ -1385,10 +1532,35 @@ def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item: QueueIte
 
     registry = ref_asset_registry(state, brief)
 
+    # 续跑菜单只在**首次**进这一张时给（`first_pass`）：改写成功／原词再掷之后的外层
+    # 重出，正是用户「回去重掷了、回来交回」的那一刻——那里要的是审查菜单（含填路径），
+    # 拿「已入库，接着校对」拦住他，新版图就永远交不进来了。
+    first_pass = True
     while True:  # 外层：出词（首次 + 改写成功后重出）
         _issue_asset_prompt(state, brief, generation_dir, item)
         outcome = None  # None ＝ 本轮没走到裁决（改写成功要重出词）
-        while True:  # 内层：审查 → 交回（打回/取消都不动台账）
+        # 续跑（issue #51 AC2）：这张图上次**已经交回**、裁决还没落定——中断就落在
+        # 交回与裁决之间。此时再问「这张图满意吗 / 路径是多少」是拿已完成的事重问一遍。
+        existing = load_asset_ledger(generation_dir).get(item.name, KIND_PICTURE)
+        if existing is not None and first_pass:
+            action = _resume_returned_asset(state, item, existing)
+            if action == LOOP_SETTLED:
+                set_current(state, None)
+                save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
+                return LOOP_SETTLED
+            if action == LOOP_ABANDONED:
+                _abandon_asset(state, brief, generation_dir, item)
+                return LOOP_ABANDONED
+            if action == LOOP_PAUSED:
+                return LOOP_PAUSED
+            if action == RESUME_REPROOFREAD:
+                outcome = _proofread_one_asset(state, brief, generation_dir, item.name)
+            elif action != RESUME_REPLACE:
+                # 未知走向不静默掉进审查菜单：那会把「认不出的信令」伪装成正常流程
+                raise ValueError(f"未知的续跑走向：{action!r}")
+            # action == RESUME_REPLACE：用户要换一张图（或上次裁了重生成），掉进审查→交回
+        first_pass = False
+        while outcome is None:  # 内层：审查 → 交回（打回/取消都不动台账）
             ledger = load_asset_ledger(generation_dir)
             existing = ledger.get(item.name, KIND_PICTURE)
             mark = f"（已入库 {existing.tag}，换版将替换）" if existing else ""
@@ -1399,10 +1571,16 @@ def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item: QueueIte
                 "  q=先到这里（回车=1）："
             ).strip()
             if choice in ("", "1"):
-                raw = _ask_asset_path(f"{item.name} 素材图路径（回车=回审查菜单）：")
+                remembered = recall_answer(state, _asset_path_key(item.name)) or ""
+                raw = _ask_asset_path(f"{item.name} 素材图路径", remembered=remembered)
                 if not raw:
                     print("未填路径，回审查菜单。")
                     continue  # 留在审查菜单，不重刷提示词
+                if raw != remembered:
+                    # 答完立刻落盘（issue #51 AC1）：中断若落在「答了、还没入库」之间，
+                    # 续跑按这条答案接着走，用户不必重敲整个路径。
+                    _record_answer(state, _asset_path_key(item.name), raw,
+                                   generation_dir=generation_dir, brief=brief)
                 submissions = [AssetSubmission(name=item.name, kind=KIND_PICTURE, source=raw)]
                 report = intake_assets(
                     generation_dir, submissions,
@@ -1414,6 +1592,8 @@ def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item: QueueIte
                     print(rendered)
                 if report.ledger.entries:
                     print(render_ledger(report.ledger))
+                # 产物接答案的班：正本与台账已落盘，答案账里那条不再有信息量
+                forget_answer(state, _asset_path_key(item.name))
                 save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
                 outcome = _proofread_one_asset(state, brief, generation_dir, item.name)
                 break
@@ -1511,11 +1691,15 @@ def _asset_loop(state: dict, brief: Brief, generation_dir: Path) -> bool:
 
         sha 不同＝这本正本被换过（循环外 intake 接受换版），旧裁决不许冒充新版：
         该资产退回待办重走一遍（issue #44「换版入库后自动重新校对」的同一口径）。
+
+        **台账每次现读**（issue #51 复审实测）：循环里也会换版——续跑菜单「换一张图」
+        与重交新图都会改写登记。用循环入口那份快照比对，换过版的这张就永远对不上
+        sha、永远「未落账」，真实形态是同一张被无限重排进待办（问一次、换一次、再来）。
         """
         row = records.get(name)
         if row is None or ProofreadRecord.from_dict(name, row).status != STATUS_DONE:
             return False
-        entry = ledger.get(name, KIND_PICTURE)
+        entry = load_asset_ledger(generation_dir).get(name, KIND_PICTURE)
         return entry is None or ProofreadRecord.from_dict(name, row).sha256 == entry.sha256
 
     def _pending():
@@ -1570,14 +1754,29 @@ def _collect_extra_media(state: dict, brief: Brief, generation_dir: Path) -> Non
     promptless = [r for r in registry if r.name not in prompted]
 
     submissions: list[AssetSubmission] = []
+    recorded: list[str] = []  # 本轮记进答案账的键（入库落定后一并作废）
     for item in promptless:
-        mark = "（已入库）" if load_asset_ledger(generation_dir).get(item.name, KIND_PICTURE) else ""
+        existing = load_asset_ledger(generation_dir).get(item.name, KIND_PICTURE)
+        if existing is not None:
+            # 续跑跳过已入库（issue #51 AC2）：这一项的正本与登记都在盘上，再问一遍路径
+            # 就是拿已完成的事重问。要换版走素材循环的「换一张图」，不在这条补交口。
+            print(f"{format_tag(KIND_PICTURE, item.picture)} {item.name} 已入库"
+                  f"（{existing.tag}），跳过。")
+            continue
+        remembered = recall_answer(state, _asset_path_key(item.name)) or ""
         raw = _ask_asset_path(
-            f"{format_tag(KIND_PICTURE, item.picture)} {item.name} 素材图路径{mark}"
-            "（无生图提示词，回车=跳过）：")
+            f"{format_tag(KIND_PICTURE, item.picture)} {item.name} 素材图路径",
+            remembered=remembered, empty_hint="（无生图提示词，回车=跳过）")
         if raw:
+            if raw != remembered:
+                _record_answer(state, _asset_path_key(item.name), raw,
+                               generation_dir=generation_dir, brief=brief)
+                recorded.append(_asset_path_key(item.name))
             submissions.append(AssetSubmission(name=item.name, kind=KIND_PICTURE, source=raw))
 
+    # 视频/音频这一段**故意不记答案**（issue #51 复审）：它是「还要加吗」的确认而非
+    # 一道题，且每次都要能反悔（加一段、再加一段）。把它记成「已经答过不再问」，
+    # 续跑后就再也加不进素材视频/音频了。
     while _confirm("还要交回素材视频/音频吗？", default=False):
         kind_raw = _prompt("类型（1=素材视频 2=素材音频，回车=取消）：").strip()
         if not kind_raw:
@@ -1602,6 +1801,9 @@ def _collect_extra_media(state: dict, brief: Brief, generation_dir: Path) -> Non
         registry=registry, script=str(state.get("script", "")),
         on_replace=_ask_asset_replacement,
     )
+    for key in recorded:
+        forget_answer(state, key)  # 产物接答案的班（同素材循环）
+    save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
     rendered = render_report(report)
     if rendered:
         print(rendered)
@@ -1676,6 +1878,11 @@ def _phase2_ref_finish(config: Config, session: SessionState) -> int:
     # 视频/音频按需挂账 + 无提示词登记项补交（issue #43 三型）；在注入卡之前收口。
     _collect_extra_media(state, brief, generation_dir)
     _deliver_injection_card(generation_dir, brief)
+    # 组装开跑前先把入参落盘（issue #51 AC3）：视频输出三元组刚由画布推导/声明定案、
+    # 回写进 brief，而组装是最贵一步（可能十几分钟）。此前这里只在 run_stage2 跑完
+    # 之后才 save_session，于是「组装窗口内 Ctrl-C」会把尺寸定案与整份会话状态一起丢
+    # ——正是 issue #47 实测的第一次中断。
+    save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
 
     with _progress_scope("[阶段 2] 正在组装官方 ref 六段式视频提示词……（预计几分钟，期间无需输入）"):
         final_state, prompt = run_stage2(state, brief, config,
@@ -1717,6 +1924,78 @@ def _collect_frame_paths(variant: str) -> tuple[str, str]:
     return first, last
 
 
+def _by_role(rows) -> dict[str, dict]:
+    """把帧路线那两份「按帧位成表的列表」索引成 role → 条目（只留对象行）。
+
+    ``frame_images``（入库记录）与 ``fl2va_frame_descriptions``（读图结果）都是
+    「每条带 role 的列表」，续跑的两处判断（路径从哪来、描述能不能复用）各自要按
+    role 取——取法写两遍就多一个会漂的地方。
+    """
+    return {str(r.get("role")): r for r in (rows or []) if isinstance(r, dict)}
+
+
+def _remembered_frame_paths(state: dict, variant: str) -> tuple[str, str] | None:
+    """上一轮已入库的关键帧路径（issue #51 续跑点）；没有可沿用的记录时返回 None。
+
+    判据是 ``frame_images``（`_store_frame` 写的入库记录）里**该变体要求的帧位都在**、
+    且文件仍可解析：``source`` 用户原路径优先（人认它），正本副本 ``target`` 兜底。
+    只沿用它不校验内容——静默比对反而会假装识别得了「这张图是不是同一张」。
+    """
+    from ..task_package import resolve_input_path
+
+    records = _by_role(state.get("frame_images"))
+    first = last = ""
+    for _, role in _required_frames(variant):
+        record = records.get(role)
+        if record is None:
+            return None
+        path = ""
+        for key in ("source", "target"):
+            raw = str(record.get(key) or "")
+            if not raw:
+                continue
+            try:
+                if resolve_input_path(raw).is_file():
+                    path = raw
+                    break
+            except (OSError, ValueError):
+                continue
+        if not path:
+            return None
+        if role == "first":
+            first = path
+        else:
+            last = path
+    return (first, last) if (first or last) else None
+
+
+def _reusable_frame_descriptions(state: dict, records: list[dict]) -> list[dict] | None:
+    """同一批帧图（sha 未变）上次的读图结果；有一个对不上就整批重读。
+
+    为什么整批判断：只复用一部分会让「同一段视频的两帧」由两次不同调用产出，
+    两次的措辞风格不一致，正文写出来两头打架。sha 是 ``_store_frame`` 现算的，
+    换一张图必然变——这正是「不重做」与「别拿旧描述说新图」之间的那条线。
+    """
+    previous_records = _by_role(state.get("frame_images"))
+    previous_descriptions = {
+        role: row for role, row in _by_role(state.get("fl2va_frame_descriptions")).items()
+        if str(row.get("description") or "").strip()
+    }
+    if not records:
+        return None
+    out: list[dict] = []
+    for record in records:
+        role = str(record.get("role"))
+        before = previous_records.get(role)
+        description = previous_descriptions.get(role)
+        if before is None or description is None:
+            return None
+        if str(before.get("sha256")) != str(record.get("sha256")):
+            return None
+        out.append(dict(description))
+    return out
+
+
 def _required_frames(variant: str) -> tuple[tuple[int, str], ...]:
     from ..tools.frame_auditor import required_frames
     return required_frames(variant)
@@ -1747,15 +2026,24 @@ def _phase2_collect_and_finish(
         _show_frame_prompts(state, generation_dir)
         _show_asset_prompts(state, generation_dir, brief.canvases)
     print("\n[阶段 2] 请提交生成好的关键帧图片（回车=跳过该项）。")
+    remembered_frames = _remembered_frame_paths(state, brief.variant)
     while True:
         try:
-            first_raw, last_raw = _collect_frame_paths(brief.variant)
+            if remembered_frames is not None:
+                # 续跑（issue #51 AC1）：上一轮已经交过并入库过同一批帧图，路径与读图
+                # 结果都在盘上——不再问一遍路径，也不重付读图。
+                first_raw, last_raw = remembered_frames
+                print(f"[续跑] 沿用上次提交的关键帧图：首帧={first_raw or '（无）'}，"
+                      f"尾帧={last_raw or '（无）'}（要换图请新开一次生成）。")
+            else:
+                first_raw, last_raw = _collect_frame_paths(brief.variant)
             first_path = _resolve_frame_file(first_raw, "首帧")
             last_path = _resolve_frame_file(last_raw, "尾帧")
         except FileNotFoundError as exc:
             print(f"[错误] {exc}")
             if not _confirm("重新提交路径？", default=True):
                 return 1
+            remembered_frames = None  # 沿用的路径坏了：退回正常问答
             continue
         break
 
@@ -1790,15 +2078,29 @@ def _phase2_collect_and_finish(
         def report_frame(frame_role: str) -> None:
             print(f"正在读取{frame_role}的实际画面……", flush=True)
 
-        with _progress_scope(f"{config.vision_model.model} 正在读取关键帧实际画面……"):
-            audits = audit_frame_images(refs, brief.variant, on_frame=report_frame)
-        descriptions = [a.to_dict() for a in audits]
-        for audit in audits:
-            label = "第一帧" if audit.role == "first" else "最后一帧"
-            print(f"\n[{label}实际画面] {audit.description}")
+        # 入库记录**先落盘**再读图（issue #51 AC3）：读图是一次慢速网络调用，中断若落在
+        # 它上面，路径与正本副本已经攒齐、只差描述——先写盘，续跑就不必再问一遍路径。
+        state["frame_images"] = list(frame_records)
+        save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
+        descriptions = _reusable_frame_descriptions(state, frame_records)
+        if descriptions is not None:
+            # 续跑（issue #51）：帧图没换（sha 同）→ 上次的读图结果仍然成立，不重付一次
+            # 视觉调用，也不覆盖，用户手里的提示词与上次一致。
+            print("[续跑] 沿用上次的关键帧读图结果（帧图未换），不重付读图。")
+        else:
+            with _progress_scope(f"{config.vision_model.model} 正在读取关键帧实际画面……"):
+                audits = audit_frame_images(refs, brief.variant, on_frame=report_frame)
+            descriptions = [a.to_dict() for a in audits]
+            for audit in audits:
+                label = "第一帧" if audit.role == "first" else "最后一帧"
+                print(f"\n[{label}实际画面] {audit.description}")
 
     state["fl2va_frame_descriptions"] = descriptions
     state["frame_images"] = frame_records
+    # 组装开跑前把帧图入参落盘（issue #51 AC3）：帧图路径、入库记录与读图结果都在
+    # 上面这几行里才攒齐，而 run_stage2 是最贵一步。此前只在它跑完之后才 save_session，
+    # 于是组装窗口内 Ctrl-C 会让用户重填路径、重付一次读图（issue #47 实测现场）。
+    save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
 
     with _progress_scope("[阶段 2] 正在组装最终视频提示词并进行质检精修……（预计几分钟，期间无需输入）"):
         final_state, prompt = run_stage2(state, brief, config, on_node=_report_node, checkpoint_dir=generation_dir)

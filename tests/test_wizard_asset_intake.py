@@ -285,9 +285,9 @@ def test_replacement_is_reported_and_needs_confirmation(tmp_path, monkeypatch, c
 
     v2 = _write_source(tmp_path, "girl-v2.png", b"content-v2-different")
     monkeypatch.setattr(wizard, "_offer_resume", lambda config: load_session(directory))
-    # 素材循环：红裙女孩交回新版（换版问人→不换），其余三张显式放弃（issue #50）；
-    # 视频输出不再问答（issue #49 自动推导），故无尾部选择器输入
-    _fake_inputs(monkeypatch, ["", "1", str(v2), "", "4", "", "4", "4"])
+    # 素材循环：红裙女孩已入库（续跑菜单 2=换一张图重新交回）→ 审查满意 → 交回新版
+    # （换版问人→不换），其余三张显式放弃（issue #50）；视频输出不再问答（issue #49）
+    _fake_inputs(monkeypatch, ["", "2", "1", str(v2), "", "4", "", "4", "4"])
     confirms = _fake_confirms(monkeypatch, [
         ("替换", False), ("视频/音频", False),   # 换版不换；不加视频/音频
     ])

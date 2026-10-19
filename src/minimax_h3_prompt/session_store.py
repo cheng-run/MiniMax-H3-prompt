@@ -39,6 +39,12 @@ STATUS_SEGMENTED_RUNNING = "segmented_running"
 # `asset_loop` 是素材循环的队列进度（issue #50）——released 记「已出过词」的语义名
 # （逐张出站的落盘节奏靠它续）、abandoned 记显式放弃的语义名；丢掉会让续接把
 # 已放弃的资产重新排进待办、把出过的词再出一遍。
+# `resume_answers` 是问答答案账（issue #51 续跑点）——某道题答过就记一条，续接不再
+# 重问（目前只有素材交回路径：`asset_path:<语义名>`）；`asset_proofread_progress` 是
+# 读图校对的**中途**进度（读图结果 + 已裁决条目 + 补漏回答）。两者都是「问到哪了」的
+# 账、不是产物：产物（素材台账、`asset_proofreads` 记录）一落定就把对应条目作废。
+# 关键帧路径**不走答案账**：它由 `frame_images`（入库记录）本身承担，没有第二本账。
+# 丢掉这两本的代价正是 issue #47 实测的两次中断——半程路径问答与已裁决条目全部重来。
 # **故意不在**这里的：`frame_revision_baseline`（修订基线，issue #25）与
 # `setting_revision`（本轮那条设定级修订，issue #28）。两个都是人机修改循环**某一轮的
 # 入参**而不是产物：前者每轮由当时那一版产物现渲染，持久化它等于把一份陈旧的基线喂给
@@ -50,8 +56,13 @@ _STATE_KEYS = (
     "character_image_prompts", "prop_image_prompts", "scene_image_prompts",
     "identity_lock", "shot_table", "shot_review_lock", "visual_design",
     "fl2va_prompt_bundle", "fl2va_frame_descriptions", "subject_defs",
+    # `frame_images` 是关键帧入库记录（role → 用户原路径/正本副本/SHA256）。阶段 2 的
+    # 「续跑不再问帧图路径、不重付读图」全靠它（issue #51）：漏登记则组装窗口一断，
+    # 用户要重填路径、视觉模型要把同一张图再读一遍。
+    "frame_images",
     "sound_design", "music", "final_prompt", "final_report", "_progress",
     "user_revisions", "frame_round", "asset_proofreads", "asset_loop",
+    "resume_answers", "asset_proofread_progress",
 )
 
 
