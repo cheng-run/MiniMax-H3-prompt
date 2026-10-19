@@ -601,7 +601,8 @@ def test_review_menu_records_external_cost_before_intake(tmp_path, monkeypatch, 
     assert (entry.external_seconds, entry.external_attempts) == (90.0, 3)
     session = load_session(_ledger_dir(tmp_path))
     answers = session.stage_state.get(ANSWERS_KEY) or {}
-    assert not [k for k in answers if k.startswith("asset_cost")], \
+    # 键名取唯一生成器（不写字符串前缀）：前缀改名后「查缺席」会静默变空转
+    assert not any(key in answers for key in wizard._asset_cost_keys("红裙女孩")), \
         f"入库后待挂成本没作废（答案会冒充事实）：{answers}"
 
 
@@ -627,7 +628,7 @@ def test_review_menu_records_external_cost_on_an_intaken_asset(tmp_path, monkeyp
         "已入库的那一版没登记上（或又被顶掉了）"
     session = load_session(_ledger_dir(tmp_path))
     answers = session.stage_state.get(ANSWERS_KEY) or {}
-    assert not [k for k in answers if k.startswith("asset_cost")], \
+    assert not any(key in answers for key in wizard._asset_cost_keys("红裙女孩")), \
         f"已入库时该直接写台账，不该在答案账里留一手：{answers}"
 
 

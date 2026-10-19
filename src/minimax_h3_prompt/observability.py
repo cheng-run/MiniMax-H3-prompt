@@ -94,7 +94,13 @@ class TokenMeter:
                 raise ValueError(f"成本表快照条目错形：{role!r} → {row!r}")
             fields: dict[str, int] = {}
             for key in ("calls", "input", "output"):
-                value = row.get(key, 0)
+                # 三个字段**必须齐整**（复审）：`row.get(key, 0)` 会把缺字段的行静默补成
+                # 0——那正是「账少了一笔而没人知道」，与本函数 docstring 的「错形要响」
+                # 和 `session_store._video_output_from_dict`「条目须齐整、不许静默强转」
+                # 的先例都相左。多出来的键忽略（前向兼容），缺的不行。
+                if key not in row:
+                    raise ValueError(f"成本表快照条目缺字段：{role}[{key}]")
+                value = row[key]
                 # bool 是 int 的子类：True 混进 token 数比报错更难查，显式挡掉
                 if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                     raise ValueError(f"成本表快照条目错形：{role}[{key}] = {value!r}")

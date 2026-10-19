@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import shutil
 from dataclasses import dataclass, replace
@@ -91,9 +92,15 @@ def _require_external_cost(seconds: Any, attempts: Any) -> tuple[float, int]:
     两个字段都是**可选**：没登记就是 0（缺省不填不报错）。登记了就得是像样的数：
     负数、字符串数字、bool、小数次数一律报错——静默强转/截断＝数据被改而不报错，
     与画布、视频输出三元组的严格读回同一条纪律。
+
+    ``inf``/``nan`` 也要挡（issue #52 复审实测）：``inf < 0`` 为假、``isinstance`` 又
+    为真，放行就会原样落盘成 ``Infinity``——那不是 RFC 8259 的 JSON，只有 Python 的
+    宽松解析器读得回来。这条守卫长在**权威校验器**里（台账/交回），不只长在向导的
+    输入提示上：向导只是入口之一，台账才是那条数据最后住的地方。
     """
-    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or seconds < 0:
-        raise ValueError(f"外部生成耗时必须是 >=0 的秒数：{seconds!r}")
+    if (isinstance(seconds, bool) or not isinstance(seconds, (int, float))
+            or not math.isfinite(seconds) or seconds < 0):
+        raise ValueError(f"外部生成耗时必须是 >=0 的有限秒数：{seconds!r}")
     if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 0:
         raise ValueError(f"外部生成次数必须是 >=0 的整数：{attempts!r}")
     return float(seconds), attempts
@@ -300,6 +307,21 @@ def save_asset_ledger(directory: str | Path, ledger: AssetLedger) -> Path:
     return target
 
 
+def _with_entry(ledger: AssetLedger, name: str, kind: str,
+                record: AssetRecord) -> AssetLedger:
+    """换掉台账里（语义名, 类型）那一条，其余条目与换版史原样保留。
+
+    登记/补登记/事后挂成本三处都要做这件事，各写一遍「重建 entries 元组」就是同一
+    形状的第二、第三份（issue #52 复审）；换版史必须跟着走，谁忘了带就静默丢史。
+    """
+    return AssetLedger(
+        entries=tuple(
+            record if (e.name, e.kind) == (name, kind) else e for e in ledger.entries
+        ),
+        replacements=ledger.replacements,
+    )
+
+
 def record_external_cost(directory: str | Path, name: str, kind: str, *,
                          seconds: float = 0, attempts: int = 0) -> AssetRecord:
     """给**已登记**的那一版挂外部生成成本（ComfyUI 出图耗时/次数，issue #52）。
@@ -315,12 +337,7 @@ def record_external_cost(directory: str | Path, name: str, kind: str, *,
         raise ValueError(f"素材台账里没有这条登记，无法登记外部成本：{kind}/{name!r}")
     seconds, attempts = _require_external_cost(seconds, attempts)
     updated = replace(entry, external_seconds=seconds, external_attempts=attempts)
-    save_asset_ledger(base, AssetLedger(
-        entries=tuple(
-            updated if (e.name, e.kind) == (name, kind) else e for e in ledger.entries
-        ),
-        replacements=ledger.replacements,
-    ))
+    save_asset_ledger(base, _with_entry(ledger, name, kind, updated))
     return updated
 
 
@@ -499,14 +516,10 @@ def intake_assets(
             if existing.sha256 == digest:
                 seconds, attempts = _cost(existing)
                 if (seconds, attempts) != (existing.external_seconds, existing.external_attempts):
-                    updated = replace(existing, external_seconds=seconds,
-                                      external_attempts=attempts)
-                    ledger_mut = AssetLedger(
-                        entries=tuple(
-                            updated if (e.name, e.kind) == (sub.name, sub.kind) else e
-                            for e in ledger_mut.entries
-                        ),
-                        replacements=ledger_mut.replacements,
+                    ledger_mut = _with_entry(
+                        ledger_mut, sub.name, sub.kind,
+                        replace(existing, external_seconds=seconds,
+                                external_attempts=attempts),
                     )
                     unchanged.append(f"{sub.name}（{existing.tag}，外部成本已更新）")
                     return

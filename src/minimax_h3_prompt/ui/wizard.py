@@ -140,10 +140,12 @@ def _asset_path_key(name: str) -> str:
 def _asset_cost_keys(name: str) -> tuple[str, str]:
     """外部生成成本（耗时秒/次数）的答案键（issue #52）：两个数各记一条，不拼串。
 
-    拼成 ``90/3`` 那种串就要在两头各写一遍解析，格式一漂就对不上账；答案账本来就装
-    字符串，分两条最省事。答过但还没入库的那笔成本住在这里，入库时挂到台账上再作废。
+    键名取术语表的口径（``external_cost`` ＝ CONTEXT.md「外部生成成本」），不漂成
+    「素材成本」那类近义词——漂了之后 grep 一个词搜不全同一件事（复审）。拼成
+    ``90/3`` 那种串还要在两头各写一遍解析，格式一漂就对不上账；答案账本来就装字符串，
+    分两条最省事。答过但还没入库的那笔成本住在这里，入库时挂到台账上再作废。
     """
-    return f"asset_cost_seconds:{name}", f"asset_cost_attempts:{name}"
+    return f"external_cost_seconds:{name}", f"external_cost_attempts:{name}"
 
 
 def _ask_asset_external_cost(name: str) -> tuple[float, int]:
@@ -154,12 +156,13 @@ def _ask_asset_external_cost(name: str) -> tuple[float, int]:
     """
     seconds = 0.0
     while True:
-        raw = _prompt(f"[素材成本·{name}] 出图耗时（秒，回车=跳过）：").strip()
+        raw = _prompt(f"[外部成本·{name}] 出图耗时（秒，回车=跳过）：").strip()
         if not raw:
             break
         try:
             seconds = float(raw)
-            # float() 会收下 inf/nan：它们进台账就不是「像样的数」了（同 bool 挡法）
+            # float() 会收下 inf/nan：它们进台账就不是「像样的数」了（同 bool 挡法；
+            # 权威守卫在 asset_ledger._require_external_cost，这里只是别让人白填）
             if seconds < 0 or not math.isfinite(seconds):
                 raise ValueError
             break
@@ -167,7 +170,7 @@ def _ask_asset_external_cost(name: str) -> tuple[float, int]:
             print("  耗时要填非负数字（单张图的生成秒数），或回车跳过。")
     attempts = 0
     while True:
-        raw = _prompt(f"[素材成本·{name}] 出图次数（回车=跳过）：").strip()
+        raw = _prompt(f"[外部成本·{name}] 出图次数（回车=跳过）：").strip()
         if not raw:
             break
         if raw.isdigit():
@@ -198,18 +201,18 @@ def _register_asset_external_cost(state: dict, brief: Brief, generation_dir: Pat
 
     seconds, attempts = _ask_asset_external_cost(item.name)
     if not (seconds or attempts):
-        print(f"[素材成本·{item.name}] 未登记（两问都跳过了）。")
+        print(f"[外部成本·{item.name}] 未登记（两问都跳过了）。")
         return
     if load_asset_ledger(generation_dir).get(item.name, KIND_PICTURE) is not None:
         record_external_cost(generation_dir, item.name, KIND_PICTURE,
                              seconds=seconds, attempts=attempts)
-        print(f"[素材成本·{item.name}] 已登记到台账（耗时 {seconds:g}s / 次数 {attempts}）。")
+        print(f"[外部成本·{item.name}] 已登记到台账（耗时 {seconds:g}s / 次数 {attempts}）。")
         return
     seconds_key, attempts_key = _asset_cost_keys(item.name)
     remember_answer(state, seconds_key, f"{seconds:g}")
     remember_answer(state, attempts_key, str(attempts))
     save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
-    print(f"[素材成本·{item.name}] 已记下，交回入库时挂到这一版上。")
+    print(f"[外部成本·{item.name}] 已记下，交回入库时挂到这一版上。")
 
 
 def _clean_path_input(raw: str) -> str:
@@ -412,6 +415,10 @@ def run_wizard(config: Config) -> int:
         # 「跑完的成本」归零。快照替换语义——文件里那张就是当时全量账；只在进程刚起
         # 的这一处接（阶段入口不清零，见 ``graph.pipeline.run_stage1``）。
         token_meter.restore(session.stage_state.get(COST_TABLE_KEY))
+        # 接完就把它从 state 里摘掉：账只住两处——活账（计量表）与产出物（会话文件、
+        # 阶段 2 断点，两者都由写入方现取活账）。state 里留一份就多一份会变旧的真相，
+        # 未来谁读了它都是读到某个时刻的数（ADR 0005 接线纪律）。
+        session.stage_state.pop(COST_TABLE_KEY, None)
     if session is None:
         session = _phase1_new(config)
         if session is None:

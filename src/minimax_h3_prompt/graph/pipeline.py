@@ -14,7 +14,7 @@ from ..agents import build_role_agents, run_agent
 from ..brief_parser import FRAME_VARIANTS, Brief
 from ..clarification import as_block
 from ..config import Config
-from ..observability import COST_TABLE_KEY, stage_saver, token_meter
+from ..observability import stage_saver, token_meter
 from ..output.assembler import assemble_and_repair
 from ..tools.h3_validator import format_issues, validate_prompt
 from ..tools.ref_metadata import to_tuple
@@ -285,10 +285,9 @@ def run_stage1(brief: Brief, config: Config, *, on_node=None,
                     on_step_done(node_name, dict(state))
     if config.common_sense_qa:
         state = _stage1_frame_qa_loop(state, brief, agents, model, config)
-    # 把活账写回 state（issue #52）：阶段 1 期间花的钱（含常识质检轮）跟着 state 走，
-    # 下一阶段与落盘都拿得到。落盘侧还会再取一次活账（session_store），这里管的是
-    # 「同进程内阶段 2 拿到的是最新账」——照抄 initial_state 里的旧快照就等于抹账。
-    state[COST_TABLE_KEY] = token_meter.snapshot()
+    # 成本表**不写进 state**（issue #52 复审按 ADR 0005 接线纪律核过）：它没有产品级
+    # 读者——落盘由 `session_store.save` 取活账（那份 state 副本会被覆盖），于是写进来
+    # 只是多一份没人读的真相。它的产出物是会话文件与阶段 2 断点，两处都直接取活账。
     return state, model, agents
 
 
@@ -421,7 +420,6 @@ def run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_node
 
     prompt, _ = assemble_and_repair(prompt, brief.mode, brief.variant)
     merged["final_prompt"] = prompt
-    merged[COST_TABLE_KEY] = token_meter.snapshot()  # 同上：阶段 2 的账也随 state 走
     if checkpoint_dir:
         clear_checkpoint(checkpoint_dir)
     return merged, prompt

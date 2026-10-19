@@ -116,7 +116,9 @@ def test_stage_entry_does_not_zero_the_account(tmp_path, monkeypatch):
     state, _, _ = pipeline_module.run_stage1(brief, _cfg(tmp_path))
 
     assert token_meter.totals()["input"] == 1500, "阶段入口把累计账清零了"
-    assert state[COST_TABLE_KEY]["role_director"] == {"calls": 2, "input": 1500, "output": 300}
+    # 成本表不进 state（复审按 ADR 0005 接线纪律核过）：它的产出物是**会话文件**，
+    # 由 `save_session` 取活账写入；state 里再放一份是「写了没人读」的第二份真相。
+    assert COST_TABLE_KEY not in state
 
 
 def test_resumed_session_continues_the_cost_account(tmp_path, monkeypatch):
@@ -241,4 +243,4 @@ def test_stage2_resume_adopts_the_checkpoint_account(tmp_path, monkeypatch):
         {"script": TOPIC}, brief, _cfg(tmp_path), model=object(), checkpoint_dir=tmp_path)
 
     assert token_meter.totals()["input"] == 3000, "断点里的账没接回来（组装那笔钱丢了）"
-    assert state[COST_TABLE_KEY]["role_prompt_engineer"]["input"] == 3000
+    assert COST_TABLE_KEY not in state, "成本表不该由阶段写进 state（产出物是会话文件）"

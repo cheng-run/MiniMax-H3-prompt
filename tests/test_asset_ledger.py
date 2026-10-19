@@ -582,6 +582,10 @@ def test_record_external_cost_on_unregistered_asset_is_loud(tmp_path):
     (90.5, 2.5),      # 次数是小数（次数只认整数）
     (True, 2),        # bool 混进数值
     ("90", 2),        # 字符串数字：静默强转＝数据被改而不报错
+    # inf/nan（复审实测）：`inf < 0` 为假、`isinstance(inf, float)` 为真，不挡就会
+    # 原样落盘成 `Infinity`——那不是 RFC 8259 的 JSON，只有 Python 的宽松解析器读得回来。
+    (float("inf"), 2),
+    (float("nan"), 2),
 ])
 def test_external_cost_rejects_nonsense(tmp_path, seconds, attempts):
     """错值要响（同画布/三元组的严格读回纪律）：静默截断或强转比丢弃更糟。"""

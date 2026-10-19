@@ -126,7 +126,10 @@ class TestCostTable:
         """错形要响（会话文件是我们自己写的，错形只可能是损坏）：吞掉＝账被悄悄清零。"""
         meter = TokenMeter(0.5, 1.5)
         for bad in ("nope", ["导演"], {"导演": "10"}, {"导演": {"calls": "1", "input": 1, "output": 1}},
-                    {"导演": {"calls": 1, "input": -1, "output": 0}}):
+                    {"导演": {"calls": 1, "input": -1, "output": 0}},
+                    # 缺字段行不许静默补 0（复审）：那正是「账少了一笔而没人知道」
+                    {"导演": {"calls": 1, "input": 900}},
+                    {"导演": {"calls": 1, "output": 30}}):
             with pytest.raises(ValueError):
                 meter.restore(bad)
 
