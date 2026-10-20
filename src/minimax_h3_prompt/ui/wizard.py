@@ -1318,19 +1318,32 @@ def _settled_asset_facts(state: dict, brief: Brief, *, exclude: str) -> list[tup
     核实过**的画面事实可回灌；出过词、交回但还没裁的那些，事实仍是待核的计划文本。
 
     画面事实按**素材画面事实**的既有优先序取（合并结果 ＞ 生图提示词 ＞ 用户登记描述）——
-    复用 ``ref_asset_registry`` 就是为了不再抄一份优先序，两处各写一份必然漂。
+    复用 ``ref_asset_registry`` 的解析结果，不再抄一份优先序（两处各写一份必然漂）。
+    已定稿素材的合并结果由 ``proofread_descriptions`` 直接给（那就是优先序的首选源，
+    与在册时 ``ref_asset_registry`` 给的是同一份）。
+
+    取材口**不许被 ``brief.refs`` 收窄**（#53 复审采纳项）：``ref_asset_registry`` 在
+    ``brief.refs`` 非空时只回用户登记的那几条，只认它的话，brief 文件路线下「已定稿但
+    用户没登记」的素材就静默不回灌了——而回灌的正是跨素材一致性，少一条就少一处锚。
     """
-    from ..asset_proofread import STATUS_DONE, ProofreadRecord, proofread_rows
+    from ..asset_proofread import STATUS_DONE, ProofreadRecord, proofread_descriptions, proofread_rows
     from ..generation import ref_asset_registry
 
-    settled = {
+    settled = [
         str(name) for name, row in proofread_rows(state).items()
         if ProofreadRecord.from_dict(str(name), row).status == STATUS_DONE
-    }
-    return [
-        (r.name, r.description) for r in ref_asset_registry(state, brief)
-        if r.name in settled and r.name != exclude and str(r.description).strip()
     ]
+    registered = {r.name: r.description for r in ref_asset_registry(state, brief)}
+    merged = proofread_descriptions(state)
+    facts: list[tuple[str, str]] = []
+    for name in settled:
+        if name == exclude:
+            continue
+        # 已定稿 ⇒ 必有合并结果（``merged``）；登记表那一份是它在册时的同一份。
+        description = str(merged.get(name) or registered.get(name) or "").strip()
+        if description:
+            facts.append((name, description))
+    return facts
 
 
 def _align_asset_with_settled(state: dict, brief: Brief, generation_dir: Path,

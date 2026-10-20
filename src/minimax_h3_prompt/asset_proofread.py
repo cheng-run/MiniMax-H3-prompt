@@ -125,12 +125,20 @@ class Omission:
 
 @dataclass(frozen=True)
 class ProofreadReport:
-    """对照器输出：偏差清单（交人三选裁决）+ 补漏候选（并入显著事实）。"""
+    """对照器输出：偏差清单（交人三选裁决）+ 补漏候选（并入显著事实）+ 被忽略的出入。
+
+    ``exempted`` 是**被锁死清单豁免**的理想描述出入（issue #53）：不判偏差、不进人裁、
+    也不并入描述，但**留痕**——它是「忽略了几条」的唯一可观测面。AC2 的卖点正是
+    「39 条偏差收敛到个位数」，收敛了多少若代码产不出来，清单配歪（某条过宽导致全部
+    命中）时人拿不到任何信号（本仓纪律：绝不静默失败）。
+    """
 
     deviations: tuple[Deviation, ...] = ()
     omissions: tuple[Omission, ...] = ()
+    exempted: tuple[Claim, ...] = ()
 
     def is_clean(self) -> bool:
+        """没有要人裁、要并入的东西即为干净——被忽略的条目不算「不干净」（它们不需动作）。"""
         return not self.deviations and not self.omissions
 
 
@@ -186,17 +194,20 @@ def compare_descriptions(
     locked = tuple(text for text in (str(x).strip() for x in locked_features) if text)
     deviations: list[Deviation] = []
     omissions: list[Omission] = []
+    exempted: list[Claim] = []
     for claim in reading.claims:
         # Claim 保证 observed 非空（构造即校验），这里不再有「静默跳过」分支。
         if claim.prompt_quote:
             if locked and not _locked_hit(claim.prompt_quote, locked):
                 # 理想描述出入：忽略（#53 AC2 裁定）。不转补漏——引文非空＝「不符」
-                # 不是「没有」，并进描述就是红裙+蓝裙同现那种自相矛盾。
+                # 不是「没有」，并进描述就是红裙+蓝裙同现那种自相矛盾。留痕：忽略的
+                # 条数与条目进 ``exempted``（收窄了多少必须看得见）。
+                exempted.append(claim)
                 continue
             deviations.append(Deviation(claim.aspect, claim.prompt_quote, claim.observed))
         elif claim.observed not in prompt:
             omissions.append(Omission(claim.aspect, claim.observed))
-    return ProofreadReport(tuple(deviations), tuple(omissions))
+    return ProofreadReport(tuple(deviations), tuple(omissions), tuple(exempted))
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +386,11 @@ def render_proofread_report(report: ProofreadReport) -> str:
         lines.append(f"[补漏] {len(report.omissions)} 条（图里有而描述没有）：")
         for item in report.omissions:
             lines.append(f"  - {item.aspect}：{item.fact}")
+    if report.exempted:
+        # 只列条目标签、不逐条铺开：收窄的成果要看得见，但不该把屏面重新淹一遍
+        # （逐条细节在 ``exempted`` 里，要查查它）。
+        aspects = "、".join(item.aspect or "未标" for item in report.exempted)
+        lines.append(f"[忽略] {len(report.exempted)} 条理想描述出入（不判偏差、不并入）：{aspects}")
     if not lines:
         lines.append("[读图校对] 无偏差、无补漏。")
     return "\n".join(lines)

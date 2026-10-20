@@ -202,6 +202,12 @@ def read_asset_rounds(directory: str | Path, *, name: str | None = None) -> list
     return out
 
 
+# 两条单资产请求（改写 / 回灌）共用的块标题。**只有这一处定义**：模板、假模型与断言
+# 三处各写一遍就是又一个会各自漂移的字面量（同 agents.OFFICIAL_VERBATIM_MARKER 的纪律，
+# ADR 0008 裁定二）。测试从 ``asset_loop`` 导入它，不另抄一份。
+CURRENT_PROMPT_HEAD = "【当前提示词】"
+
+
 def rewrite_asset_prompt(old_prompt: str, feedback: str, llm) -> str:
     """按用户意见改写一条资产生图提示词（一轮修订的产物）。
 
@@ -213,7 +219,7 @@ def rewrite_asset_prompt(old_prompt: str, feedback: str, llm) -> str:
         "请按用户意见改写下面这条 Z-Image 生图提示词。\n"
         "纪律：只落实意见点名的问题；没提到的部分逐字保留；"
         "仍然输出一条可直接复制进生图工具的提示词正文，不要解释、不要前后缀。\n\n"
-        f"【当前提示词】\n{old_prompt.strip()}\n\n"
+        f"{CURRENT_PROMPT_HEAD}\n{old_prompt.strip()}\n\n"
         f"【改写意见】\n{feedback.strip()}"
     )
     raw = llm.invoke(request)
@@ -249,7 +255,7 @@ def build_settled_align_request(prompt: str, settled: Sequence[tuple[str, str]])
         "纪律：只做一致性对齐；没被这些事实点到的部分**逐字保留**，"
         "不要新增或删除细节、不要重排版、不要解释。\n"
         "只输出一条可直接复制进生图工具的提示词正文，不要前后缀。\n\n"
-        f"【当前提示词】\n{str(prompt).strip()}\n\n"
+        f"{CURRENT_PROMPT_HEAD}\n{str(prompt).strip()}\n\n"
         f"{SETTLED_FACTS_HEAD}\n{facts}"
     )
 
@@ -285,7 +291,8 @@ def align_asset_prompt(
 
 
 __all__ = [
-    "ASSET_LOOP_KEY", "ASSET_ROUNDS_FILENAME", "QueueItem", "SETTLED_FACTS_HEAD",
+    "ASSET_LOOP_KEY", "ASSET_ROUNDS_FILENAME", "CURRENT_PROMPT_HEAD", "QueueItem",
+    "SETTLED_FACTS_HEAD",
     "TRIGGER_REGEN_REROLL", "TRIGGER_REGEN_REWORD", "TRIGGER_REVIEW_REWORD",
     "align_asset_prompt", "asset_queue", "build_settled_align_request", "log_asset_round",
     "loop_state", "note_abandoned", "note_released",

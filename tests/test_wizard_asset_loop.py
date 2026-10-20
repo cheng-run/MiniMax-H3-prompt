@@ -19,6 +19,7 @@ import pytest
 
 from minimax_h3_prompt import model_factory
 from minimax_h3_prompt.asset_ledger import load_asset_ledger
+from minimax_h3_prompt import asset_loop
 from minimax_h3_prompt.asset_loop import ASSET_ROUNDS_FILENAME
 from minimax_h3_prompt.brief_parser import Brief
 from minimax_h3_prompt.session_store import (
@@ -150,9 +151,12 @@ def _stub_vision(monkeypatch, mapping: dict[str, str]) -> list[str]:
 # 导入时的真工厂：``_run_loop`` 靠它认出「这个用例自己打过桩没有」（见那里的注释）。
 _REAL_BUILD_CHAT_MODEL = model_factory.build_chat_model
 
-# 回灌请求里那块已定稿素材事实的标题（``asset_loop.build_settled_align_request`` 里定义）。
-# 假模型靠它分辨「这是回灌还是改写」——两个出口都走 ``build_chat_model``。
-_ALIGN_HEAD = "【已定稿素材画面事实】"
+# 回灌请求里那两块标记：假模型靠它们分辨「这是回灌还是改写」、并从请求里抠回当前词。
+# **从 ``asset_loop`` 导入、不在这里另抄一份**（ADR 0008 裁定二：块标题只有一处定义，
+# 块、角色 .md 的指针句、测试都按它认）——另抄一份的话，改标记时这里静默失配，
+# 两条 AC3 用例会红得误导（报「没回灌」，实为标记搬了家）。
+_ALIGN_HEAD = asset_loop.SETTLED_FACTS_HEAD
+_CURRENT_HEAD = asset_loop.CURRENT_PROMPT_HEAD
 
 
 class _FakeLLM:
@@ -488,6 +492,7 @@ def test_proofread_adjudicates_only_locked_features(tmp_path, monkeypatch, capsy
     assert sum("裁决：" in text for text in asked) == 1, "偏差三选不止一次（清单外的也进了人裁）"
     assert "[偏差] 1 处" in out, "锁死清单没接到对照器上（清单外的也判成了偏差）"
     assert "[补漏]" not in out, "理想描述的出入被当成了「图里有而描述没有」"
+    assert "[忽略] 1 条" in out, "收窄的成果没上屏（忽略了几条看不出来）"
     assert "几乎站在画面正中" not in out, "降级条目没有真的被忽略"
 
 
@@ -519,6 +524,35 @@ def test_align_asset_prompt_refuses_to_lose_a_locked_feature():
     with pytest.raises(ValueError, match="锁死特征"):
         align_asset_prompt("道具·汽水罐生图提示词", [("红裙女孩", "宝蓝色长裙")], llm,
                            locked_features=("汽水罐",))
+
+
+def test_settled_facts_include_assets_missing_from_the_brief_refs_registry():
+    """已定稿素材的取材**不许**被 brief.refs 收窄（issue #53 复审采纳项）。
+
+    ``ref_asset_registry`` 在 ``brief.refs`` 非空时只回用户登记的那几条——拿它当唯一
+    取材口，brief 文件路线下「已定稿但用户没登记」的素材就静默不回灌了（回灌的正是
+    跨素材一致性，少一条就少一处锚）。已定稿素材的画面事实恒取**合并结果**（素材画面
+    事实裁定的首选源，也是 ``ref_asset_registry`` 在册时给的那一份），两处口径一致。
+    """
+    from minimax_h3_prompt.brief_parser import RefItem
+    from minimax_h3_prompt.ui.wizard import _settled_asset_facts
+
+    state = _ref_stage1_state() | {
+        "asset_proofreads": {
+            "红裙女孩": {"sha256": "ab", "status": "done",
+                        "description": "宝蓝色长裙、黑发的红裙女孩", "deviations": [], "omissions": []},
+            "蓝衫少年": {"sha256": "cd", "status": "pending_regen",
+                        "description": "蓝衫少年描述", "deviations": [], "omissions": []},
+        },
+    }
+    # brief 只登记了别的东西：已定稿的红裙女孩不在册
+    brief = Brief(mode="ref", variant="I2VA", duration=30.0, style="写实", plot=TOPIC,
+                  refs=[RefItem(picture=1, name="用户登记的场景", description="用户写的描述")])
+
+    facts = _settled_asset_facts(state, brief, exclude="秋日庭院")
+    assert ("红裙女孩", "宝蓝色长裙、黑发的红裙女孩") in facts, \
+        f"已定稿素材被 brief.refs 收窄掉了：{facts}"
+    assert all(name != "蓝衫少年" for name, _ in facts), "没落账的素材不该进回灌取材"
 
 
 def test_next_prompt_backfills_the_settled_asset_facts(tmp_path, monkeypatch, capsys):

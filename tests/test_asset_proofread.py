@@ -134,14 +134,19 @@ def test_quote_shorter_than_a_locked_entry_still_hits():
 
 
 def test_ideal_description_quote_is_ignored_not_adjudicated():
-    """理想描述的出入不进人裁、也不进补漏（AC2 裁定：直接忽略）。
+    """理想描述的出入不进人裁、也不进补漏（AC2 裁定：直接忽略），但**记进 ``exempted``**。
 
     当日现场那条「罐体按三分法偏左 → 实测几乎正中」就是这一档：判据是锁死清单，
     清单外的引文一律忽略——39 条偏差里的构图口味类从此既不进三选、也不会被当成
     「图里有而描述没有」并进描述（它是「不符」不是「没有」，并进去就是红裙+蓝裙同现）。
+
+    ``exempted`` 是「忽略了几条」的唯一可观测面：AC2 的卖点就是「39 条收敛到个位数」，
+    收敛了多少若代码产不出来，清单配歪（某条过宽→全部命中）时人拿不到任何信号。
     """
-    reading = Reading(claims=(Claim("构图", "女孩站在秋日庭院里", "女孩几乎站在画面正中"),))
-    assert compare_descriptions(_PROMPT, reading, _LOCKED).is_clean()
+    claim = Claim("构图", "女孩站在秋日庭院里", "女孩几乎站在画面正中")
+    report = compare_descriptions(_PROMPT, Reading(claims=(claim,)), _LOCKED)
+    assert report.is_clean(), "忽略的条目不许再算偏差或补漏"
+    assert report.exempted == (claim,), "被忽略的条目没有留痕（收敛与否无从观察）"
 
 
 def test_omission_path_is_unchanged_by_the_locked_list():
@@ -318,6 +323,22 @@ def test_render_report_lists_deviations_and_omissions():
     assert "红裙" in text and "宝蓝色长裙" in text
     assert "左腕银色腕表" in text
     assert "偏差" in text and "补漏" in text
+
+
+def test_render_report_shows_how_many_were_exempted():
+    """被锁死清单忽略的条目要在报告里露面（issue #53 AC2 的可观测面）。
+
+    只出「偏差 N 处」的话，收窄与否在界面上完全看不出来——39 条收敛到 10 条，
+    屏上仍是一句「[偏差] 10 处」，人无从判断是清单起了作用还是模型这次没报。
+    """
+    report = ProofreadReport(exempted=(
+        Claim("构图位置", "罐体按三分法置于画面偏左位置", "罐体几乎位于画面水平正中"),
+        Claim("拍摄视角", "低角度逆光与侧逆光照明", "机位接近平视且略高"),
+    ))
+    text = render_proofread_report(report)
+    assert "[忽略] 2 条" in text, "被忽略的条数没上屏"
+    assert "构图位置" in text and "拍摄视角" in text, "忽略清单没列出条目（清单配歪时无从发现）"
+    assert text.strip(), "空报告也要有话说"
 
 
 # ---------------------------------------------------------------------------
