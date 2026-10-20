@@ -9,7 +9,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from minimax_h3_prompt.ref_segments import run_ref_segmentation
+import pytest
+
+from minimax_h3_prompt.ref_segments import (
+    SEGMENT_LEDGER_FILENAME,
+    log_segment_output,
+    read_segment_ledger,
+    render_ref_segment_briefing,
+    run_ref_segmentation,
+)
 from minimax_h3_prompt.segment_prompts import (
     assemble_ref_segment,
     render_ref_segment_annotations,
@@ -293,3 +301,69 @@ def test_no_shot_blocks_edge_keeps_annotations_non_degenerate(tmp_path):
         assert "This segment begins with the scene at" in text  # 兜底状态句非空
     assert any(getattr(i, "severity", "") == "error"
                for issues in result.issues for i in issues), "缺段必须报出来"
+
+
+# ---------------------------------------------------------------------------
+# 4. 段产出账与逐段展示块（issue #55）
+# ---------------------------------------------------------------------------
+
+def test_segment_ledger_row_carries_path_sha_and_verdict(tmp_path):
+    """一段一行：段号 / 起止秒 / 视频路径 / SHA256 / 可证层判定 / 时间（issue #55 AC5）。
+
+    SHA256 是为了对抗**文件名可变引用**——只记文件名的话，素材换版/改名后旧产物
+    永久不可复测且无处报错（素材台账同款理由）。
+    """
+    import hashlib
+
+    video = tmp_path / "out" / "seg-01.mp4"
+    video.parent.mkdir()
+    video.write_bytes(b"segment-one-video")
+
+    path = log_segment_output(
+        tmp_path, segment=1, start_s=0, end_s=12, video_path=video)
+    assert path == tmp_path / "segments" / SEGMENT_LEDGER_FILENAME
+
+    rows = read_segment_ledger(tmp_path)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["segment"] == 1 and row["start_s"] == 0 and row["end_s"] == 12
+    assert row["video"] == str(video.resolve())
+    assert row["sha256"] == hashlib.sha256(b"segment-one-video").hexdigest()
+    assert row["verdict"] == "pass"
+    assert row["at"]
+
+
+def test_segment_ledger_appends_one_row_per_segment(tmp_path):
+    """追加式：第二段不改第一段那一行（历史可查，同资产轮次账的纪律）。"""
+    first = tmp_path / "a.mp4"
+    second = tmp_path / "b.mp4"
+    first.write_bytes(b"a")
+    second.write_bytes(b"b")
+    log_segment_output(tmp_path, segment=1, start_s=0, end_s=12, video_path=first)
+    log_segment_output(tmp_path, segment=2, start_s=12, end_s=20, video_path=second)
+    rows = read_segment_ledger(tmp_path)
+    assert [r["segment"] for r in rows] == [1, 2]
+    assert rows[0]["sha256"] != rows[1]["sha256"]
+
+
+def test_segment_ledger_missing_file_is_empty_and_bad_line_raises(tmp_path):
+    """文件不在＝空账；坏行**响**（追加账是「历史可查」的凭据，静默跳过等于缺页无人知）。"""
+    assert read_segment_ledger(tmp_path) == []
+    seg_dir = tmp_path / "segments"
+    seg_dir.mkdir()
+    (seg_dir / SEGMENT_LEDGER_FILENAME).write_text("{不是 JSON\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        read_segment_ledger(tmp_path)
+
+
+def test_segment_briefing_carries_window_and_duration(tmp_path):
+    """展示块含段号 / 起止秒 / 本段时长 / 提示词文件（issue #55 AC1）。"""
+    from minimax_h3_prompt.segment_planner import SegmentPlan
+
+    plan = SegmentPlan(index=1, start_s=12, end_s=22, shots_in_segment=(3, 4),
+                       summary="她走向少年递出钥匙", end_hook="钥匙递出")
+    block = render_ref_segment_briefing(
+        plan, 2, 3, tmp_path / "segments" / "segment-02.md")
+    assert "第 2/3 段" in block
+    assert "起止 12s-22s" in block and "本段时长 10s" in block
+    assert "segment-02.md" in block

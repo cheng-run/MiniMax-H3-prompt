@@ -20,6 +20,7 @@ if TYPE_CHECKING:  # 返回注解用；运行时经函数级导入取（防环�
 
     from ..asset_loop import QueueItem
     from ..injection_card import VideoOutputParams
+    from ..ref_segments import RefSegmentResult
 
 from ..brief_parser import Brief, RefItem
 from ..config import Config
@@ -1996,14 +1997,76 @@ def _collect_extra_media(state: dict, brief: Brief, generation_dir: Path) -> Non
 
 
 def _deliver_ref_segments(state: dict, brief: Brief, prompt: str,
-                          generation_dir: Path) -> None:
-    """>15 秒多参分段交付（issue #46）：薄接线——编排/文案全在 ref_segments 一份。"""
+                          generation_dir: Path) -> RefSegmentResult:
+    """>15 秒多参分段交付（issue #46）：薄接线——编排/文案全在 ref_segments 一份。
+
+    返回 ``RefSegmentResult``：逐段陪跑（issue #55）要拿它手上的 plans/段文件/正文，
+    不另读一遍盘（读回来还要处理「plan.json 与段文件对不上」的分支，那是续跑的事）。
+    """
     from ..ref_segments import deliver_ref_segments
 
-    _result, report = deliver_ref_segments(
+    result, report = deliver_ref_segments(
         whole_prompt=prompt, total_s=brief.duration, out_dir=generation_dir,
         state=state, brief=brief)
     print(report)
+    return result
+
+
+def _run_ref_segment_handoff(result: RefSegmentResult, generation_dir: Path) -> bool:
+    """多参逐段陪跑（issue #55）：一次只出当前一段 → 交回本段输出视频 → 可证层硬阻断 → 落段产出账。
+
+    节奏与素材循环（#50）同形：系统只维持一个「当前待办」，交回并验收通过才出下一段；
+    与首尾帧链的陪跑共用**可证层**判据（``_gate_segment_handoff``），不共用**语义层**
+    ——多参没有桥接帧，语义人裁与五档出路是 issue #56 的事。
+
+    「落进度」在这里就是落段产出账那一行：被拦下的段**不落行**，于是账上有什么＝
+    哪几段真的交回并通过了（拿它跳过已通过段的续跑见 issue #58，本票只写不读）。
+
+    **闸门的牙齿有边界**：可证层按实测帧数档表判（``H3_TIER_FRAMES`` 只有 4/5/6s），
+    所以「用错了时长档」在**交回的那一段落进已知档**时才报 error；计划与交回**双双**
+    落在 7–15s 未知档时只能报 warning（测不出事实就不许阻断，见 ``check_segment_video``）。
+    那是既有的可证性分级，不在这票放宽或收紧。
+
+    返回 True ＝ 全部段交回并通过；False ＝ 停住（空输入，或被拦下后不再交）。
+    """
+    from ..ref_segments import log_segment_output, render_ref_segment_briefing
+
+    plans = list(result.plans)
+    total = len(plans)
+    for position, plan in enumerate(plans, 1):
+        segment_file = result.segment_paths[position - 1]
+        print("\n" + "=" * 60)
+        print(render_ref_segment_briefing(plan, position, total, segment_file))
+        print("=" * 60)
+        print(result.texts[position - 1])
+        print("-" * 60)
+        while True:
+            raw = _clean_path_input(_prompt(
+                f"第 {position}/{total} 段输出视频路径（必填；回车=停下）："))
+            if not raw:
+                # 空输入＝停住（AC3）：既不跳过也不降级——跳过会让成片缺一段，
+                # 降级（拿提示词当产出）会让账上记着一段没人生成过的视频。
+                print(f"\n⚠ 第 {position}/{total} 段没有交回输出视频：逐段陪跑停在这里——"
+                      "这一段不落账，下一段的提示词也不出。"
+                      "已交回并通过的段留在段产出账里。", flush=True)
+                return False
+            video = Path(raw)
+            if not video.is_file():
+                # 「文件不在」是可证事实，不许走「量不出来」那条降级路（那条只留给
+                # 真产物读不出元数据的场合）；再说下面算 SHA256 也会直接抛异常。
+                print(f"[错误] 读不到这个文件：{video}——"
+                      "请交回本段在 ComfyUI 生成好的输出视频路径。", flush=True)
+                continue
+            if _gate_segment_handoff(str(video), float(plan.duration_s)):
+                print("→ 请重新交回**本段**的输出视频（回车=停下）。", flush=True)
+                continue
+            log_segment_output(
+                generation_dir, segment=position,
+                start_s=plan.start_s, end_s=plan.end_s, video_path=video)
+            print(f"[完成] 第 {position}/{total} 段已交回并通过可证层校验，已记入段产出账。")
+            break
+    print(f"\n✓ 全部 {total} 段已交回并通过可证层校验。")
+    return True
 
 
 def _deliver_injection_card(generation_dir: Path, brief: Brief) -> None:
@@ -2051,6 +2114,8 @@ def _phase2_ref_finish(config: Config, session: SessionState) -> int:
     交回→校对→裁决），一张落账/放弃才出下一张。注入卡（issue #45）出在台账收口之后：
     台账→参考槽接线清单＋视频输出三元组，用户照卡进 ComfyUI 手动接线（系统不自动投喂）。
     """
+    from ..ref_segments import segment_ledger_path
+
     brief = session.brief
     state = dict(session.stage_state)
     generation_dir = session.directory
@@ -2078,7 +2143,22 @@ def _phase2_ref_finish(config: Config, session: SessionState) -> int:
     output_file = generation_dir / "video-prompt.md"
     output_file.write_text(prompt, encoding="utf-8")
     if brief.duration > 15:
-        _deliver_ref_segments(state, brief, prompt, generation_dir)
+        # 换交付主体（issue #55）：H3 单次只能生成 4–15 秒，整片六段式是一坨不可执行的
+        # 文本——降级为**存档预览**（拆段从它取材），交付物是下面的逐段陪跑。
+        result = _deliver_ref_segments(state, brief, prompt, generation_dir)
+        print(f"\n[存档预览] 整片 ref 六段式已写入 {output_file}"
+              "（仅存档，不作交付物——交付物是逐段交回的那几段视频）。")
+        # 会话状态在上面那次 save_session 里已经是 completed——陪跑在它之后，所以
+        # 「停在段 3」的会话在盘上仍是 completed。这是**已知的信号错**，留给 issue #58：
+        # 那票要的是「已通过的段不重跑」，得连状态机一起定（base 路线用的
+        # segmented_running 在这里会落进 base 的续接分支，等于拿另一条路线的流程
+        # 续接多参会话）。本票不假装已经能续跑。
+        finished = _run_ref_segment_handoff(result, generation_dir)
+        # 账本路径当面给出：没跑完时它是「已经通过的那几段」的唯一去处，用户要接着
+        # 往下做就得知道去哪儿找（账里的行只在段产出账里，不在别处）。
+        print(f"段产出账（{'全部段已通过' if finished else '已通过的段'}）："
+              f"{segment_ledger_path(generation_dir)}")
+        return 0
     print(f"\n✓ ref 六段式视频提示词已写入：{output_file}")
     print("\n" + "=" * 60)
     print(prompt)

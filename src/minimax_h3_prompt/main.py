@@ -460,10 +460,17 @@ def _run_cli(args: argparse.Namespace) -> int:
     config.output_path.parent.mkdir(parents=True, exist_ok=True)
     config.output_path.write_text(final_prompt, encoding="utf-8")
     if brief.mode == "ref" and brief.duration > 15:
-        # 与向导 _phase2_ref_finish 同口径（issue #46）：>15 秒按镜头边界拆段，
-        # 逐段自包含六段式＋段清单/拼接顺序卡落盘；整片六段式仍存档供预览。
+        # 与向导 _phase2_ref_finish 同口径（issue #46/#55）：>15 秒按镜头边界拆段，
+        # 逐段自包含六段式＋段清单/拼接顺序卡落盘；整片六段式降级为**存档预览**
+        # ——交付物是逐段落盘的段提示词。**逐段陪跑不在这条路径上**（issue #55）：
+        # 它要交回视频、过可证层闸门、落段产出账，前提是交互终端；本快路径非交互，
+        # 且 stdout 要能整份取走（脚本场景），所以整片照旧打印、只是标明是存档。
         _deliver_ref_segments_cli(brief, final_prompt, config.output_path.parent)
-    print(f"\n已完成，最终提示词已写入: {config.output_path}")
+        print(f"\n已完成。整片 ref 六段式已写入: {config.output_path}（仅存档预览）")
+        print("交付物是上面逐段落盘的段提示词文件；逐段陪跑（交回视频＋可证层验收＋"
+              "段产出账）请用两阶段向导。")
+    else:
+        print(f"\n已完成，最终提示词已写入: {config.output_path}")
     print("=" * 60)
     print(final_prompt)
     return 0

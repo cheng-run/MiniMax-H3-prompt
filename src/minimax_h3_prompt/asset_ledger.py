@@ -67,7 +67,13 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _sha256_file(path: Path) -> str:
+def sha256_file(path: Path) -> str:
+    """文件摘要（分块读，别把整段视频读进内存）。
+
+    公开名（issue #55 复审采纳项）：段产出账也要给段视频算摘要，与素材台账是同一件
+    事——跨模块 import 一个下划线私有名，等于把「这是内部实现」的声明当耳旁风，
+    下一个想改它的人不知道外面还有人靠它。
+    """
     digest = hashlib.sha256()
     with Path(path).open("rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 16), b""):
@@ -420,7 +426,7 @@ def verify_asset_ledger(directory: str | Path) -> tuple[Drift, ...]:
             drift.append(Drift(entry.name, entry.kind, entry.number, entry.path,
                                entry.sha256, None))
             continue
-        actual = _sha256_file(target)
+        actual = sha256_file(target)
         if actual != entry.sha256:
             drift.append(Drift(entry.name, entry.kind, entry.number, entry.path,
                                entry.sha256, actual))
@@ -497,7 +503,7 @@ def intake_assets(
         source = resolve_input_path(sub.source)
         if not source.is_file():
             raise FileNotFoundError(f"交回的文件不存在：{source}")
-        digest = _sha256_file(source)
+        digest = sha256_file(source)
         existing = ledger_mut.get(sub.name, sub.kind)
 
         def _cost(prev: AssetRecord | None) -> tuple[float, int]:

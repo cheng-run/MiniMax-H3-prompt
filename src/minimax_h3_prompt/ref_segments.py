@@ -11,15 +11,20 @@
 - **机械拼装**：LLM 不可用/调用失败时的诚实地板——定义性段落逐段重复 +
   ``rebase_ref_shot_blocks`` 切片重基，同样出自包含六段式。
 
-多参**没有桥接帧**（锚定由全片共享参考素材承担），拼接归用户——本模块只出
-段清单与拼接顺序卡，不做首尾帧链的陪跑/剥帧/闸门。
+多参**没有桥接帧**（锚定由全片共享参考素材承担），所以陪跑里没有剥帧/锚帧，
+但**逐段陪跑与可证层闸门照走**（issue #55）：一次只出当前一段 → 交回本段输出视频
+→ 可证层硬阻断 → 落**段产出账**。问答节奏住在 ``ui.wizard``，本模块只放不碰终端的
+纯件（段展示块、段产出账读写）。拼接仍归用户——成片拼接是 issue #57 的事。
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
+from .asset_ledger import sha256_file
 from .segment_planner import SegmentPlan, pack_shots_into_segments, plan_segments
 from .segment_prompts import (
     _shot_blocks,
@@ -207,6 +212,96 @@ def render_ref_order_card(plans: list[SegmentPlan], segment_paths: list[Path],
     return "\n".join(lines) + "\n"
 
 
+# 段产出账文件名（issue #55 AC5）。住 segments/ 与 plan.json、order-card.md、
+# gate-log.jsonl 同址——它是**逐段陪跑的进度**（一行＝一段已交回并通过），
+# 与闸门遭遇记录（gate-log）分家：那本记人的语义判定，这本记段的交接物。
+SEGMENT_LEDGER_FILENAME = "segment-ledger.jsonl"
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def segment_ledger_path(directory: str | Path) -> Path:
+    return Path(directory) / "segments" / SEGMENT_LEDGER_FILENAME
+
+
+def log_segment_output(
+    directory: str | Path,
+    *,
+    segment: int,
+    start_s: int,
+    end_s: int,
+    video_path: str | Path,
+) -> Path:
+    """追加一行段产出账（``<generation_dir>/segments/segment-ledger.jsonl``）。
+
+    一行＝一段**已交回并通过可证层**的产出（被拦下的段不落行——AC4「不落进度」，
+    行在不在就是「这段过没过」的判据）。拿它跳过已通过段的**续跑是 issue #58**，
+    本票只写不读（除测试外没有生产路径读它），别按「已经能续跑」去理解这本账。
+
+    记 **SHA256** 是为了对抗**文件名可变引用**：只记文件名的话，段视频换版/改名后
+    旧产物永久不可复测且无处报错（素材台账同款理由）。摘要**在写入时现算**，不另收
+    参数——由调用方传 sha 就多一个「传错了也没人知道」的口子。
+
+    ``verdict`` 也不收参数：它恒为 ``pass``，因为**行在＝可证层放行**（被拦下的段
+    压根不落行）。它留在行里是让账本自己说清这一列是什么，不是给调用方旋的旋钮。
+    """
+    path = segment_ledger_path(directory)
+    record = {
+        "segment": int(segment),
+        "start_s": int(start_s),
+        "end_s": int(end_s),
+        "video": str(Path(video_path).resolve()),
+        "sha256": sha256_file(Path(video_path)),
+        "verdict": "pass",
+        "at": _now(),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return path
+
+
+def read_segment_ledger(directory: str | Path) -> list[dict]:
+    """读段产出账；文件不在＝空账，坏行**响**（ValueError）。
+
+    坏行响不吞：追加账是「这段到底交回过什么」的凭据，静默跳过坏行等于进度缺页
+    无人知（同 ``asset_loop.read_asset_rounds``）。
+    """
+    path = segment_ledger_path(directory)
+    if not path.is_file():
+        return []
+    out: list[dict] = []
+    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"段产出账第 {lineno} 行不是合法 JSON：{path}") from exc
+        if not isinstance(record, dict):
+            raise ValueError(f"段产出账第 {lineno} 行不是对象：{path}")
+        out.append(record)
+    return out
+
+
+def render_ref_segment_briefing(plan: SegmentPlan, position: int, total: int,
+                                path: Path) -> str:
+    """当前待办那一段的展示块（issue #55 AC1）：段号 / 起止秒 / 本段时长 / 提示词文件。
+
+    逐段陪跑一次只摆一段，这块是「用户此刻要复制进 ComfyUI 的那一份」的抬头；
+    起止秒与本段时长是选时长档的依据（H3 只接受整数档），所以三样同排一行。
+    整片六段式已降级为存档预览，不出现在这里（换交付主体）。
+    """
+    shots = "、".join(str(number) for number in plan.shots_in_segment) or "未标注"
+    return "\n".join([
+        f"第 {position}/{total} 段 · 起止 {plan.start_s}s-{plan.end_s}s"
+        f"（本段时长 {plan.duration_s}s）· 覆盖 Shot {shots}",
+        f"提示词文件：{path}",
+    ])
+
+
 def run_ref_segmentation(*, whole_prompt: str, total_s: float, out_dir: Path,
                          llm=None,
                          ref_meta: list[tuple[int, str, str]] | None = None) -> RefSegmentResult:
@@ -300,6 +395,4 @@ def run_ref_segmentation(*, whole_prompt: str, total_s: float, out_dir: Path,
 
 
 def _plan_json(plan: SegmentPlan) -> str:
-    import json
-
     return json.dumps(plan.to_dict(), ensure_ascii=False)

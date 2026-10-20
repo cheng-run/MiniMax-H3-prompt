@@ -165,16 +165,22 @@ def test_ref_route_direct_prompt_end_to_end(tmp_path, monkeypatch, capsys):
 
 
 def test_ref_route_over_15s_delivers_segment_prompts_and_order_card(tmp_path, monkeypatch, capsys):
-    """>15 秒（issue #46）：整片六段式仍存档，另出逐段自包含提示词＋段清单/拼接顺序卡。"""
+    """>15 秒（issue #46）：整片六段式仍存档，另出逐段自包含提示词＋段清单/拼接顺序卡。
+
+    收尾自 issue #55 起是**逐段陪跑**（整片降级为存档预览）：本条只钉「拆段产物照旧
+    落盘、收尾走到当前一段」，陪跑全程（交回视频、可证层闸门、段产出账）由
+    ``test_wizard_ref_handoff`` 驱动——这里回车＝停住，不重复那条链。
+    """
     _silence(monkeypatch)
     # 同上：画布问答属 #42，这里打桩为空集。
     monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
     _stub_stage1(monkeypatch)
     _stub_stage2(monkeypatch)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
-    # 素材循环四张全放弃（issue #50）；视频输出无问答（issue #49）
+    # 素材循环四张全放弃（issue #50）；视频输出无问答（issue #49）；
+    # 末尾那个 "" 是逐段陪跑的交回口——回车＝停住（issue #55 AC3）
     _fake_inputs(monkeypatch,
-                 [TOPIC, "20", "", "4", "", "4", "", "4", "", "4", "4"])
+                 [TOPIC, "20", "", "4", "", "4", "", "4", "", "4", "4", ""])
     monkeypatch.setattr(wizard, "_confirm", _confirm_continue_only)
 
     code = wizard.run_wizard(_cfg(tmp_path))
@@ -187,6 +193,7 @@ def test_ref_route_over_15s_delivers_segment_prompts_and_order_card(tmp_path, mo
     assert len(cards) == 1, "段清单+拼接顺序卡必须落盘"
     out = capsys.readouterr().out
     assert "#46" not in out  # 「拆段在票 #46」占位提示已退役
+    assert "第 1/" in out and "提示词文件：" in out, "收尾没走到当前一段的展示块"
 
 
 def test_unmatched_semantic_name_is_flagged(tmp_path, monkeypatch, capsys):
