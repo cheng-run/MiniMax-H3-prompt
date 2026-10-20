@@ -61,7 +61,14 @@ def _fake_inputs(monkeypatch, inputs: list[str]) -> list[str]:
 
     def fake_prompt(text: str) -> str:
         asked.append(text)
-        return next(prompts)
+        try:
+            return next(prompts)
+        except StopIteration:
+            # 逐段陪跑的交回口（issue #57 起 ≤15 秒直出也走这一套收尾）：喂完输入就
+            # 停在这里。本文件钉的不是收尾，让 StopIteration 冒出去只会冒充失败。
+            if "输出视频路径" in text:
+                return ""
+            raise
 
     monkeypatch.setattr(wizard, "_prompt", fake_prompt)
     return asked

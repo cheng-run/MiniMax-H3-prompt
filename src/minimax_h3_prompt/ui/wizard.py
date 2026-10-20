@@ -2012,6 +2012,49 @@ def _deliver_ref_segments(state: dict, brief: Brief, prompt: str,
     return result
 
 
+def _deliver_ref_single_segment(state: dict, brief: Brief, prompt: str,
+                                generation_dir: Path) -> RefSegmentResult:
+    """≤15 秒（issue #57 AC5）：整片六段式即本片**唯一执行段**——不拆段，收尾与 >15s 同一套。
+
+    直出路线**不重写、不套分段注记**（见 ``ref_segments.single_segment_result``）：整片
+    六段式是阶段 2 组装出来的产物，本身就是能直接喂给 H3 的一段（H3 单次 4–15 秒，≤15 秒
+    刚好一段）。段文件/plan.json/顺序卡照落盘，于是回传 → 两道闸 → 段产出账 → 成片这条
+    收尾与 >15s 完全同路（spec #54「收尾不分叉」）。
+
+    校验问题**当面打**（同 ``format_ref_segment_report`` 的纪律）：直出文本在阶段 2 的
+    质检循环里已经用同一个校验器核过一遍，但交付这一刻的结论照样不许静默。
+    """
+    from ..generation import ref_asset_registry
+    from ..ref_segments import single_segment_result
+    from ..tools.h3_validator import format_issues
+
+    registry = ref_asset_registry(state, brief)
+    result = single_segment_result(
+        whole_prompt=prompt, total_s=brief.duration, out_dir=generation_dir,
+        ref_meta=[(r.picture, r.name, r.description) for r in registry])
+    errors = [issue for issue in result.issues[0]
+              if getattr(issue, "severity", "") == "error"]
+    if errors:
+        print(f"[提醒] 整片提示词有 {len(errors)} 项校验未过：")
+        print(format_issues(errors))
+    return result
+
+
+def _assemble_ref_final_film(result: RefSegmentResult, generation_dir: Path):
+    """全段通过后自动拼成成片（issue #57 AC1/AC2）：编排与文案都在 ``ref_segments`` 一份。
+
+    「未通过即不拼」住在 ``assemble_final_film`` 里（**不是这里的 if**）：这条规矩必须住在
+    被拼接的那一处，否则它就是一个可以被绕过的调用方约定（本仓「规则在、接线不在」已犯
+    七次）。所以这里**无条件调用**——缺段时它自己拒绝，并把卡在哪一段当面打出来（AC3）。
+    """
+    from ..ref_segments import assemble_final_film, format_final_film, passed_segment_rows
+
+    film = assemble_final_film(
+        directory=generation_dir, plans=result.plans, total_s=result.total_s,
+        rows=passed_segment_rows(generation_dir))
+    print(format_final_film(film))
+
+
 def _run_ref_segment_handoff(result: RefSegmentResult, generation_dir: Path) -> bool:
     """多参逐段陪跑（issue #55/#56）：一次只出当前一段 → 交回本段输出视频 → **可证层**硬阻断
     → **语义层**剥首/末帧读图并排人判 → 五档出路 → 落段产出账。
@@ -2089,7 +2132,8 @@ def _run_ref_segment_handoff(result: RefSegmentResult, generation_dir: Path) -> 
             if outcome == GATE_REWORD:
                 revised = _revise_ref_segment_round(
                     text, position=position, total=total, plan=plan, total_s=total_s,
-                    segment_file=segment_file, generation_dir=generation_dir)
+                    segment_file=segment_file, generation_dir=generation_dir,
+                    annotated=result.annotated)
                 if revised is not None:
                     text = revised
                 # 取消/失败都回交回口：词没动，用户可重交或重选出路
@@ -2189,7 +2233,7 @@ def _judge_ref_segment_semantics(*, generation_dir: Path, plan, position: int, t
 
 def _revise_ref_segment_round(text: str, *, position: int, total: int, plan,
                               total_s: float, segment_file: Path,
-                              generation_dir: Path) -> str | None:
+                              generation_dir: Path, annotated: bool = True) -> str | None:
     """「修改提示词」一轮（issue #56 AC4/AC6/AC7）：问意见 → 只改画面正文 → 落盘留痕。
 
     与「重跑本段」的分界：这一档**动词**（把人的意见写回本段提示词再掷），那一档不改词。
@@ -2202,10 +2246,17 @@ def _revise_ref_segment_round(text: str, *, position: int, total: int, plan,
 
     定义块在改写里逐字取回（只动正文），交付时已按登记素材校验过 ``SEGMENT_DEFS_INCOMPLETE``，
     所以这里重过的是**正文相关**的那几条（指代前文/时间戳/快机位/对齐行/注记与状态句在位）。
+
+    ``annotated``＝本段文本带不带分段注记（``RefSegmentResult.annotated``），**决定校验口径**：
+    ≤15 秒直出的段是整片文本原样（不套注记），拿分段校验器去判它，那两条注记判据是
+    结构性必挂的假错——口径要跟着文本的形态走，不是跟着「这是第几段」走。
     """
     from ..model_factory import build_chat_model
-    from ..ref_segments import log_segment_rewrite_round, revise_ref_segment_body
-    from ..segment_prompts import validate_ref_segment
+    from ..ref_segments import (
+        log_segment_rewrite_round,
+        revise_ref_segment_body,
+        validate_segment_text,
+    )
     from ..tools.h3_validator import format_issues
 
     feedback = _prompt(
@@ -2218,9 +2269,10 @@ def _revise_ref_segment_round(text: str, *, position: int, total: int, plan,
     except Exception as exc:  # noqa: BLE001 — 改写失败要响但不许裸崩：词不动、回菜单再定
         print(f"[错误] 改写失败：{exc}；本段提示词保持原样（可重选出路）。")
         return None
-    issues = validate_ref_segment(
-        new_text, duration=plan.duration_s, segment_number=position,
-        total_segments=total, start_s=plan.start_s, total_s=total_s)
+    issues = validate_segment_text(
+        new_text, annotated=annotated, duration=plan.duration_s,
+        segment_number=position, total_segments=total, start_s=plan.start_s,
+        total_s=total_s)
     errors = [issue for issue in issues if getattr(issue, "severity", "") == "error"]
 
     segment_file.write_text(new_text, encoding="utf-8")
@@ -2312,27 +2364,32 @@ def _phase2_ref_finish(config: Config, session: SessionState) -> int:
 
     output_file = generation_dir / "video-prompt.md"
     output_file.write_text(prompt, encoding="utf-8")
+    # 交付主体换位（issue #55）：H3 单次只能生成 4–15 秒，整片六段式是一坨不可执行的
+    # 文本——>15s 时降级为**存档预览**（拆段从它取材），交付物是逐段交回的那几段视频。
+    # ≤15 秒（issue #57 AC5）走**同一套收尾**：整片文本刚好就是那一段的提示词（段文件
+    # 是它的副本），回传 → 两道闸 → 段产出账 → 成片一样不缺，短片的体验不与长片分叉。
     if brief.duration > 15:
-        # 换交付主体（issue #55）：H3 单次只能生成 4–15 秒，整片六段式是一坨不可执行的
-        # 文本——降级为**存档预览**（拆段从它取材），交付物是下面的逐段陪跑。
         result = _deliver_ref_segments(state, brief, prompt, generation_dir)
         print(f"\n[存档预览] 整片 ref 六段式已写入 {output_file}"
               "（仅存档，不作交付物——交付物是逐段交回的那几段视频）。")
-        # 会话状态在上面那次 save_session 里已经是 completed——陪跑在它之后，所以
-        # 「停在段 3」的会话在盘上仍是 completed。这是**已知的信号错**，留给 issue #58：
-        # 那票要的是「已通过的段不重跑」，得连状态机一起定（base 路线用的
-        # segmented_running 在这里会落进 base 的续接分支，等于拿另一条路线的流程
-        # 续接多参会话）。本票不假装已经能续跑。
-        finished = _run_ref_segment_handoff(result, generation_dir)
-        # 账本路径当面给出：没跑完时它是「已经通过的那几段」的唯一去处，用户要接着
-        # 往下做就得知道去哪儿找（账里的行只在段产出账里，不在别处）。
-        print(f"段产出账（{'全部段已通过' if finished else '已通过的段'}）："
-              f"{segment_ledger_path(generation_dir)}")
-        return 0
-    print(f"\n✓ ref 六段式视频提示词已写入：{output_file}")
-    print("\n" + "=" * 60)
-    print(prompt)
-    print("=" * 60)
+    else:
+        result = _deliver_ref_single_segment(state, brief, prompt, generation_dir)
+        print(f"\n[本片单段] 整片 ref 六段式已写入 {output_file}"
+              "——本片只有一段，整片文本就是本段提示词"
+              f"（段文件 {result.segment_paths[0]} 同文），并留作存档预览。")
+    # 会话状态在上面那次 save_session 里已经是 completed——陪跑在它之后，所以
+    # 「停在段 3」的会话在盘上仍是 completed。这是**已知的信号错**，留给 issue #58：
+    # 那票要的是「已通过的段不重跑」，得连状态机一起定（base 路线用的
+    # segmented_running 在这里会落进 base 的续接分支，等于拿另一条路线的流程
+    # 续接多参会话）。本票不假装已经能续跑。
+    finished = _run_ref_segment_handoff(result, generation_dir)
+    # 全段通过后自动拼成成片（issue #57 AC1）；某段没过时它自己拒绝并说清卡在哪一段
+    # （AC3）——「未通过即不拼」这条规矩住在被拼接的那一处，不在这里的 if 里。
+    _assemble_ref_final_film(result, generation_dir)
+    # 账本路径当面给出：没跑完时它是「已经通过的那几段」的唯一去处，用户要接着
+    # 往下做就得知道去哪儿找（账里的行只在段产出账里，不在别处）。
+    print(f"段产出账（{'全部段已通过' if finished else '已通过的段'}）："
+          f"{segment_ledger_path(generation_dir)}")
     return 0
 
 

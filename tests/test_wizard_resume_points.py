@@ -69,6 +69,11 @@ def _fake_inputs(monkeypatch, inputs: list[str], asked: list[str] | None = None)
         try:
             return next(prompts)
         except StopIteration:
+            # 逐段陪跑的交回口（issue #57 起 ≤15 秒直出也走这一套收尾）：跑到底的那
+            # 一轮喂完输入就停在这里。本文件用「喂完＝Ctrl-C」表示中断，不在这儿收住
+            # 会把「跑完」误当成「又断了一次」。
+            if "输出视频路径" in text:
+                return ""
             raise KeyboardInterrupt from None
 
     monkeypatch.setattr(wizard, "_prompt", fake_prompt)

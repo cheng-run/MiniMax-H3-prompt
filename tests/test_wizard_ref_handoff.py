@@ -276,3 +276,44 @@ def test_empty_handback_after_one_pass_keeps_that_row(tmp_path, monkeypatch, cap
     rows = _output_rows(tmp_path)
     assert [r["segment"] for r in rows] == [1]
     assert rows[0]["video"] == str(first.resolve())
+
+
+# ---------------------------------------------------------------------------
+# #57 AC1/AC2/AC3/AC7：全段通过后自动拼成成片；某段没过就不产出成片
+# ---------------------------------------------------------------------------
+
+def _final_film(tmp_path) -> Path:
+    return _generation_dir(tmp_path) / "final.mp4"
+
+
+def test_final_film_is_built_after_all_segments_pass(tmp_path, monkeypatch, capsys, h3_tier_video):
+    """全段通过 → 自动拼出成片（段间硬切、用各段自身帧），并当面告知落点。
+
+    两段各 10.0s 整（``h3_tier_video`` 档位外按 fps 折算）→ 成片恰 20.0s ＝ 起步总时长。
+    """
+    from minimax_h3_prompt.tools.frame_match import video_meta
+
+    first = h3_tier_video(10.0, "seg1.avi")
+    second = h3_tier_video(10.0, "seg2.avi")
+    _, code = _run(tmp_path, monkeypatch, [str(first), str(second)])
+    assert code == 0
+    out = capsys.readouterr().out
+
+    film = _final_film(tmp_path)
+    assert film.is_file(), "全段通过后必须自动拼出成片"
+    assert "成片" in out and str(film) in out, "收尾要明确告知成片落点（AC7）"
+    assert "存档预览" in out, "整片六段式只是存档预览（AC7）"
+    assert round(video_meta(film)["duration_s"], 3) == 20.0, "成片时长＝起步输入的总时长（AC2）"
+    assert video_meta(film)["frames"] == 240 + 240, "用各段自身帧，拼接不丢帧"
+
+
+def test_no_final_film_when_a_segment_did_not_pass(tmp_path, monkeypatch, capsys, h3_tier_video):
+    """某段没过 → **不产出成片**，并说清卡在哪一段（AC3；也是变异检验的靶子）。"""
+    first = h3_tier_video(10.0, "seg1.avi")
+    _, code = _run(tmp_path, monkeypatch, [str(first), ""])
+    assert code == 0
+    out = capsys.readouterr().out
+
+    assert not _final_film(tmp_path).exists(), "缺一段的成片是伪产物，不许拼"
+    assert "未产出成片" in out
+    assert "第 2 段尚未通过验收" in out, f"没说清卡在哪一段：{out[-800:]}"

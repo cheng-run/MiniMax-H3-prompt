@@ -15,14 +15,20 @@
 但**逐段陪跑与两道闸照走**（issue #55/#56）：一次只出当前一段 → 交回本段输出视频
 → **可证层**硬阻断（时长档/尺寸）→ **语义层**剥本段首/末帧读图、与 plan 声明的
 起止状态并排交人判 → 未达到给五档出路（含「修改提示词」：只动画面正文再掷）→
-落**段产出账**（一本账三类行，见 ``SEGMENT_EVENT_*``）。问答节奏住在 ``ui.wizard``，
-本模块只放不碰终端的纯件（段展示块、语义核验块、改写一轮、段产出账读写）。
-拼接仍归用户——成片拼接是 issue #57 的事。
+落**段产出账**（一本账三类行，见 ``SEGMENT_EVENT_*``）。
+
+全段通过后由 ``assemble_final_film`` **自动接成成片**（issue #57，反转 #39 的
+「拼接归用户」）：段间硬切、用各段自身帧，缺一段就拒绝（缺段成片是伪产物）。≤15 秒
+直出走同一套收尾——整片六段式即唯一执行段（``single_segment_result``），段数=1 时
+拼接退化为拷贝改名。重跑某段后可单独跑一次手动拼接（CLI ``ref-concat``，与自动拼接
+同一份编排）。问答节奏住在 ``ui.wizard``，本模块只放不碰终端的纯件（段展示块、
+语义核验块、改写一轮、段产出账读写、成片拼接）。
 """
 from __future__ import annotations
 
 import json
 import re
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,7 +48,7 @@ from .segment_prompts import (
     validate_ref_segment,
     write_ref_segment_v2,
 )
-from .tools.h3_validator import split_ref_sections
+from .tools.h3_validator import split_ref_sections, validate_ref
 
 # 机械 summary 固定句：拼装是降级路径，不编剧情摘要（不造窗外事件、不指代前文）
 _MECH_SUMMARY_BODY = (
@@ -74,6 +80,12 @@ class RefSegmentResult:
     order_card_path: Path | None = None
     plan_path: Path | None = None
     used_fallback: bool = False
+    # 段文本是否带**分段注记**（时间轴注记＋起止状态声明）。>15s 拆段恒为 True；≤15s
+    # 直出为 False——整片六段式就是它自己的唯一执行段，注记是给「段与全片对位」用的，
+    # 段数=1 时无从对位（见 ``single_segment_result``）。**校验与改写据此选口径**：
+    # 带注记走 ``validate_ref_segment``，不带注记走 ``validate_ref``——拿分段校验器去
+    # 判直出文本，那两条注记判据是结构性必挂的假错。
+    annotated: bool = True
 
 
 def _task_type_of(sections: dict[str, str]) -> str:
@@ -99,28 +111,32 @@ def _window_blocks(blocks: list[tuple[int, float, str]], window: tuple[int, int]
     return picked
 
 
+def _clean_block(text: str) -> str:
+    """镜头块原文 → 纯画面句：剥块号与一切 `At MM:SS.mmm`。
+
+    状态声明是画面描述，句里带绝对片时会把「时间戳必须相对本段起点」的纪律从注记句
+    破掉（对抗验证 B1 实证的旁路）。
+    """
+    clean = re.sub(r"^\[Shot\s+\d+\]\s*", "", text.strip())
+    clean = re.sub(r"^At\s+\d{2}:\d{2}\.\d{3},?\s*", "", clean)
+    return re.sub(r"At\s+\d{2}:\d{2}\.\d{3},?\s*", "", clean).strip()
+
+
+def _first_sentence(text: str) -> str:
+    parts = re.split(r"(?<=[.!?])\s+", _clean_block(text))
+    return parts[0].strip() if parts else _clean_block(text)
+
+
+def _last_sentence(text: str) -> str:
+    parts = re.split(r"(?<=[.!?])\s+", _clean_block(text))
+    return parts[-1].strip() if parts else _clean_block(text)
+
+
 def _derive_plan(index: int, window: tuple[int, int], blocks: list[tuple[int, float, str]],
                  total_s: int) -> SegmentPlan:
-    """回退路径的机械 plan：起止状态取自窗内首/末镜头块的首末句（英文，进提示词）。
-
-    状态句剥掉一切 `At MM:SS.mmm`：状态声明是画面描述，句里带绝对片时会把
-    「时间戳必须相对本段起点」的纪律从注记句破掉（对抗验证 B1 实证的旁路）。
-    """
+    """回退路径的机械 plan：起止状态取自窗内首/末镜头块的首末句（英文，进提示词）。"""
     picked = _window_blocks(blocks, window, total_s)
     start, end = window
-
-    def _clean_block(text: str) -> str:
-        clean = re.sub(r"^\[Shot\s+\d+\]\s*", "", text.strip())
-        clean = re.sub(r"^At\s+\d{2}:\d{2}\.\d{3},?\s*", "", clean)
-        return re.sub(r"At\s+\d{2}:\d{2}\.\d{3},?\s*", "", clean).strip()
-
-    def _first_sentence(text: str) -> str:
-        parts = re.split(r"(?<=[.!?])\s+", _clean_block(text))
-        return parts[0].strip() if parts else _clean_block(text)
-
-    def _last_sentence(text: str) -> str:
-        parts = re.split(r"(?<=[.!?])\s+", _clean_block(text))
-        return parts[-1].strip() if parts else _clean_block(text)
 
     start_state = _first_sentence(picked[0][2]) if picked else _FALLBACK_START_STATE
     end_state = _last_sentence(picked[-1][2]) if picked else _FALLBACK_END_STATE
@@ -193,7 +209,7 @@ def format_ref_segment_report(result: RefSegmentResult) -> str:
     if result.order_card_path is not None:
         lines.append(
             f"  段清单与拼接顺序卡：{result.order_card_path}"
-            "（拼接归用户，按卡片「先后」列 1→N 顺序拼接）")
+            "（拼接归系统：全段验收通过后自动接成成片）")
     for position, issues in enumerate(result.issues, 1):
         for issue in issues:
             if getattr(issue, "severity", "") == "error":
@@ -203,13 +219,20 @@ def format_ref_segment_report(result: RefSegmentResult) -> str:
 
 def render_ref_order_card(plans: list[SegmentPlan], segment_paths: list[Path],
                           total_s: int) -> str:
-    """段清单 + 拼接顺序卡（段号/起止秒/先后；issue #46 AC4）。拼接归用户。"""
+    """段清单 + 拼接顺序卡（段号/起止秒/先后；issue #46 AC4）。
+
+    **拼接归系统**（issue #57 反转 #39 ID13 的「拼接归用户」）：全部段验收通过后自动按
+    「先后」列接成成片；重跑某段后可单独跑一次手动拼接命令重出成片（不必从头走流程）。
+    「先后」列仍是本卡的内容面——它是拼接顺序的唯一出站依据，自动与手动两条路都照它走。
+    """
     lines = [
         "# 段清单与拼接顺序卡（多参分段）",
         "",
         f"总时长 {total_s:g}s → {len(plans)} 个执行段（4–15s 整数档）。"
-        "**拼接归用户**：请按「先后」列 1→{} 的顺序拼接各段输出视频；".format(len(plans))
-        + "段间没有桥接帧，衔接靠全片共享同一批参考素材与每段起止状态声明对位。",
+        "**拼接归系统**：全部段验收通过后自动按「先后」列 1→{} 的顺序接成成片".format(len(plans))
+        + "（段间硬切、用各段自身帧）；重跑某段后可单独触发一次手动拼接重出成片"
+        "（`uv run launch.py ref-concat <生成目录>`）。"
+        "段间没有桥接帧，衔接靠全片共享同一批参考素材与每段起止状态声明对位。",
         "",
         "| 先后 | 段号 | 起止秒 | 本段时长 | 提示词文件 |",
         "| --- | --- | --- | --- | --- |",
@@ -390,6 +413,223 @@ def read_segment_ledger(directory: str | Path, *, event: str | None) -> list[dic
         if event is None or record.get("event") == event:
             out.append(record)
     return out
+
+
+# --- 成片拼接（issue #57）-----------------------------------------------------
+# 成片落生成目录根部：`segments/` 里是逐段的中间物（段提示词、账、帧图），成片是**最终
+# 产物**，与 video-prompt.md（整片存档）同级——它是用户在剪辑软件/播放器里要打开的那一个。
+FINAL_FILM_FILENAME = "final.mp4"
+
+# 成片短于起步总时长的告警容差：H3 产出**从不是整数秒**（4s 档恒 4.458s，见
+# ``preflight.H3_TIER_FRAMES``），所以「等于总时长」的可证形态是**结构**的（各段计划
+# 时长之和 ＝ 起步总时长），实测时长只做**只报短**的核对。容差按**一帧/段**给：档位
+# 量化误差是帧级的（±2 帧 ≈ 0.08s），跨段累积不会超过这个量级；真短掉一档（如 10s 段
+# 交回 7s 档）差的是好几秒，照样咬得住。
+_FINAL_FILM_FRAME_S = 1.0 / 24.0
+
+
+@dataclass
+class FinalFilm:
+    """一次成片拼接的结果。
+
+    ``path`` 为 None ＝ **没产出成片**，``reason`` 说清卡在哪（缺段／账上视频对不上／
+    拼接失败）——缺一段的成片时长对不上总时长，是伪产物，比没有更坏（spec #54）。
+    """
+
+    path: Path | None
+    how: str            # "copy"（段数=1 退化为拷贝改名）/ "stream-copy" / "re-encode"
+    total_s: int        # 起步输入的总时长（用户的目标成片时长）
+    # 各段计划时长之和。**可以大于 total_s**：规划器允许末段 end 略超 total 留余量
+    # （``segment_planner.parse_segment_plan``），所以成片比起步总时长长一点是设计使然，
+    # 不是缺陷——判「段表对不对」要用覆盖式判据（``_coverage_problem``），不是相等。
+    planned_s: int
+    measured_s: float | None
+    reason: str = ""
+    warnings: list[str] = field(default_factory=list)
+
+
+def validate_segment_text(text: str, *, annotated: bool, duration: float | None = None,
+                          segment_number: int = 1, total_segments: int = 1,
+                          start_s: float = 0.0, total_s: float | None = None,
+                          ref_meta: list[tuple[int, str, str]] | None = None) -> list:
+    """按段文本的**形态**选校验口径：带分段注记走 ``validate_ref_segment``，不带走 ``validate_ref``。
+
+    口径跟着**文本的形态**走，不跟着「这是第几段」走（``RefSegmentResult.annotated``）：
+    ≤15 秒直出的段是整片文本原样（不套注记），拿分段校验器去判它，那两条注记判据
+    （``SEGMENT_TIMELINE_MISSING``/``SEGMENT_STATE_MISSING``）是结构性必挂的假错。
+
+    映射**只留这一处**：交付时算一遍、改写后再算一遍，两处各写一遍这个映射，改一处漏
+    一处就会让同一份文本「交付时过、改写后报」——issue #56 的假错正是同一种形态
+    （同一个校验器两处接线给了两个口径）。
+    """
+    if annotated:
+        return validate_ref_segment(
+            text, duration=duration, segment_number=segment_number,
+            total_segments=total_segments, start_s=start_s, total_s=total_s,
+            ref_meta=ref_meta)
+    return validate_ref(text, duration, ref_meta)
+
+
+def _write_plan_file(seg_dir: Path, plans: list[SegmentPlan]) -> Path:
+    """落 ``segments/plan.json``——**唯一**一处写它（两条产出路径同一形态）。
+
+    同一份产物两处各拼一遍，形态就会漂（拆段那处按多段拼、直出那处只写单元素）。它同时
+    是**手动拼接命令的段序真源**：形态漂了，将来按行读它的实现就只认得其中一种。
+    """
+    path = seg_dir / "plan.json"
+    path.write_text("[" + ",\n ".join(_plan_json(plan) for plan in plans) + "]",
+                    encoding="utf-8")
+    return path
+
+
+def read_plan_file(directory: str | Path) -> list[SegmentPlan]:
+    """读 ``segments/plan.json``：段序与各段计划时长的**出站真源**。
+
+    手动拼接命令没有内存里的 ``RefSegmentResult``，只能从盘上取「本片一共几段、顺序
+    如何」——不读它就无从判断「某段没过」（AC3 要的正是这句）。
+    """
+    path = Path(directory) / "segments" / "plan.json"
+    if not path.is_file():
+        raise FileNotFoundError(f"读不到分段规划：{path}（本片还没拆段，或不是多参生成目录）")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    return [SegmentPlan.from_dict(item) for item in raw]
+
+
+def passed_segment_rows(directory: str | Path) -> dict[int, dict]:
+    """段产出账里**已通过**的段 → ``{段号: 行}``（同一段多行取**最后**一行）。
+
+    **必须按 ``event`` 取数**：一本账装 output/encounter/rewrite 三类行，不判别就会把
+    「改了一轮词」读成「这段过了」（``read_segment_ledger`` 的 ``event`` 参数就是为此
+    必填）。同段多行取最后一行＝最近一次通过的那份视频：重跑过的段，成片要用**新**的
+    那一份，不是第一次通过时的那份。
+    """
+    rows: dict[int, dict] = {}
+    for row in read_segment_ledger(directory, event=SEGMENT_EVENT_OUTPUT):
+        rows[int(row.get("segment", 0))] = row
+    return rows
+
+
+def _coverage_problem(plans: list[SegmentPlan], total_s: int) -> str:
+    """段表必须无缝覆盖 ``[0, 起步总时长]``；不覆盖就返回一句「哪儿不对」（空串＝没问题）。
+
+    **末段 end 允许略超 total**（规划器留余量：``segment_planner.parse_segment_plan``
+    写着「最后一段 end 可以略超 total（留余量）但不许欠」），所以判据是「≥」不是「＝」。
+    拿「各段计划时长之和 ＝ 起步总时长」当判据，末段一留余量就会把**全段通过**的片子
+    判成「段表与本次生成不是一套」而拒绝出片——同一份契约两处口径，本仓已犯过（issue
+    #56 的假 ``SEGMENT_TIMELINE_MISSING`` 就是这个形态；本票复审实测末段超 total 的
+    规划产物可达）。
+    """
+    if not plans:
+        return "段表是空的（segments/plan.json 里没有段）"
+    if plans[0].start_s != 0:
+        return f"段表不从 0 起（首段从 {plans[0].start_s}s 起）"
+    for previous, following in zip(plans, plans[1:]):
+        if previous.end_s != following.start_s:
+            return (f"段表有缺口/重叠：{previous.start_s}-{previous.end_s}s 之后是 "
+                    f"{following.start_s}-{following.end_s}s")
+    if plans[-1].end_s < total_s:
+        return f"段表只覆盖到 {plans[-1].end_s}s，欠起步总时长 {total_s}s"
+    return ""
+
+
+def assemble_final_film(*, directory: str | Path, plans: list[SegmentPlan],
+                        total_s: int, rows: dict[int, dict]) -> FinalFilm:
+    """把**已通过验收**的各段按段序接成成片（issue #57）。
+
+    ``rows`` 是段产出账里 ``event=output`` 的行（``passed_segment_rows``）；**取数是调用
+    方的事，拼不拼由这里说了算**——「未通过即不拼」这条规矩必须住在被拼接的那一处，
+    否则它就是一个可以被绕过的调用方约定（本仓「规则在、接线不在」已犯七次）。
+
+    段序取 ``plans``（不是 ``rows`` 的插入顺序、也不是交回顺序）：plan.json 是段序的
+    唯一出站真源，自动与手动两条路都照它走。段数=1 时拼接退化为**拷贝改名**——≤15 秒
+    直出走的就是这一档，不劳 ffmpeg 一趟（spec #54「段数=1，拼接退化为拷贝改名」）。
+
+    四道可证核对都在这里做，任一不过就**不产出成片**并说清卡在哪：段表不覆盖整条片子
+    （``_coverage_problem``）、账上记的视频读不到（改名/搬走）、SHA256 对不上（换版）、
+    拼接本身失败。实测时长只做**只报短**的核对（H3 产出比标称长是设计使然，见
+    ``_FINAL_FILM_FRAME_S``）。
+    """
+    from .tools.frame_match import video_meta
+    from .tools.seam_audit import merge_videos
+
+    directory = Path(directory)
+    planned_s = sum(int(plan.duration_s) for plan in plans)
+
+    def _refuse(reason: str) -> FinalFilm:
+        return FinalFilm(path=None, how="", total_s=int(total_s), planned_s=planned_s,
+                         measured_s=None, reason=reason)
+
+    missing = [plan.index + 1 for plan in plans if (plan.index + 1) not in rows]
+    if missing:
+        return _refuse(
+            "第 " + "、".join(str(n) for n in missing)
+            + f" 段尚未通过验收：缺一段的成片时长对不上起步总时长 {int(total_s)}s，"
+            "是伪产物——不产出成片。")
+    problem = _coverage_problem(plans, int(total_s))
+    if problem:
+        return _refuse(f"{problem}：段表与本次生成不是一套，不产出成片。")
+
+    sources: list[Path] = []
+    for plan in plans:
+        number = plan.index + 1
+        row = rows[number]
+        video = Path(str(row.get("video", "")))
+        if not video.is_file():
+            return _refuse(f"第 {number} 段账上记的视频读不到：{video}"
+                           "（改名/搬走了？）——不产出成片。")
+        recorded = str(row.get("sha256") or "")
+        if recorded and sha256_file(video) != recorded:
+            return _refuse(
+                f"第 {number} 段的文件与验收时记下的 SHA256 不一致：{video}"
+                "（换版/被覆盖？）——它已经不是通过验收的那一份，不产出成片。"
+                "重跑该段后请用 `ref-concat <生成目录> --replace "
+                f"{number} <新视频>` 显式指定。")
+        sources.append(video)
+
+    out = directory / FINAL_FILM_FILENAME
+    if len(sources) == 1:
+        # 段数=1：拼接退化为拷贝改名（≤15 秒直出走这一档）
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if out.resolve() != sources[0].resolve():
+            shutil.copy2(sources[0], out)
+        how = "copy"
+    else:
+        ok, how = merge_videos(sources, out)
+        if not ok:
+            return _refuse(f"拼接失败（先 stream copy、失败转重编码都没成）：{how}")
+
+    measured = float(video_meta(out).get("duration_s") or 0.0) or None
+    warnings: list[str] = []
+    if measured is None:
+        warnings.append(f"读不到成片的时长元数据：{out}（跳过时长核对）")
+    elif measured + len(sources) * _FINAL_FILM_FRAME_S < planned_s:
+        warnings.append(
+            f"成片实测 {measured:.2f}s，短于各段计划时长之和 {planned_s}s——"
+            "可能有段没接上，或某段交回的不是计划时长档的产出")
+    return FinalFilm(path=out, how=how, total_s=int(total_s), planned_s=planned_s,
+                     measured_s=measured, warnings=warnings)
+
+
+def format_final_film(film: FinalFilm) -> str:
+    """成片结果的当面文案（AC3/AC7）：落点、时长、拼接方式，以及卡在哪一段。
+
+    起步总时长与各段计划时长之和**分别给**：末段留余量时两者不等（成片会比目标长一点），
+    只报一个数会让人以为成片超了是缺陷——那是规划器的余量，不是错。
+    """
+    if film.path is None:
+        return "\n[成片] 未产出成片：" + film.reason
+    planned = (f"起步总时长 {film.total_s}s"
+               if film.planned_s == film.total_s
+               else f"起步总时长 {film.total_s}s（各段计划时长之和 {film.planned_s}s，"
+                    "末段留余量）")
+    lines = [
+        f"\n[成片] 已接成成片：{film.path}",
+        f"  段间硬切、用各段自身帧；{planned}，"
+        + (f"实测 {film.measured_s:.2f}s" if film.measured_s else "实测时长读不出")
+        + f"（拼接方式：{'拷贝改名' if film.how == 'copy' else film.how}）。",
+    ]
+    lines += [f"  [提醒] {note}" for note in film.warnings]
+    return "\n".join(lines)
 
 
 def render_ref_segment_briefing(plan: SegmentPlan, position: int, total: int,
@@ -610,9 +850,7 @@ def run_ref_segmentation(*, whole_prompt: str, total_s: float, out_dir: Path,
             total_segments=len(plans), start_s=plan.start_s,
             total_s=total_int, ref_meta=ref_meta))
 
-    plan_path = seg_dir / "plan.json"
-    plan_path.write_text(
-        "[" + ",\n ".join(_plan_json(p) for p in plans) + "]", encoding="utf-8")
+    plan_path = _write_plan_file(seg_dir, plans)
     card_path = seg_dir / "order-card.md"
     card_path.write_text(render_ref_order_card(plans, segment_paths, total_int),
                          encoding="utf-8")
@@ -620,6 +858,53 @@ def run_ref_segmentation(*, whole_prompt: str, total_s: float, out_dir: Path,
         plans=list(plans), texts=texts, total_s=total_int, issues=issues,
         segment_paths=segment_paths, order_card_path=card_path,
         plan_path=plan_path, used_fallback=used_fallback)
+
+
+def single_segment_result(*, whole_prompt: str, total_s: float, out_dir: Path,
+                          ref_meta: list[tuple[int, str, str]] | None = None,
+                          ) -> RefSegmentResult:
+    """≤15 秒：整片六段式就是本片**唯一一个执行段**（issue #57 AC5）。
+
+    为什么直出路线也要造一个「段」：收尾（交回 → 可证层/语义层两道闸 → 段产出账 →
+    成片）**不分叉**（spec #54「≤15 秒统一」）。触发口径仍按总时长分流——直出**不拆段**，
+    所以这里的段文本是整片六段式**原样**（不重写、不套分段注记：注记是给「段与全片对位」
+    用的，段数=1 时无从对位，见 ``RefSegmentResult.annotated``）。
+
+    段文件/plan.json/顺序卡照落盘，与 >15s 同一套产物：手动拼接命令与续跑读的是它们，
+    少一份就要给 ≤15s 单开一条读盘口径。
+
+    起止状态**派生自整片正文自己的首/末镜句**（同机械拆段的 ``_derive_plan``）——语义层
+    的对照物因此就是「这份提示词自己声明的开场与收尾」，不是另写一份会漂的声明。
+    """
+    sections = split_ref_sections(whole_prompt)
+    total_int = int(round(total_s))
+    body = sections.get("detailed_description", "")
+    blocks = _shot_blocks(body, keep_cut_timestamp=True) if body.strip() else []
+    _task_type, summary_body = split_task_type(sections.get("summary", ""))
+    start_state = _first_sentence(blocks[0][2]) if blocks else _FALLBACK_START_STATE
+    end_state = _last_sentence(blocks[-1][2]) if blocks else _FALLBACK_END_STATE
+    plan = SegmentPlan(
+        index=0, start_s=0, end_s=total_int,
+        shots_in_segment=tuple(number for number, _at, _text in blocks),
+        # summary 取整片自己的那句（有就原样用；没有才退回开场状态句，不编剧情）
+        summary=(summary_body.strip() or start_state),
+        end_hook=end_state, start_state=start_state)
+
+    seg_dir = out_dir / "segments"
+    seg_dir.mkdir(parents=True, exist_ok=True)
+    path = seg_dir / "segment-01.md"
+    path.write_text(whole_prompt, encoding="utf-8")
+    plan_path = _write_plan_file(seg_dir, [plan])
+    card_path = seg_dir / "order-card.md"
+    card_path.write_text(render_ref_order_card([plan], [path], total_int),
+                         encoding="utf-8")
+    return RefSegmentResult(
+        plans=[plan], texts=[whole_prompt], total_s=total_int,
+        # 直出文本按**不带注记**的形态校验（口径映射只住在 ``validate_segment_text``）
+        issues=[validate_segment_text(whole_prompt, annotated=False,
+                                      duration=total_int, ref_meta=ref_meta)],
+        segment_paths=[path], order_card_path=card_path, plan_path=plan_path,
+        annotated=False)
 
 
 def _plan_json(plan: SegmentPlan) -> str:

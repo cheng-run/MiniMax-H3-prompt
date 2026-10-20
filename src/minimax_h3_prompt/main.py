@@ -61,6 +61,13 @@ def build_parser() -> argparse.ArgumentParser:
     audit_promote.add_argument("session_dir")
     audit_promote.add_argument("--label", required=True, help="基线标签，如「修复前」")
 
+    concat_parser = project.add_parser(
+        "ref-concat", help="多参成片拼接：把已通过验收的各段接成成片（重跑某段后单独触发）")
+    concat_parser.add_argument("session_dir", help="生成目录（含 segments/plan.json 与段产出账）")
+    concat_parser.add_argument("--replace", action="append", nargs=2, default=[],
+                               metavar=("SEGMENT", "PATH"),
+                               help="重跑某段后改用它的新视频（可重复；这一份未经本系统验收）")
+
     pre_parser = project.add_parser("preflight", help="提交前预检：校验输入帧与预算")
     pre_parser.add_argument("--input-frame", required=True, help="待提交的桥接帧 png")
     pre_parser.add_argument("--prev-video", default=None, help="上一段的 mp4")
@@ -319,6 +326,88 @@ def _timestamp() -> str:
     return datetime.now().strftime("%Y-%m-%dT%H%M%S")
 
 
+def _run_ref_concat(args: argparse.Namespace) -> int:
+    """多参成片的手动拼接（issue #57 AC4）：重跑某段后不必从头走完整流程。
+
+    与向导里的**自动**拼接是同一份编排（``ref_segments.assemble_final_film``）：段序取
+    ``segments/plan.json``（段序的唯一出站真源），「哪几段过了」取段产出账的
+    ``event=output`` 行。少一段就拒绝并点名——缺段的成片时长对不上总时长，是伪产物
+    （AC3），这条规矩住在被拼接的那一处，两条路共用一副牙齿。
+
+    ``--replace N <路径>`` 是「重跑某段」的落点：账上记的还是旧那一份（甚至旧文件已被
+    换版），用它把该段指到新视频上。这一份**没经过本系统验收**（命令非交互，跑不了两道
+    闸），所以当面说破、不装作它过了闸。
+    """
+    from pathlib import Path
+
+    from .asset_ledger import sha256_file
+    from .ref_segments import (
+        assemble_final_film,
+        format_final_film,
+        passed_segment_rows,
+        read_plan_file,
+    )
+
+    directory = Path(args.session_dir)
+    if not directory.is_dir():
+        print(f"[错误] 生成目录不存在：{directory}")
+        return 1
+    try:
+        plans = read_plan_file(directory)
+    except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        print(f"[错误] {exc}")
+        return 1
+
+    rows = passed_segment_rows(directory)
+    known = {plan.index + 1 for plan in plans}
+    for raw_segment, raw_path in args.replace:
+        try:
+            number = int(raw_segment)
+        except ValueError:
+            print(f"[错误] --replace 的段号不是整数：{raw_segment!r}")
+            return 1
+        if number not in known:
+            # 段号写错时**当面报**：不报的话这一份会被静默丢掉，用户以为换上了
+            print(f"[错误] 本片没有第 {number} 段（段号 1–{max(known)}）：{directory}")
+            return 1
+        video = Path(raw_path)
+        if not video.is_file():
+            print(f"[错误] 第 {number} 段的替换视频读不到：{video}")
+            return 1
+        rows[number] = {"segment": number, "video": str(video),
+                        "sha256": sha256_file(video)}
+        print(f"[替换] 第 {number} 段改用你指定的视频（**未经本系统验收**）：{video}")
+
+    planned_s = sum(plan.duration_s for plan in plans)
+    total_s = _ref_total_duration(directory)
+    if total_s is None:
+        # 取不到就**说破**再退：起步总时长是段表覆盖判据与「成片该多长」的对照物，
+        # 静默拿另一个数顶上就是拿计划值冒充用户目标（两者在末段留余量时不等）。
+        print(f"[提示] 读不到会话文件里的起步总时长：按各段计划时长之和 {planned_s}s 核对。")
+        total_s = planned_s
+    film = assemble_final_film(
+        directory=directory, plans=plans, total_s=total_s, rows=rows)
+    print(format_final_film(film))
+    return 0 if film.path is not None else 1
+
+
+def _ref_total_duration(directory: Path) -> int | None:
+    """从会话文件取**起步总时长**（手动拼接命令的「本片总长」口径）。
+
+    取不到（文件不在/坏了）返回 None，由调用方退回「各段计划时长之和」并当面说破——
+    不静默拿计划值冒充用户目标（末段留余量时两者不等）。
+    """
+    from .session_store import load_session
+
+    try:
+        session = load_session(directory)
+    except (OSError, ValueError):
+        return None
+    if session is None:
+        return None
+    return int(round(float(session.brief.duration)))
+
+
 def _run_preflight(args: argparse.Namespace) -> int:
     """提交前预检。可证规则失败返回 1，其余返回 0。"""
     from pathlib import Path
@@ -391,6 +480,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_ledger(args)
     if args.command == "audit":
         return _run_audit(args)
+    if args.command == "ref-concat":
+        return _run_ref_concat(args)
     if args.command == "preflight":
         return _run_preflight(args)
 
@@ -471,6 +562,11 @@ def _run_cli(args: argparse.Namespace) -> int:
               "段产出账）请用两阶段向导。")
     else:
         print(f"\n已完成，最终提示词已写入: {config.output_path}")
+        if brief.mode == "ref":
+            # ≤15 秒的收尾（交回本段视频 → 两道闸 → 成片，issue #57）与 >15s 同理要交互
+            # 终端，快路径走不了：向导里整片六段式就是那唯一一段的提示词，段文件/plan.json/
+            # 顺序卡与成片都由它产出。不静默装作这条路也能出成片。
+            print("（≤15 秒多参的逐段陪跑与成片请用两阶段向导：本快路径非交互，交不回视频。）")
     print("=" * 60)
     print(final_prompt)
     return 0

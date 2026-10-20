@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from minimax_h3_prompt import model_factory
 from minimax_h3_prompt.brief_parser import Brief
 from minimax_h3_prompt.session_store import STATUS_AWAITING_FRAMES, load_session, save_session
+from minimax_h3_prompt.tools import reference_auditor
 from minimax_h3_prompt.ui import wizard
 
 TOPIC = "红裙女孩走进秋日庭院，把青铜钥匙交给蓝衫少年。"
@@ -27,6 +28,10 @@ _SIX_SECTION_PROMPT = (
 def _silence(monkeypatch) -> None:
     monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
     monkeypatch.setattr(wizard.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    # 语义层剥首/末帧后要**读图**（真网络调用，qwen3.7-plus）：不打桩时本机没 key 会逐帧
+    # 等到超时，有 key 时又把结论绑到真模型上（同 test_wizard_ref_handoff 的纪律）。
+    monkeypatch.setattr(reference_auditor, "describe_image",
+                        lambda *a, **k: "桩：本段首/末帧的实际画面")
 
 
 def _fake_inputs(monkeypatch, inputs: list[str]) -> list[str]:
@@ -42,7 +47,13 @@ def _fake_inputs(monkeypatch, inputs: list[str]) -> list[str]:
 
 
 def _confirm_continue_only(text: str, default: bool = True) -> bool:
-    """确认桩：只有「继续出提示词」答是，其余（视频/音频附加等）一律跳过。"""
+    """确认桩：只有「继续出提示词」答是，其余（视频/音频附加等）一律跳过。
+
+    **语义层那句（问「达到」）答是**（issue #56 起每段交回后多一道人判）：本文件钉的是
+    路线入口与 ≤15 秒的收尾形状，不是语义层的五档出路（那在 test_wizard_ref_semantics）。
+    """
+    if "达到" in text:
+        return True
     return "继续" in text
 
 
@@ -131,8 +142,13 @@ def test_phase1_new_ref_route_builds_ref_brief(tmp_path, monkeypatch):
 # ≤15 秒直出一份 ref 六段式
 # ---------------------------------------------------------------------------
 
-def test_ref_route_direct_prompt_end_to_end(tmp_path, monkeypatch, capsys):
-    """run_wizard 全程：多参路线不收帧图，直出一份六段式写进 video-prompt.md。"""
+def test_ref_route_direct_prompt_end_to_end(tmp_path, monkeypatch, capsys, tmp_video):
+    """run_wizard 全程：多参路线不收帧图，整片六段式写进 video-prompt.md；≤15 秒走同一套收尾。
+
+    issue #57 AC5：直出**不拆段**，但收尾不分叉——整片文本就是本片唯一执行段的提示词
+    （段文件是它的副本），回传本段输出视频 → 两道闸 → 段产出账 → 成片（段数=1 时拼接
+    退化为**拷贝改名**）。
+    """
     _silence(monkeypatch)
     # 同上：画布问答属 #42，这里打桩为空集。
     monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
@@ -140,11 +156,14 @@ def test_ref_route_direct_prompt_end_to_end(tmp_path, monkeypatch, capsys):
     _stub_stage1(monkeypatch, captured)
     _stub_stage2(monkeypatch, captured)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
+    # 5.0s 整的段视频（≤15 秒直出一段：H3 单次 4–15 秒，整片刚好一段）
+    segment_video = tmp_video("seg1.mp4", frames=120)
     # 主题/时长/风格/方式，随后素材循环四张全放弃（issue #50：审查菜单 4=显式放弃，
-    # 队列菜单回车=出队首）——不收帧图路径；视频输出无问答（issue #49 自动推导）
+    # 队列菜单回车=出队首）——不收帧图路径；视频输出无问答（issue #49 自动推导）；
+    # 末尾那个路径是逐段陪跑的交回口（issue #57）
     asked = _fake_inputs(
         monkeypatch,
-        [TOPIC, "", "", "4", "", "4", "", "4", "", "4", "4"])
+        [TOPIC, "", "", "4", "", "4", "", "4", "", "4", "4", str(segment_video)])
     monkeypatch.setattr(wizard, "_confirm", _confirm_continue_only)
 
     code = wizard.run_wizard(_cfg(tmp_path))
@@ -162,6 +181,16 @@ def test_ref_route_direct_prompt_end_to_end(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "<Picture 1> 红裙女孩" in out  # 编号按剧本出场顺序的登记一览
     assert "59-(多Lora改)MiniMax-H3 ref2va 多参生视频 V2" in out  # 登记名
+
+    # ≤15 秒：段数=1，收尾同一套（回传 → 两道闸 → 账 → 成片）
+    assert any("第 1/1 段输出视频路径" in text for text in asked), f"交回口问句不对：{asked[-2:]}"
+    assert "第 1/1 段 · 起止 0s-5s（本段时长 5s）" in out
+    generation_dir = outputs[0].parent
+    assert (generation_dir / "segments" / "segment-01.md").read_text(encoding="utf-8") == text
+    film = generation_dir / "final.mp4"
+    assert film.is_file(), "≤15 秒也要落成片（拼接退化为拷贝改名）"
+    assert film.read_bytes() == segment_video.read_bytes()
+    assert str(film) in out
 
 
 def test_ref_route_over_15s_delivers_segment_prompts_and_order_card(tmp_path, monkeypatch, capsys):
@@ -223,8 +252,9 @@ def test_ref_resume_awaiting_still_delivers_asset_prompts(tmp_path, monkeypatch,
     save_session(directory, brief, _ref_stage1_state(), status=STATUS_AWAITING_FRAMES)
     session = load_session(directory)
     monkeypatch.setattr(wizard, "_offer_resume", lambda config: session)
-    # 素材循环四张全放弃（issue #50）；视频输出无问答（issue #49）
-    _fake_inputs(monkeypatch, ["", "4", "", "4", "", "4", "4"])
+    # 素材循环四张全放弃（issue #50）；视频输出无问答（issue #49）；
+    # 末尾的 "" 是逐段陪跑的交回口——回车＝停住（issue #57 起 ≤15 秒也走这一套）
+    _fake_inputs(monkeypatch, ["", "4", "", "4", "", "4", "4", ""])
     monkeypatch.setattr(wizard, "_confirm", _confirm_continue_only)
 
     code = wizard.run_wizard(_cfg(tmp_path))
