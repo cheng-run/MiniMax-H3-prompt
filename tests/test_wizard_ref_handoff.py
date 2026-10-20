@@ -16,9 +16,6 @@ import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
-import cv2
-import numpy as np
-
 from minimax_h3_prompt import model_factory
 from minimax_h3_prompt.brief_parser import Brief
 from minimax_h3_prompt.ref_segments import (
@@ -26,8 +23,6 @@ from minimax_h3_prompt.ref_segments import (
     read_segment_ledger,
 )
 from minimax_h3_prompt.tools import reference_auditor
-from minimax_h3_prompt.tools.frame_match import video_meta
-from minimax_h3_prompt.tools.preflight import EXPECTED_VIDEO_SIZE, H3_TIER_FRAMES
 from minimax_h3_prompt.ui import wizard
 
 TOPIC = "红裙女孩走进秋日庭院，把青铜钥匙交给蓝衫少年。"
@@ -116,24 +111,6 @@ def _cfg(tmp_path, **overrides):
     return SimpleNamespace(**base)
 
 
-def _make_video(path: Path, seconds: float, *, fps: int = 24) -> Path:
-    """写一段真视频：帧数按 H3 实测档位取（「4s」档真产物是 107 帧，不是 96 帧）。
-
-    这一条不是装饰：可证层按**帧数表**判档，96 帧的假 4s 视频落不进任何档位、只报
-    「无法确证档位」的 warning——用错帧数的话「用错时长档被拦下」这条根本测不出来。
-    """
-    frames = H3_TIER_FRAMES.get(int(round(seconds)), int(round(seconds * fps)))
-    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), fps,
-                             EXPECTED_VIDEO_SIZE)
-    assert writer.isOpened(), "测试环境缺 MJPG 编码器"
-    image = np.full((EXPECTED_VIDEO_SIZE[1], EXPECTED_VIDEO_SIZE[0], 3), 128, np.uint8)
-    for i in range(frames):
-        image[:] = 128 + (i % 8)
-        writer.write(image)
-    writer.release()
-    actual = video_meta(path).get("duration_s", 0.0)
-    assert abs(actual - frames / fps) < 0.05, f"测试视频时长不可控：{actual}"
-    return path
 
 
 def _run(tmp_path, monkeypatch, handbacks: list[str]) -> tuple[list[str], int]:
@@ -179,10 +156,10 @@ def _whole_prompt_text(tmp_path) -> str:
 # AC1 / AC2：只展示当前一段；通过才出下一段
 # ---------------------------------------------------------------------------
 
-def test_only_current_segment_is_shown_and_next_comes_after_accept(tmp_path, monkeypatch, capsys):
+def test_only_current_segment_is_shown_and_next_comes_after_accept(tmp_path, monkeypatch, capsys, h3_tier_video):
     """段 1 的词摆出来、整片不再当交付物；段 2 的词在段 1 交回通过之后才出现。"""
-    first = _make_video(tmp_path / "seg1.avi", 10.0)
-    second = _make_video(tmp_path / "seg2.avi", 10.0)
+    first = h3_tier_video(10.0, "seg1.avi")
+    second = h3_tier_video(10.0, "seg2.avi")
     asked, code = _run(tmp_path, monkeypatch, [str(first), str(second)])
     assert code == 0
     out = capsys.readouterr().out
@@ -211,9 +188,9 @@ def test_only_current_segment_is_shown_and_next_comes_after_accept(tmp_path, mon
 # AC5：段产出账一段一行（含视频路径与 SHA256）
 # ---------------------------------------------------------------------------
 
-def test_ledger_records_each_segment_with_path_and_sha(tmp_path, monkeypatch, capsys):
-    first = _make_video(tmp_path / "seg1.avi", 10.0)
-    second = _make_video(tmp_path / "seg2.avi", 10.0)
+def test_ledger_records_each_segment_with_path_and_sha(tmp_path, monkeypatch, capsys, h3_tier_video):
+    first = h3_tier_video(10.0, "seg1.avi")
+    second = h3_tier_video(10.0, "seg2.avi")
     _, code = _run(tmp_path, monkeypatch, [str(first), str(second)])
     assert code == 0
 
@@ -234,11 +211,11 @@ def test_ledger_records_each_segment_with_path_and_sha(tmp_path, monkeypatch, ca
 # AC4：可证层不合格硬阻断（不写下一段、不落进度），并当面打出错在哪
 # ---------------------------------------------------------------------------
 
-def test_wrong_duration_hard_blocks_and_logs_nothing_for_that_segment(tmp_path, monkeypatch, capsys):
+def test_wrong_duration_hard_blocks_and_logs_nothing_for_that_segment(tmp_path, monkeypatch, capsys, h3_tier_video):
     """段 1 计划 10s 却交回 4s 的视频（用错时长档）→ 拦下、重问，账上只留合规那份。"""
-    wrong = _make_video(tmp_path / "wrong.avi", 4.0)
-    right = _make_video(tmp_path / "right.avi", 10.0)
-    last = _make_video(tmp_path / "seg2.avi", 10.0)
+    wrong = h3_tier_video(4.0, "wrong.avi")
+    right = h3_tier_video(10.0, "right.avi")
+    last = h3_tier_video(10.0, "seg2.avi")
     _, code = _run(tmp_path, monkeypatch, [str(wrong), str(right), str(last)])
     assert code == 0
     out = capsys.readouterr().out
@@ -255,12 +232,12 @@ def test_wrong_duration_hard_blocks_and_logs_nothing_for_that_segment(tmp_path, 
         "账上记的必须是**通过验收的那一份**，不是先交上来的错份"
 
 
-def test_missing_video_path_is_refused_not_silently_accepted(tmp_path, monkeypatch, capsys):
+def test_missing_video_path_is_refused_not_silently_accepted(tmp_path, monkeypatch, capsys, h3_tier_video):
     """路径不存在＝可证事实：当面拦住重问，绝不当成「量不出来」放行。"""
     absent = tmp_path / "not-there.avi"
     assert not absent.exists()
-    right = _make_video(tmp_path / "right.avi", 10.0)
-    last = _make_video(tmp_path / "seg2.avi", 10.0)
+    right = h3_tier_video(10.0, "right.avi")
+    last = h3_tier_video(10.0, "seg2.avi")
     _, code = _run(tmp_path, monkeypatch, [str(absent), str(right), str(last)])
     assert code == 0
     out = capsys.readouterr().out
@@ -274,7 +251,7 @@ def test_missing_video_path_is_refused_not_silently_accepted(tmp_path, monkeypat
 # AC3：空输入停住（不静默跳过、不静默降级）
 # ---------------------------------------------------------------------------
 
-def test_empty_handback_stops_the_run(tmp_path, monkeypatch, capsys):
+def test_empty_handback_stops_the_run(tmp_path, monkeypatch, capsys, h3_tier_video):
     """回车＝停住：这一段不落账、下一段不出词，已通过的段留在账上。"""
     _, code = _run(tmp_path, monkeypatch, [""])
     assert code == 0
@@ -287,9 +264,9 @@ def test_empty_handback_stops_the_run(tmp_path, monkeypatch, capsys):
     assert _output_rows(tmp_path) == []
 
 
-def test_empty_handback_after_one_pass_keeps_that_row(tmp_path, monkeypatch, capsys):
+def test_empty_handback_after_one_pass_keeps_that_row(tmp_path, monkeypatch, capsys, h3_tier_video):
     """段 1 通过后停住：账上留着段 1 那一行（进度不丢），段 2 那一行不落。"""
-    first = _make_video(tmp_path / "seg1.avi", 10.0)
+    first = h3_tier_video(10.0, "seg1.avi")
     _, code = _run(tmp_path, monkeypatch, [str(first), ""])
     assert code == 0
     out = capsys.readouterr().out

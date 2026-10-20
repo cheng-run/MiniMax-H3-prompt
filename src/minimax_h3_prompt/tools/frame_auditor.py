@@ -116,23 +116,33 @@ def bridge_frame_prompt() -> str:
     )
 
 
-def describe_bridge_frame(path: str | Path) -> str | None:
-    """读一张桥接帧图，返回画面描述；失败返回 None（调用方诚实降级，不阻塞人工流程）。
+def _read_frame_or_none(path: str | Path, prompt: str, *,
+                        label: str, on_failure: str) -> str | None:
+    """读一张帧图 → 画面描述；失败**显式警告**并返回 None（诚实降级，绝不伪造读图记录）。
 
-    与 ``audit_frame_images`` 的单帧降级一致，但失败要**显式打印警告**——绝不静默
-    （设计决定 #8）；文件不存在同样走警告降级（剥帧刚成功却读不了图不该炸掉陪跑流程）。
+    读图走 ``reference_auditor.describe_image`` **唯一口**（关键帧/桥接帧/段首末帧同源）。
+    ``label`` 用于「XX图片不存在」「XX读图失败」两句话术，``on_failure`` 是失败后的
+    去向说明（两种帧位的去向不同：桥接帧退回图片锚定，段首末帧则是「本次没有可对照的
+    画面描述」）。文件不存在同样走警告降级——刚剥出帧却读不了图，不该炸掉陪跑流程。
     """
     from .reference_auditor import describe_image
 
     p = Path(path)
     try:
         if not p.is_file():
-            raise FileNotFoundError(f"桥接帧图片不存在：{p}")
-        description = str(describe_image(p, bridge_frame_prompt())).strip()
+            raise FileNotFoundError(f"{label}图片不存在：{p}")
+        description = str(describe_image(p, prompt)).strip()
     except Exception as exc:  # noqa: BLE001 - 单帧失败降级，不阻塞陪跑流程
-        print(f"[警告] 桥接帧读图失败（{exc}），下一段提示词将退回仅按图片锚定（无读图结果）。")
+        print(f"[警告] {label}读图失败（{exc}）：{on_failure}")
         return None
     return description or None
+
+
+def describe_bridge_frame(path: str | Path) -> str | None:
+    """读一张桥接帧图，返回画面描述；失败返回 None（调用方诚实降级，不阻塞人工流程）。"""
+    return _read_frame_or_none(
+        path, bridge_frame_prompt(), label="桥接帧",
+        on_failure="下一段提示词将退回仅按图片锚定（无读图结果）。")
 
 
 # 段首/末帧读图的帧位标签（issue #56）：读的是**本段视频自己的**开场/收尾画面，
@@ -160,26 +170,17 @@ def segment_frame_prompt(role: str) -> str:
 def describe_segment_frame(path: str | Path, role: str) -> str | None:
     """读一张段首/末帧图（issue #56 AC1），返回画面描述；失败返回 None。
 
-    读图走 ``reference_auditor.describe_image`` **唯一口**（与桥接帧/关键帧同源）；
-    失败**显式警告**并返回 None——语义层照旧把「读图失败」并排摆出来由人判，
-    绝不伪造读图记录、也不因此跳过这一层（缺一半的并排看起来像「没问题」）。
+    失败**显式警告**并返回 None——语义层照旧把「读图失败」并排摆出来由人判，绝不伪造
+    读图记录、也不因此跳过这一层（缺一半的并排看起来像「没问题」）。
 
     ``role`` 取值错**响**（ValueError）而不是降级：那是编程错误，不是「量不出来」。
     """
-    from .reference_auditor import describe_image
-
     label = _SEGMENT_FRAME_LABELS.get(str(role))
     if label is None:
         raise ValueError(f"未知的段帧位：{role!r}（应为 first/last）")
-    p = Path(path)
-    try:
-        if not p.is_file():
-            raise FileNotFoundError(f"段{label[0]}图片不存在：{p}")
-        description = str(describe_image(p, segment_frame_prompt(role))).strip()
-    except Exception as exc:  # noqa: BLE001 - 单帧失败降级，不阻塞陪跑流程
-        print(f"[警告] 段{label[0]}读图失败（{exc}）：本次没有可对照的画面描述。")
-        return None
-    return description or None
+    return _read_frame_or_none(
+        path, segment_frame_prompt(role), label=f"段{label[0]}",
+        on_failure="本次没有可对照的画面描述。")
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +203,8 @@ def _open_capture(video_path: str | Path):
     ``yield`` 出来的是已打开的 ``cv2.VideoCapture``，退出时释放句柄并清掉临时副本。
     """
     import cv2  # noqa: PLC0415 - 懒加载重依赖
+    import shutil  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
 
     source = Path(video_path)
     if not source.is_file():
@@ -214,9 +217,6 @@ def _open_capture(video_path: str | Path):
     try:
         str(source).encode("ascii")
     except UnicodeEncodeError:
-        import shutil
-        import tempfile
-
         temp_dir = Path(tempfile.mkdtemp(prefix="h3-bridge-"))
         temp_copy = temp_dir / ("source" + source.suffix.lower())
         shutil.copy2(source, temp_copy)
@@ -232,8 +232,6 @@ def _open_capture(video_path: str | Path):
             capture.release()
     finally:
         if temp_dir is not None:
-            import shutil
-
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 

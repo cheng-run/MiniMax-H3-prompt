@@ -2036,9 +2036,11 @@ def _run_ref_segment_handoff(result: RefSegmentResult, generation_dir: Path) -> 
 
     plans = list(result.plans)
     total = len(plans)
-    # 全片时长取自 plan 末段的 end_s：注记句（"of the full Ns video"）当初就是按
-    # 这批 plan 注入的，拿别处的数字重渲染会让锁定声明与 plan.json 失同步。
-    total_s = int(plans[-1].end_s) if plans else 0
+    # 全片时长取**交付时那个**（``RefSegmentResult.total_s``＝注记句与交付校验共用的口径），
+    # 不用 ``plans[-1].end_s``：规划器允许末段 end 略超 total（留余量），拿末段 end 当
+    # total 会让改写后的重过校验按另一个期望注记判「缺注记」——同一份文本交付时是过的
+    # （复审实测，issue #56）。
+    total_s = result.total_s
     for position, plan in enumerate(plans, 1):
         segment_file = result.segment_paths[position - 1]
         # 逐段当前文本：改写一轮就地替换它（下一轮改写以新词为底），不回写 result.texts
@@ -2072,7 +2074,7 @@ def _run_ref_segment_handoff(result: RefSegmentResult, generation_dir: Path) -> 
                 continue
             attempt += 1
             first_frame, last_frame, first_desc, last_desc = _capture_ref_segment_frames(
-                str(video), position, generation_dir)
+                str(video), position, generation_dir, attempt)
             outcome = _judge_ref_segment_semantics(
                 generation_dir=generation_dir, plan=plan, position=position, total=total,
                 first_description=first_desc, last_description=last_desc,
@@ -2106,11 +2108,16 @@ def _run_ref_segment_handoff(result: RefSegmentResult, generation_dir: Path) -> 
 
 
 def _capture_ref_segment_frames(video_path: str, position: int, generation_dir: Path,
+                                attempt: int,
                                 ) -> tuple[Path | None, Path | None, str | None, str | None]:
     """剥本段**首帧与末帧**并读图（issue #56 AC1）。
 
     与桥接链的 ``_capture_bridge_frame`` 差别在取哪一帧：多参段没有「下一段的首帧」
     这回事，核的是**本段自己的开场与收尾**，所以首帧取 0.00s 那一帧（不做锐度优选）。
+
+    文件名带**本段的尝试次数**（``segment-NN-tryK-first/last.png``）：同一段会被反复
+    交回（重跑/改词再掷），定名覆盖会让旧遭遇行里记的帧图路径指向新一轮的帧，而那条
+    路径正是「事后复跑那次判定」的唯一入口（本仓对视频记 SHA256 是同一条理由）。
 
     返回 ``(首帧图, 末帧图, 首帧读图, 末帧读图)``。剥帧/读图任一步失败都只警告降级：
     **绝不伪造读图记录**，也绝不中断人工陪跑——语义核验照旧摆出来，缺的那一半由
@@ -2127,7 +2134,7 @@ def _capture_ref_segment_frames(video_path: str, position: int, generation_dir: 
     for role, label, extract in (("first", "首帧", extract_first_frame),
                                  ("last", "末帧", extract_last_frame)):
         target = (Path(generation_dir) / "segments" / "frames"
-                  / f"segment-{position:02d}-{role}.png")
+                  / f"segment-{position:02d}-try{int(attempt)}-{role}.png")
         try:
             frame = extract(Path(video_path), target)
         except Exception as exc:  # noqa: BLE001 - 剥帧失败不阻塞人工流程

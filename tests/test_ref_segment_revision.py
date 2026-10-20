@@ -132,6 +132,22 @@ def test_verbatim_locked_sentences_and_clean_body_both_pass():
     assert_locked_annotations_intact(f"{_BODY}\n{locked}", locked)
 
 
+def test_annotation_shape_follows_the_canonical_prefix(monkeypatch):
+    """识别式与前缀常量**同源，且当场可验**（复审采纳项）。
+
+    把 canonical 前缀改掉，守卫必须跟着改：这一条只有在识别式**按调用时**从常量派生
+    时才会过。字面重抄一份形态的写法在这里就红——改掉常量后那份拷贝再也匹配不上，
+    守卫成了永远不响的守卫（「永不为红＝没有」）。
+    """
+    from minimax_h3_prompt import segment_prompts
+
+    locked = _locked_of(_segment_text())
+    monkeypatch.setattr(segment_prompts, "_REF_END_STATE_PREFIX", "This clip wraps up with ")
+    with pytest.raises(ValueError):
+        segment_prompts.assert_locked_annotations_intact(
+            "This clip wraps up with the jar already put down.", locked)
+
+
 # ---------------------------------------------------------------------------
 # 接缝 4：一轮改写——只换正文，其余逐字保留（AC4/AC5）
 # ---------------------------------------------------------------------------

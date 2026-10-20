@@ -307,6 +307,18 @@ def test_no_shot_blocks_edge_keeps_annotations_non_degenerate(tmp_path):
 # 4. 段产出账与逐段展示块（issue #55）
 # ---------------------------------------------------------------------------
 
+def test_result_carries_the_delivery_total_for_revalidation(tmp_path):
+    """结果带着**交付时用的**全片时长（复审采纳项，issue #56）。
+
+    注记句「of the full Ns video」与交付校验共用这个数；规划器允许末段 end 略超 total
+    （留余量），所以 ``plans[-1].end_s`` 不是它的替代品——逐段陪跑里改写后的重过校验
+    若拿末段 end 当 total，就会打出假的「缺注记」。
+    """
+    result = _run(tmp_path)
+    assert result.total_s == 30
+    assert result.total_s == int(round(30.0))
+
+
 def test_segment_ledger_row_carries_path_sha_and_verdict(tmp_path):
     """一段一行：段号 / 起止秒 / 视频路径 / SHA256 / 可证层判定 / 时间（issue #55 AC5）。
 
@@ -323,7 +335,7 @@ def test_segment_ledger_row_carries_path_sha_and_verdict(tmp_path):
         tmp_path, segment=1, start_s=0, end_s=12, video_path=video)
     assert path == tmp_path / "segments" / SEGMENT_LEDGER_FILENAME
 
-    rows = read_segment_ledger(tmp_path)
+    rows = read_segment_ledger(tmp_path, event=None)
     assert len(rows) == 1
     row = rows[0]
     assert row["segment"] == 1 and row["start_s"] == 0 and row["end_s"] == 12
@@ -341,19 +353,19 @@ def test_segment_ledger_appends_one_row_per_segment(tmp_path):
     second.write_bytes(b"b")
     log_segment_output(tmp_path, segment=1, start_s=0, end_s=12, video_path=first)
     log_segment_output(tmp_path, segment=2, start_s=12, end_s=20, video_path=second)
-    rows = read_segment_ledger(tmp_path)
+    rows = read_segment_ledger(tmp_path, event=None)
     assert [r["segment"] for r in rows] == [1, 2]
     assert rows[0]["sha256"] != rows[1]["sha256"]
 
 
 def test_segment_ledger_missing_file_is_empty_and_bad_line_raises(tmp_path):
     """文件不在＝空账；坏行**响**（追加账是「历史可查」的凭据，静默跳过等于缺页无人知）。"""
-    assert read_segment_ledger(tmp_path) == []
+    assert read_segment_ledger(tmp_path, event=None) == []
     seg_dir = tmp_path / "segments"
     seg_dir.mkdir()
     (seg_dir / SEGMENT_LEDGER_FILENAME).write_text("{不是 JSON\n", encoding="utf-8")
     with pytest.raises(ValueError):
-        read_segment_ledger(tmp_path)
+        read_segment_ledger(tmp_path, event=None)
 
 
 def test_segment_briefing_carries_window_and_duration(tmp_path):
@@ -400,7 +412,7 @@ def test_segment_ledger_carries_encounter_and_rewrite_rows(tmp_path):
         tmp_path, segment=1, feedback="末态应该是罐子已经放下",
         prompt_before="OLD BODY", prompt_after="NEW BODY")
 
-    rows = read_segment_ledger(tmp_path)
+    rows = read_segment_ledger(tmp_path, event=None)
     assert [r["event"] for r in rows] == [
         SEGMENT_EVENT_OUTPUT, SEGMENT_EVENT_ENCOUNTER, SEGMENT_EVENT_REWRITE]
 

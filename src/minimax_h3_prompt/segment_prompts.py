@@ -957,24 +957,41 @@ def split_ref_segment_detailed(detailed: str) -> tuple[str, str]:
     """把 detailed_description 拆成 ``(锁死声明, 画面正文)``（issue #56）。
 
     注记由组装器置于 detailed_description 顶部（``assemble_ref_segment``），所以切点
-    就是**首行**：首行是注记形态（"Segment N of M, covering …"）时归锁定部分，其余
-    全归正文；没有注记行时锁定部分是空串、正文原样（不把正文头一行误当注记吃掉）。
+    就是**首行**：首行是注记形态时归锁定部分，其余全归正文；没有注记行时锁定部分是
+    空串、正文原样（不把正文头一行误当注记吃掉）。
 
-    这是「改写只动画面正文」与「那两句被改动就响」两处判据的**共同切点**：两处各切
-    一次就多一个会漂的地方（同注记渲染器只有一份的纪律，ADR 0008 裁定二）。
+    这是「改写只动画面正文」与「那两句被改动就响」两处判据的**共同切点**，而「注记长
+    什么样」这件事只有 ``_timeline_note_shape`` 一处（从 canonical 模板派生）——形态
+    重抄一份的代价不是重复，而是常量一改它就静默失效。
     """
     first, sep, rest = str(detailed or "").partition("\n")
-    if sep and first.strip().startswith("Segment ") and "covering" in first:
+    if sep and re.match(_timeline_note_shape(), first.strip()):
         return first.strip(), rest.strip()
     return "", str(detailed or "").strip()
 
 
-# 注记类句子的识别式：时间轴注记首句 + 起止状态那两句。改写结果里出现它们时，
-# 必须与锁定文本**逐字**一致——判据是字面比对，不是「出现过就报」（模型照抄一遍
-# 由组装器再注入一次无害，只有**改过**的才算越权）。
-_ANNOTATION_LIKE_RE = re.compile(
-    r"This segment (?:begins|ends) with [^.\n]*"
-    r"|Segment \d+ of \d+, covering [^.\n]*")
+def _timeline_note_shape() -> str:
+    """``_REF_TIMELINE_NOTE`` → 形态正则（占位符一律换通配），由 canonical 模板**派生**。
+
+    派生而不是字面重抄（ADR 0008 裁定二「只留一处可写来源，其余派生或被钉住」）：重抄
+    的代价不是重复，而是**静默失效**——模板一改，那份拷贝就再也匹配不上，拿它做的守卫
+    成了永远不响的守卫（「永不为红＝没有」）。骨架（"Segment … of …, covering … of the
+    full … video."）保留，只有占位符处放宽。
+    """
+    return re.sub(r"\\\{[^}]*\\\}", lambda _match: r"[^.\n]*", re.escape(_REF_TIMELINE_NOTE))
+
+
+def _annotation_like_shape() -> str:
+    """注记类句子的识别式：时间轴注记首句 ＋ 起止状态那两句（三条形态全部派生自常量）。
+
+    **每次调用现拼**（不在 import 时编译）：「识别式跟着常量走」因此是**当场可验**的
+    ——改掉前缀常量，守卫必须跟着改（有测试钉着，见 ``test_ref_segment_revision.py``）。
+    """
+    return "|".join([
+        re.escape(_REF_START_STATE_PREFIX) + r"[^.\n]*",
+        re.escape(_REF_END_STATE_PREFIX) + r"[^.\n]*",
+        _timeline_note_shape(),
+    ])
 
 
 def assert_locked_annotations_intact(text: str, locked: str) -> None:
@@ -985,11 +1002,12 @@ def assert_locked_annotations_intact(text: str, locked: str) -> None:
     正文就失了同步，判据当场作废。声明本身写错属于「计划错了」，走「停下 → 重跑分段
     规划」，不是在这里偷偷改一句。
 
-    调用方（``ref_segments.revise_ref_segment_body``）据此**不采用**这一轮改写、保持
-    原词——静默放行等于让用户拿着一份自相矛盾的提示词去生成。
+    判据是**字面**比对，不是「出现过就报」：模型照抄一遍由组装器再注入一次无害，只有
+    **改过**的才算越权。调用方（``ref_segments.revise_ref_segment_body``）据此**不采用**
+    这一轮改写、保持原词——静默放行等于让用户拿着一份自相矛盾的提示词去生成。
     """
     altered = sorted({match.group(0).strip()
-                      for match in _ANNOTATION_LIKE_RE.finditer(str(text or ""))
+                      for match in re.finditer(_annotation_like_shape(), str(text or ""))
                       if match.group(0).strip() not in str(locked or "")})
     if altered:
         raise ValueError(

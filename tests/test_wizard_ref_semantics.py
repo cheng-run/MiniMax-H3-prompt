@@ -13,14 +13,20 @@
 薄接线：走真实调用链（``run_wizard`` 的多参阶段 2），只打桩 LLM、读图与交互输入。
 视频与剥帧都是**真**的（可证层判帧数档、剥帧走 cv2）；只有读图打桩（真读图要 API key，
 历史教训：暗读真 key 的用例只在本机能过）。
+
+**AC9 变异检验（2026-10-20 实测三处，本文件为判据所在）**：
+1. 摘掉语义层并排展示（把 ``render_ref_segment_semantic_check`` 的调用换成一行抬头）
+   → ``test_reached_verdict_shows_both_ends_beside_their_frames`` 红（1 条）；
+2. 五档出路砍成三档（``_REF_OUTCOME_ORDER`` 只留 停下/重跑/继续）→ 6 条红；
+3. 拆掉锁死判据（删掉 ``revise_ref_segment_body`` 里的
+   ``assert_locked_annotations_intact`` 调用）→ 2 条红（本文件 1 条 +
+   ``test_ref_segment_revision.py`` 1 条）。
+三处扰动都当场还原，全量复跑 1004 passed / 5 skipped。
 """
 from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-
-import cv2
-import numpy as np
 
 from minimax_h3_prompt import model_factory
 from minimax_h3_prompt.ref_segments import (
@@ -30,8 +36,6 @@ from minimax_h3_prompt.ref_segments import (
     read_segment_ledger,
 )
 from minimax_h3_prompt.tools import reference_auditor
-from minimax_h3_prompt.tools.frame_match import video_meta
-from minimax_h3_prompt.tools.preflight import EXPECTED_VIDEO_SIZE, H3_TIER_FRAMES
 from minimax_h3_prompt.ui import wizard
 
 TOPIC = "红裙女孩走进秋日庭院，把青铜钥匙交给蓝衫少年。"
@@ -139,24 +143,10 @@ def _cfg(tmp_path, **overrides):
     return SimpleNamespace(**base)
 
 
-def _make_video(path: Path, seconds: float, *, fps: int = 24) -> Path:
-    """写一段真视频：帧数按 H3 实测档位取（可证层按帧数表判档，96 帧的假 4s 落不进档位）。"""
-    frames = H3_TIER_FRAMES.get(int(round(seconds)), int(round(seconds * fps)))
-    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), fps,
-                             EXPECTED_VIDEO_SIZE)
-    assert writer.isOpened(), "测试环境缺 MJPG 编码器"
-    image = np.full((EXPECTED_VIDEO_SIZE[1], EXPECTED_VIDEO_SIZE[0], 3), 128, np.uint8)
-    for i in range(frames):
-        image[:] = 128 + (i % 8)
-        writer.write(image)
-    writer.release()
-    actual = video_meta(path).get("duration_s", 0.0)
-    assert abs(actual - frames / fps) < 0.05, f"测试视频时长不可控：{actual}"
-    return path
 
 
 def _run(tmp_path, monkeypatch, handbacks: list[str], *, verdicts: list[bool],
-         llm_reply: str = "", llm: object | None = None) -> tuple[list[str], int]:
+         llm: object | None = None) -> tuple[list[str], int]:
     """全程驱动：阶段 1 → 素材循环（四张全放弃）→ 阶段 2 → 逐段陪跑。"""
     _silence(monkeypatch)
     monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
@@ -194,10 +184,10 @@ def _segment_text(tmp_path, position: int) -> str:
 # AC1 / AC2 / AC8：并排展示、人下结论、遭遇落账
 # ---------------------------------------------------------------------------
 
-def test_reached_verdict_shows_both_ends_beside_their_frames(tmp_path, monkeypatch, capsys):
+def test_reached_verdict_shows_both_ends_beside_their_frames(tmp_path, monkeypatch, capsys, h3_tier_video):
     """段 1 交回后：首/末帧都剥出来、都读了图，并与声明的起止状态并排摆出。"""
-    first = _make_video(tmp_path / "seg1.avi", 10.0)
-    second = _make_video(tmp_path / "seg2.avi", 10.0)
+    first = h3_tier_video(10.0, "seg1.avi")
+    second = h3_tier_video(10.0, "seg2.avi")
     _, code = _run(tmp_path, monkeypatch, [str(first), str(second)],
                    verdicts=[True, True])
     assert code == 0
@@ -209,17 +199,18 @@ def test_reached_verdict_shows_both_ends_beside_their_frames(tmp_path, monkeypat
     assert _FIRST_READING in out and _LAST_READING in out
     assert out.index(SEG1_STATE) < out.index(_FIRST_READING)
 
-    # 首帧与末帧两张图都真剥出来了，且路径当面给出
+    # 首帧与末帧两张图都真剥出来了，且路径当面给出（文件名带本段尝试次数，见后文那条）
     frames = sorted((tmp_path / "sessions").rglob("segment-01-*.png"))
-    assert [f.name for f in frames] == ["segment-01-first.png", "segment-01-last.png"]
-    assert "segment-01-first.png" in out and "segment-01-last.png" in out
+    assert [f.name for f in frames] == ["segment-01-try1-first.png",
+                                        "segment-01-try1-last.png"]
+    assert "segment-01-try1-first.png" in out and "segment-01-try1-last.png" in out
 
     # 遭遇落账（AC8）：判定与出路逐次可查，且**不写**首尾帧链的 gate-log
     encounters = _ledger(tmp_path, SEGMENT_EVENT_ENCOUNTER)
     assert [(r["segment"], r["verdict"], r["outcome"], r["attempt"]) for r in encounters] == [
         (1, "reached", "continue", 1), (2, "reached", "continue", 1)]
-    assert encounters[0]["first_frame"].endswith("segment-01-first.png")
-    assert encounters[0]["last_frame"].endswith("segment-01-last.png")
+    assert encounters[0]["first_frame"].endswith("segment-01-try1-first.png")
+    assert encounters[0]["last_frame"].endswith("segment-01-try1-last.png")
     assert not list((tmp_path / "sessions").rglob("gate-log.jsonl")), \
         "多参的语义人裁不许写进首尾帧链的闸门遭遇账"
 
@@ -228,9 +219,9 @@ def test_reached_verdict_shows_both_ends_beside_their_frames(tmp_path, monkeypat
     assert [r["segment"] for r in outputs] == [1, 2]
 
 
-def test_not_reached_verdict_offers_five_outcomes_and_stops_by_default(tmp_path, monkeypatch, capsys):
+def test_not_reached_verdict_offers_five_outcomes_and_stops_by_default(tmp_path, monkeypatch, capsys, h3_tier_video):
     """判未达到：五档出路都摆出来，**回车＝停下**（默认不继续），且不落通过行。"""
-    first = _make_video(tmp_path / "seg1.avi", 10.0)
+    first = h3_tier_video(10.0, "seg1.avi")
     asked, code = _run(tmp_path, monkeypatch, [str(first), ""], verdicts=[False])
     assert code == 0
     out = capsys.readouterr().out
@@ -248,10 +239,10 @@ def test_not_reached_verdict_offers_five_outcomes_and_stops_by_default(tmp_path,
     assert SEG2_BODY not in out, "停下之后不许再出下一段"
 
 
-def test_explicit_accept_continues_without_changing_the_prompt(tmp_path, monkeypatch, capsys):
+def test_explicit_accept_continues_without_changing_the_prompt(tmp_path, monkeypatch, capsys, h3_tier_video):
     """「显式接受」＝明知未达到仍继续（AC2 系统只劝阻、不替人拍板），且词不动。"""
-    first = _make_video(tmp_path / "seg1.avi", 10.0)
-    second = _make_video(tmp_path / "seg2.avi", 10.0)
+    first = h3_tier_video(10.0, "seg1.avi")
+    second = h3_tier_video(10.0, "seg2.avi")
     _run(tmp_path, monkeypatch, [str(first), str(second)], verdicts=[True, True])
     before = _segment_text(tmp_path, 1)
     import shutil
@@ -273,10 +264,10 @@ def test_explicit_accept_continues_without_changing_the_prompt(tmp_path, monkeyp
 # AC4：五档里的「修改提示词」与「重跑本段」分得清
 # ---------------------------------------------------------------------------
 
-def test_rewrite_prompt_writes_feedback_into_the_segment_file(tmp_path, monkeypatch, capsys):
+def test_rewrite_prompt_writes_feedback_into_the_segment_file(tmp_path, monkeypatch, capsys, h3_tier_video):
     """「修改提示词」：收意见 → 只改画面正文 → 写回 segment-01.md 并重出给人看。"""
-    first = _make_video(tmp_path / "seg1.avi", 10.0)
-    second = _make_video(tmp_path / "seg2.avi", 10.0)
+    first = h3_tier_video(10.0, "seg1.avi")
+    second = h3_tier_video(10.0, "seg2.avi")
     old_text = None
     llm = _StubLLM("[Shot 1] A wide shot frames the girl lowering the jar onto the table.")
     asked: list[str] = []
@@ -322,10 +313,10 @@ def test_rewrite_prompt_writes_feedback_into_the_segment_file(tmp_path, monkeypa
         ("rewrite_prompt", 1), ("continue", 2), ("continue", 1)]
 
 
-def test_rerun_segment_keeps_the_prompt_untouched(tmp_path, monkeypatch, capsys):
+def test_rerun_segment_keeps_the_prompt_untouched(tmp_path, monkeypatch, capsys, h3_tier_video):
     """「重跑本段」＝**不改词**再掷：段文件逐字不变、不落改写账，只记一次遭遇。"""
-    first = _make_video(tmp_path / "seg1.avi", 10.0)
-    second = _make_video(tmp_path / "seg2.avi", 10.0)
+    first = h3_tier_video(10.0, "seg1.avi")
+    second = h3_tier_video(10.0, "seg2.avi")
     _run(tmp_path, monkeypatch, [str(first), str(second)], verdicts=[True, True])
     before = _segment_text(tmp_path, 1)
     import shutil
@@ -342,14 +333,108 @@ def test_rerun_segment_keeps_the_prompt_untouched(tmp_path, monkeypatch, capsys)
         ("rerun", 1), ("continue", 2), ("continue", 1)]
 
 
+def test_each_attempt_keeps_its_own_frames(tmp_path, monkeypatch, capsys, h3_tier_video):
+    """每轮遭遇的帧图**不许互相覆盖**（复审采纳项）。
+
+    账里记帧图路径的理由是「事后复跑那次判定的唯一入口」——定名覆盖（segment-01-first.png）
+    会让除最后一轮外的旧遭遇行指向**新一轮**的帧，那句话就不成立了；本仓对视频记 SHA256
+    正是为对抗这类可变引用，帧图同理。文件名带该段的尝试次数。
+    """
+    first = h3_tier_video(10.0, "seg1.avi")
+    second = h3_tier_video(10.0, "seg2.avi")
+    _, code = _run(tmp_path, monkeypatch, [str(first), "3", str(first), str(second)],
+                   verdicts=[False, True, True])
+    assert code == 0
+    names = sorted(p.name for p in (tmp_path / "sessions").rglob("segment-01-*.png"))
+    assert names == ["segment-01-try1-first.png", "segment-01-try1-last.png",
+                     "segment-01-try2-first.png", "segment-01-try2-last.png"]
+
+    encounters = _ledger(tmp_path, SEGMENT_EVENT_ENCOUNTER)
+    assert encounters[0]["first_frame"].endswith("segment-01-try1-first.png")
+    assert encounters[1]["first_frame"].endswith("segment-01-try2-first.png")
+    for row in encounters:
+        for key in ("first_frame", "last_frame"):
+            assert Path(row[key]).is_file(), f"{key} 指向的帧图不存在：{row[key]}"
+
+
+# ---------------------------------------------------------------------------
+# 复审采纳项：重过校验的口径必须与交付时同源
+# ---------------------------------------------------------------------------
+
+def _segment_for(plan, *, total_s: int, total_segments: int) -> str:
+    """按**交付口径**（``run_ref_segmentation`` 的 total_int）拼一段自包含六段式。"""
+    from minimax_h3_prompt.segment_prompts import (
+        assemble_ref_segment,
+        render_ref_segment_annotations,
+    )
+
+    return assemble_ref_segment(
+        subject_definitions="<Picture 1> is 红裙女孩.\n<Picture 2> is 青铜钥匙.",
+        retention_analysis="<Picture 1>: fully_preserved - ok.",
+        task_type="reference generation", summary_body="The girl sets the jar down.",
+        detailed_body="[Shot 1] A medium shot frames the girl raising the jar.",
+        overall_soundscape="Soft room tone continues.", non_diegetic_music="N/A",
+        annotations=render_ref_segment_annotations(
+            plan.index + 1, total_segments, plan.start_s, plan.end_s, total_s,
+            plan.start_state, plan.end_hook),
+    )
+
+
+def test_rewrite_revalidation_uses_the_delivery_total_not_the_last_plan_end(
+        tmp_path, monkeypatch, capsys, h3_tier_video):
+    """末段 end 可以略超全片时长（规划器留余量）——重过校验必须用**交付时那个** total。
+
+    ``segment_planner.parse_segment_plan``：「最后一段 end 可以略超 total（留余量）但不许
+    欠」，所以 ``plans[-1].end_s`` 未必等于注记句里的 "of the full Ns video"。拿它当
+    total，改写后的重过校验会算出另一个期望注记，打出**假的 SEGMENT_TIMELINE_MISSING**
+    ——而同一份文本在交付时按 total_int 校验是通过的（同一个校验器两处接线给了两个口径）。
+    """
+    from minimax_h3_prompt.ref_segments import RefSegmentResult
+    from minimax_h3_prompt.segment_planner import SegmentPlan
+
+    film_total, plans = 20, [
+        SegmentPlan(index=0, start_s=0, end_s=10, shots_in_segment=(1,),
+                    summary="起", start_state="the jar is held", end_hook="the jar is raised"),
+        # 11s 段落在 4–15s 档内，但 end=21 超出全片 20s（规划器允许的那点余量）
+        SegmentPlan(index=1, start_s=10, end_s=21, shots_in_segment=(2,),
+                    summary="收", start_state="the jar is raised", end_hook="the jar is set down"),
+    ]
+    texts = [_segment_for(p, total_s=film_total, total_segments=len(plans)) for p in plans]
+    seg_dir = tmp_path / "segments"
+    seg_dir.mkdir(parents=True)
+    paths = []
+    for position, text in enumerate(texts, 1):
+        path = seg_dir / f"segment-{position:02d}.md"
+        path.write_text(text, encoding="utf-8")
+        paths.append(path)
+    result = RefSegmentResult(plans=plans, texts=texts, segment_paths=paths,
+                              total_s=film_total)
+
+    v1 = h3_tier_video(10.0, "seg1.avi")
+    v1b = h3_tier_video(10.0, "seg1b.avi")
+    v2 = h3_tier_video(11.0, "seg2.avi")
+    _silence(monkeypatch)
+    monkeypatch.setattr(reference_auditor, "describe_image", _fake_describe_image)
+    monkeypatch.setattr(model_factory, "build_chat_model",
+                        lambda: _StubLLM("[Shot 1] The girl sets the jar down on the table."))
+    monkeypatch.setattr(wizard, "_confirm", _confirm_stub([False, True, True]))
+    _fake_inputs(monkeypatch, [str(v1), "2", "末态应该是罐子已经放下", str(v1b), str(v2)])
+
+    assert wizard._run_ref_segment_handoff(result, tmp_path) is True
+    out = capsys.readouterr().out
+    assert "SEGMENT_TIMELINE_MISSING" not in out, \
+        f"同一份文本交付时是过的，重过校验不许按另一个 total 判它缺注记：{out[-1500:]}"
+    assert "SEGMENT_STATE_MISSING" not in out
+
+
 # ---------------------------------------------------------------------------
 # AC5 / AC7：改写有牙——锁死那两句响错，交付前校验当面打
 # ---------------------------------------------------------------------------
 
-def test_tampering_with_the_locked_lines_keeps_the_old_prompt(tmp_path, monkeypatch, capsys):
+def test_tampering_with_the_locked_lines_keeps_the_old_prompt(tmp_path, monkeypatch, capsys, h3_tier_video):
     """模型顺手改了起止状态声明 → 响错、不采用这一轮、段文件保持原样（AC5）。"""
-    first = _make_video(tmp_path / "seg1.avi", 10.0)
-    second = _make_video(tmp_path / "seg2.avi", 10.0)
+    first = h3_tier_video(10.0, "seg1.avi")
+    second = h3_tier_video(10.0, "seg2.avi")
     _run(tmp_path, monkeypatch, [str(first), str(second)], verdicts=[True, True])
     before = _segment_text(tmp_path, 1)
     import shutil
@@ -371,10 +456,10 @@ def test_tampering_with_the_locked_lines_keeps_the_old_prompt(tmp_path, monkeypa
         "rewrite_prompt", "continue", "continue"]
 
 
-def test_rewritten_prompt_is_revalidated_and_problems_are_shown(tmp_path, monkeypatch, capsys):
+def test_rewritten_prompt_is_revalidated_and_problems_are_shown(tmp_path, monkeypatch, capsys, h3_tier_video):
     """改写后重过交付前校验：不合格**当面打出**（AC7），但不静默丢弃这一轮。"""
-    first = _make_video(tmp_path / "seg1.avi", 10.0)
-    second = _make_video(tmp_path / "seg2.avi", 10.0)
+    first = h3_tier_video(10.0, "seg1.avi")
+    second = h3_tier_video(10.0, "seg2.avi")
     # 指代前文 = 校验器 error 级（SEGMENT_ANAPHORA）：每段独立生成、模型无跨段记忆
     llm = _StubLLM("[Shot 1] As mentioned before, the girl lowers the jar.")
 

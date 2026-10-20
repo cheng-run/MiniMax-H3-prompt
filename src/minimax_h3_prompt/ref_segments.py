@@ -63,6 +63,12 @@ class RefSegmentResult:
 
     plans: list[SegmentPlan]
     texts: list[str]
+    # 交付时用的全片时长（＝ ``int(round(total_s))``）。**注记句与校验器同这个口径**，
+    # 别拿 ``plans[-1].end_s`` 代替：规划器允许末段 end 略超 total（留余量，见
+    # ``segment_planner.parse_segment_plan``），拿末段 end 当 total 会让「of the full
+    # Ns video」这句对不上，同一个校验器两处接线给出两个结论（复审实测，issue #56）。
+    # **不给默认值**：漏传就按 0 校验是静默错，宁可构造时就报缺参数。
+    total_s: int
     issues: list[list] = field(default_factory=list)
     segment_paths: list[Path] = field(default_factory=list)
     order_card_path: Path | None = None
@@ -357,15 +363,16 @@ def _append_row(path: Path, record: dict) -> None:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def read_segment_ledger(directory: str | Path, *, event: str | None = None) -> list[dict]:
+def read_segment_ledger(directory: str | Path, *, event: str | None) -> list[dict]:
     """读段产出账；文件不在＝空账，坏行**响**（ValueError）。
 
     坏行响不吞：追加账是「这段到底交回过什么」的凭据，静默跳过坏行等于进度缺页
     无人知（同 ``asset_loop.read_asset_rounds``）。
 
-    ``event`` 过滤是**取数的正经口**（issue #56）：账上并存 output/encounter/rewrite
-    三类行，要「哪几段过了」必须显式点名 ``event=output``；不给就返回全部行（看完整
-    因果链时用）。
+    ``event`` **必填、不给默认值**（复审采纳项）：账上并存 output/encounter/rewrite
+    三类行，要「哪几段过了」必须显式点名 ``event=SEGMENT_EVENT_OUTPUT``；想一次看完整
+    因果链时显式传 ``event=None``。危险的那条是默认值——留个「不给就返回全部」的默认，
+    将来 ``#58`` 的续跑只要漏写一次就把「改了一轮词」读成「这段过了」。
     """
     path = segment_ledger_path(directory)
     if not path.is_file():
@@ -610,7 +617,7 @@ def run_ref_segmentation(*, whole_prompt: str, total_s: float, out_dir: Path,
     card_path.write_text(render_ref_order_card(plans, segment_paths, total_int),
                          encoding="utf-8")
     return RefSegmentResult(
-        plans=list(plans), texts=texts, issues=issues,
+        plans=list(plans), texts=texts, total_s=total_int, issues=issues,
         segment_paths=segment_paths, order_card_path=card_path,
         plan_path=plan_path, used_fallback=used_fallback)
 
