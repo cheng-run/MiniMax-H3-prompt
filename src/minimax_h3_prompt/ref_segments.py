@@ -12,9 +12,12 @@
   ``rebase_ref_shot_blocks`` 切片重基，同样出自包含六段式。
 
 多参**没有桥接帧**（锚定由全片共享参考素材承担），所以陪跑里没有剥帧/锚帧，
-但**逐段陪跑与可证层闸门照走**（issue #55）：一次只出当前一段 → 交回本段输出视频
-→ 可证层硬阻断 → 落**段产出账**。问答节奏住在 ``ui.wizard``，本模块只放不碰终端的
-纯件（段展示块、段产出账读写）。拼接仍归用户——成片拼接是 issue #57 的事。
+但**逐段陪跑与两道闸照走**（issue #55/#56）：一次只出当前一段 → 交回本段输出视频
+→ **可证层**硬阻断（时长档/尺寸）→ **语义层**剥本段首/末帧读图、与 plan 声明的
+起止状态并排交人判 → 未达到给五档出路（含「修改提示词」：只动画面正文再掷）→
+落**段产出账**（一本账三类行，见 ``SEGMENT_EVENT_*``）。问答节奏住在 ``ui.wizard``，
+本模块只放不碰终端的纯件（段展示块、语义核验块、改写一轮、段产出账读写）。
+拼接仍归用户——成片拼接是 issue #57 的事。
 """
 from __future__ import annotations
 
@@ -29,10 +32,12 @@ from .segment_planner import SegmentPlan, pack_shots_into_segments, plan_segment
 from .segment_prompts import (
     _shot_blocks,
     assemble_ref_segment,
+    assert_locked_annotations_intact,
     normalize_ref_segment_output,
     rebase_ref_shot_blocks,
     render_ref_segment_annotations,
     rewrite_ref_segment_prompt,
+    split_ref_segment_detailed,
     split_task_type,
     validate_ref_segment,
     write_ref_segment_v2,
@@ -213,9 +218,20 @@ def render_ref_order_card(plans: list[SegmentPlan], segment_paths: list[Path],
 
 
 # 段产出账文件名（issue #55 AC5）。住 segments/ 与 plan.json、order-card.md、
-# gate-log.jsonl 同址——它是**逐段陪跑的进度**（一行＝一段已交回并通过），
-# 与闸门遭遇记录（gate-log）分家：那本记人的语义判定，这本记段的交接物。
+# gate-log.jsonl 同址——它是**逐段陪跑的进度**，与首尾帧链的闸门遭遇记录（gate-log）
+# 分家：那本记桥接链的锚帧人裁，这本记多参段自己的交接物、遭遇与改写轮次
+# （issue #56 AC8 明确「不写首尾帧链的闸门遭遇账」）。
 SEGMENT_LEDGER_FILENAME = "segment-ledger.jsonl"
+
+# 行类型判别字段（issue #56）。一本账装三类行，取数必须按 event 过滤：
+# - ``output``   一段已交回、可证层放行、且人在语义层判为继续/接受（#55 起）
+# - ``encounter``一次语义层遭遇：判定/出路/尝试次数/帧图（#56 AC8，每次遭遇都记）
+# - ``rewrite``  「修改提示词」的一轮：意见＋改写前后全文（#56 AC6）
+# 为什么不是三个文件：AC8/AC6 都点名「记入段产出账」，而「一段身上发生过什么」
+# 只有按段号顺序读同一本才看得出因果链（改词→重掷→又没达到→显式接受）。
+SEGMENT_EVENT_OUTPUT = "output"
+SEGMENT_EVENT_ENCOUNTER = "encounter"
+SEGMENT_EVENT_REWRITE = "rewrite"
 
 
 def _now() -> str:
@@ -236,19 +252,24 @@ def log_segment_output(
 ) -> Path:
     """追加一行段产出账（``<generation_dir>/segments/segment-ledger.jsonl``）。
 
-    一行＝一段**已交回并通过可证层**的产出（被拦下的段不落行——AC4「不落进度」，
-    行在不在就是「这段过没过」的判据）。拿它跳过已通过段的**续跑是 issue #58**，
-    本票只写不读（除测试外没有生产路径读它），别按「已经能续跑」去理解这本账。
+    一行＝一段**已交回并通过两道闸**的产出（可证层放行 ＋ 人在语义层判为继续/接受，
+    见 issue #56）：被拦下的段、以及判为「重跑本段/修改提示词/停下」的那几轮都不落
+    这一行——``event=output`` 的行在不在就是「这段过没过」的判据（**必须按 event 取数**，
+    账上还有 encounter/rewrite 两类行，见 ``SEGMENT_EVENT_*``）。拿它跳过已通过段的
+    **续跑是 issue #58**，本票只写不读（除测试外没有生产路径读它），别按「已经能续跑」
+    去理解这本账。
 
     记 **SHA256** 是为了对抗**文件名可变引用**：只记文件名的话，段视频换版/改名后
     旧产物永久不可复测且无处报错（素材台账同款理由）。摘要**在写入时现算**，不另收
     参数——由调用方传 sha 就多一个「传错了也没人知道」的口子。
 
-    ``verdict`` 也不收参数：它恒为 ``pass``，因为**行在＝可证层放行**（被拦下的段
-    压根不落行）。它留在行里是让账本自己说清这一列是什么，不是给调用方旋的旋钮。
+    ``verdict`` 也不收参数：它恒为 ``pass``，因为**行在＝两道闸都放行**。它留在行里是
+    让账本自己说清这一列是什么，不是给调用方旋的旋钮；语义层那些「没达到」的判定
+    走 ``log_segment_encounter``（那是另一类行）。
     """
     path = segment_ledger_path(directory)
     record = {
+        "event": SEGMENT_EVENT_OUTPUT,
         "segment": int(segment),
         "start_s": int(start_s),
         "end_s": int(end_s),
@@ -257,17 +278,94 @@ def log_segment_output(
         "verdict": "pass",
         "at": _now(),
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    _append_row(path, record)
     return path
 
 
-def read_segment_ledger(directory: str | Path) -> list[dict]:
+def log_segment_encounter(
+    directory: str | Path,
+    *,
+    segment: int,
+    verdict: str,
+    outcome: str,
+    attempt: int,
+    first_frame: str | Path | None = None,
+    last_frame: str | Path | None = None,
+) -> Path:
+    """追加一行**语义层遭遇**（issue #56 AC8）：段号 / 判定 / 出路 / 尝试次数 / 帧图。
+
+    「每次遭遇都记」而不是只记失败（同 gate-log 的理由）：将来若要给自动判据取阈值，
+    要的是「首末帧读图 ＋ 起止状态声明 ＋ 人的判定」这套**分离边界**——只留失败样本
+    会让边界偏斜。帧图路径是事后复跑那次判定的唯一入口，没有它攒下来的只是一堆
+    无法重放的结论。
+
+    ``verdict``/``outcome`` 是**人的**结论与选择，原样落盘、不做映射：出路集住在
+    ``ui.wizard``（问答节奏归它），本函数不复制一份会漂的字面表。**不写 gate-log**：
+    那是首尾帧链的锚帧人裁账，两本混在一起将来分不开（AC8 后半）。
+    """
+    path = segment_ledger_path(directory)
+    record = {
+        "event": SEGMENT_EVENT_ENCOUNTER,
+        "segment": int(segment),
+        "verdict": str(verdict),
+        "outcome": str(outcome),
+        "attempt": int(attempt),
+        "first_frame": str(first_frame) if first_frame else None,
+        "last_frame": str(last_frame) if last_frame else None,
+        "at": _now(),
+    }
+    _append_row(path, record)
+    return path
+
+
+def log_segment_rewrite_round(
+    directory: str | Path,
+    *,
+    segment: int,
+    feedback: str,
+    prompt_before: str,
+    prompt_after: str,
+    round_index: int | None = None,
+) -> Path:
+    """追加一行**改写轮次**（issue #56 AC6，形态照抄 ``asset-rounds.jsonl``）。
+
+    一行＝一轮的完整前后对照，只追加不改写——「哪一轮改了什么、谁要求的」事后逐行
+    可查。**不设硬上限**：一轮一轮地改是本票的正常节奏，卡上限只会逼人重跑分段规划
+    （那是另一条出路，代价高得多）。``round_index`` 缺省按该段已有轮次数自动续号
+    （跨调用不依赖内存计数，同 ``asset_loop.log_asset_round``）。
+    """
+    path = segment_ledger_path(directory)
+    existing = [row for row in read_segment_ledger(directory, event=SEGMENT_EVENT_REWRITE)
+                if int(row.get("segment", 0)) == int(segment)]
+    record = {
+        "event": SEGMENT_EVENT_REWRITE,
+        "segment": int(segment),
+        "round": int(round_index) if round_index is not None else len(existing) + 1,
+        "feedback": str(feedback),
+        "prompt_before": str(prompt_before),
+        "prompt_after": str(prompt_after),
+        "at": _now(),
+    }
+    _append_row(path, record)
+    return path
+
+
+def _append_row(path: Path, record: dict) -> None:
+    """追加一行 JSON（父目录按需建；追加式，绝不改写既有行）。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def read_segment_ledger(directory: str | Path, *, event: str | None = None) -> list[dict]:
     """读段产出账；文件不在＝空账，坏行**响**（ValueError）。
 
     坏行响不吞：追加账是「这段到底交回过什么」的凭据，静默跳过坏行等于进度缺页
     无人知（同 ``asset_loop.read_asset_rounds``）。
+
+    ``event`` 过滤是**取数的正经口**（issue #56）：账上并存 output/encounter/rewrite
+    三类行，要「哪几段过了」必须显式点名 ``event=output``；不给就返回全部行（看完整
+    因果链时用）。
     """
     path = segment_ledger_path(directory)
     if not path.is_file():
@@ -282,7 +380,8 @@ def read_segment_ledger(directory: str | Path) -> list[dict]:
             raise ValueError(f"段产出账第 {lineno} 行不是合法 JSON：{path}") from exc
         if not isinstance(record, dict):
             raise ValueError(f"段产出账第 {lineno} 行不是对象：{path}")
-        out.append(record)
+        if event is None or record.get("event") == event:
+            out.append(record)
     return out
 
 
@@ -300,6 +399,128 @@ def render_ref_segment_briefing(plan: SegmentPlan, position: int, total: int,
         f"（本段时长 {plan.duration_s}s）· 覆盖 Shot {shots}",
         f"提示词文件：{path}",
     ])
+
+
+def render_ref_segment_semantic_check(
+    *,
+    plan: SegmentPlan,
+    position: int,
+    total: int,
+    first_description: str | None,
+    last_description: str | None,
+    first_frame: str | Path | None,
+    last_frame: str | Path | None,
+) -> str:
+    """语义层核验块（issue #56 AC1）：本段起止状态声明与首/末帧实际画面**并排**。
+
+    为什么必须并排、且打在人做决定的那一刻：``start_state``/``end_hook`` 只在展示
+    提示词时出现过（比视频交回早十几分钟），剥帧当轮只看得见读图结果——人得在两个
+    时刻各记一半、再凭记忆判（桥接链的锚帧语义核验当初就是为这个理由建的）。所以
+    排版是判据的一部分：每端的「声明 → 实际画面 → 帧图」三行相邻，中间不插别的。
+
+    读图失败/没取到帧**说破**（"读图失败"／"未取得"）而不是留白：缺一半的并排看起来
+    像「没问题」，而事实是「量不出来」——本层由人下结论，人得知道眼前少的是什么。
+    """
+    def _row(value: str | None, missing: str) -> str:
+        return f"    {value if value else missing}"
+
+    return "\n".join([
+        f"[本段语义核验] 第 {position}/{total} 段"
+        f"（起止 {plan.start_s}s-{plan.end_s}s）",
+        "  本段声明的开场状态（plan.start_state）：",
+        _row(plan.start_state, "（本段没有留下开场状态声明）"),
+        "  首帧实际画面（读图结果）：",
+        _row(first_description, "（读图失败：没有可对照的画面描述）"),
+        f"  首帧图：{first_frame if first_frame else '（未取得）'}",
+        "  本段声明的结束状态（plan.end_hook）：",
+        _row(plan.end_hook, "（本段没有留下结束状态声明）"),
+        "  末帧实际画面（读图结果）：",
+        _row(last_description, "（读图失败：没有可对照的画面描述）"),
+        f"  末帧图：{last_frame if last_frame else '（未取得）'}",
+    ])
+
+
+# --- 「修改提示词」一轮（issue #56 AC4/AC5）---------------------------------
+# 请求块标题**只有这一处定义**（请求文本、假模型与断言三处各写一遍就是又一个会各自
+# 漂移的字面量，同 ``asset_loop.CURRENT_PROMPT_HEAD`` 的纪律）。
+REF_SEGMENT_BODY_HEAD = "【本段画面正文】"
+REF_SEGMENT_LOCKED_HEAD = "【锁死声明（逐字保留，且不许出现在你的输出里）】"
+REF_SEGMENT_FEEDBACK_HEAD = "【改写意见】"
+
+
+def build_ref_segment_revision_request(*, body: str, locked: str, feedback: str) -> str:
+    """「修改提示词」的请求文本（纯函数，返回字符串即契约）。
+
+    ``locked`` 从**段文件自己**取（``split_ref_segment_detailed``），不从 plan 重渲染：
+    「只动画面正文」的字面含义就是**其余一字不动**，包括那两句声明——交付时校验器已经
+    核过「声明与 plan 对得上」（``SEGMENT_TIMELINE_MISSING``/``SEGMENT_STATE_MISSING``），
+    改写这一轮再去重渲染，就成了顺手替用户「修」文件里的别的东西。
+
+    「只动正文、其余逐字保留」这条纪律是硬要求不是客套：提示词是逐轮小步改的，让模型
+    顺手「优化」没提到的镜头，跨段一致性就换来整篇漂移（同素材改写与修订基线那句
+    「未提到的部分原样保留」的用意）。
+    """
+    return (
+        "下面是一条 MiniMax H3 多参（ref2va）执行段的**画面正文**与它的**锁死声明**。\n"
+        "请按用户意见改写画面正文，仍然输出可直接喂给 H3 的正文片段（不要六段式各节标题、"
+        "不要解释、不要前后缀）。\n\n"
+        "纪律：\n"
+        "1. **只改用户意见点名的问题**；没提到的镜头逐字保留——提示词是逐轮小步改的，"
+        "全篇重写会把没提到的细节一并漂走。\n"
+        "2. **锁死声明不许动，也不许出现在你的输出里**：时间轴注记与起止状态声明由组装器"
+        "注入，它和相邻段的衔接咬死（相邻段的末态与下一段起始态是同一瞬间的同一画面），"
+        "改了它就要级联改下一段。你只能让正文**兑现**这两句声明，不能改声明本身。\n"
+        "3. 用户意见若与锁死声明冲突（例如要求改本段末态画面），照旧只改正文、声明原样"
+        "不动——声明写错属于计划错，不在这里改。\n"
+        "4. 正文时间基相对本段起点（00:00.000 ＝ 本段第一帧），严禁写进绝对片时；"
+        "仍从风格开场句写到最后一个镜头。\n\n"
+        f"{REF_SEGMENT_BODY_HEAD}\n{str(body).strip()}\n\n"
+        f"{REF_SEGMENT_LOCKED_HEAD}\n{str(locked).strip()}\n\n"
+        f"{REF_SEGMENT_FEEDBACK_HEAD}\n{str(feedback).strip()}"
+    )
+
+
+def revise_ref_segment_body(old_text: str, feedback: str, llm) -> str:
+    """按用户意见改写一段多参执行段的**画面正文**，返回整段新文本（issue #56 AC4）。
+
+    ``llm`` 由调用方注入（带 ``invoke(str)`` 接口，同 ``rewrite_asset_prompt`` 的口径），
+    测试可传 stub。
+
+    **只换正文**：定义块（subject_definitions/retention_analysis）、summary、两条音轨
+    与锁死声明都从原文本原样取回，改完由组装器重新拼——「只动画面正文」因此是代码性质，
+    不是服从性问题。
+
+    两条抛错（调用方据此保持原词，不采用这一轮）：
+    - 空产出：拼出来会是一段没有画面的提示词；
+    - 模型改动了锁死声明（``assert_locked_annotations_intact``）——静默放行等于让用户
+      拿着一份自相矛盾的提示词去生成，而语义层闸门正是拿那两句当对照物。
+    """
+    sections = split_ref_sections(old_text)
+    locked, body = split_ref_segment_detailed(sections.get("detailed_description", ""))
+    request = build_ref_segment_revision_request(body=body, locked=locked, feedback=feedback)
+    response = llm.invoke(request)
+    text = str(getattr(response, "content", response)).strip()
+    if not text:
+        raise ValueError("改写结果为空")
+    assert_locked_annotations_intact(text, locked)
+    # 模型照抄了一遍声明（无害，但同一句话出现两遍只会挤掉正文）：先剥首行注记，
+    # 再丢掉与锁定声明逐字相同的那一行——注记以组装器注入的那一份为准。
+    _duplicate, new_body = split_ref_segment_detailed(text)
+    new_body = "\n".join(
+        line for line in new_body.splitlines() if line.strip() != locked.strip()).strip()
+    if not new_body:
+        raise ValueError("改写结果为空（只剩锁死声明）")
+    task_type, summary_body = split_task_type(sections.get("summary", ""))
+    return assemble_ref_segment(
+        subject_definitions=sections.get("subject_definitions", ""),
+        retention_analysis=sections.get("retention_analysis", ""),
+        task_type=task_type or _task_type_of(sections),
+        summary_body=summary_body,
+        detailed_body=new_body,
+        overall_soundscape=sections.get("overall_soundscape", ""),
+        non_diegetic_music=sections.get("non_diegetic_music", ""),
+        annotations=locked,
+    )
 
 
 def run_ref_segmentation(*, whole_prompt: str, total_s: float, out_dir: Path,

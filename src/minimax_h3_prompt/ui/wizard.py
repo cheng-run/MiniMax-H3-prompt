@@ -2013,14 +2013,17 @@ def _deliver_ref_segments(state: dict, brief: Brief, prompt: str,
 
 
 def _run_ref_segment_handoff(result: RefSegmentResult, generation_dir: Path) -> bool:
-    """多参逐段陪跑（issue #55）：一次只出当前一段 → 交回本段输出视频 → 可证层硬阻断 → 落段产出账。
+    """多参逐段陪跑（issue #55/#56）：一次只出当前一段 → 交回本段输出视频 → **可证层**硬阻断
+    → **语义层**剥首/末帧读图并排人判 → 五档出路 → 落段产出账。
 
-    节奏与素材循环（#50）同形：系统只维持一个「当前待办」，交回并验收通过才出下一段；
-    与首尾帧链的陪跑共用**可证层**判据（``_gate_segment_handoff``），不共用**语义层**
-    ——多参没有桥接帧，语义人裁与五档出路是 issue #56 的事。
+    节奏与素材循环（#50）同形：系统只维持一个「当前待办」，交回并验收通过才出下一段。
+    两道闸的边界不同（#56 的裁定）：**可证层**（``_gate_segment_handoff``）判得出来，
+    不合格硬阻断；**语义层**判不出来（「画面是否达到声明的起止状态」是启发式），
+    所以只劝阻、由人下结论，人可显式覆盖。
 
-    「落进度」在这里就是落段产出账那一行：被拦下的段**不落行**，于是账上有什么＝
-    哪几段真的交回并通过了（拿它跳过已通过段的续跑见 issue #58，本票只写不读）。
+    「落进度」在这里就是落段产出账那一行通过行：被拦下的段、以及判为「重跑本段/修改
+    提示词/停下」的那几轮都**不落**（``event=output`` 的行在不在＝这段过没过），但每次
+    遭遇都落一行 ``event=encounter``（判定/出路/尝试次数），改写轮次落 ``event=rewrite``。
 
     **闸门的牙齿有边界**：可证层按实测帧数档表判（``H3_TIER_FRAMES`` 只有 4/5/6s），
     所以「用错了时长档」在**交回的那一段落进已知档**时才报 error；计划与交回**双双**
@@ -2033,13 +2036,20 @@ def _run_ref_segment_handoff(result: RefSegmentResult, generation_dir: Path) -> 
 
     plans = list(result.plans)
     total = len(plans)
+    # 全片时长取自 plan 末段的 end_s：注记句（"of the full Ns video"）当初就是按
+    # 这批 plan 注入的，拿别处的数字重渲染会让锁定声明与 plan.json 失同步。
+    total_s = int(plans[-1].end_s) if plans else 0
     for position, plan in enumerate(plans, 1):
         segment_file = result.segment_paths[position - 1]
+        # 逐段当前文本：改写一轮就地替换它（下一轮改写以新词为底），不回写 result.texts
+        # ——那个字段是**交付时**那一份，改写后的事实以段文件与段产出账为准。
+        text = result.texts[position - 1]
         print("\n" + "=" * 60)
         print(render_ref_segment_briefing(plan, position, total, segment_file))
         print("=" * 60)
-        print(result.texts[position - 1])
+        print(text)
         print("-" * 60)
+        attempt = 0
         while True:
             raw = _clean_path_input(_prompt(
                 f"第 {position}/{total} 段输出视频路径（必填；回车=停下）："))
@@ -2060,13 +2070,166 @@ def _run_ref_segment_handoff(result: RefSegmentResult, generation_dir: Path) -> 
             if _gate_segment_handoff(str(video), float(plan.duration_s)):
                 print("→ 请重新交回**本段**的输出视频（回车=停下）。", flush=True)
                 continue
-            log_segment_output(
-                generation_dir, segment=position,
-                start_s=plan.start_s, end_s=plan.end_s, video_path=video)
-            print(f"[完成] 第 {position}/{total} 段已交回并通过可证层校验，已记入段产出账。")
-            break
-    print(f"\n✓ 全部 {total} 段已交回并通过可证层校验。")
+            attempt += 1
+            first_frame, last_frame, first_desc, last_desc = _capture_ref_segment_frames(
+                str(video), position, generation_dir)
+            outcome = _judge_ref_segment_semantics(
+                generation_dir=generation_dir, plan=plan, position=position, total=total,
+                first_description=first_desc, last_description=last_desc,
+                first_frame=first_frame, last_frame=last_frame, attempt=attempt)
+            if outcome in (GATE_CONTINUE, GATE_ACCEPT):
+                log_segment_output(
+                    generation_dir, segment=position,
+                    start_s=plan.start_s, end_s=plan.end_s, video_path=video)
+                print(f"[完成] 第 {position}/{total} 段已交回并通过可证层与语义层校验，"
+                      "已记入段产出账。")
+                break
+            if outcome == GATE_REWORD:
+                revised = _revise_ref_segment_round(
+                    text, position=position, total=total, plan=plan, total_s=total_s,
+                    segment_file=segment_file, generation_dir=generation_dir)
+                if revised is not None:
+                    text = revised
+                # 取消/失败都回交回口：词没动，用户可重交或重选出路
+                continue
+            if outcome == GATE_RERUN:
+                print(f"→ 重跑本段（不改词）：回 ComfyUI 用**原提示词**重新生成"
+                      f"第 {position}/{total} 段，然后把**新的**输出视频路径交上来。",
+                      flush=True)
+                continue
+            # GATE_STOP：默认出路。停下不是失败——已通过的段留在账上，续跑是 #58 的事。
+            print(f"\n⚠ 第 {position}/{total} 段停在语义层：这一段不落账，"
+                  "下一段的提示词也不出。已交回并通过的段留在段产出账里。", flush=True)
+            return False
+    print(f"\n✓ 全部 {total} 段已交回并通过可证层与语义层校验。")
     return True
+
+
+def _capture_ref_segment_frames(video_path: str, position: int, generation_dir: Path,
+                                ) -> tuple[Path | None, Path | None, str | None, str | None]:
+    """剥本段**首帧与末帧**并读图（issue #56 AC1）。
+
+    与桥接链的 ``_capture_bridge_frame`` 差别在取哪一帧：多参段没有「下一段的首帧」
+    这回事，核的是**本段自己的开场与收尾**，所以首帧取 0.00s 那一帧（不做锐度优选）。
+
+    返回 ``(首帧图, 末帧图, 首帧读图, 末帧读图)``。剥帧/读图任一步失败都只警告降级：
+    **绝不伪造读图记录**，也绝不中断人工陪跑——语义核验照旧摆出来，缺的那一半由
+    ``render_ref_segment_semantic_check`` 说破（缺一半的并排看起来像「没问题」）。
+    """
+    from ..tools.frame_auditor import (
+        describe_segment_frame,
+        extract_first_frame,
+        extract_last_frame,
+    )
+
+    frames: list[Path | None] = []
+    descriptions: list[str | None] = []
+    for role, label, extract in (("first", "首帧", extract_first_frame),
+                                 ("last", "末帧", extract_last_frame)):
+        target = (Path(generation_dir) / "segments" / "frames"
+                  / f"segment-{position:02d}-{role}.png")
+        try:
+            frame = extract(Path(video_path), target)
+        except Exception as exc:  # noqa: BLE001 - 剥帧失败不阻塞人工流程
+            print(f"[警告] 剥本段{label}失败（{exc}）：本次没有取到帧，绝不伪造读图记录"
+                  "（语义核验照旧摆出来，缺的那一半会说破）。")
+            frames.append(None)
+            descriptions.append(None)
+            continue
+        print(f"[本段帧] ✓ 已剥出本段{label}：{frame}")
+        with _progress_scope(f"正在读取本段{label}实际画面……"):
+            descriptions.append(describe_segment_frame(frame, role))
+        frames.append(frame)
+    return frames[0], frames[1], descriptions[0], descriptions[1]
+
+
+def _judge_ref_segment_semantics(*, generation_dir: Path, plan, position: int, total: int,
+                                 first_description: str | None, last_description: str | None,
+                                 first_frame: Path | None, last_frame: Path | None,
+                                 attempt: int) -> str:
+    """多参语义层主判定（issue #56）：把「本段声明的起止状态」与「首/末帧实际画面」并排摆给人判。
+
+    这一层存在的理由与桥接链的锚帧语义核验同源：证据曾经没在决策时刻被摆到一起——
+    ``start_state``/``end_hook`` 只在展示提示词时出现过（比视频交回早十几分钟），剥帧
+    当轮只打印读图结果，人得在两个时刻各记一半再凭记忆判。所以这里**并排**打，且打在
+    人做决定的那一刻。
+
+    **系统只劝阻、不硬阻断**（AC2）：画面是否「达到」那个状态是启发式，没有可靠的确定性
+    判据，故结论由人下；判不合格只给五档出路（默认停下），其余全是显式覆盖。
+
+    返回值是出路之一；**每次遭遇都落一行账**（``event=encounter``，含判定/出路/尝试次数
+    ／帧图路径），但**不写**首尾帧链的 gate-log——两本账混在一起，将来给自动判据取阈值
+    时分不开（AC8）。
+    """
+    from ..ref_segments import log_segment_encounter, render_ref_segment_semantic_check
+
+    print("\n" + "-" * 60)
+    print(render_ref_segment_semantic_check(
+        plan=plan, position=position, total=total,
+        first_description=first_description, last_description=last_description,
+        first_frame=first_frame, last_frame=last_frame))
+    print("-" * 60)
+
+    reached = _confirm("首帧与末帧画面达到上面声明的起止状态了吗？", default=True)
+    outcome = GATE_CONTINUE if reached else _choose_ref_segment_outcome(
+        attempt, position=position, total=total)
+    log_segment_encounter(
+        generation_dir, segment=position,
+        verdict="reached" if reached else "not_reached", outcome=outcome,
+        attempt=attempt, first_frame=first_frame, last_frame=last_frame)
+    return outcome
+
+
+def _revise_ref_segment_round(text: str, *, position: int, total: int, plan,
+                              total_s: float, segment_file: Path,
+                              generation_dir: Path) -> str | None:
+    """「修改提示词」一轮（issue #56 AC4/AC6/AC7）：问意见 → 只改画面正文 → 落盘留痕。
+
+    与「重跑本段」的分界：这一档**动词**（把人的意见写回本段提示词再掷），那一档不改词。
+    空意见＝取消、改写失败（含模型动了锁死声明）＝不采用——两种情况都返回 None 且**词
+    保持原样**，用户留在出路菜单里重选（静默采用半成品等于让人拿着自相矛盾的提示词去生成）。
+
+    改写后**重过交付前校验**：LLM 动过的文本没理由比首次出词更可信。不合格**当面打出**
+    但仍采用——用户的意见是他自己下的，产物交付、问题当面说（同 ``format_ref_segment_report``
+    的纪律）；校验能拦的那类（模型动了锁死声明）在 ``revise_ref_segment_body`` 里已经拦下。
+
+    定义块在改写里逐字取回（只动正文），交付时已按登记素材校验过 ``SEGMENT_DEFS_INCOMPLETE``，
+    所以这里重过的是**正文相关**的那几条（指代前文/时间戳/快机位/对齐行/注记与状态句在位）。
+    """
+    from ..model_factory import build_chat_model
+    from ..ref_segments import log_segment_rewrite_round, revise_ref_segment_body
+    from ..segment_prompts import validate_ref_segment
+    from ..tools.h3_validator import format_issues
+
+    feedback = _prompt(
+        "改写意见（想怎么改，如「末态应该是罐子已经放下」；回车=取消改写）：").strip()
+    if not feedback:
+        print("已取消改写（没给意见，提示词不动）。")
+        return None
+    try:
+        new_text = revise_ref_segment_body(text, feedback, build_chat_model())
+    except Exception as exc:  # noqa: BLE001 — 改写失败要响但不许裸崩：词不动、回菜单再定
+        print(f"[错误] 改写失败：{exc}；本段提示词保持原样（可重选出路）。")
+        return None
+    issues = validate_ref_segment(
+        new_text, duration=plan.duration_s, segment_number=position,
+        total_segments=total, start_s=plan.start_s, total_s=total_s)
+    errors = [issue for issue in issues if getattr(issue, "severity", "") == "error"]
+
+    segment_file.write_text(new_text, encoding="utf-8")
+    log_segment_rewrite_round(
+        generation_dir, segment=position, feedback=feedback,
+        prompt_before=text, prompt_after=new_text)
+    print(f"\n[改写] 第 {position}/{total} 段提示词已改写并写回 {segment_file}"
+          "（本轮前后全文已记入段产出账）。请用**新提示词**重新生成，"
+          "然后把新的输出视频路径交上来。")
+    print("-" * 60)
+    print(new_text)
+    print("-" * 60)
+    if errors:
+        print(f"[提醒] 改写后的本段提示词有 {len(errors)} 项交付前校验未过：")
+        print(format_issues(errors))
+    return new_text
 
 
 def _deliver_injection_card(generation_dir: Path, brief: Brief) -> None:
@@ -2522,12 +2685,19 @@ def _gate_segment_handoff(video_path: str, expected_seconds: float | None) -> li
 
 # 闸门遭遇的判定（#14 动作集）。这些字面值会写进 segments/gate-log.jsonl，是将来给
 # 自动判据（#15）校准阈值**唯一**的素材来源，所以不许悄悄改含义。
+# 多参路线（#56）复用其中四个（continue/accept/rerun/stop）记进**段产出账**——
+# 同一套字面值、两本账（gate-log 是首尾帧链的锚帧人裁，段产出账是多参段自己的遭遇）；
+# 两条路线的「继续/显式接受/重跑本段/停下」是同一个意思，再造一套同义字面值只会让
+# 将来合并样本时对不上。
 GATE_CONTINUE = "continue"                  # 人判：尾帧画面达到了上一段的末态
 GATE_ACCEPT = "accept"                      # 明知未达到，显式覆盖「接受并继续」
 GATE_RERUN = "rerun"                        # 重跑本段（回 ComfyUI 重生成，再交一次视频）
 GATE_MANUAL_FRAME = "manual_frame"          # 手工换帧（换一张尾帧图，仍在桥接链上）
 GATE_KEYFRAME_RESTART = "keyframe_restart"  # 改用关键帧图另起（放弃桥接链；#10 的 B，只作兜底）
 GATE_STOP = "stop"                          # 停下（默认出路）
+# 多参专有（#56 AC4）：把用户意见写回本段提示词再掷——对位素材循环的「改词再掷」。
+# 首尾帧链没有这一档（它的偏差是「下游锚帧」问题，不是「这段提示词写错了」）。
+GATE_REWORD = "rewrite_prompt"
 
 _OUTCOME_LABELS = {
     GATE_CONTINUE: "画面达到末态，继续",
@@ -2536,6 +2706,18 @@ _OUTCOME_LABELS = {
     GATE_MANUAL_FRAME: "手工换帧",
     GATE_KEYFRAME_RESTART: "改用关键帧图另起",
     GATE_STOP: "停下（默认）",
+}
+
+# 多参语义层的五档出路（#56 AC3）。**菜单文案与取值映射同住这一处**：两处各写一遍
+# 就是又一个会各自漂移的字面量，而这里漂了没人看得出（选项错位照样能跑）。
+# 顺序＝菜单顺序：1 是默认（停下），其余全是显式覆盖。
+_REF_OUTCOME_ORDER = (GATE_STOP, GATE_REWORD, GATE_RERUN, GATE_CONTINUE, GATE_ACCEPT)
+_REF_OUTCOME_LABELS = {
+    GATE_STOP: "停下（默认）——回 ComfyUI 重做本段，改好再来",
+    GATE_REWORD: "修改提示词——把你的意见写回本段提示词（只动画面正文），再掷一次",
+    GATE_RERUN: "重跑本段——不改词，用原提示词重新生成，再交一次视频",
+    GATE_CONTINUE: "继续——重掷后已达标（我改判它达到了）",
+    GATE_ACCEPT: "显式接受——明知没达到仍继续（会记进段产出账）",
 }
 
 
@@ -2650,6 +2832,39 @@ def _choose_gate_outcome(attempt: int, *, last_segment: bool = False) -> str:
         print(f"  ⚠ 同一段已被拦下 {attempt} 次：末段没有下游锚可换，"
               "这里只能整段重做或接受现状（换一段收尾属于整片级重做，不在本闸门范围内）。")
     print("!" * 60)
+    while True:
+        raw = _prompt("选择出路（回车=1 停下）：").strip()
+        if raw in mapping:
+            return mapping[raw]
+        print("无效选项，重输。")
+
+
+def _choose_ref_segment_outcome(attempt: int, *, position: int, total: int) -> str:
+    """多参段判为「未达到」时的五档出路（issue #56 AC3）。默认**停下**，其余都是显式覆盖。
+
+    与首尾帧链的 ``_choose_gate_outcome`` 差在「换锚帧」那两档：多参没有帧槽可换（锚定
+    由全片共享的参考素材承担，ADR 0011），取而代之的是**改词再掷**（``GATE_REWORD``）
+    ——多参段的偏差通常是「这段提示词没写对」，桥接链的偏差是「下游锚帧不对」。
+
+    「继续」与「显式接受」都继续，但**记的不是同一件事**：前者是人改判「它其实达到了」
+    （verdict=reached），后者是明知没达到仍继续（verdict=not_reached）。合并成一档，
+    将来给自动判据取阈值时就分不开「判据误报」与「人故意放行」。
+    """
+    print("\n" + "!" * 60)
+    print("[劝阻] 本段首/末帧画面没有达到上面声明的起止状态——默认**不继续**。")
+    print("  多参段间没有桥接帧：这一段的偏差不会被下一段继承（锚定靠全片共享的参考素材），")
+    print("  但拼接之后它就是成片里的一段，偏差留在成片里。")
+    print("  出路：")
+    for index, outcome in enumerate(_REF_OUTCOME_ORDER, 1):
+        print(f"    {index}. {_REF_OUTCOME_LABELS[outcome]}")
+    print("  注：「修改提示词」只动画面正文，时间轴注记与起止状态声明**锁死**——")
+    print("      那两句写错属于「计划错了」，走「停下」重跑分段规划。")
+    if attempt >= 2:
+        print(f"  ⚠ 第 {position}/{total} 段已被拦下 {attempt} 次：反复对不上时考虑停下"
+              "重跑分段规划，或显式接受这一段的现状。")
+    print("!" * 60)
+    mapping = {str(index): outcome for index, outcome in enumerate(_REF_OUTCOME_ORDER, 1)}
+    mapping[""] = GATE_STOP  # 回车＝默认＝停下（不继续）
     while True:
         raw = _prompt("选择出路（回车=1 停下）：").strip()
         if raw in mapping:

@@ -367,3 +367,147 @@ def test_segment_briefing_carries_window_and_duration(tmp_path):
     assert "第 2/3 段" in block
     assert "起止 12s-22s" in block and "本段时长 10s" in block
     assert "segment-02.md" in block
+
+
+# ---------------------------------------------------------------------------
+# 5. 语义层遭遇与改写轮次（issue #56 AC6/AC8）：同一本段产出账，按 event 判别
+# ---------------------------------------------------------------------------
+
+def test_segment_ledger_carries_encounter_and_rewrite_rows(tmp_path):
+    """一本账三类行（event=output/encounter/rewrite），互不覆盖、可各自取数。
+
+    AC8 要的是「每次遭遇（段号/判定/出路/尝试次数）记入段产出账」、AC6 要的是
+    「每轮改写落一行（含改写前后全文）」——两样都不是通过行，所以账上必须有判别
+    字段：``#58`` 的续跑要按 ``event=output`` 取「哪几段过了」，不判别就会把
+    「改了一轮词」当成「这段过了」。
+    """
+    from minimax_h3_prompt.ref_segments import (
+        SEGMENT_EVENT_ENCOUNTER,
+        SEGMENT_EVENT_OUTPUT,
+        SEGMENT_EVENT_REWRITE,
+        log_segment_encounter,
+        log_segment_rewrite_round,
+    )
+
+    video = tmp_path / "seg-01.mp4"
+    video.write_bytes(b"segment-one-video")
+    log_segment_output(tmp_path, segment=1, start_s=0, end_s=12, video_path=video)
+    log_segment_encounter(
+        tmp_path, segment=1, verdict="not_reached", outcome="rewrite_prompt", attempt=2,
+        first_frame=tmp_path / "segments" / "frames" / "segment-01-first.png",
+        last_frame=tmp_path / "segments" / "frames" / "segment-01-last.png")
+    log_segment_rewrite_round(
+        tmp_path, segment=1, feedback="末态应该是罐子已经放下",
+        prompt_before="OLD BODY", prompt_after="NEW BODY")
+
+    rows = read_segment_ledger(tmp_path)
+    assert [r["event"] for r in rows] == [
+        SEGMENT_EVENT_OUTPUT, SEGMENT_EVENT_ENCOUNTER, SEGMENT_EVENT_REWRITE]
+
+    encounter = rows[1]
+    assert (encounter["segment"], encounter["verdict"], encounter["outcome"],
+            encounter["attempt"]) == (1, "not_reached", "rewrite_prompt", 2)
+    # 帧图路径同 gate-log 的理由：它是「事后复跑那次判定」的唯一入口
+    assert encounter["first_frame"].endswith("segment-01-first.png")
+    assert encounter["last_frame"].endswith("segment-01-last.png")
+    assert encounter["at"]
+
+    rewrite = rows[2]
+    assert rewrite["round"] == 1
+    assert rewrite["feedback"] == "末态应该是罐子已经放下"
+    assert rewrite["prompt_before"] == "OLD BODY" and rewrite["prompt_after"] == "NEW BODY"
+    assert rewrite["at"]
+
+    # 取数口：按 event 过滤（#58 续跑据此认「哪几段过了」）
+    assert [r["segment"] for r in read_segment_ledger(tmp_path, event=SEGMENT_EVENT_OUTPUT)] == [1]
+    assert [r["segment"] for r in read_segment_ledger(tmp_path, event=SEGMENT_EVENT_REWRITE)] == [1]
+    assert read_segment_ledger(tmp_path, event="nope") == []
+
+
+def test_segment_ledger_round_index_continues_across_calls(tmp_path):
+    """改写轮次不设硬上限，序号按该段已有轮次自动续（AC6；跨调用不靠内存计数）。"""
+    from minimax_h3_prompt.ref_segments import log_segment_rewrite_round
+
+    for feedback in ("先改这里", "再改那里"):
+        log_segment_rewrite_round(tmp_path, segment=2, feedback=feedback,
+                                  prompt_before="A", prompt_after="B")
+    from minimax_h3_prompt.ref_segments import SEGMENT_EVENT_REWRITE
+
+    rounds = [r["round"] for r in read_segment_ledger(tmp_path, event=SEGMENT_EVENT_REWRITE)]
+    assert rounds == [1, 2]
+
+
+def test_segment_encounter_never_touches_the_bridge_gate_log(tmp_path):
+    """AC8 后半：遭遇进段产出账，**不写**首尾帧链的 gate-log.jsonl。
+
+    两本账混在一起，将来给自动判据取阈值时就分不开「多参的语义人裁」与「桥接链的
+    锚帧人裁」——判定物、参照物、出路集都不是同一套。
+    """
+    from minimax_h3_prompt.ref_segments import log_segment_encounter
+
+    log_segment_encounter(tmp_path, segment=1, verdict="reached", outcome="continue",
+                          attempt=1, first_frame=None, last_frame=None)
+    assert not (tmp_path / "segments" / "gate-log.jsonl").exists()
+    assert (tmp_path / "segments" / SEGMENT_LEDGER_FILENAME).is_file()
+
+
+# ---------------------------------------------------------------------------
+# 6. 语义层核验块（issue #56 AC1）：声明与首/末帧实际画面**并排**
+# ---------------------------------------------------------------------------
+
+def _semantic_plan():
+    from minimax_h3_prompt.segment_planner import SegmentPlan
+
+    return SegmentPlan(
+        index=0, start_s=0, end_s=10, shots_in_segment=(1, 2),
+        summary="女孩把罐子放下", start_state="the jar is held in her right hand",
+        end_hook="the jar rests on the wooden table")
+
+
+def test_semantic_check_puts_each_declaration_beside_its_frame_reading(tmp_path):
+    """两端的「声明 → 实际画面」各自并排（AC1）。
+
+    这一层存在的理由与桥接链的锚帧语义核验同源：证据曾经没在决策时刻被摆到一起——
+    ``start_state``/``end_hook`` 只在展示提示词时打印（比视频交回早十几分钟），剥帧
+    当轮只打印读图结果，人得在两个时刻各记一半再凭记忆判。所以判据是**相邻且有序**，
+    不是「都出现了」。
+    """
+    from minimax_h3_prompt.ref_segments import render_ref_segment_semantic_check
+
+    first = tmp_path / "segments" / "frames" / "segment-01-first.png"
+    last = tmp_path / "segments" / "frames" / "segment-01-last.png"
+    block = render_ref_segment_semantic_check(
+        plan=_semantic_plan(), position=1, total=2,
+        first_description="画面里女孩右手举着陶罐", last_description="陶罐已落在木桌上",
+        first_frame=first, last_frame=last)
+
+    assert "第 1/2 段" in block
+    assert "the jar is held in her right hand" in block
+    assert "the jar rests on the wooden table" in block
+    assert "画面里女孩右手举着陶罐" in block
+    assert "陶罐已落在木桌上" in block
+    assert str(first) in block and str(last) in block
+
+    # 并排：每端的读图结果紧跟它自己的声明（声明在上、实际画面在下）
+    assert block.index("the jar is held in her right hand") < block.index("画面里女孩右手举着陶罐")
+    assert block.index("画面里女孩右手举着陶罐") < block.index("the jar rests on the wooden table")
+    assert block.index("the jar rests on the wooden table") < block.index("陶罐已落在木桌上")
+
+
+def test_semantic_check_says_so_when_a_reading_is_missing(tmp_path):
+    """读图失败/没取到帧时**说破**，不静默留白（否则「并排」缺了一半没人知道）。
+
+    缺了照样摆出来给人判：读图失败是「量不出来」，不是「画面不合格」——不许拿它
+    当自动判据，也不许因此跳过这一层。
+    """
+    from minimax_h3_prompt.ref_segments import render_ref_segment_semantic_check
+
+    block = render_ref_segment_semantic_check(
+        plan=_semantic_plan(), position=1, total=2,
+        first_description=None, last_description="陶罐已落在木桌上",
+        first_frame=None, last_frame=tmp_path / "last.png")
+    assert "读图失败" in block
+    assert "未取得" in block
+    # 声明仍在（对照物不能因为读图失败就消失）
+    assert "the jar is held in her right hand" in block
+    assert "the jar rests on the wooden table" in block

@@ -25,6 +25,7 @@ from minimax_h3_prompt.ref_segments import (
     SEGMENT_LEDGER_FILENAME,
     read_segment_ledger,
 )
+from minimax_h3_prompt.tools import reference_auditor
 from minimax_h3_prompt.tools.frame_match import video_meta
 from minimax_h3_prompt.tools.preflight import EXPECTED_VIDEO_SIZE, H3_TIER_FRAMES
 from minimax_h3_prompt.ui import wizard
@@ -57,6 +58,12 @@ _SIX_SECTION_PROMPT = (
 def _silence(monkeypatch) -> None:
     monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
     monkeypatch.setattr(wizard.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    # 读图是**网络调用**（qwen3.7-plus），必须打桩（同「会真建 LLM 客户端的用例一律打桩」
+    # 的纪律）：不打桩时本机没 key 会逐帧等到超时（#56 实测这个文件从 80s 涨到 145s，
+    # 全量里看着像卡住），有 key 时又把用例结论绑到真模型上。语义层缺读图结果的诚实
+    # 降级另有专门用例（test_ref_segment_frames.py）。
+    monkeypatch.setattr(reference_auditor, "describe_image",
+                        lambda *a, **k: "桩：本段首/末帧的实际画面")
 
 
 def _fake_inputs(monkeypatch, inputs: list[str]) -> list[str]:
@@ -72,7 +79,15 @@ def _fake_inputs(monkeypatch, inputs: list[str]) -> list[str]:
 
 
 def _confirm_continue_only(text: str, default: bool = True) -> bool:
-    """确认桩：只有「继续出提示词」答是，其余（素材视频/音频追加等）一律跳过。"""
+    """确认桩：只有「继续出提示词」答是，其余（素材视频/音频追加等）一律跳过。
+
+    **语义层那句（问「达到」）答是**（issue #56 起每段交回后多一道人判）：本文件测的是
+    **可证层**与段产出账（#55 的 AC），语义层的五档出路与改写轮次在
+    ``test_wizard_ref_semantics.py`` 里测——这里一律判「达到」，让可证层的用例只受
+    可证层影响（否则每条都要多喂一个菜单输入，测的东西就混了）。
+    """
+    if "达到" in text:
+        return True
     return "继续" in text
 
 
@@ -145,6 +160,17 @@ def _generation_dir(tmp_path) -> Path:
     return next((tmp_path / "sessions").rglob("session-state.json")).parent
 
 
+def _output_rows(tmp_path) -> list[dict]:
+    """账上的**通过行**（``event=output``）。
+
+    #56 起同一本账还装 encounter/rewrite 两类行（语义层遭遇与改写轮次），所以「哪几段
+    过了」必须按 event 取数——不判别就会把「改了一轮词」读成「这段过了」。
+    """
+    from minimax_h3_prompt.ref_segments import SEGMENT_EVENT_OUTPUT
+
+    return read_segment_ledger(_generation_dir(tmp_path), event=SEGMENT_EVENT_OUTPUT)
+
+
 def _whole_prompt_text(tmp_path) -> str:
     return next((tmp_path / "sessions").rglob("video-prompt.md")).read_text(encoding="utf-8")
 
@@ -177,7 +203,7 @@ def test_only_current_segment_is_shown_and_next_comes_after_accept(tmp_path, mon
     assert "第 2/2 段 · 起止 10s-20s（本段时长 10s）" in out
 
     # 一次只维持一个当前待办：段 2 的词出现在段 1 通过之后
-    assert out.index(SEG2_BODY) > out.index("第 1/2 段已交回并通过可证层校验")
+    assert out.index(SEG2_BODY) > out.index("第 1/2 段已交回并通过可证层与语义层校验")
     assert out.index(SEG1_BODY) < out.index(SEG2_BODY)
 
 
@@ -191,7 +217,7 @@ def test_ledger_records_each_segment_with_path_and_sha(tmp_path, monkeypatch, ca
     _, code = _run(tmp_path, monkeypatch, [str(first), str(second)])
     assert code == 0
 
-    rows = read_segment_ledger(_generation_dir(tmp_path))
+    rows = _output_rows(tmp_path)
     assert [r["segment"] for r in rows] == [1, 2]
     assert [r["start_s"] for r in rows] == [0, 10]
     assert [r["end_s"] for r in rows] == [10, 20]
@@ -222,7 +248,7 @@ def test_wrong_duration_hard_blocks_and_logs_nothing_for_that_segment(tmp_path, 
     # 硬阻断发生在段 2 出词之前：被拦下的那一次不进入下一段
     assert out.index(SEG2_BODY) > out.index("segment_video_duration_mismatch")
 
-    rows = read_segment_ledger(_generation_dir(tmp_path))
+    rows = _output_rows(tmp_path)
     assert len(rows) == 2, f"被拦下的那一次不许落账：{rows}"
     assert rows[0]["video"] == str(right.resolve())
     assert rows[0]["sha256"] == hashlib.sha256(right.read_bytes()).hexdigest(), \
@@ -239,7 +265,7 @@ def test_missing_video_path_is_refused_not_silently_accepted(tmp_path, monkeypat
     assert code == 0
     out = capsys.readouterr().out
     assert "读不到这个文件" in out
-    rows = read_segment_ledger(_generation_dir(tmp_path))
+    rows = _output_rows(tmp_path)
     assert [r["segment"] for r in rows] == [1, 2]
     assert rows[0]["video"] == str(right.resolve())
 
@@ -258,7 +284,7 @@ def test_empty_handback_stops_the_run(tmp_path, monkeypatch, capsys):
     assert SEG2_BODY not in out, "停住之后不许再出下一段"
     assert not list((tmp_path / "sessions").rglob(SEGMENT_LEDGER_FILENAME)), \
         "一段都没通过时账文件不该存在（不是「存在但为空」）"
-    assert read_segment_ledger(_generation_dir(tmp_path)) == []
+    assert _output_rows(tmp_path) == []
 
 
 def test_empty_handback_after_one_pass_keeps_that_row(tmp_path, monkeypatch, capsys):
@@ -269,7 +295,7 @@ def test_empty_handback_after_one_pass_keeps_that_row(tmp_path, monkeypatch, cap
     out = capsys.readouterr().out
     # 段 2 的词**出**了（段 1 通过了，这就是「一次只维持一个当前待办」的正常推进），
     # 但它没有交回 → 不落账
-    assert out.index(SEG2_BODY) > out.index("第 1/2 段已交回并通过可证层校验")
-    rows = read_segment_ledger(_generation_dir(tmp_path))
+    assert out.index(SEG2_BODY) > out.index("第 1/2 段已交回并通过可证层与语义层校验")
+    rows = _output_rows(tmp_path)
     assert [r["segment"] for r in rows] == [1]
     assert rows[0]["video"] == str(first.resolve())

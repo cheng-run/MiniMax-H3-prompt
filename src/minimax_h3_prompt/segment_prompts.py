@@ -953,6 +953,51 @@ def render_ref_segment_annotations(segment_number: int, total_segments: int,
     )
 
 
+def split_ref_segment_detailed(detailed: str) -> tuple[str, str]:
+    """把 detailed_description 拆成 ``(锁死声明, 画面正文)``（issue #56）。
+
+    注记由组装器置于 detailed_description 顶部（``assemble_ref_segment``），所以切点
+    就是**首行**：首行是注记形态（"Segment N of M, covering …"）时归锁定部分，其余
+    全归正文；没有注记行时锁定部分是空串、正文原样（不把正文头一行误当注记吃掉）。
+
+    这是「改写只动画面正文」与「那两句被改动就响」两处判据的**共同切点**：两处各切
+    一次就多一个会漂的地方（同注记渲染器只有一份的纪律，ADR 0008 裁定二）。
+    """
+    first, sep, rest = str(detailed or "").partition("\n")
+    if sep and first.strip().startswith("Segment ") and "covering" in first:
+        return first.strip(), rest.strip()
+    return "", str(detailed or "").strip()
+
+
+# 注记类句子的识别式：时间轴注记首句 + 起止状态那两句。改写结果里出现它们时，
+# 必须与锁定文本**逐字**一致——判据是字面比对，不是「出现过就报」（模型照抄一遍
+# 由组装器再注入一次无害，只有**改过**的才算越权）。
+_ANNOTATION_LIKE_RE = re.compile(
+    r"This segment (?:begins|ends) with [^.\n]*"
+    r"|Segment \d+ of \d+, covering [^.\n]*")
+
+
+def assert_locked_annotations_intact(text: str, locked: str) -> None:
+    """改写结果里若出现注记类句子，必须与锁定文本逐字一致，否则**响**（issue #56 AC5）。
+
+    为什么锁死：相邻段的末态与下一段起始态是**同一瞬间的同一画面**，改它就要级联改
+    下一段的 start_state 并回写 plan.json；不改而放过，语义层闸门的对照物（声明）与
+    正文就失了同步，判据当场作废。声明本身写错属于「计划错了」，走「停下 → 重跑分段
+    规划」，不是在这里偷偷改一句。
+
+    调用方（``ref_segments.revise_ref_segment_body``）据此**不采用**这一轮改写、保持
+    原词——静默放行等于让用户拿着一份自相矛盾的提示词去生成。
+    """
+    altered = sorted({match.group(0).strip()
+                      for match in _ANNOTATION_LIKE_RE.finditer(str(text or ""))
+                      if match.group(0).strip() not in str(locked or "")})
+    if altered:
+        raise ValueError(
+            "改写结果动了锁死的时间轴注记/起止状态声明：" + "；".join(altered)
+            + "——那两句是段间衔接的显式依据（相邻段的末态与下一段起始态是同一瞬间的"
+            "同一画面），只许正文兑现它、不许改它；声明本身写错请停下重跑分段规划")
+
+
 def assemble_ref_segment(*, subject_definitions: str, retention_analysis: str,
                          task_type: str, summary_body: str, detailed_body: str,
                          overall_soundscape: str, non_diegetic_music: str,
@@ -1213,10 +1258,11 @@ def normalize_ref_segment_output(text: str, *, whole_sections: dict[str, str],
         plan.start_state, plan.end_hook)
     effective_task, summary_body = split_task_type(parts.get("summary", ""))
     effective_task = effective_task or task_type
-    detailed = parts.get("detailed_description", "")
-    first, sep, rest = detailed.partition("\n")
-    if sep and first.strip().startswith("Segment ") and "covering" in first:
-        detailed = rest  # 剥掉 LLM 自写的注记行
+    # 剥掉 LLM 自写的注记行（注记以组装器为准，重复两遍只会挤掉正文）。判据与
+    # 「改写只动正文」共用 ``split_ref_segment_detailed``——两处各写一遍「首行是不是
+    # 注记」就是又一个会各自漂移的切点。
+    _self_written, detailed = split_ref_segment_detailed(
+        parts.get("detailed_description", ""))
     return assemble_ref_segment(
         subject_definitions=whole_sections.get("subject_definitions")
         or parts.get("subject_definitions", ""),
