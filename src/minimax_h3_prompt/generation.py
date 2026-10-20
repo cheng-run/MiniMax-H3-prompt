@@ -321,6 +321,10 @@ class ImagePromptVariant:
     height: int = 0
     profile_status: str = "candidate"
     instructions: tuple[str, ...] = ()
+    # 锁死清单（issue #53）：本张资产的少数身份特征，逐字摘自 positive_prompt。它是
+    # 读图校对判偏差的唯一判据（清单外的出入属理想描述，一律忽略）。**默认空表**
+    # 是给旧会话留的读口：节点侧（``nodes._normalize_locked_features``）对新产物要求非空。
+    locked_features: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.kind not in {"character", "prop", "scene"}:
@@ -342,6 +346,7 @@ class ImagePromptVariant:
             height=int(raw.get("height", 0) or 0),
             profile_status=str(raw.get("profile_status", "candidate")),
             instructions=tuple(str(x) for x in raw.get("instructions", [])),
+            locked_features=tuple(str(x) for x in raw.get("locked_features") or ()),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -356,6 +361,7 @@ class ImagePromptVariant:
             "height": self.height,
             "profile_status": self.profile_status,
             "instructions": list(self.instructions),
+            "locked_features": list(self.locked_features),
         }
 
 
@@ -966,6 +972,9 @@ def image_prompt_variants(
                 height=canvas_height,
                 profile_status=str(item.get("profile_status", "candidate")),
                 instructions=tuple(item.get("instructions", ())),
+                # 锁死清单（issue #53）照抄条目；旧条目没有这一键 → 空表（读口宽容，
+                # 与旧 dict 形状同一口径：旧会话照旧可读，只是不收窄判据）。
+                locked_features=tuple(str(x) for x in item.get("locked_features") or ()),
             ))
     return tuple(variants)
 
@@ -1045,6 +1054,14 @@ def render_asset_rows(rows: list[ImagePromptVariant], kind: str) -> str:
             # 画布行与请求【画布】块同取 `canvas_display`（issue #42 AC3）；
             # 「推荐尺寸」措辞随本票退役——那是系统钦定时代的渲染层标签。
             f"- 画布：`{canvas_display(item.width, item.height)}`", "",
+        ])
+        # 锁死清单单独成段（issue #53 AC1）：它是读图校对判偏差的唯一判据，必须出现在
+        # **产物**里——用户看不到清单，就无从判断「系统凭什么说这条是偏差」。非空才渲染
+        # （旧产物没有这一键，多一个空标题只是噪声，渲染结果与改动前逐字一致）。
+        if item.locked_features:
+            parts.extend(["### 锁死清单", "",
+                          *[f"- {x}" for x in item.locked_features], ""])
+        parts.extend([
             "### Positive Prompt", "", item.positive_prompt, "",
         ])
         if item.negative_prompt:

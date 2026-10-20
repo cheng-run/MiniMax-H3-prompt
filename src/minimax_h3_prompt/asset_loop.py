@@ -224,9 +224,70 @@ def rewrite_asset_prompt(old_prompt: str, feedback: str, llm) -> str:
     return new_prompt
 
 
+# 回灌请求里那块「已定稿素材画面事实」的标题。**只有这一处定义**：请求文本、假模型
+# 与断言三处各写一遍就是又一个会各自漂移的字面量（同 agents.OFFICIAL_VERBATIM_MARKER
+# 的纪律）。标题改这里，测试里认这个字面的地方一并跟着改。
+SETTLED_FACTS_HEAD = "【已定稿素材画面事实】"
+
+
+def build_settled_align_request(prompt: str, settled: Sequence[tuple[str, str]]) -> str:
+    """回灌请求文本（纯函数，返回字符串即契约，issue #53 AC3）。
+
+    ``settled`` 是**已定稿素材**的 ``(语义名, 画面事实)``——画面事实由调用方按
+    素材画面事实的优先序取好（合并结果 ＞ 生图提示词 ＞ 用户登记描述，见
+    ``generation._with_merged_descriptions``），本函数只负责组装，不猜来源。
+
+    「其余部分逐字保留」这条纪律是硬要求，不是客套：提示词是逐轮小步改的，让模型
+    顺手「优化」没提到的部分，跨素材一致性就换来了整篇漂移（同修订基线那句
+    「未提到的部分原样保留」的用意）。
+    """
+    facts = "\n".join(f"- {name}：{description}" for name, description in settled)
+    return (
+        "下面是一条 Z-Image 生图提示词，以及本片**已定稿**的其他素材的画面事实。\n"
+        "请让当前提示词与这些事实在**跨素材一致性**上对齐：同一个人物、同一件标志物"
+        "在两张图里必须是同一副样子（同一发色/服装/纹样/材质）。\n"
+        "纪律：只做一致性对齐；没被这些事实点到的部分**逐字保留**，"
+        "不要新增或删除细节、不要重排版、不要解释。\n"
+        "只输出一条可直接复制进生图工具的提示词正文，不要前后缀。\n\n"
+        f"【当前提示词】\n{str(prompt).strip()}\n\n"
+        f"{SETTLED_FACTS_HEAD}\n{facts}"
+    )
+
+
+def align_asset_prompt(
+    old_prompt: str,
+    settled: Sequence[tuple[str, str]],
+    llm,
+    *,
+    locked_features: Sequence[str] = (),
+) -> str:
+    """按已定稿素材的画面事实对齐一条资产生图提示词（回灌，一轮）。
+
+    ``llm`` 由调用方注入（带 ``invoke(str)`` 接口，同 ``rewrite_asset_prompt`` 的口径），
+    测试可传 stub。
+
+    **锁死特征丢了就响**：对齐请求的纪律是「只做一致性对齐、其余逐字保留」，丢掉锁死
+    特征就是越权改词——而锁死清单条目是读图校对判偏差的判据，条目在正文里找不到，
+    这一张的偏差就再也判不出来（静默失效）。调用方据此不采用对齐结果、保持原词。
+    """
+    request = build_settled_align_request(old_prompt, settled)
+    raw = llm.invoke(request)
+    text = raw if isinstance(raw, str) else getattr(raw, "content", str(raw))
+    new_prompt = str(text).strip()
+    if not new_prompt:
+        raise ValueError("回灌对齐结果为空")
+    missing = [str(x) for x in locked_features if str(x).strip() and str(x) not in new_prompt]
+    if missing:
+        raise ValueError(
+            f"回灌对齐结果丢了锁死特征：{'、'.join(missing)}——"
+            "对齐只许做跨素材一致性，锁死特征是判偏差的判据，不许改掉")
+    return new_prompt
+
+
 __all__ = [
-    "ASSET_LOOP_KEY", "ASSET_ROUNDS_FILENAME", "QueueItem",
+    "ASSET_LOOP_KEY", "ASSET_ROUNDS_FILENAME", "QueueItem", "SETTLED_FACTS_HEAD",
     "TRIGGER_REGEN_REROLL", "TRIGGER_REGEN_REWORD", "TRIGGER_REVIEW_REWORD",
-    "asset_queue", "log_asset_round", "loop_state", "note_abandoned", "note_released",
+    "align_asset_prompt", "asset_queue", "build_settled_align_request", "log_asset_round",
+    "loop_state", "note_abandoned", "note_released",
     "read_asset_rounds", "rewrite_asset_prompt", "set_current",
 ]

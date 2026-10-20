@@ -82,17 +82,26 @@ def _fake_confirms(monkeypatch, rules: list[tuple[str, bool]],
 
 
 def _ref_stage1_state() -> dict:
+    """阶段 1 产物：四张资产（语义名都在各自提示词正文里，故锁死清单取语义名合法）。
+
+    锁死清单（issue #53）逐条是**本资产提示词正文的原文片段**——节点侧钉住的不变式。
+    取语义名是最省事的一份合法清单，也让既有用例（偏差引文「红裙」）照旧命中：
+    「红裙」与条目「红裙女孩」互为子串。
+    """
+    def _entry(name: str, prompt: str) -> dict:
+        return {"name": name, "positive_prompt": prompt, "locked_features": [name]}
+
     return {
         "script": TOPIC,
         "character_image_prompts": [
-            {"name": "蓝衫少年", "positive_prompt": "人物·蓝衫少年专属生图提示词"},
-            {"name": "红裙女孩", "positive_prompt": GIRL_PROMPT},
+            _entry("蓝衫少年", "人物·蓝衫少年专属生图提示词"),
+            _entry("红裙女孩", GIRL_PROMPT),
         ],
         "prop_image_prompts": [
-            {"name": "青铜钥匙", "positive_prompt": "道具·青铜钥匙专属生图提示词"},
+            _entry("青铜钥匙", "道具·青铜钥匙专属生图提示词"),
         ],
         "scene_image_prompts": [
-            {"name": "秋日庭院", "positive_prompt": "场景·秋日庭院专属生图提示词"},
+            _entry("秋日庭院", "场景·秋日庭院专属生图提示词"),
         ],
     }
 
@@ -138,17 +147,46 @@ def _stub_vision(monkeypatch, mapping: dict[str, str]) -> list[str]:
     return seen
 
 
+# 导入时的真工厂：``_run_loop`` 靠它认出「这个用例自己打过桩没有」（见那里的注释）。
+_REAL_BUILD_CHAT_MODEL = model_factory.build_chat_model
+
+# 回灌请求里那块已定稿素材事实的标题（``asset_loop.build_settled_align_request`` 里定义）。
+# 假模型靠它分辨「这是回灌还是改写」——两个出口都走 ``build_chat_model``。
+_ALIGN_HEAD = "【已定稿素材画面事实】"
+
+
+class _FakeLLM:
+    """改写与回灌共用的假模型（两个出口都经 ``build_chat_model`` 建）。
+
+    - 回灌请求（带 ``【已定稿素材画面事实】`` 块）默认**原词回吐**——从请求里抠回当前
+      提示词再加 ``align_suffix``，于是不关心回灌的用例（「屏上出现了哪条词」那类断言）
+      与改动前逐字一致，而回灌的物证照旧落在 ``requests`` 上（请求是缝）；
+    - 改写请求回 ``rewrite_reply``。
+    """
+
+    def __init__(self, rewrite_reply: str = "改写后的提示词", align_suffix: str = "") -> None:
+        self.rewrite_reply = rewrite_reply
+        self.align_suffix = align_suffix
+        self.requests: list[str] = []
+
+    def invoke(self, message):
+        text = str(message)
+        self.requests.append(text)
+        if _ALIGN_HEAD in text:
+            return _current_prompt_from(text) + self.align_suffix
+        return self.rewrite_reply
+
+
+def _current_prompt_from(request: str) -> str:
+    """从回灌请求里抠回「当前提示词」（假模型的原词回吐用）。"""
+    return request.split("【当前提示词】\n", 1)[-1].split(f"\n\n{_ALIGN_HEAD}", 1)[0].strip()
+
+
 def _stub_rewrite(monkeypatch, new_text: str = "改写后的提示词") -> list[str]:
     """打桩「改写提示词」的 LLM 改写：记录请求、回固定新词。"""
-    seen: list[str] = []
-
-    def fake_invoke(message):
-        seen.append(str(message))
-        return new_text
-
-    monkeypatch.setattr(model_factory, "build_chat_model",
-                        lambda: SimpleNamespace(invoke=fake_invoke))
-    return seen
+    llm = _FakeLLM(new_text)
+    monkeypatch.setattr(model_factory, "build_chat_model", lambda: llm)
+    return llm.requests
 
 
 def _write_source(tmp_path: Path, name: str, content: bytes) -> Path:
@@ -180,19 +218,28 @@ def _run_loop(tmp_path, monkeypatch, tail: list[str], *,
               vision: dict[str, str] | None = None,
               confirms: list[tuple[str, bool]] | None = None,
               captured: dict | None = None,
-              confirm_log: list[str] | None = None) -> tuple[list[str], int, list[str]]:
+              confirm_log: list[str] | None = None,
+              llm: "_FakeLLM | None" = None) -> tuple[list[str], int, list[str]]:
     """全程驱动：阶段 1 → 素材循环 → 尾账/注入卡 → 阶段 2。返回 (asked, code, vision_calls)。
 
     ``confirm_log`` 传列表即收下问过的**确认句**（``_confirm`` 的文案；``asked`` 只装
     ``_prompt`` 的），免得「撤登记问没问人」这类断言没处落。
+
+    ``llm`` 传假模型即用它（回灌/改写两个出口的请求都记在它身上）；不传且用例自己
+    也没打过桩时，这里兜一个**默认假模型**——素材循环的**回灌**（issue #53）会调
+    ``build_chat_model``，漏打桩就会真去建客户端（主树有 key 时直接打网络请求，
+    干净检出上则报错），两条路都不是用例该走的路。
     """
     _silence(monkeypatch)
     monkeypatch.setattr(wizard, "_choose_canvases", lambda: canvases or {})
     _stub_stage1(monkeypatch)
     _stub_stage2(monkeypatch, captured)
     calls = _stub_vision(monkeypatch, vision or {})
-    # build_chat_model 只在「改写提示词」路径上被调；需要改写的用例先打 _stub_rewrite，
-    # 这里不再兜底覆盖它。
+    if llm is not None:
+        monkeypatch.setattr(model_factory, "build_chat_model", lambda: llm)
+    elif model_factory.build_chat_model is _REAL_BUILD_CHAT_MODEL:
+        # 用例自己打过桩（_stub_rewrite）就不覆盖它；没打过才兜底。
+        monkeypatch.setattr(model_factory, "build_chat_model", lambda: _FakeLLM())
     asked = _fake_inputs(monkeypatch, [TOPIC, "", "", "4"] + list(tail))
     # sink 传的是**同一个列表对象**（extend 只拷当时的空表，后续 append 看不见）
     _fake_confirms(monkeypatch, confirms or [("视频/音频", False)], sink=confirm_log)
@@ -407,6 +454,133 @@ def test_regen_reword_exit_rewrites_and_logs(tmp_path, monkeypatch, capsys):
     assert rounds[0]["prompt_after"] == "人物·红裙女孩专属生图提示词：宝蓝裙"
     out = capsys.readouterr().out
     assert "人物·红裙女孩专属生图提示词：宝蓝裙" in out, "改词再掷的新词没有出站"
+
+
+# ---------------------------------------------------------------------------
+# AC2：锁死清单接到对照器上——只对身份特征判偏差
+# ---------------------------------------------------------------------------
+
+def test_proofread_adjudicates_only_locked_features(tmp_path, monkeypatch, capsys):
+    """AC2 的牙齿：锁死清单**真的接到了对照器上**——清单外的出入既不进三选、也不进补漏。
+
+    读图一次交回两条：一条命中清单（裙色）、一条是构图口味级（清单外）。只有前者该占
+    一次三选，后者**忽略**——当日现场正是这一档把 39 条偏差里的人裁淹掉的。
+
+    变异检验：把 ``_proofread_one_asset`` 里传给对照器与读图请求的 ``locked`` 去掉，
+    这条必须红（构图那条回来占第二次三选，输入脚本随即错位）。
+    """
+    girl = _write_source(tmp_path, "girl.png", b"girl")
+    vision = {"picture-01": _claims(deviations=[
+        ("裙色", "红裙", "宝蓝色长裙"),                    # 命中锁死清单
+        ("构图", "女孩站在秋日庭院里", "女孩几乎站在画面正中"),  # 清单外＝理想描述
+    ])}
+    tail = [
+        "", "1", str(girl),   # 队列菜单→红裙女孩；审查满意；交回路径
+        "", "",               # 三选（只该有一次）；改后文案
+        "", "4",              # 队列菜单→蓝衫少年；放弃
+        "", "4",              # 队列菜单→秋日庭院；放弃
+        "4",                  # 青铜钥匙（最后一张自动出）：放弃
+        "8", "1",
+    ]
+    asked, code, _ = _run_loop(tmp_path, monkeypatch, tail, vision=vision)
+    assert code == 0
+    out = capsys.readouterr().out
+    assert sum("裁决：" in text for text in asked) == 1, "偏差三选不止一次（清单外的也进了人裁）"
+    assert "[偏差] 1 处" in out, "锁死清单没接到对照器上（清单外的也判成了偏差）"
+    assert "[补漏]" not in out, "理想描述的出入被当成了「图里有而描述没有」"
+    assert "几乎站在画面正中" not in out, "降级条目没有真的被忽略"
+
+
+# ---------------------------------------------------------------------------
+# AC3：回灌——出下一张的词之前注入前面已定稿素材的画面事实
+# ---------------------------------------------------------------------------
+
+def test_settled_align_request_carries_the_settled_facts():
+    """请求组装（纯函数，缝）：已定稿素材的**语义名 + 画面事实**逐条进请求。"""
+    from minimax_h3_prompt.asset_loop import build_settled_align_request
+
+    request = build_settled_align_request(
+        "道具·汽水罐生图提示词", [("红裙女孩", "宝蓝色长裙、黑发"), ("秋日庭院", "满地红叶")])
+    assert "【当前提示词】" in request and "道具·汽水罐生图提示词" in request
+    for name, desc in (("红裙女孩", "宝蓝色长裙、黑发"), ("秋日庭院", "满地红叶")):
+        assert name in request and desc in request, f"已定稿素材 {name!r} 的画面事实没进请求"
+    assert "逐字保留" in request, "回灌请求缺「其余逐字保留」的纪律——那会把没提到的细节一并漂走"
+
+
+def test_align_asset_prompt_refuses_to_lose_a_locked_feature():
+    """回灌结果丢了锁死特征 → 响（调用方据此不采用、保持原词）。
+
+    对齐请求的纪律是「只做一致性对齐、其余逐字保留」，丢掉锁死特征就是越权改词；
+    照单收下的话，这一张的偏差判据（条目要在正文里找得到）当场失效。
+    """
+    from minimax_h3_prompt.asset_loop import align_asset_prompt
+
+    llm = SimpleNamespace(invoke=lambda message: "被改得面目全非的提示词")
+    with pytest.raises(ValueError, match="锁死特征"):
+        align_asset_prompt("道具·汽水罐生图提示词", [("红裙女孩", "宝蓝色长裙")], llm,
+                           locked_features=("汽水罐",))
+
+
+def test_next_prompt_backfills_the_settled_asset_facts(tmp_path, monkeypatch, capsys):
+    """AC3：第 2 张出词前，把第 1 张**已定稿**的画面事实注入对齐请求。
+
+    跨素材一致性靠传递、不靠人肉记忆。两条断言都打在真发出去的请求串上：
+
+    - 注入的是**合并结果**（素材画面事实裁定：合并结果 ＞ 生图提示词 ＞ 用户登记描述）——
+      红裙女孩这一张裁了「按图改文案」，「红裙」已改成「宝蓝色长裙」，请求里带的必须是
+      改后的事实；带生图提示词原件就等于「图跑偏了还照原词对齐」；
+    - 第 1 张出词时**不**回灌（还没有已定稿素材，不该白花一次调用）。
+    """
+    girl = _write_source(tmp_path, "girl.png", b"girl")
+    boy = _write_source(tmp_path, "boy.png", b"boy")
+    vision = {"picture-01": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
+    llm = _FakeLLM()
+    tail = [
+        "", "1", str(girl),   # 队列菜单→红裙女孩；审查满意；交回路径
+        "", "",               # 三选回车=按图改文案；改后文案回车=用图中实见
+        "", "1", str(boy),    # 队列菜单→蓝衫少年（回灌在此之前）；审查满意；交回
+        "", "4",              # 队列菜单→秋日庭院；放弃
+        "4",                  # 青铜钥匙（最后一张自动出）：放弃
+        "8", "1",
+    ]
+    asked, code, _ = _run_loop(tmp_path, monkeypatch, tail, vision=vision, llm=llm)
+    assert code == 0
+
+    aligns = [r for r in llm.requests if _ALIGN_HEAD in r]
+    assert aligns, "出下一张的词之前没有回灌"
+    assert _current_prompt_from(aligns[0]).startswith("人物·蓝衫少年"), \
+        "第一次回灌对齐的不是第 2 张"
+    request = aligns[0]
+    assert "红裙女孩" in request and "宝蓝色长裙" in request, \
+        "回灌请求里带的不是已定稿素材的合并结果（素材画面事实裁定的优先序）"
+    assert "黑发" in request, "合并结果被截成了摘要——回灌要带整条画面事实"
+    assert "蓝衫少年" in request, "回灌请求里没有当前这张的词，对齐无从落笔"
+
+    # 第 1 张（红裙女孩）出词时还没有已定稿素材，那一次不许回灌——「没有事实也发请求」
+    # 的话这里会出现一次「当前词＝红裙女孩」的对齐。
+    assert all(not _current_prompt_from(r).startswith("人物·红裙女孩") for r in aligns), \
+        "第 1 张出词就回灌了（那时还没有已定稿素材）"
+
+
+def test_backfill_result_is_reissued_and_not_repeated_after_a_rewrite(tmp_path, monkeypatch, capsys):
+    """回灌结果**重新出站**；且改写后的重出**不再回灌一次**（不把人刚改的词按旧事实拽回去）。"""
+    girl = _write_source(tmp_path, "girl.png", b"girl")
+    llm = _FakeLLM(align_suffix="（已与已定稿素材对齐）")
+    tail = [
+        "", "1", str(girl),                       # 红裙女孩落账
+        "", "3", "改成宝蓝色", "4",                # 蓝衫少年：出词后打回改写 → 新词重出 → 放弃
+        "", "4", "4",                             # 秋日庭院、青铜钥匙：放弃
+        "8", "1",
+    ]
+    asked, code, _ = _run_loop(tmp_path, monkeypatch, tail, llm=llm)
+    assert code == 0
+    # 每张出词前各回灌一次（第 1 张没有已定稿素材，不在此列）；蓝衫少年只许一次——
+    # 改写成功后的重出是**人刚改的词**，再自动对齐一轮会按旧事实把它拽回去。
+    boy_aligns = [r for r in llm.requests if _ALIGN_HEAD in r
+                  and _current_prompt_from(r).startswith("人物·蓝衫少年")]
+    assert len(boy_aligns) == 1, f"改写后的重出又回灌了一次：{len(boy_aligns)}"
+    out = capsys.readouterr().out
+    assert "（已与已定稿素材对齐）" in out, "回灌后的新词没有重新出站"
 
 
 # ---------------------------------------------------------------------------

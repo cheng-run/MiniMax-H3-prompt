@@ -78,8 +78,11 @@ def _six_section_prompt(include: tuple[int, ...] = (1, 2, 3, 4)) -> str:
 
 
 def _assets_json(assets) -> str:
+    # locked_features（issue #53）取语义名——它逐字在提示词正文里（夹具正文都以语义名起头），
+    # 节点侧「条目必须是正文原文片段」的不变式因此成立。
     return json.dumps([
-        {"name": name, "positive_prompt": prompt, "instructions": ["粘贴到节点 10"]}
+        {"name": name, "positive_prompt": prompt, "instructions": ["粘贴到节点 10"],
+         "locked_features": [name]}
         for name, prompt in assets
     ])
 

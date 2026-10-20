@@ -69,7 +69,9 @@ _ASSET_PROMPT_HEAD = "各生成一条 Z-Image 可直接复制的生图提示词"
 
 
 def _asset_payload() -> list:
-    return [{"name": "示例资产", "positive_prompt": "资产图提示词"}]
+    # locked_features（issue #53）必须是正文的原文片段：这里取正文本身。
+    return [{"name": "示例资产", "positive_prompt": "资产图提示词",
+             "locked_features": ["资产图提示词"]}]
 
 
 # ---------------------------------------------------------------------------

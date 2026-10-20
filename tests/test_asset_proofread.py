@@ -110,6 +110,68 @@ def test_omission_already_described_is_not_listed_again():
 
 
 # ---------------------------------------------------------------------------
+# 锁死清单判据（issue #53）：只对身份特征判偏差，理想描述出入一律忽略
+# ---------------------------------------------------------------------------
+
+# 锁死清单条目是**生图提示词正文的原文片段**（节点侧钉住这条不变式），故读图逐字
+# 摘录的那句通常包含条目。
+_LOCKED = ("红裙", "青铜钥匙")
+
+
+def test_locked_feature_quote_stays_a_deviation():
+    """引文命中锁死清单 → 偏差：身份特征（发色/服装/标志物）的出入仍进人裁三选。"""
+    reading = Reading(claims=(Claim("裙色", "红裙", "宝蓝色长裙"),))
+    report = compare_descriptions(_PROMPT, reading, _LOCKED)
+    assert report.deviations == (Deviation("裙色", "红裙", "宝蓝色长裙"),)
+    assert report.omissions == ()
+
+
+def test_quote_shorter_than_a_locked_entry_still_hits():
+    """模型只摘了条目的一截也认（互为子串）——否则漏判的正是「图跑偏无人纠」。"""
+    reading = Reading(claims=(Claim("道具", "青铜", "黄铜钥匙"),))
+    report = compare_descriptions(_PROMPT, reading, _LOCKED)
+    assert len(report.deviations) == 1
+
+
+def test_ideal_description_quote_is_ignored_not_adjudicated():
+    """理想描述的出入不进人裁、也不进补漏（AC2 裁定：直接忽略）。
+
+    当日现场那条「罐体按三分法偏左 → 实测几乎正中」就是这一档：判据是锁死清单，
+    清单外的引文一律忽略——39 条偏差里的构图口味类从此既不进三选、也不会被当成
+    「图里有而描述没有」并进描述（它是「不符」不是「没有」，并进去就是红裙+蓝裙同现）。
+    """
+    reading = Reading(claims=(Claim("构图", "女孩站在秋日庭院里", "女孩几乎站在画面正中"),))
+    assert compare_descriptions(_PROMPT, reading, _LOCKED).is_clean()
+
+
+def test_omission_path_is_unchanged_by_the_locked_list():
+    """补漏并入机制不变（AC4）：空引文的「图里有而描述没有」照旧成候选，
+    与清单在不在场无关。"""
+    reading = Reading(claims=(Claim("腕表", "", "左腕银色腕表"),))
+    with_locked = compare_descriptions(_PROMPT, reading, _LOCKED)
+    without = compare_descriptions(_PROMPT, reading)
+    assert with_locked == without == ProofreadReport(omissions=(Omission("腕表", "左腕银色腕表"),))
+
+
+def test_quote_without_a_locked_list_keeps_the_old_verdict():
+    """未声明锁死清单（旧产物/旧会话）＝**不收窄**：非空引文仍一律判偏差。
+
+    锁死清单是「收窄判据」的声明；没声明就不收窄——旧会话照旧，图跑偏仍有人纠。
+    """
+    reading = Reading(claims=(Claim("构图", "女孩站在秋日庭院里", "几乎正中"),))
+    report = compare_descriptions(_PROMPT, reading)
+    assert len(report.deviations) == 1
+    assert report.omissions == ()
+
+
+def test_blank_locked_entries_do_not_widen_the_judgement():
+    """空串／空白条目不算命中——空串是任何串的子串，混进清单会让判据恒真（全部算偏差）。"""
+    reading = Reading(claims=(Claim("构图", "女孩站在秋日庭院里", "几乎正中"),))
+    report = compare_descriptions(_PROMPT, reading, ("", "   ", "红裙"))
+    assert report.deviations == ()
+
+
+# ---------------------------------------------------------------------------
 # 素材画面事实合并：纠偏差只改那一处、补漏并入、绝不整体替换
 # ---------------------------------------------------------------------------
 
@@ -225,6 +287,26 @@ def test_proofread_request_demands_verbatim_quotes_and_json_claims():
     assert "prompt_quote" in request and "observed" in request
     assert "claims" in request
     assert "逐字" in request, "引文逐字摘录要求缺失：失锚引文会让定点改文案无处落笔"
+
+
+def test_proofread_request_carries_the_locked_list_and_the_narrowing_rule():
+    """锁死清单进读图请求（issue #53 AC2）：清单**逐条**在场，且写明只有它算偏差。
+
+    只写「有锁死清单」不够——读图模型要按字面认得出是哪几条（同 issue #37 的教训：
+    请求里不给词表，那句「使其通过校验」在信息上不可赢）。清单不在请求里，模型交回的
+    prompt_quote 就落不到条目上，对照器的命中判据恒不命中、偏差清单悄悄清空。
+    """
+    request = build_proofread_request(_PROMPT, _LOCKED)
+    assert "锁死清单" in request, "请求没提锁死清单，模型无从知道偏差只判哪几处"
+    for entry in _LOCKED:
+        assert entry in request, f"锁死清单条目 {entry!r} 没进请求"
+    assert _PROMPT in request, "生图提示词仍须整体进请求——对照基准不许被摘要"
+
+
+def test_proofread_request_without_locked_list_is_unchanged():
+    """未声明锁死清单时请求逐字与改动前一致（旧产物照旧走老口径）。"""
+    assert build_proofread_request(_PROMPT) == build_proofread_request(_PROMPT, ())
+    assert "锁死清单" not in build_proofread_request(_PROMPT)
 
 
 def test_render_report_lists_deviations_and_omissions():

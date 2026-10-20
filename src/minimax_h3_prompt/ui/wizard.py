@@ -1311,6 +1311,64 @@ def _rewrite_asset_prompt_round(state: dict, brief: Brief, generation_dir: Path,
     return True
 
 
+def _settled_asset_facts(state: dict, brief: Brief, *, exclude: str) -> list[tuple[str, str]]:
+    """已定稿素材的 ``(语义名, 画面事实)``——回灌（issue #53 AC3）的取材口。
+
+    「已定稿」＝读图校对裁决落账（``status=done``）：只有走到这一步的素材才有**对着成图
+    核实过**的画面事实可回灌；出过词、交回但还没裁的那些，事实仍是待核的计划文本。
+
+    画面事实按**素材画面事实**的既有优先序取（合并结果 ＞ 生图提示词 ＞ 用户登记描述）——
+    复用 ``ref_asset_registry`` 就是为了不再抄一份优先序，两处各写一份必然漂。
+    """
+    from ..asset_proofread import STATUS_DONE, ProofreadRecord, proofread_rows
+    from ..generation import ref_asset_registry
+
+    settled = {
+        str(name) for name, row in proofread_rows(state).items()
+        if ProofreadRecord.from_dict(str(name), row).status == STATUS_DONE
+    }
+    return [
+        (r.name, r.description) for r in ref_asset_registry(state, brief)
+        if r.name in settled and r.name != exclude and str(r.description).strip()
+    ]
+
+
+def _align_asset_with_settled(state: dict, brief: Brief, generation_dir: Path,
+                              item: QueueItem) -> None:
+    """回灌（issue #53 AC3）：出这张的词之前，按前面已定稿素材的画面事实对齐一次。
+
+    只在**这张首次出词**时做（``released`` 账是「出过词」的既有账）：改写成功后的重出、
+    续跑回到中途的这张都不再对齐——词是人刚改的，再自动对齐一轮会按旧事实把他的改动
+    拽回去。
+
+    没有已定稿素材（队列第 1 张）＝不回灌、不花调用。对齐失败（LLM 报错、结果丢了锁死
+    特征）只提示、保持原词：回灌是让跨素材更一致，不该把整条循环卡死。
+    """
+    from ..asset_loop import align_asset_prompt, loop_state
+    from ..generation import image_prompt_variants
+    from ..model_factory import build_chat_model
+
+    if item.name in {str(x) for x in loop_state(state)["released"]}:
+        return
+    facts = _settled_asset_facts(state, brief, exclude=item.name)
+    if not facts:
+        return
+    old = _current_prompt_text(state, item)
+    locked = next((v.locked_features for v in image_prompt_variants(state, brief.canvases)
+                   if v.name == item.name), ())
+    try:
+        new = align_asset_prompt(old, facts, build_chat_model(), locked_features=locked)
+    except Exception as exc:  # noqa: BLE001 — 回灌失败要响但不许裸崩：词不动、继续出词
+        print(f"[回灌] {item.name} 对齐失败：{exc}；提示词保持原样。")
+        return
+    if new == old:
+        return
+    _update_prompt_text(state, item, new)
+    save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
+    print(f"[回灌] {item.name} 已按前面 {len(facts)} 条已定稿素材的画面事实对齐"
+          f"（{'、'.join(name for name, _ in facts)}）；其余部分逐字保留。")
+
+
 def _abandon_asset(state: dict, brief: Brief, generation_dir: Path, item: QueueItem) -> None:
     """显式放弃这张资产（issue #50 AC1 的另一出口）：不再出图，队列前进。
 
@@ -1422,11 +1480,15 @@ def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: 
     from ..generation import image_prompt_variants
     from ..tools.reference_auditor import describe_image
 
-    bases = {v.name: v.positive_prompt for v in image_prompt_variants(state, brief.canvases)}
+    variants = image_prompt_variants(state, brief.canvases)
+    bases = {v.name: v.positive_prompt for v in variants}
     if brief is not None:
         for r in brief.refs:
             bases.setdefault(r.name, r.description)
     base = bases.get(name)
+    # 锁死清单（issue #53）：判偏差的唯一判据。旧条目没有这一键 → 空表 ＝ 不收窄
+    # （对照器与读图请求两处口径一致：没声明清单就走旧口径）。
+    locked = next((v.locked_features for v in variants if v.name == name), ())
     ledger = load_asset_ledger(generation_dir)
     entry = ledger.get(name, KIND_PICTURE)
     if entry is None or not base:
@@ -1452,17 +1514,18 @@ def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: 
     if progress is not None:
         # 图未换版、词未改写 → 上次那份读图结果与已裁条目仍然成立
         print(f"[续跑] 沿用上次的读图结果（{entry.tag} 未换版），只问没裁过的条目。")
-        report = compare_descriptions(base, progress.reading())
+        report = compare_descriptions(base, progress.reading(), locked)
     else:
         try:
-            raw = describe_image(generation_dir / entry.path, build_proofread_request(base))
+            raw = describe_image(generation_dir / entry.path,
+                                 build_proofread_request(base, locked))
             reading = parse_reading(raw)
         except Exception as exc:  # noqa: BLE001 — 读图失败要响且不放行
             print(f"[读图校对] {entry.name} 读图失败：{exc}")
             print("已停在等交回：图没读成就不放行；重跑向导可重试。")
             _save()
             return PROOFREAD_FAILED
-        report = compare_descriptions(base, reading)
+        report = compare_descriptions(base, reading, locked)
         # 读图结果**先落盘**再问裁决：这张的视觉调用不该因为中间断了重付一次
         progress = _checkpoint(ProofreadProgress(
             name=entry.name, sha256=entry.sha256, base=base, claims=reading.claims))
@@ -1624,6 +1687,10 @@ def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item: QueueIte
     from ..generation import ref_asset_registry
 
     registry = ref_asset_registry(state, brief)
+
+    # 回灌（issue #53 AC3）：出词**之前**按前面已定稿素材的画面事实对齐一次。放在外层
+    # 循环之外＝改写成功后的重出不再对齐（那会把用户刚改的词按旧事实拽回去）。
+    _align_asset_with_settled(state, brief, generation_dir, item)
 
     # 续跑菜单只在**首次**进这一张时给（`first_pass`）：改写成功／原词再掷之后的外层
     # 重出，正是用户「回去重掷了、回来交回」的那一刻——那里要的是审查菜单（含填路径），

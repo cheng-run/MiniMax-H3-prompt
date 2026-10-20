@@ -197,11 +197,19 @@ def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_f
 
 
 def _normalize_asset_entries(parsed: object, kind: str) -> list[dict]:
-    """把资产图节点的 JSON 回复归一成四键资产条目列表（issue #40）。
+    """把资产图节点的 JSON 回复归一成五键资产条目列表（issue #40；锁死清单 issue #53）。
 
-    只保留 ``name / positive_prompt / negative_prompt / instructions`` 四键：
-    多余的键（模型键 ``zimage``/``flux2`` 等）不进 state——那是被取消的维度，
+    只保留 ``name / positive_prompt / negative_prompt / instructions / locked_features``
+    五键：多余的键（模型键 ``zimage``/``flux2`` 等）不进 state——那是被取消的维度，
     放它进来会让下游再长出「按模型分叉」的读法。语义名必填：素材台账／注入卡靠它对号。
+
+    **锁死清单**（issue #53）在这里连两道闸门一起把住：
+
+    - 缺席／空表 → 响。清单是对照器判偏差的**唯一判据**，空表＝不收窄＝「8 张图 39 条
+      偏差逐条三选」那场人裁灾难原样回来，而且没人看得出为什么（静默失败）；
+    - 条目不是 ``positive_prompt`` 的**原文片段** → 响。读图逐字摘录的那句要落得到条目上，
+      条目是转述的话命中判据恒不成立、偏差悄悄清空——同样是静默失败。这条不变式
+      由角色提示词要求模型「逐字摘录正文」，这里把它钉成可证的检查。
     """
     if not isinstance(parsed, list):
         raise ValueError(f"{kind} 生图提示词 JSON 顶层必须是数组（每资产一项）")
@@ -215,13 +223,40 @@ def _normalize_asset_entries(parsed: object, kind: str) -> list[dict]:
         positive = str(item.get("positive_prompt", "")).strip()
         if not positive:
             raise ValueError(f"{kind} 资产「{name}」的 positive_prompt 为空")
+        locked = _normalize_locked_features(item.get("locked_features"), name, positive, kind)
         entries.append({
             "name": name,
             "positive_prompt": positive,
             "negative_prompt": str(item.get("negative_prompt", "")),
             "instructions": [str(x) for x in item.get("instructions", [])],
+            "locked_features": locked,
         })
     return entries
+
+
+def _normalize_locked_features(raw: object, name: str, positive: str, kind: str) -> list[str]:
+    """归一一条资产的锁死清单（issue #53）；坏形状与不合不变式的条目都响。
+
+    形状坏（不是数组）与条目坏（空、或不是正文原文片段）分开报错，是为了让重跑的人
+    一眼看出是模型没交清单、还是交了一份转述——两者的修法不同（改角色提示词措辞 vs
+    让人工看一眼那条到底想锁什么）。
+    """
+    if raw is None:
+        raise ValueError(
+            f"{kind} 资产「{name}」缺 locked_features（锁死清单）——"
+            "它是读图校对判偏差的唯一判据，缺席等于把整篇提示词当判据（人裁被淹）")
+    if not isinstance(raw, list):
+        raise ValueError(f"{kind} 资产「{name}」的 locked_features 不是数组：{raw!r}")
+    locked = [str(x).strip() for x in raw]
+    locked = [x for x in locked if x]
+    if not locked:
+        raise ValueError(f"{kind} 资产「{name}」的 locked_features 是空表——至少要一条身份特征")
+    for entry in locked:
+        if entry not in positive:
+            raise ValueError(
+                f"{kind} 资产「{name}」的锁死清单条目 {entry!r} 不是 positive_prompt 的原文片段"
+                "——条目必须逐字摘自正文，否则读图摘录的引文落不到条目上、偏差判不出来")
+    return locked
 
 
 def _canvas_block(canvases: dict[str, tuple[int, int]] | None = None) -> str:

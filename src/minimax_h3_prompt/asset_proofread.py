@@ -134,28 +134,65 @@ class ProofreadReport:
         return not self.deviations and not self.omissions
 
 
-def compare_descriptions(image_prompt: str, reading: Reading) -> ProofreadReport:
+def _locked_hit(quote: str, locked: Sequence[str]) -> bool:
+    """引文是否命中锁死清单（字面判据）：与某条清单条目**互为子串**即算命中。
+
+    条目是生图提示词正文的原文片段（``nodes._normalize_asset_entries`` 钉住这条不变式），
+    所以读图逐字摘录的那句通常**包含**条目；反向（条目包含引文）也认——模型可能只摘了
+    条目的一截（「青铜」之于「青铜钥匙」）。两个方向都是字面判据，不猜语义
+    （同 theme_guard 的子串口径）；空条目先滤掉：空串是任何串的子串，留着判据就恒真。
+    """
+    text = str(quote).strip()
+    return any(text in entry or entry in text for entry in locked)
+
+
+def compare_descriptions(
+    image_prompt: str,
+    reading: Reading,
+    locked_features: Sequence[str] = (),
+) -> ProofreadReport:
     """对照器（纯函数）：生图提示词 × 读图结果 → 偏差清单 + 补漏候选。
 
     判据（确定性，可独立测试）：
 
-    - ``prompt_quote`` **非空** → 偏差（读图声称描述里这句与图不符）；
-    - ``prompt_quote`` 空 → 补漏候选（提示词没写的显著事实）。
+    - ``prompt_quote`` 空 → 补漏候选（提示词没写的显著事实）；
+    - ``prompt_quote`` 非空且**命中锁死清单** → 偏差（读图声称描述里这句与图不符）；
+    - ``prompt_quote`` 非空但**不命中**清单 → **理想描述**的出入（issue #53 裁定）：
+      不判偏差、不进人裁，**也不进补漏**——直接忽略。
 
-    引文**是否逐字命中**原文不改分类、只记进 ``Deviation.prompt_quote`` 供「按图改文案」
-    定点落锚：失锚引文若降级成补漏，会把互相矛盾的事实并进描述（原说红裙、又补一句蓝裙）
-    ——它是「不符」不是「没有」；静默丢弃则回到「图跑偏无人纠」。两条路都踩红线。
+    降级为什么是「忽略」而不是「转补漏」（2026-10-20 裁定）：引文非空＝读图说的是
+    「描述里这句与图不符」，即**它是「不符」不是「没有」**；当补漏并进去会让描述
+    自相矛盾（原说红裙、又补一句蓝裙）。补漏仍是「图里有而描述没有」那条空引文的路，
+    机制不变。实测（真实现场 39 条偏差重放）：窄清单下 10 条进人裁、29 条忽略、
+    补漏候选维持原有的 24 条。
+
+    为什么要收窄（2026-10-18 实测）：拿整篇提示词当判据时，8 张图出了 39 条偏差、
+    38 条被裁成「按图改文案」——大头是构图口味级出入（「罐体按三分法偏左」vs 实测
+    「几乎正中」），图是既成事实、文案跟改，人裁被淹。锁死清单把判据收到少数身份特征
+    （发色/服装/标志物）上，那些才是「这张图认不出是同一个人」的根因。
+
+    ``locked_features`` **空 = 未声明锁死清单**（旧产物、旧会话）＝不收窄：非空引文仍
+    一律判偏差。清单是「收窄判据」的声明，没声明就不收窄——否则旧会话的图跑偏无人纠。
+
+    引文**是否逐字命中**原文不改分类（命中与否只由锁死清单决定）、只记进
+    ``Deviation.prompt_quote`` 供「按图改文案」定点落锚：失锚引文若静默丢弃就回到
+    「图跑偏无人纠」；向导会引导人补锚后再落笔。
 
     补漏再做一道**字面去重**：实况文字已逐字出现在描述里的不算补漏（描述已有的事实
     再并一遍是冗余，不是补漏）。字面判据不猜语义（同 theme_guard 的子串口径）——
     漏判只是少一条候选，人裁时看得见；错并一条冗余事实倒会污染描述主体。
     """
     prompt = str(image_prompt)
+    locked = tuple(text for text in (str(x).strip() for x in locked_features) if text)
     deviations: list[Deviation] = []
     omissions: list[Omission] = []
     for claim in reading.claims:
         # Claim 保证 observed 非空（构造即校验），这里不再有「静默跳过」分支。
         if claim.prompt_quote:
+            if locked and not _locked_hit(claim.prompt_quote, locked):
+                # 理想描述出入：忽略（#53 AC2 裁定）。不转补漏——引文非空＝「不符」
+                # 不是「没有」，并进描述就是红裙+蓝裙同现那种自相矛盾。
+                continue
             deviations.append(Deviation(claim.aspect, claim.prompt_quote, claim.observed))
         elif claim.observed not in prompt:
             omissions.append(Omission(claim.aspect, claim.observed))
@@ -291,26 +328,39 @@ def merge_asset_description(
     return text
 
 
-def build_proofread_request(image_prompt: str) -> str:
+def build_proofread_request(image_prompt: str, locked_features: Sequence[str] = ()) -> str:
     """读图校对请求文本（纯函数，返回字符串即契约）。
 
     **引文必须逐字摘录**是整条纠偏链的锚点：「按图改文案」只改 ``prompt_quote`` 那一处，
     引文是模型复述而非原文，就没有「那一处」可改（合并侧会抛错）。故请求里把这条
     钉成硬要求，而不是指望视觉模型自觉。
+
+    **锁死清单条目要逐条摆出来**（issue #53）：只写一句「偏差只判身份特征」在信息上
+    不可赢——模型得按字面知道是哪几条，它摘的引文才落得到条目上（同 issue #37 的教训：
+    请求里不给词表，那句「使其通过校验」模型赢不了）。清单缺席时请求逐字与改动前一致，
+    旧产物照旧走老口径（对照器那边同样不收窄，两处口径一致）。
     """
-    return (
+    lines = [
         "这是一张 AI 视频生成的参考素材图。请把它与下面的生图提示词逐项对照，"
-        "找出两类事实，只输出一个 JSON 对象（不要 markdown 围栏）：\n"
+        "找出两类事实，只输出一个 JSON 对象（不要 markdown 围栏）：",
         '1. 偏差：图中实际画面与提示词描述**不符**的每一处。每条给出 prompt_quote'
         "（从生图提示词里**逐字摘录**那句不符的原文，一字不差——后续只改这一处）"
-        "和 observed（图中实际看到的样子）。\n"
+        "和 observed（图中实际看到的样子）。",
         '2. 补漏：图中有、而提示词**没有写**的显著事实（外观细节/道具/文字等）。'
-        "这类 prompt_quote 留空字符串，observed 写该事实。\n"
-        "只报确定可见的差异，不要臆测；与提示词一致的不要报。\n"
+        "这类 prompt_quote 留空字符串，observed 写该事实。",
+        "只报确定可见的差异，不要臆测；与提示词一致的不要报。",
+    ]
+    locked = [str(x).strip() for x in locked_features if str(x).strip()]
+    if locked:
+        lines.append(
+            "【锁死清单】只有下列身份特征与图不符才算**偏差**；其余出入（构图/光线/"
+            "口味级）属理想描述，不必报为偏差：")
+        lines.extend(f"- {entry}" for entry in locked)
+    lines.append(
         '{"claims": [{"aspect": "哪一处（如 裙色/道具/文字）", '
-        '"prompt_quote": "逐字摘录或空串", "observed": "图中实际所见"}]}\n'
-        f"【生图提示词】\n{image_prompt}"
-    )
+        '"prompt_quote": "逐字摘录或空串", "observed": "图中实际所见"}]}')
+    lines.append(f"【生图提示词】\n{image_prompt}")
+    return "\n".join(lines)
 
 
 def render_proofread_report(report: ProofreadReport) -> str:

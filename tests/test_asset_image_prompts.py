@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from minimax_h3_prompt import model_factory
 from minimax_h3_prompt.brief_parser import Brief
 from minimax_h3_prompt.generation import (
@@ -55,12 +57,17 @@ def _brief() -> Brief:
 def _assets_json(assets: tuple[tuple[str, str], ...]) -> str:
     """资产图节点的假回复：JSON **数组**，每个资产一项（issue #40 单版形态）。
 
-    每项**故意带一个多余键**（``zimage``）：节点要把它归一成四键结构
-    （name / positive_prompt / negative_prompt / instructions），多余的键不许进 state——
-    夹具干净就咬不住「归一没做」的回归（变异检验实测过：不带脏键时放开归一照样绿）。
+    每项**故意带一个多余键**（``zimage``）：节点要把它归一成五键结构
+    （name / positive_prompt / negative_prompt / instructions / locked_features），
+    多余的键不许进 state——夹具干净就咬不住「归一没做」的回归（变异检验实测过：
+    不带脏键时放开归一照样绿）。
+
+    锁死清单取语义名——它**逐字出现在提示词正文里**（夹具的提示词都以语义名起头），
+    节点侧那条「条目必须是正文原文片段」的不变式因此成立（issue #53）。
     """
     return json.dumps([
         {"name": name, "positive_prompt": prompt, "instructions": ["粘贴到节点 10"],
+         "locked_features": [name],
          "zimage": {"positive_prompt": "模型键残余不该进 state"}}
         for name, prompt in assets
     ])
@@ -167,8 +174,9 @@ def test_each_asset_gets_exactly_one_named_zimage_prompt(tmp_path, monkeypatch):
                 f"{zh}/{name} 的 profile 不是 Z-Image 档"
     for _node, _k, _d, _t, out_field, _a in _ASSETS:
         for entry in state[out_field]:
-            assert set(entry) == {"name", "positive_prompt", "negative_prompt", "instructions"}, \
-                f"{out_field} 的条目混入了四键之外的字段：{sorted(entry)}"
+            assert set(entry) == {"name", "positive_prompt", "negative_prompt",
+                                  "instructions", "locked_features"}, \
+                f"{out_field} 的条目混入了五键之外的字段：{sorted(entry)}"
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +239,7 @@ def test_asset_prompt_request_carries_the_canvas_block(monkeypatch):
     """
     requests: list[str] = []
     monkeypatch.setattr(nodes, "run_agent",
-                        lambda agent, message: requests.append(message) or _assets_json((("甲", "提示词"),)))
+                        lambda agent, message: requests.append(message) or _assets_json((("甲", "甲的提示词"),)))
     brief = _brief()
     agents = {"image_prompt_engineer": object()}
 
@@ -255,7 +263,7 @@ def _canvas_request(monkeypatch, canvases: dict) -> str:
 
     def fake_run_agent(agent, message):
         captured.append(message)
-        return _assets_json((("甲", "提示词"),))
+        return _assets_json((("甲", "甲的提示词"),))
 
     monkeypatch.setattr(nodes, "run_agent", fake_run_agent)
     brief = Brief(mode="base", variant="I2VA", duration=5.0, style="写实", plot=TOPIC,
@@ -427,6 +435,55 @@ def test_products_show_the_user_selected_canvas(tmp_path, monkeypatch):
     rendered = render_asset_rows(list(variants), variants[0].kind)
     assert "画布：`7:13 · 700 × 1300（近竖）`" in rendered, "产物没有画布行（或显示串不是单一来源那份）"
     assert "推荐尺寸" not in rendered, "「推荐尺寸」措辞还活着——系统钦定时代的旧标签"
+
+
+# ---------------------------------------------------------------------------
+# 8. 锁死清单：进条目、进产物、进请求（issue #53 AC1）
+# ---------------------------------------------------------------------------
+
+def test_asset_prompt_product_lists_the_locked_features(tmp_path, monkeypatch):
+    """AC1：生图提示词产物含**显式锁死清单段**。
+
+    清单是读图校对判偏差的唯一判据（issue #53），所以它必须出现在**产物**里——产物
+    既是用户拿去生图的那份，也是校对对照的那份。只活在 state 里的清单，用户看不到，
+    也就无从判断「系统凭什么说这条是偏差」。
+    """
+    state, _ = _run_stage1(tmp_path, monkeypatch)
+    girl = next(v for v in image_prompt_variants(state) if v.name == "红裙女孩")
+    assert girl.locked_features == ("红裙女孩",), "条目没带上锁死清单"
+
+    text = render_asset_rows([girl], "character")
+    assert "锁死清单" in text, "产物没有锁死清单段"
+    for entry in girl.locked_features:
+        assert entry in text, f"锁死清单条目 {entry!r} 没进产物"
+
+
+def test_node_refuses_a_reply_without_a_locked_list(monkeypatch):
+    """条目缺锁死清单 → 节点**响**（不是静默给空清单）。
+
+    清单缺席＝对照器不收窄（旧口径）＝「8 张图 39 条偏差逐条三选」那场人裁灾难原样
+    回来，而且没人看得出为什么。变异检验：删掉节点里那段校验，这条必须红。
+    """
+    monkeypatch.setattr(nodes, "run_agent", lambda agent, message: json.dumps(
+        [{"name": "甲", "positive_prompt": "甲的提示词"}]))
+    with pytest.raises(ValueError, match="锁死清单"):
+        nodes._make_image_prompt_node(
+            {"image_prompt_engineer": object()}, "人物", "character_design",
+            "character_image_prompts")({"brief": _brief(), "character_design": "设计正文"})
+
+
+def test_node_refuses_a_locked_entry_that_is_not_verbatim_in_the_prompt(monkeypatch):
+    """条目必须是提示词正文的**原文片段**（节点侧钉住的不变式）。
+
+    条目不是正文原文，读图逐字摘录的那句就落不到条目上——对照器的命中判据恒不命中、
+    偏差清单悄悄清空（静默失败）。这里把不变式摆在最靠前的一道闸门上，坏数据不进 state。
+    """
+    monkeypatch.setattr(nodes, "run_agent", lambda agent, message: json.dumps(
+        [{"name": "甲", "positive_prompt": "甲的提示词", "locked_features": ["发色：银白"]}]))
+    with pytest.raises(ValueError, match="原文"):
+        nodes._make_image_prompt_node(
+            {"image_prompt_engineer": object()}, "人物", "character_design",
+            "character_image_prompts")({"brief": _brief(), "character_design": "设计正文"})
 
 
 def test_entry_width_height_cannot_beat_the_selected_canvas(tmp_path, monkeypatch):
