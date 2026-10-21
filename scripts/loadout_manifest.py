@@ -19,7 +19,7 @@ LoRA（用户以为是与 ``00006`` 并列的重复跑），``00012`` 的 seed �
 
 用法（仓库根，venv python）::
 
-    ./.venv/Scripts/python.exe tools/loadout_manifest.py <产物.png> [<产物.png> ...]
+    ./.venv/Scripts/python.exe scripts/loadout_manifest.py <产物.png> [<产物.png> ...]
 
 ComfyUI 根目录按 ``--comfy-root`` → ``H3_COMFY_ROOT`` → 本机默认值的顺序解析。
 """

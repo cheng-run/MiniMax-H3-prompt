@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 import pytest
 
-from tools.flicker_metric import metrics, moving_average
+from scripts.flicker_metric import metrics, moving_average
 
 W, H, FPS, N = 64, 64, 24, 48
 

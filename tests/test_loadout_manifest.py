@@ -15,7 +15,7 @@ import json
 
 from PIL import Image, PngImagePlugin
 
-from tools.loadout_manifest import extract_loadout, main, render_report, resolve_refs
+from scripts.loadout_manifest import extract_loadout, main, render_report, resolve_refs
 
 
 def write_artifact(path, payload, *, size=(8, 8)):
