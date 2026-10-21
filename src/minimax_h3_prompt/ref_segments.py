@@ -21,8 +21,14 @@
 「拼接归用户」）：段间硬切、用各段自身帧，缺一段就拒绝（缺段成片是伪产物）。≤15 秒
 直出走同一套收尾——整片六段式即唯一执行段（``single_segment_result``），段数=1 时
 拼接退化为拷贝改名。重跑某段后可单独跑一次手动拼接（CLI ``ref-concat``，与自动拼接
-同一份编排）。问答节奏住在 ``ui.wizard``，本模块只放不碰终端的纯件（段展示块、
-语义核验块、改写一轮、段产出账读写、成片拼接）。
+同一份编排）。
+
+陪跑中断后由**续跑**接回（issue #58）：``load_ref_segments_for_resume`` 从
+``segments/plan.json`` ＋ ``segment-NN.md`` 重建装载（零 LLM 调用），
+``read_ref_handoff_progress`` 从段产出账取回已通过的段——**不新增第三本账**（阶段 2
+断点防最贵一步重烧、续跑点防问答与计价产物丢失、段产出账的通过行就是逐段陪跑的进度，
+三者各防各的）。问答节奏住在 ``ui.wizard``，本模块只放不碰终端的纯件（段展示块、
+语义核验块、改写一轮、段产出账读写、续跑装载、成片拼接）。
 """
 from __future__ import annotations
 
@@ -284,9 +290,12 @@ def log_segment_output(
     一行＝一段**已交回并通过两道闸**的产出（可证层放行 ＋ 人在语义层判为继续/接受，
     见 issue #56）：被拦下的段、以及判为「重跑本段/修改提示词/停下」的那几轮都不落
     这一行——``event=output`` 的行在不在就是「这段过没过」的判据（**必须按 event 取数**，
-    账上还有 encounter/rewrite 两类行，见 ``SEGMENT_EVENT_*``）。拿它跳过已通过段的
-    **续跑是 issue #58**，本票只写不读（除测试外没有生产路径读它），别按「已经能续跑」
-    去理解这本账。
+    账上还有 encounter/rewrite 两类行，见 ``SEGMENT_EVENT_*``）。
+
+    本行同时是**续跑的进度**（issue #58）：重跑向导时 ``read_ref_handoff_progress`` 按
+    ``event=output`` 取回已通过的段，``ui.wizard._run_ref_segment_handoff`` 据此跳段
+    ——已通过的段不重出提示词、不重跑、不重付。**不另开一本进度账**：这本账的行本来就
+    恰好是「段号＋判定＋视频路径」，再记一份只会长出第二本会漂的真相。
 
     记 **SHA256** 是为了对抗**文件名可变引用**：只记文件名的话，段视频换版/改名后
     旧产物永久不可复测且无处报错（素材台账同款理由）。摘要**在写入时现算**，不另收
@@ -507,6 +516,89 @@ def passed_segment_rows(directory: str | Path) -> dict[int, dict]:
     for row in read_segment_ledger(directory, event=SEGMENT_EVENT_OUTPUT):
         rows[int(row.get("segment", 0))] = row
     return rows
+
+
+# --- 逐段陪跑续跑（issue #58）--------------------------------------------------
+def load_ref_segments_for_resume(directory: str | Path,
+                                 *, total_s: float) -> RefSegmentResult:
+    """按盘上的段表与段文件重建 ``RefSegmentResult``——续跑**零 LLM 调用**的装载口。
+
+    续跑不能重跑阶段 2 再「重出」一遍段提示词：那既要重烧组装（最贵一步），又会得到
+    **另一套**文本与**另一套**分段边界——而段产出账里的「第 N 段已通过」只对产出它的
+    那一套有意义（同 base 路线 ``_cached_plans`` 的纪律）。所以段表取 ``segments/plan.json``
+    （段序唯一出站真源），段文本取 ``segments/segment-NN.md``——后者也正是「修改提示词」
+    改写后的落点，读回来就是**当前**那份词。
+
+    **缺失/读不出就抛**：段表没了，``passed`` 里的段号指向哪几段就无从谈起；段文件没了，
+    重出它要重付 LLM 且新文本会与已通过的那几段脱节。调用方据此响错停住（AC3 裁定：
+    账文件不在＝零通过，但段表/段文件不在＝响错）。
+    """
+    directory = Path(directory)
+    try:
+        plans = read_plan_file(directory)
+    except FileNotFoundError:
+        raise
+    except (KeyError, TypeError, ValueError) as exc:
+        # 「读不回段表」必须是可捕获的一种错（调用方按 AC3 响错停住），不是裸 traceback：
+        # `read_plan_file` 只对字段走 `from_dict`，列表外层/条目类型错会抛 TypeError/KeyError。
+        raise ValueError(
+            f"分段规划读不出来（{directory / 'segments' / 'plan.json'}）：{exc}") from exc
+    if not plans:
+        # 交付恒会写出 ≥1 段，空段表只可能是被改坏/清空过。不拦的话下面「一段都不存在」
+        # 会让续跑当成「全部通过」，直接去拼接一条没有段的片子。
+        raise ValueError(
+            f"分段规划是空的（{directory / 'segments' / 'plan.json'}）："
+            "本片一段都没有，无从续跑")
+    paths: list[Path] = []
+    texts: list[str] = []
+    for position in range(1, len(plans) + 1):
+        path = directory / "segments" / f"segment-{position:02d}.md"
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"第 {position} 段的提示词文件不见了：{path}"
+                "（续跑不重出已交付的段——重出要重付 LLM，且新词会与已通过的那几段脱节）")
+        texts.append(path.read_text(encoding="utf-8"))
+        paths.append(path)
+    # 注记的有无跟**走哪条交付路径**，不跟「段数 > 1」（issue #57 AC5 的直出路线是
+    # 1 段且无注记；>15s 也可能只剩 1 段但带注记）。判据与 ``_phase2_ref_finish``
+    # 分流那一处**同一条**：`total_s > 15`。
+    return RefSegmentResult(
+        plans=list(plans), texts=texts, total_s=int(round(total_s)),
+        segment_paths=paths, plan_path=directory / "segments" / "plan.json",
+        annotated=float(total_s) > 15)
+
+
+def read_ref_handoff_progress(directory: str | Path,
+                              plans: list[SegmentPlan]) -> dict[int, dict]:
+    """续跑要的「已通过段」→ ``{段号: 行}``；账与段表**对不上就抛**（绝不静默从零开始）。
+
+    进度就是段产出账的 ``event=output`` 行（一段一行、含段号/判定/视频路径/SHA256，
+    issue #55）——本票**不新开一本进度账**（AC4：不新增含义重叠的账）。``event`` 必须
+    显式点名：同一本账还装着 encounter/rewrite 两类行，不判别就会把「改了一轮词」读成
+    「这段过了」（``read_segment_ledger`` 的 event 参数就是为此必填）。
+
+    三条硬核对，任一不过就抛：
+    - 账行错形/读不出（``read_segment_ledger`` 已抛，这里不吞）；
+    - 段号落在段表之外（账与段表不是同一次拆段的产物）；
+    - 通过行**跳号**（陪跑是严格顺序的，中间缺段说明账被删过/改过——按它续跑会跳过
+      从没做过的段，正是本票要消灭的形态）。
+
+    账文件**不在**不算错：追加账在「一段都没通过」时本来就不存在（#55 的用例钉着
+    这一点），那种情况返回空表、从第 1 段起——调用方会把「已通过 0 段」当面打出来。
+    """
+    passed = passed_segment_rows(directory)
+    total = len(plans)
+    extra = sorted(number for number in passed if not 1 <= number <= total)
+    if extra:
+        raise ValueError(
+            f"段产出账里有段表之外的段号 {extra}（段表只有 {total} 段）："
+            "账与 segments/plan.json 不是同一次拆段的产物，不能拿它续跑")
+    numbers = sorted(passed)
+    if numbers != list(range(1, len(numbers) + 1)):
+        raise ValueError(
+            f"段产出账的通过行跳号了：{numbers}——陪跑是严格顺序的，中间缺段说明"
+            "账被删过或改过；按它续跑会跳过从没做过的段")
+    return passed
 
 
 def _coverage_problem(plans: list[SegmentPlan], total_s: int) -> str:

@@ -33,6 +33,7 @@ from ..resume_point import remember as remember_answer
 from ..session_store import (
     STATUS_AWAITING_FRAMES,
     STATUS_COMPLETED,
+    STATUS_REF_SEGMENTS_RUNNING,
     STATUS_SEGMENTED_RUNNING,
     STATUS_STAGE1_RUNNING,
     SessionState,
@@ -435,6 +436,10 @@ def run_wizard(config: Config) -> int:
     # 绝不能再走阶段 2——那正是 #17 的代价（重做阶段 2 + 已完成的所有段重来）。
     if session.status == STATUS_SEGMENTED_RUNNING:
         return _resume_segmented(config, session)
+    # 多参逐段陪跑中途退出（issue #58）：落到**多参自己的**续接路径，绝不共用上面那条
+    # ——两种陪跑的段文件、进度账与有无桥接帧全都不同（见 ``session_store`` 的状态注释）。
+    if session.status == STATUS_REF_SEGMENTS_RUNNING:
+        return _resume_ref_handoff(config, session)
     # 续接到「阶段 1 已完成、等帧图」的会话：补上同一个修改循环（issue #27）。它原本直接
     # 掉进阶段 2 的收图提问——累积清单看不到、意见提不了，而这条路径正是「重启后清单仍然
     # 非空」的真实现场（用户在首帧循环里提过意见、还没提交帧图就退出）。
@@ -2055,7 +2060,8 @@ def _assemble_ref_final_film(result: RefSegmentResult, generation_dir: Path):
     print(format_final_film(film))
 
 
-def _run_ref_segment_handoff(result: RefSegmentResult, generation_dir: Path) -> bool:
+def _run_ref_segment_handoff(result: RefSegmentResult, generation_dir: Path,
+                             *, passed: dict[int, dict] | None = None) -> bool:
     """多参逐段陪跑（issue #55/#56）：一次只出当前一段 → 交回本段输出视频 → **可证层**硬阻断
     → **语义层**剥首/末帧读图并排人判 → 五档出路 → 落段产出账。
 
@@ -2073,18 +2079,42 @@ def _run_ref_segment_handoff(result: RefSegmentResult, generation_dir: Path) -> 
     落在 7–15s 未知档时只能报 warning（测不出事实就不许阻断，见 ``check_segment_video``）。
     那是既有的可证性分级，不在这票放宽或收紧。
 
+    ``passed``：段产出账里**已通过**的段（``{段号: 行}``），续跑（issue #58）据此跳段——
+    已通过的段**不重出提示词、不重跑、不重付**：段文本本来就落盘着
+    （``segments/segment-NN.md``），重打一遍既让用户以为要再生成一次，也会把这些段的
+    语义层读图（视觉计费）再付一遍。
+
+    **两个调用方的分工**：续跑入口（``_resume_ref_handoff``）先过
+    ``read_ref_handoff_progress`` 的段表核对，再把结果传进来；首跑路径
+    （``_phase2_ref_finish``）不传、由这里现读——那个时刻账**必然为空**（有账就说明
+    陪跑开始过，会话会走续跑入口而不是首跑），所以「账与段表对不上」的核对留在续跑
+    那一处即可，不必在这里再抛一次会变成裸 traceback 的错。
+
     返回 True ＝ 全部段交回并通过；False ＝ 停住（空输入，或被拦下后不再交）。
     """
-    from ..ref_segments import log_segment_output, render_ref_segment_briefing
+    from ..ref_segments import (
+        log_segment_output,
+        passed_segment_rows,
+        render_ref_segment_briefing,
+    )
 
     plans = list(result.plans)
     total = len(plans)
+    if passed is None:
+        passed = passed_segment_rows(generation_dir)
     # 全片时长取**交付时那个**（``RefSegmentResult.total_s``＝注记句与交付校验共用的口径），
     # 不用 ``plans[-1].end_s``：规划器允许末段 end 略超 total（留余量），拿末段 end 当
     # total 会让改写后的重过校验按另一个期望注记判「缺注记」——同一份文本交付时是过的
     # （复审实测，issue #56）。
     total_s = result.total_s
     for position, plan in enumerate(plans, 1):
+        if position in passed:
+            # 续跑跳段（issue #58 AC2）：不重出提示词、不重跑、不重付。当面说清跳了哪一段、
+            # 用的是哪份视频（账上记的路径＋SHA256 是事后复跑那次验收的唯一入口）。
+            row = passed[position]
+            print(f"\n[续接] 第 {position}/{total} 段已通过验收，跳过"
+                  f"（不重出提示词、不重跑、不重付）：{row.get('video', '')}")
+            continue
         segment_file = result.segment_paths[position - 1]
         # 逐段当前文本：改写一轮就地替换它（下一轮改写以新词为底），不回写 result.texts
         # ——那个字段是**交付时**那一份，改写后的事实以段文件与段产出账为准。
@@ -2143,7 +2173,8 @@ def _run_ref_segment_handoff(result: RefSegmentResult, generation_dir: Path) -> 
                       f"第 {position}/{total} 段，然后把**新的**输出视频路径交上来。",
                       flush=True)
                 continue
-            # GATE_STOP：默认出路。停下不是失败——已通过的段留在账上，续跑是 #58 的事。
+            # GATE_STOP：默认出路。停下不是失败——已通过的段留在账上，重跑向导会从
+            # 最后一个续跑点（段产出账的最新通过行）接着走（issue #58）。
             print(f"\n⚠ 第 {position}/{total} 段停在语义层：这一段不落账，"
                   "下一段的提示词也不出。已交回并通过的段留在段产出账里。", flush=True)
             return False
@@ -2360,7 +2391,12 @@ def _phase2_ref_finish(config: Config, session: SessionState) -> int:
         final_state, prompt = run_stage2(state, brief, config,
                                          on_node=_report_node, checkpoint_dir=generation_dir)
     _drain_stdin()
-    save_session(generation_dir, brief, final_state, status=STATUS_COMPLETED)
+    # 逐段陪跑**开始之前**就不能标 completed（issue #58）：陪跑跨越几小时的人工生成，
+    # 中途 Ctrl-C/关机时若会话已是 completed，重跑向导会另开新 GEN、阶段 1/2 重做，
+    # 而段产出账里的进度**永远读不到**——与首尾帧链 #17 完全同形（#55 在这一处留了
+    # 注释点名本票）。标成 ref_segments_running，跑完才转 completed。
+    # 不复用 segmented_running：那个值会把多参会话路由进 base 的续接分支。
+    save_session(generation_dir, brief, final_state, status=STATUS_REF_SEGMENTS_RUNNING)
 
     output_file = generation_dir / "video-prompt.md"
     output_file.write_text(prompt, encoding="utf-8")
@@ -2377,11 +2413,6 @@ def _phase2_ref_finish(config: Config, session: SessionState) -> int:
         print(f"\n[本片单段] 整片 ref 六段式已写入 {output_file}"
               "——本片只有一段，整片文本就是本段提示词"
               f"（段文件 {result.segment_paths[0]} 同文），并留作存档预览。")
-    # 会话状态在上面那次 save_session 里已经是 completed——陪跑在它之后，所以
-    # 「停在段 3」的会话在盘上仍是 completed。这是**已知的信号错**，留给 issue #58：
-    # 那票要的是「已通过的段不重跑」，得连状态机一起定（base 路线用的
-    # segmented_running 在这里会落进 base 的续接分支，等于拿另一条路线的流程
-    # 续接多参会话）。本票不假装已经能续跑。
     finished = _run_ref_segment_handoff(result, generation_dir)
     # 全段通过后自动拼成成片（issue #57 AC1）；某段没过时它自己拒绝并说清卡在哪一段
     # （AC3）——「未通过即不拼」这条规矩住在被拼接的那一处，不在这里的 if 里。
@@ -2390,6 +2421,13 @@ def _phase2_ref_finish(config: Config, session: SessionState) -> int:
     # 往下做就得知道去哪儿找（账里的行只在段产出账里，不在别处）。
     print(f"段产出账（{'全部段已通过' if finished else '已通过的段'}）："
           f"{segment_ledger_path(generation_dir)}")
+    # 跑完才转 completed（issue #58）：转早了，中断的会话就不再是「可续接」的，
+    # 续跑语义会被永久劫持（同 #17 的收尾）。
+    if finished:
+        save_session(generation_dir, brief, final_state, status=STATUS_COMPLETED)
+    else:
+        print(f"[续接] 本次没有跑完全部段，会话保持「多参分段进行中」：下次重跑向导会落回 "
+              f"{generation_dir.name}，从已通过的那一段之后继续（阶段 1/2 不重跑）。")
     return 0
 
 
@@ -3294,6 +3332,52 @@ def _resume_segmented(config: Config, session: SessionState) -> int:
     print(f"\n[续接] 上一次分段陪跑没有跑完，回到 {directory.name} 继续（阶段 1/2 不重跑）。")
     _run_long_form(session.brief, session, prompt, _read_cached_summary(directory),
                    session.stage_state, directory)
+    return 0
+
+
+def _resume_ref_handoff(config: Config, session: SessionState) -> int:
+    """多参逐段陪跑续接（issue #58）：回到同一个 GEN，已通过的段不重出、不重跑、不重付。
+
+    与 ``_resume_segmented`` 是**两条路线的续接**，不共用：base 那边靠
+    ``segments/progress.json`` 的 ``done=N`` 与 ``shot-NN.md``、接着还要剥桥接帧；
+    多参这边靠**段产出账的通过行**与 ``segment-NN.md``、没有桥接帧。拿 base 的
+    ``_run_long_form`` 走多参会话，等于拿另一条路线的步骤去续它。
+
+    零 LLM 调用：段表与段文本都从盘上读回（``load_ref_segments_for_resume``），
+    阶段 1/2 一步不动。读不回来就**响错停住**（AC3 裁定）：段表/段文件缺失、账行错形、
+    账与段表对不上——这些形态下「从零开始」等于把已通过的段当没做过。
+    """
+    from ..ref_segments import (
+        load_ref_segments_for_resume,
+        read_ref_handoff_progress,
+        segment_ledger_path,
+    )
+
+    directory = session.directory
+    brief = session.brief
+    try:
+        result = load_ref_segments_for_resume(directory, total_s=brief.duration)
+        passed = read_ref_handoff_progress(directory, result.plans)
+    except (OSError, ValueError) as exc:
+        print(f"[错误] 多参逐段陪跑的落盘物读不回来：{exc}")
+        print("  这不是「一段都没做」——静默从零开始会把已通过的段当没做过"
+              "（已生成的视频得重新交回，已付的读图也白付）。")
+        print(f"  出路：恢复 {directory / 'segments'} 下的 plan.json / segment-NN.md / "
+              "segment-ledger.jsonl 后重跑；或删掉会话文件另开一次生成。")
+        return 1
+    print(f"\n[续接] 上一次多参逐段陪跑没有跑完，回到 {directory.name} 继续"
+          f"（阶段 1/2 不重跑）：已通过 {len(passed)}/{len(result.plans)} 段。")
+    finished = _run_ref_segment_handoff(result, directory, passed=passed)
+    # 拼接与账本路径的处理与首跑**同一份**（issue #57）：这里不复制一遍「未通过即不拼」。
+    _assemble_ref_final_film(result, directory)
+    print(f"段产出账（{'全部段已通过' if finished else '已通过的段'}）："
+          f"{segment_ledger_path(directory)}")
+    if finished:
+        # 跑完才转 completed：转早了，这个会话就不再出现在可续接列表里（同 #17 的收尾）。
+        save_session(directory, brief, session.stage_state, status=STATUS_COMPLETED)
+    else:
+        print(f"[续接] 本次仍没有跑完全部段：下次重跑向导还会落回 {directory.name}，"
+              "从已通过的那一段之后继续（阶段 1/2 不重跑）。")
     return 0
 
 
