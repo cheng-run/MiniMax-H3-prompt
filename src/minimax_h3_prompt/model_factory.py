@@ -25,6 +25,18 @@ _LLM_CONNECT_TIMEOUT_SECONDS = 10.0
 _LLM_WRITE_TIMEOUT_SECONDS = 30.0
 _LLM_POOL_TIMEOUT_SECONDS = 10.0
 
+# 一次角色调用（含它自己的全部重试）的墙钟预算，即「一个角色的一次产出」。
+# 不要压得比 ADR 0001 记录的合法耗时还小：阶段 2 组装是单次大上下文调用，
+# **实测可超 10 分钟**，所以 1200 秒是下限而不是随意取的整数——低于它会把
+# 合法调用掐死。并行节点内三个角色各持一份，互不牵连（各算各的 deadline）。
+_LLM_CALL_BUDGET_SECONDS = 1200.0
+
+# 含首次尝试在内的总尝试次数上限。它是**与预算并列的第二道界**：只看预算的话，
+# 预算 1200 秒 ÷ 每次首字节线 30 秒 = 40 次，最坏延迟仍然不可接受；只看次数的话，
+# 每次都可能耗满读超时，同样没有硬顶。spec #59 的净效果句给的是「三次尝试
+# 各 30 秒 ≈ 90 秒」，故取 3。
+_LLM_MAX_ATTEMPTS = 3
+
 try:  # deepagents 依赖 langchain-anthropic，单独 import 避免硬依赖
     from langchain_anthropic import ChatAnthropic  # type: ignore
 except ImportError:  # pragma: no cover

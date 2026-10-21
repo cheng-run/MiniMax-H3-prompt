@@ -10,13 +10,16 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 from langchain.agents import create_agent
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import tool
 
-from .. import film_language
+from .. import film_language, model_factory
 from ..brief_parser import FRAME_VARIANTS, RefItem
+from ..config import config
 from ..observability import record_agent_call, reporter
 from ..tools.h3_validator import (
     ALIGN_TEMPLATES,
@@ -203,46 +206,237 @@ def _content_to_text(content: object) -> str:
     return str(content)
 
 
+# 「还在等」事件的节流间隔。它**不是超时**（别并进 model_factory 的超时常量区）：
+# 流式下一个大请求能吐上千块，逐块上报会把事件总线和终端刷爆；而用户需要的只是
+# 「它还活着」的节奏感。10 秒一次与首字节线的量级一致（issue #59 实测健康块间
+# gap 最大 0.62 秒，所以 10 秒没消息本身就是强信号）。#62 按这个节奏渲染。
+_WAIT_PROGRESS_INTERVAL_SECONDS = 10.0
+
+
+class FirstByteHandler(BaseCallbackHandler):
+    """记录「首字节到了」并按节流上报生成进度（issue #61）。
+
+    为什么靠回调、不看返回值：流式下每个 token 到达就是「服务端在干活」的唯一
+    活体信号，而 invoke 的返回值要等整段结束才有。也不重构既有的「取最后一个
+    非空 AI 消息」逻辑——那段约定有大量既有用例依赖（spec #59 决定 6）。
+
+    事件契约（#62 照着渲染，字段定死）：
+    - first_byte: {type, role, state, elapsed}
+    - generating: {type, role, state, elapsed, chunks, bytes}
+    ``elapsed`` 一律是「从本次调用开始到此刻的秒数」。
+    """
+
+    def __init__(self, role: str, interval: float | None = None) -> None:
+        self.role = role
+        self._started_at = time.monotonic()
+        # 读模块常量而不是写成默认参数：默认参数在 import 时就固定了，
+        # 测试 monkeypatch 常量会失效（守卫会变成永不为红）。
+        self._interval = _WAIT_PROGRESS_INTERVAL_SECONDS if interval is None else interval
+        self._last_progress_at = self._started_at
+        self.first_byte_at: float | None = None
+        self.chunks = 0
+        self.bytes = 0
+
+    def seconds_since_start(self) -> float:
+        return time.monotonic() - self._started_at
+
+    def seconds_since_first_byte(self) -> float:
+        if self.first_byte_at is None:
+            return 0.0
+        return time.monotonic() - self.first_byte_at
+
+    def on_llm_new_token(self, token: str, **kwargs) -> None:
+        now = time.monotonic()
+        if self.first_byte_at is None:
+            self.first_byte_at = now
+            reporter.emit({
+                "type": "agent_wait", "role": self.role, "state": "first_byte",
+                "elapsed": now - self._started_at,
+            })
+        self.chunks += 1
+        self.bytes += len(token or "")
+        if now - self._last_progress_at >= self._interval:
+            self._last_progress_at = now
+            reporter.emit({
+                "type": "agent_wait", "role": self.role, "state": "generating",
+                "elapsed": now - self._started_at,
+                "chunks": self.chunks, "bytes": self.bytes,
+            })
+
+
+def _is_timeout_error(exc: BaseException) -> bool:
+    """异常是不是「超时」——httpx 与 openai 内嵌的 httpx2 两代都要咬得住。
+
+    **不能** ``isinstance(exc, httpx.ReadTimeout)``：openai 自带的 http 栈是
+    vendored 的 ``httpx2``。实测（openai 3.0.0 + langchain-openai 1.5.0）：
+    - 首字节前卡住 → ``openai.APITimeoutError``；
+    - 流到一半卡住 → ``httpx2.ReadTimeout``，它对 ``httpx.ReadTimeout``、
+      内建 ``TimeoutError``、``APITimeoutError`` **全是 False**；
+    - 两代栈唯一的交集是 MRO 里名为 ``TimeoutException`` 的基类，故按类名判。
+      这样将来 openai 切回真 httpx 也不会静默漏判（漏判＝卡住不再止损）。
+    """
+    try:
+        from openai import APITimeoutError
+    except ImportError:  # pragma: no cover - openai 是硬依赖，留作防御
+        APITimeoutError = None  # type: ignore[assignment]
+    if APITimeoutError is not None and isinstance(exc, APITimeoutError):
+        return True
+    return any(cls.__name__ == "TimeoutException" for cls in type(exc).__mro__)
+
+
+def _gateway_name() -> str:
+    """报错文案里的网关名：优先 base_url 的 host，取不到退回 provider。
+
+    为什么从配置派生：原文案写死 ``"DashScope"``，用户换过网关后它仍把排查方向
+    指向 DashScope（spec #59 user story 15）。host 比 provider 更能指认实际节点
+    （换端点正是本票的重试机制），所以 host 优先。
+    """
+    settings = config.primary_model
+    if settings.base_url:
+        host = urlparse(settings.base_url).hostname
+        if host:
+            return host
+    return settings.provider or "未知网关"
+
+
+def _call_failure(
+    role: str,
+    *,
+    phase: str,
+    elapsed: float,
+    attempts: int,
+    remaining: float,
+) -> RuntimeError:
+    """构造「这次调用为什么失败、下一步怎么办」的中文错误——**唯一一份**文案。
+
+    两个分支共用同一段结尾：同一句话只写一处，否则改一处漏一处（本仓「同一契约
+    不许两处口径」的老毛病）。网关名与所有数字都从配置/常量派生（issue #61）：
+    常量一改文案跟着改，测试以 monkeypatch 常量来验这条接线。
+    """
+    gateway = _gateway_name()
+    read_timeout = model_factory._LLM_READ_TIMEOUT_SECONDS
+    budget = model_factory._LLM_CALL_BUDGET_SECONDS
+    max_attempts = model_factory._LLM_MAX_ATTEMPTS
+    if phase == "midstream":
+        head = (
+            f"{role} 调用失败：网关 {gateway} 已返回首字节、流了 {elapsed:.1f} 秒后断流。"
+            f"\n首字节之后断流不自动重试——已经流了一半，重来一遍是纯浪费（已试 {attempts} 次）。"
+        )
+    elif attempts >= max_attempts:
+        head = (
+            f"{role} 调用失败：网关 {gateway} 连续 {attempts} 次在 {read_timeout:.0f} 秒内"
+            f"没有返回首字节（判定卡住），最后一次等了 {elapsed:.1f} 秒。"
+            f"\n已到尝试次数上限（{max_attempts} 次），不再重试。"
+        )
+    else:
+        head = (
+            f"{role} 调用失败：网关 {gateway} 连续 {attempts} 次在 {read_timeout:.0f} 秒内"
+            f"没有返回首字节（判定卡住），最后一次等了 {elapsed:.1f} 秒。"
+            f"\n本次调用的 {budget:.0f} 秒预算只剩 {max(remaining, 0.0):.0f} 秒，"
+            f"不够再等一次首字节线，不再重试。"
+        )
+    return RuntimeError(
+        head
+        + "\n这通常是网关节点卡住或请求被挂起，不是本地网络问题。"
+        + "\n下一步：稍后重试；若反复卡在同一节点，换一个 base_url 节点或检查网关状态。"
+    )
+
+
 def run_agent(agent: object, message: str, retry_empty: bool = True) -> str:
     """invoke 一个角色 agent，返回最终回答的纯文本。
 
-    超时处理策略：
-    - 捕获 openai.APITimeoutError（DashScope 网关对长输出请求有超时天花板）；
-    - 最多自动重试 1 次（第二次也一样超时就抛 RuntimeError，给调用方清晰的中文信息，
-      避免栈炸 + 避免 openai 客户端级重试把 token 翻倍的隐性成本）。
+    判据分派（issue #61，三种病走三条路）：
+    - **首字节前**超时 → 判**卡住** → 可重试。重试会新建连接、触发 DNS 重解析，
+      实测换到过另一个网关节点（``101.132.45.96`` → ``139.196.165.158``），
+      被卡住的那次重试确实救回来过，所以别照搬「卡住不重试」；
+    - **首字节后**超时 → 不重试，直接报错（已流了一半，重来是纯浪费）；
+    - **空产出** → 走既有的 ``retry_empty`` 递归重试，判据独立（它是内容病），
+      但并入同一份预算；
+    - 其他异常 → 原样上抛（``raise``，不改类型）。
+
+    预算与次数的分工：``_LLM_CALL_BUDGET_SECONDS`` 是墙钟硬顶（含全部重试），
+    ``_LLM_MAX_ATTEMPTS`` 是次数硬顶。重试还要求**剩余预算撑得起一次首字节线**
+    ——连 30 秒都等不起的剩余预算没有意义。并行节点里每个角色各调一次本函数，
+    各算各的 deadline，天然互不牵连（不引入模块级共享状态）。
     """
     role = getattr(agent, "name", "agent")
-    try:
-        return _run_agent_inner(agent, message, retry_empty=retry_empty)
-    except Exception as exc:
-        # 只在是 API 超时时重试一次；其他异常直接抛
+    started = time.monotonic()
+    deadline = started + model_factory._LLM_CALL_BUDGET_SECONDS
+    timeout_attempt = 0
+    # 每次真正 invoke 都把 handler 放进来，外层靠 handlers[-1] 判断「首字节到没到」。
+    # 空产出重试会递归再 invoke 一次，所以它必须是列表而不是单个对象。
+    handlers: list[FirstByteHandler] = []
+    while True:
+        timeout_attempt += 1
+        handlers.clear()
         try:
-            from openai import APITimeoutError
-        except ImportError:
-            APITimeoutError = None  # type: ignore
-        if APITimeoutError is not None and isinstance(exc, APITimeoutError):
-            print(f"[重试] {role} 首次调用超时，正在自动重试一次……", flush=True)
-            try:
-                return _run_agent_inner(agent, message, retry_empty=retry_empty)
-            except APITimeoutError as retry_exc:
-                raise RuntimeError(
-                    f"{role} 连续两次调用 DashScope 超时（单次 900s 上限）。\n"
-                    f"这通常是服务端网关瓶颈，不是网络问题。\n"
-                    f"建议：稍后重试；或检查代理/网络稳定性。"
-                ) from retry_exc
-        raise
+            return _run_agent_inner(
+                agent, message, retry_empty=retry_empty,
+                role=role, deadline=deadline, handlers=handlers,
+            )
+        except Exception as exc:
+            if not _is_timeout_error(exc):
+                raise
+            handler = handlers[-1] if handlers else None
+            if handler is not None and handler.first_byte_at is not None:
+                # 首字节到了才算「流了一半」；空产出重试里断掉的那次同样按此判。
+                raise _call_failure(
+                    role,
+                    phase="midstream",
+                    elapsed=handler.seconds_since_first_byte(),
+                    attempts=timeout_attempt,
+                    remaining=deadline - time.monotonic(),
+                ) from exc
+            elapsed = handler.seconds_since_start() if handler else time.monotonic() - started
+            reporter.emit({
+                "type": "agent_wait", "role": role, "state": "stuck",
+                "elapsed": elapsed, "attempt": timeout_attempt,
+            })
+            remaining = deadline - time.monotonic()
+            # attempt 事件语义：stuck.attempt = 刚失败的尝试序号；
+            # retrying.attempt = 即将发起的尝试序号（后者＝已试次数 + 1）。
+            if (
+                timeout_attempt < model_factory._LLM_MAX_ATTEMPTS
+                and remaining >= model_factory._LLM_READ_TIMEOUT_SECONDS
+            ):
+                reporter.emit({
+                    "type": "agent_wait", "role": role, "state": "retrying",
+                    "attempt": timeout_attempt + 1,
+                    "remaining_budget": max(0.0, remaining),
+                })
+                continue
+            raise _call_failure(
+                role,
+                phase="stuck",
+                elapsed=elapsed,
+                attempts=timeout_attempt,
+                remaining=remaining,
+            ) from exc
 
 
-def _run_agent_inner(agent: object, message: str, retry_empty: bool = True) -> str:
-    """一次 LLM 调用本体；run_agent 的超时重试层包裹在它外面。
+def _run_agent_inner(
+    agent: object,
+    message: str,
+    retry_empty: bool = True,
+    *,
+    role: str,
+    deadline: float,
+    handlers: list[FirstByteHandler],
+) -> str:
+    """一次 LLM 调用本体；run_agent 的超时与预算层包裹在它外面。
 
-    原 run_agent 的取文本逻辑原封不动搬到这里——优先取「最后一个有非空文本的 AI 消息」，
-    空产出且 retry_empty=True 时追加一句提示重试一次。
+    取文本逻辑原封不动搬自改动前：优先取「最后一个有非空文本的 AI 消息」，
+    空产出且 retry_empty=True 时追加一句提示重试一次。空产出重试**也吃同一份
+    预算**：``deadline`` 到了就不再来一轮（否则内容病能把调用预算撑穿）。
     """
-    role = getattr(agent, "name", "agent")
     reporter.emit({"type": "agent_start", "role": role})
+    handler = FirstByteHandler(role)
+    handlers.append(handler)
     t0 = time.time()
-    result = agent.invoke({"messages": [{"role": "user", "content": message}]})
+    result = agent.invoke(
+        {"messages": [{"role": "user", "content": message}]},
+        config={"callbacks": [handler]},
+    )
     msgs = result.get("messages", [])
 
     out = ""
@@ -258,11 +452,14 @@ def _run_agent_inner(agent: object, message: str, retry_empty: bool = True) -> s
             if txt.strip():
                 out = txt
                 break
-    if not out and retry_empty:
+    if not out and retry_empty and time.monotonic() < deadline:
         out = _run_agent_inner(
             agent,
             f"{message}\n\n（你上一条回复是空的，请直接给出内容，不要空谈。）",
             retry_empty=False,
+            role=role,
+            deadline=deadline,
+            handlers=handlers,
         )
     record_agent_call(role, msgs, out, time.time() - t0)
     return out
