@@ -177,7 +177,12 @@ stage_saver = StageSaver()
 
 
 def record_agent_call(role: str, messages, out: str, duration: float) -> None:
-    """记录一次 LLM 调用：token 计量 + 事件上报（agent_done）。"""
+    """记录一次 LLM 调用：token 计量 + 事件上报（agent_done）。
+
+    ``duration`` 是**这次产出总共花了多久**（agent 调用方应传「从 run_agent
+    开始到此刻」，含超时重试），不是单次尝试的耗时——两者在重试过的调用上会
+    差出数倍，而用户问的是「这次调用总共花了多久」（spec #59 US5）。
+    """
     usage = extract_usage(messages)
     token_meter.add(role, usage["input"], usage["output"])
     reporter.emit({

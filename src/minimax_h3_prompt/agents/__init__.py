@@ -223,21 +223,29 @@ class FirstByteHandler(BaseCallbackHandler):
     事件契约（#62 照着渲染，字段定死）：
     - first_byte: {type, role, state, elapsed}
     - generating: {type, role, state, elapsed, chunks, bytes}
+      ``chunks`` 是块数；``bytes`` 是这些块的 **UTF-8 字节数**，不是字符数
+      （复审实测 ``"你好世界"`` 4 个字符 = 12 字节）。渲染层按 kB 展示，单位必须
+      真是字节，否则进度里的「kB」是假的。
     - stuck / retrying 由外层 ``run_agent`` 发（判定与动作都在那里）：
       stuck 带 ``elapsed`` 与刚失败的 ``attempt``；retrying 带 ``attempt``（即将
       发起的尝试序号）、``retry``（重试序号，1 起）与 ``remaining_budget``。
     ``elapsed`` 一律是「从本次调用开始到此刻的秒数」。
     """
 
-    def __init__(self, role: str, interval: float | None = None) -> None:
+    def __init__(self, role: str) -> None:
         self.role = role
         self._started_at = time.monotonic()
         # 读模块常量而不是写成默认参数：默认参数在 import 时就固定了，
-        # 测试 monkeypatch 常量会失效（守卫会变成永不为红）。
-        self._interval = _WAIT_PROGRESS_INTERVAL_SECONDS if interval is None else interval
+        # 测试 monkeypatch 常量会失效（守卫会变成永不为红）。原先还有个
+        # ``interval`` 形参，全仓无调用方——留着它等于给测试开一条绕过常量
+        # 的私路，删掉。
+        self._interval = _WAIT_PROGRESS_INTERVAL_SECONDS
         self._last_progress_at = self._started_at
         self.first_byte_at: float | None = None
         self.chunks = 0
+        # 累计的是 UTF-8 字节数：流式块是 str，``len`` 只数码点，中文一块 3 字节
+        # 会算成 1（实测「你好世界」4 字符 = 12 字节）。字段名与渲染层的 kB
+        # 都按字节说话，口径必须一致。
         self.bytes = 0
 
     def seconds_since_start(self) -> float:
@@ -257,7 +265,9 @@ class FirstByteHandler(BaseCallbackHandler):
                 "elapsed": now - self._started_at,
             })
         self.chunks += 1
-        self.bytes += len(token or "")
+        # UTF-8 字节数，不是 ``len(token)``（那数码点：中文一字 1、字节却是 3）。
+        # 空 token 也要能过，所以先 ``or ""`` 再编码。
+        self.bytes += len((token or "").encode("utf-8"))
         if now - self._last_progress_at >= self._interval:
             self._last_progress_at = now
             reporter.emit({
@@ -325,19 +335,22 @@ def _call_failure(
             f"{role} 调用失败：网关 {gateway} 已返回首字节、流了 {elapsed:.1f} 秒后断流。"
             f"\n首字节之后断流不自动重试——已经流了一半，重来一遍是纯浪费（已试 {attempts} 次）。"
         )
-    elif attempts >= max_attempts:
-        head = (
-            f"{role} 调用失败：网关 {gateway} 连续 {attempts} 次在 {read_timeout:.0f} 秒内"
-            f"没有返回首字节（判定卡住），最后一次等了 {elapsed:.1f} 秒。"
-            f"\n已到尝试次数上限（{max_attempts} 次），不再重试。"
-        )
     else:
-        head = (
+        # 两个「卡住」分支的前两句逐字相同，只写这一处再拼各自的尾句：复审抓到
+        # 它们被复制成两份，改一处漏一处就是又一份会各自漂移的文案。拼出来与
+        # 拆前逐字节一致（``stuck_head`` 以句号结尾，尾句自带 ``\n``）。
+        stuck_head = (
             f"{role} 调用失败：网关 {gateway} 连续 {attempts} 次在 {read_timeout:.0f} 秒内"
             f"没有返回首字节（判定卡住），最后一次等了 {elapsed:.1f} 秒。"
-            f"\n本次调用的 {budget:.0f} 秒预算只剩 {max(remaining, 0.0):.0f} 秒，"
-            f"不够再等一次首字节线，不再重试。"
         )
+        if attempts >= max_attempts:
+            head = stuck_head + f"\n已到尝试次数上限（{max_attempts} 次），不再重试。"
+        else:
+            head = (
+                stuck_head
+                + f"\n本次调用的 {budget:.0f} 秒预算只剩 {max(remaining, 0.0):.0f} 秒，"
+                f"不够再等一次首字节线，不再重试。"
+            )
     return RuntimeError(
         head
         + "\n这通常是网关节点卡住或请求被挂起，不是本地网络问题。"
@@ -356,6 +369,9 @@ def run_agent(agent: object, message: str, retry_empty: bool = True) -> str:
     - **空产出** → 走既有的 ``retry_empty`` 递归重试，判据独立（它是内容病），
       但并入同一份预算；
     - 其他异常 → 原样上抛（``raise``，不改类型）。
+
+    ``agent_done.duration`` 报「从本函数开始到出结果」的总耗时（含全部超时重试），
+    不是最后一次尝试的耗时——US5 问的是「这次调用总共花了多久」。
 
     预算与次数的分工：``_LLM_CALL_BUDGET_SECONDS`` 是墙钟硬顶（含全部重试），
     ``_LLM_MAX_ATTEMPTS`` 是次数硬顶。重试还要求**剩余预算撑得起一次首字节线**
@@ -382,6 +398,7 @@ def run_agent(agent: object, message: str, retry_empty: bool = True) -> str:
             return _run_agent_inner(
                 agent, message, retry_empty=retry_empty,
                 role=role, deadline=deadline, handlers=handlers,
+                started=started,
             )
         except Exception as exc:
             if not _is_timeout_error(exc):
@@ -434,16 +451,21 @@ def _run_agent_inner(
     role: str,
     deadline: float,
     handlers: list[FirstByteHandler],
+    started: float,
 ) -> str:
     """一次 LLM 调用本体；run_agent 的超时与预算层包裹在它外面。
 
     取文本逻辑原封不动搬自改动前：优先取「最后一个有非空文本的 AI 消息」，
     空产出且 retry_empty=True 时追加一句提示重试一次。空产出重试**也吃同一份
     预算**：``deadline`` 到了就不再来一轮（否则内容病能把调用预算撑穿）。
+
+    ``started`` 是 ``run_agent`` 的起点（monotonic），**不是**本次尝试的起点：
+    US5 要的「这次调用总共花了多久」含全部超时重试，每次尝试各自计时会让重试
+    过的调用只报最后一次的耗时（复审实测）。空产出重试递归时把它原样传下去，
+    于是内层那次 done 报的也是「从 run_agent 开始到现在」。
     """
     handler = FirstByteHandler(role)
     handlers.append(handler)
-    t0 = time.time()
     result = agent.invoke(
         {"messages": [{"role": "user", "content": message}]},
         config={"callbacks": [handler]},
@@ -471,6 +493,9 @@ def _run_agent_inner(
             role=role,
             deadline=deadline,
             handlers=handlers,
+            started=started,
         )
-    record_agent_call(role, msgs, out, time.time() - t0)
+    # duration 是「从 run_agent 开始到此刻」的总耗时（含已发生的超时重试），
+    # token 计量口径不动（仍按本次返回的消息取 usage）。
+    record_agent_call(role, msgs, out, time.monotonic() - started)
     return out

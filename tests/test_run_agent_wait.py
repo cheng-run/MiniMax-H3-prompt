@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import threading
 import time
 
 import pytest
@@ -328,16 +329,20 @@ def test_generating_events_are_throttled(events):
 
 
 def test_generating_event_reports_chunks_and_bytes(monkeypatch, events):
-    """节流到点后上报累计块数与字节数（#62 按这两个数渲染进度）。
+    """节流到点后上报累计块数与 **UTF-8 字节数**（#62 按这两个数渲染进度）。
 
     把间隔改成 0：每块都到点，于是能数清累计值；变异检验——实现若忘了累计
     chunks/bytes，或把间隔写成字面量（不读常量），这条会红。
+
+    **刻意用中文块**：``"你好"`` 是 2 个字符、6 个 UTF-8 字节（复审实测
+    ``"你好世界"`` 4 字符 = 12 字节）。若实现退回 ``len(token)``，三块会报
+    6 而不是 18，这条即红——ASCII 样本咬不住这个变异。
     """
     monkeypatch.setattr(agents_module, "_WAIT_PROGRESS_INTERVAL_SECONDS", 0.0)
 
     def behaviour(call_no, handler):
         for _ in range(3):
-            handler.on_llm_new_token("ab")
+            handler.on_llm_new_token("你好")
         return {"messages": [AIMessage(content="ok")]}
 
     run_agent(FakeAgent(behaviour), "请写美术设定")
@@ -345,6 +350,93 @@ def test_generating_event_reports_chunks_and_bytes(monkeypatch, events):
     generating = [e for e in _wait_events(events) if e["state"] == "generating"]
     assert generating  # 间隔为 0 时每块都发
     assert generating[-1]["chunks"] == 3
-    assert generating[-1]["bytes"] == 6
+    assert generating[-1]["bytes"] == 18  # 3 块 × 2 字符 × 3 字节
     assert generating[-1]["role"] == ROLE
     assert generating[-1]["elapsed"] >= 0.0
+
+
+def test_agent_done_duration_covers_all_attempts():
+    """``agent_done.duration`` 是本次产出总耗时，含超时重试（spec #59 US5）。
+
+    第一次尝试睡 0.06 秒后超时、第二次成功：总耗时约 0.12 秒。变异检验——
+    实现若在每次尝试里重新 ``t0 = time.time()``，duration 只有约 0.06 秒，
+    这条即红（「最后一次尝试的耗时」不是用户问的那个数）。
+    """
+    done = []
+
+    def collect(event: dict) -> None:
+        if event.get("type") == "agent_done":
+            done.append(event)
+
+    def behaviour(call_no, handler):
+        time.sleep(0.06)
+        if call_no == 1:
+            raise _api_timeout()
+        handler.on_llm_new_token("ok")
+        return {"messages": [AIMessage(content="美术设定")]}
+
+    reporter.subscribe(collect)
+    try:
+        assert run_agent(FakeAgent(behaviour), "请写美术设定") == "美术设定"
+    finally:
+        reporter.unsubscribe(collect)
+
+    assert len(done) == 1  # 超时重试只在成功后记一次
+    assert done[0]["duration"] >= 0.11
+
+
+def test_parallel_calls_have_independent_budgets(monkeypatch):
+    """并行节点内各角色的调用预算互不牵连（issue #61 验收条）。
+
+    两个线程各跑一次 ``run_agent``：A 的调用睡 0.9 秒后成功；B 在 A 跑起来
+    0.6 秒后才开始，首次尝试再睡 0.7 秒后超时，第二次尝试成功。预算 1.0 秒。
+
+    **为什么这条能分辨「共享 vs 各自」**（已用变异检验见过红）：若 deadline 是
+    模块级共享的（从 A 的起点算起），B 超时那一刻距 A 起点已 1.3 秒，剩余预算
+    为负 → 不许重试 → B 抛错；各算各的 deadline 时，B 的 1.0 秒从它自己开始算，
+    超时后还剩约 0.3 秒，够一次 0.05 秒的首字节线 → 重试成功。断言两条都返回、
+    且 B 确实被调用了两次（重试真的发生了）。余量 0.3 秒，避免线程调度抖动。
+    """
+    monkeypatch.setattr(model_factory, "_LLM_CALL_BUDGET_SECONDS", 1.0)
+    # 让「剩余预算撑不撑得起一次首字节线」这个门槛很小，聚焦在 deadline 本身
+    monkeypatch.setattr(model_factory, "_LLM_READ_TIMEOUT_SECONDS", 0.05)
+
+    a_started = threading.Event()
+
+    def a_behaviour(call_no, handler):
+        a_started.set()
+        time.sleep(0.9)
+        handler.on_llm_new_token("A")
+        return {"messages": [AIMessage(content="A 的产出")]}
+
+    def b_behaviour(call_no, handler):
+        if call_no == 1:
+            time.sleep(0.7)
+            raise _api_timeout()
+        handler.on_llm_new_token("B")
+        return {"messages": [AIMessage(content="B 的产出")]}
+
+    agent_a = FakeAgent(a_behaviour)
+    agent_b = FakeAgent(b_behaviour)
+    results: dict[str, str] = {}
+
+    def run_a() -> None:
+        results["a"] = run_agent(agent_a, "请写美术设定")
+
+    def run_b() -> None:
+        results["b"] = run_agent(agent_b, "请写美术设定")
+
+    thread_a = threading.Thread(target=run_a)
+    thread_a.start()
+    assert a_started.wait(2.0), "A 没有进入 invoke"
+    time.sleep(0.6)  # 让 A 先吃掉半格预算，B 再开始（两条调用在时间上重叠）
+    thread_b = threading.Thread(target=run_b)
+    thread_b.start()
+    thread_a.join(5.0)
+    thread_b.join(5.0)
+
+    assert not thread_a.is_alive() and not thread_b.is_alive()
+    assert results["a"] == "A 的产出"
+    assert results["b"] == "B 的产出"
+    assert agent_a.calls == 1
+    assert agent_b.calls == 2  # 第一次超时、第二次成功——重试真的发生了

@@ -75,6 +75,7 @@
 1. **圆桌**：`graph/roundtable.py` 的 `_invoke` 直接 `model.invoke`，**没有重试层**，超时带裸栈炸穿——它不走 `run_agent`，本节的三条线对它不生效。复现再开票。
 2. **读图**：`tools/reference_auditor` 自带 `timeout=900`，是**另一条路、另一个客户端**，同样不经过 `run_agent`。
 3. **调用预算的边界（有意取舍，不是缺陷）**：预算在**尝试之间**判定，单次健康流不会被中途掐断——中途的判定归**块间线**，而它只管块间间隔。所以调用预算**不是**能打断长流的总闸：一条持续有数据、但总耗时超过 1200 秒的流会跑完，不会被掐。写清楚这一点，别让后来者以为它是总闸。
+4. **Anthropic 分支只有单值超时（有据的偏差，不是漏做）**：spec 决定 3 要求 connect / write / pool 另给短值，但 `ChatAnthropic` 的 pydantic 字段 `default_request_timeout` 只收 `float`，传 `httpx.Timeout` 会 `ValidationError`（2026-10-21 实测）。所以 `model_factory._anthropic` 只能给一个数，取值 `_LLM_READ_TIMEOUT_SECONDS`——首字节线在这一支成立，四相分离不成立。OpenAI 兼容分支（`ChatOpenAI`，`timeout` 收 `httpx.Timeout`）不受影响。若将来 langchain-anthropic 支持四相，再补。
 
 ## 样本局限
 
