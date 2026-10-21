@@ -223,6 +223,9 @@ class FirstByteHandler(BaseCallbackHandler):
     事件契约（#62 照着渲染，字段定死）：
     - first_byte: {type, role, state, elapsed}
     - generating: {type, role, state, elapsed, chunks, bytes}
+    - stuck / retrying 由外层 ``run_agent`` 发（判定与动作都在那里）：
+      stuck 带 ``elapsed`` 与刚失败的 ``attempt``；retrying 带 ``attempt``（即将
+      发起的尝试序号）、``retry``（重试序号，1 起）与 ``remaining_budget``。
     ``elapsed`` 一律是「从本次调用开始到此刻的秒数」。
     """
 
@@ -360,6 +363,12 @@ def run_agent(agent: object, message: str, retry_empty: bool = True) -> str:
     各算各的 deadline，天然互不牵连（不引入模块级共享状态）。
     """
     role = getattr(agent, "name", "agent")
+    # 「开始」每**次产出**只发一次：挪到重试循环之外（issue #62 裁定 1）。发在
+    # ``_run_agent_inner`` 里时，每次超时重试都会再打一行「正在处理……」，既看不出
+    # 这是第几次（重试已有专属的 retrying 事件），又刷屏；超时重试路径上 agent_done
+    # 本来只在成功时发一次，一举一收才对称。空产出重试同样不再重发——那是同一次产出
+    # 内部的补一次（注意：那条路径上 agent_done 会发两次，属既有行为，#62 未动）。
+    reporter.emit({"type": "agent_start", "role": role})
     started = time.monotonic()
     deadline = started + model_factory._LLM_CALL_BUDGET_SECONDS
     timeout_attempt = 0
@@ -395,6 +404,8 @@ def run_agent(agent: object, message: str, retry_empty: bool = True) -> str:
             remaining = deadline - time.monotonic()
             # attempt 事件语义：stuck.attempt = 刚失败的尝试序号；
             # retrying.attempt = 即将发起的尝试序号（后者＝已试次数 + 1）。
+            # retry 是**重试序号**（1 表示第一次重试）＝ attempt - 1，由这里派生：
+            # 渲染层再自己减一次就会与 attempt 错位（issue #62 裁定 2）。
             if (
                 timeout_attempt < model_factory._LLM_MAX_ATTEMPTS
                 and remaining >= model_factory._LLM_READ_TIMEOUT_SECONDS
@@ -402,6 +413,7 @@ def run_agent(agent: object, message: str, retry_empty: bool = True) -> str:
                 reporter.emit({
                     "type": "agent_wait", "role": role, "state": "retrying",
                     "attempt": timeout_attempt + 1,
+                    "retry": timeout_attempt,
                     "remaining_budget": max(0.0, remaining),
                 })
                 continue
@@ -429,7 +441,6 @@ def _run_agent_inner(
     空产出且 retry_empty=True 时追加一句提示重试一次。空产出重试**也吃同一份
     预算**：``deadline`` 到了就不再来一轮（否则内容病能把调用预算撑穿）。
     """
-    reporter.emit({"type": "agent_start", "role": role})
     handler = FirstByteHandler(role)
     handlers.append(handler)
     t0 = time.time()

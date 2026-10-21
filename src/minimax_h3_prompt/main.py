@@ -109,6 +109,14 @@ def _topic_progress(event: dict) -> None:
     elif event_type == "agent_done":
         duration = event.get("duration", 0.0)
         print(f"[完成] {role}（{duration:.1f}s）", flush=True)
+    elif event_type == "agent_wait":
+        # 等待转折复用向导那一份格式化（ui.progress.format_wait_event）：两处各写
+        # 一份状态文案，改一处漏一处的老毛病就这么来的（issue #62）。
+        from .ui.progress import format_wait_event
+
+        line = format_wait_event(event)
+        if line:
+            print(f"[等待] {line}", flush=True)
 
 
 def _create_video_with_progress(topic: str, config, **kwargs):
