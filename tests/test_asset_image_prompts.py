@@ -486,6 +486,92 @@ def test_node_refuses_a_locked_entry_that_is_not_verbatim_in_the_prompt(monkeypa
             "character_image_prompts")({"brief": _brief(), "character_design": "设计正文"})
 
 
+def _run_image_node(monkeypatch, replies: list[str]):
+    """按调用顺序返回假回复，跑一次人物生图提示词节点。
+
+    返回 ``(run, calls)``：``run()`` 触发节点执行（可能抛错），``calls`` 收集全部出站
+    请求。按顺序取回复是为了区分「主请求」与「修复请求」——修复重试的题眼就是**第二次**
+    调用收到了什么、以及它到底有没有发生。
+    """
+    calls: list[str] = []
+
+    def fake_run_agent(agent, message):
+        calls.append(message)
+        return replies[min(len(calls) - 1, len(replies) - 1)]
+
+    monkeypatch.setattr(nodes, "run_agent", fake_run_agent)
+    node = nodes._make_image_prompt_node(
+        {"image_prompt_engineer": object()}, "人物", "character_design",
+        "character_image_prompts")
+
+    def run():
+        return node({"brief": _brief(), "character_design": "设计正文"})
+
+    return run, calls
+
+
+def test_node_repairs_a_paraphrased_locked_entry_once(monkeypatch):
+    """条目是转述时先修复一次，而不是一次违约就让整条阶段 1 停住。
+
+    场景／道具的身份特征在设计资料里就是抽象描述，模型很容易从资料概括出条目而不是
+    从自己刚写的正文里摘。修复请求的价值在两点：把**正文**交回去（模型才有东西可逐字
+    摘），且只收 name → locked_features 的补丁（正文冻结，产物不会被顺手改写）。
+    """
+    positive = "甲站在庭院里，穿红裙，银白长发垂到腰际"
+    bad = json.dumps([{"name": "甲", "positive_prompt": positive,
+                       "locked_features": ["红裙女孩"]}])
+    patch = json.dumps([{"name": "甲", "locked_features": ["银白长发"]}])
+
+    run, calls = _run_image_node(monkeypatch, [bad, patch])
+    entry = run()["character_image_prompts"][0]
+
+    assert entry["locked_features"] == ["银白长发"], "修复后的清单没生效"
+    assert entry["positive_prompt"] == positive, "修复把正文改掉了（正文必须冻结）"
+    assert len(calls) == 2, "违约应当恰好修一次"
+    assert positive in calls[1], "修复请求没带正文，模型无从逐字摘"
+
+
+def test_node_refuses_when_the_repair_still_paraphrases(monkeypatch):
+    """修复一次后仍是转述 → 停，且错误里写明「已修复尝试」。
+
+    「宁可停，不要静默回落到不收窄」是 issue #53 的裁定；本次只把「一次违约即停」
+    放宽成「一次违约可修，修不好仍停」。缺少这条用例，重试很容易被改成无限重试。
+    """
+    bad = json.dumps([{"name": "甲", "positive_prompt": "甲的提示词：红裙",
+                       "locked_features": ["红裙女孩"]}])
+
+    run, calls = _run_image_node(monkeypatch, [bad])
+    with pytest.raises(ValueError, match="修复 1 次后仍不合规"):
+        run()
+    assert len(calls) == 2, "修复只许一次"
+
+
+def test_node_does_not_repair_a_structurally_broken_reply(monkeypatch):
+    """结构性坏法不进修复：补丁格式是 name → 清单，结构坏了补丁无处落。
+
+    若这里退化成「也修一次」，模型整体跑偏时等于白多付一次调用，而且错误会被包上
+    「修复后仍不合规」的外壳，把真正的病因（顶层格式）埋到第二层。
+    """
+    run, calls = _run_image_node(monkeypatch, [json.dumps({"name": "甲"})])
+    with pytest.raises(ValueError, match="顶层必须是数组"):
+        run()
+    assert len(calls) == 1, "结构性错误不该触发修复调用"
+
+
+def test_node_refuses_an_empty_locked_list_even_after_repair(monkeypatch):
+    """空清单（issue #53 三道闸之一）此前没有任何用例钉住。
+
+    空表＝不收窄＝「8 张图 39 条偏差逐条三选」那场人裁灾难原样回来；它也是清单层
+    违约，所以走同一条修复路径，修不好仍要停。
+    """
+    empty = json.dumps([{"name": "甲", "positive_prompt": "甲的提示词", "locked_features": []}])
+
+    run, calls = _run_image_node(monkeypatch, [empty])
+    with pytest.raises(ValueError, match="空表"):
+        run()
+    assert len(calls) == 2, "空表也应当先走一次修复"
+
+
 def test_entry_width_height_cannot_beat_the_selected_canvas(tmp_path, monkeypatch):
     """资产条目里混进的 width/height（四键契约外残留）压不过选定画布（issue #42 复审）。"""
     state, _ = _run_stage1(tmp_path, monkeypatch)

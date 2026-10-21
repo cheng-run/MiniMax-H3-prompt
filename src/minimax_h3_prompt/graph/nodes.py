@@ -192,6 +192,21 @@ def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_f
                 parsed = json.loads(repair)
             except json.JSONDecodeError as exc:
                 raise ValueError(f"{kind} 生图提示词不是有效 JSON") from exc
+        # 清单层违约先修一次（issue #64）：条目是转述时下游的偏差判定会静默失效，
+        # 但一次违约就停住整条阶段 1 的代价与这个模型的失败模式不匹配。
+        violations = _locked_violations(parsed, kind)
+        if violations:
+            patch = run_agent(
+                agents["image_prompt_engineer"],
+                _build_locked_repair_request(kind, violations, _canvas_block(brief.canvases)),
+            )
+            merged = _apply_locked_repair(parsed, kind, patch, violations)
+            try:
+                return {output_field: _normalize_asset_entries(merged, kind)}
+            except ValueError as exc:
+                # 修复后仍不合规才停：给重跑的人留下「已试过一次修复」与逐条明细，
+                # 一眼分清是模型固执还是可修（节点原始报错里没有这层信息）。
+                raise ValueError(f"{kind} 锁死清单修复 1 次后仍不合规：{exc}") from exc
         return {output_field: _normalize_asset_entries(parsed, kind)}
     return node
 
@@ -234,29 +249,138 @@ def _normalize_asset_entries(parsed: object, kind: str) -> list[dict]:
     return entries
 
 
+def _locked_problem(raw: object, positive: str) -> str | None:
+    """返回锁死清单的违约描述；合规时返回 ``None``（issue #53 的不变式判据）。
+
+    这是**唯一**一份清单判据：节点校验（``_normalize_locked_features``）与一次修复
+    重试（``_locked_violations``）都从这里取口径。两处各写一份子串判断的话，改一处
+    另一处就静默失效——本仓「同一契约两处口径」已经咬过两次（issue #56／#57）。
+
+    返回值接在「{kind} 资产「{name}」：」之后读，所以每句都以自己的主语起头，不带前缀。
+    """
+    if raw is None:
+        return ("缺 locked_features（锁死清单）——"
+                "它是读图校对判偏差的唯一判据，缺席等于把整篇提示词当判据（人裁被淹）")
+    if not isinstance(raw, list):
+        return f"locked_features 不是数组：{raw!r}"
+    locked = [str(x).strip() for x in raw]
+    locked = [x for x in locked if x]
+    if not locked:
+        return "locked_features 是空表——至少要一条身份特征"
+    bad = [x for x in locked if x not in positive]
+    if bad:
+        return (f"锁死清单条目 {bad[0]!r} 不是 positive_prompt 的原文片段"
+                "——条目必须逐字摘自正文，否则读图摘录的引文落不到条目上、偏差判不出来")
+    return None
+
+
 def _normalize_locked_features(raw: object, name: str, positive: str, kind: str) -> list[str]:
     """归一一条资产的锁死清单（issue #53）；坏形状与不合不变式的条目都响。
 
     形状坏（不是数组）与条目坏（空、或不是正文原文片段）分开报错，是为了让重跑的人
     一眼看出是模型没交清单、还是交了一份转述——两者的修法不同（改角色提示词措辞 vs
-    让人工看一眼那条到底想锁什么）。
+    让人工看一眼那条到底想锁什么）。两类现在都先走一次补丁式修复（issue #64）；
+    修复后仍不合规才到这里抛错。
     """
-    if raw is None:
+    problem = _locked_problem(raw, positive)
+    if problem is not None:
+        raise ValueError(f"{kind} 资产「{name}」：{problem}")
+    return [str(x).strip() for x in raw if str(x).strip()]
+
+
+def _locked_violations(parsed: object, kind: str) -> list[dict]:
+    """收集**清单层**违约，供节点做一次补丁式修复（issue #64）。
+
+    为什么需要修复而不是一次违约就停：条目转述时下游会**静默**把整条偏差降级成
+    「理想描述出入」（``asset_proofread._locked_hit`` 双向子串必不命中），所以闸门
+    必须响；但场景／道具的身份特征在设计资料里就是抽象描述，模型从资料概括而不是从
+    正文摘的概率不低，一次违约就让整条阶段 1 停住、重跑还要重付已成功的那几路调用，
+    代价与触发点不匹配。一次重交的成本是 1 次调用，且本仓已有同形先例（关键帧 bundle
+    外层回灌错误重写一次）。
+
+    结构性坏法（顶层不是数组、项不是对象、name／positive_prompt 缺）**不收**：修复
+    请求的格式是 ``name → locked_features``，结构坏了补丁无处落，重交只会再撞同一道闸；
+    它们仍由 ``_normalize_asset_entries`` 原样报错。
+    """
+    if not isinstance(parsed, list):
+        return []
+    violations = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            return []
+        name = str(item.get("name", "")).strip()
+        positive = str(item.get("positive_prompt", "")).strip()
+        if not name or not positive:
+            return []
+        problem = _locked_problem(item.get("locked_features"), positive)
+        if problem is not None:
+            violations.append({
+                "name": name,
+                "positive_prompt": positive,
+                "locked_features": item.get("locked_features"),
+                "problem": problem,
+            })
+    return violations
+
+
+def _build_locked_repair_request(kind: str, violations: list[dict], canvas_block: str) -> str:
+    """拼一次补丁式修复请求：只收 ``name → locked_features``，正文冻结。
+
+    为什么把 ``positive_prompt`` 全文交回去：模型要「逐字摘」，手里就得有那篇正文；
+    只给条目名的话它只能再转述一次。为什么不许它改正文：图词已经设计定稿，允许改
+    正文等于让修复顺手改产物，而且「条目在正文里」可以被改正文满足——唯一变量必须是
+    清单，diff 才审得动。
+    """
+    lines = [
+        f"以下{kind}资产的锁死清单不合规。请**只修正 locked_features**：",
+        "每一条必须是该资产 positive_prompt 里**原样存在**的连续片段（逐字复制，不改写、"
+        "不概括、不加「发色：」这类前缀），每条资产 2–5 条。",
+        "不要改动 positive_prompt，也不要输出它或其它字段。",
+        "只输出 JSON 数组，每项只含 name 与 locked_features 两个键。",
+        canvas_block,
+    ]
+    for v in violations:
+        lines.append(
+            f"- name：{v['name']}\n"
+            f"  positive_prompt：{v['positive_prompt']}\n"
+            f"  不合格的清单：{v['locked_features']!r}\n"
+            f"  问题：{v['problem']}")
+    return "\n".join(lines)
+
+
+def _apply_locked_repair(parsed: list, kind: str, raw: str, violations: list[dict]) -> list:
+    """把修复补丁按 ``name`` 合并回原条目（正文与其余字段一字不动）。
+
+    补丁缺资产就整次判失败：静默留下某个资产的坏清单，等于让下游的偏差判定继续悄悄
+    失效——正是这道闸门要防的那件事。
+    """
+    try:
+        patch = json.loads(raw)
+    except json.JSONDecodeError as exc:
         raise ValueError(
-            f"{kind} 资产「{name}」缺 locked_features（锁死清单）——"
-            "它是读图校对判偏差的唯一判据，缺席等于把整篇提示词当判据（人裁被淹）")
-    if not isinstance(raw, list):
-        raise ValueError(f"{kind} 资产「{name}」的 locked_features 不是数组：{raw!r}")
-    locked = [str(x).strip() for x in raw]
-    locked = [x for x in locked if x]
-    if not locked:
-        raise ValueError(f"{kind} 资产「{name}」的 locked_features 是空表——至少要一条身份特征")
-    for entry in locked:
-        if entry not in positive:
+            f"{kind} 锁死清单的修复结果不是有效 JSON（已修复尝试 1 次）：{raw[:200]!r}") from exc
+    if not isinstance(patch, list):
+        raise ValueError(f"{kind} 锁死清单的修复结果顶层必须是数组（已修复尝试 1 次）")
+    replacements: dict[str, object] = {}
+    for item in patch:
+        if not isinstance(item, dict) or "locked_features" not in item:
             raise ValueError(
-                f"{kind} 资产「{name}」的锁死清单条目 {entry!r} 不是 positive_prompt 的原文片段"
-                "——条目必须逐字摘自正文，否则读图摘录的引文落不到条目上、偏差判不出来")
-    return locked
+                f"{kind} 锁死清单的修复结果每项只许有 name 与 locked_features（已修复尝试 1 次）：{item!r}")
+        name = str(item.get("name", "")).strip()
+        if not name:
+            raise ValueError(f"{kind} 锁死清单的修复结果有一项缺 name（已修复尝试 1 次）")
+        replacements[name] = item.get("locked_features")
+    missing = [v["name"] for v in violations if v["name"] not in replacements]
+    if missing:
+        raise ValueError(f"{kind} 锁死清单的修复结果缺了这些资产：{missing}（已修复尝试 1 次）")
+    merged = []
+    for item in parsed:
+        name = str(item.get("name", "")).strip()
+        if name in replacements:
+            # 只替换清单键；其余键（尤其 positive_prompt）原样保留——这是补丁式的全部意义。
+            item = {**item, "locked_features": replacements[name]}
+        merged.append(item)
+    return merged
 
 
 def _canvas_block(canvases: dict[str, tuple[int, int]] | None = None) -> str:
