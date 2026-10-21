@@ -27,6 +27,34 @@ def test_build_deepseek_from_config(monkeypatch):
     )
 
 
+def test_build_custom_openai_compatible_provider(monkeypatch):
+    """未内置的 provider（自建网关/中转站）按 OpenAI 兼容端点建，不再被白名单拦下。
+
+    2026-10-20 实测：`config/agent.yaml` 写 provider=opencode（opencode.ai/zen/go）
+    时 `build_chat_model` 抛 `ValueError: 未知 LLM_PROVIDER`。而 config.py 早就为任意
+    provider 生成 `{PROVIDER}_API_KEY` 默认名、工厂里的视觉侧（reference_auditor）也从
+    不校验 provider 名——白名单只活在主模型这一处，属于自相矛盾。
+    """
+    settings = ModelSettings(
+        provider="opencode",
+        model="deepseek-v4.1-flash",
+        base_url="https://opencode.ai/zen/go",
+        api_key_env="OPENCODE_API_KEY",
+        purpose="主模型",
+    )
+    monkeypatch.setattr(model_factory.config, "primary_model", settings)
+    monkeypatch.setattr(model_factory.config, "resolve_api_key", lambda _: "secret")
+    constructor = Mock()
+    monkeypatch.setattr(model_factory, "ChatOpenAI", constructor)
+
+    model_factory.build_chat_model()
+
+    constructor.assert_called_once_with(
+        model="deepseek-v4.1-flash", api_key="secret", base_url="https://opencode.ai/zen/go",
+        timeout=900, max_retries=0,
+    )
+
+
 def test_build_vision_uses_config(monkeypatch):
     from minimax_h3_prompt.tools import reference_auditor
 

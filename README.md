@@ -72,6 +72,8 @@ DASHSCOPE_API_KEY=xxx
 
 `LLM_PROVIDER`、各 provider 的 `*_MODEL`/`*_MODEL_NAME`/`*_BASE_URL` 仍作为旧配置兼容覆盖项；未设置时才使用 `agent.yaml` 的值。不要把真实 key 写进仓库。
 
+`provider` 不限于内置的四种：任何 OpenAI 兼容网关（自建服务、中转站、`opencode` 等）直接把 `provider` 写成网关名，并在同一节点给出 `base_url` 与 `api_key_env` 即可；只有 `provider: anthropic` 走 Anthropic 官方 SDK。
+
 ## brief 格式
 
 `examples/` 里有示例（模板 `examples/brief_template.md`）。**`输入` 键对应你喂工作流的参考方式**：

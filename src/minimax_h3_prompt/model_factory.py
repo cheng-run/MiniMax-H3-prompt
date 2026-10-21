@@ -52,16 +52,21 @@ def build_chat_model() -> BaseChatModel:
     if provider == "anthropic":
         return _anthropic(key, settings)
 
-    if provider in {"deepseek", "openai", "dashscope"}:
-        base_url = settings.base_url
-        if provider == "deepseek" and base_url and "anthropic" in base_url:
-            return _anthropic(key, settings)
-        return ChatOpenAI(
-            model=settings.model,
-            api_key=key,
-            base_url=base_url,
-            timeout=_LLM_TIMEOUT_SECONDS,
-            max_retries=_LLM_MAX_RETRIES,
-        )
+    base_url = settings.base_url
+    # deepseek 的 anthropic 兼容端点仍走 ChatAnthropic（历史行为，别动）。
+    if provider == "deepseek" and base_url and "anthropic" in base_url:
+        return _anthropic(key, settings)
 
-    raise ValueError(f"未知 LLM_PROVIDER: {provider}（应为 anthropic | openai | dashscope | deepseek）")
+    # 其余 provider 一律按 OpenAI 兼容端点处理：自建网关 / 中转站（opencode、one-api、
+    # openrouter…）不需要预先登记进名单，base_url 与 model 由 agent.yaml 显式给出即可。
+    # 这里原是一份四值白名单，2026-10-20 用户配 provider=opencode 被它拦下；而 config.py
+    # 早已为任意 provider 生成 {PROVIDER}_API_KEY 默认名、视觉侧（reference_auditor）也从
+    # 不校验 provider 名——白名单只活在工厂这一处。名字写错仍有上面的 _require 兜住
+    # （会报「缺失 XXX_API_KEY」），不会静默打到 api.openai.com。
+    return ChatOpenAI(
+        model=settings.model,
+        api_key=key,
+        base_url=base_url,
+        timeout=_LLM_TIMEOUT_SECONDS,
+        max_retries=_LLM_MAX_RETRIES,
+    )
