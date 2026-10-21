@@ -8,18 +8,27 @@
 - AC3 进度落盘物缺失/错形时**响错**，不静默从零开始（裁定见下）；
 - AC4 与**阶段 2 断点**、**续跑点**的边界（见 CONTEXT.md 词条与代码注释）；
 - AC5 主缝测试驱动**真实调用链**（``run_wizard`` 的多参阶段 2），只打桩 LLM 与交互输入；
-- AC6 **变异检验**：把「续跑跳过已通过段」摘掉，本文件必须变红（实测记录见文件尾）。
+- AC6 **变异检验**：把「续跑跳过已通过段」摘掉，本文件必须变红。
+
+**AC6 的实测记录（2026-10-21，两次都跑在实现提交之后）**：把
+``ui/wizard._run_ref_segment_handoff`` 里那段跳段块（``if position in passed: … continue``）
+整块删掉，本文件 13 条里**恰好 2 条转红**
+（``test_resume_skips_the_passed_segment_and_continues_from_the_next`` 与
+``test_resume_works_for_the_single_segment_route_too``），且两条都红在**自己的断言**上
+（「续跑重问了已通过段的交回口」），不是以输入表耗尽那种与 AC 无关的方式红；当场还原后
+13 条全绿。两次独立复现（实现提交后、复审采纳项落地后各一次），结果一致。
 
 **AC3 的口径（2026-10-21 用户裁定：分档）**：
 - 段产出账**文件不在** ＝ 一段都没通过（追加账在零通过时本来就不存在，#55 的
-  ``test_empty_handback_stops_the_run`` 钉着这一点）——当面打印「账上没有已通过的段」，
-  从第 1 段起，**这不是错**，也不是静默（打印本身就是响）；
-- **段表 plan.json 缺失/读不出、段文件缺失、账行错形、账行与段表对不上**（段号越界或
-  跳号）＝ 响错停住：这些形态下「从零开始」意味着把已通过的段当没做过。
+  ``test_empty_handback_stops_the_run`` 钉着这一点）——续跑当面打印「已通过 0/N 段」
+  并从第 1 段起，**这不是错**，也不是静默（打印本身就是响）；
+- **段表 plan.json 缺失/读不出、段文件缺失、账行错形（含通过行缺字段）、账行与段表
+  对不上**（段号越界或跳号）＝ 响错停住：这些形态下「从零开始」意味着把已通过的段当
+  没做过。
 
-**不重付的判据**：续跑全程零 LLM 调用——``run_stage1``/``run_stage2`` 一旦被调就
-直接炸（见 ``_resume_run`` 的布防），段文本从 ``segments/segment-NN.md`` 读回，
-已通过段连语义层的读图（视觉计费）都不再跑。
+**不重付的判据**：续跑不重跑阶段 1/2——``run_stage1``/``run_stage2`` 一旦被调就直接炸
+（见 ``_resume_run`` 的布防），段文本从 ``segments/segment-NN.md`` 读回，已通过段连
+语义层的读图（视觉计费）都不再跑（**当段**照旧要读图——「零调用」只对已通过的段成立）。
 """
 from __future__ import annotations
 
@@ -117,11 +126,21 @@ def _new_run_tail(duration: str) -> list[str]:
     return [TOPIC, duration, "", "4", "", "4", "", "4", "", "4", "4"]
 
 
+def _confirm_declining_resume(text: str, default: bool = True) -> bool:
+    """确认桩：**拒绝**续接（答否），其余按 ``_confirm_continue_only`` 的老规矩。"""
+    if "两阶段任务" in text:
+        return False
+    return _confirm_continue_only(text, default)
+
+
 def _run(tmp_path, monkeypatch, handbacks: list[str],
-         *, duration: str = "20") -> tuple[list[str], int]:
+         *, duration: str = "20",
+         decline_resume: bool = False) -> tuple[list[str], int]:
     """首跑全程：阶段 1 → 素材循环 → 阶段 2 → 逐段陪跑（真调用链，只打桩 LLM 与输入）。
 
     ``duration``：20 ＝ >15s 拆两段；12 ＝ ≤15s 直出单段（走同一套收尾，issue #57 AC5）。
+    ``decline_resume``：对「发现 N 个未完成的两阶段任务，是否继续」答**否**——用户放着
+    续接不用、重走一遍流程的那条路（``_session_dir`` 会复用同一个 GEN）。
     """
     _silence(monkeypatch)
     monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
@@ -134,7 +153,9 @@ def _run(tmp_path, monkeypatch, handbacks: list[str],
         lambda state, brief, config, **kw: (dict(state), _SIX_SECTION_PROMPT))
     # 假模型没有 invoke：规划与回退重写都失败 → 走机械拆段（确定性）
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
-    monkeypatch.setattr(wizard, "_confirm", _confirm_continue_only)
+    monkeypatch.setattr(wizard, "_confirm",
+                        _confirm_declining_resume if decline_resume
+                        else _confirm_continue_only)
     asked = _fake_inputs(monkeypatch, [*_new_run_tail(duration), *handbacks])
     return asked, wizard.run_wizard(_cfg(tmp_path))
 
@@ -396,6 +417,81 @@ def test_ledger_row_with_a_null_segment_number_is_refused(tmp_path, monkeypatch,
     assert code == 1, f"code={code} asked={asked} out={out[-800:]}"
     assert "[错误]" in out and "段产出账" in out, f"没响或没说清是账的问题：{out[-600:]}"
     assert not any("输出视频路径" in text for text in asked)
+
+
+def test_ledger_row_missing_the_ac1_fields_is_refused(tmp_path, monkeypatch, capsys,
+                                                      h3_tier_video):
+    """通过行缺 AC1 点名的字段（视频路径/判定）→ 响错，**不当成「这段过了」**。
+
+    复审实测补的：行还在、只是被剥了字段时，续跑会照跳、跳过的路径是空串、且不响
+    ——「行在＝这段过了」这条判据建立在**行写全了**之上。
+    """
+    gen, _first = _interrupted(tmp_path, monkeypatch, h3_tier_video)
+    capsys.readouterr()
+    ledger = gen / "segments" / "segment-ledger.jsonl"
+    row = next(r for r in map(json.loads, ledger.read_text(encoding="utf-8").splitlines())
+               if r.get("event") == SEGMENT_EVENT_OUTPUT)
+    ledger.write_text(json.dumps({k: v for k, v in row.items()
+                                  if k not in ("video", "verdict")}, ensure_ascii=False)
+                      + "\n", encoding="utf-8")
+
+    asked, code = _resume_run(tmp_path, monkeypatch, [""])
+    out = capsys.readouterr().out
+
+    assert code == 1, f"code={code} asked={asked} out={out[-800:]}"
+    assert "[错误]" in out and "缺字段" in out, f"没响或没说清缺什么：{out[-600:]}"
+    assert not any("输出视频路径" in text for text in asked)
+
+
+def test_resume_with_no_ledger_starts_from_the_first_segment_aloud(tmp_path, monkeypatch,
+                                                                   capsys, h3_tier_video):
+    """账文件不在（一段都没通过）→ 从第 1 段起，并**当面说明**已通过 0 段。
+
+    这是 AC3 裁定的前半档：追加账在零通过时本来就不存在，所以「缺失」不算错——但也不
+    许静默：续跑开头必须把这句打出来（用户才知道自己的进度是 0，不是被清了）。
+    """
+    first = h3_tier_video(10.0, "seg1.avi")
+    _run(tmp_path, monkeypatch, [""])          # 停在段 1，一段都没通过 → 账文件不存在
+    capsys.readouterr()
+    assert not list((tmp_path / "sessions").rglob("segment-ledger.jsonl"))
+
+    asked, code = _resume_run(tmp_path, monkeypatch, [str(first), ""])
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "已通过 0/2 段" in out, f"没说清本轮从零起：{out[-600:]}"
+    assert any("第 1/2 段输出视频路径" in text for text in asked), \
+        f"零通过时应当从第 1 段问起：{asked}"
+
+
+def test_declining_resume_then_rerunning_does_not_reuse_the_old_ledger(tmp_path, monkeypatch,
+                                                                      capsys, h3_tier_video):
+    """拒绝续接后重走一遍流程 → 复用同一 GEN，但**上一次的通过行不许被当成本轮进度**。
+
+    ``_session_dir`` 只要会话不是 completed 就复用同一个 GEN，而用户可以拒绝续接再输
+    同一个题面：那时段表/段文件/整片存档都被新一轮交付覆盖，唯独追加式的段产出账不会
+    ——不挪开的话，新一次的陪跑会直接打印「第 1/2 段已通过验收，跳过」，而那段视频用户
+    这一轮根本没生成过（复审实测可达，issue #58）。
+    """
+    first = h3_tier_video(10.0, "seg1.avi")
+    second = h3_tier_video(10.0, "seg2.avi")
+    _run(tmp_path, monkeypatch, [str(first), ""])   # 段 1 通过 → 停住
+    gen = _generation_dir(tmp_path)
+    capsys.readouterr()
+
+    asked, code = _run(tmp_path, monkeypatch, [str(second), ""], decline_resume=True)
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert _generation_dir(tmp_path) == gen, "本用例要的是「复用同一 GEN」这条路径"
+    assert "已挪到" in out, f"旧账没被挪开：{out[-800:]}"
+    assert list((gen / "segments").glob("segment-ledger.jsonl.bak*")), \
+        "旧账没有备份下来（挪而不删）"
+    assert any("第 1/2 段输出视频路径" in text for text in asked), \
+        f"新一次交付必须从第 1 段问起，而不是吃旧账：{asked}"
+    rows = _output_rows(tmp_path)
+    assert [r["segment"] for r in rows] == [1], f"本轮账上不该有旧行：{rows}"
+    assert rows[0]["video"] == str(second.resolve())
 
 
 def test_ledger_disagreeing_with_the_plan_is_refused(tmp_path, monkeypatch, capsys,

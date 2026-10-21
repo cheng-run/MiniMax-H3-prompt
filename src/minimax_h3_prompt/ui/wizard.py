@@ -690,11 +690,15 @@ def _session_dir(config: Config, topic: str) -> Path:
     续接规则：最新 GEN 的会话**未完成** → 复用续接；``completed`` 或无会话文件 →
     自动开下一个 GEN 编号（同主题重新生成 = 新的一次验收运行，2026-09-22 裁定）。
 
-    「未完成」指 ``awaiting_frames`` / ``stage1_running`` / ``segmented_running`` 三态。
-    这里只按「不是 completed」判，所以新增未完成态自动获得续接语义——但前提是
-    **确实有代码在写那个态**：``segmented_running`` 曾长期只存在于本 docstring 里
-    （分段陪跑从不改会话状态），于是「分段进行中」这一态在运行时不存在，向导会另开
-    新 GEN、``progress.json`` 永远读不到（issue #17）。
+    「未完成」指 ``awaiting_frames`` / ``stage1_running`` / ``segmented_running`` /
+    ``ref_segments_running`` 四态。这里只按「不是 completed」判，所以新增未完成态自动
+    获得续接语义——但前提是**确实有代码在写那个态**：``segmented_running`` 曾长期只
+    存在于本 docstring 里（分段陪跑从不改会话状态），于是「分段进行中」这一态在运行时
+    不存在，向导会另开新 GEN、``progress.json`` 永远读不到（issue #17）。
+
+    复用 GEN 有个副作用要留意（issue #58 复审实测）：用户**拒绝续接**再重走流程时，
+    同一个 GEN 的段产物会被新一轮交付整份覆盖，而**追加式**的账（多参的段产出账）
+    不会——所以新一次交付开头要把它挪开（``ref_segments.rotate_segment_ledger``）。
     """
     from ..session_store import STATUS_COMPLETED, load_session
 
@@ -2394,7 +2398,7 @@ def _phase2_ref_finish(config: Config, session: SessionState) -> int:
     交回→校对→裁决），一张落账/放弃才出下一张。注入卡（issue #45）出在台账收口之后：
     台账→参考槽接线清单＋视频输出三元组，用户照卡进 ComfyUI 手动接线（系统不自动投喂）。
     """
-    from ..ref_segments import is_single_segment_route
+    from ..ref_segments import is_single_segment_route, rotate_segment_ledger
 
     brief = session.brief
     state = dict(session.stage_state)
@@ -2431,6 +2435,15 @@ def _phase2_ref_finish(config: Config, session: SessionState) -> int:
     # 文本——>15s 时降级为**存档预览**（拆段从它取材），交付物是逐段交回的那几段视频。
     # ≤15 秒（issue #57 AC5）走**同一套收尾**：整片文本刚好就是那一段的提示词（段文件
     # 是它的副本），回传 → 两道闸 → 段产出账 → 成片一样不缺，短片的体验不与长片分叉。
+    # 走到这里就说明会话没有「陪跑进行中」的进度（那种会话由 ``run_wizard`` 路由到续跑
+    # 入口），所以这**是一次新的陪跑**：同一个 GEN 里可能还躺着上一次交付的段产出账
+    # （用户拒绝了续接、重走一遍流程时会复用 GEN），挪开它，本轮进度从零记起。
+    # 不挪的后果是拿上一次的通过行索引这一次的段——复审实测可达（issue #58）。
+    rotated = rotate_segment_ledger(generation_dir)
+    if rotated is not None:
+        print(f"[提示] 本生成目录里还留着上一次陪跑的段产出账，已挪到 {rotated}"
+              "（本轮从第 1 段重新记）。")
+
     if is_single_segment_route(brief.duration):
         result = _deliver_ref_single_segment(state, brief, prompt, generation_dir)
         print(f"\n[本片单段] 整片 ref 六段式已写入 {output_file}"
@@ -3349,6 +3362,20 @@ def _resume_segmented(config: Config, session: SessionState) -> int:
     return 0
 
 
+def _ref_delivery_started(directory: Path) -> bool:
+    """本片是否**已经交付过**（段表/段文件/段产出账三样里只要有一件在，就是）。
+
+    用来把两种「读不回来」分开（issue #58 复审实测）：交付那一步就中断的窗口里**确实**
+    一段都没做，说「这不是一段都没做」是撒谎；已经交付过而落盘物丢了，才是进度有风险。
+    """
+    from ..ref_segments import segment_ledger_path
+
+    segments = directory / "segments"
+    return ((segments / "plan.json").is_file()
+            or segment_ledger_path(directory).is_file()
+            or any(segments.glob("segment-*.md")))
+
+
 def _resume_ref_handoff(config: Config, session: SessionState) -> int:
     """多参逐段陪跑续接（issue #58）：回到同一个 GEN，已通过的段不重出、不重跑、不重付。
 
@@ -3373,10 +3400,19 @@ def _resume_ref_handoff(config: Config, session: SessionState) -> int:
         passed = read_ref_handoff_progress(directory, total_segments=len(result.plans))
     except (OSError, ValueError) as exc:
         print(f"[错误] 多参逐段陪跑的落盘物读不回来：{exc}")
-        print("  这不是「一段都没做」——静默从零开始会把已通过的段当没做过"
-              "（已生成的视频得重新交回，已付的读图也白付）。")
-        print(f"  出路：恢复 {directory / 'segments'} 下的 plan.json / segment-NN.md / "
-              "segment-ledger.jsonl 后重跑；或删掉会话文件另开一次生成。")
+        if _ref_delivery_started(directory):
+            print("  这不是「一段都没做」——静默从零开始会把已通过的段当没做过"
+                  "（已生成的视频得重新交回，已付的读图也白付）。")
+            print(f"  出路：恢复 {directory / 'segments'} 下的 plan.json / segment-NN.md / "
+                  "segment-ledger.jsonl 后重跑；或删掉会话文件另开一次生成。")
+        else:
+            # 交付那一步就中断了（会话已标「陪跑进行中」，但段表/段文件/账都还没落）。
+            # 这时**确实**一段都没做，说「这不是一段都没做」是撒谎——这个窗口是复审
+            # 实测指出的（issue #58）：状态写在交付之前，而交付要跑 LLM，几分钟的窗口。
+            print("  这一段**还没开始做**：段表、段文件、段产出账三样都还没有，"
+                  "所以没有任何进度会丢。")
+            print("  出路：删掉本会话文件（session-state.json）后重跑——阶段 1/2 会重做；"
+                  "或把上一次交付的 segments/ 恢复回来再续。")
         return 1
     print(f"\n[续接] 上一次多参逐段陪跑没有跑完，回到 {directory.name} 继续"
           f"（阶段 1/2 不重跑）：已通过 {len(passed)}/{len(result.plans)} 段。")

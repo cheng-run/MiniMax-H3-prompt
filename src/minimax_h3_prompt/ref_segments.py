@@ -583,6 +583,30 @@ def load_ref_segments_for_resume(directory: str | Path,
         annotated=not is_single_segment_route(total_s))
 
 
+def rotate_segment_ledger(directory: str | Path) -> Path | None:
+    """把上一次陪跑的段产出账挪成 ``.bak``，给**新一次交付**腾出干净的进度记录。
+
+    为什么需要它：``ui.wizard._session_dir`` 只要会话不是 completed 就复用同一个 GEN，
+    而用户可以**拒绝续接**、重走一遍流程。那时 ``plan.json``/``segment-NN.md``/
+    ``video-prompt.md`` 都会被新一轮交付整份覆盖，唯独这本账是追加式的、从不清理——
+    不挪开的话，新一次的陪跑会读到**上一次**的通过行，把「第 1 段已通过」当成这一轮的
+    进度照跳（2026-10-21 复审实测：拒绝续接 + 重输同题 → 落回同一 GEN，直接打印
+    「第 1/2 段已通过验收，跳过」，而那段视频用户这一轮根本没生成过）。
+
+    挪而不删：旧账是那一次交付的凭据，留着可查；返回新路径供调用方当面说破。
+    """
+    path = segment_ledger_path(directory)
+    if not path.is_file():
+        return None
+    target = path.with_name(path.name + ".bak")
+    index = 1
+    while target.exists():
+        index += 1
+        target = path.with_name(f"{path.name}.bak{index}")
+    path.rename(target)
+    return target
+
+
 def read_ref_handoff_progress(directory: str | Path, *,
                               total_segments: int) -> dict[int, dict]:
     """续跑要的「已通过段」→ ``{段号: 行}``；账与段表**对不上就抛**（绝不静默从零开始）。
@@ -595,8 +619,12 @@ def read_ref_handoff_progress(directory: str | Path, *,
     显式点名：同一本账还装着 encounter/rewrite 两类行，不判别就会把「改了一轮词」读成
     「这段过了」（``read_segment_ledger`` 的 event 参数就是为此必填）。
 
-    三条硬核对，任一不过就抛：
-    - 账行错形/读不出（``read_segment_ledger`` 已抛，这里不吞）；
+    四条硬核对，任一不过就抛：
+    - 账行错形/读不出（``read_segment_ledger`` 管 JSON/对象形态；**缺字段**由下面那条管）；
+    - 通过行**缺 AC1 点名的字段**（段号/判定/视频路径）或 SHA256——「行在＝这段过了」这条
+      判据建立在**行写全了**之上：一条只剩 ``{"event":"output"}`` 的行不是「这段过了」的
+      证据，拿它跳段等于放行一段没人生成过的视频（2026-10-21 复审实测：剥掉 video 后
+      续跑照跳、路径为空、还不响）；
     - 段号落在段表之外（账与段表不是同一次拆段的产物）；
     - 通过行**跳号**（陪跑是严格顺序的，中间缺段说明账被删过/改过——按它续跑会跳过
       从没做过的段，正是本票要消灭的形态）。
@@ -612,6 +640,18 @@ def read_ref_handoff_progress(directory: str | Path, *,
         # traceback，而「账行错形要响错停住」是 CONTEXT.md「分段续跑」词条的承诺
         # （2026-10-21 复审实测：`{"event":"output","segment":null}` 复现得到）。
         raise ValueError(f"段产出账的行读不出段号（{segment_ledger_path(directory)}）：{exc}") from exc
+    for number, row in sorted(passed.items()):
+        missing = [key for key in ("video", "sha256", "verdict")
+                   if not str(row.get(key) or "").strip()]
+        if missing:
+            raise ValueError(
+                f"段产出账第 {number} 段的通过行缺字段 {missing}"
+                f"（{segment_ledger_path(directory)}）：行在＝这段过了这条判据建立在行写全了"
+                "之上，残缺的行不能拿来跳段")
+        if str(row.get("verdict")) != "pass":
+            raise ValueError(
+                f"段产出账第 {number} 段的通过行 verdict 是 {row.get('verdict')!r}，不是 pass："
+                "只有通过行才该出现在 event=output 里（判定见 log_segment_output 的注释）")
     total = int(total_segments)
     extra = sorted(number for number in passed if not 1 <= number <= total)
     if extra:
