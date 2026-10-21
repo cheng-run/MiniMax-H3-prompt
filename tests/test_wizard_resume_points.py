@@ -170,11 +170,27 @@ def _session_dir(tmp_path: Path) -> Path:
     return next((tmp_path / "sessions").rglob("session-state.json")).parent
 
 
+def _stub_alignment(monkeypatch) -> None:
+    """桩掉回灌（``_align_asset_with_settled``）——它会真建 LLM 客户端。
+
+    本文件测的是**续跑点**，回灌结果不在任何断言里；不打桩的话，有 ``.env`` 的机器上
+    它会真发网络请求（2026-10-21 实测：本文件 6 条用例 236s→54s，单条 3 次调用共 105s），
+    而没有 ``.env`` 的干净检出上同一路径又秒失败——两种机器跑的分明不是同一条路径。
+    本仓纪律「会真建 LLM 客户端的用例一律打桩」正是为这个：抛错让回灌走它自己的
+    「失败只提示、词保持原样」出口，与干净检出上的行为一致且毫秒级。
+    """
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("回灌调用未打桩（issue #59 全量跑时发现的真网络请求）")
+
+    monkeypatch.setattr(model_factory, "build_chat_model", boom)
+
+
 def _start_ref_run(tmp_path, monkeypatch, *, vision: dict[str, str] | None = None,
                    stage2=None, asked: list[str] | None = None) -> list[str]:
     """装好一整套桩（不跑）。返回共用的 ``asked`` sink——两轮向导的提问都落在它上面。"""
     asked = asked if asked is not None else []
     _silence(monkeypatch)
+    _stub_alignment(monkeypatch)
     monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
     _stub_stage1(monkeypatch)
     if stage2 is None:
