@@ -691,7 +691,7 @@ def _segment_shot_texts(plan, state: dict) -> tuple[list[str], bool]:
     从分镜表按 ``[Shot N]`` 抽取本段覆盖的镜头——整条分镜表灌进每一段会把其他时间窗的
     事件一起喂给 H3，破坏「时间窗纪律」。
     同一根因早前已被诊断过并命名为 ``extract_segment_shots``
-    （`docs/superpowers/specs/2026-09-17-segment-lock-scoping-design.md` 根因 4：
+    （`docs/design/2026-09-17-segment-lock-scoping-design.md` 根因 4：
     「``shot_text_{n}`` 键根本不存在 → 回退整张分镜表」），但那份计划从未实现，
     且其配套结构 GLOBAL_LOCK 已被 2026-09-22 官方格式迁移废弃（同批误删的 edge-stability
     句已于 issue #8 恢复——它是官方硬要求，见 ``EDGE_STABILITY_SENTENCE``）。

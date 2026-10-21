@@ -4,7 +4,7 @@
 > 已被 **2026-09-22 官方格式迁移废弃**（`tools/h3_validator` 报 error，见 `CONTEXT.md` 末节）。
 > **根因分析仍然成立**，尤其「根因 4：`shot_text_{n}` 键根本不存在 → 回退整张分镜表」，
 > 已由 2026-09-22 的首帧锚定修复落地（`segment_prompts._segment_shot_texts`，缺陷编号 H4）。
-> 配套计划 `docs/superpowers/plans/2026-09-17-segment-lock-scoping.md` 同样未实施。
+> 配套计划同样未实施（该计划文件 2026-10-21 随旧工具链清理删除，git 历史可取回）。
 
 ## 背景
 
