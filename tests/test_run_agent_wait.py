@@ -440,3 +440,72 @@ def test_parallel_calls_have_independent_budgets(monkeypatch):
     assert results["b"] == "B 的产出"
     assert agent_a.calls == 1
     assert agent_b.calls == 2  # 第一次超时、第二次成功——重试真的发生了
+
+
+# ---------------------------------------------------------------------------
+# 服务端内容审核拦截（MiniMax 1027 / output new_sensitive）
+# ---------------------------------------------------------------------------
+
+def _sensitive_rejection() -> Exception:
+    """生产形态的审核拦截：openai 把流里的 SSE error 事件重抛成 APIError。
+
+    MiniMax 网关返回 ``{"error": {"code": 1027, "message": "output new_sensitive"}}``，
+    langchain-openai 走 ``openai._streaming`` 的 error 分支重新抛出，``str(exc)``
+    就是 ``output new_sensitive (1027)``（2026-10-21 实测 traceback）。
+    """
+    import httpx
+    from openai import APIError
+
+    return APIError(
+        "output new_sensitive (1027)",
+        request=httpx.Request("POST", "https://api.minimax.cn/v1/chat/completions"),
+        body={"code": 1027, "message": "output new_sensitive"},
+    )
+
+
+def test_sensitive_output_rejection_retries_with_a_nudge(events):
+    """审核拦截＝服务端没让这段产出落地：换一次采样可能就过，且要把措辞往克制里带。
+
+    判据按「结构化字段优先、文案兜底」：body 里的 code/message 是原始证据，
+    ``str(exc)`` 是 openai 拼出来的展示串，两者在 SDK 版本间未必同时可靠。
+    """
+    sent: list[str] = []
+
+    def behaviour(call_no, handler):
+        if call_no == 1:
+            raise _sensitive_rejection()
+        handler.on_llm_new_token("重")
+        return {"messages": [AIMessage(content="重写后的提示词")]}
+
+    agent = FakeAgent(behaviour)
+
+    def capture(payload, config=None):
+        sent.append(payload["messages"][0]["content"])
+        return behaviour(len(sent), (config or {}).get("callbacks")[0])
+
+    agent.invoke = capture
+
+    assert run_agent(agent, "请写人物生图提示词") == "重写后的提示词"
+    assert len(sent) == 2, "审核拦截应当恰好重试一次"
+    assert "请写人物生图提示词" in sent[1]
+    assert "内容审核" in sent[1], "重试请求没把「上一轮被审核拦了」告诉模型"
+    states = [e["state"] for e in _wait_events(events)]
+    assert "retrying" in states
+
+
+def test_sensitive_output_rejection_stops_after_attempt_cap(events):
+    """连续被拦到次数上限：停，且错误说清病因与下一步（别伪装成超时）。"""
+
+    def behaviour(call_no, handler):
+        raise _sensitive_rejection()
+
+    agent = FakeAgent(behaviour)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        run_agent(agent, "请写人物生图提示词")
+
+    assert agent.calls == model_factory._LLM_MAX_ATTEMPTS
+    msg = str(excinfo.value)
+    assert "内容审核" in msg
+    assert "new_sensitive" in msg or "1027" in msg, "错误里没留服务端的原始码"
+    assert ROLE in msg

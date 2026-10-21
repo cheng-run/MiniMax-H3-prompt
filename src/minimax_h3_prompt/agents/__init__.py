@@ -297,6 +297,45 @@ def _is_timeout_error(exc: BaseException) -> bool:
     return any(cls.__name__ == "TimeoutException" for cls in type(exc).__mro__)
 
 
+# 被服务端内容审核拦截后重试时追加的提示。为什么带一句「更克制」而不是原样重发：
+# 同输入重采样未必换掉触发点（模型往往沿同一思路写），一句话把措辞往安全区带，
+# 又不改变设计信息与输出格式（issue #65 实测：MiniMax 1027 拦的是**产出**）。
+_SENSITIVE_NUDGE = (
+    "\n\n（上一次产出被服务端内容审核拦截了。请保持原有设计信息与输出格式，换一种更克制"
+    "的措辞重新输出，避免任何可能触发内容审核的描写。）"
+)
+
+
+def _is_sensitive_output_error(exc: BaseException) -> bool:
+    """异常是不是服务端内容审核拦截（MiniMax 1027 / ``output new_sensitive``）。
+
+    为什么单独判：它不是超时、也不是本地契约错误。langchain-openai 把流里的 SSE
+    error 事件重抛成 ``APIError("output new_sensitive (1027)")``，``body`` 里带着
+    原始 error 映射；不同 SDK 版本对 body 的保留程度不同，所以结构化字段优先、
+    展示串兜底。**不认裸的 "1027"**：那会把任何消息里恰好带这串数字的异常当成
+    审核拦截，重试错方向。
+    """
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        if str(body.get("code")) == "1027":
+            return True
+        if "new_sensitive" in str(body.get("message", "")):
+            return True
+    return "new_sensitive" in str(exc)
+
+
+def _sensitive_failure(role: str, *, attempts: int) -> RuntimeError:
+    """审核拦截用尽重试后的报错：说清「服务端拦了产出」，别伪装成超时或校验失败。"""
+    return RuntimeError(
+        f"{role} 调用失败：网关 {_gateway_name()} 连续 {attempts} 次以内容审核拦截了产出"
+        "（MiniMax 1027 / output new_sensitive）。"
+        "\n这不是超时，也不是本地网络问题：模型已经生成了内容，被服务端的安全过滤拦下，"
+        "每次拦截都换过一次更克制的措辞重试。"
+        "\n下一步：重跑一次（换采样可能通过）；若反复被拦，把剧情／人物外观／服化道描述里"
+        "的敏感措辞改克制些，或换一个模型。"
+    )
+
+
 def _gateway_name() -> str:
     """报错文案里的网关名：优先 base_url 的 host，取不到退回 provider。
 
@@ -387,12 +426,12 @@ def run_agent(agent: object, message: str, retry_empty: bool = True) -> str:
     reporter.emit({"type": "agent_start", "role": role})
     started = time.monotonic()
     deadline = started + model_factory._LLM_CALL_BUDGET_SECONDS
-    timeout_attempt = 0
+    attempt_no = 0
     # 每次真正 invoke 都把 handler 放进来，外层靠 handlers[-1] 判断「首字节到没到」。
     # 空产出重试会递归再 invoke 一次，所以它必须是列表而不是单个对象。
     handlers: list[FirstByteHandler] = []
     while True:
-        timeout_attempt += 1
+        attempt_no += 1
         handlers.clear()
         try:
             return _run_agent_inner(
@@ -401,6 +440,25 @@ def run_agent(agent: object, message: str, retry_empty: bool = True) -> str:
                 started=started,
             )
         except Exception as exc:
+            if _is_sensitive_output_error(exc):
+                # 审核拦截与超时共用同一份「尝试次数 + 墙钟预算」：它也是「这一次产出
+                # 没拿到」，多来一轮的代价与首字节线同量级；但重试时**要改请求**——
+                # 同输入重采样未必换掉触发点，所以追加一句「换更克制的措辞」。
+                remaining = deadline - time.monotonic()
+                if (
+                    attempt_no < model_factory._LLM_MAX_ATTEMPTS
+                    and remaining >= model_factory._LLM_READ_TIMEOUT_SECONDS
+                ):
+                    reporter.emit({
+                        "type": "agent_wait", "role": role, "state": "retrying",
+                        "attempt": attempt_no + 1,
+                        "retry": attempt_no,
+                        "remaining_budget": max(0.0, remaining),
+                    })
+                    if _SENSITIVE_NUDGE not in message:
+                        message += _SENSITIVE_NUDGE
+                    continue
+                raise _sensitive_failure(role, attempts=attempt_no) from exc
             if not _is_timeout_error(exc):
                 raise
             handler = handlers[-1] if handlers else None
@@ -410,13 +468,13 @@ def run_agent(agent: object, message: str, retry_empty: bool = True) -> str:
                     role,
                     phase="midstream",
                     elapsed=handler.seconds_since_first_byte(),
-                    attempts=timeout_attempt,
+                    attempts=attempt_no,
                     remaining=deadline - time.monotonic(),
                 ) from exc
             elapsed = handler.seconds_since_start() if handler else time.monotonic() - started
             reporter.emit({
                 "type": "agent_wait", "role": role, "state": "stuck",
-                "elapsed": elapsed, "attempt": timeout_attempt,
+                "elapsed": elapsed, "attempt": attempt_no,
             })
             remaining = deadline - time.monotonic()
             # attempt 事件语义：stuck.attempt = 刚失败的尝试序号；
@@ -424,13 +482,13 @@ def run_agent(agent: object, message: str, retry_empty: bool = True) -> str:
             # retry 是**重试序号**（1 表示第一次重试）＝ attempt - 1，由这里派生：
             # 渲染层再自己减一次就会与 attempt 错位（issue #62 裁定 2）。
             if (
-                timeout_attempt < model_factory._LLM_MAX_ATTEMPTS
+                attempt_no < model_factory._LLM_MAX_ATTEMPTS
                 and remaining >= model_factory._LLM_READ_TIMEOUT_SECONDS
             ):
                 reporter.emit({
                     "type": "agent_wait", "role": role, "state": "retrying",
-                    "attempt": timeout_attempt + 1,
-                    "retry": timeout_attempt,
+                    "attempt": attempt_no + 1,
+                    "retry": attempt_no,
                     "remaining_budget": max(0.0, remaining),
                 })
                 continue
@@ -438,7 +496,7 @@ def run_agent(agent: object, message: str, retry_empty: bool = True) -> str:
                 role,
                 phase="stuck",
                 elapsed=elapsed,
-                attempts=timeout_attempt,
+                attempts=attempt_no,
                 remaining=remaining,
             ) from exc
 
