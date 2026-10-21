@@ -550,7 +550,12 @@ def _run_cli(args: argparse.Namespace) -> int:
     final_prompt = run_pipeline(brief, config)
     config.output_path.parent.mkdir(parents=True, exist_ok=True)
     config.output_path.write_text(final_prompt, encoding="utf-8")
-    if brief.mode == "ref" and brief.duration > 15:
+    # 分流口径**从常量派生**（issue #58 复审）：这条判据与向导 `_phase2_ref_finish`、
+    # 续跑装载的 `annotated` 是**同一条契约**（整片能不能一次喂给 H3 ＝ 规划器的执行段
+    # 上限），所以走同一个 `is_single_segment_route`，不在这里再写一个字面 15。
+    from .ref_segments import is_single_segment_route
+
+    if brief.mode == "ref" and not is_single_segment_route(brief.duration):
         # 与向导 _phase2_ref_finish 同口径（issue #46/#55）：>15 秒按镜头边界拆段，
         # 逐段自包含六段式＋段清单/拼接顺序卡落盘；整片六段式降级为**存档预览**
         # ——交付物是逐段落盘的段提示词。**逐段陪跑不在这条路径上**（issue #55）：

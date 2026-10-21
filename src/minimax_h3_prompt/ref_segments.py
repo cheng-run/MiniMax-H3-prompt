@@ -40,7 +40,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .asset_ledger import sha256_file
-from .segment_planner import SegmentPlan, pack_shots_into_segments, plan_segments
+from .segment_planner import (
+    MAX_SEG_S,
+    SegmentPlan,
+    pack_shots_into_segments,
+    plan_segments,
+)
 from .segment_prompts import (
     _shot_blocks,
     assemble_ref_segment,
@@ -55,6 +60,17 @@ from .segment_prompts import (
     write_ref_segment_v2,
 )
 from .tools.h3_validator import split_ref_sections, validate_ref
+
+def is_single_segment_route(total_s: float) -> bool:
+    """本片是否走「整片＝唯一执行段」的直出路线：总时长不超过 H3 **单次生成上限**。
+
+    上限就是规划器的执行段上限 ``MAX_SEG_S``（ref 模式 4–15s 档的顶）——「整片能不能
+    一次喂给 H3」与「一段能有多长」是**同一条契约**，所以这里**从常量派生、不写字面 15**：
+    重抄一份的话，改上限时这几处会静默漂（本仓「同一份契约不许两处口径」，2026-10-21
+    复审实测：这个 15 在本仓已有 `MAX_SEG_S` / `MAX_SEGMENT_SECONDS` 两份真源）。
+    """
+    return float(total_s) <= MAX_SEG_S
+
 
 # 机械 summary 固定句：拼装是降级路径，不编剧情摘要（不造窗外事件、不指代前文）
 _MECH_SUMMARY_BODY = (
@@ -536,11 +552,10 @@ def load_ref_segments_for_resume(directory: str | Path,
     directory = Path(directory)
     try:
         plans = read_plan_file(directory)
-    except FileNotFoundError:
-        raise
-    except (KeyError, TypeError, ValueError) as exc:
-        # 「读不回段表」必须是可捕获的一种错（调用方按 AC3 响错停住），不是裸 traceback：
-        # `read_plan_file` 只对字段走 `from_dict`，列表外层/条目类型错会抛 TypeError/KeyError。
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        # 「读不回段表」必须是调用方**捕得住**的一种错（按 AC3 响错停住），不是裸 traceback：
+        # `read_plan_file` 只对字段走 `from_dict`，列表外层/条目类型错会抛
+        # TypeError/AttributeError/KeyError（文件整个不在是 FileNotFoundError，照旧上抛）。
         raise ValueError(
             f"分段规划读不出来（{directory / 'segments' / 'plan.json'}）：{exc}") from exc
     if not plans:
@@ -560,17 +575,20 @@ def load_ref_segments_for_resume(directory: str | Path,
         texts.append(path.read_text(encoding="utf-8"))
         paths.append(path)
     # 注记的有无跟**走哪条交付路径**，不跟「段数 > 1」（issue #57 AC5 的直出路线是
-    # 1 段且无注记；>15s 也可能只剩 1 段但带注记）。判据与 ``_phase2_ref_finish``
-    # 分流那一处**同一条**：`total_s > 15`。
+    # 1 段且无注记；>15s 也可能只剩 1 段但带注记）。判据与分流那一处**同一条**：
+    # `is_single_segment_route`——阈值住在那里、且从常量派生，这里不再写第二遍。
     return RefSegmentResult(
         plans=list(plans), texts=texts, total_s=int(round(total_s)),
         segment_paths=paths, plan_path=directory / "segments" / "plan.json",
-        annotated=float(total_s) > 15)
+        annotated=not is_single_segment_route(total_s))
 
 
-def read_ref_handoff_progress(directory: str | Path,
-                              plans: list[SegmentPlan]) -> dict[int, dict]:
+def read_ref_handoff_progress(directory: str | Path, *,
+                              total_segments: int) -> dict[int, dict]:
     """续跑要的「已通过段」→ ``{段号: 行}``；账与段表**对不上就抛**（绝不静默从零开始）。
+
+    ``total_segments`` 是段表的段数（调用方手上就有 ``len(result.plans)``）——只收这个数
+    而不是整张段表：本函数**只用它的长度**，收一张表会让读者以为还要拿段内容做点什么。
 
     进度就是段产出账的 ``event=output`` 行（一段一行、含段号/判定/视频路径/SHA256，
     issue #55）——本票**不新开一本进度账**（AC4：不新增含义重叠的账）。``event`` 必须
@@ -586,8 +604,15 @@ def read_ref_handoff_progress(directory: str | Path,
     账文件**不在**不算错：追加账在「一段都没通过」时本来就不存在（#55 的用例钉着
     这一点），那种情况返回空表、从第 1 段起——调用方会把「已通过 0 段」当面打出来。
     """
-    passed = passed_segment_rows(directory)
-    total = len(plans)
+    try:
+        passed = passed_segment_rows(directory)
+    except (AttributeError, TypeError) as exc:
+        # 段号字段错形（如 `"segment": null`）在 `int(...)` 处抛的是 TypeError，不是
+        # ValueError——不转的话它就绕过调用方的 `except (OSError, ValueError)` 变成裸
+        # traceback，而「账行错形要响错停住」是 CONTEXT.md「分段续跑」词条的承诺
+        # （2026-10-21 复审实测：`{"event":"output","segment":null}` 复现得到）。
+        raise ValueError(f"段产出账的行读不出段号（{segment_ledger_path(directory)}）：{exc}") from exc
+    total = int(total_segments)
     extra = sorted(number for number in passed if not 1 <= number <= total)
     if extra:
         raise ValueError(

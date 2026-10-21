@@ -2,7 +2,9 @@
 
 覆盖票面 AC：
 - AC1 每段通过即落盘进度（段号 + 判定 + 视频路径）——进度就是 #55 的段产出账通过行；
-- AC2 中断后重跑，从**最后一个续跑点**继续；已通过的段不重出提示词、不重跑、不重付；
+- AC2 中断后重跑，从**最后一个已通过的段之后**继续（票面口语叫「最后一个续跑点」——
+  但 CONTEXT.md 里**续跑点**另有所指：答案账与校对进度两本「问到哪了」的账）；
+  已通过的段不重出提示词、不重跑、不重付；
 - AC3 进度落盘物缺失/错形时**响错**，不静默从零开始（裁定见下）；
 - AC4 与**阶段 2 断点**、**续跑点**的边界（见 CONTEXT.md 词条与代码注释）；
 - AC5 主缝测试驱动**真实调用链**（``run_wizard`` 的多参阶段 2），只打桩 LLM 与交互输入；
@@ -190,7 +192,7 @@ def test_interrupted_handoff_keeps_the_session_resumable(tmp_path, monkeypatch,
 
 
 # ---------------------------------------------------------------------------
-# AC2 / AC5：续跑从最后一个续跑点继续，已通过的段不重出、不重跑、不重付
+# AC2 / AC5：续跑从最后一个已通过的段之后继续，已通过的段不重出、不重跑、不重付
 # ---------------------------------------------------------------------------
 
 def test_resume_skips_the_passed_segment_and_continues_from_the_next(
@@ -369,6 +371,30 @@ def test_malformed_ledger_line_is_refused(tmp_path, monkeypatch, capsys, h3_tier
 
     assert code == 1 and "[错误]" in out
     assert "段产出账" in out and "不是合法 JSON" in out, f"没说清账坏在哪：{out[-600:]}"
+    assert not any("输出视频路径" in text for text in asked)
+
+
+def test_ledger_row_with_a_null_segment_number_is_refused(tmp_path, monkeypatch, capsys,
+                                                          h3_tier_video):
+    """账行的段号字段错形（``"segment": null``）→ 响错停住，**不是裸 traceback**。
+
+    这一条是复审实测补的：``int(None)`` 抛的是 **TypeError**，不落进调用方的
+    ``except (OSError, ValueError)``——于是 CONTEXT.md「分段续跑」词条承诺的「账行错形
+    要响错停住」只接了半条（本仓「规则在、接线不在」的又一次）。
+    """
+    gen, _first = _interrupted(tmp_path, monkeypatch, h3_tier_video)
+    capsys.readouterr()
+    ledger = gen / "segments" / "segment-ledger.jsonl"
+    row = next(r for r in map(json.loads, ledger.read_text(encoding="utf-8").splitlines())
+               if r.get("event") == SEGMENT_EVENT_OUTPUT)
+    ledger.write_text(json.dumps({**row, "segment": None}, ensure_ascii=False) + "\n",
+                      encoding="utf-8")
+
+    asked, code = _resume_run(tmp_path, monkeypatch, [""])
+    out = capsys.readouterr().out
+
+    assert code == 1, f"code={code} asked={asked} out={out[-800:]}"
+    assert "[错误]" in out and "段产出账" in out, f"没响或没说清是账的问题：{out[-600:]}"
     assert not any("输出视频路径" in text for text in asked)
 
 
