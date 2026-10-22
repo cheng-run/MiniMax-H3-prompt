@@ -49,6 +49,45 @@ _TIMESTAMP_AFTER_TAG = re.compile(r"(\[Shot\s+\d+\])\s*At\s+(\d{2}):(\d{2})\.(\d
 # 镜头区之后属于全局声音/配乐段落的标记（用于界定镜头区结尾）
 _SUFFIX_MARKERS = ("overall_soundscape:", "non_diegetic_music:")
 
+# 写段直调的角色名（issue #70 / ADR 0019）：事件、成本表与进度面板都按它分账。
+# 四条路径各占一个名字——合成一行的话，成本表上看不出钱花在「写段」还是「回退写段」，
+# 而这两条路径的触发条件（规划失败）恰好是用户最需要区分的那种。
+SEGMENT_WRITER_ROLE = "role_segment_writer"
+SEGMENT_REWRITER_ROLE = "role_segment_rewriter"
+REF_SEGMENT_WRITER_ROLE = "role_ref_segment_writer"
+REF_SEGMENT_REWRITER_ROLE = "role_ref_segment_rewriter"
+
+
+def _direct_write(llm, request: str, *, role: str, label: str) -> str | None:
+    """写段类直调的唯一出口（issue #70 / ADR 0019）：接看门狗，失败把病因打给人看。
+
+    **为什么在这里打印、而不是把病因往上传**：四个写段函数的返回契约都是
+    ``str | None``（调用方据此回退机械拼装/保持原词），改返回值要把四个调用点的
+    回退分支全部重写一遍；而票面要的正是「失败那一刻的一行字」——写段是从调用方
+    看不到「调了几次、为什么失败」的地方。看门狗已把尝试次数与病因写进
+    ``DirectCallResult.error``（卡住 / 中流断流 / 其他异常三种措辞），这里原样转述，
+    不另造一套口径（本仓「同一契约不许两处口径」）。
+
+    ``label`` 由调用方给（如「第 2 段回退写段」）：只有它知道段号与路径名，
+    这里不猜。
+    """
+    # 延迟导入：agents 会拉起 langchain 角色装配栈，本模块也被 --brief 快路径直接
+    # import（理由同 ``segment_planner.plan_segments``）。
+    from .agents import run_direct_call  # noqa: PLC0415
+
+    result = run_direct_call(llm, request, role=role)
+    if not result.ok:
+        print(f"[警告] {label}调用失败（已试 {result.attempts} 次）：{result.error}",
+              flush=True)
+        return None
+    text = result.text.strip()
+    if not text:
+        # 空回复同样是失败：旧代码在这里静默返回 None，向导只打一句「跳过」。
+        print(f"[警告] {label}返回空文本（已试 {result.attempts} 次）：按失败处理，"
+              "不把空段当产物交出去。", flush=True)
+        return None
+    return text
+
 
 # 行首裸时间戳（无 [Shot N] 标记的镜头边界），用于"模型漏标镜头号"的兼容降级
 _BARE_TIMESTAMP_LINE = re.compile(r"^At\s+(\d{2}):(\d{2})\.(\d{3}),?\s*", re.IGNORECASE)
@@ -477,7 +516,10 @@ def rewrite_segment_prompt(
 ) -> str | None:
     """用 LLM 把 segment 重写为本段时间窗内的独立提示词；失败返回 None（调用方回退机械拆分）。
 
-    llm 由调用方注入（测试可传 stub）；应为带 ``invoke(str)`` 接口的对象。
+    调用走直调看门狗（issue #70 / ADR 0019）：卡住会重试、失败那句会把病因与尝试
+    次数打给用户；返回 None 只表示「本段没有可用的重写稿，请回退」，不再等于静默。
+
+    llm 由调用方注入（测试可传 stub）；应为带 ``invoke(str, config=...)`` 接口的对象。
 
     position_index：本段 0-based 段号，用于从 ``bridge_frame_descriptions`` 按段号取
     桥接帧读图结果（回退路径与 v2 路径同一套锚定）；缺省 None 保持旧行为。
@@ -506,13 +548,10 @@ def rewrite_segment_prompt(
         f"{_visual_decision_block_for_request(state or {}, (segment.shot_number,))}"
         f"\n完整提示词：\n{full_prompt}"
     )
-    try:
-        response = llm.invoke(request)
-    except Exception:  # noqa: BLE001 - 任何 LLM 异常都回退机械拆分
-        return None
-    text = getattr(response, "content", response)
-    text = str(text).strip()
-    return text or None
+    return _direct_write(
+        llm, request, role=SEGMENT_REWRITER_ROLE,
+        label=(f"第 {position_index + 1} 段回退写段" if position_index is not None
+               else "本段回退写段"))
 
 
 # ---------------------------------------------------------------------------
@@ -860,6 +899,10 @@ def write_segment_v2(
     ``MAX_SEGMENT_ATTEMPTS`` 次 LLM 调用 = 首次 + 1 次重写）。仍不合格时**交回原文**
     而不是 None——返回 None 会被向导当成「生成失败」跳过，用户看不到坏在哪；
     交回原文后由向导把 issue 明细当面打给用户（warning 级不参与重写）。
+
+    调用本身走直调看门狗（issue #70）：卡住会先重试，用尽后打印病因与尝试次数再
+    返回 None。``MAX_SEGMENT_ATTEMPTS`` 只管**内容**不合格的重写（issue 回插），
+    与看门狗的存活重试是两道不同的预算，别把它们合并成一道。
     """
     duration = float(plan.duration_s)
     start_s = float(plan.start_s)
@@ -867,12 +910,12 @@ def write_segment_v2(
     request = base_request
     text: str | None = None
     for attempt in range(MAX_SEGMENT_ATTEMPTS):
-        try:
-            response = llm.invoke(request)
-        except Exception:  # noqa: BLE001 - LLM 调用异常仍按老契约返回 None
-            return None
-        text = str(getattr(response, "content", response)).strip()
-        if not text:
+        text = _direct_write(
+            llm, request, role=SEGMENT_WRITER_ROLE,
+            label=f"第 {plan.index + 1} 段写段")
+        if text is None:
+            # 调用失败（卡住到上限/中流断流/其他异常）：病因已由 ``_direct_write``
+            # 当面打出，这里照老契约返回 None 让调用方回退，但不静默（issue #70）。
             return None
         errors = segment_errors(text, duration, start_s)
         if not errors:
@@ -1213,6 +1256,9 @@ def rewrite_ref_segment_prompt(*, whole_prompt: str, plan, total_segments: int,
                                total_s: int, shot_texts: list[str], llm) -> str | None:
     """回退式（规划失败）：LLM 把整片六段式重写为本段时间窗的独立提示词；失败返回 None。
 
+    调用走直调看门狗（issue #70）：卡住会重试，失败那句把病因与尝试次数打给用户，
+    再由调用方回退机械拼装——回退本身是对的，静默才是错的（ADR 0019）。
+
     产出同样要过 ``normalize_ref_segment_output`` 归一（调用方做）：定义逐段重复
     与注记注入不靠 LLM 服从性。纪律声明与 v2 请求共用 ``_REF_SEGMENT_DISCIPLINES``
     ——两条路径各拼各的纪律文本，漏一条就等规划一失败掉一个档次。注记提示句同取
@@ -1239,12 +1285,9 @@ def rewrite_ref_segment_prompt(*, whole_prompt: str, plan, total_segments: int,
         f"{_ref_defs_request_block(sections)}"
         f"\n完整提示词（整片六段式，供你取材；只准取本段时间窗内的内容）：\n{whole_prompt}"
     )
-    try:
-        response = llm.invoke(request)
-    except Exception:  # noqa: BLE001 - 任何 LLM 异常都回退机械拼装
-        return None
-    text = str(getattr(response, "content", response)).strip()
-    return text or None
+    return _direct_write(
+        llm, request, role=REF_SEGMENT_REWRITER_ROLE,
+        label=f"第 {plan.index + 1} 段多参回退写段")
 
 
 # summary 任务类型前缀（官方 ref-en.txt §3）：解析**只此一份**，组装归一与编排取任务关系共用。
@@ -1302,7 +1345,8 @@ def write_ref_segment_v2(plan, all_plans: list, *, whole_sections: dict[str, str
     """多参 v2 写段（issue #46）：LLM 细写 → 归一化 → 校验，有界重写。
 
     契约同 ``write_segment_v2``：LLM 调用失败返回 None；重试耗尽仍不合格时
-    **交回原文**（当面给用户看问题），不返回 None 装死。
+    **交回原文**（当面给用户看问题），不返回 None 装死。调用走直调看门狗
+    （issue #70）：卡住会先重试，失败那句把病因与尝试次数打给用户再回退。
     """
     base_request = build_ref_segment_v2_request(
         plan, all_plans, whole_sections=whole_sections,
@@ -1310,12 +1354,12 @@ def write_ref_segment_v2(plan, all_plans: list, *, whole_sections: dict[str, str
     request = base_request
     text: str | None = None
     for attempt in range(MAX_SEGMENT_ATTEMPTS):
-        try:
-            response = llm.invoke(request)
-        except Exception:  # noqa: BLE001 - LLM 调用异常按契约返回 None
-            return None
-        raw = str(getattr(response, "content", response)).strip()
-        if not raw:
+        raw = _direct_write(
+            llm, request, role=REF_SEGMENT_WRITER_ROLE,
+            label=f"第 {plan.index + 1} 段多参写段")
+        if raw is None:
+            # 调用失败：病因已当面打出（issue #70），照老契约返回 None 由调用方
+            # 回退机械拼装——回退是对的，静默才是错的。
             return None
         text = normalize_ref_segment_output(
             raw, whole_sections=whole_sections, plan=plan,

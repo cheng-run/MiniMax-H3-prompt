@@ -82,7 +82,7 @@ class _StubLLM:
         self.reply = reply
         self.requests: list[str] = []
 
-    def invoke(self, request: str):
+    def invoke(self, request: str, config=None):
         if "【改写意见】" not in request:
             raise RuntimeError("假模型只在改写口说话")
         self.requests.append(request)

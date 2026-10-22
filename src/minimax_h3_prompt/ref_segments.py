@@ -24,7 +24,8 @@
 同一份编排）。
 
 陪跑中断后由**续跑**接回（issue #58）：``load_ref_segments_for_resume`` 从
-``segments/plan.json`` ＋ ``segment-NN.md`` 重建装载（零 LLM 调用），
+``segments/plan.json`` ＋ ``video-prompt.md`` 重建**按需写段作业**（已落盘的段零
+LLM 调用直接复用；按需写段下没轮到的段本来就没写过），
 ``read_ref_handoff_progress`` 从段产出账取回已通过的段——**不新增第三本账**（阶段 2
 断点防最贵一步重烧、续跑点防问答与计价产物丢失、段产出账的通过行就是逐段陪跑的进度，
 三者各防各的）。问答节奏住在 ``ui.wizard``，本模块只放不碰终端的纯件（段展示块、
@@ -114,6 +115,121 @@ class RefSegmentResult:
     planning_failure: str = ""
 
 
+@dataclass
+class RefSegmentJob:
+    """多参「按需写段」的准备结果（issue #70）：边界已定案，**一段都还没写**。
+
+    为什么要有这一层：票面要求「轮到哪段才写哪段，写完立刻落盘并打印」，而逐段陪跑
+    （#55 AC1/#56）要求「段 N 的词只能在段 N-1 交回并通过之后出现」。批式交付（先写完
+    全部段再陪跑）两条不可能同时成立，所以把**规划/准备**与**写单段**拆开——
+    ``write_segment(position)`` 由陪跑循环在当前段轮到时调用，批式入口按序循环调用它。
+
+    与 ``RefSegmentResult`` 保持**同名只读属性**（plans / segment_paths / total_s /
+    issues / used_fallback / planning_failure / annotated），好让交付报告、成片拼接与
+    收尾那几处不必按类型分叉（同一份文案、同一份拼接判据——本仓「同一契约不许两处
+    口径」）。
+
+    ``reuse_written``：已落盘的段文件是否直接复用。True＝续跑（零 LLM 调用，段词就是
+    上一次交付/改写后的那一份）；False＝新一次交付，重新写并覆盖——这里若也复用，
+    用户改了修订重跑一遍会拿到**上一次**的旧词。
+    """
+
+    plans: list[SegmentPlan]
+    sections: dict[str, str]
+    blocks: list[tuple[int, float, str]]
+    whole_prompt: str
+    total_s: int
+    task_type: str
+    out_dir: Path
+    llm: object | None = None
+    ref_meta: list[tuple[int, str, str]] | None = None
+    used_fallback: bool = False
+    planning_failure: str = ""
+    annotated: bool = True
+    reuse_written: bool = False
+    # 只读占位：``format_ref_segment_report`` 与 ``RefSegmentResult`` 同形取数。按需
+    # 写段下校验结论在**写那一段时**才产生，报告里这一项恒为空（结论走段级 [] 提醒行）。
+    issues: list[list] = field(default_factory=list)
+
+    def segment_path(self, position: int) -> Path:
+        """第 ``position`` 段（1 起）的提示词文件路径。"""
+        return Path(self.out_dir) / "segments" / f"segment-{position:02d}.md"
+
+    @property
+    def segment_paths(self) -> list[Path]:
+        return [self.segment_path(position) for position in range(1, len(self.plans) + 1)]
+
+    @property
+    def plan_path(self) -> Path:
+        return Path(self.out_dir) / "segments" / "plan.json"
+
+    @property
+    def order_card_path(self) -> Path:
+        return Path(self.out_dir) / "segments" / "order-card.md"
+
+    def write_segment(self, position: int) -> tuple[str, list]:
+        """写第 ``position`` 段（1 起）：写出/复用 → 落盘 → 校验，返回 ``(正文, issues)``。
+
+        **落盘在这里，打印在调用方**：批式入口与陪跑循环的「出词时机」不同（前者按序
+        全打、后者一次只出当前一段），把打印留给他们，才不会出现两套口播口径。
+        """
+        plan = self.plans[position - 1]
+        path = self.segment_path(position)
+        if self.reuse_written and path.is_file():
+            # 续跑（#58）：已落盘的段直接用，不重付 LLM（重出还会与已通过的段脱节）。
+            text = path.read_text(encoding="utf-8")
+        else:
+            text = self._generate(plan)
+            path.write_text(text, encoding="utf-8")
+        issues = validate_segment_text(
+            text, annotated=self.annotated, duration=plan.duration_s,
+            segment_number=position, total_segments=len(self.plans),
+            start_s=plan.start_s, total_s=self.total_s, ref_meta=self.ref_meta)
+        return text, issues
+
+    def _generate(self, plan) -> str:
+        """调模型写一段（或回退机械拼装）——请求内容与批式时代**逐字相同**。"""
+        total_segments = len(self.plans)
+        if not self.used_fallback:
+            shot_texts = [text for number, _at, text in self.blocks
+                          if number in plan.shots_in_segment] or [
+                text for _n, _at, text in _window_blocks(
+                    self.blocks, (plan.start_s, plan.end_s), self.total_s)]
+            text = write_ref_segment_v2(
+                plan, self.plans, whole_sections=self.sections, shot_texts=shot_texts,
+                task_type=self.task_type, llm=self.llm, total_s=self.total_s,
+                ref_meta=self.ref_meta)
+        else:
+            shot_texts = [text for _n, _at, text in _window_blocks(
+                self.blocks, (plan.start_s, plan.end_s), self.total_s)]
+            text = None
+            if self.llm is not None:
+                raw = rewrite_ref_segment_prompt(
+                    whole_prompt=self.whole_prompt, plan=plan,
+                    total_segments=total_segments, total_s=self.total_s,
+                    shot_texts=shot_texts, llm=self.llm)
+                if raw:
+                    text = normalize_ref_segment_output(
+                        raw, whole_sections=self.sections, plan=plan,
+                        total_segments=total_segments, total_s=self.total_s,
+                        task_type=self.task_type)
+        if text is None:
+            # 机械拼装是诚实地板：写段失败也照出完整产物，由段级 [提醒] 行把问题打出来。
+            text = _mechanical_segment(self.sections, plan, total_segments,
+                                       self.total_s, shot_texts, self.task_type)
+        return text
+
+
+def format_segment_issue_lines(position: int, issues) -> list[str]:
+    """单段校验结论 → 报告行（``format_ref_segment_report`` 与陪跑循环共用这一份）。
+
+    error 级逐条当面打、warning 不打（不阻断交付的提示刷屏只会淹没真问题）；句式与
+    交付报告逐字一致——两处各拼一遍就是又一个会各自漂移的口径。
+    """
+    return [f"  [提醒] 第 {position} 段校验未过 {issue.code}: {issue.message}"
+            for issue in issues if getattr(issue, "severity", "") == "error"]
+
+
 def _task_type_of(sections: dict[str, str]) -> str:
     task, _body = split_task_type(sections.get("summary", ""))
     return task or "reference generation"
@@ -193,14 +309,12 @@ def _mechanical_segment(sections: dict[str, str], plan: SegmentPlan,
     )
 
 
-def deliver_ref_segments(*, whole_prompt: str, total_s: float, out_dir: Path,
-                         state: dict | None = None, brief=None) -> tuple[RefSegmentResult, str]:
-    """多参分段交付（向导与 --brief 快路径共用这一份，issue #46）。
+def _build_ref_job(*, whole_prompt: str, total_s: float, out_dir: Path,
+                   state: dict | None = None, brief=None) -> tuple[RefSegmentJob, list[str]]:
+    """建模 → 素材登记 → 准备（**不写段**）→ (作业, 提示行)。两个入口共用这一份编排。
 
-    建模 → 素材登记 → 拆段落盘 → 报告文案；两个 UI 入口只 print 报告，不再各拼
-    一份同义流程（复制两份的交付函数迟早漂移）。模型构造失败降级机械拼装（不静默）；
-    ``state`` 为空时登记从 ``brief.refs`` 派生（brief 文件流程的编号是用户声明的）。
-    返回 ``(结果, 报告全文)``。
+    模型构造失败降级机械拼装（不静默）；``state`` 为空时登记从 ``brief.refs`` 派生
+    （brief 文件流程的编号是用户声明的）。
     """
     from .generation import ref_asset_registry
     from .model_factory import build_chat_model
@@ -212,18 +326,49 @@ def deliver_ref_segments(*, whole_prompt: str, total_s: float, out_dir: Path,
         llm = None
         notes.append(f"[提示] 模型构造失败（{exc}）：分段提示词改走机械拼装（定义逐段重复＋切片重基）。")
     registry = ref_asset_registry(state or {}, brief)
-    result = run_ref_segmentation(
-        whole_prompt=whole_prompt, total_s=total_s, out_dir=out_dir,
-        llm=llm, ref_meta=[(r.picture, r.name, r.description) for r in registry])
-    report = "\n".join([*notes, format_ref_segment_report(result)])
-    return result, report
+    job = prepare_ref_segmentation(
+        whole_prompt=whole_prompt, total_s=total_s, out_dir=out_dir, llm=llm,
+        ref_meta=[(r.picture, r.name, r.description) for r in registry])
+    return job, notes
 
 
-def format_ref_segment_report(result: RefSegmentResult) -> str:
+def prepare_ref_segments(*, whole_prompt: str, total_s: float, out_dir: Path,
+                         state: dict | None = None, brief=None) -> tuple[RefSegmentJob, str]:
+    """**按需写段**路线的准备口（向导用，issue #70）：返回 ``(作业, 报告全文)``。
+
+    只做规划与段表：段正文留给逐段陪跑在**当前段轮到时**才写（``job.write_segment``）
+    ——先写完再陪跑会让用户在还没生成第 1 段时就先看到第 2 段的词（#55 AC1/#56）。
+    报告里因此只有段表与段文件路径，校验结论改由陪跑在写段那一刻逐段打出。
+    """
+    job, notes = _build_ref_job(
+        whole_prompt=whole_prompt, total_s=total_s, out_dir=out_dir, state=state,
+        brief=brief)
+    return job, "\n".join([*notes, format_ref_segment_report(job)])
+
+
+def deliver_ref_segments(*, whole_prompt: str, total_s: float, out_dir: Path,
+                         state: dict | None = None, brief=None,
+                         ) -> tuple[RefSegmentResult, str]:
+    """**批式**多参分段交付（``--brief`` 快路径用，issue #46）：准备 → 逐段写完 → 报告。
+
+    向导走 ``prepare_ref_segments``（按需写段）：那边的出词时机归逐段陪跑。两个入口
+    共用同一份建模/登记/准备编排（``_build_ref_job``），不各拼一份同义流程。
+    返回 ``(结果, 报告全文)``。
+    """
+    job, notes = _build_ref_job(
+        whole_prompt=whole_prompt, total_s=total_s, out_dir=out_dir, state=state,
+        brief=brief)
+    result = write_all_ref_segments(job)
+    return result, "\n".join([*notes, format_ref_segment_report(result)])
+
+
+def format_ref_segment_report(result: RefSegmentResult | RefSegmentJob) -> str:
     """交付报告（向导与 --brief 快路径共用同一份文案，不各拼各的）。
 
     error 级校验问题逐条当面打——段照样交付（重写预算已在写段层用尽），
     但结论绝不静默（warning 级不打：不阻断交付的提示刷屏只会淹没真问题）。
+    收 ``RefSegmentJob`` 时 ``issues`` 恒为空（按需写段，结论在写段那一刻逐段打），
+    其余每一项同形——段表/路径/顺序卡在准备阶段就已经定案。
     """
     lines = [
         f"\n[多参分段] 总时长 >15 秒：已按镜头边界拆成 {len(result.plans)} 个执行段"
@@ -243,9 +388,7 @@ def format_ref_segment_report(result: RefSegmentResult) -> str:
             f"  段清单与拼接顺序卡：{result.order_card_path}"
             "（拼接归系统：全段验收通过后自动接成成片）")
     for position, issues in enumerate(result.issues, 1):
-        for issue in issues:
-            if getattr(issue, "severity", "") == "error":
-                lines.append(f"  [提醒] 第 {position} 段校验未过 {issue.code}: {issue.message}")
+        lines.extend(format_segment_issue_lines(position, issues))
     return "\n".join(lines)
 
 
@@ -545,19 +688,23 @@ def passed_segment_rows(directory: str | Path) -> dict[int, dict]:
 
 
 # --- 逐段陪跑续跑（issue #58）--------------------------------------------------
-def load_ref_segments_for_resume(directory: str | Path,
-                                 *, total_s: float) -> RefSegmentResult:
-    """按盘上的段表与段文件重建 ``RefSegmentResult``——续跑**零 LLM 调用**的装载口。
+def load_ref_segments_for_resume(directory: str | Path, *, total_s: float,
+                                 llm=None,
+                                 ref_meta: list[tuple[int, str, str]] | None = None
+                                 ) -> RefSegmentJob:
+    """按盘上的段表重建「按需写段」作业——续跑**不重写已落盘的段**（issue #58/#70）。
 
     续跑不能重跑阶段 2 再「重出」一遍段提示词：那既要重烧组装（最贵一步），又会得到
     **另一套**文本与**另一套**分段边界——而段产出账里的「第 N 段已通过」只对产出它的
     那一套有意义（同 base 路线 ``_cached_plans`` 的纪律）。所以段表取 ``segments/plan.json``
-    （段序唯一出站真源），段文本取 ``segments/segment-NN.md``——后者也正是「修改提示词」
-    改写后的落点，读回来就是**当前**那份词。
+    （段序唯一出站真源），整片正文取 ``video-prompt.md``（写单段的请求素材：定义块、
+    镜头块、任务类型都从它派生）。
 
-    **缺失/读不出就抛**：段表没了，``passed`` 里的段号指向哪几段就无从谈起；段文件没了，
-    重出它要重付 LLM 且新文本会与已通过的那几段脱节。调用方据此响错停住（AC3 裁定：
-    账文件不在＝零通过，但段表/段文件不在＝响错）。
+    **按需写段后，段文件不再要求「全部都在」**：中断时后面几段本来就没轮到、没写过，
+    这是正常形态；缺的段由陪跑轮到它时现场写（``reuse_written=True``，已落盘的一律
+    复用、零 LLM）。段表缺失/读不出仍照旧抛——那一段已通过指的是哪几段，无从谈起。
+
+    已通过段的文件在不在，由调用方拿 ``passed`` 核（它才知道哪几段已通过）。
     """
     directory = Path(directory)
     try:
@@ -574,23 +721,29 @@ def load_ref_segments_for_resume(directory: str | Path,
         raise ValueError(
             f"分段规划是空的（{directory / 'segments' / 'plan.json'}）："
             "本片一段都没有，无从续跑")
-    paths: list[Path] = []
-    texts: list[str] = []
-    for position in range(1, len(plans) + 1):
-        path = directory / "segments" / f"segment-{position:02d}.md"
-        if not path.is_file():
-            raise FileNotFoundError(
-                f"第 {position} 段的提示词文件不见了：{path}"
-                "（续跑不重出已交付的段——重出要重付 LLM，且新词会与已通过的那几段脱节）")
-        texts.append(path.read_text(encoding="utf-8"))
-        paths.append(path)
+    whole_prompt_path = directory / "video-prompt.md"
+    if not whole_prompt_path.is_file():
+        # 写单段要拿整片正文取材（定义块/镜头块/任务类型）；它不在，未轮到的段就写不出来。
+        raise FileNotFoundError(
+            f"整片提示词不见了：{whole_prompt_path}"
+            "（续跑要靠它写还没轮到的段；把它从备份恢复后再续）")
+    whole_prompt = whole_prompt_path.read_text(encoding="utf-8")
+    sections = split_ref_sections(whole_prompt)
+    body = sections.get("detailed_description", "")
+    blocks = _shot_blocks(body, keep_cut_timestamp=True) if body.strip() else []
     # 注记的有无跟**走哪条交付路径**，不跟「段数 > 1」（issue #57 AC5 的直出路线是
     # 1 段且无注记；>15s 也可能只剩 1 段但带注记）。判据与分流那一处**同一条**：
     # `is_single_segment_route`——阈值住在那里、且从常量派生，这里不再写第二遍。
-    return RefSegmentResult(
-        plans=list(plans), texts=texts, total_s=int(round(total_s)),
-        segment_paths=paths, plan_path=directory / "segments" / "plan.json",
-        annotated=not is_single_segment_route(total_s))
+    return RefSegmentJob(
+        plans=list(plans), sections=sections, blocks=blocks, whole_prompt=whole_prompt,
+        total_s=int(round(total_s)), task_type=_task_type_of(sections),
+        out_dir=directory, llm=llm, ref_meta=ref_meta,
+        # 段的边界在 plan.json 里已经定案；当初规划式还是回退式已不影响写段——
+        # 回退式只是规划失败时的替代写法，写单段一律走规划式请求（内容纪律同一份）。
+        used_fallback=False,
+        annotated=not is_single_segment_route(total_s),
+        # 续跑的核心语义（#58）：已落盘的段直接复用，不再付一次 LLM。
+        reuse_written=True)
 
 
 def rotate_segment_ledger(directory: str | Path) -> Path | None:
@@ -861,6 +1014,10 @@ REF_SEGMENT_BODY_HEAD = "【本段画面正文】"
 REF_SEGMENT_LOCKED_HEAD = "【锁死声明（逐字保留，且不许出现在你的输出里）】"
 REF_SEGMENT_FEEDBACK_HEAD = "【改写意见】"
 
+# 「按意见改写一段」的直调角色名（issue #70 / ADR 0019）：与写段/回退写段分开记账，
+# 否则成本表上分不清哪笔钱花在「重写正文」上（这一段是用户按键才发生的，最该看得见）。
+REF_SEGMENT_REVISER_ROLE = "role_ref_segment_reviser"
+
 
 def build_ref_segment_revision_request(*, body: str, locked: str, feedback: str) -> str:
     """「修改提示词」的请求文本（纯函数，返回字符串即契约）。
@@ -897,8 +1054,10 @@ def build_ref_segment_revision_request(*, body: str, locked: str, feedback: str)
 def revise_ref_segment_body(old_text: str, feedback: str, llm) -> str:
     """按用户意见改写一段多参执行段的**画面正文**，返回整段新文本（issue #56 AC4）。
 
-    ``llm`` 由调用方注入（带 ``invoke(str)`` 接口，同 ``rewrite_asset_prompt`` 的口径），
-    测试可传 stub。
+    ``llm`` 由调用方注入（带 ``invoke(str, config=...)`` 接口，同 ``rewrite_asset_prompt``
+    的口径），测试可传 stub。**调用走直调看门狗**（issue #70 / ADR 0019）：卡住会先重试；
+    用尽后抛 ``RuntimeError``，文案带病因与尝试次数——调用方把它原样打在用户面前，
+    再保持原词、留在菜单（改写失败绝不被静默采用）。
 
     **只换正文**：定义块（subject_definitions/retention_analysis）、summary、两条音轨
     与锁死声明都从原文本原样取回，改完由组装器重新拼——「只动画面正文」因此是代码性质，
@@ -912,8 +1071,16 @@ def revise_ref_segment_body(old_text: str, feedback: str, llm) -> str:
     sections = split_ref_sections(old_text)
     locked, body = split_ref_segment_detailed(sections.get("detailed_description", ""))
     request = build_ref_segment_revision_request(body=body, locked=locked, feedback=feedback)
-    response = llm.invoke(request)
-    text = str(getattr(response, "content", response)).strip()
+    # 延迟导入：本模块也走 --brief 快路径，不必为了一口气拉起角色装配栈。
+    from .agents import run_direct_call  # noqa: PLC0415
+
+    result = run_direct_call(llm, request, role=REF_SEGMENT_REVISER_ROLE)
+    if not result.ok:
+        # 抛而不是返回空串：调用方（向导）据此保持原词、留在出路菜单。异常文案自带
+        # 尝试次数与病因，因为它会被 ``[错误] 改写失败：…`` 原样打到用户眼前（#70）。
+        raise RuntimeError(
+            f"本段改写调用失败（已试 {result.attempts} 次）：{result.error}")
+    text = result.text.strip()
     if not text:
         raise ValueError("改写结果为空")
     assert_locked_annotations_intact(text, locked)
@@ -937,13 +1104,19 @@ def revise_ref_segment_body(old_text: str, feedback: str, llm) -> str:
     )
 
 
-def run_ref_segmentation(*, whole_prompt: str, total_s: float, out_dir: Path,
-                         llm=None,
-                         ref_meta: list[tuple[int, str, str]] | None = None) -> RefSegmentResult:
-    """把整片 ref 六段式拆成逐段自包含提示词并落盘（issue #46）。
+def prepare_ref_segmentation(*, whole_prompt: str, total_s: float, out_dir: Path,
+                             llm=None,
+                             ref_meta: list[tuple[int, str, str]] | None = None
+                             ) -> RefSegmentJob:
+    """规划/准备（issue #46）：切点 → 段边界（规划式，失败回退机械打包）→ 段表与顺序卡。
 
-    llm：带 ``invoke(str)`` 的模型；None → 全机械（不静默失败，产物照样完整）。
+    **一段提示词都不写**（issue #70 按需写段）：写哪一段、什么时候写，由调用方决定——
+    批式入口按序写完，逐段陪跑则在当前段轮到时才写。
+
+    llm：带 ``invoke(str, config=...)`` 的模型；None → 全机械（不静默失败，产物照样完整）。
     ref_meta：素材登记（(picture, name, description)），供「定义逐段重复」校验。
+    已落盘的段文件一律**重写**（新一次交付）：复用上一次的词会让改了修订的重跑拿到旧词；
+    只有续跑装载（``load_ref_segments_for_resume``）才置 ``reuse_written=True``。
     """
     sections = split_ref_sections(whole_prompt)
     task_type = _task_type_of(sections)
@@ -981,56 +1154,69 @@ def run_ref_segmentation(*, whole_prompt: str, total_s: float, out_dir: Path,
         plans = [_derive_plan(index, window, blocks, total_int)
                  for index, window in enumerate(packed)]
 
-    texts: list[str] = []
-    for plan in plans:
-        if not used_fallback:
-            shot_texts = [text for number, _at, text in blocks
-                          if number in plan.shots_in_segment] or [
-                text for _n, _at, text in _window_blocks(
-                    blocks, (plan.start_s, plan.end_s), total_int)]
-            text = write_ref_segment_v2(
-                plan, plans, whole_sections=sections, shot_texts=shot_texts,
-                task_type=task_type, llm=llm, total_s=total_int, ref_meta=ref_meta)
-        else:
-            shot_texts = [text for _n, _at, text in _window_blocks(
-                blocks, (plan.start_s, plan.end_s), total_int)]
-            text = None
-            if llm is not None:
-                raw = rewrite_ref_segment_prompt(
-                    whole_prompt=whole_prompt, plan=plan,
-                    total_segments=len(plans), total_s=total_int,
-                    shot_texts=shot_texts, llm=llm)
-                if raw:
-                    text = normalize_ref_segment_output(
-                        raw, whole_sections=sections, plan=plan,
-                        total_segments=len(plans), total_s=total_int, task_type=task_type)
-        if text is None:
-            text = _mechanical_segment(sections, plan, len(plans), total_int,
-                                       shot_texts, task_type)
-        texts.append(text)
-
-    seg_dir = out_dir / "segments"
-    seg_dir.mkdir(parents=True, exist_ok=True)
-    segment_paths: list[Path] = []
-    issues: list[list] = []
-    for position, (plan, text) in enumerate(zip(plans, texts), 1):
-        path = seg_dir / f"segment-{position:02d}.md"
-        path.write_text(text, encoding="utf-8")
-        segment_paths.append(path)
-        issues.append(validate_ref_segment(
-            text, duration=plan.duration_s, segment_number=position,
-            total_segments=len(plans), start_s=plan.start_s,
-            total_s=total_int, ref_meta=ref_meta))
-
-    plan_path = _write_plan_file(seg_dir, plans)
-    card_path = seg_dir / "order-card.md"
-    card_path.write_text(render_ref_order_card(plans, segment_paths, total_int),
-                         encoding="utf-8")
-    return RefSegmentResult(
-        plans=list(plans), texts=texts, total_s=total_int, issues=issues,
-        segment_paths=segment_paths, order_card_path=card_path,
-        plan_path=plan_path, used_fallback=used_fallback,
+    job = RefSegmentJob(
+        plans=list(plans), sections=sections, blocks=blocks, whole_prompt=whole_prompt,
+        total_s=total_int, task_type=task_type, out_dir=Path(out_dir), llm=llm,
+        ref_meta=ref_meta, used_fallback=used_fallback,
         planning_failure=planning_failure)
+    seg_dir = Path(out_dir) / "segments"
+    seg_dir.mkdir(parents=True, exist_ok=True)
+    _write_plan_file(seg_dir, job.plans)
+    # 顺序卡只依赖段表与段文件路径（两者此刻都已定案），所以准备阶段就能写全——
+    # 它与「段正文写没写」无关，别为了等写段把它也推到后面去。
+    job.order_card_path.write_text(
+        render_ref_order_card(job.plans, job.segment_paths, total_int), encoding="utf-8")
+    return job
+
+
+def write_all_ref_segments(job: RefSegmentJob) -> RefSegmentResult:
+    """批式编排（``--brief`` 快路径）：按序调用写单段，逐段横幅、落盘即打印。
+
+    每段写一行步骤横幅「正在写第 N/M 段」；**心跳由调用方的作用域提供**（快路径用
+    ``step_scope`` 把整个交付包住，这里再开一个作用域就会让同一事件打两遍）。
+    """
+    # 延迟导入：纯机械路径（llm=None）不该为了一口气拉起 rich 与进度面板。
+    from .ui.progress import format_step_banner  # noqa: PLC0415
+
+    total = len(job.plans)
+    texts: list[str] = []
+    issues: list[list] = []
+    for position in range(1, total + 1):
+        print(format_step_banner(f"正在写第 {position}/{total} 段",
+                                 round_no=position, total_rounds=total), flush=True)
+        text, segment_issues = job.write_segment(position)
+        texts.append(text)
+        issues.append(segment_issues)
+        # 落盘即打印：写完这一段就交到用户眼前，不攒整片（issue #70）。
+        print(f"\n[多参写段] 第 {position}/{total} 段已落盘：{job.segment_path(position)}",
+              flush=True)
+        print("=" * 60, flush=True)
+        print(text, flush=True)
+        print("=" * 60, flush=True)
+    return RefSegmentResult(
+        plans=list(job.plans), texts=texts, total_s=job.total_s, issues=issues,
+        segment_paths=job.segment_paths, order_card_path=job.order_card_path,
+        plan_path=job.plan_path, used_fallback=job.used_fallback,
+        planning_failure=job.planning_failure)
+
+
+def run_ref_segmentation(*, whole_prompt: str, total_s: float, out_dir: Path,
+                         llm=None,
+                         ref_meta: list[tuple[int, str, str]] | None = None
+                         ) -> RefSegmentResult:
+    """把整片 ref 六段式拆成逐段自包含提示词并落盘（issue #46）——**批式入口**。
+
+    准备一步（``prepare_ref_segmentation``）＋ 按序写完（``write_all_ref_segments``）。
+    逐段陪跑那条路不走这里：它只做准备、在陪跑轮到当前段时才写（``RefSegmentJob.
+    write_segment``），否则用户会在还没生成第 1 段时先看到第 2 段的词（#55 AC1）。
+
+    llm：带 ``invoke(str, config=...)`` 的模型；None → 全机械（不静默失败，产物照样完整）。
+    ref_meta：素材登记（(picture, name, description)），供「定义逐段重复」校验。
+    """
+    job = prepare_ref_segmentation(
+        whole_prompt=whole_prompt, total_s=total_s, out_dir=out_dir, llm=llm,
+        ref_meta=ref_meta)
+    return write_all_ref_segments(job)
 
 
 def single_segment_result(*, whole_prompt: str, total_s: float, out_dir: Path,

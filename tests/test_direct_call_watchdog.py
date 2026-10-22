@@ -373,13 +373,14 @@ def test_ref_delivery_prints_banner_and_heartbeat_from_wizard(capsys, monkeypatc
     from minimax_h3_prompt.brief_parser import Brief
     from minimax_h3_prompt.ui import wizard
 
-    def fake_deliver(**kwargs):
+    def fake_prepare(**kwargs):
         # 模拟规划期间真模型发出的等待事件：没有订阅者的话，用户看不到这一行。
         reporter.emit({"type": "agent_wait", "role": ROLE, "state": "generating",
                        "elapsed": 15.0, "chunks": 3, "bytes": 30})
         return SimpleNamespace(), "[多参分段] 报告正文"
 
-    monkeypatch.setattr(ref_segments, "deliver_ref_segments", fake_deliver)
+    # 向导走**准备**口（按需写段，issue #70）：段正文在陪跑轮到时才写。
+    monkeypatch.setattr(ref_segments, "prepare_ref_segments", fake_prepare)
     brief = Brief(mode="ref", duration=30.0, style="写实", plot="花园递钥匙")
 
     wizard._deliver_ref_segments({}, brief, "PROMPT", tmp_path)

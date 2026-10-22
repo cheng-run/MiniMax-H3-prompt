@@ -20,7 +20,7 @@ if TYPE_CHECKING:  # 返回注解用；运行时经函数级导入取（防环�
 
     from ..asset_loop import QueueItem
     from ..injection_card import VideoOutputParams
-    from ..ref_segments import RefSegmentResult
+    from ..ref_segments import RefSegmentJob, RefSegmentResult
 
 from ..brief_parser import Brief, RefItem
 from ..config import Config
@@ -2133,24 +2133,27 @@ def _collect_extra_media(state: dict, brief: Brief, generation_dir: Path) -> Non
 
 
 def _deliver_ref_segments(state: dict, brief: Brief, prompt: str,
-                          generation_dir: Path) -> RefSegmentResult:
-    """>15 秒多参分段交付（issue #46）：薄接线——编排/文案全在 ref_segments 一份。
+                          generation_dir: Path):
+    """>15 秒多参分段**准备**（issue #46）＋按需写段（issue #70）：薄接线——编排/文案
+    全在 ``ref_segments`` 一份。
 
-    返回 ``RefSegmentResult``：逐段陪跑（issue #55）要拿它手上的 plans/段文件/正文，
-    不另读一遍盘（读回来还要处理「plan.json 与段文件对不上」的分支，那是续跑的事）。
+    返回 ``RefSegmentJob``（不是 ``RefSegmentResult``）：本函数只定案段边界、落 plan.json
+    与顺序卡，**一段提示词都不写**。正文由逐段陪跑在当前段轮到时写（``_run_ref_segment_
+    handoff``）——先写完再陪跑，用户会在还没生成第 1 段时就先看到第 2、3 段的词
+    （#55 AC1/#56：一次只维持一个当前待办）。
     """
-    from ..ref_segments import deliver_ref_segments
+    from ..ref_segments import prepare_ref_segments
 
     # 多参交付里的拆段是直调路径：横幅＋心跳都在这里成对出现（issue #67）。
     # 报告仍由本函数打印——它是「产物交付」的结论，不是等待反馈。
     with step_scope("正在按镜头切点拆分执行段"):
-        result, report = deliver_ref_segments(
+        job, report = prepare_ref_segments(
             whole_prompt=prompt, total_s=brief.duration, out_dir=generation_dir,
             state=state, brief=brief)
     print(report)
     # 交付也是长阻塞：清掉生成期间误敲的键，别让第一个问答吞掉它们。
     _drain_stdin()
-    return result
+    return job
 
 
 def _deliver_ref_single_segment(state: dict, brief: Brief, prompt: str,
@@ -2181,8 +2184,11 @@ def _deliver_ref_single_segment(state: dict, brief: Brief, prompt: str,
     return result
 
 
-def _assemble_ref_final_film(result: RefSegmentResult, generation_dir: Path):
+def _assemble_ref_final_film(result, generation_dir: Path):
     """全段通过后自动拼成成片（issue #57 AC1/AC2）：编排与文案都在 ``ref_segments`` 一份。
+
+    ``result`` 只需有 ``plans`` 与 ``total_s``（``RefSegmentResult`` 与「按需写段」的
+    ``RefSegmentJob`` 同形——拼接判据不该按产物来源分叉）。
 
     「未通过即不拼」住在 ``assemble_final_film`` 里（**不是这里的 if**）：这条规矩必须住在
     被拼接的那一处，否则它就是一个可以被绕过的调用方约定（本仓「规则在、接线不在」已犯
@@ -2196,7 +2202,7 @@ def _assemble_ref_final_film(result: RefSegmentResult, generation_dir: Path):
     print(format_final_film(film))
 
 
-def _finish_ref_handoff(result: RefSegmentResult, generation_dir: Path, brief: Brief,
+def _finish_ref_handoff(result, generation_dir: Path, brief: Brief,
                         state: dict, finished: bool) -> None:
     """逐段陪跑的收尾（首跑与续跑**同一份**，issue #57/#58）。
 
@@ -2223,12 +2229,37 @@ def _finish_ref_handoff(result: RefSegmentResult, generation_dir: Path, brief: B
           f"{generation_dir.name}，从已通过的那一段之后继续（阶段 1/2 不重跑）。")
 
 
-def _run_ref_segment_handoff(result: RefSegmentResult, generation_dir: Path,
+def _write_ref_segment_now(source, position: int, total: int) -> tuple[str, list]:
+    """取当前段正文：>15s 的按需写段作业**此刻**写；≤15s 直出取已落盘的整片文本。
+
+    写这一段被 ``step_scope`` 包住：横幅「正在写第 N/M 段」＋等待心跳成对出现
+    （issue #70 / ADR 0019）——写段是直调长调用，卡住/重试只有订阅者看得见。
+    写完立刻落盘（``RefSegmentJob.write_segment`` 负责），打印交给调用方。
+    """
+    from ..ref_segments import RefSegmentJob
+
+    if isinstance(source, RefSegmentJob):
+        with step_scope(f"正在写第 {position}/{total} 段",
+                        round_no=position, total_rounds=total):
+            return source.write_segment(position)
+    # ≤15s 直出：整片六段式就是本段提示词，交付时已落盘（不重写、不套注记）。
+    return source.texts[position - 1], []
+
+
+def _run_ref_segment_handoff(result, generation_dir: Path,
                              *, passed: dict[int, dict] | None = None) -> bool:
-    """多参逐段陪跑（issue #55/#56）：一次只出当前一段 → 交回本段输出视频 → **可证层**硬阻断
-    → **语义层**剥首/末帧读图并排人判 → 五档出路 → 落段产出账。
+    """多参逐段陪跑（issue #55/#56/#70）：**轮到哪段才写哪段** → 出词 → 交回本段输出视频
+    → **可证层**硬阻断 → **语义层**剥首/末帧读图并排人判 → 五档出路 → 落段产出账。
 
     节奏与素材循环（#50）同形：系统只维持一个「当前待办」，交回并验收通过才出下一段。
+    两条票面要求在这里同时成立（issue #70 的裁定）：
+
+    - **写完立刻落盘并打印**：写那一段的调用被 ``step_scope`` 包住（横幅「正在写第 N/M
+      段」＋心跳），写完当场落盘、当场把正文打到终端；
+    - **段 N 的词只能在段 N-1 通过之后出现**（#55 AC1/#56）：所以写段发生在**这里**的
+      循环里，而不是交付阶段把整片一次写完——``result`` 若是 ``RefSegmentJob``（>15s
+      按需写段作业）就现场写，若是 ``RefSegmentResult``（≤15s 直出）则文本早已落盘。
+
     两道闸的边界不同（#56 的裁定）：**可证层**（``_gate_segment_handoff``）判得出来，
     不合格硬阻断；**语义层**判不出来（「画面是否达到声明的起止状态」是启发式），
     所以只劝阻、由人下结论，人可显式覆盖。
@@ -2256,6 +2287,7 @@ def _run_ref_segment_handoff(result: RefSegmentResult, generation_dir: Path,
     返回 True ＝ 全部段交回并通过；False ＝ 停住（空输入，或被拦下后不再交）。
     """
     from ..ref_segments import (
+        format_segment_issue_lines,
         log_segment_output,
         passed_segment_rows,
         render_ref_segment_briefing,
@@ -2265,9 +2297,9 @@ def _run_ref_segment_handoff(result: RefSegmentResult, generation_dir: Path,
     total = len(plans)
     if passed is None:
         passed = passed_segment_rows(generation_dir)
-    # 全片时长取**交付时那个**（``RefSegmentResult.total_s``＝注记句与交付校验共用的口径），
-    # 不用 ``plans[-1].end_s``：规划器允许末段 end 略超 total（留余量），拿末段 end 当
-    # total 会让改写后的重过校验按另一个期望注记判「缺注记」——同一份文本交付时是过的
+    # 全片时长取**交付时那个**（``total_s``＝注记句与交付校验共用的口径），不用
+    # ``plans[-1].end_s``：规划器允许末段 end 略超 total（留余量），拿末段 end 当 total
+    # 会让改写后的重过校验按另一个期望注记判「缺注记」——同一份文本交付时是过的
     # （复审实测，issue #56）。
     total_s = result.total_s
     for position, plan in enumerate(plans, 1):
@@ -2279,13 +2311,19 @@ def _run_ref_segment_handoff(result: RefSegmentResult, generation_dir: Path,
                   f"（不重出提示词、不重跑、不重付）：{row.get('video', '')}")
             continue
         segment_file = result.segment_paths[position - 1]
+        # 轮到这一段才写（issue #70）：横幅＋心跳包住这一次直调，写完立刻落盘——
+        # 打印就在下面，与交回口紧挨着，用户第一眼看到的就是「现在该做什么」。
+        text, issues = _write_ref_segment_now(result, position, total)
         # 逐段当前文本：改写一轮就地替换它（下一轮改写以新词为底），不回写 result.texts
-        # ——那个字段是**交付时**那一份，改写后的事实以段文件与段产出账为准。
-        text = result.texts[position - 1]
+        # ——那个字段是**交付时**那一份（≤15s 直出），改写后的事实以段文件为准。
         print("\n" + "=" * 60)
         print(render_ref_segment_briefing(plan, position, total, segment_file))
         print("=" * 60)
         print(text)
+        # 交付前校验不当场跑：分段是「产出即交付」的路径，error 级结论绝不静默
+        # （warning 不刷屏，理由同 ``format_ref_segment_report``）。
+        for line in format_segment_issue_lines(position, issues):
+            print(line)
         print("-" * 60)
         attempt = 0
         while True:
@@ -2459,7 +2497,10 @@ def _revise_ref_segment_round(text: str, *, position: int, total: int, plan,
         print("已取消改写（没给意见，提示词不动）。")
         return None
     try:
-        new_text = revise_ref_segment_body(text, feedback, build_chat_model())
+        # 步骤横幅＋等待心跳成对出现（issue #70 / ADR 0019）：改写是一次直调长调用，
+        # 与写段同形的反馈（横幅＝在做什么，心跳＝还活着吗）。
+        with step_scope(f"正在按意见改写第 {position}/{total} 段"):
+            new_text = revise_ref_segment_body(text, feedback, build_chat_model())
     except Exception as exc:  # noqa: BLE001 — 改写失败要响但不许裸崩：词不动、回菜单再定
         print(f"[错误] 改写失败：{exc}；本段提示词保持原样（可重选出路）。")
         return None
@@ -3516,10 +3557,13 @@ def _resume_ref_handoff(config: Config, session: SessionState) -> int:
     多参这边靠**段产出账的通过行**与 ``segment-NN.md``、没有桥接帧。拿 base 的
     ``_run_long_form`` 走多参会话，等于拿另一条路线的步骤去续它。
 
-    零 LLM 调用：段表与段文本都从盘上读回（``load_ref_segments_for_resume``），
-    阶段 1/2 一步不动。读不回来就**响错停住**（AC3 裁定）：段表/段文件缺失、账行错形、
+    零重复付费：段表从盘上读回、已落盘的段词直接复用（``load_ref_segments_for_resume``，
+    按需写段下**还没轮到的段本来就没写过**，由陪跑轮到它时写一次），阶段 1/2 一步不动。
+    读不回来就**响错停住**（AC3 裁定）：段表缺失/读不出、已通过段的段文件缺失、账行错形、
     账与段表对不上——这些形态下「从零开始」等于把已通过的段当没做过。
     """
+    from ..generation import ref_asset_registry
+    from ..model_factory import build_chat_model
     from ..ref_segments import (
         load_ref_segments_for_resume,
         read_ref_handoff_progress,
@@ -3528,8 +3572,26 @@ def _resume_ref_handoff(config: Config, session: SessionState) -> int:
     directory = session.directory
     brief = session.brief
     try:
-        result = load_ref_segments_for_resume(directory, total_s=brief.duration)
-        passed = read_ref_handoff_progress(directory, total_segments=len(result.plans))
+        # 未轮到的段要在陪跑里现场写，所以这里备一个模型：构造失败降级机械拼装（不静默）。
+        try:
+            llm = build_chat_model()
+        except Exception as exc:  # noqa: BLE001 - 降级机械拼装，不静默失败
+            llm = None
+            print(f"[提示] 模型构造失败（{exc}）：续跑时还没写过的段改走机械拼装。")
+        registry = ref_asset_registry(session.stage_state, brief)
+        job = load_ref_segments_for_resume(
+            directory, total_s=brief.duration, llm=llm,
+            ref_meta=[(r.picture, r.name, r.description) for r in registry])
+        passed = read_ref_handoff_progress(directory, total_segments=len(job.plans))
+        # 已通过的段必须有段文件：账说「这段过了」，词却不见了＝落盘物互相矛盾。
+        # 未轮到的段缺文件是**正常形态**（按需写段：没轮到就不写），不在此列。
+        for position in sorted(passed):
+            path = job.segment_path(position)
+            if not path.is_file():
+                raise FileNotFoundError(
+                    f"第 {position} 段的提示词文件不见了：{path}"
+                    "（这一段已在段产出账里记为通过，续跑不重出已交付的段——"
+                    "重出要重付 LLM，且新词会与已通过的那几段脱节）")
     except (OSError, ValueError) as exc:
         print(f"[错误] 多参逐段陪跑的落盘物读不回来：{exc}")
         if _ref_delivery_started(directory):
@@ -3547,10 +3609,10 @@ def _resume_ref_handoff(config: Config, session: SessionState) -> int:
                   "或把上一次交付的 segments/ 恢复回来再续。")
         return 1
     print(f"\n[续接] 上一次多参逐段陪跑没有跑完，回到 {directory.name} 继续"
-          f"（阶段 1/2 不重跑）：已通过 {len(passed)}/{len(result.plans)} 段。")
-    finished = _run_ref_segment_handoff(result, directory, passed=passed)
+          f"（阶段 1/2 不重跑）：已通过 {len(passed)}/{len(job.plans)} 段。")
+    finished = _run_ref_segment_handoff(job, directory, passed=passed)
     # 收尾（拼接 → 账本路径 → 转 completed）与首跑**同一份**：见 ``_finish_ref_handoff``。
-    _finish_ref_handoff(result, directory, brief, session.stage_state, finished)
+    _finish_ref_handoff(job, directory, brief, session.stage_state, finished)
     return 0
 
 
@@ -3713,11 +3775,15 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
         # ② 每段重写：soundscape/music 为本段重写英文摘要句（官方 §4.6/§4.7）；失败回退机械拆分并明示
         rewritten: str | None = None
         if rewrite_llm is not None:
-            rewritten = rewrite_segment_prompt(
-                segment, prompt, rewrite_llm,
-                state=state, is_first=position == 0, is_last=position + 1 == total,
-                position_index=position,
-            )
+            # 步骤横幅＋等待心跳（issue #70 / ADR 0019）：回退写段也走直调看门狗，
+            # 卡住/重试只有订阅者看得见。横幅回答「在写第几段」，心跳回答「还活着吗」。
+            with step_scope(f"正在写第 {position + 1}/{total} 段",
+                            round_no=position + 1, total_rounds=total):
+                rewritten = rewrite_segment_prompt(
+                    segment, prompt, rewrite_llm,
+                    state=state, is_first=position == 0, is_last=position + 1 == total,
+                    position_index=position,
+                )
         display_text = rewritten or segment.text
         fallback_label = "" if rewritten else "[回退] 声音描述保持整条原样（未按段重写）"
 
@@ -3895,19 +3961,18 @@ def _run_segmented_flow_v2(session: SessionState, plans: list, state: dict, llm,
         return seg_dir / f"shot-{index + 1:02d}.md"
 
     def generate(position: int) -> str | None:
-        """写第 position 段；已有落盘文件则直接复用（续跑不重写）。"""
+        """写第 position 段；已有落盘文件则直接复用（续跑不重写）。
+
+        不再在这里手发 agent_start/agent_done：写段已改走直调看门狗（issue #70），
+        那一次调用自己会发同形事件并进成本表——再手发一份就是每段两次记账。
+        """
         f = seg_file(position)
         if f.is_file():
             try:
                 return f.read_text(encoding="utf-8")
             except OSError:
                 pass
-        from ..observability import reporter
-        reporter.emit({"type": "agent_start", "role": f"segment_{position + 1}_writer"})
-        t0 = time.time()
         text = write_segment_v2(plans[position], plans, state, llm)
-        reporter.emit({"type": "agent_done", "role": f"segment_{position + 1}_writer",
-                       "duration": time.time() - t0, "out_len": len(text or "")})
         if text:
             f.write_text(text, encoding="utf-8")
         return text
@@ -3952,10 +4017,17 @@ def _run_segmented_flow_v2(session: SessionState, plans: list, state: dict, llm,
             plan = plans[position]
             # 当前段：等到写出来（若后台已在跑，很快返回）
             if position not in prefetch:
-                print(f"\n[分段撰写] 正在写第 {position + 1}/{total} 段提示词（{plan.start_s}-{plan.end_s}s）……", flush=True)
+                # 步骤横幅（issue #70 / ADR 0019）：与 ref 路径同一句话式。心跳由上面
+                # 全局订阅的 TextProgress 承担（它还兼管后台预取段的事件，所以这里
+                # 不另开 step_scope，免得同一事件打两行）。
+                print(format_step_banner(f"正在写第 {position + 1}/{total} 段",
+                                         round_no=position + 1, total_rounds=total),
+                      flush=True)
             text = take(position)
             if text is None:
-                print(f"[警告] 第 {position + 1} 段生成失败，跳过。")
+                # 病因与尝试次数已由写段层当面打出（issue #70）：这里只说这一段被跳过，
+                # 不重复转述病因（同一句话打两遍，用户会当成两次失败）。
+                print(f"[警告] 第 {position + 1} 段没有产出（病因见上），跳过本段。")
                 continue
             # 交付前校验：分段是唯一「产出即交付」的路径，不合格必须当面示警（绝不静默）
             errors = _gate_segment_text(position, text, float(plan.duration_s),

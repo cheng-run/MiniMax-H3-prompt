@@ -312,6 +312,9 @@ def test_resume_loader_takes_the_annotation_flag_from_the_delivery_route(tmp_pat
     (gen / "segments" / "plan.json").write_text(
         json.dumps([plan.to_dict()], ensure_ascii=False), encoding="utf-8")
     (gen / "segments" / "segment-01.md").write_text("整片正文", encoding="utf-8")
+    # 按需写段（issue #70）后，续跑要拿整片正文给「还没轮到的段」取材——写单段的
+    # 请求素材（定义块/镜头块/任务类型）都从它派生，缺了它未轮到的段写不出来。
+    (gen / "video-prompt.md").write_text(_SIX_SECTION_PROMPT, encoding="utf-8")
 
     assert load_ref_segments_for_resume(gen, total_s=16.0).annotated is True, \
         ">15s 的单段片是拆段路径的产物，带注记"
@@ -366,17 +369,23 @@ def test_unusable_plan_table_is_refused_not_restarted(tmp_path, monkeypatch, cap
     assert "分段规划" in out, f"没说清是段表读不回来：{out[-600:]}"
 
 
-def test_missing_segment_file_is_refused(tmp_path, monkeypatch, capsys, h3_tier_video):
-    """段文件没了 → 响错：续跑不许「重出」已交付的段（那要重付 LLM 且会与已通过的脱节）。"""
+def test_missing_segment_file_of_a_passed_segment_is_refused(tmp_path, monkeypatch, capsys,
+                                                             h3_tier_video):
+    """**已通过**段的段文件没了 → 响错：账说这段过了，词却不见了。
+
+    按需写段（issue #70）之后，判据从「所有段文件都得在」收窄成「已通过的段文件得在」：
+    没轮到的段本来就没写过，缺文件是正常形态；已通过的段缺文件才是落盘物互相矛盾
+    （续跑不许「重出」已交付的段——那要重付 LLM 且会与已通过的脱节）。
+    """
     gen, _first = _interrupted(tmp_path, monkeypatch, h3_tier_video)
     capsys.readouterr()
-    (gen / "segments" / "segment-02.md").unlink()
+    (gen / "segments" / "segment-01.md").unlink()
 
     asked, code = _resume_run(tmp_path, monkeypatch, [""])
     out = capsys.readouterr().out
 
     _assert_refused_loudly(tmp_path, asked, code, out)
-    assert "第 2 段的提示词文件不见了" in out, f"没点名缺的是哪一段：{out[-600:]}"
+    assert "第 1 段的提示词文件不见了" in out, f"没点名缺的是哪一段：{out[-600:]}"
 
 
 def test_malformed_ledger_line_is_refused(tmp_path, monkeypatch, capsys, h3_tier_video):

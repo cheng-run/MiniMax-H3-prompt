@@ -94,7 +94,7 @@ def test_rewrite_segment_prompt_uses_llm_and_window():
     class FakeLLM:
         def __init__(self):
             self.last_request = ""
-        def invoke(self, request):
+        def invoke(self, request, config=None):
             self.last_request = request
             return "For the target video ... [Shot 1] rewritten, scoped."
 
@@ -108,7 +108,7 @@ def test_rewrite_segment_prompt_uses_llm_and_window():
 
 def test_rewrite_segment_prompt_fallback_on_llm_error():
     class BrokenLLM:
-        def invoke(self, request):
+        def invoke(self, request, config=None):
             raise RuntimeError("quota exhausted")
 
     segments = split_shots_from_prompt(SAMPLE_PROMPT, total_duration=12.0)
@@ -146,7 +146,7 @@ class FakeLLM:
         self.last_request = ""
         self._reply = reply
 
-    def invoke(self, request):
+    def invoke(self, request, config=None):
         self.last_request = request
         return self._reply
 
@@ -857,7 +857,7 @@ class SequencedLLM:
     def calls(self) -> int:
         return len(self.requests)
 
-    def invoke(self, request):
+    def invoke(self, request, config=None):
         self.requests.append(request)
         index = min(len(self.requests), len(self._replies)) - 1
         return self._replies[index]
@@ -1374,7 +1374,7 @@ def _ref_v2_llm():
         def __init__(self):
             self.requests: list[str] = []
 
-        def invoke(self, request):
+        def invoke(self, request, config=None):
             self.requests.append(request)
             return _ref_segment_sample()
 
@@ -1408,7 +1408,7 @@ def test_fallback_ref_rewrite_request_carries_same_disciplines():
     class _LLM:
         last_request = ""
 
-        def invoke(self, request):
+        def invoke(self, request, config=None):
             self.llm_last = request
             return _ref_segment_sample()
 
@@ -1441,7 +1441,7 @@ def test_wordlist_reaches_both_ref_segment_requests():
     assert "一概不用" in v2_request
 
     class _LLM:
-        def invoke(self, request):
+        def invoke(self, request, config=None):
             self.last = request
             return _ref_segment_sample()
 
@@ -1486,7 +1486,7 @@ def test_write_ref_segment_v2_retries_on_errors_bounded():
         def __init__(self):
             self.requests: list[str] = []
 
-        def invoke(self, request):
+        def invoke(self, request, config=None):
             self.requests.append(request)
             return replies[len(self.requests) - 1]
 

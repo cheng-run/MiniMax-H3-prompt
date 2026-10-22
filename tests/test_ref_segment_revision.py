@@ -159,7 +159,7 @@ class _StubLLM:
         self.reply = reply
         self.requests: list[str] = []
 
-    def invoke(self, request: str):
+    def invoke(self, request: str, config=None):
         self.requests.append(request)
         return self.reply
 

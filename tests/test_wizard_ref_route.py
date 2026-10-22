@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 from minimax_h3_prompt import model_factory
@@ -247,12 +248,19 @@ def test_ref_route_over_15s_delivers_segment_prompts_and_order_card(tmp_path, mo
     assert code == 0
     outputs = list((tmp_path / "sessions").rglob("video-prompt.md"))
     assert len(outputs) == 1  # 整片存档不撤
-    seg_files = list((tmp_path / "sessions").rglob("segment-*.md"))
-    assert len(seg_files) >= 2, f"20s 应拆出 ≥2 个执行段：{seg_files}"
+    generation_dir = outputs[0].parent
+    # 段表/顺序卡在交付（准备）这一步就定案；**段正文按需写**（issue #70）：这一轮
+    # 停在段 1 的交回口，所以只有 segment-01.md 在盘上——段 2 的词还没轮到、还没写。
+    plans = json.loads((generation_dir / "segments" / "plan.json").read_text(encoding="utf-8"))
+    assert len(plans) >= 2, f"20s 应拆出 ≥2 个执行段：{plans}"
+    assert (generation_dir / "segments" / "segment-01.md").is_file(), "当前段的词没落盘"
+    assert not (generation_dir / "segments" / "segment-02.md").is_file(), \
+        "段 2 在段 1 交回之前就写了（按需写段退化成批量前置）"
     cards = list((tmp_path / "sessions").rglob("order-card.md"))
     assert len(cards) == 1, "段清单+拼接顺序卡必须落盘"
     out = capsys.readouterr().out
     assert "#46" not in out  # 「拆段在票 #46」占位提示已退役
+    assert "▶ 正在写第 1/" in out, "写当前段没有步骤横幅"
     assert "第 1/" in out and "提示词文件：" in out, "收尾没走到当前一段的展示块"
 
 
