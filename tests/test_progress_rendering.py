@@ -349,3 +349,23 @@ class TestStepBanner:
                                "elapsed": 0.5})
         out = capsys.readouterr().out
         assert out.count("已有响应") == 1, f"同一心跳打了两遍：\n{out}"
+
+    def test_wizard_progress_scope_nests_with_step_scope(self, capsys):
+        """向导的 ``_progress_scope`` 也必须走 ``event_scope``（复审 T6）。
+
+        它原先自己 ``reporter.subscribe(TextProgress())``：当它里面再套一个
+        ``step_scope``（素材循环里就是这种形状）时，两层各订一个监听器，同一条心跳
+        在终端上出现两遍——用户会以为系统跑了两轮（正是 issue #71 修过的形态，
+        只是换了一个入口）。判据：心跳恰好一行，且标题行与用时统计仍照旧。
+        """
+        from minimax_h3_prompt.ui.wizard import _progress_scope
+
+        with _progress_scope("循环级订阅"):
+            with step_scope("正在读图校对"):
+                reporter.emit({"type": "agent_wait", "role": ROLE, "state": "first_byte",
+                               "elapsed": 0.5})
+
+        out = capsys.readouterr().out
+        assert out.count("已有响应") == 1, f"同一心跳打了两遍：\n{out}"
+        assert "循环级订阅" in out, "标题行被改掉了"
+        assert "[完成] 本段用时" in out, "用时统计被改掉了"

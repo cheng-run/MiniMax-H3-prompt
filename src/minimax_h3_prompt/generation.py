@@ -28,7 +28,19 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 # 「V3（24图槽）」，两处各写一份就会漂成两个名字（用户按名字进 ComfyUI 找不到
 # 工作流）。这里只是给既有 import 面留的只读别名；文档引文与它的一致性由守卫测试
 # ``tests/test_ref_route_prompts.py`` 钉住；旧称「工作流 63」已废弃。
-REF_WORKFLOW_NAME = workflow_settings().ref_workflow_name
+# 别名**不在 import 时求值**（复审 S4）：模块级赋值会把名字钉死在首次加载那一刻，
+# 换一份 workflow.yaml 后菜单/登记行仍指旧工作流而不报错。PEP 562 的模块
+# ``__getattr__`` 让每次取用都现读配置——别名保留，语义与注入卡同源。
+
+# 兼容别名的名字（``__all__`` 与 ``__getattr__`` 共用，避免两处各写一份字面量）。
+_REF_WORKFLOW_ALIAS = "REF_WORKFLOW_NAME"
+
+
+def __getattr__(name: str):
+    """PEP 562：取 ``REF_WORKFLOW_NAME`` 时现读生效配置（复审 S4）。"""
+    if name == _REF_WORKFLOW_ALIAS:
+        return workflow_settings().ref_workflow_name
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 class ImageProfile(NamedTuple):
@@ -1204,7 +1216,7 @@ def render_generation(result: GenerationResult) -> dict[str, str]:
 
 
 __all__ = [
-    "REF_WORKFLOW_NAME",
+    _REF_WORKFLOW_ALIAS,
     "GenerationResult", "PromptArtifact", "PromptKind", "ImagePromptVariant",
     "FL2VAFramePrompt", "FL2VAPromptBundle", "brief_snapshot",
     "ImageProfile", "IMAGE_PROFILE_DEFAULTS", "IMAGE_FAMILY_LABELS", "RETIRED_IMAGE_FAMILIES",

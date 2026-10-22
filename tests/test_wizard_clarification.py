@@ -42,7 +42,9 @@ class _QuestionLLM:
         self.error = error
         self.requests: list[str] = []
 
-    def invoke(self, request: str):
+    def invoke(self, request: str, config: dict | None = None):
+        # 直调入口会带 config（看门狗回调）；不接受它就会把一次正常调用变成
+        # 「调用失败」，把澄清整段静默跳过（复审 S1 接线后的真实形态）。
         self.requests.append(request)
         if self.error is not None:
             raise self.error

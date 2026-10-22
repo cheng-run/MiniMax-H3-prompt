@@ -17,7 +17,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from ..observability import reporter, token_meter
+from ..observability import format_step_banner, reporter, token_meter
 
 
 def role_label(role: str) -> str:
@@ -78,14 +78,9 @@ def format_wait_event(event: dict) -> str | None:
     return None
 
 
-def format_step_banner(action: str, *, round_no: int = 1, total_rounds: int = 1) -> str:
-    """步骤横幅一行：「正在做什么 ＋ 第几轮/N」（issue #67 / ADR 0019）。
-
-    它与心跳是**两种信号**（CONTEXT.md「步骤横幅」）：横幅回答「现在在干什么」，
-    心跳（``format_wait_event``）回答「还活着吗」。所以横幅里**不带**已等时长——
-    那个数属于心跳行，抄两份就是两处会各自漂移的口径。
-    """
-    return f"▶ {action}（第 {round_no}/{total_rounds} 轮）……"
+# format_step_banner 的真源已移到 ``observability``（graph/ 也要用，且 graph 不许
+# import ui）。这里保留导入即继续导出，既有 ``from .progress import format_step_banner``
+# 不用改（复审 S2）。
 
 
 # 嵌套订阅的引用计数（issue #71）。只在 ``event_scope`` 里读写，且都在锁下：

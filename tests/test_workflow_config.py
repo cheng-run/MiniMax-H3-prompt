@@ -101,3 +101,25 @@ def test_registered_name_constant_derives_from_the_config():
 
     assert generation.REF_WORKFLOW_NAME == workflow_settings().ref_workflow_name
     assert generation.REF_WORKFLOW_NAME == V3_WORKFLOW_NAME
+
+
+def test_user_facing_exits_read_the_registered_name_at_call_time(tmp_path, monkeypatch):
+    """登记名在**调用时**取，不是 import 时求值（复审 S4）。
+
+    原先 ``generation.REF_WORKFLOW_NAME = workflow_settings().ref_workflow_name`` 在
+    import 那一刻定值：换一份配置后，注入卡会用新名字，菜单/登记行却还指着旧名字——
+    用户按菜单进 ComfyUI 找不到那张工作流，而且**不报错**。判据：把生效路径换到
+    临时 YAML 后，别名与注入卡都必须当场跟着变（monkeypatch 退出即恢复）。
+    """
+    from minimax_h3_prompt import generation, injection_card, workflow_config
+    from minimax_h3_prompt.asset_ledger import AssetLedger
+    from minimax_h3_prompt.injection_card import VideoOutputParams
+
+    path = tmp_path / "workflow.yaml"
+    path.write_text('ref_workflow_name: "临时工作流 V9"\n', encoding="utf-8")
+    monkeypatch.setattr(workflow_config, "WORKFLOW_CONFIG_PATH", path)
+
+    assert generation.REF_WORKFLOW_NAME == "临时工作流 V9", (
+        "兼容别名仍停在 import 时的旧值——改配置不会改用户可见的登记名")
+    text = injection_card.render_injection_card(AssetLedger(), VideoOutputParams())
+    assert "临时工作流 V9" in text and V3_WORKFLOW_NAME not in text

@@ -243,6 +243,31 @@ def test_menu_ref_label_uses_registered_name(monkeypatch):
     assert any(REF_WORKFLOW_NAME in choice for choice in captured["choices"])
 
 
+def test_menu_label_reads_the_registered_name_at_call_time(tmp_path, monkeypatch):
+    """菜单文案在**调用时**取登记名（复审 S4）：换配置后菜单必须当场跟着变。
+
+    原先 import 时就求值，换一份 ``config/workflow.yaml`` 后菜单仍指旧工作流，
+    用户按菜单进 ComfyUI 找不到那张——而且不报错。
+    """
+    from minimax_h3_prompt import workflow_config
+    from minimax_h3_prompt.ui import menu
+
+    path = tmp_path / "workflow.yaml"
+    path.write_text('ref_workflow_name: "临时工作流 V9"\n', encoding="utf-8")
+    monkeypatch.setattr(workflow_config, "WORKFLOW_CONFIG_PATH", path)
+
+    captured: dict = {}
+
+    def fake_select(prompt, choices):
+        captured["choices"] = list(choices)
+        return SimpleNamespace(ask=lambda: captured["choices"][3])
+
+    monkeypatch.setattr(menu.questionary, "select", fake_select)
+    assert menu.choose_model() == "ref2va"
+    assert any("临时工作流 V9" in choice for choice in captured["choices"]), (
+        f"菜单仍用旧登记名：{captured['choices']}")
+
+
 def test_legacy_workflow_63_name_is_gone_from_user_facing_files():
     """用户可见面（菜单/向导/README/brief 模板与示例）不再出现「工作流 63」，且登记名统一。"""
     root = Path(__file__).resolve().parents[1]

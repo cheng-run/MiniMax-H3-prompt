@@ -18,10 +18,12 @@ console = Console()
 
 def choose_model() -> str:
     """返回 'i2va' | 'l2va' | 'fl2va' | 'ref2va' | 'polish' | 'dry-run' | 'exit'。"""
-    from ..generation import REF_WORKFLOW_NAME
+    from ..workflow_config import workflow_settings
 
-    # 多参路线登记名钉死 REF_WORKFLOW_NAME（issue #41 AC6）；旧的工作流编号称法已废弃。
-    ref_label = f"④ 多参生成视频（{REF_WORKFLOW_NAME} · 参考素材多张）"
+    # 登记名在**调用时**现取（复审 S4）：它是配置项，不是常量；import 时求值会让
+    # 换一份 workflow.yaml 后菜单仍指旧工作流（用户按菜单进 ComfyUI 找不到那张）。
+    # 旧的工作流编号称法已废弃（issue #41 AC6）。
+    ref_label = f"④ 多参生成视频（{workflow_settings().ref_workflow_name} · 参考素材多张）"
     choice = questionary.select(
         "选择出片方式（对应你的 ComfyUI 工作流和参考输入）",
         choices=[

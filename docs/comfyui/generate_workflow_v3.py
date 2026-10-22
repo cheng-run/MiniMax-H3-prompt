@@ -19,16 +19,35 @@ from __future__ import annotations
 
 import argparse
 import copy
+import importlib.util
 import json
 from pathlib import Path
 
-# 与 docs/comfyui/MiniMaxH3-Refs24/nodes_refs24.py 保持一致：
-# 24 来自 ADR 0017 的真实素材数；类型名故意不复用上游的 JZL_REF2VA_BUS，
-# 防止 18 槽总线与 24 槽总线互插后静默少喂图。
-IMAGE_SLOTS = 24
-VIDEO_SLOTS = 3
-VIDEO_AUDIO_SLOTS = 3
-AUDIO_SLOTS = 3
+
+def _load_slot_constants():
+    """槽位数从节点包**动态取**，不在这里另抄一份（复审 T1）。
+
+    24/3/3 是节点端口的**物理事实**，真源在 ``MiniMaxH3-Refs24/nodes_refs24.py``。
+    生成脚本、校验脚本、配置默认值各抄一份时，改一处而漏另一处不会报错——脚本会
+    按旧数重建工作流，而节点包已是新数（ADR 0017 的原始事故：接线接进空气）。
+    目录名带连字符不能普通 import，故用 ``spec_from_file_location`` 指向模块文件。
+    """
+    path = Path(__file__).resolve().parent / "MiniMaxH3-Refs24" / "nodes_refs24.py"
+    spec = importlib.util.spec_from_file_location("refs24_slots_for_generator", path)
+    if spec is None or spec.loader is None:  # pragma: no cover - 仓库副本缺失才发生
+        raise SystemExit(f"[fail] 无法加载节点槽位常量：{path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_SLOTS = _load_slot_constants()
+IMAGE_SLOTS = _SLOTS.REF_IMAGE_SLOTS
+VIDEO_SLOTS = _SLOTS.REF_VIDEO_SLOTS
+VIDEO_AUDIO_SLOTS = _SLOTS.VIDEO_AUDIO_SLOTS
+AUDIO_SLOTS = _SLOTS.REF_AUDIO_SLOTS
+
+# 类型名故意不复用上游的 JZL_REF2VA_BUS，防止 18 槽总线与 24 槽总线互插后静默少喂图。
 BUS_TYPE = "MINIMAX_H3_REFS24_BUS"
 BUS_OUT_TYPE = "MiniMaxH3Refs24BusOut"
 BUS_IN_TYPE = "MiniMaxH3Refs24BusIn"
@@ -180,11 +199,13 @@ def _expand_reference_graph(graph: dict) -> None:
     bus_out["inputs"] = image_inputs + rest_inputs
     # 视频/音轨/音频的输入槽位随图槽数整体后移，旧连线的 target_slot 必须同步。
     for slot, link_id in enumerate(video_links):
-        _update_link(graph, link_id, target_slot=24 + slot)
+        _update_link(graph, link_id, target_slot=IMAGE_SLOTS + slot)
     for slot, link_id in enumerate(video_audio_links):
-        _update_link(graph, link_id, target_slot=27 + slot)
+        _update_link(graph, link_id, target_slot=IMAGE_SLOTS + VIDEO_SLOTS + slot)
     for slot, link_id in enumerate(audio_links):
-        _update_link(graph, link_id, target_slot=30 + slot)
+        _update_link(
+            graph, link_id,
+            target_slot=IMAGE_SLOTS + VIDEO_SLOTS + VIDEO_AUDIO_SLOTS + slot)
     bus_out["type"] = BUS_OUT_TYPE
     bus_out["properties"] = {"Node name for S&R": BUS_OUT_TYPE}
     bus_out["size"] = [340, 780]
@@ -308,22 +329,34 @@ def _rewire_parameter_graph(graph: dict) -> None:
     # 原有连线只改槽位下标，不换 id：V2 里已有的 9 张图仍是同一条线。
     for slot in range(9):
         _update_link(graph, image_links[slot], target_slot=3 + slot)
+    # 编码节点前 3 个输入是固定的 CLIP/VAE/音频VAE；参考槽从这里往后排。
+    fixed_encoder_inputs = 3
     for slot in range(VIDEO_SLOTS):
-        _update_link(graph, video_links[slot], origin_slot=24 + slot, target_slot=27 + slot)
+        _update_link(
+            graph, video_links[slot],
+            origin_slot=IMAGE_SLOTS + slot,
+            target_slot=fixed_encoder_inputs + IMAGE_SLOTS + slot)
     for slot in range(VIDEO_AUDIO_SLOTS):
         _update_link(
             graph,
             video_audio_links[slot],
-            origin_slot=27 + slot,
-            target_slot=30 + slot,
+            origin_slot=IMAGE_SLOTS + VIDEO_SLOTS + slot,
+            target_slot=fixed_encoder_inputs + IMAGE_SLOTS + VIDEO_SLOTS + slot,
         )
     for slot in range(AUDIO_SLOTS):
-        _update_link(graph, audio_links[slot], origin_slot=30 + slot, target_slot=33 + slot)
-    _update_link(graph, prompt_link, target_slot=36)
-    _update_link(graph, width_link, target_slot=37)
-    _update_link(graph, height_link, target_slot=38)
-    _update_link(graph, length_link, target_slot=39)
-    _update_link(graph, ref_scale_link, target_slot=41)
+        _update_link(
+            graph, audio_links[slot],
+            origin_slot=IMAGE_SLOTS + VIDEO_SLOTS + VIDEO_AUDIO_SLOTS + slot,
+            target_slot=(fixed_encoder_inputs + IMAGE_SLOTS + VIDEO_SLOTS
+                         + VIDEO_AUDIO_SLOTS + slot))
+    # widget 型输入排在全部参考槽之后：prompt / width / height / length / ref_image_size / ref_scale。
+    first_widget_input = (fixed_encoder_inputs + IMAGE_SLOTS + VIDEO_SLOTS
+                          + VIDEO_AUDIO_SLOTS + AUDIO_SLOTS)
+    _update_link(graph, prompt_link, target_slot=first_widget_input)
+    _update_link(graph, width_link, target_slot=first_widget_input + 1)
+    _update_link(graph, height_link, target_slot=first_widget_input + 2)
+    _update_link(graph, length_link, target_slot=first_widget_input + 3)
+    _update_link(graph, ref_scale_link, target_slot=first_widget_input + 5)
 
     # 解包节点：24 图 + 3 视频 + 3 音轨 + 3 音频。
     bus_outputs = []

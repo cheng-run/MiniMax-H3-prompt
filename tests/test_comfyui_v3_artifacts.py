@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -199,6 +200,73 @@ def test_encode_node_reuses_upstream_instead_of_copying() -> None:
     for copied in ("vae.encode(", "clip.tokenize(", "_encode_ref_audio", "conditioning_set_values"):
         assert copied not in source, f"疑似复制了上游编码实现：{copied}"
     assert 'BUS_TYPE = "MINIMAX_H3_REFS24_BUS"' in source
+
+
+def _load_slot_module():
+    """直接加载节点实现（不经包入口），只为取三个槽位常量。
+
+    目录名带连字符，不能走普通 import；``spec_from_file_location`` 指向
+    ``nodes_refs24.py`` 即可——该文件模块级没有相对导入。
+    """
+    name = "refs24_slots_under_test"
+    spec = importlib.util.spec_from_file_location(name, NODES_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(name, None)
+    return module
+
+
+def test_slot_counts_agree_across_config_workflow_and_node_package(tmp_path) -> None:
+    """同一个物理事实只有一份真源：配置默认值 == V3 端口数 == 节点常量（复审 T1）。
+
+    24/3/3 此前在五处字面重抄（``workflow_config``、V3 JSON、生成脚本、校验脚本、
+    节点包），改一处而漏另一处**不会报错**——注入卡会照一个端口数写卡，而工作流只有
+    另一个数，用户接线接进空气（ADR 0017 记录的原始事故）。本测试把三处来源并排：
+    任一处单独改动都当场红。
+
+    变异检验：把 ``DEFAULT_SLOT_COUNTS[KIND_PICTURE]`` 改成 20（或把 V3 JSON 删掉
+    一个图槽、把节点包改成 20），本条红。
+    """
+    from minimax_h3_prompt.asset_ledger import KIND_AUDIO, KIND_PICTURE, KIND_VIDEO
+    from minimax_h3_prompt.workflow_config import (
+        DEFAULT_SLOT_COUNTS,
+        load_workflow_settings,
+    )
+
+    # 缺文件路径＝读「默认值」这条真源（不碰本机 config/workflow.yaml 的显式值）
+    settings = load_workflow_settings(tmp_path / "absent.yaml")
+    assert settings.slot_counts == DEFAULT_SLOT_COUNTS
+
+    slots = _load_slot_module()
+    node_counts = {
+        KIND_PICTURE: slots.REF_IMAGE_SLOTS,
+        KIND_VIDEO: slots.REF_VIDEO_SLOTS,
+        KIND_AUDIO: slots.REF_AUDIO_SLOTS,
+    }
+
+    workflow = _workflow()
+    ref_names = [item["name"] for item in
+                 next(n for n in _subgraph(workflow, "②")["nodes"] if n["type"] == BUS_OUT_TYPE)["inputs"]]
+    param_names = [item["name"] for item in
+                   next(n for n in _subgraph(workflow, "③")["nodes"] if n["type"] == ENCODE_TYPE)["inputs"]]
+
+    def count(names: list[str], prefix: str) -> int:
+        # 精确匹配 ``prefix_<数字>``：``ref_video_audio_N`` 不能被算进 ``ref_video``
+        return sum(1 for name in names if re.fullmatch(rf"{prefix}_\d+", name))
+
+    for kind, prefix in ((KIND_PICTURE, "ref_image"),
+                         (KIND_VIDEO, "ref_video"),
+                         (KIND_AUDIO, "ref_audio")):
+        assert settings.slot_counts[kind] == node_counts[kind], (
+            f"{kind} 槽位数：配置 {settings.slot_counts[kind]} ≠ 节点包 {node_counts[kind]}")
+        assert count(ref_names, prefix) == node_counts[kind], (
+            f"V3 参考资产子图 {prefix}_* 端口数 {count(ref_names, prefix)} ≠ 节点包 {node_counts[kind]}")
+        assert count(param_names, prefix) == node_counts[kind], (
+            f"V3 编码节点 {prefix}_* 端口数 {count(param_names, prefix)} ≠ 节点包 {node_counts[kind]}")
 
 
 # ── 工作流 V3：24 槽真的连到了编码节点 ─────────────────────────────

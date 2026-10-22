@@ -415,14 +415,29 @@ def _retry_allowed(attempt_no: int, remaining: float) -> bool:
     )
 
 
+def _emit_retrying(role: str, attempt_no: int, remaining: float) -> None:
+    """发一条 ``retrying`` 事件（issue #62 的字段契约）。
+
+    **派生只在这一处**：``attempt``＝即将发起的尝试序号（已试次数 + 1）、
+    ``retry``＝重试序号（1 起）＝``attempt - 1``。它原先在「卡住重试」与「审核拦截
+    重试」两处各写一份，改口径时漏一处就会静默错位（复审 T2，本仓「同一契约不许
+    两处口径」）。调用方必须先过 ``_retry_allowed``——本函数只负责发事件，不判能不能重试。
+    """
+    reporter.emit({
+        "type": "agent_wait", "role": role, "state": "retrying",
+        "attempt": attempt_no + 1,
+        "retry": attempt_no,
+        "remaining_budget": max(0.0, remaining),
+    })
+
+
 def _emit_stuck_then_maybe_retry(
     role: str, *, elapsed: float, attempt_no: int, remaining: float,
 ) -> bool:
     """发 ``stuck``，够条件再发 ``retrying`` 并返回 True（调用方继续下一轮）。
 
     事件字段是 issue #62 定死的契约：``stuck.attempt``＝刚失败的尝试序号；
-    ``retrying.attempt``＝即将发起的尝试序号（已试次数 + 1）；``retry``＝**重试序号**
-    （1 起）＝``attempt - 1``，派生只在这一处（渲染层再减一次就会错位）。
+    ``retrying`` 的三个字段由 ``_emit_retrying`` 统一派生（复审 T2）。
     """
     reporter.emit({
         "type": "agent_wait", "role": role, "state": "stuck",
@@ -430,12 +445,7 @@ def _emit_stuck_then_maybe_retry(
     })
     if not _retry_allowed(attempt_no, remaining):
         return False
-    reporter.emit({
-        "type": "agent_wait", "role": role, "state": "retrying",
-        "attempt": attempt_no + 1,
-        "retry": attempt_no,
-        "remaining_budget": max(0.0, remaining),
-    })
+    _emit_retrying(role, attempt_no, remaining)
     return True
 
 
@@ -475,8 +485,11 @@ class DirectCallResult:
         return str(getattr(self.response, "content", self.response))
 
 
-def run_direct_call(llm, request: str, *, role: str) -> DirectCallResult:
+def run_direct_call(llm, request: object, *, role: str) -> DirectCallResult:
     """包装**一次直接模型调用**（``llm.invoke``），接上与 ``run_agent`` 同一份看门狗。
+
+    ``request`` 通常是一条字符串请求，但圆桌传的是 ``BaseChatModel`` 的消息列表
+    （issue #67 之后新增的消费者，复审 S1）——入口只负责透传，不改形、不猜类型。
 
     判据与 ``run_agent`` 逐条同源（ADR 0015/#61），不另立第二套：
 
@@ -607,12 +620,9 @@ def run_agent(agent: object, message: str, retry_empty: bool = True) -> str:
                 # 同输入重采样未必换掉触发点，所以追加一句「换更克制的措辞」。
                 remaining = deadline - time.monotonic()
                 if _retry_allowed(attempt_no, remaining):
-                    reporter.emit({
-                        "type": "agent_wait", "role": role, "state": "retrying",
-                        "attempt": attempt_no + 1,
-                        "retry": attempt_no,
-                        "remaining_budget": max(0.0, remaining),
-                    })
+                    # 与卡住重试共用同一处字段派生（复审 T2）：两处各写一份，
+                    # 改 attempt/retry 口径时漏一处就是静默错位。
+                    _emit_retrying(role, attempt_no, remaining)
                     if _SENSITIVE_NUDGE not in message:
                         message += _SENSITIVE_NUDGE
                     continue

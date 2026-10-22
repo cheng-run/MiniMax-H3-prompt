@@ -27,10 +27,19 @@ class _FakeLLM:
     def __init__(self, content: str) -> None:
         self.content = content
         self.requests: list[str] = []
+        # 直调入口会把看门狗回调塞进 config；记下来才能证「真的走了统一入口」
+        # （复审 S1：裸 invoke 的生产形态正是 config 为空）。
+        self.configs: list[dict | None] = []
 
-    def invoke(self, request: str) -> _Reply:
+    def invoke(self, request: str, config: dict | None = None) -> _Reply:
         self.requests.append(request)
+        self.configs.append(config)
         return _Reply(self.content)
+
+
+class _BoomLLM:
+    def invoke(self, request: str, config: dict | None = None) -> _Reply:
+        raise RuntimeError("gateway boom")
 
 
 def test_limit_caps_question_count():
@@ -77,6 +86,25 @@ def test_generate_passes_topic_and_limit_to_model():
     assert questions == ["庭院是哪个朝代？", "人物服装按哪个年代？"]
     assert "秋日庭院里的橘猫" in llm.requests[0]
     assert "2" in llm.requests[0], "上限没写进请求——模型无从知道该给几个问题"
+
+
+def test_generate_goes_through_the_direct_call_watchdog():
+    """澄清是 ADR 0019 点名要接看门狗的直调点（复审 S1）。
+
+    判据落在「模型收到了看门狗回调」上：裸 ``llm.invoke`` 时 config 为 None，
+    调用期间既没有首字节心跳也没有卡住重试。变异检验：改回裸 invoke，本条红。
+    """
+    llm = _FakeLLM("庭院是哪个朝代？")
+    generate_clarifying_questions("秋日庭院", llm, 1)
+    assert llm.configs and llm.configs[0], "澄清调用没带 config——仍是裸 invoke"
+    assert llm.configs[0].get("callbacks"), "澄清调用没挂看门狗回调（等不出首字节心跳）"
+
+
+def test_generate_raises_with_the_watchdog_diagnosis_on_failure():
+    """失败语义照旧：抛异常由调用方报出来再跳过澄清（绝不静默）。"""
+    with pytest.raises(RuntimeError) as excinfo:
+        generate_clarifying_questions("秋日庭院", _BoomLLM(), 1)
+    assert "gateway boom" in str(excinfo.value), "异常里没带病因，用户看不出是网关还是内容"
 
 
 @pytest.mark.parametrize("raw", ["跳过", "skip", " SKIP ", "跳过 "])

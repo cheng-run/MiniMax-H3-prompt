@@ -491,6 +491,13 @@ def test_sensitive_output_rejection_retries_with_a_nudge(events):
     assert "内容审核" in sent[1], "重试请求没把「上一轮被审核拦了」告诉模型"
     states = [e["state"] for e in _wait_events(events)]
     assert "retrying" in states
+    # 审核拦截与卡住重试共用同一处字段派生（复审 T2）：attempt/retry/预算三个字段
+    # 逐一对齐。两处各写一份时，改口径漏一处就会在这里露馅。
+    retrying = [e for e in _wait_events(events) if e["state"] == "retrying"]
+    assert retrying, "审核拦截重试没有发 retrying 事件"
+    assert retrying[0]["attempt"] == 2, "即将发起的是第 2 次尝试"
+    assert retrying[0]["retry"] == 1, "retry 是重试序号（1 起），不是尝试序号"
+    assert retrying[0]["remaining_budget"] >= 0.0
 
 
 def test_sensitive_output_rejection_stops_after_attempt_cap(events):

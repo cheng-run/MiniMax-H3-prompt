@@ -250,13 +250,15 @@ def _choose_generation_mode() -> str:
     返回 "REF2VA" 不是帧变体——由 ``_phase1_new`` 转成 ``Brief(mode="ref")``，
     帧逻辑一律按 ``FRAME_VARIANTS`` 判，不看它。
     """
-    from ..generation import REF_WORKFLOW_NAME
+    from ..workflow_config import workflow_settings
 
+    # 登记名调用时现取（复审 S4）：换配置即换菜单文案，与注入卡同源。
+    name = workflow_settings().ref_workflow_name
     print("请选择视频生成方式：")
     print("  1. 首帧生成视频（I2VA，以首帧图起笔，向前发展）")
     print("  2. 尾帧生成视频（L2VA，从合理开场逐步收敛到尾帧图）")
     print("  3. 首尾帧生成视频（FL2VA，首尾帧锚定，默认）")
-    print(f"  4. 多参生成视频（ref2va，参考素材＋文本驱动；登记工作流：{REF_WORKFLOW_NAME}）")
+    print(f"  4. 多参生成视频（ref2va，参考素材＋文本驱动；登记工作流：{name}）")
     while True:
         raw = _prompt("输入 1/2/3/4（回车=3 首尾帧）：").strip()
         if not raw:
@@ -389,17 +391,19 @@ def _progress_saver(generation_dir: Path, brief: Brief) -> Callable[[str, dict],
 
 @contextmanager
 def _progress_scope(title: str):
-    """订阅事件总线，把各角色进度实时打到终端；退出（含异常）必解绑并报总用时。"""
-    from ..observability import reporter
+    """订阅事件总线，把各角色进度实时打到终端；退出（含异常）必解绑并报总用时。
 
-    listener = TextProgress()
+    订阅走 ``event_scope``（复审 T6）：它自己带嵌套引用计数，与 ``step_scope``
+    嵌套时只挂一个 ``TextProgress``。原先这里直接 ``reporter.subscribe``，两层各订
+    一个监听器，同一条心跳会打两遍——用户会以为系统跑了两轮（issue #71 修的是同一个
+    形态，只是从这个入口漏过去了）。标题行、用时统计与 ``_drain_stdin`` 保持不变。
+    """
     start = time.time()
     print(f"\n{title}", flush=True)
-    reporter.subscribe(listener)
     try:
-        yield
+        with event_scope():
+            yield
     finally:
-        reporter.unsubscribe(listener)
         _drain_stdin()
         m, s = divmod(int(time.time() - start), 60)
         print(f"[完成] 本段用时 {m} 分 {s:02d} 秒。\n", flush=True)
@@ -776,10 +780,13 @@ def _show_asset_prompts(state: dict, generation_dir: Path,
 
 def _show_ref_registry(state: dict, brief: Brief) -> None:
     """多参参考素材登记一览：语义名 → <Picture N>（编号按剧本出场顺序，issue #41）。"""
-    from ..generation import REF_WORKFLOW_NAME, ref_asset_registry
+    from ..generation import ref_asset_registry
+    from ..workflow_config import workflow_settings
 
     registry = ref_asset_registry(state, brief)
-    print(f"\n[参考素材登记] 编号按剧本出场顺序（登记工作流：{REF_WORKFLOW_NAME}）")
+    # 登记名调用时现取（复审 S4）：与注入卡、菜单同源，换配置即换这一行。
+    print(f"\n[参考素材登记] 编号按剧本出场顺序"
+          f"（登记工作流：{workflow_settings().ref_workflow_name}）")
     if not registry:
         print("  （无）")
         return
@@ -1317,6 +1324,20 @@ def _update_prompt_text(state: dict, item: QueueItem, new_text: str) -> None:
     _find_prompt_entry(state, item)["positive_prompt"] = new_text
 
 
+def _locked_features(state: dict, brief: Brief, name: str) -> Sequence[str]:
+    """取一张素材的锁死清单（issue #53）：判偏差的唯一判据。
+
+    抽成一处是因为它有两个消费者（AI 改词、回灌对齐）——两处各写一遍 ``next(...)``
+    就是第二份会漂的取法（复审 T5）：将来 ``image_prompt_variants`` 的字段改名或
+    清单来源改口径，漏改一处就会静默退回空清单（＝不收窄），而空清单是合法值，
+    没有任何东西会报红。旧条目没有这一键时返回空元组（不收窄），与对照器同口径。
+    """
+    from ..generation import image_prompt_variants
+
+    return next((v.locked_features for v in image_prompt_variants(state, brief.canvases)
+                 if v.name == name), ())
+
+
 def _rewrite_asset_prompt_round(state: dict, brief: Brief, generation_dir: Path, item: QueueItem,
                                 *, trigger: str) -> bool:
     """「改写提示词」/「改词再掷」一轮（issue #50 AC2/AC3）：问意见 → LLM 改写一条
@@ -1368,7 +1389,6 @@ def _ai_reword_asset_round(state: dict, brief: Brief, generation_dir: Path, item
         ai_reword_asset_prompt,
         log_asset_round,
     )
-    from ..generation import image_prompt_variants
     from ..model_factory import build_chat_model
     from ..tools.image_prompt_discipline import check_image_prompt
 
@@ -1378,8 +1398,7 @@ def _ai_reword_asset_round(state: dict, brief: Brief, generation_dir: Path, item
         print("[AI 改词] 没有可用的偏差清单，提示词保持原样（不猜着改）。")
         return False
     old = _current_prompt_text(state, item)
-    locked = next((v.locked_features for v in image_prompt_variants(state, brief.canvases)
-                   if v.name == item.name), ())
+    locked = _locked_features(state, brief, item.name)
     try:
         new = ai_reword_asset_prompt(old, deviations, build_chat_model(),
                                      locked_features=locked)
@@ -1400,7 +1419,11 @@ def _ai_reword_asset_round(state: dict, brief: Brief, generation_dir: Path, item
         prompt_before=old, prompt_after=new,
     )
     save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
-    print(f"[AI 改词·{item.name}] 已按 {len(deviations)} 处偏差改写（锁死清单与其余正文逐字保留），"
+    # 成功文案只写系统**真的核对过**的事实（复审 S5）：「锁死清单」逐条做过子串校验
+    # （ai_reword_asset_prompt 里 missing 那段）；「其余正文逐字保留」只是请求里写给
+    # 模型的纪律，系统没有核对，不能对用户保证——超证据的文案比没有文案更坏。
+    print(f"[AI 改词·{item.name}] 已按 {len(deviations)} 处偏差改写"
+          f"（锁死清单已逐条核对；其余正文请人工确认），"
           f"并记入轮次账（{ASSET_ROUNDS_FILENAME}）。")
     # 改写也是一次出词：照跑警告级纪律检查（#68 / ADR 0018）。只警告、不阻断——
     # 这份词是人要拿去生图的，纪律问题得在出图前看得见。
@@ -1460,7 +1483,6 @@ def _align_asset_with_settled(state: dict, brief: Brief, generation_dir: Path,
     出谁」后第一眼必须看到系统在动作。
     """
     from ..asset_loop import align_asset_prompt, loop_state
-    from ..generation import image_prompt_variants
     from ..model_factory import build_chat_model
 
     with step_scope("正在与前序素材对齐"):
@@ -1470,8 +1492,7 @@ def _align_asset_with_settled(state: dict, brief: Brief, generation_dir: Path,
         if not facts:
             return
         old = _current_prompt_text(state, item)
-        locked = next((v.locked_features for v in image_prompt_variants(state, brief.canvases)
-                       if v.name == item.name), ())
+        locked = _locked_features(state, brief, item.name)
         try:
             new = align_asset_prompt(old, facts, build_chat_model(), locked_features=locked)
         except Exception as exc:  # noqa: BLE001 — 回灌失败要响但不许裸崩：词不动、继续出词

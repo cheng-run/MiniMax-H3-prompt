@@ -19,10 +19,27 @@ import importlib.util
 import sys
 from pathlib import Path
 
-IMAGE_SLOTS = 24
-VIDEO_SLOTS = 3
-VIDEO_AUDIO_SLOTS = 3
-AUDIO_SLOTS = 3
+
+def _load_slot_constants():
+    """槽位数从节点包**动态取**，不在这里另抄一份（复审 T1）。
+
+    校验脚本若自己写 24/3/3，改节点包后脚本仍按旧数核对：要么把正确的包判成
+    「槽位不符」，要么（更坏）漏掉真实的槽位漂移——判据与被判物必须同源。
+    """
+    path = Path(__file__).resolve().parent / "MiniMaxH3-Refs24" / "nodes_refs24.py"
+    spec = importlib.util.spec_from_file_location("refs24_slots_for_verifier", path)
+    if spec is None or spec.loader is None:  # pragma: no cover - 仓库副本缺失才发生
+        raise SystemExit(f"[fail] 无法加载节点槽位常量：{path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_SLOTS = _load_slot_constants()
+IMAGE_SLOTS = _SLOTS.REF_IMAGE_SLOTS
+VIDEO_SLOTS = _SLOTS.REF_VIDEO_SLOTS
+VIDEO_AUDIO_SLOTS = _SLOTS.VIDEO_AUDIO_SLOTS
+AUDIO_SLOTS = _SLOTS.REF_AUDIO_SLOTS
 ALL_SLOTS = (
     tuple(f"ref_image_{i}" for i in range(IMAGE_SLOTS))
     + tuple(f"ref_video_{i}" for i in range(VIDEO_SLOTS))

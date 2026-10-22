@@ -14,7 +14,7 @@ from ..agents import build_role_agents, run_agent
 from ..brief_parser import FRAME_VARIANTS, Brief
 from ..clarification import as_block
 from ..config import Config
-from ..observability import stage_saver, token_meter
+from ..observability import format_step_banner, stage_saver, token_meter
 from ..output.assembler import assemble_and_repair
 from ..tools.h3_validator import format_issues, validate_prompt
 from ..tools.ref_metadata import to_tuple
@@ -302,6 +302,10 @@ def _stage1_frame_qa_loop(state: dict, brief: Brief, agents, model, config: Conf
     # 替换语义不该因为 state 里多了一个键就滑成「以用户上一版为基线」。
     state.pop(FRAME_BASELINE_KEY, None)
     for i in range(config.max_qa_iterations):
+        # 横幅回答「在干什么、第几轮」（ADR 0019 决定 3 / 复审 S2）：这个循环原先
+        # 只在事件总线上有动静而没人订阅，终端上就是一段没有任何输出的长等待。
+        print(format_step_banner("正在质检精修", round_no=i + 1,
+                                 total_rounds=config.max_qa_iterations), flush=True)
         bundle_dict = state.get("fl2va_prompt_bundle")
         if not isinstance(bundle_dict, dict):
             break
@@ -352,6 +356,9 @@ def run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_node
         token_meter.restore(checkpoint.get("cost_table"))
         print("[续接] 检测到阶段 2 断点（组装已于此前完成），直接进入质检精修。", flush=True)
     else:
+        # 「正在组装」也是 ADR 0019 决定 3 点名的长步骤（复审 S2）。只在实际组装
+        # 分支打：断点续跑跳过组装，打出来就是一句假话。
+        print(format_step_banner("正在组装视频提示词"), flush=True)
         graph, _ = build_pipeline_graph(model, brief, config, stage=2, refs=registry)
         initial: PipelineState = {
             "brief": brief,
@@ -382,6 +389,9 @@ def run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_node
 
     # 有界质检精修：确定性校验 → 有 error 则 qa 给建议 + prompt_engineer 修正
     for i in range(config.max_qa_iterations):
+        # 与阶段 1 的生图 qa 循环同一条横幅口径（ADR 0019 决定 3 / 复审 S2）。
+        print(format_step_banner("正在质检精修", round_no=i + 1,
+                                 total_rounds=config.max_qa_iterations), flush=True)
         issues = validate_prompt(prompt, brief.mode, duration=brief.duration,
                                  variant=brief.variant, ref_meta=ref_meta)
         theme_issues = theme_fidelity_issues(

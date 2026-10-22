@@ -37,6 +37,10 @@ BLOCK_LABEL = "起步澄清"
 # 一次正常回答撞车，而撞车的代价是用户想说的那句被当成跳过。
 SKIP_WORDS = ("跳过", "skip")
 
+# 直调入口的角色名（ADR 0019 决定 1 / 复审 S1）：澄清是点名要接看门狗的直调点，
+# 事件与成本表按这个名字归类。写死在入口旁，避免调用处与测试各抄一份字面量。
+CLARIFY_ROLE = "role_clarifier"
+
 # 行首编号/项目符号：模型很爱加，剥掉后问题本身才能原样问给用户。
 _PREFIX_RE = re.compile(r"^\s*(?:[-*•·]|[（(]?\d{1,2}[.、)）])\s*")
 
@@ -80,9 +84,17 @@ def generate_clarifying_questions(topic: str, llm, limit: int) -> list[str]:
     """
     if limit <= 0:
         return []
+    # 延迟导入：agents 会拉起角色装配栈，而澄清的纯函数层（问句抽取、跳过词）不该
+    # 为了一次问句解析背整条依赖（同 segment_planner 的取法）。
+    from .agents import run_direct_call
+
     request = f"{_load_instruction()}\n\n最多 {limit} 个问题。\n主题：{topic}"
-    response = llm.invoke(request)
-    return parse_questions(str(getattr(response, "content", response)), limit)
+    result = run_direct_call(llm, request, role=CLARIFY_ROLE)
+    if not result.ok:
+        # 保持本函数「不吞异常」的既有约定：失败带病因抛出，由向导报出来再跳过澄清
+        # （ADR 0019 决定 1，复审 S1——原先这里裸调，卡住时没有任何信号）。
+        raise RuntimeError(result.error)
+    return parse_questions(result.text, limit)
 
 
 def render_clarification_block(pairs: Iterable[tuple[str, str]] | None) -> str:
@@ -121,6 +133,7 @@ def as_block(clarifications: str) -> str:
 __all__ = [
     "BLOCK_LABEL",
     "CLARIFY_PROMPT_PATH",
+    "CLARIFY_ROLE",
     "SKIP_WORDS",
     "as_block",
     "generate_clarifying_questions",

@@ -20,6 +20,20 @@ COST_TABLE_KEY = "cost_table"
 VISION_ROLE = "role_vision"
 
 
+def format_step_banner(action: str, *, round_no: int = 1, total_rounds: int = 1) -> str:
+    """步骤横幅一行：「正在做什么 ＋ 第几轮/N」（issue #67 / ADR 0019）。
+
+    它与心跳是**两种信号**（CONTEXT.md「步骤横幅」）：横幅回答「现在在干什么」，
+    心跳（``ui.progress.format_wait_event``）回答「还活着吗」。所以横幅里**不带**已等
+    时长——那个数属于心跳行，抄两份就是两处会各自漂移的口径。
+
+    **住在 observability 而不是 ui**：``graph/pipeline.py`` 也要打横幅（qa 复审、组装，
+    复审 S2），而 ``graph/`` 不许 import ``ui/``（分层）。这里只是纯字符串格式化、
+    不依赖 rich；``ui.progress`` 继续从这里导出，既有 import 面不变。
+    """
+    return f"▶ {action}（第 {round_no}/{total_rounds} 轮）……"
+
+
 class Reporter:
     """线程安全事件总线。事件为 dict，必须含 type。"""
 
