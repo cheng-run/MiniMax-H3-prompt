@@ -149,6 +149,7 @@ def test_ref_route_direct_prompt_end_to_end(tmp_path, monkeypatch, capsys, tmp_v
     （段文件是它的副本），回传本段输出视频 → 两道闸 → 段产出账 → 成片（段数=1 时拼接
     退化为**拷贝改名**）。
     """
+    from minimax_h3_prompt.generation import REF_WORKFLOW_NAME
     _silence(monkeypatch)
     # 同上：画布问答属 #42，这里打桩为空集。
     monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
@@ -180,7 +181,7 @@ def test_ref_route_direct_prompt_end_to_end(tmp_path, monkeypatch, capsys, tmp_v
         assert f"{header}:" in text
     out = capsys.readouterr().out
     assert "<Picture 1> 红裙女孩" in out  # 编号按剧本出场顺序的登记一览
-    assert "59-(多Lora改)MiniMax-H3 ref2va 多参生视频 V2" in out  # 登记名
+    assert REF_WORKFLOW_NAME in out  # 登记名（config/workflow.yaml 单一真源）
 
     # ≤15 秒：段数=1，收尾同一套（回传 → 两道闸 → 账 → 成片）
     assert any("第 1/1 段输出视频路径" in text for text in asked), f"交回口问句不对：{asked[-2:]}"

@@ -79,7 +79,7 @@ DASHSCOPE_API_KEY=xxx
 `examples/` 里有示例（模板 `examples/brief_template.md`）。**`输入` 键对应你喂工作流的参考方式**：
 
 ```markdown
-输入: 首尾帧     # 首帧（工作流62·1张图）| 尾帧（工作流62·1张图）| 首尾帧（工作流62·2张图）| 多参（59-(多Lora改)MiniMax-H3 ref2va 多参生视频 V2·N 张素材）
+输入: 首尾帧     # 首帧（工作流62·1张图）| 尾帧（工作流62·1张图）| 首尾帧（工作流62·2张图）| 多参（59-(多Lora改)MiniMax-H3 ref2va 多参生视频 V3（24图槽）·N 张素材）
 时长: 6          # 秒
 风格: Cinematic 武侠电影质感
 语言: Chinese
@@ -154,12 +154,15 @@ START → [制片] → [导演] → [创意会·圆桌] → [编剧]
 
 `config/agent.yaml`：`max_qa_iterations`（质检精修上限）、`roundtable_max_rounds`（圆桌轮数上限）、`default_duration`、`output_path`（默认 `output/final_prompt.txt`）。
 
+`config/workflow.yaml`：多参路线的**登记工作流名**与三型参考槽位数（默认图 24 / 视频 3 / 音频 3）。槽位数是工作流节点的物理端口数，不是模型能力（ADR 0017）——先有对应端口的工作流再改这里的数字；缺失时读取口回落默认值。与 `agent.yaml`（模型侧）分开：换模型不该误改槽位。
+
 ## 目录结构
 
 ```
 src/minimax_h3_prompt/
 ├── main.py              # CLI（wizard 向导 / brief 快路径 / create-video / generate-prompts）
 ├── config.py            # YAML + `.env` 统一配置（API key 仅从 `.env` 读取）
+├── workflow_config.py   # 工作流登记名与参考槽位数（`config/workflow.yaml`）
 ├── model_factory.py     # LLM 后端工厂（自动探测）
 ├── brief_parser.py      # brief 解析
 ├── topic_generation.py  # 主题 → 提示词单入口（落盘到 output/sessions）

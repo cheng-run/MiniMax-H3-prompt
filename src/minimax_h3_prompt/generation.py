@@ -16,17 +16,19 @@ from .tools.theme_guard import (
     contains_unqualified_conflict as _contains_unqualified_conflict,
     scene_requirement_groups,
 )
+from .workflow_config import workflow_settings
 
 PromptKind = Literal["script", "video", "character", "prop", "scene"]
 _PROMPT_KINDS = ("script", "video", "character", "prop", "scene")
 _GENERATION_ID = re.compile(r"^GEN\d{3}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
-# 多参（ref2va）路线的登记工作流名。**唯一可写来源**（issue #41 AC6）：产物/菜单/注入卡
-# 的指称都要对得上「59-(多Lora改)MiniMax-H3 ref2va 多参生视频 V2」，两处各写一份就会
-# 漂成两个名字（用户按名字进 ComfyUI 找不到工作流）。文档引文与它的一致性由守卫测试
+# 多参（ref2va）路线的登记工作流名。**唯一可写来源是 config/workflow.yaml**
+# （issue #41 AC6 → issue #65 改为配置派生）：产物/菜单/注入卡的指称都要对得上
+# 「V3（24图槽）」，两处各写一份就会漂成两个名字（用户按名字进 ComfyUI 找不到
+# 工作流）。这里只是给既有 import 面留的只读别名；文档引文与它的一致性由守卫测试
 # ``tests/test_ref_route_prompts.py`` 钉住；旧称「工作流 63」已废弃。
-REF_WORKFLOW_NAME = "59-(多Lora改)MiniMax-H3 ref2va 多参生视频 V2"
+REF_WORKFLOW_NAME = workflow_settings().ref_workflow_name
 
 
 class ImageProfile(NamedTuple):

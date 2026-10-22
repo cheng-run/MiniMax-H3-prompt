@@ -31,6 +31,7 @@ from minimax_h3_prompt.injection_card import (
     slot_name,
     write_injection_card,
 )
+from minimax_h3_prompt.workflow_config import workflow_settings
 
 # ---------------------------------------------------------------------------
 # 1. 尺寸推导：与 59- 工作流节点同口径（AC2）
@@ -157,9 +158,12 @@ def test_out_of_contract_values_are_rejected_loudly(needle, kwargs):
 # 2. 槽位映射：素材名→槽位，编号按剧本出场顺序（AC1 的映射口径）
 # ---------------------------------------------------------------------------
 
+# 槽位映射的样例覆盖：首尾两种边界都取，图槽上限从工作流配置派生（issue #65：
+# 不再把 9 当边界——配置一改，这里跟着走）。
+_PICTURE_CAP = workflow_settings().slot_count(KIND_PICTURE)
 SLOT_CASES = (
     ("picture", 1, "ref_image_0"),   # <Picture 1> 进第一个图槽：编号即叙事顺序
-    ("picture", 9, "ref_image_8"),
+    ("picture", _PICTURE_CAP, f"ref_image_{_PICTURE_CAP - 1}"),
     ("video", 1, "ref_video_0"),
     ("audio", 1, "ref_audio_0"),
     ("audio", 3, "ref_audio_2"),
@@ -173,18 +177,21 @@ def test_slot_name_maps_ledger_number_to_workflow_slot(kind, number, expected):
 
 
 def test_slot_name_rejects_numbers_beyond_the_physical_ports():
-    """槽位是真实端口名：越界编号不造名（图 9 / 视频 3 / 音频 3 是硬端口数）。
+    """槽位是真实端口名：越界编号不造名（端口数从工作流配置派生，不钉死 9）。
 
-    第 10 张图若渲成 `ref_image_9`，照卡接线会接到不存在的端口——接线清单的
+    超过端口数若仍渲出 `ref_image_N`，照卡接线会接到不存在的端口——接线清单的
     最低义务是每行都能接得上（复审 (a)1）。
     """
+
+    settings = workflow_settings()
+    picture_cap = settings.slot_count(KIND_PICTURE)
     with pytest.raises(ValueError) as excinfo:
-        slot_name("picture", 10)
-    assert "9" in str(excinfo.value), "报错要给出端口数（可赢信息）"
+        slot_name(KIND_PICTURE, picture_cap + 1)
+    assert str(picture_cap) in str(excinfo.value), "报错要给出端口数（可赢信息）"
     with pytest.raises(ValueError):
-        slot_name("video", 4)
+        slot_name(KIND_VIDEO, settings.slot_count(KIND_VIDEO) + 1)
     with pytest.raises(ValueError):
-        slot_name("audio", 4)
+        slot_name(KIND_AUDIO, settings.slot_count(KIND_AUDIO) + 1)
 
 
 def test_preset_table_carries_exactly_the_ten_node_widget_labels():
@@ -252,11 +259,10 @@ def test_card_records_the_widget_triple_and_final_size():
 
 
 def test_card_carries_the_registered_workflow_name():
-    """AC3：注入卡含登记工作流名（与产物/菜单同一指称，REF_WORKFLOW_NAME 单一来源）。"""
-    from minimax_h3_prompt.generation import REF_WORKFLOW_NAME
+    """AC3：注入卡含登记工作流名（与产物/菜单同一指称，workflow.yaml 单一来源）。"""
 
     text = render_injection_card(_ledger_with(), VideoOutputParams())
-    assert REF_WORKFLOW_NAME in text
+    assert workflow_settings().ref_workflow_name in text
 
 
 def test_card_warns_on_number_gaps_that_shift_model_labels():
@@ -459,17 +465,79 @@ def test_brief_snapshot_records_the_video_output_triple():
                                         "megapixels": 1.0, "multiple": 16}
 
 
-def test_card_never_maps_assets_to_nonexistent_ports():
-    """溢出台账不渲假端口：标「无对应槽位」＋点名告警，缺号警告只扫真实端口范围。"""
-    ten_pictures = _ledger_with(*[
-        _entry(f"人物{i}", KIND_PICTURE, i, f"assets/picture-{i:02d}.png")
-        for i in range(1, 11)  # 10 张图：第 10 张无端口（图槽只有 0..8）
+def test_card_maps_all_24_picture_slots_from_config():
+    """AC2（issue #65）：24 张素材逐条给出 `ref_image_0..ref_image_23`，一个都不越界。
+
+    旧版把 9 当物理事实写死，24 张里 15 张被标「无对应槽位」——用户无端口可接
+    （ADR 0017 的真实事故）。槽位数改为读 ``config/workflow.yaml`` 后，1..24 全有槽。
+    """
+
+    cap = workflow_settings().slot_count(KIND_PICTURE)
+    ledger = _ledger_with(*[
+        _entry(f"素材{i}", KIND_PICTURE, i, f"assets/picture-{i:02d}.png")
+        for i in range(1, cap + 1)
     ])
-    text = render_injection_card(ten_pictures, VideoOutputParams())
-    assert "ref_image_9" not in text, "越界编号不得渲出不存在的端口名"
+    text = render_injection_card(ledger, VideoOutputParams())
+    for i in range(1, cap + 1):
+        assert f"ref_image_{i - 1}" in text, f"第 {i} 张没有槽位"
+    assert "无对应槽位" not in text and "槽位越界" not in text, "24 张不该有越界告警"
+    assert "缺号" not in text, "1..24 齐全，不得误报缺号"
+
+
+def test_card_never_maps_assets_to_nonexistent_ports():
+    """溢出台账不渲假端口：标「无对应槽位」＋点名告警，缺号警告只扫真实端口范围。
+
+    边界从工作流配置派生（issue #65：不再钉死 9）——配置一改，这里跟着走。
+    """
+
+    cap = workflow_settings().slot_count(KIND_PICTURE)
+    overflowed = _ledger_with(*[
+        _entry(f"人物{i}", KIND_PICTURE, i, f"assets/picture-{i:02d}.png")
+        for i in range(1, cap + 2)  # cap+1 张图：最后一张无端口
+    ])
+    text = render_injection_card(overflowed, VideoOutputParams())
+    assert f"ref_image_{cap}" not in text, "越界编号不得渲出不存在的端口名"
     assert "无对应槽位" in text and "槽位越界" in text
-    assert "人物10" in text            # 溢出条目仍列名（不静默丢）
-    assert "缺号" not in text          # 1..9 齐全，不得误报缺号
+    assert f"人物{cap + 1}" in text    # 溢出条目仍列名（不静默丢）
+    assert "缺号" not in text          # 1..cap 齐全，不得误报缺号
+
+
+def test_card_25th_picture_is_marked_slotless_with_widening_guidance():
+    """AC3（issue #65）：24 槽下第 25 张标「无对应槽位」＋告警给出扩端口指引。
+
+    不渲 `ref_image_24`（那是不存在的端口），但也不静默丢素材——照卡接线的人要
+    知道该改哪里：新建端口更多的工作流，再把槽位数写进配置。
+    """
+    ledger = _ledger_with(*[
+        _entry(f"素材{i}", KIND_PICTURE, i, f"assets/picture-{i:02d}.png")
+        for i in range(1, 26)  # 25 张：第 25 张超出 24 个图槽
+    ])
+    text = render_injection_card(ledger, VideoOutputParams())
+    assert "ref_image_23" in text and "ref_image_24" not in text
+    assert "无对应槽位" in text and "素材25" in text
+    assert "扩工作流端口" in text, "告警要给出「去扩工作流端口」的指引"
+    assert "缺号" not in text, "1..24 齐全，不得误报缺号"
+
+
+def test_card_boundary_follows_the_workflow_config(tmp_path, monkeypatch):
+    """AC4（issue #65）：改配置即改边界——不重载模块、不重建卡函数。
+
+    把生效配置换成图 3 槽：3 张全有槽、第 4 张越界。若实现里还留着写死的 24/9，
+    这条立刻红（守卫的变异检验）。
+    """
+    from minimax_h3_prompt import workflow_config
+
+    path = tmp_path / "workflow.yaml"
+    path.write_text("slots:\n  picture: 3\n", encoding="utf-8")
+    monkeypatch.setattr(workflow_config, "WORKFLOW_CONFIG_PATH", path)
+    ledger = _ledger_with(*[
+        _entry(f"素材{i}", KIND_PICTURE, i, f"assets/picture-{i:02d}.png")
+        for i in range(1, 5)
+    ])
+    text = render_injection_card(ledger, VideoOutputParams())
+    assert "ref_image_0" in text and "ref_image_2" in text
+    assert "ref_image_3" not in text
+    assert "无对应槽位" in text and "素材4" in text
 
 
 def test_card_warns_when_two_entries_claim_the_same_port():

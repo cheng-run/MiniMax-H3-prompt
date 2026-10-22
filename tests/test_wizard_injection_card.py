@@ -158,6 +158,8 @@ def _run_full_flow(tmp_path, monkeypatch, canvases: dict | None = None):
 def test_wizard_derives_video_output_without_asking(tmp_path, monkeypatch):
     """AC1/AC2：向导不再出现视频尺寸问答；三元组由画布自动推导并复现当日手选值
     ——画布 1280×720 推出 16:9 · 0.9MP · 32 → 1280×736。"""
+    from minimax_h3_prompt.workflow_config import workflow_settings
+
     card, asked = _run_full_flow(tmp_path, monkeypatch, {"zimage": (1280, 720)})
     for question in asked:
         assert "视频输出" not in question and "生成尺寸" not in question, question
@@ -166,7 +168,7 @@ def test_wizard_derives_video_output_without_asking(tmp_path, monkeypatch):
     assert "16:9 (Widescreen)" in text                      # AC2 比例档（继承画布）
     assert "megapixels：0.9" in text and "对齐倍数：32" in text
     assert "1280 × 736" in text                             # AC2 最终 W×H
-    assert "59-(多Lora改)MiniMax-H3 ref2va 多参生视频 V2" in text  # AC3 登记名
+    assert workflow_settings().ref_workflow_name in text  # AC3 登记名（配置单一来源）
 
 
 def test_derived_triple_lands_in_the_session_brief(tmp_path, monkeypatch):

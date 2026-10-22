@@ -40,7 +40,8 @@ from .asset_ledger import (
     format_tag,
     load_asset_ledger,
 )
-from .generation import REF_WORKFLOW_NAME, image_canvas_size
+from .generation import image_canvas_size
+from .workflow_config import WorkflowSettings, workflow_settings
 
 # 注入卡落盘文件名（生成目录根上，与 asset-ledger.json 同级）。
 CARD_FILENAME = "injection-card.md"
@@ -259,35 +260,38 @@ def _reduce_pair(w_ratio: int, h_ratio: int) -> tuple[int, int]:
     return w_ratio // divisor, h_ratio // divisor
 
 
-# 素材类型 → 工作流槽位前缀（0 起编号，节点端口名逐字）：9 图槽 + 3 视频槽 +
-# 3 视频音频（随视频走，非独立素材）+ 3 音频槽。
+# 素材类型 → 工作流槽位前缀（0 起编号，节点端口名逐字）：图槽 + 视频槽 +
+# 视频音频（随视频走，非独立素材）+ 音频槽。
 _SLOT_PREFIX = {
     KIND_PICTURE: "ref_image_",
     KIND_VIDEO: "ref_video_",
     KIND_AUDIO: "ref_audio_",
 }
-# 各型槽位数是**物理端口数**（JZL_MiniMaxH3Ref2vaBus 的 BUS_KEYS 实测：图 0..8、
-# 视频 0..2、音频 0..2）：超出就是造出不存在的端口名，照卡接线接进空气——编号
-# 越界必须响（绝不静默），见 ``slot_name`` 与 ``render_injection_card``。
-_SLOT_COUNTS = {KIND_PICTURE: 9, KIND_VIDEO: 3, KIND_AUDIO: 3}
+# 各型槽位数**不再写死**（issue #65 / ADR 0017）：9 只是旧节点的 UI 上限，不是模型
+# 能力。槽位数是工作流属性，从 ``config/workflow.yaml`` 读（缺省图 24 / 视频 3 /
+# 音频 3）。超出仍是「造出不存在的端口名」——编号越界必须响（绝不静默），见
+# ``slot_name`` 与 ``render_injection_card``。
 # 视频音轨的配对槽位前缀（节点 ``ref_video_audio_N``）：它不是独立素材——台账无此
 # 型，槽位随同号视频走，故不进 _SLOT_PREFIX（进了就多出一种「可登记类型」的读法）。
 _SOUNDTRACK_PREFIX = "ref_video_audio_"
 
 
-def slot_name(kind: str, number: int) -> str:
+def slot_name(kind: str, number: int,
+              settings: WorkflowSettings | None = None) -> str:
     """台账条目 → 工作流参考槽端口名（如 ``<Picture 1>`` → ``ref_image_0``）。
 
     编号 N 映射到同型第 N 个槽（0 起）：台账编号即剧本出场顺序（label continuity），
     按号落槽后模型的 ``<Picture i>`` 等标签与提示词天然对齐。**缺号有坑**——空槽会让
     模型标签前移错位，渲染层见到缺号要报（见 ``render_injection_card``）。
-    **越界不造名**：编号超过该型物理端口数就抛错——照卡接线不能接进不存在的端口。
+    **越界不造名**：编号超过该型端口数就抛错——照卡接线不能接进不存在的端口。
+    ``settings`` 为空时读生效配置（测试换配置即可换边界，见 ``workflow_config``）。
     """
     if kind not in _SLOT_PREFIX:
         raise ValueError(f"参考素材类型无效：{kind!r}（只认 {', '.join(_SLOT_PREFIX)}）")
     if isinstance(number, bool) or not isinstance(number, int) or number < 1:
         raise ValueError(f"官方编号必须是正整数：{number!r}")
-    cap = _SLOT_COUNTS[kind]
+    active = settings or workflow_settings()
+    cap = active.slot_count(kind)
     if number > cap:
         raise ValueError(
             f"参考槽编号越界：{kind} {number} 超出节点槽位数 {cap}"
@@ -295,7 +299,8 @@ def slot_name(kind: str, number: int) -> str:
     return f"{_SLOT_PREFIX[kind]}{number - 1}"
 
 
-def _missing_slots(entries: tuple[AssetRecord, ...]) -> list[str]:
+def _missing_slots(entries: tuple[AssetRecord, ...],
+                   settings: WorkflowSettings) -> list[str]:
     """各型「号段有洞」的槽位名（缺号＝模型标签错位的源头，要点名）。
 
     只扫到**已分配最大号**：尾部空置的端口是正常留白（不移位），号段中间的洞才
@@ -304,30 +309,34 @@ def _missing_slots(entries: tuple[AssetRecord, ...]) -> list[str]:
     """
     missing: list[str] = []
     for kind in (KIND_PICTURE, KIND_VIDEO, KIND_AUDIO):
+        cap = settings.slot_count(kind)
         numbers = {e.number for e in entries if e.kind == kind}
-        within = {n for n in numbers if n <= _SLOT_COUNTS[kind]}
+        within = {n for n in numbers if n <= cap}
         if not within:
             continue
         for number in range(1, max(within) + 1):
             if number not in within:
-                missing.append(slot_name(kind, number))
+                missing.append(slot_name(kind, number, settings))
     return missing
 
 
 def render_injection_card(ledger: AssetLedger, params: VideoOutputParams,
-                          notes: tuple[str, ...] = ()) -> str:
+                          notes: tuple[str, ...] = (),
+                          settings: WorkflowSettings | None = None) -> str:
     """注入卡全文（纯文本，AC1/AC2/AC3）：接线表 + 三元组 + 登记工作流名 + 附注。
 
     卡是给人照抄的对照清单，**不是可执行载荷**——槽位与正本文件名只住在这里，
     提示词正文一个都不许进（AC4）。缺号、槽位越界、视频音轨配对这三类「接线会
     错位/接空」的坑在附注里说破（绝不静默）。``notes`` 是画布推导的说破行（issue #49
     比例回退/面积夹档），跟在三元组块下——推导替用户做的非常规选择要留底。
+    ``settings`` 为空时读生效的工作流配置（登记名与槽位数同出一源，issue #65）。
     """
+    active = settings or workflow_settings()
     width, height = params.size
     lines = [
         "# 注入卡（多参 ref2va 接线清单）",
         "",
-        f"登记工作流：{REF_WORKFLOW_NAME}",
+        f"登记工作流：{active.ref_workflow_name}",
         "本卡是给人照抄的对照清单，不是可执行载荷：照卡进 ComfyUI 手动接线，"
         "系统不自动投喂。",
         "",
@@ -337,10 +346,10 @@ def render_injection_card(ledger: AssetLedger, params: VideoOutputParams,
         "| --- | --- | --- | --- | --- |",
     ]
     for entry in ledger.entries:
-        if entry.number > _SLOT_COUNTS[entry.kind]:
+        if entry.number > active.slot_count(entry.kind):
             slot_cell = "（无对应槽位）"  # 越界编号不造假端口名（照卡接线不得接进空气）
         else:
-            slot_cell = slot_name(entry.kind, entry.number)
+            slot_cell = slot_name(entry.kind, entry.number, active)
         lines.append(
             f"| {slot_cell} | {entry.name} "
             f"| {KIND_LABELS[entry.kind]} | {format_tag(entry.kind, entry.number)} "
@@ -364,30 +373,31 @@ def render_injection_card(ledger: AssetLedger, params: VideoOutputParams,
     ]
     videos = [e for e in ledger.entries if e.kind == KIND_VIDEO]
     audios = [e for e in ledger.entries if e.kind == KIND_AUDIO]
+    video_cap = active.slot_count(KIND_VIDEO)
     for entry in videos:
-        if entry.number <= _SLOT_COUNTS[KIND_VIDEO]:
+        if entry.number <= video_cap:
             # 配对槽与视频同号（节点 index-paired：ref_video_audio_N 属 ref_video_N）
             lines.append(
                 f"- 素材视频「{entry.name}」的音轨接 {_SOUNDTRACK_PREFIX}{entry.number - 1}"
                 "（视频加载器的 audio 输出；无音轨则空着）。")
-    if any(e.number <= _SLOT_COUNTS[KIND_VIDEO] for e in videos) and audios:
+    if any(e.number <= video_cap for e in videos) and audios:
         lines.append(
             "- 素材视频自带音轨时，该音轨在提示词里占一个 <Audio> 号（排在该 <Video> 之前）"
             "——独立音频的 <Audio> 编号可能与台账标签对不上，接线以本卡槽位为准。")
-    overflow = [e for e in ledger.entries if e.number > _SLOT_COUNTS[e.kind]]
+    overflow = [e for e in ledger.entries if e.number > active.slot_count(e.kind)]
     for entry in overflow:
-        cap = _SLOT_COUNTS[entry.kind]
+        cap = active.slot_count(entry.kind)
         lines.append(
             f"- ⚠ 槽位越界：「{entry.name}」{format_tag(entry.kind, entry.number)} 编号 "
             f"{entry.number} 超出节点{KIND_LABELS[entry.kind]}槽位数 {cap}——工作流无对应"
-            "端口，照卡接线接不到它；需精简素材（该型只吃 "
-            f"{cap} 个）。")
+            "端口，照卡接线接不到它；可精简素材，或去扩工作流端口"
+            "（新建一个该型端口更多的工作流，再把槽位数写进 config/workflow.yaml）。")
     # 同号重复＝多行抢同一端口，只有一行接得上（台账编号未强制唯一时的防御性告警）
     claimed: dict[tuple[str, int], str] = {}
     for entry in ledger.entries:
         key = (entry.kind, entry.number)
         if key in claimed:
-            port = (slot_name(*key) if entry.number <= _SLOT_COUNTS[entry.kind]
+            port = (slot_name(*key, active) if entry.number <= active.slot_count(entry.kind)
                     else "（无对应槽位）")
             lines.append(
                 f"- ⚠ 同号重复：「{claimed[key]}」与「{entry.name}」同为 "
@@ -395,7 +405,7 @@ def render_injection_card(ledger: AssetLedger, params: VideoOutputParams,
                 "请核对台账编号后重交其一。")
         else:
             claimed[key] = entry.name
-    missing = _missing_slots(ledger.entries)
+    missing = _missing_slots(ledger.entries, active)
     if missing:
         lines.append(
             f"- ⚠ 缺号：{', '.join(missing)} 无登记素材——空槽会让模型 <Picture N> 等标签"
@@ -413,12 +423,13 @@ class CardWrite(NamedTuple):
 
 
 def write_injection_card(directory: str | Path, params: VideoOutputParams,
-                         notes: tuple[str, ...] = ()) -> CardWrite:
+                         notes: tuple[str, ...] = (),
+                         settings: WorkflowSettings | None = None) -> CardWrite:
     """渲染并落盘注入卡（向导与结构化产物出口共用这一份，issue #45）。
 
     台账从生成目录读回（``asset-ledger.json``，没有就当空台账——映射区写「无登记
     素材」而参数区照出，视频输出参数本身可照抄）。``notes`` 是推导说破行，进参数
-    块附注（issue #49）。
+    块附注（issue #49）；``settings`` 透传给渲染层（issue #65 的槽位口径）。
 
     **已存在不覆盖**（issue #49 AC4）：卡是手改出口，用户改完系统再渲染回写＝把手改
     抹掉。要重出新卡，用户删除 ``injection-card.md`` 后重跑——删除是显式动作，与
@@ -428,6 +439,7 @@ def write_injection_card(directory: str | Path, params: VideoOutputParams,
     path = base / CARD_FILENAME
     if path.exists():
         return CardWrite(path, path.read_text(encoding="utf-8"), False)
-    text = render_injection_card(load_asset_ledger(base), params, notes=notes)
+    text = render_injection_card(load_asset_ledger(base), params, notes=notes,
+                                 settings=settings)
     path.write_text(text, encoding="utf-8")
     return CardWrite(path, text, True)
