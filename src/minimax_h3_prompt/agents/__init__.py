@@ -9,6 +9,7 @@ deepagents 的"有界圆桌/讨论"思想已用 LangGraph 子图实现（graph/r
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -397,6 +398,160 @@ def _call_failure(
     )
 
 
+def _retry_allowed(attempt_no: int, remaining: float) -> bool:
+    """还能不能再发一次：**次数上限与剩余预算两道界**（与调用本身同源）。
+
+    只看预算的话，1200 ÷ 30 = 40 次，最坏延迟仍不可接受；只看次数的话，每次都可能
+    耗满读超时，同样没有硬顶（ADR 0015）。重试还要求剩余预算**撑得起一次首字节线**
+    ——连 30 秒都等不起的剩余预算没有意义。
+
+    抽成一个函数是因为它有三处消费者（``run_agent`` 的卡住分支、审核拦截分支与
+    直调入口）。抄三份就是三处会各自漂移的口径：改上限时漏一处，那条路径会**静默**
+    多重试或少重试（本仓「同一契约不许两处口径」）。
+    """
+    return (
+        attempt_no < model_factory._LLM_MAX_ATTEMPTS
+        and remaining >= model_factory._LLM_READ_TIMEOUT_SECONDS
+    )
+
+
+def _emit_stuck_then_maybe_retry(
+    role: str, *, elapsed: float, attempt_no: int, remaining: float,
+) -> bool:
+    """发 ``stuck``，够条件再发 ``retrying`` 并返回 True（调用方继续下一轮）。
+
+    事件字段是 issue #62 定死的契约：``stuck.attempt``＝刚失败的尝试序号；
+    ``retrying.attempt``＝即将发起的尝试序号（已试次数 + 1）；``retry``＝**重试序号**
+    （1 起）＝``attempt - 1``，派生只在这一处（渲染层再减一次就会错位）。
+    """
+    reporter.emit({
+        "type": "agent_wait", "role": role, "state": "stuck",
+        "elapsed": elapsed, "attempt": attempt_no,
+    })
+    if not _retry_allowed(attempt_no, remaining):
+        return False
+    reporter.emit({
+        "type": "agent_wait", "role": role, "state": "retrying",
+        "attempt": attempt_no + 1,
+        "retry": attempt_no,
+        "remaining_budget": max(0.0, remaining),
+    })
+    return True
+
+
+@dataclass(frozen=True)
+class DirectCallResult:
+    """一次直调的结果（issue #67 / ADR 0019）：**不抛异常、不返回 None**。
+
+    为什么要一个结果对象而不是继续返回 ``None``：静默降级的根源就是调用方分不清
+    「调失败了」与「调成功了但内容空」，于是只能一律回退且一句话不说。病因与尝试
+    次数必须能随结果一起回到调用方手里，由**调用方**决定回退（拆段回退机械拆分、
+    写段保持原词）——回退本身是对的，静默才是错的（ADR 0019）。
+    """
+
+    ok: bool
+    # 成功时的原始响应对象：调用方还要用它取 ``.content`` 与 ``usage_metadata``，
+    # 入口不替它做归一化（各调用点的取文本口径不相同，见 #70）。
+    response: object | None = None
+    # 失败时面向用户的一段话（含网关、尝试次数、下一步）；成功时为 None。
+    error: str | None = None
+    # 真正发起过几次调用（含首次）。调用方拿它打印「已试 N 次」。
+    attempts: int = 1
+    duration: float = 0.0
+
+    @property
+    def text(self) -> str:
+        """成功时的纯文本；失败时空串。
+
+        取法与各直调调用点改动前**逐字相同**（``str(getattr(resp, "content", resp))``）：
+        这是同一个「取最终文本」约定，别在这里另立一套归一口径。
+        """
+        if self.response is None:
+            return ""
+        return str(getattr(self.response, "content", self.response))
+
+
+def run_direct_call(llm, request: str, *, role: str) -> DirectCallResult:
+    """包装**一次直接模型调用**（``llm.invoke``），接上与 ``run_agent`` 同一份看门狗。
+
+    判据与 ``run_agent`` 逐条同源（ADR 0015/#61），不另立第二套：
+
+    - **首字节前**超时 → 判卡住 → 可重试（重试新建连接会触发 DNS 重解析，实测换到过
+      另一个网关节点，被卡住的那次重试确实救回来过）；
+    - **首字节后**超时 → 不重试，直接给带病因的失败结果；
+    - 尝试上限 ``_LLM_MAX_ATTEMPTS`` 与调用预算 ``_LLM_CALL_BUDGET_SECONDS`` 并列成
+      两道界，且重试还要求剩余预算撑得起一次首字节线；
+    - 其他异常 → 不重试、不抛出，原样把病因放进结果（调用方据此报人话或回退）。
+
+    事件契约与角色调用**同形**（``agent_start`` / ``agent_wait`` 的 first_byte、
+    generating、stuck、retrying / ``agent_done``），所以既有的 ``TextProgress`` 与
+    ``LiveProgress`` 不用改就能渲染它（issue #62 把事件与渲染分开的那笔投资）。
+
+    token 记账走 ``record_agent_call``：直调路径此前整个在成本表外，统一入口后顺带
+    进账（ADR 0019「后果」第一条，成本数字上升属预期变化）。
+    """
+    reporter.emit({"type": "agent_start", "role": role})
+    started = time.monotonic()
+    deadline = started + model_factory._LLM_CALL_BUDGET_SECONDS
+    attempt_no = 0
+    while True:
+        attempt_no += 1
+        # 每次尝试都换一个 handler：stuck/midstream 的 ``elapsed`` 都以本次尝试为起点计时，
+        # 与 run_agent 相同（跨尝试累计的耗时由结果对象的 duration 承担）。
+        handler = FirstByteHandler(role)
+        try:
+            response = llm.invoke(request, config={"callbacks": [handler]})
+        except Exception as exc:  # noqa: BLE001 - 失败的判定在这里分派，交出结果而不是异常
+            now = time.monotonic()
+            if not _is_timeout_error(exc):
+                return DirectCallResult(
+                    ok=False,
+                    error=(
+                        f"{role} 调用失败：{type(exc).__name__}: {exc}"
+                        "\n这不是超时（看门狗只管「卡住」），原样重发大概率同样失败，故不重试。"
+                    ),
+                    attempts=attempt_no,
+                    duration=now - started,
+                )
+            if handler.first_byte_at is not None:
+                return DirectCallResult(
+                    ok=False,
+                    error=str(_call_failure(
+                        role,
+                        phase="midstream",
+                        elapsed=handler.seconds_since_first_byte(),
+                        attempts=attempt_no,
+                        remaining=deadline - now,
+                    )),
+                    attempts=attempt_no,
+                    duration=now - started,
+                )
+            elapsed = handler.seconds_since_start()
+            remaining = deadline - now
+            if _emit_stuck_then_maybe_retry(
+                role, elapsed=elapsed, attempt_no=attempt_no, remaining=remaining
+            ):
+                continue
+            return DirectCallResult(
+                ok=False,
+                error=str(_call_failure(
+                    role,
+                    phase="stuck",
+                    elapsed=elapsed,
+                    attempts=attempt_no,
+                    remaining=remaining,
+                )),
+                attempts=attempt_no,
+                duration=time.monotonic() - started,
+            )
+        out = str(getattr(response, "content", response))
+        duration = time.monotonic() - started
+        # 与 run_agent 同一条记账口：token 计量 + agent_done（duration 含全部重试）。
+        record_agent_call(role, [response], out, duration)
+        return DirectCallResult(
+            ok=True, response=response, attempts=attempt_no, duration=duration)
+
+
 def run_agent(agent: object, message: str, retry_empty: bool = True) -> str:
     """invoke 一个角色 agent，返回最终回答的纯文本。
 
@@ -445,10 +600,7 @@ def run_agent(agent: object, message: str, retry_empty: bool = True) -> str:
                 # 没拿到」，多来一轮的代价与首字节线同量级；但重试时**要改请求**——
                 # 同输入重采样未必换掉触发点，所以追加一句「换更克制的措辞」。
                 remaining = deadline - time.monotonic()
-                if (
-                    attempt_no < model_factory._LLM_MAX_ATTEMPTS
-                    and remaining >= model_factory._LLM_READ_TIMEOUT_SECONDS
-                ):
+                if _retry_allowed(attempt_no, remaining):
                     reporter.emit({
                         "type": "agent_wait", "role": role, "state": "retrying",
                         "attempt": attempt_no + 1,
@@ -472,25 +624,12 @@ def run_agent(agent: object, message: str, retry_empty: bool = True) -> str:
                     remaining=deadline - time.monotonic(),
                 ) from exc
             elapsed = handler.seconds_since_start() if handler else time.monotonic() - started
-            reporter.emit({
-                "type": "agent_wait", "role": role, "state": "stuck",
-                "elapsed": elapsed, "attempt": attempt_no,
-            })
+            # attempt/retry 的语义与「次数 + 预算」两道界都住在
+            # ``_emit_stuck_then_maybe_retry``（与直调入口共用同一份判据）。
             remaining = deadline - time.monotonic()
-            # attempt 事件语义：stuck.attempt = 刚失败的尝试序号；
-            # retrying.attempt = 即将发起的尝试序号（后者＝已试次数 + 1）。
-            # retry 是**重试序号**（1 表示第一次重试）＝ attempt - 1，由这里派生：
-            # 渲染层再自己减一次就会与 attempt 错位（issue #62 裁定 2）。
-            if (
-                attempt_no < model_factory._LLM_MAX_ATTEMPTS
-                and remaining >= model_factory._LLM_READ_TIMEOUT_SECONDS
+            if _emit_stuck_then_maybe_retry(
+                role, elapsed=elapsed, attempt_no=attempt_no, remaining=remaining
             ):
-                reporter.emit({
-                    "type": "agent_wait", "role": role, "state": "retrying",
-                    "attempt": attempt_no + 1,
-                    "retry": attempt_no,
-                    "remaining_budget": max(0.0, remaining),
-                })
                 continue
             raise _call_failure(
                 role,

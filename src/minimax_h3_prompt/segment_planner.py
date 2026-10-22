@@ -264,23 +264,36 @@ def _boundaries_on_cuts(plans: list[SegmentPlan], shot_cuts: tuple[int, ...]) ->
     return True
 
 
+# 直调路径在事件与成本表里的角色名（与 ``role_vision`` 同形）：分段规划此前绕过
+# ``run_agent``，等待事件与 token 都不在账上（ADR 0019）。
+SEGMENT_PLANNER_ROLE = "role_segment_planner"
+
+
 def plan_segments(shot_table: str, total_s: float, llm, *, frame_context: str = "",
                   revision_context: str = "", mode: str = "base",
                   shot_cuts: tuple[int, ...] | None = None) -> list[SegmentPlan] | None:
-    """调 LLM 规划分段；任一失败返回 None（调用方回退机械拆分）。
+    """调 LLM 规划分段；**回复不合格返回 None**（调用方回退机械拆分）。
 
-    shot_table：阶段 1 的「分镜设计」文本（[Shot N] 描述 + 切点）。
-    frame_context：真实关键帧图片的读图结果（``segment_prompts.frame_anchor_context``）。
+    ``shot_table``：阶段 1 的「分镜设计」文本（[Shot N] 描述 + 切点）。
+    ``frame_context``：真实关键帧图片的读图结果（``segment_prompts.frame_anchor_context``）。
     分镜表只是**计划**，用户可能复用/修改首帧图；两者冲突时以图片为准，否则
     plan 层会把「空店→猫进门」这类已被图片否定的状态固化进每一段。
-    revision_context：用户的累积修订 ＋ 注入优先序（``segment_prompts.render_revision_context``）。
+    ``revision_context``：用户的累积修订 ＋ 注入优先序（``segment_prompts.render_revision_context``）。
     本函数**不依赖 state**——修订与帧锚一样经显式入参进来，于是「规划层到底看到了什么」
     在调用点一眼可见；issue #26 的断链正是「收了一个没人读的参数」那种形态。
 
-    mode="ref"（多参分段，issue #46）：换 ref 规划指令（镜头切点边界、4–15s、
+    ``mode="ref"``（多参分段，issue #46）：换 ref 规划指令（镜头切点边界、4–15s、
     起止状态英文进提示词），解析侧同时启用 ref 契约（状态必填 + 切点对齐）。
-    shot_cuts：镜头切点表（含 0 与 total），供「边界落在镜头切点」的确定性校验；
+    ``shot_cuts``：镜头切点表（含 0 与 total），供「边界落在镜头切点」的确定性校验；
     抽不出切点时传 None，只靠指令约束。
+
+    **调用走直调等待看门狗**（issue #67 / ADR 0019）：首字节心跳、仅首字节前的卡住
+    重试、调用预算与 token 记账都与角色调用同源。两种失败分开表达，别压成一句：
+
+    - **调用失败**（卡住到上限 / 中流断流 / 其他异常）→ 抛 ``RuntimeError``，文案带
+      病因与尝试次数。调用方拿它打印「为什么回退」——票面 AC 要求原因与次数可见。
+    - **回复不合格**（非 JSON、时长档/切点/状态声明不合契约）→ 返回 None。这是内容
+      病，重发同样的问题没有意义，交回调用方回退机械拆分。
     """
     total_int = int(round(total_s))
     frame_block = (
@@ -295,9 +308,12 @@ def plan_segments(shot_table: str, total_s: float, llm, *, frame_context: str = 
         f"{revision_block}"
         f"\n分镜表：\n{shot_table}"
     )
-    try:
-        response = llm.invoke(request)
-    except Exception:  # noqa: BLE001
-        return None
-    text = getattr(response, "content", response)
-    return parse_segment_plan(str(text), total_int, mode=mode, shot_cuts=shot_cuts)
+    # 延迟导入：agents 会拉起 langchain 的角色装配栈，而本模块也被 --brief 快路径
+    # 直接 import；把这条依赖压在真正调用的那一刻，别拖慢入口。
+    from .agents import run_direct_call  # noqa: PLC0415 - 避免入口期拉起角色装配栈
+
+    result = run_direct_call(llm, request, role=SEGMENT_PLANNER_ROLE)
+    if not result.ok:
+        # 调用失败不可能是「回复不合格」：把带病因与次数的诊断原样交给调用方。
+        raise RuntimeError(result.error)
+    return parse_segment_plan(result.text, total_int, mode=mode, shot_cuts=shot_cuts)

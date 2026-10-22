@@ -19,7 +19,13 @@ from rich.console import Console
 
 from minimax_h3_prompt.agents import run_agent
 from minimax_h3_prompt.observability import reporter
-from minimax_h3_prompt.ui.progress import LiveProgress, TextProgress, format_wait_event
+from minimax_h3_prompt.ui.progress import (
+    LiveProgress,
+    TextProgress,
+    format_step_banner,
+    format_wait_event,
+    step_scope,
+)
 
 ROLE = "role_art_director"
 NAME = "art_director"  # role_label 剥掉 role_ 前缀后的用户可读名
@@ -276,3 +282,46 @@ class TestTopicProgress:
         _topic_progress({"type": "agent_done", "role": ROLE, "duration": 2.5})
         lines = capsys.readouterr().out.splitlines()
         assert lines == ["[进行中] art_director 正在处理……", "[完成] art_director（2.5s）"]
+
+
+class TestStepBanner:
+    """步骤横幅（issue #67 / ADR 0019）：回答「在干什么、第几轮」，与心跳分开。
+
+    心跳（``format_wait_event``）回答「还活着吗」——两种信号不可互相代替，所以横幅
+    不带已等时长，轮次也不许省成「进行中」。
+    """
+
+    def test_banner_carries_action_and_round(self):
+        assert format_step_banner("正在分段规划") == "▶ 正在分段规划（第 1/1 轮）……"
+
+    def test_banner_follows_given_round_numbers(self):
+        """轮次取自入参（qa 复审那种多轮长步骤要用），渲染层不写死 1/1。"""
+        line = format_step_banner("正在 qa 复审", round_no=2, total_rounds=3)
+        assert "第 2/3 轮" in line
+
+    def test_step_scope_prints_banner_and_renders_heartbeat(self, capsys):
+        """拆段用的组合：先横幅，等待期间的心跳行由同一个作用域打印。"""
+        got: list[dict] = []
+        reporter.subscribe(got.append)
+        try:
+            with step_scope("正在分段规划"):
+                reporter.emit({"type": "agent_wait", "role": ROLE, "state": "first_byte",
+                               "elapsed": 0.6})
+                reporter.emit({"type": "agent_wait", "role": ROLE, "state": "generating",
+                               "elapsed": 12.0, "chunks": 5, "bytes": 100})
+        finally:
+            reporter.unsubscribe(got.append)
+
+        out = capsys.readouterr().out
+        assert "▶ 正在分段规划（第 1/1 轮）……" in out
+        assert "已等 12s" in out
+        assert out.index("第 1/1 轮") < out.index("已等 12s")
+
+    def test_step_scope_unsubscribes_on_exit(self, capsys):
+        """退出即解绑：否则后面每一步都会重复打印同一串心跳（监听器越叠越多）。"""
+        with step_scope("正在分段规划"):
+            pass
+        capsys.readouterr()  # 丢掉横幅那一行
+        reporter.emit({"type": "agent_wait", "role": ROLE, "state": "first_byte",
+                       "elapsed": 0.5})
+        assert capsys.readouterr().out == ""

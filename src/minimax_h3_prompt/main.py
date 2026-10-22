@@ -511,9 +511,13 @@ def main(argv: list[str] | None = None) -> int:
 def _deliver_ref_segments_cli(brief, prompt: str, out_dir) -> None:
     """--brief 快路径的多参分段交付（issue #46）：薄接线，编排/文案与向导同一份。"""
     from .ref_segments import deliver_ref_segments
+    from .ui.progress import step_scope
 
-    _result, report = deliver_ref_segments(
-        whole_prompt=prompt, total_s=brief.duration, out_dir=out_dir, brief=brief)
+    # 与向导路径同一份等待反馈（issue #67）：快路径也走直调看门狗，横幅与心跳
+    # 不许只在向导里有——两条入口打同一个拆段调用，反馈口径必须一条。
+    with step_scope("正在按镜头切点拆分执行段"):
+        _result, report = deliver_ref_segments(
+            whole_prompt=prompt, total_s=brief.duration, out_dir=out_dir, brief=brief)
     print(report)
 
 

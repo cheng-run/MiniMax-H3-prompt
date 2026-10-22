@@ -1,4 +1,6 @@
 """segment planner（4-10s 整秒分段规划）测试。"""
+import pytest
+
 from minimax_h3_prompt.segment_planner import (
     FRAME_CONTEXT_HEADER,
     SegmentPlan,
@@ -184,7 +186,9 @@ class FakeLLM:
         self.last_request = ""
         self._reply = reply
 
-    def invoke(self, request):
+    # config 是直调等待看门狗传进来的回调配置（issue #67）——生产模型都收这个参数，
+    # 假模型也必须同形，否则接线一上就 TypeError。
+    def invoke(self, request, config=None):
         self.last_request = request
         return self._reply
 
@@ -366,3 +370,72 @@ def test_ref_planner_instruction_declares_no_bridge_semantics():
     anchor_lines = [l for l in instruction.splitlines() if "首帧锚" in l]
     assert anchor_lines, "应当显式声明 end_hook 与首尾帧链的『下段首帧锚』无关"
     assert all("不是" in l for l in anchor_lines)
+
+
+# ---------------------------------------------------------------------------
+# 拆段改走直调等待看门狗（issue #67 / ADR 0019）
+#
+# 此前拆段直接 ``llm.invoke``：没有首字节事件、没有重试、没有预算，异常被吞成 None，
+# 用户只看到白等 30 秒后静默降级为机械拆分。这里钉住两件事：
+# 1) 调用失败会按尝试上限重试，且把病因与次数交回调用方（不再吞掉）；
+# 2) 回复不合格仍是 None——「内容病」与「调用病」不压成一句诊断（ADR 0015）。
+# ---------------------------------------------------------------------------
+
+class _TimeoutLLM:
+    """每次调用都在首字节前超时（生产形态：``openai.APITimeoutError``）。"""
+
+    def __init__(self):
+        self.calls = 0
+
+    def invoke(self, request, config=None):
+        import httpx
+        from openai import APITimeoutError
+
+        self.calls += 1
+        raise APITimeoutError(
+            request=httpx.Request("POST", "https://gw.example/v1/chat/completions"))
+
+
+def test_plan_segments_retries_then_raises_with_cause_and_attempts():
+    """规划调用卡住：按尝试上限重试，然后把「病因＋尝试次数」交给调用方。
+
+    变异检验：把看门狗拆掉（退回裸 ``llm.invoke`` + 吞异常）时，``llm.calls`` 只有 1、
+    也不会抛错——这条即红。
+    """
+    from minimax_h3_prompt import model_factory
+
+    llm = _TimeoutLLM()
+    with pytest.raises(RuntimeError) as excinfo:
+        plan_segments("分镜表：[Shot 1] ……", 9, llm)
+
+    assert llm.calls == model_factory._LLM_MAX_ATTEMPTS
+    msg = str(excinfo.value)
+    assert "卡住" in msg
+    assert f"{model_factory._LLM_MAX_ATTEMPTS} 次" in msg
+
+
+def test_plan_segments_emits_wait_events_for_the_banner_heartbeat():
+    """等待事件从拆段这一层发出——这正是「已等 Xs / 判定卡住」行的来源。"""
+    from minimax_h3_prompt.observability import reporter
+
+    got: list[dict] = []
+    reporter.subscribe(got.append)
+    try:
+        with pytest.raises(RuntimeError):
+            plan_segments("分镜表：[Shot 1] ……", 9, _TimeoutLLM())
+    finally:
+        reporter.unsubscribe(got.append)
+
+    waits = [e for e in got if e.get("type") == "agent_wait"]
+    states = [e["state"] for e in waits]
+    assert states.count("stuck") >= 1
+    assert "retrying" in states
+    assert all(e["role"] == "role_segment_planner" for e in waits)
+
+
+def test_plan_segments_still_returns_none_on_bad_reply():
+    """回复不合格（非 JSON）仍是 None：内容病不重试，交调用方回退机械拆分。"""
+    llm = FakeLLM("not json at all")
+    assert plan_segments("分镜表：[Shot 1] ……", 9, llm) is None
+    # 只调一次：内容病没有重试（重发同样的问题没有意义）
+    assert llm.last_request

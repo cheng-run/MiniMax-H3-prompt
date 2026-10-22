@@ -64,7 +64,7 @@ from ..user_revisions import (
     render_revocation_block,
     revocation_note,
 )
-from .progress import TextProgress
+from .progress import TextProgress, step_scope
 
 
 def resolve_effective_variant(requested: str, have_first: bool, have_last: bool) -> str:
@@ -2027,10 +2027,15 @@ def _deliver_ref_segments(state: dict, brief: Brief, prompt: str,
     """
     from ..ref_segments import deliver_ref_segments
 
-    result, report = deliver_ref_segments(
-        whole_prompt=prompt, total_s=brief.duration, out_dir=generation_dir,
-        state=state, brief=brief)
+    # 多参交付里的拆段是直调路径：横幅＋心跳都在这里成对出现（issue #67）。
+    # 报告仍由本函数打印——它是「产物交付」的结论，不是等待反馈。
+    with step_scope("正在按镜头切点拆分执行段"):
+        result, report = deliver_ref_segments(
+            whole_prompt=prompt, total_s=brief.duration, out_dir=generation_dir,
+            state=state, brief=brief)
     print(report)
+    # 交付也是长阻塞：清掉生成期间误敲的键，别让第一个问答吞掉它们。
+    _drain_stdin()
     return result
 
 
@@ -3528,13 +3533,20 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
         llm = build_chat_model()
         if state.get("shot_table"):
             # 帧图实际画面一并交给规划层：分镜表只是计划，用户可能复用/改了图（冲突时以图为准）
-            with _progress_scope("[分段规划] 正在按 4-10s 整数边界切分剧情并锁定衔接……"):
+            # 步骤横幅＋等待心跳（issue #67 / ADR 0019）：拆段走直调看门狗后，卡住/
+            # 重试/生成中都是事件，必须有订阅者才会变成终端上的行；横幅与订阅成对
+            # 出现（step_scope），不留下「打了横幅却听不到心跳」的半套接线。
+            with step_scope("正在分段规划"):
                 plans = plan_segments(
                     str(state.get("shot_table", "")), brief.duration, llm,
                     frame_context=frame_anchor_context(state),
                     # 修订经**显式入参**交给规划层：它不依赖 state（issue #26 AC-4）
                     revision_context=render_revision_context(state),
                 )
+            # 规划是长阻塞：用户此时误敲的键会滞留在行缓冲里，被下一个 input() 吞掉
+            # （「跳问」）。这一句原先挂在 `_progress_scope` 的退出路径上，换成
+            # step_scope 后必须在这里补回来，否则这一步之后的所有问答都会受影响。
+            _drain_stdin()
     except Exception as exc:  # noqa: BLE001 - 规划失败回退旧路径
         print(f"[提示] 分段规划失败（{exc}），回退到按 [Shot N] 机械拆分。")
 

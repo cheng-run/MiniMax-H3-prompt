@@ -220,7 +220,7 @@ class _V2LLM:
     def __init__(self):
         self.requests: list[str] = []
 
-    def invoke(self, request):
+    def invoke(self, request, config=None):
         self.requests.append(request)
         if "分段规划师" in request:
             return _PLAN_JSON
@@ -247,7 +247,7 @@ class _FallbackLLM:
     def __init__(self):
         self.requests: list[str] = []
 
-    def invoke(self, request):
+    def invoke(self, request, config=None):
         self.requests.append(request)
         if "分段规划师" in request:
             return "not json at all"
@@ -268,6 +268,55 @@ def test_fallback_path_still_delivers_self_contained_segments(tmp_path):
 
 def test_short_film_is_not_segmented_at_source(tmp_path):
     """>15s 才拆是入口守卫的事：编排器面对 ≤15s 也不会硬拆——行为定死。"""
+
+
+# ---------------------------------------------------------------------------
+# 拆段调用失败不再静默（issue #67 / ADR 0019）
+#
+# 规划调用卡住时，回退机械拆分本身是对的；错的是**一句话不说**——用户只看到白等
+# 30 秒后产物换了一种形态。病因与尝试次数随结果一起回来，由交付报告当面打出来。
+# ---------------------------------------------------------------------------
+
+class _TimeoutLLM:
+    """每次调用都在首字节前超时；写段那一步的异常同样被各自的 try 吃掉。"""
+
+    def __init__(self):
+        self.calls = 0
+
+    def invoke(self, request, config=None):
+        import httpx
+        from openai import APITimeoutError
+
+        self.calls += 1
+        raise APITimeoutError(
+            request=httpx.Request("POST", "https://gw.example/v1/chat/completions"))
+
+
+def test_planning_call_failure_is_reported_not_swallowed(tmp_path):
+    """规划调用失败：回退机械拆分，但病因与尝试次数留在结果里（不再静默）。"""
+    from minimax_h3_prompt import model_factory
+
+    llm = _TimeoutLLM()
+    result = _run(tmp_path, llm=llm)
+
+    assert result.used_fallback
+    assert result.planning_failure, "拆段调用失败被吞掉了（又回到静默降级）"
+    assert "卡住" in result.planning_failure
+    assert f"{model_factory._LLM_MAX_ATTEMPTS} 次" in result.planning_failure
+    # 规划真的按看门狗重试过（只调一次说明没接上）
+    assert llm.calls >= model_factory._LLM_MAX_ATTEMPTS
+
+    # 交付报告把这个病因当面打出来（用户不必猜「为什么这次是机械拆的」）
+    from minimax_h3_prompt.ref_segments import format_ref_segment_report
+
+    report = format_ref_segment_report(result)
+    assert "分段规划调用失败" in report
+    assert f"{model_factory._LLM_MAX_ATTEMPTS} 次" in report
+
+
+def test_no_llm_means_no_planning_failure_note(tmp_path):
+    """llm=None 是**有意**的纯机械路线：没有失败可言，不该编一条病因出来。"""
+    assert _run(tmp_path, llm=None).planning_failure == ""
     result = run_ref_segmentation(
         whole_prompt=_WHOLE_30S, total_s=12.0, out_dir=tmp_path,
         llm=None, ref_meta=_REF_META)

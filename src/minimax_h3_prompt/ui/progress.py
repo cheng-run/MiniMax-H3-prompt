@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 import time
+from contextlib import contextmanager
 from typing import Callable
 
 from rich.console import Console, Group
@@ -75,6 +76,35 @@ def format_wait_event(event: dict) -> str | None:
         return (f"↻ {name} 正在重试第 {retry} 次（第 {attempt} 次尝试，"
                 f"剩 {remaining:.0f}s 预算）")
     return None
+
+
+def format_step_banner(action: str, *, round_no: int = 1, total_rounds: int = 1) -> str:
+    """步骤横幅一行：「正在做什么 ＋ 第几轮/N」（issue #67 / ADR 0019）。
+
+    它与心跳是**两种信号**（CONTEXT.md「步骤横幅」）：横幅回答「现在在干什么」，
+    心跳（``format_wait_event``）回答「还活着吗」。所以横幅里**不带**已等时长——
+    那个数属于心跳行，抄两份就是两处会各自漂移的口径。
+    """
+    return f"▶ {action}（第 {round_no}/{total_rounds} 轮）……"
+
+
+@contextmanager
+def step_scope(action: str, *, round_no: int = 1, total_rounds: int = 1):
+    """打印步骤横幅，并在作用域内订阅等待心跳；退出（含异常）必解绑。
+
+    为什么要有这个组合：直调路径的事件只对**已订阅者**可见。拆段与素材循环原先
+    都在进展作用域之外，于是「判定卡住 / 正在重试第 N 次」这些最有用的行没人打印
+    ——用户只看到白等（ADR 0019）。横幅与监听器成对存在，就不会出现「打了横幅
+    却听不到心跳」的半套接线。
+    """
+    print(format_step_banner(action, round_no=round_no, total_rounds=total_rounds),
+          flush=True)
+    listener = TextProgress()
+    reporter.subscribe(listener)
+    try:
+        yield listener
+    finally:
+        reporter.unsubscribe(listener)
 
 
 class TextProgress:

@@ -108,6 +108,10 @@ class RefSegmentResult:
     # 带注记走 ``validate_ref_segment``，不带注记走 ``validate_ref``——拿分段校验器去
     # 判直出文本，那两条注记判据是结构性必挂的假错。
     annotated: bool = True
+    # 拆段**调用失败**的病因（含尝试次数；issue #67 / ADR 0019）。空串＝没有失败：
+    # 纯机械路线（llm=None）与规划成功都是空串，两者不该被说成「失败了」。
+    # 只有「回复不合格」也不进这里——那是内容病，调用本身是通的。
+    planning_failure: str = ""
 
 
 def _task_type_of(sections: dict[str, str]) -> str:
@@ -226,6 +230,12 @@ def format_ref_segment_report(result: RefSegmentResult) -> str:
         f"（4–15s 整数档，不均匀硬切）："
         + ", ".join(f"{p.start_s}-{p.end_s}s" for p in result.plans),
     ]
+    if result.planning_failure:
+        # 回退机械拆分本身是对的，静默才是错的（issue #67 / ADR 0019）：把调用层给的
+        # 病因原话（含尝试次数）打出来，让用户能分清是网络卡住还是内容不合格。
+        lines.append(
+            "[提示] 分段规划调用失败，已回退机械拆分（原因与尝试次数如下）：\n"
+            f"{result.planning_failure}")
     for position, (plan, path) in enumerate(zip(result.plans, result.segment_paths), 1):
         lines.append(f"  第 {position} 段 {plan.start_s}s-{plan.end_s}s（{plan.duration_s}s）→ {path}")
     if result.order_card_path is not None:
@@ -954,12 +964,17 @@ def run_ref_segmentation(*, whole_prompt: str, total_s: float, out_dir: Path,
 
     plans: list[SegmentPlan] | None = None
     used_fallback = False
+    planning_failure = ""
     if llm is not None and blocks:
         cuts = tuple(sorted({w[0] for w in windows} | {total_int}))
         try:
             plans = plan_segments(body, total_int, llm, mode="ref", shot_cuts=cuts)
-        except Exception:  # noqa: BLE001 - 规划失败回退机械拆分
+        except Exception as exc:  # noqa: BLE001 - 规划失败回退机械拆分
+            # **不吞病因**（issue #67）：``plan_segments`` 只在调用失败时抛错（卡住到
+            # 上限/中流断流/其他异常），文案自带尝试次数。回退本身是对的，静默才是错的
+            # ——把原话带进结果，由交付报告当面打给用户。
             plans = None
+            planning_failure = str(exc)
     if not plans:
         used_fallback = True
         packed = pack_shots_into_segments(windows, total_int)
@@ -1014,7 +1029,8 @@ def run_ref_segmentation(*, whole_prompt: str, total_s: float, out_dir: Path,
     return RefSegmentResult(
         plans=list(plans), texts=texts, total_s=total_int, issues=issues,
         segment_paths=segment_paths, order_card_path=card_path,
-        plan_path=plan_path, used_fallback=used_fallback)
+        plan_path=plan_path, used_fallback=used_fallback,
+        planning_failure=planning_failure)
 
 
 def single_segment_result(*, whole_prompt: str, total_s: float, out_dir: Path,
