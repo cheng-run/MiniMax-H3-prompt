@@ -48,8 +48,11 @@ def test_scope_keeps_only_pictures_used_by_this_segment_and_renumbers_from_one()
     assert [(a.new_picture, a.original_picture, a.name) for a in scope.pictures] == [
         (1, 3, "门厅")]
     assert scope.picture_map == {3: 1}
-    # 反向闭包：以这张图为来源的 <Subject 3> 定义也要留下（否则图没定义可挂）
-    assert scope.subject_numbers == (3,)
+    # 这张图**有独立定义行**：它自己把画面讲清楚了，不再反向拉引用它的 Subject 3
+    # （2026-10-22 实测反例：无条件反向拉取会把「全片公寓系统」Subject 拉进只拍卧室的
+    # 段，连带拖入 4 张本段用不到的图）。反向拉取只服务「没有独立定义行、只内联在
+    # Subject 里」的官方写法。
+    assert scope.subject_numbers == ()
 
 
 def test_scope_seeds_from_semantic_names_because_the_body_uses_names():
@@ -78,7 +81,8 @@ def test_scope_keeps_everything_when_the_shot_text_mentions_nothing():
     """分不清本段用哪几张时**保留全部**（宁可超限报错，也不静默让段内无参照）。"""
     scope = _scope("[Shot 1] A wide shot of the empty street.")
     assert [a.original_picture for a in scope.pictures] == [1, 2, 3]
-    assert scope.subject_numbers == (1, 2, 3)
+    # 保留全部＝图与 Subject 都保留：只留图会让段内定义块半缺，正文引用的实体没定义。
+    assert scope.subject_numbers == (1, 2, 3, 4)
 
 
 def test_scope_follows_subject_definitions_into_the_pictures_they_cite():
@@ -164,3 +168,49 @@ def test_injection_card_lists_new_original_name_and_file_in_one_table():
     assert "段 2/5" in card
     assert "| <Picture 1> | <Picture 1> | 红裙女孩 | assets/picture-01.png |" in card
     assert "| <Picture 2> | <Picture 3> | 门厅 | assets/picture-03.png |" in card
+
+
+# ---------------------------------------------------------------------------
+# 反向闭包的边界（issue #75 实测：段 1 被拉成 8 张，其中 4 张本段根本不用）
+# ---------------------------------------------------------------------------
+
+def test_a_picture_with_its_own_definition_does_not_pull_in_every_subject_that_cites_it():
+    """独立 Picture 定义已经讲清楚这张图，就不该反向拉「引用它的全部 Subject」。
+
+    反例（2026-10-22 实测）：段 1 只直接引用 <Picture 1>，反向闭包把「公寓材质与
+    空间系统」Subject 6 拉进来（它引用 Picture 1/4/9/10/24），于是夜间卧室、卸妆棉、
+    窗边起居区全被拖进本段——8 张里有 4 张本段根本拍不到。反向拉取只该服务
+    「图没有独立定义行、只内联在 Subject 里」的官方写法。
+    """
+    defs = (
+        "<Subject 1> is the room system: anchored by <Picture 1> and <Picture 9>.\n"
+        "<Subject 2> is the woman in <Picture 2>.\n"
+        "<Picture 1> is the bedroom anchor for Shot 01.\n"
+        "<Picture 2> is the identity anchor.\n"
+        "<Picture 9> is the nighttime bedroom.\n"
+    )
+    scope = compute_segment_scope(
+        shot_text="Wide shot of the bedroom (<Picture 1>).",
+        subject_definitions=defs,
+        registry=[(1, "卧室", ""), (2, "她", ""), (9, "夜间卧室", "")],
+    )
+    assert [p.original_picture for p in scope.pictures] == [1]
+
+
+def test_picture_definition_references_to_other_pictures_are_followed():
+    """一张图自己的定义里引用了别的图（夜灯/充电器），那些图也必须进本段子集。
+
+    否则段内会留下 `<Picture N>` 悬空引用：模型能看到标签、却拿不到对应参考图，
+    校验器也会报 PICTURE_UNDEFINED（2026-10-22 实测）。
+    """
+    defs = (
+        "<Picture 1> is the bedroom anchor, with the night-light shown in <Picture 3>.\n"
+        "<Picture 2> is the identity anchor.\n"
+        "<Picture 3> is the warm bedside night-light.\n"
+    )
+    scope = compute_segment_scope(
+        shot_text="Wide shot of the bedroom (<Picture 1>).",
+        subject_definitions=defs,
+        registry=[(1, "卧室", ""), (2, "她", ""), (3, "夜灯", "")],
+    )
+    assert [p.original_picture for p in scope.pictures] == [1, 3]

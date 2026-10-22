@@ -216,8 +216,10 @@ def compute_segment_scope(
         if any(name in text for name in mentioned):
             seed_subjects.add(number)
     if not seed_subjects and not seed_pictures:
-        # 无从判定本段素材：保留全部（超限照报，不静默饿死本段）
+        # 无从判定本段素材：保留全部（超限照报，不静默饿死本段）。Subject 也一并保留
+        # ——只留图不留 Subject 会让段内定义块半缺，正文引用的实体没有定义。
         seed_pictures = {picture for picture, _name, _desc in registry}
+        seed_subjects = {number for (kind, number) in entries if kind == "subject"}
 
     pending: list[tuple[str, int]] = [("subject", n) for n in seed_subjects]
     pending += [("picture", n) for n in seed_pictures]
@@ -239,16 +241,26 @@ def compute_segment_scope(
         kept_pictures.add(number)
         entry = entries.get(key)
         if entry:
-            # 独立 Picture 定义里引用的 Subject 一并保留
-            subjects, _pictures = _labels_in(entry)
+            # 独立 Picture 定义：它自己讲清楚了这张图，所以**不**反向拉「所有引用这张图
+            # 的 Subject」——2026-10-22 实测：段 1 只用到 <Picture 1>，反向闭包把「公寓
+            # 材质与空间系统」Subject 6 拉进来（它引用 Picture 1/4/9/10/24），于是夜间
+            # 卧室、卸妆棉、窗边起居区全被拖进本段，8 张里 4 张本段根本拍不到。
+            # 反向拉取只服务「图没有独立定义行、只内联在 Subject 里」的官方写法（见
+            # else 分支）。
+            subjects, pictures = _labels_in(entry)
             pending += [("subject", n) for n in subjects - kept_subjects]
-        # 反向：以这张图为来源的 Subject 定义也要保留（「只作为来源的图内联在
-        # Subject 定义里」是官方推荐写法，图自己没有独立定义行）
-        for subject_number, subject_text in subject_entries:
-            if subject_number in kept_subjects:
-                continue
-            if re.search(rf"<Picture\s+{number}>", subject_text):
-                pending.append(("subject", subject_number))
+            # Picture→Picture：定义里引用的其他参考图（如夜间卧室引用夜灯/充电器）
+            # 也是本段的依赖。漏掉它们，段内会留下 `<Picture N>` 悬空引用：模型看到
+            # 标签却拿不到图，校验器也会报 PICTURE_UNDEFINED。
+            pending += [("picture", n) for n in pictures - kept_pictures]
+        else:
+            # 反向：以这张图为来源的 Subject 定义也要保留（「只作为来源的图内联在
+            # Subject 定义里」是官方推荐写法，图自己没有独立定义行）。
+            for subject_number, subject_text in subject_entries:
+                if subject_number in kept_subjects:
+                    continue
+                if re.search(rf"<Picture\s+{number}>", subject_text):
+                    pending.append(("subject", subject_number))
 
     names = {picture: name for picture, name, _desc in registry}
     path_map = dict(paths or {})
