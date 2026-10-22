@@ -88,6 +88,45 @@ def format_step_banner(action: str, *, round_no: int = 1, total_rounds: int = 1)
     return f"▶ {action}（第 {round_no}/{total_rounds} 轮）……"
 
 
+# 嵌套订阅的引用计数（issue #71）。只在 ``event_scope`` 里读写，且都在锁下：
+# 计数归零才真正 subscribe/unsubscribe，嵌套层级由调用方随意套。
+_scope_lock = threading.Lock()
+_scope_depth = 0
+_scope_listener: TextProgress | None = None
+
+
+@contextmanager
+def event_scope():
+    """只订阅事件、**不打横幅**；可嵌套，同一次运行只挂一个 ``TextProgress``。
+
+    为什么要有「不打横幅」这一层：素材循环整段原先在进展作用域之外，读图、改写、
+    回灌三个长步骤各自套 banner 之后循环**其余时刻**仍然无人订阅（ADR 0019）。
+    循环级订阅兜住这些间隙；每一步的横幅仍由 ``step_scope`` 自己打。
+
+    为什么嵌套只订一个监听器：循环级 ``event_scope`` 里再套 ``step_scope`` 是正常
+    用法，两层各订一个 ``TextProgress`` 会把同一条心跳打印两遍——用户会以为系统
+    跑了两轮（issue #71）。引用计数在这一处，调用方不用关心嵌套层级。
+
+    线程安全：计数与监听器都挂在锁下。本仓的进展作用域都在主线程开，
+    这里只是不让「将来谁在后台线程也开一个」把计数改坏。
+    """
+    global _scope_depth, _scope_listener
+    with _scope_lock:
+        if _scope_depth == 0:
+            _scope_listener = TextProgress()
+            reporter.subscribe(_scope_listener)
+        _scope_depth += 1
+        listener = _scope_listener
+    try:
+        yield listener
+    finally:
+        with _scope_lock:
+            _scope_depth -= 1
+            if _scope_depth == 0:
+                reporter.unsubscribe(_scope_listener)
+                _scope_listener = None
+
+
 @contextmanager
 def step_scope(action: str, *, round_no: int = 1, total_rounds: int = 1):
     """打印步骤横幅，并在作用域内订阅等待心跳；退出（含异常）必解绑。
@@ -96,15 +135,13 @@ def step_scope(action: str, *, round_no: int = 1, total_rounds: int = 1):
     都在进展作用域之外，于是「判定卡住 / 正在重试第 N 次」这些最有用的行没人打印
     ——用户只看到白等（ADR 0019）。横幅与监听器成对存在，就不会出现「打了横幅
     却听不到心跳」的半套接线。
+
+    订阅走 ``event_scope``：与循环级订阅嵌套时不会把心跳打两遍（issue #71）。
     """
     print(format_step_banner(action, round_no=round_no, total_rounds=total_rounds),
           flush=True)
-    listener = TextProgress()
-    reporter.subscribe(listener)
-    try:
+    with event_scope() as listener:
         yield listener
-    finally:
-        reporter.unsubscribe(listener)
 
 
 class TextProgress:

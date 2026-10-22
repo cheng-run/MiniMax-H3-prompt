@@ -458,6 +458,10 @@ class DirectCallResult:
     # 真正发起过几次调用（含首次）。调用方拿它打印「已试 N 次」。
     attempts: int = 1
     duration: float = 0.0
+    # 失败原因是不是「超时（卡住/断流）」（issue #71）。读图客户端据此决定要不要回退
+    # 非流式：卡住说明网关根本没在干活，回退只会把 900 秒白等藏回去；不支持流式才是
+    # 那条路要治的病。**不从错误文案反推**——那等于让调用方解析人话。
+    timed_out: bool = False
 
     @property
     def text(self) -> str:
@@ -525,6 +529,7 @@ def run_direct_call(llm, request: str, *, role: str) -> DirectCallResult:
                     )),
                     attempts=attempt_no,
                     duration=now - started,
+                    timed_out=True,
                 )
             elapsed = handler.seconds_since_start()
             remaining = deadline - now
@@ -543,6 +548,7 @@ def run_direct_call(llm, request: str, *, role: str) -> DirectCallResult:
                 )),
                 attempts=attempt_no,
                 duration=time.monotonic() - started,
+                timed_out=True,
             )
         out = str(getattr(response, "content", response))
         duration = time.monotonic() - started

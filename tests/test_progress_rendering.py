@@ -22,6 +22,7 @@ from minimax_h3_prompt.observability import reporter
 from minimax_h3_prompt.ui.progress import (
     LiveProgress,
     TextProgress,
+    event_scope,
     format_step_banner,
     format_wait_event,
     step_scope,
@@ -325,3 +326,26 @@ class TestStepBanner:
         reporter.emit({"type": "agent_wait", "role": ROLE, "state": "first_byte",
                        "elapsed": 0.5})
         assert capsys.readouterr().out == ""
+
+    def test_event_scope_subscribes_without_a_banner(self, capsys):
+        """素材循环整体订阅用它：循环里每一步各有横幅，这一层只管别出现静默窗口。"""
+        with event_scope():
+            reporter.emit({"type": "agent_wait", "role": ROLE, "state": "first_byte",
+                           "elapsed": 0.5})
+        out = capsys.readouterr().out
+        assert "已有响应" in out, "订阅了却没渲染心跳"
+        assert "▶" not in out, "不带横幅的作用域不该自己打横幅"
+
+    def test_nested_scopes_share_one_listener(self, capsys):
+        """嵌套（循环级 event_scope ＋ 步骤级 step_scope）只许打一遍心跳。
+
+        issue #71 的接线正是这个形状：素材循环整体在订阅里，读图/改写再各套一个
+        step_scope。两层各订一个监听器的话，同一件事会在终端上出现两遍——用户会
+        以为系统跑了两轮。
+        """
+        with event_scope():
+            with step_scope("正在读图校对"):
+                reporter.emit({"type": "agent_wait", "role": ROLE, "state": "first_byte",
+                               "elapsed": 0.5})
+        out = capsys.readouterr().out
+        assert out.count("已有响应") == 1, f"同一心跳打了两遍：\n{out}"

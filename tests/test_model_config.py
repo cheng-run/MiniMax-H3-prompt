@@ -126,12 +126,44 @@ def test_build_anthropic_streams_and_reports_usage(monkeypatch):
     assert kwargs["max_retries"] == model_factory._LLM_MAX_RETRIES
 
 
-def test_build_vision_uses_config(monkeypatch):
-    """视觉模型本票不动（issue #60 out of scope）：900 秒是已知缺口，落到 #63 的 ADR。
+def test_build_vision_uses_config_and_streams(monkeypatch):
+    """视觉侧也从配置取（issue #60 的既有口径）；读图主路走流式（issue #71）。
 
-    保留这条用例是为了让「视觉侧没被顺手改掉」有据可查——它的客户端是另一条路，
-    将来治它要单开票。
+    首字节线**从主档常量派生**：视觉与文本各写一个数就是两处会各自漂移的口径——
+    改主档的 30 秒时读图不动，用户就得在两道线之间猜。所以这里 monkeypatch 常量，
+    断言构造出来的就是那个数。
     """
+    from minimax_h3_prompt import model_factory
+    from minimax_h3_prompt.tools import reference_auditor
+
+    settings = ModelSettings(
+        provider="dashscope",
+        model="qwen3.7-plus",
+        base_url="https://vision.example/v1",
+        api_key_env="DASHSCOPE_API_KEY",
+        purpose="视觉模型",
+    )
+    monkeypatch.setattr(reference_auditor.config, "vision_model", settings)
+    monkeypatch.setattr(reference_auditor.config, "resolve_api_key", lambda _: "secret")
+    monkeypatch.setattr(model_factory, "_LLM_READ_TIMEOUT_SECONDS", 7.0)
+    constructor = Mock()
+    monkeypatch.setattr(reference_auditor, "ChatOpenAI", constructor)
+
+    reference_auditor._build_vision_model()
+
+    kwargs = constructor.call_args.kwargs
+    assert kwargs["model"] == "qwen3.7-plus"
+    assert kwargs["api_key"] == "secret"
+    assert kwargs["base_url"] == "https://vision.example/v1"
+    assert kwargs["streaming"] is True
+    # 与主档同一条「开流式必须开 usage 上报」的纪律：漏了它成本表记 0 且不报错
+    assert kwargs["stream_usage"] is True
+    assert kwargs["max_retries"] == model_factory._LLM_MAX_RETRIES
+    assert kwargs["timeout"].read == 7.0
+
+
+def test_build_vision_fallback_stays_nonstreaming_with_a_long_timeout(monkeypatch):
+    """网关不支持流式时的回退档：非流式、900 秒（那条路等的是完整响应，不是首字节）。"""
     from minimax_h3_prompt.tools import reference_auditor
 
     settings = ModelSettings(
@@ -146,9 +178,8 @@ def test_build_vision_uses_config(monkeypatch):
     constructor = Mock()
     monkeypatch.setattr(reference_auditor, "ChatOpenAI", constructor)
 
-    reference_auditor._build_vision_model()
+    reference_auditor._build_vision_model(streaming=False)
 
-    constructor.assert_called_once_with(
-        model="qwen3.7-plus", api_key="secret", base_url="https://vision.example/v1",
-        timeout=900, max_retries=0,
-    )
+    kwargs = constructor.call_args.kwargs
+    assert kwargs["streaming"] is False
+    assert kwargs["timeout"] == reference_auditor._FALLBACK_TIMEOUT_SECONDS

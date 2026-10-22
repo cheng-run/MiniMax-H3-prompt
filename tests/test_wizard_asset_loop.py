@@ -16,6 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from langchain_core.messages import AIMessage
 
 from minimax_h3_prompt import model_factory
 from minimax_h3_prompt.asset_ledger import load_asset_ledger
@@ -196,7 +197,8 @@ class _FakeLLM:
         self.requests.append(text)
         self.configs.append(config)
         # 直调入口（ADR 0019）靠这个信号发「首字节」心跳：真实路径上是流式 token，
-        # 假模型手动打一下，等待事件那条契约才测得到。改写/回灌两条路仍不传 config。
+        # 假模型手动打一下，等待事件那条契约才测得到（issue #71 的横幅/心跳断言）；
+        # 改写/回灌两条路仍不传 config，故这一下只影响走看门狗的那些请求。
         for callback in (config or {}).get("callbacks") or []:
             callback.on_llm_new_token("…")
         if _AI_REWORD_HEAD in text:
@@ -247,6 +249,7 @@ def _rounds(tmp_path: Path) -> list[dict]:
 def _run_loop(tmp_path, monkeypatch, tail: list[str], *,
               canvases: dict | None = None,
               vision: dict[str, str] | None = None,
+              vision_model=None,
               confirms: list[tuple[str, bool]] | None = None,
               captured: dict | None = None,
               confirm_log: list[str] | None = None,
@@ -260,12 +263,22 @@ def _run_loop(tmp_path, monkeypatch, tail: list[str], *,
     也没打过桩时，这里兜一个**默认假模型**——素材循环的**回灌**（issue #53）会调
     ``build_chat_model``，漏打桩就会真去建客户端（主树有 key 时直接打网络请求，
     干净检出上则报错），两条路都不是用例该走的路。
+
+    ``vision_model`` 传假视觉模型则**走真实 ``describe_image``**（issue #71 的读图
+    看门狗考题：只有真函数才会发首字节事件），此时第三个返回值恒为空表。
     """
     _silence(monkeypatch)
     monkeypatch.setattr(wizard, "_choose_canvases", lambda: canvases or {})
     _stub_stage1(monkeypatch)
     _stub_stage2(monkeypatch, captured)
-    calls = _stub_vision(monkeypatch, vision or {})
+    if vision_model is not None:
+        # 按 streaming 选模型：主路（流式）用传进来的，回退档也给它——本文件没有
+        # 「网关不支持流式」的考题（那条在 tests/test_vision_watchdog.py）。
+        monkeypatch.setattr(reference_auditor, "_build_vision_model",
+                            lambda streaming=True: vision_model)
+        calls: list[str] = []
+    else:
+        calls = _stub_vision(monkeypatch, vision or {})
     if llm is not None:
         monkeypatch.setattr(model_factory, "build_chat_model", lambda: llm)
     elif model_factory.build_chat_model is _REAL_BUILD_CHAT_MODEL:
@@ -586,7 +599,7 @@ def test_align_asset_prompt_refuses_to_lose_a_locked_feature():
     """
     from minimax_h3_prompt.asset_loop import align_asset_prompt
 
-    llm = SimpleNamespace(invoke=lambda message: "被改得面目全非的提示词")
+    llm = SimpleNamespace(invoke=lambda message, config=None: "被改得面目全非的提示词")
     with pytest.raises(ValueError, match="锁死特征"):
         align_asset_prompt("道具·汽水罐生图提示词", [("红裙女孩", "宝蓝色长裙")], llm,
                            locked_features=("汽水罐",))
@@ -923,6 +936,107 @@ def test_external_cost_can_be_skipped_by_leaving_both_blank(tmp_path, monkeypatc
 
 
 # ---------------------------------------------------------------------------
+# 素材循环的进展可见性（issue #71 / ADR 0019）
+#
+# 用户实测的三处静默：`[读图校对]` 之后读图不发声、敲完「下一个出谁」后先静默跑
+# 回灌、素材改写没有任何反馈。断言只看**终端上的行与顺序**——横幅回答「在干什么」，
+# 心跳回答「还活着吗」，两者缺一都算回到静默。
+# ---------------------------------------------------------------------------
+
+class _StreamingVisionModel:
+    """假视觉模型：喂首字节（心跳的来源）并回一份无偏差读数。"""
+
+    def __init__(self, reading: str = '{"claims": []}') -> None:
+        self.reading = reading
+        self.calls = 0
+
+    def invoke(self, request, config=None):
+        self.calls += 1
+        for handler in (config or {}).get("callbacks") or []:
+            handler.on_llm_new_token("画面")
+        return AIMessage(content=self.reading)
+
+
+def _write_png(tmp_path: Path, name: str) -> Path:
+    """真实读图要真图片（describe_image 会先压缩）：交回的源文件必须是合法 PNG。"""
+    from PIL import Image
+
+    path = tmp_path / "returned" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (16, 16), (10, 20, 30)).save(path)
+    return path
+
+
+def test_choice_is_followed_by_align_then_prompt_banner(tmp_path, monkeypatch, capsys):
+    """敲完「下一个出谁」后先是「正在与前序素材对齐」，随后是「正在生成生图提示词」。
+
+    这两行之间还要**有心跳**：回灌是一次直调，横幅只说明开始了，事件才证明它活着
+    （否则用户面对的仍是「打完一行字之后干等」）。
+    """
+    girl = _write_png(tmp_path, "girl.png")
+    garden = _write_png(tmp_path, "garden.png")
+    tail = [
+        "", "1", str(girl),      # 红裙女孩：落账（第 1 张没有前序，对齐是空转）
+        "",                      # 队列菜单：秋日庭院
+        "1", str(garden),        # 回灌→出词→审查满意→交回
+        "", "4",                 # 队列菜单：青铜钥匙 → 放弃
+        "4",                     # 蓝衫少年（最后一张自动出）：放弃
+        "8", "1",
+    ]
+    asked, code, _ = _run_loop(tmp_path, monkeypatch, tail)
+    assert code == 0
+
+    out = capsys.readouterr().out
+    prompt_at = out.index("当前待办：秋日庭院")
+    align_at = out.rindex("▶ 正在与前序素材对齐", 0, prompt_at)
+    generate_at = out.rindex("▶ 正在生成生图提示词", 0, prompt_at)
+    assert align_at < generate_at < prompt_at, \
+        "选择之后的反馈顺序不对：应先「对齐」再「出词」"
+    gap = out[align_at:generate_at]
+    assert "asset_align" in gap and "已有响应" in gap, \
+        f"对齐期间没有心跳（打了横幅却听不到事件）：\n{gap}"
+
+
+def test_read_proofread_has_step_banner_and_heartbeat(tmp_path, monkeypatch, capsys):
+    """``[读图校对]`` 之后必须是「在读图」的横幅＋心跳，而不是一行字之后的白等。
+
+    走**真实** ``describe_image``（只换视觉模型）：注册表最后一道题就是它发出的
+    首字节事件有没有人打印。
+    """
+    girl = _write_png(tmp_path, "girl.png")
+    tail = ["", "1", str(girl), "", "4", "", "4", "4", "8", "1"]
+    model = _StreamingVisionModel()
+    _asked, code, _ = _run_loop(tmp_path, monkeypatch, tail, vision_model=model)
+    assert code == 0
+    assert model.calls == 1
+
+    out = capsys.readouterr().out
+    read_at = out.index("[读图校对] 红裙女孩")
+    banner_at = out.index("▶ 正在读图校对", read_at)
+    heart_at = out.index("已有响应", banner_at)
+    assert banner_at < heart_at, "读图横幅之后没有心跳"
+    assert "vision" in out[banner_at:heart_at], "心跳不是读图那一次发出的"
+
+
+def test_asset_rewrite_has_step_banner_and_heartbeat(tmp_path, monkeypatch, capsys):
+    """素材改写（审查打回选 3）同样有横幅与心跳——它也是一次直调。"""
+    girl = _write_png(tmp_path, "girl.png")
+    tail = [
+        "", "1", str(girl),                 # 红裙女孩落账
+        "", "3", "改成宝蓝色", "4",          # 秋日庭院：打回改写 → 重出 → 放弃
+        "", "4", "4",                       # 其余两张放弃
+        "8", "1",
+    ]
+    _asked, code, _ = _run_loop(tmp_path, monkeypatch, tail, llm=_FakeLLM())
+    assert code == 0
+
+    out = capsys.readouterr().out
+    rewrite_at = out.index("▶ 正在改写生图提示词")
+    log_at = out.index("[改写·秋日庭院] 已记入轮次账", rewrite_at)
+    gap = out[rewrite_at:log_at]
+    assert "asset_rewrite" in gap and "已有响应" in gap, \
+        f"改写期间没有横幅/心跳：\n{gap}"
+
 # 票 7/9（issue #72）：重生成菜单的「AI 按偏差改词」与重画轮次提示
 # ---------------------------------------------------------------------------
 
@@ -1182,3 +1296,8 @@ def test_ai_reword_goes_through_the_direct_call_watchdog(tmp_path, monkeypatch, 
     # 入口把回调递给了模型：没有它，上面的首字节事件根本发不出来
     assert any((config or {}).get("callbacks") for config in llm.configs), \
         "假模型没收到 callbacks——AI 改词仍是裸调"
+    # 成功文案不许超证据（复审 S5）：代码只**确定性核对**了锁死清单（逐条子串检查），
+    # 「其余正文逐字保留」是模型该守的纪律，系统没有核对过，不能对用户这么保证。
+    out = capsys.readouterr().out
+    assert "锁死清单已逐条核对；其余正文请人工确认" in out
+    assert "其余正文逐字保留" not in out, "成功文案仍在对用户保证系统没核对过的部分"

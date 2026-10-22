@@ -11,8 +11,15 @@ issue #50 的队列是**类型优先**（人物→场景→道具），组内才
 from __future__ import annotations
 
 from minimax_h3_prompt.asset_ledger import KIND_PICTURE, AssetLedger, AssetRecord
-from minimax_h3_prompt.asset_loop import asset_queue
+from minimax_h3_prompt.asset_loop import (
+    ASSET_ALIGN_ROLE,
+    ASSET_REWRITE_ROLE,
+    align_asset_prompt,
+    asset_queue,
+    rewrite_asset_prompt,
+)
 from minimax_h3_prompt.injection_card import VideoOutputParams, render_injection_card
+from minimax_h3_prompt.observability import reporter, token_meter
 
 # 四张资产：剧本里的出场序是 红裙女孩(1) → 秋日庭院(2) → 青铜钥匙(3) → 蓝衫少年(4)。
 # 入参故意按「类型分组」的形态给（人物两张挤在一起、道具/场景各一张），
@@ -64,3 +71,91 @@ def test_asset_queue_order_matches_injection_card_order():
     ]
     queue_names = [item.name for item in asset_queue(_ENTRIES, pictures=_PICTURES)]
     assert card_names == queue_names
+
+
+# ---------------------------------------------------------------------------
+# 素材改写与回灌走直调看门狗（issue #71 / ADR 0019）
+#
+# 这两处原先裸调 ``llm.invoke``：没有首字节事件、没有卡住重试、失败只留一句异常。
+# 断言落在**事件序列**与**成本表角色**上——改回裸 invoke 时这里既收不到 agent_start，
+# 也收不到 first_byte（假模型的 invoke 只有在 config 里拿到回调时才打得出首字节）。
+# ---------------------------------------------------------------------------
+
+class _StreamingStub:
+    """最小直调假模型：``invoke(request, config=...)``，首字节喂 config 里的回调。"""
+
+    def __init__(self, reply: str) -> None:
+        self.reply = reply
+        self.requests: list[str] = []
+        self.configs: list[object] = []
+
+    def invoke(self, request, config=None):
+        self.requests.append(str(request))
+        self.configs.append(config)
+        for callback in (config or {}).get("callbacks") or []:
+            callback.on_llm_new_token("…")
+        return self.reply
+
+
+def _collect_events():
+    got: list[dict] = []
+    reporter.subscribe(got.append)
+    return got, got.append
+
+
+def test_rewrite_goes_through_the_direct_call_watchdog():
+    """改写：事件序列（start → first_byte → done）与成本表角色都必须是统一入口的。"""
+    stub = _StreamingStub("改后的提示词")
+    before = token_meter.snapshot().get(ASSET_REWRITE_ROLE, {"calls": 0})["calls"]
+    events, unsubscribe = _collect_events()
+    try:
+        new = rewrite_asset_prompt("原词", "改成宝蓝色", stub)
+    finally:
+        reporter.unsubscribe(unsubscribe)
+
+    assert new == "改后的提示词"
+    roles = [e.get("role") for e in events]
+    assert ASSET_REWRITE_ROLE in roles, "改写没走直调入口（没有角色事件）"
+    types = [e.get("type") for e in events if e.get("role") == ASSET_REWRITE_ROLE]
+    assert "agent_start" in types and "agent_done" in types, f"改写事件不成对：{types}"
+    states = [e.get("state") for e in events
+              if e.get("type") == "agent_wait" and e.get("role") == ASSET_REWRITE_ROLE]
+    assert "first_byte" in states, "改写没有首字节心跳（裸 invoke 的形态）"
+    assert stub.configs and all((c or {}).get("callbacks") for c in stub.configs), \
+        "模型没收到回调——参数没经直调入口递下去"
+    after = token_meter.snapshot()[ASSET_REWRITE_ROLE]["calls"]
+    assert after == before + 1, "改写的 token 没进成本表（直调入口的记账口没走到）"
+
+
+def test_align_goes_through_the_direct_call_watchdog():
+    """回灌：同一形状，角色单列成 ``role_asset_align``（成本表才看得出花在哪）。"""
+    stub = _StreamingStub("对齐后的提示词")
+    before = token_meter.snapshot().get(ASSET_ALIGN_ROLE, {"calls": 0})["calls"]
+    events, unsubscribe = _collect_events()
+    try:
+        new = align_asset_prompt("原词", [("红裙女孩", "宝蓝色长裙")], stub)
+    finally:
+        reporter.unsubscribe(unsubscribe)
+
+    assert new == "对齐后的提示词"
+    roles = [e.get("role") for e in events]
+    assert ASSET_ALIGN_ROLE in roles, "回灌没走直调入口（没有角色事件）"
+    states = [e.get("state") for e in events
+              if e.get("type") == "agent_wait" and e.get("role") == ASSET_ALIGN_ROLE]
+    assert "first_byte" in states, "回灌没有首字节心跳（裸 invoke 的形态）"
+    after = token_meter.snapshot()[ASSET_ALIGN_ROLE]["calls"]
+    assert after == before + 1, "回灌的 token 没进成本表"
+
+
+def test_direct_call_failure_keeps_the_value_error_contract():
+    """失败仍是 ValueError（调用方按它回菜单/保持原词），文案带统一入口的病因。"""
+    class _Broken:
+        def invoke(self, request, config=None):
+            raise RuntimeError("网关拒绝")
+
+    try:
+        rewrite_asset_prompt("原词", "意见", _Broken())
+    except ValueError as exc:
+        assert "网关拒绝" in str(exc)
+    else:  # pragma: no cover - 走到这里就是契约破了
+        raise AssertionError("改写失败没有抛 ValueError")

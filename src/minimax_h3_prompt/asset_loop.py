@@ -248,6 +248,29 @@ def render_regen_hint(rounds: int) -> str:
 CURRENT_PROMPT_HEAD = "【当前提示词】"
 
 
+# 直调路径的角色名（issue #71 / ADR 0019）：素材改写与回灌都是直调，事件与
+# token 记账都按这两个名字出现在终端与成本表里——各写一份字面量就会漂。
+ASSET_REWRITE_ROLE = "role_asset_rewrite"
+ASSET_ALIGN_ROLE = "role_asset_align"
+
+
+def _call_direct(llm, request: str, *, role: str) -> str:
+    """一次直调走统一看门狗（ADR 0019）：失败带病因抛出，不做静默降级。
+
+    为什么这两个纯件也要接看门狗：它们原先直接 ``llm.invoke``，首字节/卡住/重试
+    全是空白——素材循环里用户看到的就是「打完一行字之后干等」。判据与角色调用
+    同源（``agents.run_direct_call``），这里只负责把失败翻成异常让调用方保持原词。
+    """
+    from .agents import run_direct_call  # 延迟导入：避免入口期拉起角色装配栈
+
+    result = run_direct_call(llm, request, role=role)
+    if not result.ok:
+        # 保持两个调用方原有的异常契约（元组/字符串接口都按「调用失败」处理），
+        # 只把病因换成统一入口给的那一段人话。
+        raise ValueError(result.error)
+    return result.text
+
+
 def rewrite_asset_prompt(old_prompt: str, feedback: str, llm) -> str:
     """按用户意见改写一条资产生图提示词（一轮修订的产物）。
 
@@ -262,9 +285,7 @@ def rewrite_asset_prompt(old_prompt: str, feedback: str, llm) -> str:
         f"{CURRENT_PROMPT_HEAD}\n{old_prompt.strip()}\n\n"
         f"【改写意见】\n{feedback.strip()}"
     )
-    raw = llm.invoke(request)
-    text = raw if isinstance(raw, str) else getattr(raw, "content", str(raw))
-    new_prompt = str(text).strip()
+    new_prompt = _call_direct(llm, request, role=ASSET_REWRITE_ROLE).strip()
     if not new_prompt:
         raise ValueError("改写结果为空")
     return new_prompt
@@ -317,9 +338,7 @@ def align_asset_prompt(
     这一张的偏差就再也判不出来（静默失效）。调用方据此不采用对齐结果、保持原词。
     """
     request = build_settled_align_request(old_prompt, settled)
-    raw = llm.invoke(request)
-    text = raw if isinstance(raw, str) else getattr(raw, "content", str(raw))
-    new_prompt = str(text).strip()
+    new_prompt = _call_direct(llm, request, role=ASSET_ALIGN_ROLE).strip()
     if not new_prompt:
         raise ValueError("回灌对齐结果为空")
     missing = [str(x) for x in locked_features if str(x).strip() and str(x) not in new_prompt]
@@ -410,14 +429,13 @@ def ai_reword_asset_prompt(
     丢了这一张的偏差就再也判不出来（静默失效）。调用方据此不采用改写结果、保持原词。
     结果是空串也响：空词写回等于把这张图的提示词删了。
     """
-    from .agents import run_direct_call  # noqa: PLC0415 - 避免入口期拉起角色装配栈
     from .tools.image_prompt_discipline import discipline_text
 
     request = build_ai_reword_request(prompt, deviations, locked_features, discipline_text())
-    result = run_direct_call(llm, request, role=AI_REWORD_ROLE)
-    if not result.ok:
-        raise ValueError(result.error)
-    new_prompt = result.text.strip()
+    # 复用同文件的 ``_call_direct``（复审 T4）：它已经把「run_direct_call → 失败翻异常」
+    # 这段接好了，这里再抄一遍就是第二份会各自漂移的接线。空串/锁死清单校验留在下面
+    # ——那是 AI 改词特有的结果契约，与调用包装不是一回事。
+    new_prompt = _call_direct(llm, request, role=AI_REWORD_ROLE).strip()
     if not new_prompt:
         raise ValueError("AI 改词结果为空")
     missing = [str(x) for x in locked_features if str(x).strip() and str(x) not in new_prompt]
@@ -431,7 +449,8 @@ def ai_reword_asset_prompt(
 __all__ = [
     "AI_REWORD_DEVIATIONS_HEAD", "AI_REWORD_DISCIPLINE_HEAD", "AI_REWORD_LOCKED_HEAD",
     "AI_REWORD_ROLE",
-    "ASSET_LOOP_KEY", "ASSET_ROUNDS_FILENAME", "CURRENT_PROMPT_HEAD", "QueueItem",
+    "ASSET_ALIGN_ROLE", "ASSET_LOOP_KEY", "ASSET_ROUNDS_FILENAME", "ASSET_REWRITE_ROLE",
+    "CURRENT_PROMPT_HEAD", "QueueItem",
     "REGEN_TRIGGERS", "SETTLED_FACTS_HEAD",
     "TRIGGER_REGEN_AI_REWORD", "TRIGGER_REGEN_REROLL", "TRIGGER_REGEN_REWORD",
     "TRIGGER_REVIEW_REWORD",

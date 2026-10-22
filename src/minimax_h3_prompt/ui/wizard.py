@@ -64,7 +64,7 @@ from ..user_revisions import (
     render_revocation_block,
     revocation_note,
 )
-from .progress import TextProgress, step_scope
+from .progress import TextProgress, event_scope, format_step_banner, step_scope
 
 
 def resolve_effective_variant(requested: str, have_first: bool, have_last: bool) -> str:
@@ -1289,6 +1289,9 @@ def _issue_asset_prompt(state: dict, brief: Brief, generation_dir: Path, item: Q
     if row is None:
         raise ValueError(f"队列资产在 state 里找不到提示词条目：{item.name!r}")
     label = KIND_LABELS.get(item.kind, item.kind)
+    # 出词也是用户等待的一步（issue #71）：横幅先说明在干什么；这一步是纯渲染，
+    # 没有心跳可说，所以只有横幅——不伪造等待。
+    print(format_step_banner("正在生成生图提示词"), flush=True)
     print(f"\n[素材循环] 当前待办：{item.name}（{label}）")
     print(render_asset_rows([row], item.kind))
     _sync_released_asset_files(state, brief, generation_dir, item.name)
@@ -1331,7 +1334,10 @@ def _rewrite_asset_prompt_round(state: dict, brief: Brief, generation_dir: Path,
 
     old = _current_prompt_text(state, item)
     try:
-        new = rewrite_asset_prompt(old, feedback, build_chat_model())
+        # 步骤横幅＋等待心跳（issue #71 / ADR 0019）：改写是直调，事件只有订阅者
+        # 能看到；横幅与订阅成对（step_scope），不留「打了字之后干等」。
+        with step_scope("正在改写生图提示词"):
+            new = rewrite_asset_prompt(old, feedback, build_chat_model())
     except Exception as exc:  # noqa: BLE001 — 改写失败要响但不许裸崩：词不动、回菜单再定
         print(f"[错误] 改写失败：{exc}；提示词保持原样。")
         return False
@@ -1448,30 +1454,35 @@ def _align_asset_with_settled(state: dict, brief: Brief, generation_dir: Path,
 
     没有已定稿素材（队列第 1 张）＝不回灌、不花调用。对齐失败（LLM 报错、结果丢了锁死
     特征）只提示、保持原词：回灌是让跨素材更一致，不该把整条循环卡死。
+
+    横幅由 ``step_scope`` 与订阅成对给出（issue #71 / ADR 0019）：这是选择之后的第一个
+    动作，第 1 张没有前序素材时对齐空转、毫秒返回，也照样打这一行——用户敲完「下一个
+    出谁」后第一眼必须看到系统在动作。
     """
     from ..asset_loop import align_asset_prompt, loop_state
     from ..generation import image_prompt_variants
     from ..model_factory import build_chat_model
 
-    if item.name in {str(x) for x in loop_state(state)["released"]}:
-        return
-    facts = _settled_asset_facts(state, brief, exclude=item.name)
-    if not facts:
-        return
-    old = _current_prompt_text(state, item)
-    locked = next((v.locked_features for v in image_prompt_variants(state, brief.canvases)
-                   if v.name == item.name), ())
-    try:
-        new = align_asset_prompt(old, facts, build_chat_model(), locked_features=locked)
-    except Exception as exc:  # noqa: BLE001 — 回灌失败要响但不许裸崩：词不动、继续出词
-        print(f"[回灌] {item.name} 对齐失败：{exc}；提示词保持原样。")
-        return
-    if new == old:
-        return
-    _update_prompt_text(state, item, new)
-    save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
-    print(f"[回灌] {item.name} 已按前面 {len(facts)} 条已定稿素材的画面事实对齐"
-          f"（{'、'.join(name for name, _ in facts)}）；其余部分逐字保留。")
+    with step_scope("正在与前序素材对齐"):
+        if item.name in {str(x) for x in loop_state(state)["released"]}:
+            return
+        facts = _settled_asset_facts(state, brief, exclude=item.name)
+        if not facts:
+            return
+        old = _current_prompt_text(state, item)
+        locked = next((v.locked_features for v in image_prompt_variants(state, brief.canvases)
+                       if v.name == item.name), ())
+        try:
+            new = align_asset_prompt(old, facts, build_chat_model(), locked_features=locked)
+        except Exception as exc:  # noqa: BLE001 — 回灌失败要响但不许裸崩：词不动、继续出词
+            print(f"[回灌] {item.name} 对齐失败：{exc}；提示词保持原样。")
+            return
+        if new == old:
+            return
+        _update_prompt_text(state, item, new)
+        save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
+        print(f"[回灌] {item.name} 已按前面 {len(facts)} 条已定稿素材的画面事实对齐"
+              f"（{'、'.join(name for name, _ in facts)}）；其余部分逐字保留。")
 
 
 def _abandon_asset(state: dict, brief: Brief, generation_dir: Path, item: QueueItem) -> None:
@@ -1630,8 +1641,11 @@ def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: 
         report = compare_descriptions(base, progress.reading(), locked)
     else:
         try:
-            raw = describe_image(generation_dir / entry.path,
-                                 build_proofread_request(base, locked))
+            # 读完图之前不能只有一行 `[读图校对]`（issue #71 / ADR 0019）：读图客户端
+            # 走流式后首字节/生成中都是事件，横幅与订阅必须成对出现。
+            with step_scope("正在读图校对"):
+                raw = describe_image(generation_dir / entry.path,
+                                     build_proofread_request(base, locked))
             reading = parse_reading(raw)
         except Exception as exc:  # noqa: BLE001 — 读图失败要响且不放行
             print(f"[读图校对] {entry.name} 读图失败：{exc}")
@@ -1807,6 +1821,7 @@ def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item: QueueIte
 
     # 回灌（issue #53 AC3）：出词**之前**按前面已定稿素材的画面事实对齐一次。放在外层
     # 循环之外＝改写成功后的重出不再对齐（那会把用户刚改的词按旧事实拽回去）。
+    # 横幅与心跳在函数内的 step_scope 里成对出现（issue #71）。
     _align_asset_with_settled(state, brief, generation_dir, item)
 
     # 续跑菜单只在**首次**进这一张时给（`first_pass`）：改写成功／原词再掷之后的外层
@@ -2007,35 +2022,40 @@ def _asset_loop(state: dict, brief: Brief, generation_dir: Path) -> bool:
     def _pending():
         return [q for q in queue if q.name not in abandoned and not _settled(q.name)]
 
-    while True:
-        pending = _pending()
-        if not pending:
-            set_current(state, None)
-            save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
-            print(f"\n[素材循环] 队列清空：{len(queue)} 张全部落账/放弃。")
-            return True
-        # 续接时「当前待办」直接接上，不再问一遍出谁（系统只维持一张当前待办）
-        current_name = str(loop.get("current") or "")
-        item = None
-        if current_name:
-            item = next((q for q in pending if q.name == current_name), None)
-        if item is None:
-            # 只剩一张待办时不问「出谁」——没有可跳的号；暂停出口仍在审查菜单（q）。
-            item = pending[0] if len(pending) == 1 else _pick_next_asset(pending)
+    # 循环整体纳入事件订阅（issue #71 / ADR 0019）：读图、改写、回灌是三步已知的
+    # 长调用，但**串起它们的那层**原先在进展作用域之外——任何一处漏套 step_scope
+    # 都会退回「没有订阅者的静默窗口」。这里兜底订阅；每一步的横幅仍由 step_scope
+    # 自己打（嵌套共用同一个监听器，不会把心跳打两遍）。
+    with event_scope():
+        while True:
+            pending = _pending()
+            if not pending:
+                set_current(state, None)
+                save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
+                print(f"\n[素材循环] 队列清空：{len(queue)} 张全部落账/放弃。")
+                return True
+            # 续接时「当前待办」直接接上，不再问一遍出谁（系统只维持一张当前待办）
+            current_name = str(loop.get("current") or "")
+            item = None
+            if current_name:
+                item = next((q for q in pending if q.name == current_name), None)
             if item is None:
+                # 只剩一张待办时不问「出谁」——没有可跳的号；暂停出口仍在审查菜单（q）。
+                item = pending[0] if len(pending) == 1 else _pick_next_asset(pending)
+                if item is None:
+                    save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
+                    print("[素材循环] 已保留进度；重跑向导从当前待办继续。")
+                    return False
+            set_current(state, item.name)
+            save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
+            outcome = _asset_cycle(state, brief, generation_dir, item)
+            if outcome == LOOP_PAUSED:
                 save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
                 print("[素材循环] 已保留进度；重跑向导从当前待办继续。")
                 return False
-        set_current(state, item.name)
-        save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
-        outcome = _asset_cycle(state, brief, generation_dir, item)
-        if outcome == LOOP_PAUSED:
-            save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
-            print("[素材循环] 已保留进度；重跑向导从当前待办继续。")
-            return False
-        # LOOP_SETTLED / LOOP_ABANDONED：已落账/已放弃，继续出下一张
-        abandoned = {str(x) for x in loop["abandoned"]}
-        records = proofread_rows(state)
+            # LOOP_SETTLED / LOOP_ABANDONED：已落账/已放弃，继续出下一张
+            abandoned = {str(x) for x in loop["abandoned"]}
+            records = proofread_rows(state)
 
 
 def _collect_extra_media(state: dict, brief: Brief, generation_dir: Path) -> None:

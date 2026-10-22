@@ -199,8 +199,18 @@ def test_vision_reading_is_counted_in_the_account(tmp_path, monkeypatch):
         content="画面里有一名红裙女孩。",
         usage_metadata={"input_tokens": 1234, "output_tokens": 56, "total_tokens": 1290},
     )
+
+    class _StreamingVision:
+        """读图主路走流式（issue #71）：假模型把首字节喂给 config 里的回调。"""
+
+        def invoke(self, messages, config=None):
+            callbacks = (config or {}).get("callbacks") or []
+            for handler in callbacks:
+                handler.on_llm_new_token("画面")
+            return reply
+
     monkeypatch.setattr(reference_auditor, "_build_vision_model",
-                        lambda: SimpleNamespace(invoke=lambda messages: reply))
+                        lambda streaming=True: _StreamingVision())
 
     text = reference_auditor.describe_image(image)
 
