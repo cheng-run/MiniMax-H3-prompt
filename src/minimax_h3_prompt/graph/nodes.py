@@ -23,6 +23,7 @@ from ..generation import (
     variant_frame_names,
 )
 from ..tools.h3_validator import validate_prompt
+from ..tools.image_prompt_discipline import check_image_prompt
 from ..tools.ref_metadata import format_ref_meta
 from ..tools.theme_guard import theme_requirements_text
 from ..user_revisions import (
@@ -202,13 +203,33 @@ def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_f
             )
             merged = _apply_locked_repair(parsed, kind, patch, violations)
             try:
-                return {output_field: _normalize_asset_entries(merged, kind)}
+                entries = _normalize_asset_entries(merged, kind)
             except ValueError as exc:
                 # 修复后仍不合规才停：给重跑的人留下「已试过一次修复」与逐条明细，
                 # 一眼分清是模型固执还是可修（节点原始报错里没有这层信息）。
                 raise ValueError(f"{kind} 锁死清单修复 1 次后仍不合规：{exc}") from exc
-        return {output_field: _normalize_asset_entries(parsed, kind)}
+        else:
+            entries = _normalize_asset_entries(parsed, kind)
+        # 纪律检查**排在归一之后**：只有形状合规的条目才谈得上「正文写法」，
+        # 也保证两条返回路径（修过/没修过）都经过同一道检查（issue #68）。
+        _warn_image_prompt_discipline(entries, kind)
+        return {output_field: entries}
     return node
+
+
+def _warn_image_prompt_discipline(entries: list[dict], kind: str) -> None:
+    """出词后打印警告级纪律检查结果（issue #68 / ADR 0018）。
+
+    **只打印、不改产物、不阻断**：Turbo 的失败模式是「细节没画出来」，不是
+    「输出不合规」；做成 error 闸门会被合法写法误伤，把一份本来能出图的提示词停掉。
+    警告打在节点里而不是展示口：真实运行都经过节点，且本文件已有同样的先例
+    （关键帧节点剥帧的告警）。
+    """
+    for entry in entries:
+        for warning in check_image_prompt(str(entry.get("positive_prompt", ""))):
+            print(
+                f"[警告] {kind}「{entry.get('name', '')}」生图提示词：{warning.message}"
+            )
 
 
 def _normalize_asset_entries(parsed: object, kind: str) -> list[dict]:
