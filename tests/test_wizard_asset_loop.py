@@ -4,7 +4,7 @@
 - AC1 一次只出一张、裁决落账（或显式放弃）后才出下一张；
 - AC2 审查打回不入库；「改写提示词」算一轮修订并留痕（追加式轮次账）；
 - AC3 校对后「重生成」默认原词再掷、「改词再掷」出口存在且留痕；
-- AC4 队列默认人物→场景→道具，支持跳号/指定下一个出谁；
+- AC4 队列纯 ``<Picture N>`` 升序（issue #66），支持跳号/指定下一个出谁；
 - AC5 展示的画布行与用户选定画布同源（不回落默认表）。
 
 薄接线：走真实调用链（``run_wizard``），只打桩 LLM 与交互输入。
@@ -33,8 +33,9 @@ from minimax_h3_prompt.ui import wizard
 
 TOPIC = "红裙女孩走进秋日庭院，把青铜钥匙交给蓝衫少年。"
 
-# 队列默认序（issue #50 AC4：人物→场景→道具；组内按 <Picture N> 剧本出场序）
-QUEUE_ORDER = ["红裙女孩", "蓝衫少年", "秋日庭院", "青铜钥匙"]
+# 队列默认序（issue #66 起纯 <Picture N> 升序＝剧本出场序＝接线序：
+# 红裙女孩 1 → 秋日庭院 2 → 青铜钥匙 3 → 蓝衫少年 4）
+QUEUE_ORDER = ["红裙女孩", "秋日庭院", "青铜钥匙", "蓝衫少年"]
 
 _SIX_SECTION_PROMPT = (
     "subject_definitions:\n<Subject 1> is 红裙女孩 in <Picture 1>.\n\n"
@@ -259,11 +260,11 @@ def _run_loop(tmp_path, monkeypatch, tail: list[str], *,
 
 
 # ---------------------------------------------------------------------------
-# AC4：队列默认人物→场景→道具；组内剧本出场序
+# AC4：队列纯 <Picture N> 升序（＝剧本出场序＝接线序）；跳号不丢、只剩一张不问
 # ---------------------------------------------------------------------------
 
-def test_queue_defaults_character_scene_prop(tmp_path, monkeypatch, capsys):
-    """四张全落账：出词顺序必须是 人物→场景→道具（AC4），不是 state 存储序。"""
+def test_queue_follows_picture_number_order(tmp_path, monkeypatch, capsys):
+    """四张全交回：出词顺序必须是 <Picture N> 升序，不是「人物→场景→道具」分组。"""
     paths = {name: _write_source(tmp_path, f"{name}.png", name.encode())
              for name in QUEUE_ORDER}
     # 每张：审查满意→路径；队列菜单 回车=默认队首（最后一张自动出，不问）
@@ -278,22 +279,61 @@ def test_queue_defaults_character_scene_prop(tmp_path, monkeypatch, capsys):
     assert code == 0
     out = capsys.readouterr().out
     positions = [out.index(f"当前待办：{name}") for name in QUEUE_ORDER]
-    assert positions == sorted(positions), f"出词顺序不是人物→场景→道具：{QUEUE_ORDER}"
+    assert positions == sorted(positions), f"出词顺序不是 <Picture N> 升序：{QUEUE_ORDER}"
     # 每张出词只出现一次（一次只展示一张，AC1）
     assert out.count(GIRL_PROMPT) == 1
     assert list((tmp_path / "sessions").rglob("video-prompt.md"))
 
 
+def test_queue_menu_shows_list_index_and_picture_number(tmp_path, monkeypatch, capsys):
+    """菜单同屏显示列表序号与 ``<Picture N>``，且整表按 Picture 号升序排列。"""
+    # 四张全放弃：菜单会被问三次（最后一张自动出），表文本每次都重打一遍。
+    _run_loop(tmp_path, monkeypatch, ["", "4", "", "4", "", "4", "4", "8", "1"])
+    out = capsys.readouterr().out
+    # 判据从同一份顺序真源派生：序号是列表下标 1..4，Picture 号来自剧本出场序。
+    expected = [
+        (1, "红裙女孩", 1, "人物"),
+        (2, "秋日庭院", 2, "场景"),
+        (3, "青铜钥匙", 3, "道具"),
+        (4, "蓝衫少年", 4, "人物"),
+    ]
+    for index, name, number, label in expected:
+        assert f"{index}. <Picture {number}> {name}（{label}）" in out, (
+            f"菜单缺序号/Picture 号/类型标签：{index}/{number}/{name}")
+
+
+def test_last_pending_is_not_asked(tmp_path, monkeypatch):
+    """只剩一张待办时不再问「下一个出谁」——没有可跳的号，问一句只是打断。"""
+    asked, code, _ = _run_loop(
+        tmp_path, monkeypatch, ["", "4", "", "4", "", "4", "4", "8", "1"])
+    assert code == 0
+    menus = [text for text in asked if "下一个出谁" in text]
+    assert len(menus) == len(QUEUE_ORDER) - 1, (
+        f"四张待办应只问三次（最后一张自动出），实际 {len(menus)} 次")
+
+
+def test_skipped_asset_reappears_in_later_menu(tmp_path, monkeypatch, capsys):
+    """跳号只改本次出谁，不把被跳过的素材踢出待办：下一轮菜单里它还在。"""
+    # 首问选 2 号（秋日庭院）并放弃；被跳过的 1 号（红裙女孩）必须回到下一轮菜单。
+    tail = ["2", "4", "", "4", "", "4", "4", "8", "1"]
+    _run_loop(tmp_path, monkeypatch, tail)
+    out = capsys.readouterr().out
+    # 菜单共三次：第一次四张，之后每次少一张——被跳过的 1 号仍被处理
+    assert out.count("[素材循环] 待办队列") == len(QUEUE_ORDER) - 1
+    assert out.index("当前待办：秋日庭院") < out.index("当前待办：红裙女孩"), (
+        "跳号后红裙女孩应当仍在后续待办里被处理")
+
+
 def test_queue_supports_skip_and_specify_next(tmp_path, monkeypatch, capsys):
-    """跳号/指定下一个出谁（AC4）：首问直接打序号 3，先出场景那张。"""
+    """跳号/指定下一个出谁（AC4）：首问直接打序号 3，先出 3 号（青铜钥匙）。"""
     paths = {name: _write_source(tmp_path, f"{name}.png", name.encode())
              for name in QUEUE_ORDER}
     tail: list[str] = [
-        "3",              # 队列菜单：跳号，先出 3 号（秋日庭院）
-        "1", str(paths["秋日庭院"]),
+        "3",              # 队列菜单：跳号，先出 3 号（青铜钥匙）
+        "1", str(paths["青铜钥匙"]),
         "", "4",          # 回队首（红裙女孩）→ 放弃
-        "", "4",          # 蓝衫少年 → 放弃
-        "4",              # 最后一张自动出，放弃
+        "", "4",          # 秋日庭院 → 放弃
+        "4",              # 最后一张（蓝衫少年）自动出，放弃
         "8", "1",
     ]
     asked, code, _ = _run_loop(tmp_path, monkeypatch, tail)
@@ -301,8 +341,8 @@ def test_queue_supports_skip_and_specify_next(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     # 第一张出的是 3 号（跳号生效）
     first = min(out.index(f"当前待办：{name}") for name in QUEUE_ORDER)
-    assert "当前待办：秋日庭院" in out
-    assert out.index("当前待办：秋日庭院") == first, "跳号没生效：3 号应当先出"
+    assert "当前待办：青铜钥匙" in out
+    assert out.index("当前待办：青铜钥匙") == first, "跳号没生效：3 号应当先出"
     assert any("跳号/指定下一个出谁" in text for text in asked), "队列菜单缺跳号入口"
 
 
@@ -573,15 +613,15 @@ def test_next_prompt_backfills_the_settled_asset_facts(tmp_path, monkeypatch, ca
     - 第 1 张出词时**不**回灌（还没有已定稿素材，不该白花一次调用）。
     """
     girl = _write_source(tmp_path, "girl.png", b"girl")
-    boy = _write_source(tmp_path, "boy.png", b"boy")
+    garden = _write_source(tmp_path, "garden.png", b"garden")
     vision = {"picture-01": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
     llm = _FakeLLM()
     tail = [
-        "", "1", str(girl),   # 队列菜单→红裙女孩；审查满意；交回路径
-        "", "",               # 三选回车=按图改文案；改后文案回车=用图中实见
-        "", "1", str(boy),    # 队列菜单→蓝衫少年（回灌在此之前）；审查满意；交回
-        "", "4",              # 队列菜单→秋日庭院；放弃
-        "4",                  # 青铜钥匙（最后一张自动出）：放弃
+        "", "1", str(girl),    # 队列菜单→红裙女孩；审查满意；交回路径
+        "", "",                # 三选回车=按图改文案；改后文案回车=用图中实见
+        "", "1", str(garden),  # 队列菜单→秋日庭院（回灌在此之前）；审查满意；交回
+        "", "4",               # 队列菜单→青铜钥匙；放弃
+        "4",                   # 蓝衫少年（最后一张自动出）：放弃
         "8", "1",
     ]
     asked, code, _ = _run_loop(tmp_path, monkeypatch, tail, vision=vision, llm=llm)
@@ -589,13 +629,13 @@ def test_next_prompt_backfills_the_settled_asset_facts(tmp_path, monkeypatch, ca
 
     aligns = [r for r in llm.requests if _ALIGN_HEAD in r]
     assert aligns, "出下一张的词之前没有回灌"
-    assert _current_prompt_from(aligns[0]).startswith("人物·蓝衫少年"), \
-        "第一次回灌对齐的不是第 2 张"
+    assert _current_prompt_from(aligns[0]).startswith("场景·秋日庭院"), \
+        "第一次回灌对齐的不是第 2 张（<Picture 2>）"
     request = aligns[0]
     assert "红裙女孩" in request and "宝蓝色长裙" in request, \
         "回灌请求里带的不是已定稿素材的合并结果（素材画面事实裁定的优先序）"
     assert "黑发" in request, "合并结果被截成了摘要——回灌要带整条画面事实"
-    assert "蓝衫少年" in request, "回灌请求里没有当前这张的词，对齐无从落笔"
+    assert "秋日庭院" in request, "回灌请求里没有当前这张的词，对齐无从落笔"
 
     # 第 1 张（红裙女孩）出词时还没有已定稿素材，那一次不许回灌——「没有事实也发请求」
     # 的话这里会出现一次「当前词＝红裙女孩」的对齐。
@@ -609,17 +649,17 @@ def test_backfill_result_is_reissued_and_not_repeated_after_a_rewrite(tmp_path, 
     llm = _FakeLLM(align_suffix="（已与已定稿素材对齐）")
     tail = [
         "", "1", str(girl),                       # 红裙女孩落账
-        "", "3", "改成宝蓝色", "4",                # 蓝衫少年：出词后打回改写 → 新词重出 → 放弃
-        "", "4", "4",                             # 秋日庭院、青铜钥匙：放弃
+        "", "3", "改成宝蓝色", "4",                # 秋日庭院：出词后打回改写 → 新词重出 → 放弃
+        "", "4", "4",                             # 青铜钥匙、蓝衫少年：放弃
         "8", "1",
     ]
     asked, code, _ = _run_loop(tmp_path, monkeypatch, tail, llm=llm)
     assert code == 0
-    # 每张出词前各回灌一次（第 1 张没有已定稿素材，不在此列）；蓝衫少年只许一次——
+    # 每张出词前各回灌一次（第 1 张没有已定稿素材，不在此列）；被改写的那张只许一次——
     # 改写成功后的重出是**人刚改的词**，再自动对齐一轮会按旧事实把它拽回去。
-    boy_aligns = [r for r in llm.requests if _ALIGN_HEAD in r
-                  and _current_prompt_from(r).startswith("人物·蓝衫少年")]
-    assert len(boy_aligns) == 1, f"改写后的重出又回灌了一次：{len(boy_aligns)}"
+    rewritten_aligns = [r for r in llm.requests if _ALIGN_HEAD in r
+                        and _current_prompt_from(r).startswith("场景·秋日庭院")]
+    assert len(rewritten_aligns) == 1, f"改写后的重出又回灌了一次：{len(rewritten_aligns)}"
     out = capsys.readouterr().out
     assert "（已与已定稿素材对齐）" in out, "回灌后的新词没有重新出站"
 

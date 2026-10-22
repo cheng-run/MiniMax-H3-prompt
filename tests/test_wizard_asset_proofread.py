@@ -281,10 +281,10 @@ def test_mid_adjudication_crash_keeps_earlier_records(tmp_path, monkeypatch):
     })
     girl = _write_source(tmp_path, "girl.png", b"girl")
     key = _write_source(tmp_path, "key.png", b"key")
-    # 素材循环：红裙女孩→girl（picture-01，干净落账）；少年/庭院放弃；
-    # 青铜钥匙→key（picture-03）→ 三选时炸
+    # 素材循环（issue #66 纯 Picture 序）：红裙女孩→girl（picture-01，干净落账）；
+    # 秋日庭院放弃；青铜钥匙→key（picture-03）→ 三选时炸
     wire = iter([TOPIC, "", "", "4", "", "1", str(girl),
-                 "", "4", "", "4", "1", str(key)])
+                 "", "4", "1", "1", str(key)])
 
     def boom_on_adjudication(text: str) -> str:
         if "裁决" in text:

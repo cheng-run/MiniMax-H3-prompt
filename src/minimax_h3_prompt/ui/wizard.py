@@ -646,7 +646,15 @@ def _phase1_new(config: Config) -> SessionState | None:
     )
     generation_dir = _session_dir(config, topic)
 
-    with _progress_scope("[阶段 1] 正在生成剧本、设计与首尾帧生图提示词……（预计几分钟，期间无需输入）"):
+    # 阶段 1 标题按路线说对话（issue #66）：多参路线的实际产出是**资产图**生图提示词，
+    # 沿用「首尾帧」措辞会让用户误以为自己在跑首尾帧链（票面用户现场）。首尾帧链措辞
+    # 原样保留——≤9 张的既有流程与老产物描述不受影响。
+    stage1_title = (
+        "[阶段 1] 正在生成剧本、设计与资产图生图提示词……（预计几分钟，期间无需输入）"
+        if brief.mode == "ref" else
+        "[阶段 1] 正在生成剧本、设计与首尾帧生图提示词……（预计几分钟，期间无需输入）"
+    )
+    with _progress_scope(stage1_title):
         state, model, agents = run_stage1(
             brief, config, on_node=_report_node,
             on_step_done=_progress_saver(generation_dir, brief),
@@ -1204,13 +1212,17 @@ def _pick_next_asset(pending: Sequence[QueueItem]) -> QueueItem | None:
 
     「跳号」与「指定下一个」是同一问的两张脸：打一个序号就既跳过了默认那张、又指定了
     出谁；被跳的号留在队列里稍后回来，不丢。返回 None ＝ 用户「先到这里」。
+
+    issue #66：队列已按 ``<Picture N>`` 升序（＝剧本出场序＝接线序），菜单同屏显示
+    **列表序号**与 **Picture 号**——两者不总相等（跳号场景下 2 号可能挂着 Picture 5），
+    只看序号填图会填错槽，故 Picture 号排在前面、与注入卡逐行对账。
     """
     from ..generation import KIND_LABELS
 
-    print("\n[素材循环] 待办队列（默认顺序 人物→场景→道具）：")
+    print("\n[素材循环] 待办队列（顺序＝<Picture N> 升序＝剧本出场序＝接线序）：")
     for index, item in enumerate(pending, 1):
         label = KIND_LABELS.get(item.kind, item.kind)
-        print(f"  {index}. {item.name}（{label}·<Picture {item.picture}>）")
+        print(f"  {index}. <Picture {item.picture}> {item.name}（{label}）")
     default = pending[0]
     while True:
         raw = _prompt(
@@ -1851,8 +1863,9 @@ def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item: QueueIte
 def _asset_loop(state: dict, brief: Brief, generation_dir: Path) -> bool:
     """素材循环（issue #50）：队列驱动的逐张闭环，一次只维持一张「当前待办」。
 
-    队列默认顺序**人物→场景→道具**，支持跳号/指定下一个出谁（AC4）；每张要么裁决
-    落账、要么显式放弃才轮到下一张（AC1）。返回 True ＝ 队列清空，继续注入卡与阶段 2；
+    队列顺序＝纯 ``<Picture N>`` 升序（issue #66 起；＝剧本出场序＝接线序），支持
+    跳号/指定下一个出谁（AC4）；每张要么裁决落账、要么显式放弃才轮到下一张（AC1）。
+    返回 True ＝ 队列清空，继续注入卡与阶段 2；
     False ＝ 用户「先到这里」，会话保持可续接（进度已逐张落盘）。
     """
     from ..asset_ledger import KIND_PICTURE, IntakeReport, load_asset_ledger, render_report, verify_asset_ledger

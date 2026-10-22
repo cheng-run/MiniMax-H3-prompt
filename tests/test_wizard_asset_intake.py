@@ -155,10 +155,10 @@ def test_ref_flow_collects_pictures_and_writes_ledger(tmp_path, monkeypatch, cap
         "青铜钥匙": _write_source(tmp_path, "key.png", b"key"),
         "蓝衫少年": _write_source(tmp_path, "boy.png", b"boy"),
     }
-    # 素材循环（issue #50）逐张交回：队列序=人物→场景→道具（组内剧本出场序）；
+    # 素材循环（issue #66 纯 Picture 序）：逐张交回，顺序＝剧本出场序；
     # 每张「队列菜单回车=出队首 → 审查回车/1=满意 → 填路径」；随后不再加视频/音频；
     # 视频输出不再问答（issue #49 自动推导），故无尾部选择器输入
-    queue = ["红裙女孩", "蓝衫少年", "秋日庭院", "青铜钥匙"]
+    queue = ["红裙女孩", "秋日庭院", "青铜钥匙", "蓝衫少年"]
     loop: list[str] = []
     for index, name in enumerate(queue):
         if index < len(queue) - 1:
@@ -249,7 +249,7 @@ def test_complete_loop_proceeds_without_pause_question(tmp_path, monkeypatch):
 
     _stub_vision_clean(monkeypatch)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
-    queue = ["红裙女孩", "蓝衫少年", "秋日庭院", "青铜钥匙"]
+    queue = ["红裙女孩", "秋日庭院", "青铜钥匙", "蓝衫少年"]
     paths = {name: _write_source(tmp_path, f"{name}.png", name.encode()) for name in queue}
     loop: list[str] = []
     for index, name in enumerate(queue):

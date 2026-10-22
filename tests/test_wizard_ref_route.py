@@ -138,6 +138,36 @@ def test_phase1_new_ref_route_builds_ref_brief(tmp_path, monkeypatch):
     assert captured2["brief"].variant == "FL2VA"
 
 
+def test_phase1_title_says_asset_prompts_on_ref_route(tmp_path, monkeypatch, capsys):
+    """多参路线阶段 1 标题说「资产图生图提示词」（issue #66）。
+
+    票面现场：多参流程显示「正在生成剧本、设计与首尾帧生图提示词」，可实际产出是
+    资产图提示词——用户会误以为自己在跑首尾帧链。标题按 ``brief.mode`` 分叉。
+    """
+    _silence(monkeypatch)
+    monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
+    monkeypatch.setattr(wizard, "_confirm", lambda *a, **k: False)
+    _stub_stage1(monkeypatch)
+    _fake_inputs(monkeypatch, [TOPIC, "", "", "4"])
+    wizard._phase1_new(_cfg(tmp_path))
+    out = capsys.readouterr().out
+    assert "剧本、设计与资产图生图提示词" in out, "多参路线标题没说资产图"
+    assert "首尾帧生图提示词" not in out, "多参路线标题不该再提首尾帧"
+
+
+def test_phase1_title_keeps_frame_chain_on_base_route(tmp_path, monkeypatch, capsys):
+    """首尾帧链的阶段 1 标题原样保留（issue #66 AC「首尾帧链标题不变」）。"""
+    _silence(monkeypatch)
+    monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
+    monkeypatch.setattr(wizard, "_confirm", lambda *a, **k: False)
+    _stub_stage1(monkeypatch)
+    _fake_inputs(monkeypatch, [TOPIC, "", "", "3"])
+    wizard._phase1_new(_cfg(tmp_path))
+    out = capsys.readouterr().out
+    assert "剧本、设计与首尾帧生图提示词" in out
+    assert "资产图生图提示词" not in out, "首尾帧链标题不该混进多参措辞"
+
+
 # ---------------------------------------------------------------------------
 # ≤15 秒直出一份 ref 六段式
 # ---------------------------------------------------------------------------

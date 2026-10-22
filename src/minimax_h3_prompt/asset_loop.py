@@ -23,9 +23,11 @@ ASSET_ROUNDS_FILENAME = "asset-rounds.jsonl"
 # 队列进度在 state 里的键（会话持久化白名单同此名，见 session_store._STATE_KEYS）。
 ASSET_LOOP_KEY = "asset_loop"
 
-# 队列默认顺序（issue #50 AC4）：人物→场景→道具。**不是** KIND_LABELS 的
-# 枚举序（人物/道具/场景）——那是渲染标题的顺序；这里是出题节奏的裁定。
-_KIND_QUEUE_ORDER = {"character": 0, "scene": 1, "prop": 2}
+# 资产类型白名单（只做入参校验，**不再参与排序**）。issue #66 起队列顺序纯按
+# ``<Picture N>`` 升序：编号即剧本出场序，也正是注入卡与工作流槽位的接线序；
+# 原先的「人物→场景→道具」分组（issue #50 AC4，2026-10-18 裁定）让用户按菜单
+# 顺序填图时填错槽，故该分组在 issue #66 被推翻。
+_ASSET_KINDS = ("character", "scene", "prop")
 
 # 留痕触发口（每行 round 记录的 trigger）：
 # - 审查打回「改写提示词」（AC2）；
@@ -105,28 +107,32 @@ class QueueItem(NamedTuple):
 
 
 def asset_queue(entries: Sequence[dict[str, Any]], *, pictures: dict[str, int] | None = None) -> tuple[QueueItem, ...]:
-    """把资产条目排成素材循环的待办队列（issue #50 AC4）。
+    """把资产条目排成素材循环的待办队列（issue #66 起纯 ``<Picture N>`` 升序）。
 
-    默认顺序**人物→场景→道具**，组内按 ``<Picture N>`` 登记号（剧本出场序，
-    编号即叙事顺序）定序；``pictures`` 不给（或名字不在映射里）时按传入序
-    稳定排组内末尾——与参考素材登记「找不到出场的排尾」同一口径。
+    编号来自 ``pictures``（语义名 → 剧本出场序，经 ``ref_asset_registry`` 派生），
+    升序排列后菜单顺序＝注入卡顺序＝工作流槽位顺序，用户按菜单往槽位里填图不会
+    填错槽（issue #64 问题 2 的实测现场）。**不再有类型分组**：类型只用于展示标签。
+
+    ``pictures`` 不给（或名字不在映射里）的条目排尾部、保持传入序——与参考素材
+    登记「找不到出场的排尾」同一口径；跳号（1、5、9）不影响升序，被跳过的号
+    仍然留在队列里（待办与否由 ``ui.wizard._asset_loop`` 按落账/放弃判）。
 
     入参是 ``{kind: [条目]}`` 或 ``(kind, 条目)`` 序列；条目取四键契约
     （name/positive_prompt/negative_prompt/instructions，见
     ``generation._normalize_asset_entries``）。
     """
-    items: list[tuple[int, int, int, QueueItem]] = []
+    items: list[tuple[int, int, QueueItem]] = []
     seq = 0
 
     def _add(kind: str, raw: dict[str, Any]) -> None:
         nonlocal seq
-        if kind not in _KIND_QUEUE_ORDER:
+        if kind not in _ASSET_KINDS:
             raise ValueError(f"未知资产类型：{kind!r}")
         name = str(raw.get("name", "")).strip()
         if not name:
             raise ValueError("资产条目缺语义名 name")
         number = (pictures or {}).get(name, 10**6 + seq)
-        items.append((_KIND_QUEUE_ORDER[kind], number, seq, QueueItem(number, kind, name)))
+        items.append((number, seq, QueueItem(number, kind, name)))
         seq += 1
 
     if isinstance(entries, dict):
@@ -137,7 +143,7 @@ def asset_queue(entries: Sequence[dict[str, Any]], *, pictures: dict[str, int] |
         for kind, raw in entries:
             _add(str(kind), raw)
 
-    return tuple(item for *_keys, item in sorted(items, key=lambda t: t[:3]))
+    return tuple(item for *_keys, item in sorted(items, key=lambda t: t[:2]))
 
 
 def _now() -> str:

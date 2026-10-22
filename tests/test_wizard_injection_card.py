@@ -135,8 +135,8 @@ def _run_full_flow(tmp_path, monkeypatch, canvases: dict | None = None):
     _stub_stage1(monkeypatch)
     _stub_stage2(monkeypatch)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
-    # 素材循环队列序（issue #50 AC4：人物→场景→道具、组内剧本出场序）
-    queue = ["红裙女孩", "蓝衫少年", "秋日庭院", "青铜钥匙"]
+    # 素材循环队列序（issue #66：纯 <Picture N> 升序＝剧本出场序＝接线序）
+    queue = ["红裙女孩", "秋日庭院", "青铜钥匙", "蓝衫少年"]
     paths = {name: _write_source(tmp_path, f"{name}.png", name.encode()) for name in queue}
     loop: list[str] = []
     for index, name in enumerate(queue):
