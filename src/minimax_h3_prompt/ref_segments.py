@@ -1172,19 +1172,18 @@ def prepare_ref_segmentation(*, whole_prompt: str, total_s: float, out_dir: Path
 def write_all_ref_segments(job: RefSegmentJob) -> RefSegmentResult:
     """批式编排（``--brief`` 快路径）：按序调用写单段，逐段横幅、落盘即打印。
 
-    每段写一行步骤横幅「正在写第 N/M 段」；**心跳由调用方的作用域提供**（快路径用
-    ``step_scope`` 把整个交付包住，这里再开一个作用域就会让同一事件打两遍）。
+    每段一行步骤横幅「正在写第 N/M 段」，横幅与心跳成对出现（``step_scope``；
+    调用方另有外层作用域时由 ``event_scope`` 的引用计数挡住重复监听，issue #71）。
     """
-    # 延迟导入：纯机械路径（llm=None）不该为了一口气拉起 rich 与进度面板。
-    from .ui.progress import format_step_banner  # noqa: PLC0415
+    from .ui.progress import step_scope  # 延迟导入：纯机械路径不必拉起 rich
 
     total = len(job.plans)
     texts: list[str] = []
     issues: list[list] = []
     for position in range(1, total + 1):
-        print(format_step_banner(f"正在写第 {position}/{total} 段",
-                                 round_no=position, total_rounds=total), flush=True)
-        text, segment_issues = job.write_segment(position)
+        with step_scope(f"正在写第 {position}/{total} 段",
+                        round_no=position, total_rounds=total):
+            text, segment_issues = job.write_segment(position)
         texts.append(text)
         issues.append(segment_issues)
         # 落盘即打印：写完这一段就交到用户眼前，不攒整片（issue #70）。

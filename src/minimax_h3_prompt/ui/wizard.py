@@ -64,7 +64,12 @@ from ..user_revisions import (
     render_revocation_block,
     revocation_note,
 )
-from .progress import TextProgress, event_scope, format_step_banner, step_scope
+from .progress import (
+    TextProgress,
+    event_scope,
+    format_step_banner,
+    step_scope,
+)
 
 
 def resolve_effective_variant(requested: str, have_first: bool, have_last: bool) -> str:
