@@ -33,10 +33,19 @@ _ASSET_KINDS = ("character", "scene", "prop")
 # - 审查打回「改写提示词」（AC2）；
 # - 校对后重生成「改词再掷」（AC3，词图皆错时连词一起换）；
 # - 校对后重生成「原词再掷」（AC3 默认口——词没动也记一笔，因为裁决
-#   记录会被换版后的重新校对**覆盖**，重掷历史只活在追加账里）。
+#   记录会被换版后的重新校对**覆盖**，重掷历史只活在追加账里）；
+# - 校对后重生成「AI 按偏差改词」（issue #72 / ADR 0018：由模型按偏差清单把被画漏的
+#   细节写显式。与「改词再掷」分得清——那一档的意见是人写的，这一档是模型写的，
+#   事后要能分辨是谁要求的这一轮）。
 TRIGGER_REVIEW_REWORD = "review_reword"
 TRIGGER_REGEN_REWORD = "regen_reword"
 TRIGGER_REGEN_REROLL = "regen_reroll"
+TRIGGER_REGEN_AI_REWORD = "regen_ai_reword"
+
+# 「重画轮次」只认因偏差重画的这三档（issue #72）：审查打回改写不算——那一档图还没交回，
+# 把它算进来会把「本张已重画 N 轮」说得比事实多。清单保持单一定义：计数口按它过滤，
+# 将来加触发口只改这里（写死一遍 in ("a","b") 就是第二份口径）。
+REGEN_TRIGGERS = (TRIGGER_REGEN_REROLL, TRIGGER_REGEN_REWORD, TRIGGER_REGEN_AI_REWORD)
 
 # 打回「外部重掷」**不留痕**（issue #50 明确「不登记」）：它不是这本账的触发口，
 # 故此处不设常量——写进轮次账就等于给被拒图记了名。
@@ -208,6 +217,31 @@ def read_asset_rounds(directory: str | Path, *, name: str | None = None) -> list
     return out
 
 
+def count_regen_rounds(directory: str | Path, *, name: str) -> int:
+    """这张资产因偏差被重画了几轮——**从轮次账现算**，不另存计数器（issue #72）。
+
+    不存计数器的理由：计数器是第二份真相，改写轮次账一被追加（续跑、CLI 补记），
+    两边就各自漂；而「重画过几轮」只用来提示，现算一次的成本是一行文件读。
+    只认 ``REGEN_TRIGGERS`` 那几档：审查打回改写不是重画（见该常量的注释）。
+    """
+    return sum(
+        1 for record in read_asset_rounds(directory, name=name)
+        if record.get("trigger") in REGEN_TRIGGERS
+    )
+
+
+def render_regen_hint(rounds: int) -> str:
+    """重画轮次提示的**唯一写源**（issue #72 的菜单与校对报告两处都取它）。
+
+    两处各拼一遍就会各自漂（同 ``format_tag`` 的纪律）。0 轮返回空串：第一次进重生成
+    菜单时「已重画 0 轮」是噪音，人要看的是「你已经在这张图上花了 N 轮」。
+    """
+    count = int(rounds)
+    if count <= 0:
+        return ""
+    return f"本张已重画 {count} 轮；仍不过可按图改文案保留这一版"
+
+
 # 两条单资产请求（改写 / 回灌）共用的块标题。**只有这一处定义**：模板、假模型与断言
 # 三处各写一遍就是又一个会各自漂移的字面量（同 agents.OFFICIAL_VERBATIM_MARKER 的纪律，
 # ADR 0008 裁定二）。测试从 ``asset_loop`` 导入它，不另抄一份。
@@ -296,11 +330,113 @@ def align_asset_prompt(
     return new_prompt
 
 
+# AI 改词请求（issue #72）三块标题。**只有这一处定义**：请求文本、假模型与断言三处
+# 各写一遍就是又一个会各自漂移的字面量（同 CURRENT_PROMPT_HEAD 的纪律）。
+AI_REWORD_DEVIATIONS_HEAD = "【偏差清单】"
+AI_REWORD_LOCKED_HEAD = "【锁死清单】"
+AI_REWORD_DISCIPLINE_HEAD = "【生图提示词纪律】"
+
+# AI 改词的角色名：直调入口的事件（agent_start / agent_wait / agent_done）与成本表
+# 都按它归类（issue #72 / ADR 0019）。单列一个角色名，成本表里才看得出「AI 改词花了多少」。
+AI_REWORD_ROLE = "role_asset_ai_reword"
+
+
+def build_ai_reword_request(
+    prompt: str,
+    deviations: Sequence[tuple[str, str, str]],
+    locked_features: Sequence[str] = (),
+    discipline: str = "",
+) -> str:
+    """AI 改词请求文本（纯函数，返回字符串即契约，issue #72）。
+
+    ``deviations`` 是**本轮全部**偏差的三元组 ``(哪一处, 描述原文, 图中实见)``——
+    不是「已裁过的那几条」：人在第一条上就选了「重生成」时，后面的偏差压根没轮到人裁，
+    但它们照样是这张图要修的地方（票面「全部偏差条目」）。
+
+    **方向是强化原意，不是迁就成图**（ADR 0018 末段）：把被画漏/画歪的那几处写显式，
+    让下一轮更可能画对；照着图改等于让一张画歪的图反过来改设计，而且那是「按图改文案」
+    的活（改素材画面事实），与这里改生图提示词是两件事。这条纪律必须写进请求——不给它，
+    模型最省力的做法就是照 observed 抄一遍，图的问题被固化成设计。
+
+    ``discipline`` 由调用方从 ``image_prompt_discipline.discipline_text()`` 现取（#68 的
+    单一来源），本函数不复制正文：两份纪律文本必然各自漂。
+    """
+    items = [
+        f"- {aspect}：描述「{quote}」→ 图中「{observed}」"
+        for aspect, quote, observed in deviations
+    ]
+    lines = [
+        "下面是一条 Z-Image 生图提示词，以及读图校对给出的偏差清单。",
+        "请**按偏差清单改写这条提示词**：方向是**强化原意**——把被画漏、被画错的那几处"
+        "写得更显式（具体、可看见、正向陈述），让下一轮出图更可能画对。",
+        "纪律：",
+        "1. 只改偏差涉及的那几处；没被点到的部分**逐字保留**，不要重排版、不要「顺手优化」。",
+        "2. 锁死清单的条目必须在改写结果里**逐字保留**——它们是判偏差的判据，改掉就再也判不出来。",
+        "3. **不得改成图里的样子**：图是画歪的现场证据，不是设计。照着图改等于用一张画歪的图"
+        "反过来改设计；那属于「按图改文案」，不是这一步。",
+        "只输出改写后的**完整提示词正文**，不要解释、不要前后缀。",
+        "",
+        f"{CURRENT_PROMPT_HEAD}\n{str(prompt).strip()}",
+        "",
+        f"{AI_REWORD_DEVIATIONS_HEAD}\n" + "\n".join(items),
+    ]
+    locked = [str(x).strip() for x in locked_features if str(x).strip()]
+    if locked:
+        lines.extend(["", f"{AI_REWORD_LOCKED_HEAD}\n" + "\n".join(f"- {x}" for x in locked)])
+    if str(discipline).strip():
+        lines.extend(["", f"{AI_REWORD_DISCIPLINE_HEAD}\n{str(discipline).strip()}"])
+    return "\n".join(lines)
+
+
+def ai_reword_asset_prompt(
+    prompt: str,
+    deviations: Sequence[tuple[str, str, str]],
+    llm,
+    *,
+    locked_features: Sequence[str] = (),
+) -> str:
+    """按偏差清单改写一条资产生图提示词（AI 改词，一轮，issue #72）。
+
+    ``llm`` 由调用方注入（带 ``invoke(request, config=...)`` 接口，测试可传 stub）。
+    纪律文本**现取** ``discipline_text()``：改 .md 即改模型看到的那一份，
+    与角色提示词不可能只改到一半（#68 的单一来源）。
+
+    **调用走直调等待看门狗**（issue #67 / ADR 0019）：ADR 的裁定是「所有直接
+    ``llm.invoke`` 改走它」，AI 改词是这条规则落地之后新增的直调点——裸调就没有首字节
+    心跳、没有卡住重试、token 也不进成本表（``run_agent`` 之外的第二套等待体验）。
+    失败照旧**抛错交给调用方**（词保持原样、留在菜单），病因与尝试次数在错误文案里。
+
+    **锁死特征丢了就响**：同 ``align_asset_prompt`` 的理由——条目是判偏差的判据，
+    丢了这一张的偏差就再也判不出来（静默失效）。调用方据此不采用改写结果、保持原词。
+    结果是空串也响：空词写回等于把这张图的提示词删了。
+    """
+    from .agents import run_direct_call  # noqa: PLC0415 - 避免入口期拉起角色装配栈
+    from .tools.image_prompt_discipline import discipline_text
+
+    request = build_ai_reword_request(prompt, deviations, locked_features, discipline_text())
+    result = run_direct_call(llm, request, role=AI_REWORD_ROLE)
+    if not result.ok:
+        raise ValueError(result.error)
+    new_prompt = result.text.strip()
+    if not new_prompt:
+        raise ValueError("AI 改词结果为空")
+    missing = [str(x) for x in locked_features if str(x).strip() and str(x) not in new_prompt]
+    if missing:
+        raise ValueError(
+            f"AI 改词结果丢了锁死特征：{'、'.join(missing)}——"
+            "锁死清单是判偏差的判据，AI 改词只许强化原意、不许把它改掉")
+    return new_prompt
+
+
 __all__ = [
+    "AI_REWORD_DEVIATIONS_HEAD", "AI_REWORD_DISCIPLINE_HEAD", "AI_REWORD_LOCKED_HEAD",
+    "AI_REWORD_ROLE",
     "ASSET_LOOP_KEY", "ASSET_ROUNDS_FILENAME", "CURRENT_PROMPT_HEAD", "QueueItem",
-    "SETTLED_FACTS_HEAD",
-    "TRIGGER_REGEN_REROLL", "TRIGGER_REGEN_REWORD", "TRIGGER_REVIEW_REWORD",
-    "align_asset_prompt", "asset_queue", "build_settled_align_request", "log_asset_round",
-    "loop_state", "note_abandoned", "note_released",
-    "read_asset_rounds", "rewrite_asset_prompt", "set_current",
+    "REGEN_TRIGGERS", "SETTLED_FACTS_HEAD",
+    "TRIGGER_REGEN_AI_REWORD", "TRIGGER_REGEN_REROLL", "TRIGGER_REGEN_REWORD",
+    "TRIGGER_REVIEW_REWORD",
+    "ai_reword_asset_prompt", "align_asset_prompt", "asset_queue",
+    "build_ai_reword_request", "build_settled_align_request", "count_regen_rounds",
+    "log_asset_round", "loop_state", "note_abandoned", "note_released",
+    "read_asset_rounds", "render_regen_hint", "rewrite_asset_prompt", "set_current",
 ]

@@ -13,7 +13,7 @@ import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, NamedTuple
 
 if TYPE_CHECKING:  # 返回注解用；运行时经函数级导入取（防环，brief_parser 同款）
     from collections.abc import Sequence
@@ -1172,6 +1172,19 @@ LOOP_SETTLED, LOOP_ABANDONED, LOOP_PAUSED = "settled", "abandoned", "paused"
 PROOFREAD_DONE, PROOFREAD_REGEN, PROOFREAD_FAILED = "done", "regen", "failed"
 
 
+class ProofreadOutcome(NamedTuple):
+    """读图校对一张的结果：状态 ＋ 本轮偏差清单（issue #72）。
+
+    偏差清单要**带出去**：重生成菜单的「AI 按偏差改词」按它改词，而且取的是本轮**全部**
+    偏差，不是 ``ProofreadRecord`` 里那几条已裁的——人在第一条上选了「重生成」，后面的
+    偏差压根没轮到人裁，但它们照样是这张图要修的地方。只在状态里留个 ``regen`` 的话，
+    这份清单随函数返回一起丢，AI 改词就只能靠人复述。
+    """
+
+    status: str
+    deviations: tuple = ()
+
+
 # 单张闭环的续跑走向（issue #51）：这张图上次已交回、裁决还没落定，续跑给它三条路。
 # 与 LOOP_* 同为信令常量——裸字符串会被打错字且无处对账。
 RESUME_REPROOFREAD, RESUME_REPLACE = "reproofread", "replace"
@@ -1333,6 +1346,63 @@ def _rewrite_asset_prompt_round(state: dict, brief: Brief, generation_dir: Path,
     return True
 
 
+def _ai_reword_asset_round(state: dict, brief: Brief, generation_dir: Path, item: QueueItem,
+                           deviations: Sequence[tuple[str, str, str]]) -> bool:
+    """「AI 按偏差改词」一轮（issue #72 / ADR 0018）：按偏差清单强化原意 → 写回 → 留痕。
+
+    ``deviations`` 是本轮**全部**偏差 ``(哪一处, 描述原文, 图中实见)``，调用方从
+    ``ProofreadOutcome.deviations`` 换形而来。
+
+    失败（LLM 报错、结果丢了锁死特征、模型一个字都没改）只提示、词保持原样并**留在菜单**
+    ——静默换词等于让人在不知情下用上一条没验证过的改写。返回 True 才重出词。
+    """
+    from ..asset_loop import (
+        ASSET_ROUNDS_FILENAME,
+        TRIGGER_REGEN_AI_REWORD,
+        ai_reword_asset_prompt,
+        log_asset_round,
+    )
+    from ..generation import image_prompt_variants
+    from ..model_factory import build_chat_model
+    from ..tools.image_prompt_discipline import check_image_prompt
+
+    if not deviations:
+        # 防御分支：重生成菜单只在本轮判出偏差后才可达，真走到这里说明信令接错了。
+        # 没有清单就无从「按偏差改词」，猜着改会把没问题的部分一起漂走。
+        print("[AI 改词] 没有可用的偏差清单，提示词保持原样（不猜着改）。")
+        return False
+    old = _current_prompt_text(state, item)
+    locked = next((v.locked_features for v in image_prompt_variants(state, brief.canvases)
+                   if v.name == item.name), ())
+    try:
+        new = ai_reword_asset_prompt(old, deviations, build_chat_model(),
+                                     locked_features=locked)
+    except Exception as exc:  # noqa: BLE001 — 失败要响但不许裸崩：词不动、回菜单再定
+        print(f"[AI 改词·{item.name}] 改写失败：{exc}；提示词保持原样。")
+        return False
+    if new == old:
+        # 原词回吐不是「改成功」：留痕就会给轮次账记一个假的改写轮，
+        # 而「本张已重画 N 轮」正是按那本账算的（issue #72）。
+        print("[AI 改词] 模型没有改动任何内容，提示词保持原样。")
+        return False
+    _update_prompt_text(state, item, new)
+    aspects = "、".join(str(aspect) for aspect, _quote, _observed in deviations)
+    log_asset_round(
+        generation_dir,
+        name=item.name, kind=item.kind, trigger=TRIGGER_REGEN_AI_REWORD,
+        feedback=f"校对裁决重生成：AI 按偏差改词（{aspects}）",
+        prompt_before=old, prompt_after=new,
+    )
+    save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
+    print(f"[AI 改词·{item.name}] 已按 {len(deviations)} 处偏差改写（锁死清单与其余正文逐字保留），"
+          f"并记入轮次账（{ASSET_ROUNDS_FILENAME}）。")
+    # 改写也是一次出词：照跑警告级纪律检查（#68 / ADR 0018）。只警告、不阻断——
+    # 这份词是人要拿去生图的，纪律问题得在出图前看得见。
+    for warning in check_image_prompt(new):
+        print(f"[纪律警告·{item.name}] {warning.message}")
+    return True
+
+
 def _settled_asset_facts(state: dict, brief: Brief, *, exclude: str) -> list[tuple[str, str]]:
     """已定稿素材的 ``(语义名, 画面事实)``——回灌（issue #53 AC3）的取材口。
 
@@ -1485,11 +1555,14 @@ def _pin_rewrite_quote(dev, running: str, *, name: str) -> str:
 def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: str):
     """读图校对**一张**（issue #44 机制，issue #50 逐张闭环调用）。
 
-    返回 ``PROOFREAD_DONE``（裁决落账）/ ``PROOFREAD_REGEN``（该张裁了「重生成」）/ ``PROOFREAD_FAILED``（读图
-    失败——不放行，图跑偏无人纠）。对照底本恒取生图提示词最新版：换版重交/改词再掷的
+    返回 ``ProofreadOutcome``：``status`` 是 ``PROOFREAD_DONE``（裁决落账）/ ``PROOFREAD_REGEN``
+    （该张裁了「重生成」）/ ``PROOFREAD_FAILED``（读图失败——不放行，图跑偏无人纠）；裁了
+    重生成时 ``deviations`` 带上本轮全部偏差（重生成菜单的 AI 改词按它改，issue #72）。
+    对照底本恒取生图提示词最新版：换版重交/改词再掷的
     新图是按**当前词**画的，不是按上一轮合并结果画的。
     """
     from ..asset_ledger import KIND_PICTURE, load_asset_ledger
+    from ..asset_loop import count_regen_rounds, render_regen_hint
     from ..asset_proofread import (
         DECISION_LABELS,
         DECISION_REGENERATE,
@@ -1545,6 +1618,11 @@ def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: 
         return updated
 
     print(f"\n[读图校对] {entry.name}（{entry.tag}）")
+    # 重画轮次（issue #72）：从轮次账现算（不另存计数器）。提示放在**裁决之前**——
+    # 「还能按图改文案保留这一版」是给人裁决时的信息，等到重生成菜单才说就晚了一步。
+    regen_hint = render_regen_hint(count_regen_rounds(generation_dir, name=entry.name))
+    if regen_hint:
+        print(f"[重画轮次] {regen_hint}")
     progress = load_progress(state, entry.name, sha256=entry.sha256, base=base)
     if progress is not None:
         # 图未换版、词未改写 → 上次那份读图结果与已裁条目仍然成立
@@ -1559,7 +1637,7 @@ def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: 
             print(f"[读图校对] {entry.name} 读图失败：{exc}")
             print("已停在等交回：图没读成就不放行；重跑向导可重试。")
             _save()
-            return PROOFREAD_FAILED
+            return ProofreadOutcome(PROOFREAD_FAILED)
         report = compare_descriptions(base, reading, locked)
         # 读图结果**先落盘**再问裁决：这张的视觉调用不该因为中间断了重付一次
         progress = _checkpoint(ProofreadProgress(
@@ -1634,7 +1712,7 @@ def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: 
         ).to_dict()
         clear_progress(state, entry.name)  # 记录接进度班的时刻：进度此后只剩旧话
         _save()  # 逐张落盘：后面的张中途炸不丢这张的裁决（评审：崩溃丢账）
-        return PROOFREAD_REGEN
+        return ProofreadOutcome(PROOFREAD_REGEN, report.deviations)
     # name=语义名：改写落点不许落在名字上（名字是 registry 键不是偏差处，
     # 评审点名的缺陷场景——全局 replace 连名改会与登记名失同步）。
     merged = merge_asset_description(base, adjudications, accepted, name=entry.name)
@@ -1647,7 +1725,7 @@ def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: 
     _save()  # 逐张落盘（同上）
     if merged != base:
         print(f"  素材画面事实（合并后）：{merged}")
-    return PROOFREAD_DONE
+    return ProofreadOutcome(PROOFREAD_DONE)
 
 
 def _resume_returned_asset(state: dict, item: QueueItem, entry) -> str:
@@ -1701,14 +1779,18 @@ def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item: QueueIte
 
     返回 ``LOOP_SETTLED``（裁决落账）/ ``LOOP_ABANDONED``（显式放弃）/ ``LOOP_PAUSED``（用户
     先到这）。**审查在填路径之前**——打回两出口都不入库：外部重掷系统连看都不看
-    （不登记被拒图），改写提示词只动词、留痕一轮修订。校对裁了「重生成」走重掷菜单：
-    默认原词再掷、另留改词再掷（词图皆错时连词一起换）。
+    （不登记被拒图），改写提示词只动词、留痕一轮修订。校对裁了「重生成」走重掷菜单
+    （issue #72 起四档）：默认原词再掷、改词再掷（词图皆错时连词一起换）、AI 按偏差改词
+    （模型按偏差清单把被画漏的细节写显式）、显式放弃。「按图改文案」始终是校对裁决
+    里的那一档，由人按键，**没有任何自动兜底路径**。
     """
     from ..asset_loop import (
         TRIGGER_REGEN_REROLL,
         TRIGGER_REGEN_REWORD,
         TRIGGER_REVIEW_REWORD,
+        count_regen_rounds,
         log_asset_round,
+        render_regen_hint,
         set_current,
     )
     from ..asset_ledger import (
@@ -1731,6 +1813,7 @@ def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item: QueueIte
     # 重出，正是用户「回去重掷了、回来交回」的那一刻——那里要的是审查菜单（含填路径），
     # 拿「已入库，接着校对」拦住他，新版图就永远交不进来了。
     first_pass = True
+    report_deviations: tuple = ()  # 本轮校对判出的全部偏差（重生成菜单的 AI 改词按它改）
     while True:  # 外层：出词（首次 + 改写成功后重出）
         _issue_asset_prompt(state, brief, generation_dir, item)
         outcome = None  # None ＝ 本轮没走到裁决（改写成功要重出词）
@@ -1749,7 +1832,8 @@ def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item: QueueIte
             if action == LOOP_PAUSED:
                 return LOOP_PAUSED
             if action == RESUME_REPROOFREAD:
-                outcome = _proofread_one_asset(state, brief, generation_dir, item.name)
+                result = _proofread_one_asset(state, brief, generation_dir, item.name)
+                outcome, report_deviations = result.status, result.deviations
             elif action != RESUME_REPLACE:
                 # 未知走向不静默掉进审查菜单：那会把「认不出的信令」伪装成正常流程
                 raise ValueError(f"未知的续跑走向：{action!r}")
@@ -1799,7 +1883,8 @@ def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item: QueueIte
                 forget_answer(state, cost_seconds_key)
                 forget_answer(state, cost_attempts_key)
                 save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
-                outcome = _proofread_one_asset(state, brief, generation_dir, item.name)
+                result = _proofread_one_asset(state, brief, generation_dir, item.name)
+                outcome, report_deviations = result.status, result.deviations
                 break
             if choice == "2":
                 print("被拒图不登记。请在 ComfyUI 重掷后回来重新审查。")
@@ -1828,12 +1913,15 @@ def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item: QueueIte
             set_current(state, None)
             save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
             return LOOP_SETTLED
-        # outcome == PROOFREAD_REGEN：重生成菜单（issue #50 AC3）
+        # outcome == PROOFREAD_REGEN：重生成菜单（issue #50 AC3，issue #72 扩到四档）
         while True:
+            # 轮次提示每轮现算（重画轮次从轮次账推导，不另存计数器）：0 轮不占版面。
+            hint = render_regen_hint(count_regen_rounds(generation_dir, name=item.name))
             regen = _prompt(
-                f"[重生成·{item.name}] 图要重画：\n"
+                f"[重生成·{item.name}] 图要重画" + (f"（{hint}）" if hint else "") + "：\n"
                 "  1=原词再掷（默认，提示词不动）  2=改词再掷（留痕一轮修订）\n"
-                "  3=显式放弃这张资产  q=先到这里（回车=1）："
+                "  3=AI 按偏差改词（留痕一轮修订，锁死清单逐字保留）  4=显式放弃这张资产\n"
+                "  q=先到这里（回车=1）："
             ).strip()
             if regen in ("", "1"):
                 log_asset_round(
@@ -1853,11 +1941,17 @@ def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item: QueueIte
                     break
                 continue
             if regen == "3":
+                # AI 改词同理：失败留在菜单，词与账都不动（issue #72 AC「失败提示保持原样」）
+                triples = [(d.aspect, d.prompt_quote, d.observed) for d in report_deviations]
+                if _ai_reword_asset_round(state, brief, generation_dir, item, triples):
+                    break
+                continue
+            if regen == "4":
                 _abandon_asset(state, brief, generation_dir, item)
                 return LOOP_ABANDONED
             if regen.lower() == "q":
                 return LOOP_PAUSED
-            print("无效输入，请选 1/2/3/q。")
+            print("无效输入，请选 1/2/3/4/q。")
 
 
 def _asset_loop(state: dict, brief: Brief, generation_dir: Path) -> bool:

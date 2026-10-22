@@ -165,25 +165,44 @@ _REAL_BUILD_CHAT_MODEL = model_factory.build_chat_model
 # 两条 AC3 用例会红得误导（报「没回灌」，实为标记搬了家）。
 _ALIGN_HEAD = asset_loop.SETTLED_FACTS_HEAD
 _CURRENT_HEAD = asset_loop.CURRENT_PROMPT_HEAD
+# AI 改词请求（issue #72）的块标题：假模型靠它把「AI 改词」与「用户意见改写」分开
+# （两者都回一条词，混在一起就看不出 AI 改词到底走没走到）。
+_AI_REWORD_HEAD = asset_loop.AI_REWORD_DEVIATIONS_HEAD
 
 
 class _FakeLLM:
-    """改写与回灌共用的假模型（两个出口都经 ``build_chat_model`` 建）。
+    """改写、回灌与 AI 改词共用的假模型（三个出口都经 ``build_chat_model`` 建）。
 
     - 回灌请求（带 ``【已定稿素材画面事实】`` 块）默认**原词回吐**——从请求里抠回当前
       提示词再加 ``align_suffix``，于是不关心回灌的用例（「屏上出现了哪条词」那类断言）
       与改动前逐字一致，而回灌的物证照旧落在 ``requests`` 上（请求是缝）；
-    - 改写请求回 ``rewrite_reply``。
+    - AI 改词请求（带 ``【偏差清单】`` 块，issue #72）回 ``ai_reword_reply``；
+      ``ai_reword_error`` 非空时**抛它**——失败留菜单那条路要能一次走到；
+    - 其余改写请求回 ``rewrite_reply``。
     """
 
-    def __init__(self, rewrite_reply: str = "改写后的提示词", align_suffix: str = "") -> None:
+    def __init__(self, rewrite_reply: str = "改写后的提示词", align_suffix: str = "", *,
+                 ai_reword_reply: str = "AI 按偏差改写的提示词",
+                 ai_reword_error: Exception | None = None) -> None:
         self.rewrite_reply = rewrite_reply
         self.align_suffix = align_suffix
+        self.ai_reword_reply = ai_reword_reply
+        self.ai_reword_error = ai_reword_error
         self.requests: list[str] = []
+        self.configs: list = []
 
-    def invoke(self, message):
+    def invoke(self, message, config=None):
         text = str(message)
         self.requests.append(text)
+        self.configs.append(config)
+        # 直调入口（ADR 0019）靠这个信号发「首字节」心跳：真实路径上是流式 token，
+        # 假模型手动打一下，等待事件那条契约才测得到。改写/回灌两条路仍不传 config。
+        for callback in (config or {}).get("callbacks") or []:
+            callback.on_llm_new_token("…")
+        if _AI_REWORD_HEAD in text:
+            if self.ai_reword_error is not None:
+                raise self.ai_reword_error
+            return self.ai_reword_reply
         if _ALIGN_HEAD in text:
             return _current_prompt_from(text) + self.align_suffix
         return self.rewrite_reply
@@ -677,7 +696,7 @@ def test_abandon_after_intake_asks_before_withdrawing(tmp_path, monkeypatch, cap
     tail = [
         "", "1", str(girl),      # 交回
         "2",                     # 三选：重生成
-        "3",                     # 重生成菜单：显式放弃这张资产
+        "4",                     # 重生成菜单：显式放弃这张资产（#72 起「3」是 AI 改词）
         "", "4", "", "4", "4",   # 其余三张放弃
         "8", "1",
     ]
@@ -697,7 +716,9 @@ def test_abandon_after_intake_can_keep_the_registration(tmp_path, monkeypatch, c
 
     girl = _write_source(tmp_path, "girl.png", b"girl")
     vision = {"picture-01": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
-    tail = ["", "1", str(girl), "2", "3", "", "4", "", "4", "4", "8", "1"]
+    tail = ["", "1", str(girl), "2",
+            "4",   # 重生成菜单：显式放弃（#72 起「3」是 AI 改词）
+            "", "4", "", "4", "4", "8", "1"]
     _asked, code, _ = _run_loop(
         tmp_path, monkeypatch, tail, vision=vision,
         confirms=[("撤下", False), ("视频/音频", False)])
@@ -899,3 +920,265 @@ def test_external_cost_can_be_skipped_by_leaving_both_blank(tmp_path, monkeypatc
     assert code == 0
     entry = load_asset_ledger(_ledger_dir(tmp_path)).get("红裙女孩", "picture")
     assert (entry.external_seconds, entry.external_attempts) == (0.0, 0)
+
+
+# ---------------------------------------------------------------------------
+# 票 7/9（issue #72）：重生成菜单的「AI 按偏差改词」与重画轮次提示
+# ---------------------------------------------------------------------------
+
+def _girl_entry(state: dict) -> dict:
+    """从最终 state 取红裙女孩那一条资产条目（词有没有被换掉，以它为准）。"""
+    return next(e for e in state["character_image_prompts"] if e["name"] == "红裙女孩")
+
+
+def test_regen_menu_offers_four_choices_plus_q(tmp_path, monkeypatch, capsys):
+    """菜单四项 + q（AC1）：旧的「3=显式放弃」让位给「3=AI 按偏差改词」，「4」才是放弃。
+
+    变异检验：菜单退回三项（丢掉 AI 改词那一行）→ 本条与后面三条 AI 改词用例一起变红；
+    「4」不再是放弃 → 本条收尾的输入错位、code 非 0。
+    """
+    girl = _write_source(tmp_path, "girl.png", b"girl")
+    vision = {"picture-01": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
+    tail = [
+        "", "1", str(girl),
+        "2",          # 三选：重生成
+        "4",          # 重生成菜单：显式放弃
+        "", "4", "", "4", "4",
+        "8", "1",
+    ]
+    asked, code, _ = _run_loop(tmp_path, monkeypatch, tail, vision=vision)
+
+    assert code == 0
+    menu = next(text for text in asked if "重生成·红裙女孩" in text)
+    for entry in ("1=原词再掷", "2=改词再掷", "3=AI 按偏差改词", "4=显式放弃", "q=先到这里"):
+        assert entry in menu, f"重生成菜单缺 {entry!r}：{menu}"
+    assert not _rounds(tmp_path), "显式放弃不入轮次账"
+
+
+def test_ai_reword_rewrites_by_all_deviations_and_logs_a_new_trigger(
+        tmp_path, monkeypatch, capsys):
+    """「AI 按偏差改词」（AC2/AC3）：输入四件齐、方向是强化原意、成功落新触发口。
+
+    第二条偏差（裙长）**还没来得及裁**就被 voided——AI 改词仍必须看到它：偏差清单取
+    本轮的**全部**条目，不是「已裁过的那几条」（票面「全部偏差条目」）。
+    """
+    girl = _write_source(tmp_path, "girl.png", b"girl")
+    vision = {"picture-01": _claims(deviations=[
+        ("裙色", "红裙", "宝蓝色长裙"),   # 人裁：重生成
+        ("裙长", "红裙", "及踝长裙"),     # 还没轮到裁，deviation 已判出
+    ])}
+    rewritten = "人物·红裙女孩专属生图提示词：红裙，及踝长度，裙面为宝蓝色"
+    llm = _FakeLLM(ai_reword_reply=rewritten)
+    captured: dict = {}
+    tail = [
+        "", "1", str(girl),
+        "2",           # 三选（裙色）：重生成
+        "3",           # 重生成菜单：AI 按偏差改词
+        "4",           # 新词出站后的审查：放弃这张收尾
+        "", "4", "", "4", "4",
+        "8", "1",
+    ]
+    asked, code, _ = _run_loop(tmp_path, monkeypatch, tail, vision=vision, llm=llm,
+                               captured=captured)
+
+    assert code == 0
+    assert any("3=AI 按偏差改词" in text for text in asked), "重生成菜单缺 AI 改词"
+    request = next(text for text in llm.requests if _AI_REWORD_HEAD in text)
+    # 输入四件：当前词、全部偏差（描述 × 图中实见）、锁死清单、生图提示词纪律
+    assert GIRL_PROMPT in request, "当前提示词没进 AI 改词请求"
+    for piece in ("裙色", "红裙", "宝蓝色长裙", "裙长", "及踝长裙"):
+        assert piece in request, f"偏差条目 {piece!r} 没进 AI 改词请求"
+    assert "【锁死清单】" in request and "- 红裙女孩" in request, "锁死清单没进 AI 改词请求"
+    # 纪律取 #68 那份单一来源（独立字面值，不从 discipline_text() 现算）
+    assert "状态翻译成可见证据" in request, "生图提示词纪律没进 AI 改词请求"
+    # 方向：强化原意，不是迁就成图
+    assert "不得改成图里的样子" in request, "AI 改词请求没写明方向（会把图当设计改）"
+    assert "逐字保留" in request, "AI 改词请求缺「其余正文逐字保留」的纪律"
+    # 成功：写回 + 落一行新触发口（与 review_reword/regen_reword/regen_reroll 并列）
+    rounds = _rounds(tmp_path)
+    assert [r["trigger"] for r in rounds] == ["regen_ai_reword"]
+    assert rounds[0]["prompt_before"] == GIRL_PROMPT
+    assert rounds[0]["prompt_after"] == rewritten
+    assert "裙色" in rounds[0]["feedback"] and "裙长" in rounds[0]["feedback"], \
+        "轮次账没记下这一轮按哪几处偏差改的词"
+    assert "及踝长度" in capsys.readouterr().out, "AI 改词后的完整提示词没出站"
+    # 不存在自动「按图改文案」：素材画面事实仍是原词，记录仍停在 pending_regen
+    record = captured["state"]["asset_proofreads"]["红裙女孩"]
+    assert record["status"] == "pending_regen"
+    assert record["description"] == GIRL_PROMPT, "AI 改词悄悄把素材画面事实按图改了"
+
+
+def test_ai_reword_failure_keeps_the_prompt_and_stays_in_the_menu(
+        tmp_path, monkeypatch, capsys):
+    """AI 改词失败（AC4）：提示词保持原样、不留痕，**留在重生成菜单**——不许静默换词。"""
+    girl = _write_source(tmp_path, "girl.png", b"girl")
+    vision = {"picture-01": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
+    llm = _FakeLLM(ai_reword_error=RuntimeError("网关 500"))
+    captured: dict = {}
+    tail = [
+        "", "1", str(girl),
+        "2",           # 三选：重生成
+        "3",           # AI 改词：失败
+        "4",           # 仍留在菜单——这次显式放弃收尾
+        "", "4", "", "4", "4",
+        "8", "1",
+    ]
+    asked, code, _ = _run_loop(tmp_path, monkeypatch, tail, vision=vision, llm=llm,
+                               captured=captured)
+
+    assert code == 0
+    assert sum(1 for text in asked if "重生成·红裙女孩" in text) >= 2, \
+        "AI 改词失败后没回到重生成菜单（人被静默推出去了）"
+    out = capsys.readouterr().out
+    assert "网关 500" in out and "提示词保持原样" in out, "失败没给可读病因"
+    assert not _rounds(tmp_path), "失败的 AI 改词不许留痕"
+    assert _girl_entry(captured["state"])["positive_prompt"] == GIRL_PROMPT, \
+        "失败的 AI 改词把提示词换掉了"
+
+
+def test_ai_reword_that_drops_a_locked_feature_is_rejected(tmp_path, monkeypatch, capsys):
+    """AI 改词结果丢了锁死特征 → 不采用（AC2「锁死清单逐字保留」的牙齿）。
+
+    锁死清单是读图校对判偏差的判据：条目不在正文里，这一张的偏差再也判不出来
+    （静默失效）。照单收下比直接失败更坏，所以按失败处理——词不动、留在菜单。
+    """
+    girl = _write_source(tmp_path, "girl.png", b"girl")
+    vision = {"picture-01": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
+    # 「红裙女孩」是这一张的锁死特征；回复里整个丢了它
+    llm = _FakeLLM(ai_reword_reply="人物专属生图提示词：宝蓝色长裙")
+    captured: dict = {}
+    tail = [
+        "", "1", str(girl),
+        "2", "3",      # 三选：重生成 → AI 改词（结果丢锁死特征）
+        "4",           # 留在菜单 → 放弃收尾
+        "", "4", "", "4", "4",
+        "8", "1",
+    ]
+    asked, code, _ = _run_loop(tmp_path, monkeypatch, tail, vision=vision, llm=llm,
+                               captured=captured)
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "丢了锁死特征" in out and "提示词保持原样" in out
+    assert not _rounds(tmp_path), "被拒的 AI 改词不许留痕"
+    assert _girl_entry(captured["state"])["positive_prompt"] == GIRL_PROMPT
+    assert sum(1 for text in asked if "重生成·红裙女孩" in text) >= 2, "失败后没留在菜单"
+
+
+def test_regen_rounds_are_counted_from_the_round_ledger(tmp_path):
+    """重画轮次只从**资产轮次账**推导（AC5）；「审查打回改写」不是重画，不计入。"""
+    from minimax_h3_prompt.asset_loop import (
+        TRIGGER_REGEN_AI_REWORD,
+        TRIGGER_REGEN_REROLL,
+        TRIGGER_REGEN_REWORD,
+        TRIGGER_REVIEW_REWORD,
+        count_regen_rounds,
+        log_asset_round,
+        render_regen_hint,
+    )
+
+    for trigger in (TRIGGER_REVIEW_REWORD, TRIGGER_REGEN_REROLL,
+                    TRIGGER_REGEN_REWORD, TRIGGER_REGEN_AI_REWORD):
+        log_asset_round(tmp_path, name="红裙女孩", kind="character", trigger=trigger,
+                        feedback="", prompt_before="a", prompt_after="b")
+    # 别的资产的轮次不算到这一张头上
+    log_asset_round(tmp_path, name="蓝衫少年", kind="character", trigger=TRIGGER_REGEN_REROLL,
+                    feedback="", prompt_before="a", prompt_after="b")
+
+    assert count_regen_rounds(tmp_path, name="红裙女孩") == 3
+    assert count_regen_rounds(tmp_path, name="蓝衫少年") == 1
+    assert count_regen_rounds(tmp_path, name="秋日庭院") == 0
+
+    assert render_regen_hint(0) == "", "0 轮不该加噪音"
+    hint = render_regen_hint(2)
+    assert "本张已重画 2 轮" in hint and "可按图改文案保留这一版" in hint
+
+
+def test_regen_menu_and_proofread_report_show_the_regen_round_hint(
+        tmp_path, monkeypatch, capsys):
+    """重画一轮后再校对（AC5）：**校对报告**与**重生成菜单**都提示已重画 1 轮。
+
+    判据落在「同一条偏差第二次交回」上：第一轮没重画过（不该出现提示），第二轮是
+    重画后的图（该出现，且只出现两处——报告一处、菜单一处）。
+    """
+    girl = _write_source(tmp_path, "girl.png", b"girl")
+    vision = {"picture-01": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
+    tail = [
+        "", "1", str(girl),
+        "2",             # 三选：重生成
+        "",              # 重掷菜单：原词再掷（这一轮落了账）
+        "1", str(girl),  # 审查：满意→交回重画后的图
+        "2",             # 第二次三选：重生成
+        "q",             # 第二次重掷菜单：先到这里
+    ]
+    asked, code, _ = _run_loop(tmp_path, monkeypatch, tail, vision=vision)
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert [r["trigger"] for r in _rounds(tmp_path)] == ["regen_reroll"]
+    assert "本张已重画 1 轮" in out, "校对报告处没提示重画轮次"
+    hinted_menus = [t for t in asked if "本张已重画 1 轮" in t]
+    assert len(hinted_menus) == 1, f"重生成菜单处的轮次提示不对：{hinted_menus}"
+    assert out.count("本张已重画 1 轮") == 1, "第一轮（0 轮）就出现了提示"
+    assert "可按图改文案保留这一版" in hinted_menus[0], "提示没给「按图改文案」这条退路"
+
+
+def test_ai_reword_output_is_rechecked_against_the_discipline(tmp_path, monkeypatch, capsys):
+    """AI 改词也是一次出词：结果照跑警告级纪律检查（#68 / ADR 0018）——只警告、不阻断。"""
+    girl = _write_source(tmp_path, "girl.png", b"girl")
+    vision = {"picture-01": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
+    # 含负向表述（Turbo 上是空动作）——改写结果照样写回，但要有一行警告
+    llm = _FakeLLM(ai_reword_reply="人物·红裙女孩专属生图提示词：宝蓝色长裙，不要阴影")
+    tail = [
+        "", "1", str(girl),
+        "2", "3",      # 三选：重生成 → AI 改词（结果违反纪律）
+        "4",           # 放弃收尾
+        "", "4", "", "4", "4",
+        "8", "1",
+    ]
+    _asked, code, _ = _run_loop(tmp_path, monkeypatch, tail, vision=vision, llm=llm)
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "不要阴影" in out, "改写结果没写回出站"
+    assert "[纪律警告" in out and "负向表述" in out, "AI 改词结果没跑纪律检查"
+
+
+def test_ai_reword_goes_through_the_direct_call_watchdog(tmp_path, monkeypatch, capsys):
+    """AI 改词是**直调点**：请求走 ``run_direct_call``，等待事件与角色调用同形（ADR 0019）。
+
+    ADR 0019 的裁定是「所有直接 ``llm.invoke`` 改走它」；AI 改词是这条规则落地之后新增
+    的直调点，裸调就会成为新的「规则在、接线不在」——用户等这一轮时看不到首字节，
+    卡住也没人救。变异检验：把 ``ai_reword_asset_prompt`` 改回裸 ``llm.invoke(request)``，
+    本条报红（没有 agent_start/agent_wait 事件，假模型也收不到 callbacks）。
+    """
+    from minimax_h3_prompt.observability import reporter
+
+    girl = _write_source(tmp_path, "girl.png", b"girl")
+    vision = {"picture-01": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
+    llm = _FakeLLM(ai_reword_reply="人物·红裙女孩专属生图提示词：红裙，及踝长度，宝蓝色裙面")
+    events: list[dict] = []
+    reporter.subscribe(events.append)
+    try:
+        _asked, code, _ = _run_loop(tmp_path, monkeypatch, [
+            "", "1", str(girl),
+            "2", "3",      # 三选：重生成 → AI 改词
+            "4",           # 放弃收尾
+            "", "4", "", "4", "4",
+            "8", "1",
+        ], vision=vision, llm=llm)
+    finally:
+        reporter.unsubscribe(events.append)
+
+    assert code == 0
+    role = "role_asset_ai_reword"
+    assert [e for e in events if e.get("type") == "agent_start" and e.get("role") == role], \
+        "AI 改词没走直调入口（没有 agent_start）"
+    waits = [e for e in events if e.get("type") == "agent_wait" and e.get("role") == role]
+    assert "first_byte" in [e.get("state") for e in waits], \
+        "AI 改词等待期间没有首字节心跳（看不见它在动）"
+    assert [e for e in events if e.get("type") == "agent_done" and e.get("role") == role], \
+        "AI 改词没有收尾事件（耗时与 token 没进账）"
+    # 入口把回调递给了模型：没有它，上面的首字节事件根本发不出来
+    assert any((config or {}).get("callbacks") for config in llm.configs), \
+        "假模型没收到 callbacks——AI 改词仍是裸调"
