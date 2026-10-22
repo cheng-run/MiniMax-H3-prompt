@@ -317,3 +317,36 @@ def test_no_final_film_when_a_segment_did_not_pass(tmp_path, monkeypatch, capsys
     assert not _final_film(tmp_path).exists(), "缺一段的成片是伪产物，不许拼"
     assert "未产出成片" in out
     assert "第 2 段尚未通过验收" in out, f"没说清卡在哪一段：{out[-800:]}"
+
+
+# ---------------------------------------------------------------------------
+# issue #74：终端复制边界
+# ---------------------------------------------------------------------------
+
+def test_segment_prompt_is_wrapped_by_copy_boundary_markers(
+        tmp_path, monkeypatch, capsys, h3_tier_video):
+    """逐段陪跑：复制标记之间恰好是段文件全文；段号抬头与交回口都在标记之外。
+
+    用户就在终端里划选复制（2026-10-22 现场）。抬头若落进标记内，会被一起带进
+    ComfyUI 提示词框；尾部交回提示若落进去，会污染最后一行。
+    """
+    from minimax_h3_prompt.ref_segments import COPY_END_MARKER, COPY_START_MARKER
+
+    first = h3_tier_video(10.0, "seg1.avi")
+    second = h3_tier_video(10.0, "seg2.avi")
+    _run(tmp_path, monkeypatch, [str(first), str(second)])
+    out = capsys.readouterr().out
+
+    assert out.count(COPY_START_MARKER) == 2
+    assert out.count(COPY_END_MARKER) == 2
+
+    for position in (1, 2):
+        path = _generation_dir(tmp_path) / "segments" / f"segment-{position:02d}.md"
+        start = out.index(COPY_START_MARKER, 0 if position == 1 else first_end)
+        end = out.index(COPY_END_MARKER, start)
+        block = out[start + len(COPY_START_MARKER):end].strip("\n")
+        # 文件末尾带一个换行、终端切片被 strip 掉了：比较正文本身，不比排版换行。
+        assert block == path.read_text(encoding="utf-8").rstrip("\n"), (
+            f"第 {position} 段标记之间与段文件不一致")
+        assert out.index(f"第 {position}/2 段 · 起止") < start
+        first_end = end

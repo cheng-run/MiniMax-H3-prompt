@@ -2316,6 +2316,7 @@ def _run_ref_segment_handoff(result, generation_dir: Path,
         format_segment_issue_lines,
         log_segment_output,
         passed_segment_rows,
+        render_copy_block,
         render_ref_segment_briefing,
     )
 
@@ -2344,8 +2345,9 @@ def _run_ref_segment_handoff(result, generation_dir: Path,
         # ——那个字段是**交付时**那一份（≤15s 直出），改写后的事实以段文件为准。
         print("\n" + "=" * 60)
         print(render_ref_segment_briefing(plan, position, total, segment_file))
-        print("=" * 60)
-        print(text)
+        # 正文包在复制边界里（issue #74）：抬头已在上方、交回提示在下方，两者都在
+        # 标记之外——用户在终端划选时不会把段号或问句带进 ComfyUI 提示词框。
+        print(render_copy_block(text))
         # 交付前校验不当场跑：分段是「产出即交付」的路径，error 级结论绝不静默
         # （warning 不刷屏，理由同 ``format_ref_segment_report``）。
         for line in format_segment_issue_lines(position, issues):

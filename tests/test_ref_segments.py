@@ -817,3 +817,34 @@ def test_assemble_final_film_refuses_a_segment_table_with_a_gap(tmp_path, tmp_vi
                                rows=passed_segment_rows(tmp_path))
     assert film.path is None
     assert "缺口/重叠" in film.reason and "0-2s 之后是 3-5s" in film.reason, film.reason
+
+
+# ---------------------------------------------------------------------------
+# issue #74：终端里复制边界必须肉眼可判
+# ---------------------------------------------------------------------------
+
+def test_each_segment_body_is_wrapped_by_copy_boundary_markers(tmp_path, capsys):
+    """批式路径：每条复制标记之间**恰好**是段文件全文，抬头与落盘行都在标记之外。
+
+    用户是在终端里划选复制进 ComfyUI 的（2026-10-22 现场反馈）。判据不只看「有标记」：
+    标记之间必须与落盘的 segment-NN.md 逐字符相同——多一个抬头或少一节都算错。
+    """
+    from minimax_h3_prompt.ref_segments import COPY_END_MARKER, COPY_START_MARKER
+
+    result = _run(tmp_path, llm=None)
+    out = capsys.readouterr().out
+    assert out.count(COPY_START_MARKER) == len(result.plans)
+    assert out.count(COPY_END_MARKER) == len(result.plans)
+
+    search_from = 0
+    for position, (path, text) in enumerate(zip(result.segment_paths, result.texts), 1):
+        start = out.index(COPY_START_MARKER, search_from)
+        end = out.index(COPY_END_MARKER, start)
+        search_from = end + len(COPY_END_MARKER)
+        block = out[start + len(COPY_START_MARKER):end].strip("\n")
+        # 文件末尾带一个换行、终端切片被 strip 掉了：比较正文本身，不比排版换行。
+        assert block == path.read_text(encoding="utf-8").rstrip("\n"), (
+            f"第 {position} 段标记之间与段文件不一致")
+        assert block == text.rstrip("\n")
+        # 落盘行（抬头）在标记之外
+        assert out.index(f"第 {position}/{len(result.plans)} 段已落盘") < start

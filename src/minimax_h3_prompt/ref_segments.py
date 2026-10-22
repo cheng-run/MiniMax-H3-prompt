@@ -968,6 +968,24 @@ def render_ref_segment_briefing(plan: SegmentPlan, position: int, total: int,
     ])
 
 
+# 复制边界标记（issue #74）：用户是在**终端里**划选复制的，抬头（段号/起止/文件路径）
+# 与尾部交回提示紧贴正文时，很容易把段号或交回问题一起带进 ComfyUI 提示词框，或者
+# 误以为只要 `detailed_description` 那一节。两条标记把「复制范围」变成肉眼可判的边界；
+# 文案点名「整份六节正文」是必要的——2026-10-22 现场就是有人问「我要复制的是哪些」。
+# 标记真源住这里、两个打印点（批式快路径与逐段陪跑）共用，避免各写一套措辞后漂移。
+COPY_START_MARKER = "──────── 复制以下内容到 ComfyUI 提示词框（整份六节正文）────────"
+COPY_END_MARKER = "──────── 复制到此为止（以上为完整六节正文）────────"
+
+
+def render_copy_block(text: str) -> str:
+    """把一段提示词正文包进复制边界标记（issue #74）。
+
+    标记之间**只有正文**：抬头与交回提示都由调用方打在块外。返回值按行拼，
+    正文里的空行与 `[Shot N]` 原样保留（复制进 ComfyUI 的必须与段文件逐字一致）。
+    """
+    return "\n".join((COPY_START_MARKER, text, COPY_END_MARKER))
+
+
 def render_ref_segment_semantic_check(
     *,
     plan: SegmentPlan,
@@ -1189,9 +1207,8 @@ def write_all_ref_segments(job: RefSegmentJob) -> RefSegmentResult:
         # 落盘即打印：写完这一段就交到用户眼前，不攒整片（issue #70）。
         print(f"\n[多参写段] 第 {position}/{total} 段已落盘：{job.segment_path(position)}",
               flush=True)
-        print("=" * 60, flush=True)
-        print(text, flush=True)
-        print("=" * 60, flush=True)
+        # 正文包在复制边界里（issue #74）：用户在终端划选，抬头必须留在标记外。
+        print(render_copy_block(text), flush=True)
     return RefSegmentResult(
         plans=list(job.plans), texts=texts, total_s=job.total_s, issues=issues,
         segment_paths=job.segment_paths, order_card_path=job.order_card_path,
