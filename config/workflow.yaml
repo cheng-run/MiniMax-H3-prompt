@@ -13,3 +13,9 @@ slots:
   picture: 24
   video: 3
   audio: 3
+
+# 每个执行段真正喂几张参考图（issue #75）：段内只保留本段 Shot 用到的素材并重编号。
+# 与上面的 picture 槽位数是两件事——槽位是工作流端口数（24），这是单次生成喂几张；
+# 24 张全喂时 Qwen3-VL 序列约 5.4 万 token，16GB 卡上朴素注意力要 232 GiB（实测 OOM）。
+# 缺省 9（ADR 0017 / issue #75）。改大之前先量显存与耗时。
+refs_per_segment: 9

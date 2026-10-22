@@ -940,7 +940,7 @@ def _ctx(**fields: str) -> str:
 # 多参分段（issue #46）：自包含 ref 六段式——组装、时间轴注记、校验
 #
 # 与首尾帧链的分段是两套锚定语义：多参**没有桥接帧**，跨段连续性靠
-# 「全片共享同一批参考素材 + 每段起止状态声明 + 时间轴注记对位」；
+# 「每段各自用到的参考素材（段内子集＋重编号）+ 每段起止状态声明 + 时间轴注记对位」；
 # issue #9「分段恒单图开场锚」属首尾帧链，ref 段**不得**套 I2VA 锚定行。
 # ---------------------------------------------------------------------------
 
@@ -1070,7 +1070,7 @@ def assemble_ref_segment(*, subject_definitions: str, retention_analysis: str,
     而不是让 LLM 重写，「标签语义逐段一致」就是代码性质而不是服从性问题
     （官方 ref-en.txt §2：标签一经定义，各段落保持同一含义）。
     ``annotations``（时间轴注记＋起止状态声明）置于 detailed_description 顶部。
-    summary 的任务类型前缀沿用整片的（各段共享同一批参考素材，任务关系不变）。
+    summary 的任务类型前缀沿用整片的（同一批素材跨段保持同一外观，任务关系不变）。
     """
     summary = f"[{str(task_type).strip()}] {str(summary_body).strip()}".strip()
     detailed = f"{annotations}\n{detailed_body}".strip() if annotations else str(detailed_body).strip()
@@ -1087,7 +1087,9 @@ def assemble_ref_segment(*, subject_definitions: str, retention_analysis: str,
 def validate_ref_segment(text: str, *, duration: float | None = None,
                          segment_number: int = 1, total_segments: int = 1,
                          start_s: float = 0.0, total_s: float | None = None,
-                         ref_meta: list[tuple[int, str, str]] | None = None) -> list[ValidationIssue]:
+                         ref_meta: list[tuple[int, str, str]] | None = None,
+                         subject_scope: tuple[int, ...] | list[int] | None = None,
+                         ) -> list[ValidationIssue]:
     """多参分段提示词校验（issue #46）：ref 六段式 + 分段专属纪律。
 
     在 ``validate_ref`` 之上补四条 error 级：
@@ -1103,8 +1105,13 @@ def validate_ref_segment(text: str, *, duration: float | None = None,
     启发式）、「快机位＋多拍」共存（error，同基链；该阈值量于 4 步采样，引用见
     ``_check_fast_camera_multi_beat_coexist``——59- 工作流固定 8 步，纪律照旧执行，
     不自行放宽）。
+
+    ``ref_meta`` / ``subject_scope`` 传**本段子集**（issue #75）：段内只喂用到的图，
+    编号从 1 连续，所以「登记图全进定义」（``SEGMENT_DEFS_INCOMPLETE``）与 Subject
+    连续性都得按本段范围判，拿整片登记判会把每一段都判红。
     """
-    issues = validate_ref(text, duration=duration, ref_meta=ref_meta)
+    issues = validate_ref(text, duration=duration, ref_meta=ref_meta,
+                          subject_scope=subject_scope)
     align_lines = [ln for ln in text.splitlines() if has_align_instruction(ln)]
     if align_lines:
         # issue #9「分段恒单图开场锚」不适用多参（ADR 0011）：锚定行出现在 ref 段
@@ -1160,7 +1167,7 @@ _REF_SEGMENT_DISCIPLINES = f"""\
 H3 是执行型模型：你写什么它就做什么，含糊等于失控。要求：
 
 ## 多参锚定语义（与首尾帧链不同）
-- 本段**没有**首帧图、**没有桥接帧**：画面锚定由**全片共享同一批参考素材**承担（subject_definitions 里逐段重复的定义＋素材图本身）
+- 本段**没有**首帧图、**没有桥接帧**：画面锚定由**本段参考素材**承担（请求给定的 subject_definitions 就是本段要用的那几张图＋它们的定义；段与段各自只带自己用到的素材，外观靠同一批素材图跨段保持一致）
 - **不写任何图片对齐指令行**（I2VA/FL2VA/L2VA 锚定行都属于首尾帧路线；「分段单图开场锚」裁定不适用于多参）
 
 ## ⚠️ 时间窗纪律（最高优先级）
@@ -1198,23 +1205,27 @@ _REF_SEGMENT_REWRITE_INSTRUCTION = (
 )
 
 
-def _ref_defs_request_block(whole_sections: dict[str, str]) -> str:
-    """请求里的「定义块」：v2 与回退式下发同一份（同改同测的物证点）。"""
+def _ref_defs_request_block(sections: dict[str, str]) -> str:
+    """请求里的「定义块」：v2 与回退式下发同一份（同改同测的物证点）。
+
+    调用方传**本段作用域**的 sections（issue #75：子集＋段内新号）。请求里只出现本段
+    要用的素材定义——整片 24 张定义下发给写段器，产出就会照着 24 张写，段内接线接不下。
+    """
     return (
         "\nsubject_definitions 定义块（**原样复制**进你的输出，一字不改）：\n"
-        f"{str(whole_sections.get('subject_definitions', '')).strip()}\n"
+        f"{str(sections.get('subject_definitions', '')).strip()}\n"
         "\nretention_analysis 定义块（**原样复制**进你的输出，一字不改）：\n"
-        f"{str(whole_sections.get('retention_analysis', '')).strip()}\n"
+        f"{str(sections.get('retention_analysis', '')).strip()}\n"
     )
 
 
 def build_ref_segment_v2_request(plan, all_plans: list, *,
-                                 whole_sections: dict[str, str],
+                                 sections: dict[str, str],
                                  shot_texts: list[str], task_type: str,
                                  total_s: float) -> str:
     """组装多参 v2 写段请求（issue #46）。
 
-    入参全部显式（不依赖 state）：多参段的锚定素材是整片定义块＋本段镜头原文，
+    入参全部显式（不依赖 state）：多参段的锚定素材是**本段**定义块＋本段镜头原文，
     修订/帧锚/画面决策那套是首尾帧链的注入通道，多参路线没有它们的语义。
     注记提示句取 ``render_ref_segment_annotations``（与组装器/校验器同源），
     请求里不手抄第二份注记形态。
@@ -1248,23 +1259,26 @@ def build_ref_segment_v2_request(plan, all_plans: list, *,
         f"本段剧情概述（中文，仅供你理解剧情，不得写进提示词）：{plan.summary}\n"
         f"{future_block}\n"
         f"\n{shots_block}"
-        f"{_ref_defs_request_block(whole_sections)}"
+        f"{_ref_defs_request_block(sections)}"
     )
 
 
-def rewrite_ref_segment_prompt(*, whole_prompt: str, plan, total_segments: int,
+def rewrite_ref_segment_prompt(*, base_prompt: str, plan, total_segments: int,
                                total_s: int, shot_texts: list[str], llm) -> str | None:
     """回退式（规划失败）：LLM 把整片六段式重写为本段时间窗的独立提示词；失败返回 None。
 
     调用走直调看门狗（issue #70）：卡住会重试，失败那句把病因与尝试次数打给用户，
     再由调用方回退机械拼装——回退本身是对的，静默才是错的（ADR 0019）。
 
+    ``base_prompt`` 是**本段作用域**的整片提示词（issue #75：定义块已裁成子集＋段内
+    新号）。它是「取材上下文」，塞整片 24 张定义进去，模型就会照着 24 张写。
+
     产出同样要过 ``normalize_ref_segment_output`` 归一（调用方做）：定义逐段重复
     与注记注入不靠 LLM 服从性。纪律声明与 v2 请求共用 ``_REF_SEGMENT_DISCIPLINES``
     ——两条路径各拼各的纪律文本，漏一条就等规划一失败掉一个档次。注记提示句同取
     ``render_ref_segment_annotations``（plan 携带段序/起止/状态，不拆成参数串）。
     """
-    sections = split_ref_sections(whole_prompt)
+    sections = split_ref_sections(base_prompt)
     shots_block = (
         "本段 Shot 原文（按时间顺序；输出要按本段时间基重写并重新编号为 [Shot 1] 起）：\n"
         + "\n\n".join(shot_texts)
@@ -1283,7 +1297,8 @@ def rewrite_ref_segment_prompt(*, whole_prompt: str, plan, total_segments: int,
         f"{annotations_hint}\n"
         f"\n{shots_block}"
         f"{_ref_defs_request_block(sections)}"
-        f"\n完整提示词（整片六段式，供你取材；只准取本段时间窗内的内容）：\n{whole_prompt}"
+        f"\n完整提示词（按本段参考素材裁剪后的六段式，供你取材；只准取本段时间窗内的内容）："
+        f"\n{base_prompt}"
     )
     return _direct_write(
         llm, request, role=REF_SEGMENT_REWRITER_ROLE,
@@ -1302,14 +1317,14 @@ def split_task_type(summary: str) -> tuple[str, str]:
     return match.group(1).strip(), str(summary)[match.end():].strip()
 
 
-def normalize_ref_segment_output(text: str, *, whole_sections: dict[str, str],
+def normalize_ref_segment_output(text: str, *, sections: dict[str, str],
                                  plan, total_segments: int, total_s: float,
                                  task_type: str) -> str:
     """LLM 产出 → 自包含六段式的归一化（v2 与回退式共用，issue #46 AC2）。
 
-    定义性段落换成整片原文（逐段重复由代码保证），时间轴注记＋起止状态声明
-    按 plan 注入 detailed_description 顶部；LLM 若自写了注记行，先剥掉再注入
-    （注记以组装器为准，重复两遍只会挤掉正文）。
+    定义性段落换成**本段作用域**的原文（issue #75：子集＋段内新号，逐段重复由代码
+    保证），时间轴注记＋起止状态声明按 plan 注入 detailed_description 顶部；LLM 若
+    自写了注记行，先剥掉再注入（注记以组装器为准，重复两遍只会挤掉正文）。
     """
     parts = split_ref_sections(text)
     if not parts:
@@ -1325,9 +1340,9 @@ def normalize_ref_segment_output(text: str, *, whole_sections: dict[str, str],
     _self_written, detailed = split_ref_segment_detailed(
         parts.get("detailed_description", ""))
     return assemble_ref_segment(
-        subject_definitions=whole_sections.get("subject_definitions")
+        subject_definitions=sections.get("subject_definitions")
         or parts.get("subject_definitions", ""),
-        retention_analysis=whole_sections.get("retention_analysis")
+        retention_analysis=sections.get("retention_analysis")
         or parts.get("retention_analysis", ""),
         task_type=effective_task,
         summary_body=summary_body,
@@ -1338,18 +1353,24 @@ def normalize_ref_segment_output(text: str, *, whole_sections: dict[str, str],
     )
 
 
-def write_ref_segment_v2(plan, all_plans: list, *, whole_sections: dict[str, str],
+def write_ref_segment_v2(plan, all_plans: list, *, sections: dict[str, str],
                          shot_texts: list[str], task_type: str, llm,
                          total_s: float,
-                         ref_meta: list[tuple[int, str, str]] | None = None) -> str | None:
+                         ref_meta: list[tuple[int, str, str]] | None = None,
+                         subject_scope: tuple[int, ...] | list[int] | None = None,
+                         ) -> str | None:
     """多参 v2 写段（issue #46）：LLM 细写 → 归一化 → 校验，有界重写。
 
     契约同 ``write_segment_v2``：LLM 调用失败返回 None；重试耗尽仍不合格时
     **交回原文**（当面给用户看问题），不返回 None 装死。调用走直调看门狗
     （issue #70）：卡住会先重试，失败那句把病因与尝试次数打给用户再回退。
+
+    ``sections`` / ``ref_meta`` / ``subject_scope`` 都是**本段作用域**（issue #75）：
+    请求只带本段定义块，校验也按本段登记判——拿整片登记判段产物，``PICTURE_UNUSED``
+    会把每一段都判红（本段本来就用不到别的图）。
     """
     base_request = build_ref_segment_v2_request(
-        plan, all_plans, whole_sections=whole_sections,
+        plan, all_plans, sections=sections,
         shot_texts=shot_texts, task_type=task_type, total_s=total_s)
     request = base_request
     text: str | None = None
@@ -1362,12 +1383,12 @@ def write_ref_segment_v2(plan, all_plans: list, *, whole_sections: dict[str, str
             # 回退机械拼装——回退是对的，静默才是错的。
             return None
         text = normalize_ref_segment_output(
-            raw, whole_sections=whole_sections, plan=plan,
+            raw, sections=sections, plan=plan,
             total_segments=len(all_plans), total_s=total_s, task_type=task_type)
         errors = [i for i in validate_ref_segment(
             text, duration=plan.duration_s, segment_number=plan.index + 1,
             total_segments=len(all_plans), start_s=plan.start_s, total_s=total_s,
-            ref_meta=ref_meta) if i.severity == "error"]
+            ref_meta=ref_meta, subject_scope=subject_scope) if i.severity == "error"]
         if not errors:
             return text
         if attempt + 1 == MAX_SEGMENT_ATTEMPTS:

@@ -2167,15 +2167,26 @@ def _deliver_ref_segments(state: dict, brief: Brief, prompt: str,
     与顺序卡，**一段提示词都不写**。正文由逐段陪跑在当前段轮到时写（``_run_ref_segment_
     handoff``）——先写完再陪跑，用户会在还没生成第 1 段时就先看到第 2、3 段的词
     （#55 AC1/#56：一次只维持一个当前待办）。
+
+    单段素材超限（issue #75）返回 **None** 并当面说清：这是设计边界，不是崩溃——
+    片子还没开始生成，用户这时改剧本/拆段最便宜（等到第 5 段才发现，前面几小时的
+    生成都白做）。
     """
     from ..ref_segments import prepare_ref_segments
+    from ..segment_refs import SegmentAssetOverflowError
 
     # 多参交付里的拆段是直调路径：横幅＋心跳都在这里成对出现（issue #67）。
     # 报告仍由本函数打印——它是「产物交付」的结论，不是等待反馈。
-    with step_scope("正在按镜头切点拆分执行段"):
-        job, report = prepare_ref_segments(
-            whole_prompt=prompt, total_s=brief.duration, out_dir=generation_dir,
-            state=state, brief=brief)
+    try:
+        with step_scope("正在按镜头切点拆分执行段"):
+            job, report = prepare_ref_segments(
+                whole_prompt=prompt, total_s=brief.duration, out_dir=generation_dir,
+                state=state, brief=brief)
+    except SegmentAssetOverflowError as exc:
+        print(f"\n[错误] 本片无法按段交付：{exc}")
+        print("  提示词与素材台账都已就绪，问题只在「某一段要喂的图太多」——"
+              "改剧本的镜头划分或精简素材后重跑阶段 2 即可。")
+        return None
     print(report)
     # 交付也是长阻塞：清掉生成期间误敲的键，别让第一个问答吞掉它们。
     _drain_stdin()
@@ -2345,6 +2356,13 @@ def _run_ref_segment_handoff(result, generation_dir: Path,
         # ——那个字段是**交付时**那一份（≤15s 直出），改写后的事实以段文件为准。
         print("\n" + "=" * 60)
         print(render_ref_segment_briefing(plan, position, total, segment_file))
+        # 本段接线卡在复制块**之前**（issue #75 AC4）：先看这段要接哪几张图、接哪个槽，
+        # 再看要复制进 ComfyUI 的正文。文本与 `segments/injection-card-NN.md` 同源
+        # （同一渲染函数），两处各拼一遍就会各漂各的。
+        card = getattr(result, "segment_asset_card", None)
+        card_text = card(position) if callable(card) else ""
+        if card_text:
+            print(card_text)
         # 正文包在复制边界里（issue #74）：抬头已在上方、交回提示在下方，两者都在
         # 标记之外——用户在终端划选时不会把段号或问句带进 ComfyUI 提示词框。
         print(render_copy_block(text))
@@ -2652,6 +2670,10 @@ def _phase2_ref_finish(config: Config, session: SessionState) -> int:
               f"（段文件 {result.segment_paths[0]} 同文），并留作存档预览。")
     else:
         result = _deliver_ref_segments(state, brief, prompt, generation_dir)
+        if result is None:
+            # 单段素材超限（issue #75）：错误已当面打全，片子还没开始生成——
+            # 不再往下陪跑（没有段可写），会话保持可续接，改完剧本重跑阶段 2 即可。
+            return 1
         print(f"\n[存档预览] 整片 ref 六段式已写入 {output_file}"
               "（仅存档，不作交付物——交付物是逐段交回的那几段视频）。")
     finished = _run_ref_segment_handoff(result, generation_dir)
@@ -3173,7 +3195,7 @@ def _choose_ref_segment_outcome(attempt: int, *, position: int, total: int) -> s
     """多参段判为「未达到」时的五档出路（issue #56 AC3）。默认**停下**，其余都是显式覆盖。
 
     与首尾帧链的 ``_choose_gate_outcome`` 差在「换锚帧」那两档：多参没有帧槽可换（锚定
-    由全片共享的参考素材承担，ADR 0011），取而代之的是**改词再掷**（``GATE_REWORD``）
+    由本段用到的参考素材承担，ADR 0011），取而代之的是**改词再掷**（``GATE_REWORD``）
     ——多参段的偏差通常是「这段提示词没写对」，桥接链的偏差是「下游锚帧不对」。
 
     「继续」与「显式接受」都继续，但**记的不是同一件事**：前者是人改判「它其实达到了」
@@ -3182,7 +3204,7 @@ def _choose_ref_segment_outcome(attempt: int, *, position: int, total: int) -> s
     """
     print("\n" + "!" * 60)
     print("[劝阻] 本段首/末帧画面没有达到上面声明的起止状态——默认**不继续**。")
-    print("  多参段间没有桥接帧：这一段的偏差不会被下一段继承（锚定靠全片共享的参考素材），")
+    print("  多参段间没有桥接帧：这一段的偏差不会被下一段继承（锚定靠本段用到的参考素材），")
     print("  但拼接之后它就是成片里的一段，偏差留在成片里。")
     print("  出路：")
     for index, outcome in enumerate(_REF_OUTCOME_ORDER, 1):

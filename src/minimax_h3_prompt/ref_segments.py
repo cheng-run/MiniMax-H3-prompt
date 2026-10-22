@@ -11,7 +11,8 @@
 - **机械拼装**：LLM 不可用/调用失败时的诚实地板——定义性段落逐段重复 +
   ``rebase_ref_shot_blocks`` 切片重基，同样出自包含六段式。
 
-多参**没有桥接帧**（锚定由全片共享参考素材承担），所以陪跑里没有剥帧/锚帧，
+多参**没有桥接帧**（锚定由每段用到的参考素材承担，段内只带本段素材并重编号），
+所以陪跑里没有剥帧/锚帧，
 但**逐段陪跑与两道闸照走**（issue #55/#56）：一次只出当前一段 → 交回本段输出视频
 → **可证层**硬阻断（时长档/尺寸）→ **语义层**剥本段首/末帧读图、与 plan 声明的
 起止状态并排交人判 → 未达到给五档出路（含「修改提示词」：只动画面正文再掷）→
@@ -36,16 +37,23 @@ from __future__ import annotations
 import json
 import re
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .asset_ledger import sha256_file
+from .asset_ledger import KIND_PICTURE, load_asset_ledger, sha256_file
 from .segment_planner import (
     MAX_SEG_S,
     SegmentPlan,
     pack_shots_into_segments,
     plan_segments,
+)
+from .segment_refs import (
+    SegmentAssetScope,
+    compute_segment_scope,
+    render_segment_injection_card,
+    rewrite_picture_labels,
+    scope_ref_sections,
 )
 from .segment_prompts import (
     _shot_blocks,
@@ -61,6 +69,7 @@ from .segment_prompts import (
     write_ref_segment_v2,
 )
 from .tools.h3_validator import split_ref_sections, validate_ref
+from .workflow_config import DEFAULT_REFS_PER_SEGMENT, workflow_settings
 
 def is_single_segment_route(total_s: float) -> bool:
     """本片是否走「整片＝唯一执行段」的直出路线：总时长不超过 H3 **单次生成上限**。
@@ -147,6 +156,10 @@ class RefSegmentJob:
     planning_failure: str = ""
     annotated: bool = True
     reuse_written: bool = False
+    # 每段参考图上限（issue #75）：本段用到的图超过它就报错点名。默认值从工作流配置
+    # 取（``config/workflow.yaml`` 的 ``refs_per_segment``），缺省 9——不在这里另写
+    # 一个字面量，否则改配置时这里会静默不跟（本仓「同一契约不许两处口径」）。
+    refs_per_segment: int = DEFAULT_REFS_PER_SEGMENT
     # 只读占位：``format_ref_segment_report`` 与 ``RefSegmentResult`` 同形取数。按需
     # 写段下校验结论在**写那一段时**才产生，报告里这一项恒为空（结论走段级 [] 提醒行）。
     issues: list[list] = field(default_factory=list)
@@ -154,6 +167,10 @@ class RefSegmentJob:
     def segment_path(self, position: int) -> Path:
         """第 ``position`` 段（1 起）的提示词文件路径。"""
         return Path(self.out_dir) / "segments" / f"segment-{position:02d}.md"
+
+    def segment_card_path(self, position: int) -> Path:
+        """第 ``position`` 段的接线卡路径（issue #75 AC4）：段文件同目录、同段号。"""
+        return Path(self.out_dir) / "segments" / f"injection-card-{position:02d}.md"
 
     @property
     def segment_paths(self) -> list[Path]:
@@ -167,11 +184,51 @@ class RefSegmentJob:
     def order_card_path(self) -> Path:
         return Path(self.out_dir) / "segments" / "order-card.md"
 
+    def _shot_texts(self, plan: SegmentPlan) -> list[str]:
+        """本段 Shot 原文（写段请求与素材子集**共用这一份**，不各取一套）。
+
+        规划式按 ``shots_in_segment`` 精确取；回退式（规划失败）按时间窗重叠取——
+        与 ``_generate`` 的分支判据同一条。两处各写一遍取值逻辑，就会出现「子集按
+        A 批镜头算、请求给的是 B 批镜头」，段内外素材对不上。
+        """
+        return _segment_shot_texts(plan, self.blocks, self.total_s,
+                                   used_fallback=self.used_fallback)
+
+    def _scope_for(self, plan: SegmentPlan) -> SegmentAssetScope | None:
+        """本段的素材子集；旧 plan.json（没有该字段）返回 None ＝ 整片定义原样。
+
+        **读 plan 上的映射、不重算**（issue #75 AC5）：续跑重写某段必须用交付时定案
+        的那张表，重算会得到另一套号，新写出的段与已通过的段就数着不同的 Picture。
+        """
+        if plan.assets_in_segment is None:
+            return None
+        return SegmentAssetScope.from_dict(plan.assets_in_segment)
+
+    def segment_asset_card(self, position: int) -> str:
+        """本段接线卡文本（终端打印与 ``injection-card-NN.md`` **同一份**）。
+
+        旧 plan.json（无子集映射）返回空串：那一路本就没有段内重编号，接线看整片
+        注入卡（``injection_card.md``）。
+        """
+        scope = self._scope_for(self.plans[position - 1])
+        if scope is None:
+            return ""
+        return render_segment_injection_card(
+            scope, position=position, total=len(self.plans))
+
+    def _write_segment_card(self, position: int, scope: SegmentAssetScope) -> Path:
+        path = self.segment_card_path(position)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(render_segment_injection_card(
+            scope, position=position, total=len(self.plans)), encoding="utf-8")
+        return path
+
     def write_segment(self, position: int) -> tuple[str, list]:
         """写第 ``position`` 段（1 起）：写出/复用 → 落盘 → 校验，返回 ``(正文, issues)``。
 
         **落盘在这里，打印在调用方**：批式入口与陪跑循环的「出词时机」不同（前者按序
         全打、后者一次只出当前一段），把打印留给他们，才不会出现两套口播口径。
+        接线卡也在这里落盘（写段成功＝这一段有了可接线的段内编号）。
         """
         plan = self.plans[position - 1]
         path = self.segment_path(position)
@@ -181,41 +238,53 @@ class RefSegmentJob:
         else:
             text = self._generate(plan)
             path.write_text(text, encoding="utf-8")
+        scope = self._scope_for(plan)
         issues = validate_segment_text(
             text, annotated=self.annotated, duration=plan.duration_s,
             segment_number=position, total_segments=len(self.plans),
-            start_s=plan.start_s, total_s=self.total_s, ref_meta=self.ref_meta)
+            start_s=plan.start_s, total_s=self.total_s,
+            ref_meta=(scope.ref_meta if scope is not None else self.ref_meta),
+            subject_scope=(scope.subject_numbers if scope is not None else None))
+        if scope is not None:
+            self._write_segment_card(position, scope)
         return text, issues
 
     def _generate(self, plan) -> str:
-        """调模型写一段（或回退机械拼装）——请求内容与批式时代**逐字相同**。"""
+        """调模型写一段（或回退机械拼装）——请求只带**本段**定义块（issue #75）。"""
         total_segments = len(self.plans)
+        scope = self._scope_for(plan)
+        # 段内作用域：定义块裁到本段素材并重编号；旧 plan.json（scope=None）保持整片。
+        sections = self.sections if scope is None else scope_ref_sections(self.sections, scope)
+        shot_texts = self._shot_texts(plan)
+        if scope is not None:
+            shot_texts = [rewrite_picture_labels(text, scope.picture_map)
+                          for text in shot_texts]
+        ref_meta = scope.ref_meta if scope is not None else self.ref_meta
+        subject_scope = scope.subject_numbers if scope is not None else None
         if not self.used_fallback:
-            shot_texts = [text for number, _at, text in self.blocks
-                          if number in plan.shots_in_segment] or [
-                text for _n, _at, text in _window_blocks(
-                    self.blocks, (plan.start_s, plan.end_s), self.total_s)]
             text = write_ref_segment_v2(
-                plan, self.plans, whole_sections=self.sections, shot_texts=shot_texts,
+                plan, self.plans, sections=sections, shot_texts=shot_texts,
                 task_type=self.task_type, llm=self.llm, total_s=self.total_s,
-                ref_meta=self.ref_meta)
+                ref_meta=ref_meta, subject_scope=subject_scope)
         else:
-            shot_texts = [text for _n, _at, text in _window_blocks(
-                self.blocks, (plan.start_s, plan.end_s), self.total_s)]
             text = None
             if self.llm is not None:
+                # 回退式把「整片提示词」当取材上下文一并下发——所以那份上下文也得是
+                # **本段作用域**的：把整片 24 张定义塞回去，模型照样会照着写。
+                base_prompt = (self.whole_prompt if scope is None
+                               else _scoped_whole_prompt(self.sections, sections))
                 raw = rewrite_ref_segment_prompt(
-                    whole_prompt=self.whole_prompt, plan=plan,
+                    base_prompt=base_prompt, plan=plan,
                     total_segments=total_segments, total_s=self.total_s,
                     shot_texts=shot_texts, llm=self.llm)
                 if raw:
                     text = normalize_ref_segment_output(
-                        raw, whole_sections=self.sections, plan=plan,
+                        raw, sections=sections, plan=plan,
                         total_segments=total_segments, total_s=self.total_s,
                         task_type=self.task_type)
         if text is None:
             # 机械拼装是诚实地板：写段失败也照出完整产物，由段级 [提醒] 行把问题打出来。
-            text = _mechanical_segment(self.sections, plan, total_segments,
+            text = _mechanical_segment(sections, plan, total_segments,
                                        self.total_s, shot_texts, self.task_type)
         return text
 
@@ -291,6 +360,62 @@ def _derive_plan(index: int, window: tuple[int, int], blocks: list[tuple[int, fl
     )
 
 
+def _segment_shot_texts(plan: SegmentPlan, blocks: list[tuple[int, float, str]],
+                        total_s: int, *, used_fallback: bool) -> list[str]:
+    """本段 Shot 原文：规划式按 ``shots_in_segment`` 精确取，回退式按时间窗重叠取。
+
+    写段请求与素材子集**共用这一个取值口**（issue #75）：两处各写一遍，就会出现
+    「子集按 A 批镜头算、请求给的是 B 批镜头」，段内外的素材对不上。
+    """
+    if not used_fallback:
+        picked = [text for number, _at, text in blocks if number in plan.shots_in_segment]
+        if picked:
+            return picked
+    return [text for _n, _at, text in _window_blocks(
+        blocks, (plan.start_s, plan.end_s), total_s)]
+
+
+def _plan_scope(plan: SegmentPlan, *, sections: dict[str, str],
+                blocks: list[tuple[int, float, str]], total_s: int,
+                used_fallback: bool, ref_meta: list[tuple[int, str, str]] | None,
+                asset_paths: dict[int, str] | None, refs_per_segment: int,
+                position: int, total: int) -> SegmentAssetScope:
+    """一段的素材子集——准备阶段算一次、写进 plan.json（issue #75 AC1/AC3/AC5）。
+
+    Shot 原文与写段请求同取 ``_segment_shot_texts``：子集与请求必须看同一批镜头。
+    超限由 ``compute_segment_scope`` 抛 ``SegmentAssetOverflowError``（点名素材）。
+    """
+    shot_texts = _segment_shot_texts(plan, blocks, total_s, used_fallback=used_fallback)
+    return compute_segment_scope(
+        shot_text="\n\n".join(shot_texts),
+        subject_definitions=sections.get("subject_definitions", ""),
+        registry=ref_meta or [],
+        refs_per_segment=refs_per_segment,
+        paths=asset_paths,
+        segment_label=f"第 {position}/{total} 段",
+    )
+
+
+def _scoped_whole_prompt(sections: dict[str, str], scoped: dict[str, str]) -> str:
+    """整片提示词 → 本段作用域版本（回退式请求的「完整提示词」取材块）。
+
+    只换定义性段落（子集＋新号），正文/音轨沿用整片：回退式要的是「按本段时间窗从
+    整片取材」，取材对象当然得是**本段会用的素材**——把整片 24 张定义塞回去，模型
+    照抄的就是 24 张。
+    """
+    task_type, summary_body = split_task_type(scoped.get("summary", ""))
+    return assemble_ref_segment(
+        subject_definitions=scoped.get("subject_definitions", ""),
+        retention_analysis=scoped.get("retention_analysis", ""),
+        task_type=task_type or _task_type_of(scoped),
+        summary_body=summary_body,
+        detailed_body=sections.get("detailed_description", ""),
+        # 音轨取 scoped（图号已改写）；整片逐段一致的音轨描述本来就在两处同形。
+        overall_soundscape=scoped.get("overall_soundscape", "N/A") or "N/A",
+        non_diegetic_music=scoped.get("non_diegetic_music", "N/A") or "N/A",
+    )
+
+
 def _mechanical_segment(sections: dict[str, str], plan: SegmentPlan,
                         total_segments: int, total_s: int, shot_texts: list[str],
                         task_type: str) -> str:
@@ -326,9 +451,15 @@ def _build_ref_job(*, whole_prompt: str, total_s: float, out_dir: Path,
         llm = None
         notes.append(f"[提示] 模型构造失败（{exc}）：分段提示词改走机械拼装（定义逐段重复＋切片重基）。")
     registry = ref_asset_registry(state or {}, brief)
+    # 正本路径取素材台账（与整片注入卡同一口径：`assets/picture-NN.png`），不在这里
+    # 拼路径——台账才是「哪张图对应哪个文件」的真源，拼出来的路径可能指向空。
+    asset_paths = {entry.number: entry.path
+                   for entry in load_asset_ledger(out_dir).entries
+                   if entry.kind == KIND_PICTURE}
     job = prepare_ref_segmentation(
         whole_prompt=whole_prompt, total_s=total_s, out_dir=out_dir, llm=llm,
-        ref_meta=[(r.picture, r.name, r.description) for r in registry])
+        ref_meta=[(r.picture, r.name, r.description) for r in registry],
+        asset_paths=asset_paths or None)
     return job, notes
 
 
@@ -407,7 +538,7 @@ def render_ref_order_card(plans: list[SegmentPlan], segment_paths: list[Path],
         "**拼接归系统**：全部段验收通过后自动按「先后」列 1→{} 的顺序接成成片".format(len(plans))
         + "（段间硬切、用各段自身帧）；重跑某段后可单独触发一次手动拼接重出成片"
         "（`uv run launch.py ref-concat <生成目录>`）。"
-        "段间没有桥接帧，衔接靠全片共享同一批参考素材与每段起止状态声明对位。",
+        "段间没有桥接帧，衔接靠每段各自用到的参考素材（同一素材跨段保持同一外观）与每段起止状态声明对位。",
         "",
         "| 先后 | 段号 | 起止秒 | 本段时长 | 提示词文件 |",
         "| --- | --- | --- | --- | --- |",
@@ -629,7 +760,9 @@ class FinalFilm:
 def validate_segment_text(text: str, *, annotated: bool, duration: float | None = None,
                           segment_number: int = 1, total_segments: int = 1,
                           start_s: float = 0.0, total_s: float | None = None,
-                          ref_meta: list[tuple[int, str, str]] | None = None) -> list:
+                          ref_meta: list[tuple[int, str, str]] | None = None,
+                          subject_scope: tuple[int, ...] | list[int] | None = None,
+                          ) -> list:
     """按段文本的**形态**选校验口径：带分段注记走 ``validate_ref_segment``，不带走 ``validate_ref``。
 
     口径跟着**文本的形态**走，不跟着「这是第几段」走（``RefSegmentResult.annotated``）：
@@ -639,13 +772,16 @@ def validate_segment_text(text: str, *, annotated: bool, duration: float | None 
     映射**只留这一处**：交付时算一遍、改写后再算一遍，两处各写一遍这个映射，改一处漏
     一处就会让同一份文本「交付时过、改写后报」——issue #56 的假错正是同一种形态
     （同一个校验器两处接线给了两个口径）。
+
+    ``ref_meta`` / ``subject_scope`` 传**本段子集**（issue #75）：段内只喂用到的图，
+    编号从 1 连续，拿整片登记判会把每一段都判红（``PICTURE_UNUSED``/``LABEL_GAP_SUBJECT``）。
     """
     if annotated:
         return validate_ref_segment(
             text, duration=duration, segment_number=segment_number,
             total_segments=total_segments, start_s=start_s, total_s=total_s,
-            ref_meta=ref_meta)
-    return validate_ref(text, duration, ref_meta)
+            ref_meta=ref_meta, subject_scope=subject_scope)
+    return validate_ref(text, duration, ref_meta, subject_scope=subject_scope)
 
 
 def _write_plan_file(seg_dir: Path, plans: list[SegmentPlan]) -> Path:
@@ -1124,7 +1260,9 @@ def revise_ref_segment_body(old_text: str, feedback: str, llm) -> str:
 
 def prepare_ref_segmentation(*, whole_prompt: str, total_s: float, out_dir: Path,
                              llm=None,
-                             ref_meta: list[tuple[int, str, str]] | None = None
+                             ref_meta: list[tuple[int, str, str]] | None = None,
+                             asset_paths: dict[int, str] | None = None,
+                             refs_per_segment: int | None = None,
                              ) -> RefSegmentJob:
     """规划/准备（issue #46）：切点 → 段边界（规划式，失败回退机械打包）→ 段表与顺序卡。
 
@@ -1133,6 +1271,11 @@ def prepare_ref_segmentation(*, whole_prompt: str, total_s: float, out_dir: Path
 
     llm：带 ``invoke(str, config=...)`` 的模型；None → 全机械（不静默失败，产物照样完整）。
     ref_meta：素材登记（(picture, name, description)），供「定义逐段重复」校验。
+    asset_paths：原号 → 正本相对路径（台账口径），进每段接线卡。
+    refs_per_segment：每段参考图上限；None → 读工作流配置（``config/workflow.yaml``）。
+
+    **准备阶段就把每段的素材子集算好并写进 plan.json**（issue #75）：超限的片子在这里
+    当场报错，不必等用户花几小时生成到第 5 段才发现第 5 段接不下；续跑也照这张表改写。
     已落盘的段文件一律**重写**（新一次交付）：复用上一次的词会让改了修订的重跑拿到旧词；
     只有续跑装载（``load_ref_segments_for_resume``）才置 ``reuse_written=True``。
     """
@@ -1141,6 +1284,10 @@ def prepare_ref_segmentation(*, whole_prompt: str, total_s: float, out_dir: Path
     body = sections.get("detailed_description", "")
     blocks = _shot_blocks(body, keep_cut_timestamp=True) if body.strip() else []
     total_int = int(round(total_s))
+    if refs_per_segment is None:
+        # 生效配置在**调用时**读（见 ``workflow_config.load_workflow_settings``）：
+        # 改 yaml 即改边界，缓存或 import 时求值都会让守卫变成假的。
+        refs_per_segment = workflow_settings().refs_per_segment
 
     if blocks:
         # 切点钳进 [0, total]：块时间超 total（调用方时长与整片不一致）时不得把窗外切点带进打包
@@ -1172,11 +1319,22 @@ def prepare_ref_segmentation(*, whole_prompt: str, total_s: float, out_dir: Path
         plans = [_derive_plan(index, window, blocks, total_int)
                  for index, window in enumerate(packed)]
 
+    # 段内素材子集（issue #75）：逐段算出「新号 → 原号」并**随 plan.json 落盘**。
+    # 超限就在这里抛（点名超限素材），绝不静默截断。
+    total = len(plans)
+    plans = [
+        replace(plan, assets_in_segment=_plan_scope(
+            plan, sections=sections, blocks=blocks, total_s=total_int,
+            used_fallback=used_fallback, ref_meta=ref_meta, asset_paths=asset_paths,
+            refs_per_segment=refs_per_segment, position=position, total=total).to_dict())
+        for position, plan in enumerate(plans, 1)
+    ]
+
     job = RefSegmentJob(
         plans=list(plans), sections=sections, blocks=blocks, whole_prompt=whole_prompt,
         total_s=total_int, task_type=task_type, out_dir=Path(out_dir), llm=llm,
         ref_meta=ref_meta, used_fallback=used_fallback,
-        planning_failure=planning_failure)
+        planning_failure=planning_failure, refs_per_segment=int(refs_per_segment))
     seg_dir = Path(out_dir) / "segments"
     seg_dir.mkdir(parents=True, exist_ok=True)
     _write_plan_file(seg_dir, job.plans)
@@ -1207,6 +1365,11 @@ def write_all_ref_segments(job: RefSegmentJob) -> RefSegmentResult:
         # 落盘即打印：写完这一段就交到用户眼前，不攒整片（issue #70）。
         print(f"\n[多参写段] 第 {position}/{total} 段已落盘：{job.segment_path(position)}",
               flush=True)
+        # 接线卡在复制块**之前**（issue #75 AC4）：用户先知道这段要接哪几张图，
+        # 再看到要复制进 ComfyUI 的正文——顺序反过来，人已经去划选正文了。
+        card = job.segment_asset_card(position)
+        if card:
+            print(card, flush=True)
         # 正文包在复制边界里（issue #74）：用户在终端划选，抬头必须留在标记外。
         print(render_copy_block(text), flush=True)
     return RefSegmentResult(

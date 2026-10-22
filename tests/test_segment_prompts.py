@@ -1362,7 +1362,7 @@ def _ref_plans():
 def _ref_request_kwargs():
     sections = split_ref_sections(_REF_WHOLE_PROMPT)
     return dict(
-        whole_sections=sections,
+        sections=sections,
         shot_texts=["[Shot 2] A close-up as she hands 青铜钥匙 to the boy."],
         task_type="reference generation",
         total_s=22,
@@ -1414,7 +1414,7 @@ def test_fallback_ref_rewrite_request_carries_same_disciplines():
 
     llm = _LLM()
     rewrite_ref_segment_prompt(
-        whole_prompt=_REF_WHOLE_PROMPT, plan=_ref_plans()[1], total_segments=2,
+        base_prompt=_REF_WHOLE_PROMPT, plan=_ref_plans()[1], total_segments=2,
         total_s=22, shot_texts=["[Shot 2] A close-up as she hands the key over."], llm=llm)
     request = llm.llm_last
     assert "subject_definitions" in request and "原样复制" in request
@@ -1447,7 +1447,7 @@ def test_wordlist_reaches_both_ref_segment_requests():
 
     llm = _LLM()
     rewrite_ref_segment_prompt(
-        whole_prompt=_REF_WHOLE_PROMPT, plan=plan, total_segments=2,
+        base_prompt=_REF_WHOLE_PROMPT, plan=plan, total_segments=2,
         total_s=22, shot_texts=["[Shot 2] …"], llm=llm)
     assert marker in llm.last and "## 词表：景别" in llm.last
     assert "一概不用" in llm.last

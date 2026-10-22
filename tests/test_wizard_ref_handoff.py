@@ -350,3 +350,64 @@ def test_segment_prompt_is_wrapped_by_copy_boundary_markers(
             f"第 {position} 段标记之间与段文件不一致")
         assert out.index(f"第 {position}/2 段 · 起止") < start
         first_end = end
+
+
+# ---------------------------------------------------------------------------
+# issue #75：段内素材子集 · 终端接线清单 / 超限拒绝
+# ---------------------------------------------------------------------------
+
+def test_segment_asset_card_is_printed_before_the_copy_block(
+        tmp_path, monkeypatch, capsys, h3_tier_video):
+    """每段先打本段接线清单，再打正文复制块（AC4：先知道接哪几张，再去划选正文）。"""
+    from minimax_h3_prompt.ref_segments import COPY_START_MARKER
+
+    first = h3_tier_video(10.0, "seg1.avi")
+    second = h3_tier_video(10.0, "seg2.avi")
+    _run(tmp_path, monkeypatch, [str(first), str(second)])
+    out = capsys.readouterr().out
+
+    for position in (1, 2):
+        header = f"本段参考素材接线（段 {position}/2）"
+        assert header in out
+        assert out.index(header) < out.index(COPY_START_MARKER, out.index(header))
+        assert (_generation_dir(tmp_path) / "segments"
+                / f"injection-card-{position:02d}.md").is_file()
+
+
+def test_segment_asset_overflow_is_refused_before_any_generation(
+        tmp_path, monkeypatch, capsys):
+    """超限（issue #75 AC3）在交付阶段就停：打人话、返回 None，不进陪跑。"""
+    from minimax_h3_prompt import ref_segments
+    from minimax_h3_prompt.segment_refs import SegmentAssetOverflowError
+
+    def _boom(**_kwargs):
+        raise SegmentAssetOverflowError(
+            "第 1/2 段：本段要用 10 张参考图，超过每段上限 9 张（素材1、素材10）")
+
+    monkeypatch.setattr(ref_segments, "prepare_ref_segments", _boom)
+    monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
+
+    result = wizard._deliver_ref_segments(
+        {}, Brief(mode="ref", duration=30.0), "PROMPT", tmp_path)
+
+    assert result is None
+    out = capsys.readouterr().out
+    assert "无法按段交付" in out
+    assert "素材10" in out and "素材1" in out
+
+
+def test_overflow_stops_the_run_instead_of_entering_the_handoff(
+        tmp_path, monkeypatch, capsys, h3_tier_video):
+    """端到端：超限时**不进逐段陪跑**（guard 生效），也不落任何段文件。"""
+    from minimax_h3_prompt import ref_segments
+    from minimax_h3_prompt.segment_refs import SegmentAssetOverflowError
+
+    def _boom(**_kwargs):
+        raise SegmentAssetOverflowError("第 1/2 段：本段要用 10 张参考图（素材1、素材10）")
+
+    monkeypatch.setattr(ref_segments, "prepare_ref_segments", _boom)
+    _asked, code = _run(tmp_path, monkeypatch, [])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "无法按段交付" in out
+    assert not (_generation_dir(tmp_path) / "segments" / "segment-01.md").is_file()

@@ -9,6 +9,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 # 规划验收闸的时长档**分路线**（ADR 0012）：
@@ -37,13 +38,18 @@ class SegmentPlan:
     # 多参分段（issue #46）：无桥接帧，start_state 与 end_hook 一起作为「起止状态声明」
     # 进每段提示词正文（段间叙事衔接的显式依据）。首尾帧链不用它（默认空）。
     start_state: str = ""
+    # 本段参考素材子集（issue #75）：段内新号 → 整片原号（＋素材名/正本路径）。
+    # **必须随 plan.json 落盘**：续跑重写某段时要照**当初定案的一张表**改写，按 Shot
+    # 原文重算是另一套结果（素材邻接关系一样，但重算的边界一旦与交付时不同，新写出的
+    # 段就与已通过的段数着不同的号）。旧 plan.json 没有这一键 → None＝整片定义原样。
+    assets_in_segment: dict[str, Any] | None = None
 
     @property
     def duration_s(self) -> int:
         return self.end_s - self.start_s
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "index": self.index,
             "start_s": self.start_s,
             "end_s": self.end_s,
@@ -52,6 +58,11 @@ class SegmentPlan:
             "end_hook": self.end_hook,
             "start_state": self.start_state,
         }
+        # 只有存在子集映射时才写这一键：≤15s 直出（整片＝一段）没有段内子集，
+        # 多一个 `null` 只会让旧形态的 plan.json 变得不好认。
+        if self.assets_in_segment is not None:
+            data["assets_in_segment"] = self.assets_in_segment
+        return data
 
     @classmethod
     def from_dict(cls, raw: dict) -> "SegmentPlan":
@@ -62,6 +73,10 @@ class SegmentPlan:
         同一套分段，就得能把 plan.json 读回来——GEN005 当初是手抄一份绕过去的
         （``resume_gen005.py``，issue #17）。
         """
+        # 延迟导入：段内素材子集只服务多参路线，首尾帧链的 plan.json 读回不必把它
+        # （连同工作流配置的 yaml 解析）拉进 import 图。
+        from .segment_refs import SegmentAssetScope  # noqa: PLC0415
+
         return cls(
             index=int(raw["index"]),
             start_s=int(raw["start_s"]),
@@ -71,6 +86,11 @@ class SegmentPlan:
             end_hook=str(raw["end_hook"]),
             # 旧 plan.json 没有这个键：缺省空串（首尾帧链的既有产物）
             start_state=str(raw.get("start_state", "")),
+            # issue #75：旧 plan.json 没有 assets_in_segment → None（整片定义原样兼容）。
+            # 形态坏了要响（ValueError）——续跑照错表改写就是接错线。
+            assets_in_segment=(
+                SegmentAssetScope.from_dict(raw["assets_in_segment"]).to_dict()
+                if raw.get("assets_in_segment") is not None else None),
         )
 
 

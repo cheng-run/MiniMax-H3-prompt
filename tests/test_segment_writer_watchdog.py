@@ -156,10 +156,10 @@ def test_all_four_write_functions_emit_watchdog_events():
         plans = _v2_plans()
         write_segment_v2(plans[0], plans, {"shot_table": "x"}, Model())
         rewrite_ref_segment_prompt(
-            whole_prompt=_WHOLE_12S, plan=_ref_plans()[0], total_segments=2,
+            base_prompt=_WHOLE_12S, plan=_ref_plans()[0], total_segments=2,
             total_s=12, shot_texts=["[Shot 1] …"], llm=Model())
         write_ref_segment_v2(
-            _ref_plans()[1], _ref_plans(), whole_sections=split_ref_sections(_WHOLE_12S),
+            _ref_plans()[1], _ref_plans(), sections=split_ref_sections(_WHOLE_12S),
             shot_texts=["[Shot 2] …"], task_type="reference generation",
             llm=Model(), total_s=12)
     finally:

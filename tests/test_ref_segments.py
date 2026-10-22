@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -101,20 +102,27 @@ def test_mechanical_segments_are_packed_at_shot_cuts(tmp_path):
 
 
 def test_mechanical_segments_are_self_contained_six_section(tmp_path):
-    """每段完整六段式：定义性段落逐段重复整片定义，注记与起止状态声明齐。"""
+    """每段完整六段式：定义块是本段**子集**、图与定义双向自包含、交付零 error。
+
+    issue #75 改了「定义性段落」的口径：从「逐段重复整片定义」改成「逐段重复**本段
+    用到的**定义」。自包含的判据因此落在「段内出现的每个 <Picture N> 都在本段定义块
+    里」——整片定义不再是每段的一部分（24 张全喂正是 OOM 的来源）。
+    """
     result = _run(tmp_path, llm=None)
     assert len(result.texts) == 3
-    whole = split_ref_sections(_WHOLE_30S)
     for position, text in enumerate(result.texts):
         sections = split_ref_sections(text)
-        assert sections["subject_definitions"].strip() == whole["subject_definitions"].strip()
-        assert sections["retention_analysis"].strip() == whole["retention_analysis"].strip()
-        plan = result.plans[position]
-        errors = [i for i in validate_ref_segment(
-            text, duration=plan.duration_s, segment_number=position + 1,
-            total_segments=3, start_s=plan.start_s, total_s=30, ref_meta=_REF_META)
-            if i.severity == "error"]
+        defs = sections["subject_definitions"]
+        used = {int(m) for m in re.findall(r"<Picture (\d+)>", text)}
+        assert used, "段内一张参考图都没有：语义名/标签都没收上素材"
+        assert all(f"<Picture {n}>" in defs for n in used)  # 引用 → 定义，段内自包含
+        assert sections["retention_analysis"].strip()
+        errors = [i for i in result.issues[position] if i.severity == "error"]
         assert errors == [], f"段 {position + 1}: {[(i.code, i.message) for i in errors]}"
+    # 段 3（Shot 5）只提到 青铜钥匙：定义块里不该再出现 红裙女孩（子集生效；段内图号
+    # 已重编号，所以判语义名而不是原号）
+    third = split_ref_sections(result.texts[2])["subject_definitions"]
+    assert "青铜钥匙" in third and "红裙女孩" not in third
 
 
 def test_mechanical_segments_rebase_timestamps_to_segment_start(tmp_path):
@@ -231,13 +239,11 @@ def test_v2_path_writes_planned_segments(tmp_path):
     result = _run(tmp_path, llm=_V2LLM())
     assert not result.used_fallback
     assert [(p.start_s, p.end_s) for p in result.plans] == [(0, 12), (12, 22), (22, 30)]
-    for position, (plan, text) in enumerate(zip(result.plans, result.texts), 1):
+    for position, text in enumerate(result.texts, 1):
         sections = split_ref_sections(text)
         assert f"Segment {position} of 3" in sections["detailed_description"]
-        errors = [i for i in validate_ref_segment(
-            text, duration=plan.duration_s, segment_number=position,
-            total_segments=3, start_s=plan.start_s, total_s=30, ref_meta=_REF_META)
-            if i.severity == "error"]
+        # 交付时按**本段子集**校验（issue #75）：拿整片登记判会把每段都判 PICTURE_UNUSED
+        errors = [i for i in result.issues[position - 1] if i.severity == "error"]
         assert errors == [], f"段 {position}: {[(i.code, i.message) for i in errors]}"
 
 
@@ -258,11 +264,8 @@ def test_fallback_path_still_delivers_self_contained_segments(tmp_path):
     result = _run(tmp_path, llm=_FallbackLLM())
     assert result.used_fallback
     assert [(p.start_s, p.end_s) for p in result.plans] == [(0, 12), (12, 22), (22, 30)]
-    for position, (plan, text) in enumerate(zip(result.plans, result.texts), 1):
-        errors = [i for i in validate_ref_segment(
-            text, duration=plan.duration_s, segment_number=position,
-            total_segments=3, start_s=plan.start_s, total_s=30, ref_meta=_REF_META)
-            if i.severity == "error"]
+    for position, text in enumerate(result.texts, 1):
+        errors = [i for i in result.issues[position - 1] if i.severity == "error"]
         assert errors == [], f"段 {position}: {[(i.code, i.message) for i in errors]}"
 
 

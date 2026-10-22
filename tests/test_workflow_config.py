@@ -91,6 +91,42 @@ def test_repo_config_registers_v3_with_24_picture_slots():
     assert DEFAULT_SLOT_COUNTS == {KIND_PICTURE: 24, KIND_VIDEO: 3, KIND_AUDIO: 3}
 
 
+# --- 每段参考图上限（issue #75）------------------------------------------------
+# 这是**另一个**边界：槽位数是工作流端口数（24），每段上限是单次生成真正喂几张。
+# 24 张全喂会 OOM（ADR 0017「代价」），所以默认 9 是票面钉死的字面量。
+
+def test_missing_config_uses_nine_refs_per_segment(tmp_path):
+    """缺文件 → 每段 9 张（issue #75 的默认值）。"""
+    assert load_workflow_settings(tmp_path / "absent.yaml").refs_per_segment == 9
+
+
+def test_config_file_drives_refs_per_segment(tmp_path):
+    """写什么读什么：换显存/换工作流只改这一处。"""
+    path = tmp_path / "workflow.yaml"
+    path.write_text("refs_per_segment: 6\n", encoding="utf-8")
+    assert load_workflow_settings(path).refs_per_segment == 6
+
+
+@pytest.mark.parametrize("body", [
+    "refs_per_segment: 0\n",      # 0 张＝段内无参照，必是笔误
+    "refs_per_segment: 2.5\n",    # 张数只能是整数
+    "refs_per_segment: yes\n",    # YAML 的 yes 是 bool（isinstance int 的坑）
+    'refs_per_segment: "9"\n',    # 字符串数字不静默转换
+])
+def test_invalid_refs_per_segment_is_loud(tmp_path, body):
+    """写了非法值要报（静默回默认会把笔误藏起来）。"""
+    path = tmp_path / "workflow.yaml"
+    path.write_text(body, encoding="utf-8")
+    with pytest.raises(ValueError) as excinfo:
+        load_workflow_settings(path)
+    assert "refs_per_segment" in str(excinfo.value)
+
+
+def test_repo_config_caps_each_segment_at_nine_pictures():
+    """仓库生效配置：每段 9 张（与 ADR 0017 的「每段默认 9」同源）。"""
+    assert workflow_settings().refs_per_segment == 9
+
+
 def test_registered_name_constant_derives_from_the_config():
     """菜单/向导/产物共用的 `REF_WORKFLOW_NAME` 必须从配置派生（票面 AC5 单一真源）。
 

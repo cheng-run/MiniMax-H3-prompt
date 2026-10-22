@@ -33,13 +33,26 @@ DEFAULT_SLOT_COUNTS: Mapping[str, int] = {
     KIND_AUDIO: 3,
 }
 
+# 每个执行段默认喂几张参考图（issue #75 / ADR 0017）：24 张全喂时 Qwen3-VL 序列约
+# 5.4 万 token，16GB 卡只剩朴素注意力 kernel，`einsum` 要 232 GiB（2026-10-22 实测
+# OOM）。9 是社区调度器（`SceneDispatcher2`）与旧节点 UI 上限同款的每段值——作为
+# **每段默认值**合理，作为**全局容量**才是错的（ADR 0017 裁定）。写进配置文件后
+# 换工作流/换显存只改这里。
+DEFAULT_REFS_PER_SEGMENT = 9
+
 
 @dataclass(frozen=True)
 class WorkflowSettings:
-    """一份生效的工作流登记：名字 + 三型槽位数（槽位数＝物理端口数）。"""
+    """一份生效的工作流登记：名字 + 三型槽位数＋每段参考图上限（issue #75）。
+
+    ``refs_per_segment`` 与槽位数是两个**不同**的边界：槽位数是工作流端口数（全局
+    容量），每段上限是单次生成真正喂几张图（显存/序列长度决定）。ADR 0017 的原话是
+    「9 作为每段默认值仍然合理，作为全局容量才是错的」——两个数因此各占一个字段。
+    """
 
     ref_workflow_name: str
     slot_counts: Mapping[str, int]
+    refs_per_segment: int = DEFAULT_REFS_PER_SEGMENT
 
     def slot_count(self, kind: str) -> int:
         """取某一型的端口数；未知类型报错（与 ``KINDS`` 同一口径）。"""
@@ -97,7 +110,14 @@ def load_workflow_settings(path: str | Path | None = None) -> WorkflowSettings:
                else DEFAULT_SLOT_COUNTS[kind])
         for kind in KINDS
     }
-    return WorkflowSettings(name, counts)
+    per_segment = raw.get("refs_per_segment")
+    if per_segment is None:
+        refs_per_segment = DEFAULT_REFS_PER_SEGMENT
+    else:
+        # 写了就必须是正整数：`0`/`false`/`"9"` 都会被 _positive_int 挡下——
+        # 静默回默认会把「本想限制却打错字」藏起来（同 slots 的纪律）。
+        refs_per_segment = _positive_int(per_segment, "refs_per_segment")
+    return WorkflowSettings(name, counts, refs_per_segment)
 
 
 def workflow_settings() -> WorkflowSettings:
