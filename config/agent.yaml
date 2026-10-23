@@ -16,6 +16,9 @@ cost:
 
 # 模型配置：只放非敏感项，API key 仍放项目根 .env。
 # 旧的 provider-specific *_MODEL / *_BASE_URL 环境变量仍可覆盖这里的值。
+# base_url 必须写完整 URL，不要写环境变量名：解析器不展开它（2026-10-21 实测，
+# 写 MINIMAX_BASE_URL 会被当字面 URL 发出去，视觉档直接 APIConnectionError；
+# 视觉侧 config._build_vision_settings 只认 DASHSCOPE_BASE_URL，连覆盖都轮不上）。
 models:
   primary:
     # provider: deepseek
@@ -23,16 +26,16 @@ models:
     # base_url: https://api.deepseek.com/v1
     # api_key_env: DEEPSEEK_API_KEY
 
-    provider: dashscope
-    model: qwen3.8-max-0902
-    base_url: https://ws-hzk37yyattdxxdls.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
-    api_key_env: DASHSCOPE_API_KEY
+    provider: minimax
+    model: MiniMax-M3.1-Flash
+    base_url: https://api.minimax.cn/v1
+    api_key_env: MINIMAX_API_KEY
 
   vision:
-    provider: dashscope
-    model: qwen3.8-27b
-    base_url: https://ws-hzk37yyattdxxdls.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
-    api_key_env: DASHSCOPE_API_KEY
+    provider: minimax
+    model: MiniMax-M3.1-Flash
+    base_url: https://api.minimax.cn/v1
+    api_key_env: MINIMAX_API_KEY
 
 # 旧字段：仅在新模型配置和兼容环境变量都未提供模型名时作为 fallback。
 # model: ""
