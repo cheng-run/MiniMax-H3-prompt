@@ -317,44 +317,15 @@ def test_canvas_block_maps_composition_set_by_aspect_family_not_model(monkeypatc
 # 5. 出站交付：向导展示 + 产物落盘两处都拿得到全部资产提示词（issue #40 AC2）
 # ---------------------------------------------------------------------------
 
-def test_wizard_delivers_all_asset_prompts_on_screen_and_on_disk(tmp_path, monkeypatch, capsys):
-    """向导出站口：每条资产提示词都能在**打印与落盘**两处拿到（AC2）。
+def test_fl2va_result_does_not_carry_ref_asset_prompts(tmp_path, monkeypatch):
+    """首尾帧链的产物不许出现**多参路线的资产图提示词**（#41 AC1「首尾帧路线不受影响」）。
 
-    这是「提示词产出没展示」那类缺陷的守卫（「规则在、接线不在」家族第 7 次同族的
-    同型现场）：三个节点产了、用户拿不到＝白产。落盘文件名与非向导路径同名
-    （character-prompt.md 等）——两处各起一个名字就是第二份可写来源，迟早漂开。
-    """
-    state, _ = _run_stage1(tmp_path, monkeypatch)
-    generation_dir = tmp_path / "GEN001"
-    generation_dir.mkdir()
-    from minimax_h3_prompt.ui import wizard
+    资产图提示词是**多参（ref2va）素材循环**的产物：给用户拿去生素材图、逐张交回、再进
+    注入卡接线。首尾帧链走的是关键帧图（首帧／尾帧）＋桥接帧，资产提示词对它没有落点。
 
-    wizard._show_asset_prompts(state, generation_dir)
-
-    out = capsys.readouterr().out
-    for _node, _zh, _d, _t, _out, assets in _ASSETS:
-        for name, prompt in assets:
-            assert name in out, f"展示里没有资产「{name}」"
-            assert prompt in out, f"展示里没有资产「{name}」的提示词"
-    for filename in ("character-prompt.md", "prop-prompt.md", "scene-prompt.md"):
-        path = generation_dir / filename
-        assert path.is_file(), f"落盘缺 {filename}"
-    for _node, _zh, _d, _t, _out, assets in _ASSETS:
-        filename = {
-            "character_image_prompts": "character-prompt.md",
-            "prop_image_prompts": "prop-prompt.md",
-            "scene_image_prompts": "scene-prompt.md",
-        }[_out]
-        text = (generation_dir / filename).read_text(encoding="utf-8")
-        for name, prompt in assets:
-            assert name in text and prompt in text, f"{filename} 里缺资产「{name}」"
-
-
-def test_fl2va_result_keeps_asset_prompts_for_delivery(tmp_path, monkeypatch):
-    """FL2VA 结果不许丢资产提示词（AC2「全部」）：帧变体也要拿得到资产图生图提示词。
-
-    ``result_from_state`` 的 FL2VA 分支曾把 ``image_prompts`` 直接置空——三个节点产了、
-    结果对象里却没有，下游谁也拿不到。两条渲染分支（有无首尾帧 bundle）都要带资产键。
+    issue #40 曾在 FL2VA 分支无条件塞进 ``image_prompts``，并在渲染层追加
+    character/prop/scene 三键——现场表现成「首帧路线也变成了多参」。本用例钉住回滚：
+    帧变体回到 #40 之前的空元组，渲染结果里也没有这三键。
     """
     state, _ = _run_stage1(tmp_path, monkeypatch)
     # result_from_state 要求 script/video 齐全——阶段 1 只产到设计层，这里补上阶段 2 的产物。
@@ -370,18 +341,74 @@ def test_fl2va_result_keeps_asset_prompts_for_delivery(tmp_path, monkeypatch):
 
     result = result_from_state(
         state, brief, generation_id="GEN001", topic_id="t", project_id="p")
-    assert result.image_prompts, "FL2VA 分支把资产提示词丢了"
+    assert result.image_prompts == (), "FL2VA 分支又带上了多参的资产图提示词"
 
     rendered = render_generation(result)
     for key in ("character", "prop", "scene"):
-        assert key in rendered, f"FL2VA 渲染缺 {key} 键"
+        assert key not in rendered, f"FL2VA 渲染多出了多参产物键 {key}"
+    # 帧链自己的产物一样不能少（回滚别把该有的也切掉）
+    for key in ("script", "video", "fl2va", "first-frame", "last-frame"):
+        assert key in rendered, f"FL2VA 渲染缺自己的产物键 {key}"
+
+
+def test_base_route_does_not_deliver_asset_prompts_to_the_wizard(tmp_path, monkeypatch, capsys):
+    """首帧路线的人机修改循环不许展示或落盘资产图提示词（#41 AC1）。
+
+    修改循环是**首尾帧链专用**（多参在 ``_phase1_new`` 就分流走了，不进这里）。issue #40
+    在循环顶端无条件调 ``_show_asset_prompts``，于是首帧路线跑一次就会打印并落盘
+    character-prompt.md / prop-prompt.md / scene-prompt.md —— 用户看到的就是「首帧路线
+    变成多参了」。
+
+    判据打在两处**用户可观察的出口**：哨兵函数没被调用（不打印），目录里没有三份多参文件。
+    """
+    from minimax_h3_prompt.ui import wizard
+
+    state, _ = _run_stage1(tmp_path, monkeypatch)
+    generation_dir = tmp_path / "GEN001"
+    generation_dir.mkdir()
+    # 立刻走完循环：_confirm 读 _prompt，空输入＝回车＝默认 False（没有意见，退出）
+    monkeypatch.setattr(wizard, "_prompt", lambda *a, **k: "")
+
+    wizard._user_revision_loop(state, generation_dir, _brief(),
+                               SimpleNamespace())
+
+    # 判据按**内容**而不是按「某函数有没有被调用」：批量出站函数已经删了，但将来若
+    # 换个名字把它加回来，用户看到的症状是一样的（终端打印 + 三份文件落盘）。
+    out = capsys.readouterr().out
     for _node, _zh, _d, _t, _out, assets in _ASSETS:
-        key = {"character_image_prompts": "character",
-               "prop_image_prompts": "prop",
-               "scene_image_prompts": "scene"}[_out]
         for name, prompt in assets:
-            assert name in rendered[key] and prompt in rendered[key], \
-                f"FL2VA 渲染的 {key} 里缺资产「{name}」"
+            assert prompt not in out, f"首帧路线仍在打印多参资产「{name}」的提示词"
+    for filename in ("character-prompt.md", "prop-prompt.md", "scene-prompt.md"):
+        assert not (generation_dir / filename).exists(), \
+            f"首帧路线仍落盘了多参产物 {filename}"
+
+
+def test_base_stage2_intake_does_not_deliver_asset_prompts(tmp_path, monkeypatch, capsys):
+    """阶段 2 入口（首尾帧链专用）同样不许展示或落盘资产图提示词（#41 AC1）。
+
+    这里是 issue #40 的第二处渗入点：提交关键帧图之前先打了一遍资产图提示词。
+    判据仍是两个用户可观察的出口（不打印、不落盘），不按源码字面断言。
+    """
+    from minimax_h3_prompt.ui import wizard
+
+    state, _ = _run_stage1(tmp_path, monkeypatch)
+    generation_dir = tmp_path / "GEN001"
+    generation_dir.mkdir()
+    session = SimpleNamespace(brief=_brief(), stage_state=state, directory=generation_dir)
+    # 帧图提交这一关节外：路径不存在 → 打印错误后问「重新提交？」，答否即返回 1。
+    monkeypatch.setattr(wizard, "_collect_frame_paths", lambda variant: ("缺失帧.png", ""))
+    monkeypatch.setattr(wizard, "_resolve_frame_file",
+                        lambda raw, role: (_ for _ in ()).throw(FileNotFoundError(raw)))
+    monkeypatch.setattr(wizard, "_confirm", lambda *a, **k: False)
+
+    assert wizard._phase2_collect_and_finish(SimpleNamespace(), session) == 1
+    out = capsys.readouterr().out
+    for _node, _zh, _d, _t, _out, assets in _ASSETS:
+        for name, prompt in assets:
+            assert prompt not in out, f"阶段 2 入口仍在打印多参资产「{name}」的提示词"
+    for filename in ("character-prompt.md", "prop-prompt.md", "scene-prompt.md"):
+        assert not (generation_dir / filename).exists(), \
+            f"阶段 2 入口仍落盘了多参产物 {filename}"
 
 
 # ---------------------------------------------------------------------------

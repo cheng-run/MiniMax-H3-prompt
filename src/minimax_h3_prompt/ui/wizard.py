@@ -759,28 +759,11 @@ def _show_frame_prompts(state: dict, generation_dir: Path) -> None:
             print()
 
 
-def _show_asset_prompts(state: dict, generation_dir: Path,
-                        canvases: dict[str, tuple[int, int]] | None = None) -> None:
-    """资产图生图提示词的出站口：展示 + 落盘（issue #40 AC2）。
-
-    三个资产图节点的产物此前没有任何出站口——向导不展示、不落盘，用户根本拿不到。
-    这里把每类资产渲染成一份 Markdown，打印出来并写进生成目录。落盘文件名取
-    ``topic_generation._ARTIFACT_FILES``（与非向导路径同一份映射，两处各起一个名字
-    就是第二份可写来源）。``canvases`` 是用户选定画布（issue #42）——会话 state 里
-    不持久化 brief 对象，所以由调用方从手上那份 brief 递进来。
-    """
-    from ..generation import image_prompt_variants, render_asset_rows
-    from ..topic_generation import _ARTIFACT_FILES
-
-    variants = image_prompt_variants(state, canvases)
-    for kind in ("character", "prop", "scene"):
-        rows = [item for item in variants if item.kind == kind]
-        if not rows:
-            continue
-        rendered = render_asset_rows(rows, kind)
-        print(rendered)
-        print()
-        (generation_dir / _ARTIFACT_FILES[kind]).write_text(rendered, encoding="utf-8")
+# `_show_asset_prompts` 已删（2026-10-23，#40 回滚）：它是资产图提示词的批量出站口，
+# 只被首尾帧链的两个调用点用过——而资产图是**多参（ref2va）素材循环**的产物。
+# 多参路线早在 #50 就改用逐张出站（`_issue_asset_prompt` + `_sync_released_asset_files`），
+# 这个函数对首尾帧链是渗入、对多参是死代码。别因为「看起来还能用」把它加回来：
+# 首帧路线要的出站物是关键帧图提示词（`_show_frame_prompts`），不是素材图。
 
 
 def _show_ref_registry(state: dict, brief: Brief) -> None:
@@ -1032,9 +1015,13 @@ def _user_revision_loop(state: dict, generation_dir: Path, brief: Brief, config:
 
     while True:
         _show_frame_prompts(state, generation_dir)
-        # 资产图提示词与关键帧提示词同批出站（issue #40）：它们都是给用户拿去生图的素材，
-        # 少展示一样用户就少拿一样——此前资产提示词在向导里根本不可见。
-        _show_asset_prompts(state, generation_dir, brief.canvases)
+        # 资产图提示词**不在这里出站**（#40 回滚，依据 #41 AC1「首尾帧路线不受影响」）：
+        # 它是多参（ref2va）素材循环的产物——用户拿它生素材图、交回、进注入卡接线；
+        # 首尾帧链要的是关键帧图（首/尾帧）＋桥接帧，资产提示词没有落点。
+        # 本函数是**首尾帧链专用**（多参在 `_phase1_new` / `_resume_stage1` /
+        # `_resume_awaiting_frames` 三处都先分流走了），所以这里不是「按路线分叉」，
+        # 而是「多参产物不许进这条路线」——2026-10-23 现场：首帧路线跑一次就打印并
+        # 落盘了 character-prompt.md 等三份多参文件，用户看到「首帧路线变成了多参」。
         # 每轮重出**前后**都摆一次清单（重出后再回到循环顶端）：它是「我到底说过什么」的
         # 唯一凭据，也是撤销时照着念编号的那张表——没摆出来，撤销就只剩「撤最后一条」。
         _show_revision_list(state)
@@ -2804,7 +2791,9 @@ def _phase2_collect_and_finish(
     # （新跑/续接阶段 1 的收尾）就不重复刷屏。
     if show_frame_prompts:
         _show_frame_prompts(state, generation_dir)
-        _show_asset_prompts(state, generation_dir, brief.canvases)
+        # 资产图提示词不随关键帧提示词出站（#40 回滚，同 `_user_revision_loop` 的理由）：
+        # 本函数只服务首尾帧链；多参的素材循环走 `_phase2_ref_finish`。上一版在这里
+        # 无条件多打一遍三份资产提示词并落盘，首帧用户会以为自己进了多参流程。
     print("\n[阶段 2] 请提交生成好的关键帧图片（回车=跳过该项）。")
     remembered_frames = _remembered_frame_paths(state, brief.variant)
     while True:

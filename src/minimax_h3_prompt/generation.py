@@ -865,9 +865,11 @@ def result_from_state(
                 created_at=_now(),
             ),
         )
-        # 资产提示词不随变体被丢弃（issue #40）：帧变体也要拿得到全部资产图生图提示词，
-        # 曾经这里是空元组——三个节点产了、结果对象里却没有，下游谁也拿不到。
-        image_prompts: tuple[ImagePromptVariant, ...] = image_prompt_variants(state, brief.canvases)
+        # 帧变体**不带**资产图提示词（#40 回滚，依据 #41 AC1「首尾帧路线不受影响」）：
+        # 资产图是多参（ref2va）素材循环的产物，首尾帧链用关键帧图＋桥接帧，拿它没有落点。
+        # #40 曾在这里无条件填满 N 资产，于是 FL2VA 的产物里多出三份多参提示词；
+        # 2026-10-23 用户现场把它看成「首帧路线变成了多参」。
+        image_prompts: tuple[ImagePromptVariant, ...] = ()
     else:
         missing = [kind for kind, content in values.items() if not str(content).strip()]
         if missing:
@@ -1188,24 +1190,19 @@ def render_fl2va_markdown(result: GenerationResult) -> str:
     parts.append("")
     return "\n".join(parts).rstrip() + "\n"
 def render_generation(result: GenerationResult) -> dict[str, str]:
-    """返回当前生成模式的可复制产物；FL2VA 输出融合首尾帧，但资产提示词两条路都带（issue #40）。"""
+    """返回当前生成模式的可复制产物；FL2VA 只输出融合首尾帧。
+
+    FL2VA 的产物里**没有**资产图提示词（#40 回滚，依据 #41 AC1）：那是多参素材循环的
+    产物。#40 曾在这一支追加 character/prop/scene 三键，帧链用户凭空多拿到三份多参文件。
+    """
     if result.fl2va_prompt_bundle is not None:
-        out = {
+        return {
             "script": result.script,
             "video": result.artifact("video").content,
             "fl2va": render_fl2va_markdown(result),
             "first-frame": render_fl2va_frame_markdown(result, "first"),
             "last-frame": render_fl2va_frame_markdown(result, "last"),
         }
-        # 旧 FL2VA 产物的 image_prompts 是空元组（改动前的 result_from_state 丢弃过）：
-        # 那种现场无货可交，不硬塞空文件——也不能走 artifact 回退（FL2VA 的 artifacts
-        # 只有 video，按 kind 取会 KeyError）。逐类有货才带键：缺类跳过，不落仅标题的空壳。
-        if result.image_prompts:
-            for kind in ("character", "prop", "scene"):
-                rows = [item for item in result.image_prompts if item.kind == kind]
-                if rows:
-                    out[kind] = render_asset_rows(rows, kind)
-        return out
     return {
         "script": result.script,
         "video": result.artifact("video").content,

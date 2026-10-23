@@ -134,8 +134,9 @@ def test_phase1_new_puts_the_selected_canvases_into_the_brief(tmp_path, monkeypa
     monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
     monkeypatch.setattr(wizard, "_ask_clarifications", lambda config, topic: "")
     # 展示口不是本条的缝（另有出站用例钉它们），打成空操作免得空 bundle 去过解析。
+    # 展示口不是本条的缝（另有出站用例钉它们），打成空操作免得空 bundle 去过解析。
+    # 资产出站口已随 #40 回滚从首尾帧链移除，这里不再有第二个要打桩的展示口。
     monkeypatch.setattr(wizard, "_show_frame_prompts", lambda *a, **k: None)
-    monkeypatch.setattr(wizard, "_show_asset_prompts", lambda *a, **k: None)
 
     captured: dict = {}
 
@@ -153,44 +154,32 @@ def test_phase1_new_puts_the_selected_canvases_into_the_brief(tmp_path, monkeypa
         "选择器的选定值没进 brief——那一行接线丢了"
 
 
-def test_both_asset_outlet_call_sites_forward_the_canvases(tmp_path, monkeypatch):
-    """向导两个资产出站口都把 brief.canvases 递进去（复审：删第三参后全套照绿）。
+def test_asset_loop_outlet_forwards_the_selected_canvas(tmp_path, monkeypatch, capsys):
+    """素材循环的单张出站口按 brief.canvases 渲染（issue #42 AC5 / #50 AC5）。
 
-    「规则在、接线不在」的守卫：``_show_asset_prompts`` 自己认 canvases，但修改循环与
-    阶段 2 收尾两个**调用点**不传的话，选定非默认画布时打印与落盘照样回落默认尺寸。
-    用探针包住出站口记录实参，两条流程各走一遍。
+    #40 回滚后，向导里**唯一**的资产图出站口是多参素材循环（``_issue_asset_prompt``）；
+    首尾帧链不再有资产出站口。这条守卫原先盯的是首尾帧链那两个调用点，随回滚改到
+    真出口上：选定非默认画布时，打印出来的是选定尺寸，不是默认表。
     """
-    seen: list = []
-    monkeypatch.setattr(wizard, "_show_frame_prompts", lambda *a, **k: None)
-    monkeypatch.setattr(wizard, "_show_asset_prompts",
-                        lambda state, directory, canvases=None: seen.append(canvases))
-    monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
-    brief = Brief(mode="base", variant="I2VA", duration=5.0, plot="主题",
+    from minimax_h3_prompt.asset_loop import QueueItem
+
+    assert callable(wizard._issue_asset_prompt)
+    monkeypatch.setattr(wizard, "_sync_released_asset_files", lambda *a, **k: None)
+    brief = Brief(mode="ref", variant="T2VA", duration=5.0, plot="主题",
                   canvases={"zimage": (700, 1300)})
-    state = {"fl2va_prompt_bundle": {}, "shot_table": "[Shot 1] 庭院"}
+    state = {
+        "character_image_prompts": [
+            {"name": "红裙女孩", "positive_prompt": "红裙女孩的生图提示词"},
+        ],
+    }
     generation_dir = tmp_path / "GEN001"
     generation_dir.mkdir()
-    cfg = SimpleNamespace(default_duration=5.0, default_language="Chinese",
-                          sessions_root=tmp_path / "sessions", max_clarification_rounds=0)
 
-    # 流程一：修改循环的循环顶出站口
-    monkeypatch.setattr(wizard, "_confirm", lambda *a, **k: False)
-    wizard._user_revision_loop(state, generation_dir, brief, cfg)
+    wizard._issue_asset_prompt(
+        state, brief, generation_dir, QueueItem(picture=1, kind="character", name="红裙女孩"))
 
-    # 流程二：阶段 2 收尾的补展示出站口——展示后收帧图路径，用哨兵异常跳出
-    class _Stop(Exception):
-        pass
-
-    monkeypatch.setattr(wizard, "_prompt", lambda *a, **k: (_ for _ in ()).throw(_Stop()))
-    from minimax_h3_prompt.session_store import SessionState
-    session = SessionState(generation_dir, brief, state, "awaiting_frames")
-    try:
-        wizard._phase2_collect_and_finish(cfg, session, show_frame_prompts=True)
-    except _Stop:
-        pass
-
-    assert seen == [brief.canvases, brief.canvases], \
-        f"两个出站口没都递到画布：{seen}"
+    out = capsys.readouterr().out
+    assert "700" in out and "1300" in out, f"素材循环出站没按选定画布渲染：{out}"
 
 
 def test_wizard_frame_renderer_shows_the_selected_canvas():
