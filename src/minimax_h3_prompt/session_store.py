@@ -72,6 +72,40 @@ _STATE_KEYS = (
     "resume_answers", "asset_proofread_progress",
 )
 
+# 资产图提示词三键（父 spec #77 / issue #80）：只属于多参路线。键名与 `graph/state.py`
+# 的声明、上面 `_STATE_KEYS` 白名单同源，**两处都保留**——旧的首尾帧会话文件里还有这
+# 三个键，得先读得回来、再按路线丢掉；删掉声明或白名单会连旧的多参会话一起丢素材。
+_ASSET_PROMPT_KEYS = ("character_image_prompts", "prop_image_prompts", "scene_image_prompts")
+
+
+def _route_filtered_state(raw_state: Any, brief: Brief) -> dict[str, Any]:
+    """按路线过滤读回的 stage_state（issue #80 / 父 spec #77）。
+
+    **这是路线过滤，不是容错洗数据**：这里丢的是「这条路线根本不该有」的产物——修复
+    之前（2026-09-27 起）首尾帧阶段 1 无条件跑三个资产图节点，三键被写进会话；续跑时
+    原样读回，多参产物就会从内存和之后的每一次保存里复现（2026-10-23 用户现场把它看成
+    「首帧路线变成了多参」）。字段**损坏**仍按既有纪律大声报错（`_canvases_from_dict`、
+    `_video_output_from_dict`、以及本函数 `dict(...)` 的形状要求都不动），两者不许混为
+    一谈：坏数据要响，错路线的数据要静默但确定地丢掉。
+
+    判据只认 `Brief.mode`（多参＝ref，经 `Brief.is_ref`，与 `generation.asset_prompts_for`
+    的路线守卫同义）。**禁止**改用「变体是不是 FL2VA」或「有没有首尾帧 bundle」——多参
+    的变体是 T2VA、没有 bundle，这两条正是父 spec 逐字点名的错判据。
+
+    多参会话**原样保留**（含读图校对记录 `asset_proofreads`）：三键是素材台账与素材
+    循环的输入，读回丢键等于中断续跑后素材全丢。
+
+    只过滤内存副本、不在这里改写文件：`find_awaiting_sessions` 的扫描走同一个读入口，
+    读一次就回写会让恢复扫描动用户目录里的每一个会话；文件侧的收敛靠续跑后那次
+    ``save``——过滤后的 state 落盘，三键自然不在了。
+    """
+    stage_state = dict(raw_state)
+    if brief.is_ref:
+        return stage_state
+    for key in _ASSET_PROMPT_KEYS:
+        stage_state.pop(key, None)
+    return stage_state
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -236,6 +270,9 @@ def load_session(directory: str | Path) -> SessionState | None:
 
     **字段内容损坏**（如画布条目错形）不走 None、抛 ValueError——那类损坏若也吞成
     None，就是「画布悄悄回落默认表」的静默危害（issue #42 复审）；精确数据坏了要响。
+
+    读回时按**路线**过滤 stage_state（issue #80）：非多参会话丢掉资产图提示词三键，
+    详见 ``_route_filtered_state``。这是路线过滤、不是容错——字段损坏照旧报错。
     """
     target = Path(directory) / SESSION_FILENAME
     if not target.is_file():
@@ -246,10 +283,12 @@ def load_session(directory: str | Path) -> SessionState | None:
         return None
     if raw.get("schema_version") != _SCHEMA_VERSION:
         return None
+    # brief 先解出来：路线判据是 `Brief.mode`，stage_state 的过滤要按它走（issue #80）。
+    brief = _brief_from_dict(raw.get("brief", {}))
     return SessionState(
         directory=Path(directory),
-        brief=_brief_from_dict(raw.get("brief", {})),
-        stage_state=dict(raw.get("stage_state", {})),
+        brief=brief,
+        stage_state=_route_filtered_state(raw.get("stage_state", {}), brief),
         status=str(raw.get("status", STATUS_AWAITING_FRAMES)),
         variant_downgraded=str(raw.get("variant_downgraded", "")),
         frame_images=tuple(dict(x) for x in raw.get("frame_images", [])),
