@@ -76,7 +76,20 @@ def test_legacy_environment_overrides_yaml(config_without_env, monkeypatch):
 
 
 def test_anthropic_auth_token_fallback(config_without_env, monkeypatch):
-    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    # 显式构造 settings，不再拿 YAML 的 primary 当夹具（2026-10-24 issue #83 合并实测）：
+    # 这条回退只在 ``provider=anthropic`` 且 ``api_key_env=ANTHROPIC_API_KEY`` 时生效；
+    # 用户把主模型换到网关（``api_key_env`` 指向 ``MINIMAX_API_KEY`` 之类）之后，用例
+    # 再也走不到那个分支——它此前是「本机能过」，靠 .env 里的真 key 兜住了断言。
+    # 测的是回退规则本身，与当前 YAML 配的是哪个网关无关。
+    from minimax_h3_prompt.config import ModelSettings
+
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "test-token")
     cfg = config_without_env()
-    assert cfg.resolve_api_key(cfg.primary_model) == "test-token"
+    settings = ModelSettings(
+        provider="anthropic",
+        model="test-model",
+        base_url="https://example.invalid",
+        api_key_env="ANTHROPIC_API_KEY",
+        purpose="测试",
+    )
+    assert cfg.resolve_api_key(settings) == "test-token"
