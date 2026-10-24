@@ -225,8 +225,7 @@ def _assets_json(name: str, prompt: str) -> str:
     # 锁死清单必须是正文原文片段（issue #53 的不变式），所以取提示词开头那三个字，
     # 不另写一项「名字」——夹具不合规时节点会在检查器之前先停下来，测不到接线。
     return json.dumps([
-        {"name": name, "positive_prompt": prompt, "instructions": ["粘贴到节点 10"],
-         "locked_features": [prompt[:3]]},
+        {"name": name, "positive_prompt": prompt, "locked_features": [prompt[:3]]},
     ])
 
 

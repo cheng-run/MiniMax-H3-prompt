@@ -239,10 +239,11 @@ def _warn_image_prompt_discipline(entries: list[dict], kind: str) -> None:
 
 
 def _normalize_asset_entries(parsed: object, kind: str) -> list[dict]:
-    """把资产图节点的 JSON 回复归一成五键资产条目列表（issue #40；锁死清单 issue #53）。
+    """把资产图节点的 JSON 回复归一成四键资产条目列表（issue #40；锁死清单 issue #53）。
 
-    只保留 ``name / positive_prompt / negative_prompt / instructions / locked_features``
-    五键：多余的键（模型键 ``zimage``/``flux2`` 等）不进 state——那是被取消的维度，
+    只保留 ``name / positive_prompt / negative_prompt / locked_features``
+    四键：多余的键（模型键 ``zimage``/``flux2``、已删的 ``instructions`` 等）不进 state——
+    那是被取消的维度，
     放它进来会让下游再长出「按模型分叉」的读法。语义名必填：素材台账／注入卡靠它对号。
 
     **锁死清单**（issue #53）在这里连两道闸门一起把住：
@@ -270,7 +271,8 @@ def _normalize_asset_entries(parsed: object, kind: str) -> list[dict]:
             "name": name,
             "positive_prompt": positive,
             "negative_prompt": str(item.get("negative_prompt", "")),
-            "instructions": [str(x) for x in item.get("instructions", [])],
+            # 模型若仍按旧模板回了 instructions，这里直接丢掉（2026-10-24 删除该键）：
+            # 产物没有「操作说明」出口，留着只会在 state 里多一份没人读的正文复制品。
             "locked_features": locked,
         })
     return entries

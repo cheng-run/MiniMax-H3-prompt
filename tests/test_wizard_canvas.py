@@ -203,3 +203,27 @@ def test_wizard_frame_renderer_shows_the_selected_canvas():
     rendered = render_fl2va_frame_markdown_from_bundle(bundle, "first")
     assert "画布：`7:13 · 700 × 1300（近竖）`" in rendered, "向导帧渲染器没显示选定画布"
     assert "推荐尺寸" not in rendered, "「推荐尺寸」措辞在向导帧渲染器里还活着"
+
+
+def test_wizard_frame_renderer_no_longer_renders_operator_notes():
+    """向导帧渲染器同样不再输出「操作说明」（三条渲染出口必须一起收口）。
+
+    向导这份直解 bundle、不走 generation 的渲染层——只改 generation 一处，用户在向导
+    里看到的仍是那份重复正文（2026-10-23 实测正是向导出站）。
+    """
+    from minimax_h3_prompt.generation import fl2va_bundle_from_dict
+    from minimax_h3_prompt.ui.wizard import render_fl2va_frame_markdown_from_bundle
+
+    prompt = "水母群与光斑的第一帧画面"
+    payload = {
+        "scene_anchor": "光斑",
+        "first": {"zimage": {"positive_prompt": prompt, "instructions": [prompt]}},
+        "continuity_constraints": ["保持同一片水母群"],
+    }
+    brief = Brief(variant="I2VA", duration=5, plot="漂浮的水母群与光斑")
+    bundle = fl2va_bundle_from_dict(payload, brief)
+
+    rendered = render_fl2va_frame_markdown_from_bundle(bundle, "first")
+
+    assert "操作说明" not in rendered, "向导帧渲染器还在输出「操作说明」小节"
+    assert rendered.count(prompt) == 1, "正文被 instructions 重复渲染了一次"

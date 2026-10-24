@@ -1157,8 +1157,8 @@ def render_fl2va_frame_markdown_from_bundle(bundle, frame: str) -> str:
             f"- 提示词节点：`{item.prompt_node_id}`", "",
             "### Positive Prompt", "", item.positive_prompt, "",
         ])
-        if item.instructions:
-            parts.extend(["### 操作说明", "", *[f"- {x}" for x in item.instructions], ""])
+        # 「操作说明」已删除（2026-10-24）：向导出站正是用户看到重复正文的那条路
+        # （实测 instructions 被填成整段提示词）。理由与判据见 `generation.render_asset_rows`。
     return "\n".join(parts).rstrip()
 
 

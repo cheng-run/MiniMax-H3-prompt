@@ -334,7 +334,9 @@ class ImagePromptVariant:
     width: int = 0
     height: int = 0
     profile_status: str = "candidate"
-    instructions: tuple[str, ...] = ()
+    # 「操作说明」（instructions）已于 2026-10-24 删除：它只是双模型时代的搬运说明，
+    # 现在抬头已印节点号；模型还会把正文抄进去（实测整段提示词被重复一次）。旧会话
+    # 里残留的该键在读取处被忽略——字段删了，没有第二个入口能把它带回来。
     # 锁死清单（issue #53）：本张资产的少数身份特征，逐字摘自 positive_prompt。它是
     # 读图校对判偏差的唯一判据（清单外的出入属理想描述，一律忽略）。**默认空表**
     # 是给旧会话留的读口：节点侧（``nodes._normalize_locked_features``）对新产物要求非空。
@@ -359,7 +361,6 @@ class ImagePromptVariant:
             width=int(raw.get("width", 0) or 0),
             height=int(raw.get("height", 0) or 0),
             profile_status=str(raw.get("profile_status", "candidate")),
-            instructions=tuple(str(x) for x in raw.get("instructions", [])),
             locked_features=tuple(str(x) for x in raw.get("locked_features") or ()),
         )
 
@@ -374,7 +375,6 @@ class ImagePromptVariant:
             "width": self.width,
             "height": self.height,
             "profile_status": self.profile_status,
-            "instructions": list(self.instructions),
             "locked_features": list(self.locked_features),
         }
 
@@ -400,7 +400,7 @@ class FL2VAFramePrompt:
     width: int = 0
     height: int = 0
     profile_status: str = "candidate"
-    instructions: tuple[str, ...] = ()
+    # 「操作说明」（instructions）已于 2026-10-24 删除，理由见 `ImagePromptVariant`。
 
     def __post_init__(self) -> None:
         if self.frame not in {"first", "last"}:
@@ -450,7 +450,6 @@ class FL2VAFramePrompt:
             width=width,
             height=height,
             profile_status=str(raw.get("profile_status", profile.status)),
-            instructions=tuple(str(x) for x in raw.get("instructions", [])),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -470,7 +469,6 @@ class FL2VAFramePrompt:
             "width": self.width,
             "height": self.height,
             "profile_status": self.profile_status,
-            "instructions": list(self.instructions),
         }
 
 
@@ -933,7 +931,7 @@ def image_prompt_variants(
     显示串在渲染处取 ``canvas_display``——与请求【画布】块同源。
 
     state 里 ``{kind}_image_prompts`` 是**资产条目列表**（issue #40 N 化），每条四键
-    ``name / positive_prompt / negative_prompt / instructions``。两种旧形状照样可读：
+    ``name / positive_prompt / negative_prompt / locked_features``。两种旧形状照样可读：
     **dict 形状**（#40 之前的会话：``{zimage:…, flux2:…}``）每类降级为一条 Z-Image——
     Flux.2 版已全链取消，旧数据里的 flux2 一并弃读；**整键缺失**（#36 之前的会话）回退
     设计正文——那种现场没有专门的生图提示词，回退到设计正文总比给空串强（那是设计正文
@@ -984,7 +982,8 @@ def image_prompt_variants(
                 width=canvas_width,
                 height=canvas_height,
                 profile_status=str(item.get("profile_status", "candidate")),
-                instructions=tuple(item.get("instructions", ())),
+                # 旧条目残留的 instructions 在这里被忽略（字段已删，2026-10-24）：
+                # 产物不再有「操作说明」出口，读旧会话也不会把它带回来。
                 # 锁死清单（issue #53）照抄条目；旧条目没有这一键 → 空表（读口宽容，
                 # 与旧 dict 形状同一口径：旧会话照旧可读，只是不收窄判据）。
                 locked_features=tuple(str(x) for x in item.get("locked_features") or ()),
@@ -1109,8 +1108,10 @@ def render_asset_rows(rows: list[ImagePromptVariant], kind: str) -> str:
         ])
         if item.negative_prompt:
             parts.extend(["### Negative Prompt", "", item.negative_prompt, ""])
-        if item.instructions:
-            parts.extend(["### 操作说明", "", *[f"- {x}" for x in item.instructions], ""])
+        # 这里曾有「### 操作说明」小节（2026-10-24 删除）：那是双模型时代告诉用户
+        # 「这份粘到哪个 ComfyUI 节点」的搬运说明，Flux.2 退役后抬头已经印了节点号；
+        # 而模型会把它填成正文本身（实测 877 字提示词被原样重复一次），产物就成了
+        # 一整段复制品。历史会话里残留的 instructions 一律忽略，不再展示。
     return "\n".join(parts).rstrip() + "\n"
 
 
@@ -1165,8 +1166,8 @@ def render_fl2va_frame_markdown(result: GenerationResult, frame: str) -> str:
         parts.extend(["### Positive Prompt", "", item.positive_prompt, ""])
         if item.negative_prompt:
             parts.extend(["### Negative Prompt", "", item.negative_prompt, ""])
-        if item.instructions:
-            parts.extend(["### 操作说明", "", *[f"- {x}" for x in item.instructions], ""])
+        # 「操作说明」小节同 `render_asset_rows` 一并删除（2026-10-24）：理由见那处注释，
+        # 三个渲染出口（本处、资产产物、向导帧）必须一起收口，否则用户换一个入口仍会看到。
     return "\n".join(parts).rstrip() + "\n"
 
 

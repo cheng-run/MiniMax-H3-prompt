@@ -34,8 +34,7 @@
       "positive_prompt": "一段完整的中文静态画面提示词，描述首帧",
       "negative_prompt": "",
       "composition": "本画幅下的构图：景别 + 主体位置 + 留白/引导线/对称",
-      "lighting": "光线的方向 + 强度 + 质感",
-      "instructions": ["粘贴到 Z-Image 节点 10 的 text 输入"]
+      "lighting": "光线的方向 + 强度 + 质感"
     }
   },
   "last": {
@@ -45,8 +44,7 @@
       "positive_prompt": "一段完整的中文静态画面提示词，描述尾帧",
       "negative_prompt": "",
       "composition": "本画幅下的构图",
-      "lighting": "光线的方向 + 强度 + 质感",
-      "instructions": ["粘贴到 Z-Image 节点 10 的 text 输入"]
+      "lighting": "光线的方向 + 强度 + 质感"
     }
   },
   "continuity_constraints": [

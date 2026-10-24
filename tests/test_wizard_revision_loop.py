@@ -31,7 +31,6 @@ def _bundle_payload(label: str) -> dict:
         "scene_anchor": "秋日庭院",
         "first": {"zimage": {
             "positive_prompt": f"秋日庭院里的橘猫（{label}）",
-            "instructions": ["paste to node 187"],
         }},
         "continuity_constraints": ["保持同一只橘猫与同一庭院"],
     }

@@ -127,7 +127,7 @@ def asset_queue(entries: Sequence[dict[str, Any]], *, pictures: dict[str, int] |
     仍然留在队列里（待办与否由 ``ui.wizard._asset_loop`` 按落账/放弃判）。
 
     入参是 ``{kind: [条目]}`` 或 ``(kind, 条目)`` 序列；条目取四键契约
-    （name/positive_prompt/negative_prompt/instructions，见
+    （name/positive_prompt/negative_prompt/locked_features，见
     ``generation._normalize_asset_entries``）。
     """
     items: list[tuple[int, int, QueueItem]] = []

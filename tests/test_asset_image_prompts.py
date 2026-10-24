@@ -71,8 +71,8 @@ def _ref_brief() -> Brief:
 def _assets_json(assets: tuple[tuple[str, str], ...]) -> str:
     """资产图节点的假回复：JSON **数组**，每个资产一项（issue #40 单版形态）。
 
-    每项**故意带一个多余键**（``zimage``）：节点要把它归一成五键结构
-    （name / positive_prompt / negative_prompt / instructions / locked_features），
+    每项**故意带一个多余键**（``zimage``）：节点要把它归一成四键结构
+    （name / positive_prompt / negative_prompt / locked_features），
     多余的键不许进 state——夹具干净就咬不住「归一没做」的回归（变异检验实测过：
     不带脏键时放开归一照样绿）。
 
@@ -80,8 +80,7 @@ def _assets_json(assets: tuple[tuple[str, str], ...]) -> str:
     节点侧那条「条目必须是正文原文片段」的不变式因此成立（issue #53）。
     """
     return json.dumps([
-        {"name": name, "positive_prompt": prompt, "instructions": ["粘贴到节点 10"],
-         "locked_features": [name],
+        {"name": name, "positive_prompt": prompt, "locked_features": [name],
          "zimage": {"positive_prompt": "模型键残余不该进 state"}}
         for name, prompt in assets
     ])
@@ -238,8 +237,8 @@ def test_each_asset_gets_exactly_one_named_zimage_prompt(tmp_path, monkeypatch):
     for _node, _k, _d, _t, out_field, _a in _ASSETS:
         for entry in state[out_field]:
             assert set(entry) == {"name", "positive_prompt", "negative_prompt",
-                                  "instructions", "locked_features"}, \
-                f"{out_field} 的条目混入了五键之外的字段：{sorted(entry)}"
+                                  "locked_features"}, \
+                f"{out_field} 的条目混入了四键之外的字段：{sorted(entry)}"
 
 
 # ---------------------------------------------------------------------------
@@ -595,6 +594,36 @@ def test_products_show_the_user_selected_canvas(tmp_path, monkeypatch):
     rendered = render_asset_rows(list(variants), variants[0].kind)
     assert "画布：`7:13 · 700 × 1300（近竖）`" in rendered, "产物没有画布行（或显示串不是单一来源那份）"
     assert "推荐尺寸" not in rendered, "「推荐尺寸」措辞还活着——系统钦定时代的旧标签"
+
+
+def test_asset_product_no_longer_renders_operator_notes():
+    """资产产物不再渲染「操作说明」小节（旧会话条目带 instructions 也不渲染）。
+
+    同帧产物：那本是双模型时代的「粘到哪个节点」搬运说明，现在抬头已经印了节点号；
+    模型还会把正文抄进去（2026-10-23 实测），于是产物里出现整段提示词的复制品。
+    """
+    state = {
+        "character_image_prompts": [
+            {"name": "红裙女孩", "positive_prompt": "红裙女孩站在秋日庭院石阶前",
+             "negative_prompt": "", "instructions": ["红裙女孩站在秋日庭院石阶前"]},
+        ],
+    }
+    variants = image_prompt_variants(state)
+
+    text = render_asset_rows(list(variants), "character")
+
+    assert "操作说明" not in text, "资产产物还在输出「操作说明」小节"
+    assert text.count("红裙女孩站在秋日庭院石阶前") == 1, \
+        "正文被 instructions 重复渲染了一次"
+
+
+def test_asset_role_prompt_no_longer_asks_for_operator_notes():
+    """资产角色提示词同样不再要求 instructions（生产端与渲染端一起收口）。"""
+    from minimax_h3_prompt.agents import load_role_prompt
+
+    prompt = load_role_prompt("image_prompt_engineer")
+
+    assert '"instructions"' not in prompt, "image_prompt_engineer.md 还在要求 instructions 字段"
 
 
 # ---------------------------------------------------------------------------

@@ -22,7 +22,7 @@ from minimax_h3_prompt.user_revisions import LAYER_FRAME, render_baseline_block
 def frame_payload(prompt: str) -> dict:
     """一帧的模型载荷（现行形状）：只有 zimage 一份——ADR 0013 全链退役后单模型输出。"""
     return {
-        "zimage": {"positive_prompt": prompt, "instructions": ["paste to node 10"]},
+        "zimage": {"positive_prompt": prompt},
     }
 
 
@@ -725,6 +725,53 @@ def test_frame_products_carry_the_user_selected_canvas():
     assert "Flux.2" not in rendered and "flux2" not in rendered, \
         "Flux.2 已退役，产物展示不得再出现 Flux.2 行"
     assert "推荐尺寸" not in rendered, "「推荐尺寸」措辞还活着——系统钦定时代的旧标签"
+
+
+def test_frame_product_no_longer_renders_operator_notes():
+    """产物不再出现「操作说明」小节——旧会话带着的 instructions 也不渲染。
+
+    该小节源自双模型时代的搬运说明（「粘贴到 Z-Image 节点 10 的 text 输入」）：Flux.2
+    退役后抬头已经印了「提示词节点」，它只剩重复；一旦模型把正文抄进 instructions
+    （2026-10-23 实测：877 字正文被原样重复一次），产物里就出现整段提示词的复制品。
+    历史会话的 state 里仍带着这个键，所以判据只能落在渲染层：数据有、产物也不能有。
+    """
+    payload = bundle_payload()
+    for frame in ("first", "last"):
+        row = payload[frame]["zimage"]
+        # 复刻实测现场：模型把 positive_prompt 原文填进了 instructions。
+        row["instructions"] = [row["positive_prompt"]]
+    brief = Brief(variant="FL2VA", duration=5, style="live-action realism",
+                  plot="中世纪酒馆室内，冒险者团队庆祝")
+    result = result_from_state(
+        {
+            "script": "The adventurers celebrate in the tavern.",
+            "final_prompt": "视频提示词正文",
+            "character_design": "three adventurers",
+            "prop_design": "wooden mugs and quest gear",
+            "background_design": "medieval tavern interior",
+            "fl2va_prompt_bundle": payload,
+        },
+        brief, generation_id="GEN001", topic_id="topic", project_id="project",
+    )
+
+    rendered = render_fl2va_frame_markdown(result, "first")
+
+    assert "操作说明" not in rendered, "渲染层还在输出「操作说明」小节"
+    assert rendered.count(payload["first"]["zimage"]["positive_prompt"]) == 1, \
+        "正文被 instructions 重复渲染了一次"
+
+
+def test_frame_role_prompt_no_longer_asks_for_operator_notes():
+    """帧角色提示词不再要求模型输出 instructions（「操作说明」的生产端）。
+
+    只删渲染不删请求＝每跑一次仍让模型造一段没人读的文本（本仓「删死参数要追传递
+    闭包」）。判据取带引号的键名：只禁 JSON 示例里的字段，不禁散文里提到这个词。
+    """
+    from minimax_h3_prompt.agents import load_role_prompt
+
+    prompt = load_role_prompt("frame_prompt_engineer")
+
+    assert '"instructions"' not in prompt, "frame_prompt_engineer.md 还在要求 instructions 字段"
 
 
 def test_model_hallucinated_size_cannot_beat_the_selected_canvas():
