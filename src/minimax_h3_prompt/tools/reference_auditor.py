@@ -36,6 +36,12 @@ _FALLBACK_TIMEOUT_SECONDS = 900
 # 无声的几分钟。
 _FALLBACK_HEARTBEAT_SECONDS = 10.0
 
+# 「入口/鉴权配错」的 HTTP 状态码：401（key 不对）、403（无权限）、404（路径不存在）。
+# 换非流式打的还是同一个 URL，回退只会再花一次配额把同一个错重演一遍；而报成
+# 「网关可能不支持流式」会把用户引向错误方向——2026-10-24 实测：视觉 base_url 多打
+# 一个 1（/v11），用户只看到 nginx 404 的 HTML 与一句「网关可能不支持流式」。
+_CONFIG_ERROR_STATUS = frozenset({401, 403, 404})
+
 
 def _build_vision_model(*, streaming: bool = True) -> ChatOpenAI:
     """视觉客户端：流式档接与主档同源的等待判据；非流式档只用于网关不支持流式的回退。
@@ -137,6 +143,8 @@ def describe_image(path: str | Path, instruction: str | None = None) -> str:
 
     - **超时（卡住 / 中流断流）**：照实抛错，**不回退**。回退非流式等于把「判出
       卡住」重新埋回 900 秒白等里，正是本票要治的病；
+    - **入口/鉴权配错（401/403/404）**：直接抛错并点名 ``base_url`` 与模型名，
+      **不回退**——非流式打的是同一个 URL，必然同样失败；
     - **非超时失败或空流**：最可能是网关不吃 ``stream``（400 拒掉，或干脆忽略参数
       返回一坨 JSON → 零个块）。这时明确报出来，回退非流式，只报已等时长。
     """
@@ -163,6 +171,16 @@ def describe_image(path: str | Path, instruction: str | None = None) -> str:
         # 卡住不是「不支持流式」：不许回退（见 docstring）
         raise RuntimeError(result.error)
     cause = result.error if not result.ok else "流式响应没有任何内容（网关可能忽略了 stream 参数）"
+    if result.status_code in _CONFIG_ERROR_STATUS:
+        # 配错就直说配错：把它混进「网关可能不支持流式」会让人去查网关方言，
+        # 而真正该改的是 base_url / api_key_env（2026-10-24 实测）。
+        settings = config.vision_model
+        raise RuntimeError(
+            f"读图失败：HTTP {result.status_code}——这是入口/鉴权配置错误，"
+            "不是网关不支持流式，故不回退非流式（非流式打的是同一个地址）。\n"
+            f"请检查视觉模型的 base_url 与模型名：{settings.base_url} / {settings.model}"
+            f"（key 取 {settings.api_key_env}）\n原因：{cause}"
+        )
     print(f"[读图] 流式读图失败：{cause}", flush=True)
     print("[读图] 网关可能不支持流式：已回退为非流式读图——这条路上没有首字节可判，"
           "等待期间只能报告已等时长（ADR 0019）。", flush=True)
