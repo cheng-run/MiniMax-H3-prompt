@@ -25,7 +25,12 @@ if TYPE_CHECKING:  # 返回注解用；运行时经函数级导入取（防环�
 from ..brief_parser import Brief, RefItem
 from ..config import Config
 from ..generation import canvas_display, render_fl2va_frame_markdown
-from ..graph.pipeline import run_stage1, run_stage2, stage1_rerun_plan
+from ..graph.pipeline import (
+    rerun_silent_nodes,
+    run_stage1,
+    run_stage2,
+    stage1_rerun_plan,
+)
 from ..observability import COST_TABLE_KEY, token_meter
 from ..resume_point import forget as forget_answer
 from ..resume_point import recall as recall_answer
@@ -894,15 +899,21 @@ def _ask_revision_layer() -> str:
         print(f"[提示] 请输入 1-{top} 之一（回车=1 只改画面）。")
 
 
-def _confirm_setting_rerun(plan) -> bool:
+def _confirm_setting_rerun(plan, mode: str = "base") -> bool:
     """重跑前的确认门：念清「将重跑 N 步」与「哪些已看过的产物会被替换」，默认**不跑**。
 
     为什么必须问：重跑会替换用户已经看过、可能已经拿去生图的产物，而 LLM 生成**不可复现
     同一版本**——这是不可逆动作（票面）。默认取「否」，回车不该是那个不可逆的选项。
+
+    环节串与步数按**路线**收敛（issue #81）：首尾帧不产出资产图提示词，那个节点也不报
+    进度，念全切片就多报一步。``plan`` 本身仍是全切片（一张图、一条链），过滤只发生在
+    这一层——计划对象改动会连带改掉两条结构测试的口径（父 spec #77）。
     """
+    silent = rerun_silent_nodes(mode)
+    steps = tuple(name for name in plan.nodes if name not in silent)
     print(f"\n[设定级重跑] 层次：{plan.spec.label}")
-    print(f"将重跑 {len(plan.nodes)} 步："
-          + " → ".join(_NODE_LABELS.get(name, name) for name in plan.nodes))
+    print(f"将重跑 {len(steps)} 步："
+          + " → ".join(_NODE_LABELS.get(name, name) for name in steps))
     print("下列你已经看过的产物会被替换（LLM 生成不可复现同一版本，替换不可逆）：")
     for label in plan.artifacts:
         print(f"  - {label}")
@@ -1056,7 +1067,7 @@ def _user_revision_loop(state: dict, generation_dir: Path, brief: Brief, config:
             spec = LAYER_SPECS.get(layer)
             if spec is not None:
                 plan = stage1_rerun_plan(layer, mode=brief.mode)
-                if not _confirm_setting_rerun(plan):
+                if not _confirm_setting_rerun(plan, mode=brief.mode):
                     # 拒绝＝不跑也不留痕（票面 AC-3）：不记这条、不推轮次、不写台账——
                     # 只有内存里的这条意见被丢掉，产物一个字节都没变。
                     print("[提示] 已放弃本次设定级重跑：这条意见没有记录，任何产物也没有被改动。"

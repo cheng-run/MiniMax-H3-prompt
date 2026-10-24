@@ -193,10 +193,34 @@ _NODE_ARTIFACTS: dict[str, tuple[str, ...]] = {
     "parallel_sound": ("对白与环境声", "配乐"),
 }
 
-# base 模式下这两份根本不产出：身份评审与参考一致性节点直接返回空串
-# （nodes.make_identity_rt_node / _make_reference_consistency_node）。把它们列进
+# base 模式下这些产物根本不产出：身份评审与参考一致性节点直接返回空串
+# （nodes.make_identity_rt_node / _make_reference_consistency_node）；三件资产图提示词
+# 是同一形态的路线专属产物——首尾帧把人物/道具/场景**融合**进一张关键帧，没有「每件资产
+# 单独出图」这一步，资产图节点直接早退（issue #78 / 父 spec #77）。把它们列进
 # 「会被替换」就是对用户说谎——那是不存在、也就无所谓被替换的产物。
-_REF_ONLY_ARTIFACTS = frozenset({"身份一致性锁定", "参考一致性素材"})
+_REF_ONLY_ARTIFACTS = frozenset({
+    "身份一致性锁定", "参考一致性素材",
+    "人物资产图提示词", "道具资产图提示词", "场景资产图提示词",
+})
+
+
+def rerun_silent_nodes(mode: str = "base") -> frozenset[str]:
+    """该路线下不会产出任何产物的环节：产物标签**全都**落在「仅多参」集合里。
+
+    确认门用它扣掉「将重跑 N 步」与环节名（issue #81）：资产图节点在首尾帧路线早退、
+    返回空更新，``run_stage1`` 只在 update 非空时回调，所以进度行不出现；确认门若照
+    ``plan.nodes`` 全切片念，就比用户实际看到的环节多一步，而这句话正是他判断代价的依据。
+
+    从 ``_NODE_ARTIFACTS`` 现推、调用时现算：链上增删节点或调整「仅多参」集合时自动跟随。
+    另手写一份节点名清单就会像本仓既往那样——链条变了它不报错，只是悄悄说错。
+    """
+    if str(mode) == "ref":
+        return frozenset()
+    return frozenset(
+        name
+        for name, labels in _NODE_ARTIFACTS.items()
+        if labels and all(label in _REF_ONLY_ARTIFACTS for label in labels)
+    )
 
 
 def stage1_rerun_plan(layer: str, *, mode: str = "base") -> Stage1RerunPlan:
