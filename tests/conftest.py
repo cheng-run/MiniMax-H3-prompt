@@ -17,6 +17,19 @@ import pytest
 DEFAULT_COMFY_OUTPUT = Path(
     r"D:/Comfyui/ComfyUI/output/视频/MiniMax-H3/2026-09-18")
 
+# 真实旧会话样本目录（阶段 1 产物，仓库外；`output/` 已 gitignore）。
+# 说话的是**用户机器**上的现场：清洁检出与换机器时整类用例 SKIP，不伪造样本。
+DEFAULT_SESSION_SAMPLES = Path(r"D:/项目/python/MiniMax-H3-prompt/output/sessions")
+
+
+def session_samples_dir() -> Path:
+    """真实旧会话样本目录：``H3_SESSION_SAMPLES`` 优先，空字符串视为未设。
+
+    统一入口的理由与 ``comfy_output_dir`` 同款（issue #77 复审 G）：机器专属路径
+    散在几个测试文件里各写一份默认值，换机器时总有一处忘改、那条用例就悄悄空转。
+    """
+    return Path(os.environ.get("H3_SESSION_SAMPLES") or DEFAULT_SESSION_SAMPLES)
+
 
 def comfy_output_dir() -> Path:
     """真实素材的输出目录：``H3_COMFY_OUTPUT`` 优先，空字符串视为未设。"""

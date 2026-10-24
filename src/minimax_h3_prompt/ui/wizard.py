@@ -899,7 +899,7 @@ def _ask_revision_layer() -> str:
         print(f"[提示] 请输入 1-{top} 之一（回车=1 只改画面）。")
 
 
-def _confirm_setting_rerun(plan, mode: str = "base") -> bool:
+def _confirm_setting_rerun(plan, mode: str) -> bool:
     """重跑前的确认门：念清「将重跑 N 步」与「哪些已看过的产物会被替换」，默认**不跑**。
 
     为什么必须问：重跑会替换用户已经看过、可能已经拿去生图的产物，而 LLM 生成**不可复现
@@ -908,6 +908,9 @@ def _confirm_setting_rerun(plan, mode: str = "base") -> bool:
     环节串与步数按**路线**收敛（issue #81）：首尾帧不产出资产图提示词，那个节点也不报
     进度，念全切片就多报一步。``plan`` 本身仍是全切片（一张图、一条链），过滤只发生在
     这一层——计划对象改动会连带改掉两条结构测试的口径（父 spec #77）。
+
+    ``mode`` **没有默认值**（issue #77 复审 D）：计划对象不带路线，默认值会让将来新增的
+    调用点漏传时静默按首尾帧念步数——重跑代价这句话正是用户判断风险的依据。
     """
     silent = rerun_silent_nodes(mode)
     steps = tuple(name for name in plan.nodes if name not in silent)

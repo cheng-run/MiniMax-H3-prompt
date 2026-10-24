@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .brief_parser import Brief, RefItem
+from .graph.state import ASSET_PROMPT_KEYS
 from .observability import COST_TABLE_KEY, token_meter
 
 SESSION_FILENAME = "session-state.json"
@@ -60,7 +61,9 @@ STATUS_REF_SEGMENTS_RUNNING = "ref_segments_running"
 _STATE_KEYS = (
     "production_plan", "director_brief", "creative_lock", "script",
     "character_design", "background_design", "prop_design", "art_design",
-    "character_image_prompts", "prop_image_prompts", "scene_image_prompts",
+    # 资产三键从 graph/state.py 的**唯一声明**展开（issue #77 复审 B）：这里再抄一遍
+    # 键名字面，加第四类资产时白名单会静默漏掉它、保存即丢。
+    *ASSET_PROMPT_KEYS,
     "identity_lock", "shot_table", "shot_review_lock", "visual_design",
     "fl2va_prompt_bundle", "fl2va_frame_descriptions", "subject_defs",
     # `frame_images` 是关键帧入库记录（role → 用户原路径/正本副本/SHA256）。阶段 2 的
@@ -72,10 +75,11 @@ _STATE_KEYS = (
     "resume_answers", "asset_proofread_progress",
 )
 
-# 资产图提示词三键（父 spec #77 / issue #80）：只属于多参路线。键名与 `graph/state.py`
-# 的声明、上面 `_STATE_KEYS` 白名单同源，**两处都保留**——旧的首尾帧会话文件里还有这
-# 三个键，得先读得回来、再按路线丢掉；删掉声明或白名单会连旧的多参会话一起丢素材。
-_ASSET_PROMPT_KEYS = ("character_image_prompts", "prop_image_prompts", "scene_image_prompts")
+# 资产图提示词三键（父 spec #77 / issue #80）：只属于多参路线。键名从 `graph/state.py`
+# 的 `ASSET_PROMPT_KEYS` **派生、不重抄**；上面 `_STATE_KEYS` 白名单由同一个常量展开。
+# 三键仍留在白名单里——旧的首尾帧会话文件里还有这三个键，得先读得回来、再按路线丢掉；
+# 删掉声明或白名单会连旧的多参会话一起丢素材。
+_ASSET_PROMPT_KEYS = ASSET_PROMPT_KEYS
 
 
 def _route_filtered_state(raw_state: Any, brief: Brief) -> dict[str, Any]:
@@ -88,8 +92,8 @@ def _route_filtered_state(raw_state: Any, brief: Brief) -> dict[str, Any]:
     `_video_output_from_dict`、以及本函数 `dict(...)` 的形状要求都不动），两者不许混为
     一谈：坏数据要响，错路线的数据要静默但确定地丢掉。
 
-    判据只认 `Brief.mode`（多参＝ref，经 `Brief.is_ref`，与 `generation.asset_prompts_for`
-    的路线守卫同义）。**禁止**改用「变体是不是 FL2VA」或「有没有首尾帧 bundle」——多参
+    判据只认 `Brief.mode`（多参＝ref，经 `Brief.is_ref` → `brief_parser.is_ref_mode`，
+    与产物出口同一真源）。**禁止**改用「变体是不是 FL2VA」或「有没有首尾帧 bundle」——多参
     的变体是 T2VA、没有 bundle，这两条正是父 spec 逐字点名的错判据。
 
     多参会话**原样保留**（含读图校对记录 `asset_proofreads`）：三键是素材台账与素材

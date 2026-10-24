@@ -9,6 +9,17 @@ from typing import TypedDict
 from ..brief_parser import Brief
 
 
+# 资产图提示词三键（父 spec #77 / issue #80）：多参路线独占的产物键。
+# **唯一声明**。会话持久化白名单、读回时的路线过滤、产物出口都从这个常量派生——
+# 字面重抄一份的代价是加第四类资产（或改键名）时那些地方静默漏掉它，而且没有任何
+# 用例会红（#56 复审：守卫形态要从常量派生）。
+ASSET_PROMPT_KEYS = (
+    "character_image_prompts",
+    "prop_image_prompts",
+    "scene_image_prompts",
+)
+
+
 class PipelineState(TypedDict, total=False):
     # 输入
     brief: Brief
@@ -26,6 +37,8 @@ class PipelineState(TypedDict, total=False):
     background_design: str  # 背景设计师
     prop_design: str  # 道具设计师
     art_design: str  # 美术指导统筹结果
+    # 三键必须逐个声明：LangGraph 只搬运 schema 里声明过的键；键名清单见
+    # ``ASSET_PROMPT_KEYS``（上面），别在这里另立一份。
     character_image_prompts: list  # 人物资产 Z-Image 提示词列表（每资产一条，issue #40）
     prop_image_prompts: list  # 道具资产 Z-Image 提示词列表
     scene_image_prompts: list  # 场景资产 Z-Image 提示词列表

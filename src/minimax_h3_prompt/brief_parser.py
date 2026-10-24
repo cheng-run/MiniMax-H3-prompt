@@ -92,11 +92,27 @@ class Brief:
 
     @property
     def is_ref(self) -> bool:
-        return self.mode == "ref"
+        """多参路线（委托 ``is_ref_mode``）：路线判据不许在这个属性里再写一遍。"""
+        return is_ref_mode(self.mode)
 
 
 # 帧锚点变体：参考图是"首帧/尾帧"，不是角色/场景
 FRAME_VARIANTS = ("I2VA", "FL2VA", "L2VA")
+
+
+def is_ref_mode(mode: str) -> bool:
+    """路线判据的**唯一真源**（父 spec #77）：多参路线＝``mode == "ref"``。
+
+    产线此前有三份同义写法（``Brief.is_ref``、``str(mode) == "ref"``、
+    ``generation._route_emits_asset_prompts``），改一处漏一处的后果是「产物出口按多参、
+    素材登记按首尾帧」——父 spec 逐字点名的错判据，也是本仓「同一契约两处口径」的
+    老形态。所有路线分叉都从这里派生，判据本身**只在这里**写一次。
+
+    只认精确小写 ``ref``：``REF`` / ``Ref`` 是拼错的路线值，静默放宽等于把一条本来
+    该报错的路读成多参（``parse_brief_text`` 的「模式」键已按小写归一，这里的严格
+    只兜住会话文件与外部调用方）。
+    """
+    return mode == "ref"
 
 
 def brief_uses_refs(brief: Brief) -> bool:

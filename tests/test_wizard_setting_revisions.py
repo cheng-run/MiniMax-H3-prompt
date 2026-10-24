@@ -255,7 +255,8 @@ def test_gate_defaults_to_not_rerunning(monkeypatch, capsys):
     monkeypatch.setattr(wizard, "_prompt", lambda text, *a, **k: "")  # 直接回车
     monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
 
-    assert wizard._confirm_setting_rerun(stage1_rerun_plan(LAYER_CHARACTER)) is False
+    assert wizard._confirm_setting_rerun(
+        stage1_rerun_plan(LAYER_CHARACTER), mode="base") is False
     assert "按默认 否 处理" in capsys.readouterr().out
 
 

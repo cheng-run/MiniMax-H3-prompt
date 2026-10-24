@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from langgraph.graph import END, START, StateGraph
 
 from ..agents import build_role_agents, run_agent
-from ..brief_parser import FRAME_VARIANTS, Brief
+from ..brief_parser import FRAME_VARIANTS, Brief, is_ref_mode
 from ..clarification import as_block
 from ..config import Config
 from ..observability import format_step_banner, stage_saver, token_meter
@@ -214,7 +214,7 @@ def rerun_silent_nodes(mode: str = "base") -> frozenset[str]:
     从 ``_NODE_ARTIFACTS`` 现推、调用时现算：链上增删节点或调整「仅多参」集合时自动跟随。
     另手写一份节点名清单就会像本仓既往那样——链条变了它不报错，只是悄悄说错。
     """
-    if str(mode) == "ref":
+    if is_ref_mode(mode):
         return frozenset()
     return frozenset(
         name
@@ -240,7 +240,7 @@ def stage1_rerun_plan(layer: str, *, mode: str = "base") -> Stage1RerunPlan:
         label
         for name in nodes
         for label in _NODE_ARTIFACTS.get(name, ())
-        if str(mode) == "ref" or label not in _REF_ONLY_ARTIFACTS
+        if is_ref_mode(mode) or label not in _REF_ONLY_ARTIFACTS
     )
     return Stage1RerunPlan(spec=spec, start=spec.resume_from, nodes=nodes, artifacts=artifacts)
 

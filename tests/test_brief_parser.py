@@ -1,7 +1,28 @@
 """brief_parser 单测：输入/模型键、参考图段、行内注释、画布键。"""
 import pytest
 
-from minimax_h3_prompt.brief_parser import brief_uses_refs, min_refs, parse_brief_text
+from minimax_h3_prompt.brief_parser import (
+    Brief,
+    brief_uses_refs,
+    is_ref_mode,
+    min_refs,
+    parse_brief_text,
+)
+
+
+def test_route_predicate_has_one_source_of_truth():
+    """路线判据唯一真源（issue #77 复审 A）：模块级函数与 ``Brief.is_ref`` 必须同义。
+
+    判据此前有三份写法（``brief.mode == "ref"``、``str(mode) == "ref"``、
+    ``_route_emits_asset_prompts``）：改一处漏一处的后果是「产物出口按多参、素材登记
+    按首尾帧」——父 spec #77 逐字点名的错判据形态。大小写敏感也钉住：``REF`` 不是
+    路线值，静默放宽会把拼错的会话读成多参。
+    """
+    assert is_ref_mode("ref") is True
+    for mode in ("base", "REF", "Ref", "", "ref2va", " ref"):
+        assert is_ref_mode(mode) is False, f"{mode!r} 被误判为多参"
+    assert Brief(mode="ref").is_ref is True
+    assert Brief(mode="base").is_ref is False
 
 
 def test_model_fl2va():

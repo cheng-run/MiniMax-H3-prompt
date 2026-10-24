@@ -67,6 +67,11 @@ def test_save_generation_writes_files_and_rejects_changed_without_overwrite(tmp_
 # 参考素材登记（多参路线，issue #41）：<Picture N> 编号按剧本出场顺序分配
 # ---------------------------------------------------------------------------
 
+def _ref_brief() -> Brief:
+    """多参 brief：登记派生只对 ref 发生，路线必须显式交给它（issue #77 复审 C）。"""
+    return Brief(mode="ref")
+
+
 def test_ref_asset_registry_numbers_by_script_appearance_order():
     """编号按**剧本出场顺序**分配（编号即叙事顺序），不按资产枚举顺序。"""
     state = {
@@ -79,7 +84,7 @@ def test_ref_asset_registry_numbers_by_script_appearance_order():
             {"name": "青铜钥匙", "positive_prompt": "钥匙·正向"},
         ],
     }
-    registry = ref_asset_registry(state)
+    registry = ref_asset_registry(state, _ref_brief())
     assert [(r.picture, r.name) for r in registry] == [
         (1, "红裙女孩"), (2, "青铜钥匙"), (3, "蓝衫少年"),
     ]
@@ -93,7 +98,7 @@ def test_ref_asset_registry_description_is_image_prompt():
             {"name": "红裙女孩", "positive_prompt": "红裙、黑发、银项链的生图提示词正文"},
         ],
     }
-    registry = ref_asset_registry(state)
+    registry = ref_asset_registry(state, _ref_brief())
     assert registry[0].description == "红裙、黑发、银项链的生图提示词正文"
 
 
@@ -152,7 +157,7 @@ def test_ref_asset_registry_consumes_proofread_description():
             },
         },
     }
-    registry = ref_asset_registry(state)
+    registry = ref_asset_registry(state, _ref_brief())
     assert registry[0].description == (
         "宝蓝色长裙、黑发、银项链的生图提示词正文；左腕银色腕表"
     )
@@ -173,7 +178,7 @@ def test_ref_asset_registry_tail_keeps_unmatched_stable():
         "prop_image_prompts": [{"name": "未出场钥匙", "positive_prompt": "c"}],
         "scene_image_prompts": [{"name": "未出场场景", "positive_prompt": "d"}],
     }
-    registry = ref_asset_registry(state)
+    registry = ref_asset_registry(state, _ref_brief())
     assert [(r.picture, r.name) for r in registry] == [
         (1, "红裙女孩"), (2, "未出场少年"), (3, "未出场钥匙"), (4, "未出场场景"),
     ]

@@ -428,7 +428,7 @@ def test_registry_description_prefers_merged_over_prompt():
         "红裙女孩": {"sha256": "cd" * 32, "status": "done",
                     "description": "合并后的素材画面事实", "deviations": [], "omissions": []},
     }
-    registry = ref_asset_registry(state)
+    registry = ref_asset_registry(state, Brief(mode="ref"))
     by_name = {r.name: r.description for r in registry}
     assert by_name["红裙女孩"] == "合并后的素材画面事实"
     assert by_name["青铜钥匙"] == "道具·青铜钥匙专属生图提示词"

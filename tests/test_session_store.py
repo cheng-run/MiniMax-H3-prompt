@@ -4,11 +4,11 @@ bug（2026-09-22）：``fl2va_frame_descriptions``（首帧实际画面的读图
 ``_STATE_KEYS`` 白名单里，save 时被静默丢弃 → 续跑后的分段流程不再锚定首帧图片。
 """
 import json
-import os
 from pathlib import Path
 
 import pytest
 
+from conftest import session_samples_dir
 from minimax_h3_prompt.brief_parser import Brief
 from minimax_h3_prompt.session_store import load_session, save_session
 
@@ -240,12 +240,28 @@ def test_saved_cost_table_is_the_live_account_not_the_stale_copy(tmp_path, _clea
 # 路线过滤：资产图提示词三键只属于多参路线（issue #80 / 父 spec #77）
 # ---------------------------------------------------------------------------
 
+# 真实旧会话样本目录由 conftest 统一裁决（`H3_SESSION_SAMPLES` 优先），见文末真样本用例。
 _ASSET_KEYS = ("character_image_prompts", "prop_image_prompts", "scene_image_prompts")
 
-# 真实旧会话样本（仓库外、`output/` 已 gitignore）：有则验真、无则 SKIP。
-# 与 tests/conftest.py 的机器专属素材同一口径——换机器请设 H3_SESSION_SAMPLES。
-_REAL_SAMPLES = Path(os.environ.get("H3_SESSION_SAMPLES")
-                     or r"D:/项目/python/MiniMax-H3-prompt/output/sessions")
+
+def test_route_key_list_derives_from_the_state_declaration():
+    """三键清单不许字面重抄（issue #77 复审 B）：声明在 ``graph/state.py`` 一处。
+
+    会话白名单、路线过滤与产物出口都从同一个常量派生——本仓「守卫形态要从常量派生」
+    的教训（#56 复审）：重抄一份，第四类资产加进 ``PipelineState`` 时那些地方会静默
+    漏掉它，过滤永远不为红。
+    """
+    from minimax_h3_prompt import session_store
+    from minimax_h3_prompt.graph.state import ASSET_PROMPT_KEYS, PipelineState
+
+    assert session_store._ASSET_PROMPT_KEYS is ASSET_PROMPT_KEYS, \
+        "会话持久化仍在自己抄一份三键清单"
+    declared = tuple(
+        key for key in PipelineState.__annotations__ if key.endswith("_image_prompts"))
+    assert ASSET_PROMPT_KEYS == declared, \
+        "state 注解里有常量没覆盖的资产图提示词键（加第四类资产时就是这里漏）"
+    assert all(key in session_store._STATE_KEYS for key in ASSET_PROMPT_KEYS), \
+        "三键有声明却不在持久化白名单里——保存时会被静默丢弃"
 
 
 def _asset_prompt_state() -> dict:
@@ -334,9 +350,10 @@ def test_real_old_sessions_filter_by_route():
     机器）就 SKIP；样本里连一份带三键的旧首尾帧会话都没有时同样 SKIP——那种情况下
     这条用例已经退化成空转，报绿就是骗人。
     """
-    if not _REAL_SAMPLES.is_dir():
-        pytest.skip(f"真实会话样本目录不存在：{_REAL_SAMPLES}")
-    files = sorted(_REAL_SAMPLES.glob("**/session-state.json"))
+    samples = session_samples_dir()
+    if not samples.is_dir():
+        pytest.skip(f"真实会话样本目录不存在：{samples}")
+    files = sorted(samples.glob("**/session-state.json"))
     snapshots = []
     for path in files:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -344,7 +361,7 @@ def test_real_old_sessions_filter_by_route():
         mode = raw.get("brief", {}).get("mode", "base")
         snapshots.append((path, mode, before))
     if not [s for s in snapshots if s[1] != "ref" and s[2]]:
-        pytest.skip(f"样本里没有带三键的旧首尾帧会话：{_REAL_SAMPLES}")
+        pytest.skip(f"样本里没有带三键的旧首尾帧会话：{samples}")
 
     for path, mode, before in snapshots:
         loaded = load_session(path.parent)

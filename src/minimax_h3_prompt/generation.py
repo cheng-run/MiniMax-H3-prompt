@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
 from .asset_proofread import proofread_descriptions
-from .brief_parser import Brief, CanvasMap, RefItem
+from .brief_parser import Brief, CanvasMap, RefItem, is_ref_mode
 from .tools.theme_guard import (
     _CONFLICTING_OUTDOOR_TERMS,
     contains_unqualified_conflict as _contains_unqualified_conflict,
@@ -992,30 +992,21 @@ def image_prompt_variants(
     return tuple(variants)
 
 
-def _route_emits_asset_prompts(mode: str) -> bool:
-    """路线判据的唯一落点（issue #78 / 父 spec #77）：资产图提示词只属于多参路线。
-
-    判据取 ``Brief.mode``（``base`` / ``ref``）。**禁止**改用「变体是不是 FL2VA」或
-    「有没有首尾帧 bundle」：多参的变体是 T2VA、没有 bundle，那两条支路恰好也是多参的
-    产物出口（父 spec 逐字点名的陷阱）。``render_generation`` 拿不到 Brief，只能拿
-    ``result.mode``（那是 ``Brief.mode`` 的留存），故判据单列在这里、由入口与渲染共用。
-    """
-    return str(mode) == "ref"
-
-
 def asset_prompts_for(brief: Brief, state: dict[str, Any]) -> tuple[ImagePromptVariant, ...]:
     """路线感知的资产图提示词取数口（issue #78）：非多参路线恒为空元组。
 
-    产物结果构造、渲染、参考素材登记、描述合并四处都从这里走，新增出口不接这条线就会
-    重演 #40「首尾帧路线凭空多出多参产物」。``canvases`` 必须透传——多参产物行的尺寸
-    只有这一个来源（未传就静默回落 profile 默认表，与用户选定自相矛盾）。
+    四处共享同一路线判据（``brief_parser.is_ref_mode``，父 spec #77），但只有三处走本
+    取数口：**产物结果构造、素材登记、描述合并**；`render_generation` 拿不到 Brief，
+    只拿 ``result.mode`` 用同一判据决定产物集。新增出口不接这条线就会重演 #40
+    「首尾帧路线凭空多出多参产物」。``canvases`` 必须透传——多参产物行的尺寸只有这一个
+    来源（未传就静默回落 profile 默认表，与用户选定自相矛盾）。
     """
-    if not _route_emits_asset_prompts(brief.mode):
+    if not is_ref_mode(brief.mode):
         return ()
     return image_prompt_variants(state, brief.canvases)
 
 
-def ref_asset_registry(state: dict[str, Any], brief: Brief | None = None) -> list[RefItem]:
+def ref_asset_registry(state: dict[str, Any], brief: Brief) -> list[RefItem]:
     """多参路线的参考素材登记：语义名 + `<Picture N>` 编号 + 描述（生图提示词）。
 
     编号按**剧本出场顺序**分配（编号即叙事顺序，2026-10-16 裁定，CONTEXT.md「参考素材」）：
@@ -1031,18 +1022,21 @@ def ref_asset_registry(state: dict[str, Any], brief: Brief | None = None) -> lis
     ``list_reference_assets``（实测复审：帧路线 qa/prompt_engineer 多出该工具、报资产级编号，
     AC1「首尾帧路线不受影响」软性回归）。派生只对 ``mode="ref"`` 发生。
 
+    ``brief`` **必填**（issue #77 复审 C）：可选的 ``brief=None`` 等于留了一条绕过路线
+    守卫的后门——不传就既不过滤也不合并描述，调用方漏传不会有任何症状。所有生产调用点
+    都持有 Brief，测试也按路线显式构造。
+
     描述默认取该资产的**生图提示词**（素材画面事实规则：以生图提示词为描述主体，
     它细节最全）；若该语义名有**读图校对**记录（issue #44），取裁决合并后的**素材画面
     事实**——生图提示词为底、只定点改了不符的那处、尾部并入了补漏事实，细节不丢。
     """
-    if brief is not None:
-        if brief.refs:
-            # 路线必须显式交给描述合并（issue #78）：这一支在 mode 守卫**之前**返回，
-            # 不传路线的话，旧 base 会话里残留的同名资产提示词会顶替用户登记的帧描述。
-            return _with_merged_descriptions(
-                sorted(brief.refs, key=lambda r: r.picture), state, brief)
-        if not _route_emits_asset_prompts(brief.mode):
-            return []
+    if brief.refs:
+        # 路线必须显式交给描述合并（issue #78）：这一支在 mode 守卫**之前**返回，
+        # 不传路线的话，旧 base 会话里残留的同名资产提示词会顶替用户登记的帧描述。
+        return _with_merged_descriptions(
+            sorted(brief.refs, key=lambda r: r.picture), state, brief)
+    if not is_ref_mode(brief.mode):
+        return []
     script = str(state.get("script", ""))
 
     def _appearance_key(pair: tuple[int, ImagePromptVariant]) -> tuple[int, int, int]:
@@ -1053,9 +1047,8 @@ def ref_asset_registry(state: dict[str, Any], brief: Brief | None = None) -> lis
         return (1, order, order)   # 无出场：排最后，保持枚举序（稳定）
 
     # 走统一入口（issue #78）：到这里路线已确定是多参，入口只是把「透传画布」这件事
-    # 也钉在同一处；``brief`` 为 None 的旧内部调用保留无路线版。
-    variants = (asset_prompts_for(brief, state) if brief is not None
-                else image_prompt_variants(state))
+    # 也钉在同一处。
+    variants = asset_prompts_for(brief, state)
     ordered = [item for _, item in sorted(enumerate(variants), key=_appearance_key)]
     return _with_merged_descriptions([
         RefItem(picture=number, name=item.name, description=item.positive_prompt)
@@ -1064,7 +1057,7 @@ def ref_asset_registry(state: dict[str, Any], brief: Brief | None = None) -> lis
 
 
 def _with_merged_descriptions(refs: list[RefItem], state: dict[str, Any],
-                              brief: Brief | None = None) -> list[RefItem]:
+                              brief: Brief) -> list[RefItem]:
     """素材画面事实覆盖（issue #44 AC3）：描述取校对记录的合并结果。
 
     合并结果＝生图提示词为底、定点纠偏 + 尾部补漏（``merge_asset_description``），
@@ -1073,12 +1066,12 @@ def _with_merged_descriptions(refs: list[RefItem], state: dict[str, Any],
 
     路线过滤（issue #78）：非多参路线原样返回登记的 refs——首尾帧的 refs 是首/尾帧锚点，
     拿多参残留的资产提示词或读图校对记录改写它，就是把两条路线的指称体系搅在一起。
+    ``brief`` **必填**（issue #77 复审 C）：与 ``ref_asset_registry`` 同一条后门。
     """
-    if brief is not None and not _route_emits_asset_prompts(brief.mode):
+    if not is_ref_mode(brief.mode):
         return list(refs)
     merged = proofread_descriptions(state)
-    variants = (asset_prompts_for(brief, state) if brief is not None
-                else image_prompt_variants(state))
+    variants = asset_prompts_for(brief, state)
     prompts = {v.name: v.positive_prompt for v in variants}
     return [
         RefItem(picture=r.picture, name=r.name,
@@ -1229,8 +1222,8 @@ def render_generation(result: GenerationResult) -> dict[str, str]:
     FL2VA 的产物里**没有**资产图提示词（#40 回滚，依据 #41 AC1）：那是多参素材循环的
     产物。#40 曾在这一支追加 character/prop/scene 三键，帧链用户凭空多拿到三份多参文件。
 
-    路线判定收在 ``_route_emits_asset_prompts`` 一处（issue #78）：非多参只返回剧本与
-    视频提示词。判据取 ``result.mode``，**不能**按 ``result.image_prompts`` 空不空判——
+    路线判定走 ``brief_parser.is_ref_mode``（issue #78 / 父 spec #77）：非多参只返回
+    剧本与视频提示词。判据取 ``result.mode``，**不能**按 ``result.image_prompts`` 空不空判——
     修复前的 base generation.json 里还留着三键，按空表判会把三份 md 重新渲染出来。
     也不许把它们渲染成空行：``render_image_prompt_markdown`` 会把空行回落成设计正文，
     那正是「设计正文当生图提示词」的历史现场。
@@ -1243,7 +1236,7 @@ def render_generation(result: GenerationResult) -> dict[str, str]:
             "first-frame": render_fl2va_frame_markdown(result, "first"),
             "last-frame": render_fl2va_frame_markdown(result, "last"),
         }
-    if not _route_emits_asset_prompts(result.mode):
+    if not is_ref_mode(result.mode):
         return {
             "script": result.script,
             "video": result.artifact("video").content,

@@ -173,7 +173,7 @@ def test_the_three_asset_prompt_nodes_run_on_the_stage1_chain(tmp_path, monkeypa
             f"{node_name} 写回的资产名与设计不符：{[item.get('name') for item in stored]}"
 
 
-def test_base_stage1_sends_no_asset_prompt_request(tmp_path, monkeypatch):
+def test_base_stage1_sends_no_asset_prompt_request(tmp_path, monkeypatch, capsys):
     """源头守卫（issue #78 / spec #77）：首尾帧阶段 1 不碰资产图角色。
 
     首尾帧把人物、道具、场景**融合**成一张关键帧，没有「每件资产单独出图」这一步；
@@ -198,6 +198,11 @@ def test_base_stage1_sends_no_asset_prompt_request(tmp_path, monkeypatch):
         "首尾帧阶段 1 仍发出了资产图提示词请求"
     for field in ("character_image_prompts", "prop_image_prompts", "scene_image_prompts"):
         assert field not in state, f"首尾帧阶段 1 仍写回了多参产物键 {field}"
+    # 多参纪律警告（issue #68 / ADR 0018）也不许出现：它由资产图节点在出词后打印，
+    # 首尾帧路线连那道检查都不该走到——出现即说明节点没早退（issue #77 复审 E）。
+    out = capsys.readouterr().out
+    assert "生图提示词：" not in out, \
+        f"首尾帧阶段 1 打印了多参纪律警告：{[line for line in out.splitlines() if '生图提示词：' in line]}"
 
 
 # ---------------------------------------------------------------------------
