@@ -24,15 +24,15 @@ models:
     # api_key_env: DEEPSEEK_API_KEY
 
     provider: dashscope
-    model: glm-5.3
-    base_url: https://ws-hzk37yyattdxxdls.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
-    api_key_env: DASHSCOPE_API_KEY
+    model: MiniMax-M3.1-Flash
+    base_url: https://api.minimax.cn/v1
+    api_key_env: MINIMAX_API_KEY
 
   vision:
     provider: dashscope
-    model: qwen3.8-27b
-    base_url: https://ws-hzk37yyattdxxdls.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
-    api_key_env: DASHSCOPE_API_KEY
+    model: MiniMax-M3.1-Flash
+    base_url: https://api.minimax.cn/v11
+    api_key_env: MINIMAX_API_KEY
 
 # 旧字段：仅在新模型配置和兼容环境变量都未提供模型名时作为 fallback。
 # model: ""
