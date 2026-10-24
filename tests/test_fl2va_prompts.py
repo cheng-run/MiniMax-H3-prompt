@@ -773,7 +773,9 @@ def test_result_from_state_threads_canvases_into_prompts_and_bundle():
     非 FL2VA 支路的 bundle 解析一旦被删参，产物画布行静默回落默认、与同份
     generation.json 的 brief_snapshot.canvases 自相矛盾（AC1/AC3 可静默破坏）。
     """
-    brief = Brief(variant="I2VA", duration=5, plot="漂浮的水母群与光斑",
+    # 资产图提示词只属于多参路线（issue #78）：本用例的「提示词」那一半必须走 ref，
+    # base 下它按路线返回空元组；同一份 state 用 base brief 再跑一次是本文件的成对断言。
+    brief = Brief(mode="ref", variant="I2VA", duration=5, plot="漂浮的水母群与光斑",
                   canvases={"zimage": (700, 1300)})
     state = {
         "script": "分场剧本", "final_prompt": "视频提示词正文",
@@ -794,6 +796,16 @@ def test_result_from_state_threads_canvases_into_prompts_and_bundle():
     row = result.fl2va_prompt_bundle.first[0]
     assert (row.width, row.height) == (700, 1300), \
         "非 FL2VA 支路的 bundle 没按选定画布解析（幻觉尺寸赢了）"
+
+    # 成对断言（issue #78）：同一份 state 换 base 路线，资产产物必须为空，
+    # 而关键帧 bundle 的画布透传照旧——路线只决定资产集，不拿走帧链的能力。
+    base_brief = Brief(variant="I2VA", duration=5, plot="漂浮的水母群与光斑",
+                       canvases={"zimage": (700, 1300)})
+    base_result = result_from_state(state, base_brief, generation_id="GEN001",
+                                    topic_id="topic", project_id="project")
+    assert base_result.image_prompts == (), "首尾帧路线的结果对象仍带着资产图提示词"
+    base_row = base_result.fl2va_prompt_bundle.first[0]
+    assert (base_row.width, base_row.height) == (700, 1300)
 
 
 def test_frame_node_request_asks_for_composition_and_lighting(monkeypatch):

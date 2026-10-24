@@ -327,7 +327,11 @@ def test_every_topic_node_carries_the_clarification_block(monkeypatch, case):
     monkeypatch.setattr(nodes, "run_agent",
                         lambda agent, message: seen.append(message) or reply)
     block = clarification.render_clarification_block([(QUESTIONS[0], ANSWER_1)])
-    brief = Brief(variant="I2VA", duration=5.0, plot=TOPIC, clarifications=block)
+    # 资产图节点只在多参路线出词（issue #78 源头守卫）：base 下它会早退、一条请求都不发，
+    # 这条用例就证不到「澄清块进了资产图请求」。其余节点仍是 base，不放宽它们的路线。
+    mode = "ref" if name == "image_prompt_character" else "base"
+    brief = Brief(mode=mode, variant="I2VA", duration=5.0, plot=TOPIC,
+                  clarifications=block)
 
     factory()({**_state_for(brief), **extra})
 

@@ -11,10 +11,16 @@ N×1），每个资产一版 Z-Image 提示词、带**语义名**（下游素材
 3. **不回退**：下游 ``image_prompt_variants`` 取到的是生图提示词本身，不是设计正文；
 4. **请求**：三个节点发出的真实请求带【画布】块（生图词表的指针指着它）；
 5. **折叠清单**：``_FOLDED_NODES``／组合节点声明／链三者一致（注释不再说反话）。
+
+issue #78 起路线决定产物集（父 spec #77）：**只有多参路线**跑这三个节点、只有多参
+路线的产物出口带三份资产图提示词。所以本文件的**正向断言全部跑 ref 路线**（它们钉的是
+多参闭环，路线改成 base 就什么也证不了）；base 路线另有守卫用例钉「不发请求、
+不写状态」「不构造、不渲染、不落盘」，且旧 generation.json 里残留的三键也不许再渲染。
 """
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -26,8 +32,11 @@ from minimax_h3_prompt.generation import (
     image_canvas_size,
     image_prompt_variants,
     render_asset_rows,
+    render_generation,
+    result_from_state,
 )
 from minimax_h3_prompt.graph import nodes, pipeline, roundtable
+from minimax_h3_prompt.topic_generation import save_generation
 
 TOPIC = "秋日庭院里的橘猫"
 
@@ -54,6 +63,11 @@ def _brief() -> Brief:
     return Brief(mode="base", variant="I2VA", duration=5.0, style="写实", plot=TOPIC)
 
 
+def _ref_brief() -> Brief:
+    """多参路线的 brief：资产图提示词只属于这条路线（issue #78）。"""
+    return Brief(mode="ref", variant="T2VA", duration=5.0, style="写实", plot=TOPIC)
+
+
 def _assets_json(assets: tuple[tuple[str, str], ...]) -> str:
     """资产图节点的假回复：JSON **数组**，每个资产一项（issue #40 单版形态）。
 
@@ -73,9 +87,23 @@ def _assets_json(assets: tuple[tuple[str, str], ...]) -> str:
     ])
 
 
-def _run_stage1(tmp_path, monkeypatch) -> tuple[dict, list[str]]:
-    """真图跑一遍阶段 1（模型与圆桌都打桩），返回 ``(state, 全部出站请求)``。"""
+def _run_stage1(tmp_path, monkeypatch, brief: Brief | None = None
+                ) -> tuple[dict, list[str], list[str]]:
+    """真图跑一遍阶段 1（模型与圆桌都打桩），返回 ``(state, 全部出站请求, 调用角色)``。
+
+    默认走**多参**路线：本文件的正向断言钉的是多参闭环（每资产一条提示词）。
+    角色清单供源头守卫用例断言「首尾帧阶段 1 不碰资产图角色」——把 ``build_role_agents``
+    的产物换成带角色名的占位对象，``run_agent`` 桩就能记下**是谁在调模型**，而不是从
+    请求文本反推（请求措辞一改，反推就会静默失效）。
+    """
     requests: list[str] = []
+    roles: list[str] = []
+    brief = brief or _ref_brief()
+    real_build = pipeline.build_role_agents
+
+    def spy_build(model, refs, mode, duration, variant):
+        return {role: SimpleNamespace(role=role)
+                for role in real_build(model, refs, mode, duration, variant)}
 
     # 各节点的假回复：按**请求正文**辨认调用方（本文件考的是请求，不是角色提示词）。
     # 设计／美术这两层回可辨认的正文，好让下游请求里能逐字认出「读到了谁」。
@@ -88,6 +116,7 @@ def _run_stage1(tmp_path, monkeypatch) -> tuple[dict, list[str]]:
 
     def fake_run_agent(agent, message):
         requests.append(message)
+        roles.append(getattr(agent, "role", "?"))
         for _node, kind, _design_field, _design, _out, assets in _ASSETS:
             if _ASSET_HEAD in message and f"请为{kind}" in message:
                 return _assets_json(assets)
@@ -108,12 +137,14 @@ def _run_stage1(tmp_path, monkeypatch) -> tuple[dict, list[str]]:
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
     # 节点落盘目录不在本票题目里：别往仓库的 output/ 里写东西
     monkeypatch.setattr(pipeline.stage_saver, "base", tmp_path / "stages")
+    # 角色名只在桩里用：真 agents 是 langchain 对象，挂不上标记
+    monkeypatch.setattr(pipeline, "build_role_agents", spy_build)
 
     state, _, _ = pipeline.run_stage1(
-        _brief(),
+        brief,
         SimpleNamespace(roundtable_max_rounds=1, common_sense_qa=False),
     )
-    return state, requests
+    return state, requests, roles
 
 
 # ---------------------------------------------------------------------------
@@ -121,14 +152,14 @@ def _run_stage1(tmp_path, monkeypatch) -> tuple[dict, list[str]]:
 # ---------------------------------------------------------------------------
 
 def test_the_three_asset_prompt_nodes_run_on_the_stage1_chain(tmp_path, monkeypatch):
-    """三个资产图节点各发一次请求，且**请求里带的是上游产物**。
+    """多参路线上三个资产图节点各发一次请求，且**请求里带的是上游产物**。
 
     只断言「state 里有产物」不够：键可以由链条之外的任何东西写进去。这里断言的是
     **请求文本里含人物设计／道具设计／背景设计／美术统筹的正文**——那是「它跑在设计师与
     美术指导之后、读到的是它们这一轮的产出」这件事的物证（组合节点若排在美术指导之前，
     美术统筹那一块就是空的）。
     """
-    state, requests = _run_stage1(tmp_path, monkeypatch)
+    state, requests, _roles = _run_stage1(tmp_path, monkeypatch)
 
     for node_name, kind, _design_field, design_text, out_field, assets in _ASSETS:
         sent = [r for r in requests if _ASSET_HEAD in r and f"请为{kind}" in r]
@@ -142,6 +173,33 @@ def test_the_three_asset_prompt_nodes_run_on_the_stage1_chain(tmp_path, monkeypa
             f"{node_name} 写回的资产名与设计不符：{[item.get('name') for item in stored]}"
 
 
+def test_base_stage1_sends_no_asset_prompt_request(tmp_path, monkeypatch):
+    """源头守卫（issue #78 / spec #77）：首尾帧阶段 1 不碰资产图角色。
+
+    首尾帧把人物、道具、场景**融合**成一张关键帧，没有「每件资产单独出图」这一步；
+    三个节点此前无条件在链上，每次白付 3 次调用，锁死清单不合规还会让整条阶段 1 失败。
+    判据打在三处外部行为上：**调用角色清单**（不是请求措辞反推）、请求条数、state 键。
+
+    变异检验：把 ``_make_image_prompt_node`` 开头的路线早退删掉，本用例必须红。
+    """
+    state, requests, roles = _run_stage1(tmp_path, monkeypatch, brief=_brief())
+
+    # 引入资产节点之前的调用水平（spec #77）：12 次、角色固定。用集合断言是因为
+    # 设计/声音两组在组合节点里并发跑，追加顺序不保证。
+    assert len(roles) == 12, f"首尾帧阶段 1 的模型调用数不是 12：{sorted(roles)}"
+    assert set(roles) == {
+        "producer", "director", "screenwriter",
+        "character_designer", "background_designer", "prop_designer",
+        "art_director", "storyboard", "cinematographer",
+        "frame_prompt_engineer", "sound_designer", "composer",
+    }, f"首尾帧阶段 1 的调用清单变了：{sorted(set(roles))}"
+    assert "image_prompt_engineer" not in roles, "首尾帧阶段 1 仍在校资产图提示词"
+    assert not any(_ASSET_HEAD in request for request in requests), \
+        "首尾帧阶段 1 仍发出了资产图提示词请求"
+    for field in ("character_image_prompts", "prop_image_prompts", "scene_image_prompts"):
+        assert field not in state, f"首尾帧阶段 1 仍写回了多参产物键 {field}"
+
+
 # ---------------------------------------------------------------------------
 # 2. N×1：每资产一条 Z-Image 提示词、带语义名，不按模型数翻倍
 # ---------------------------------------------------------------------------
@@ -153,7 +211,7 @@ def test_each_asset_gets_exactly_one_named_zimage_prompt(tmp_path, monkeypatch):
     还要认得出「这条是谁的」）。同时钉住归一结构**只有四键**——模型键（zimage/flux2）
     不许再混进 state 形状里。
     """
-    state, _ = _run_stage1(tmp_path, monkeypatch)
+    state, _, _ = _run_stage1(tmp_path, monkeypatch)
 
     # 预期是**字面量**（不从 _ASSETS 现算）：从夹具推导就与实现同构，形状错了也一起绿。
     expected = {
@@ -190,7 +248,7 @@ def test_asset_prompts_are_not_the_design_text_anymore(tmp_path, monkeypatch):
     是给**旧会话**留的兼容降级：链上没这个节点时它是唯一出路，于是一路把设计说明喂进
     ComfyUI。接通之后新跑的会话永远取不到那条分支，这里钉的就是它。
     """
-    state, _ = _run_stage1(tmp_path, monkeypatch)
+    state, _, _ = _run_stage1(tmp_path, monkeypatch)
 
     variants = image_prompt_variants(state)
     for v in variants:
@@ -240,7 +298,7 @@ def test_asset_prompt_request_carries_the_canvas_block(monkeypatch):
     requests: list[str] = []
     monkeypatch.setattr(nodes, "run_agent",
                         lambda agent, message: requests.append(message) or _assets_json((("甲", "甲的提示词"),)))
-    brief = _brief()
+    brief = _ref_brief()
     agents = {"image_prompt_engineer": object()}
 
     for _node, kind, design_field, _design, out_field, _assets in _ASSETS:
@@ -266,7 +324,8 @@ def _canvas_request(monkeypatch, canvases: dict) -> str:
         return _assets_json((("甲", "甲的提示词"),))
 
     monkeypatch.setattr(nodes, "run_agent", fake_run_agent)
-    brief = Brief(mode="base", variant="I2VA", duration=5.0, style="写实", plot=TOPIC,
+    # 节点只在多参路线出词（issue #78 源头守卫）：这里考的是请求里的【画布】块
+    brief = Brief(mode="ref", variant="T2VA", duration=5.0, style="写实", plot=TOPIC,
                   canvases=canvases)
     agents = {"image_prompt_engineer": object()}
     nodes._make_image_prompt_node(agents, "人物", "character_design", "character_image_prompts")(
@@ -327,7 +386,9 @@ def test_fl2va_result_does_not_carry_ref_asset_prompts(tmp_path, monkeypatch):
     character/prop/scene 三键——现场表现成「首帧路线也变成了多参」。本用例钉住回滚：
     帧变体回到 #40 之前的空元组，渲染结果里也没有这三键。
     """
-    state, _ = _run_stage1(tmp_path, monkeypatch)
+    # 阶段 1 跑的是多参路线：state 里**故意带着**资产三键，用来证明首尾帧出口不看变体、
+    # 也不看「state 里有没有资产」，只看路线（issue #78）。
+    state, _, _ = _run_stage1(tmp_path, monkeypatch)
     # result_from_state 要求 script/video 齐全——阶段 1 只产到设计层，这里补上阶段 2 的产物。
     state["final_prompt"] = "最终视频提示词"
     state["fl2va_prompt_bundle"] = {
@@ -337,7 +398,6 @@ def test_fl2va_result_does_not_carry_ref_asset_prompts(tmp_path, monkeypatch):
         "continuity_constraints": ["保持同一只橘猫"],
     }
     brief = Brief(mode="base", variant="FL2VA", duration=5.0, style="写实", plot=TOPIC)
-    from minimax_h3_prompt.generation import render_generation, result_from_state
 
     result = result_from_state(
         state, brief, generation_id="GEN001", topic_id="t", project_id="p")
@@ -349,6 +409,74 @@ def test_fl2va_result_does_not_carry_ref_asset_prompts(tmp_path, monkeypatch):
     # 帧链自己的产物一样不能少（回滚别把该有的也切掉）
     for key in ("script", "video", "fl2va", "first-frame", "last-frame"):
         assert key in rendered, f"FL2VA 渲染缺自己的产物键 {key}"
+
+
+def test_base_result_and_render_drop_asset_prompts_even_with_stale_state(tmp_path, monkeypatch):
+    """出口守卫（issue #78）：首尾帧结果对象与渲染都不含三份资产图提示词。
+
+    「无首尾帧 bundle」支路（T2VA/I2VA 这类非 FL2VA 的 base）此前会原样渲染三份 md——
+    旧会话续跑、库路径读回都走它。state 故意带着多参残留：若出口拿「state 里有没有资产」
+    当路线判据，这里就会漏；唯一判据是 ``Brief.mode``（父 spec #77）。
+    """
+    state, _, _ = _run_stage1(tmp_path, monkeypatch)  # 多参路线产出的 state（带三键）
+    state["final_prompt"] = "最终视频提示词"
+
+    result = result_from_state(
+        state, _brief(), generation_id="GEN001", topic_id="t", project_id="p")
+    assert result.image_prompts == (), "首尾帧结果对象又带上了多参的资产图提示词"
+    assert set(render_generation(result)) == {"script", "video"}, \
+        f"首尾帧渲染多出了产物键：{sorted(render_generation(result))}"
+
+    # 落盘口是同一份键表（save_generation 遍历 render_generation），顺带钉住三份 md 不落盘。
+    directory = save_generation(result, tmp_path / "GEN_base")
+    for filename in ("character-prompt.md", "prop-prompt.md", "scene-prompt.md"):
+        assert not (directory / filename).exists(), f"首尾帧路线仍落盘了 {filename}"
+
+
+def test_old_base_generation_json_cannot_bring_asset_prompts_back(tmp_path, monkeypatch):
+    """旧 generation.json 已带着三份资产提示词时，渲染仍按**路线**丢弃（issue #78）。
+
+    本用例是「按产物空不空判路线」的杀手：旧 base 结果的 ``image_prompts`` 非空，
+    只看空表就会把三份 md 重新渲染出来。判据取 ``result.mode``——它记的就是 ``Brief.mode``。
+    """
+    state, _, _ = _run_stage1(tmp_path, monkeypatch)
+    state["final_prompt"] = "最终视频提示词"
+    fresh = result_from_state(
+        state, _brief(), generation_id="GEN001", topic_id="t", project_id="p")
+    stale_prompts = image_prompt_variants(state)  # 修复前写进 base 产物的那批行
+    assert stale_prompts, "夹具没造出残留资产行，断言会落空"
+    old = replace(fresh, image_prompts=stale_prompts)
+
+    assert set(render_generation(old)) == {"script", "video"}, \
+        "旧 base 结果里的残留资产行被渲染成了三份 md"
+
+
+def test_ref_result_and_render_keep_asset_prompts_and_selected_canvas(tmp_path, monkeypatch):
+    """多参正向（成对断言，issue #78）：结果、渲染、画布透传一样不少。
+
+    反转上一对用例：同样「state 带三键」，换成多参 brief 就必须全部出现，且产物行尺寸
+    取用户选定画布（``asset_prompts_for`` 必须透传 ``brief.canvases``——漏传就静默回落默认）。
+    """
+    state, _, _ = _run_stage1(tmp_path, monkeypatch)
+    state["final_prompt"] = "最终视频提示词"
+    brief = Brief(mode="ref", variant="T2VA", duration=5.0, style="写实", plot=TOPIC,
+                  canvases={"zimage": (700, 1300)})
+
+    result = result_from_state(
+        state, brief, generation_id="GEN001", topic_id="t", project_id="p")
+    assert {(v.kind, v.name) for v in result.image_prompts} == {
+        ("character", "红裙女孩"), ("character", "蓝衫少年"),
+        ("prop", "青铜钥匙"), ("scene", "秋日庭院"),
+    }, "多参路线的资产图提示词被出口守卫误伤了"
+    assert all((v.width, v.height) == (700, 1300) for v in result.image_prompts), \
+        "产物行没拿到用户选定画布（asset_prompts_for 漏传 canvases）"
+
+    rendered = render_generation(result)
+    assert set(rendered) == {"script", "video", "character", "prop", "scene"}, \
+        f"多参渲染缺产物键：{sorted(rendered)}"
+    assert "红裙女孩" in rendered["character"]
+    assert "人物·红裙女孩专属生图提示词" in rendered["character"]
+    assert "秋日庭院" in rendered["scene"]
 
 
 def test_base_route_does_not_deliver_asset_prompts_to_the_wizard(tmp_path, monkeypatch, capsys):
@@ -363,7 +491,7 @@ def test_base_route_does_not_deliver_asset_prompts_to_the_wizard(tmp_path, monke
     """
     from minimax_h3_prompt.ui import wizard
 
-    state, _ = _run_stage1(tmp_path, monkeypatch)
+    state, _, _ = _run_stage1(tmp_path, monkeypatch)
     generation_dir = tmp_path / "GEN001"
     generation_dir.mkdir()
     # 立刻走完循环：_confirm 读 _prompt，空输入＝回车＝默认 False（没有意见，退出）
@@ -391,7 +519,7 @@ def test_base_stage2_intake_does_not_deliver_asset_prompts(tmp_path, monkeypatch
     """
     from minimax_h3_prompt.ui import wizard
 
-    state, _ = _run_stage1(tmp_path, monkeypatch)
+    state, _, _ = _run_stage1(tmp_path, monkeypatch)
     generation_dir = tmp_path / "GEN001"
     generation_dir.mkdir()
     session = SimpleNamespace(brief=_brief(), stage_state=state, directory=generation_dir)
@@ -452,7 +580,7 @@ def test_products_show_the_user_selected_canvas(tmp_path, monkeypatch):
     的渲染层措辞）：改动前两处排版各写一份——请求块画「640 × 1280（竖幅）」、
     产物写「推荐尺寸：640 × 1280」——正是 AC3 点名的两个来源。
     """
-    state, _ = _run_stage1(tmp_path, monkeypatch)
+    state, _, _ = _run_stage1(tmp_path, monkeypatch)
 
     variants = image_prompt_variants(state, {"zimage": (700, 1300)})
     assert variants, "资产产物是空的"
@@ -475,7 +603,7 @@ def test_asset_prompt_product_lists_the_locked_features(tmp_path, monkeypatch):
     既是用户拿去生图的那份，也是校对对照的那份。只活在 state 里的清单，用户看不到，
     也就无从判断「系统凭什么说这条是偏差」。
     """
-    state, _ = _run_stage1(tmp_path, monkeypatch)
+    state, _, _ = _run_stage1(tmp_path, monkeypatch)
     girl = next(v for v in image_prompt_variants(state) if v.name == "红裙女孩")
     assert girl.locked_features == ("红裙女孩",), "条目没带上锁死清单"
 
@@ -494,9 +622,10 @@ def test_node_refuses_a_reply_without_a_locked_list(monkeypatch):
     monkeypatch.setattr(nodes, "run_agent", lambda agent, message: json.dumps(
         [{"name": "甲", "positive_prompt": "甲的提示词"}]))
     with pytest.raises(ValueError, match="锁死清单"):
+        # 节点只在多参路线出词（issue #78）：路线守卫的用例另有一条，这里直接走 ref。
         nodes._make_image_prompt_node(
             {"image_prompt_engineer": object()}, "人物", "character_design",
-            "character_image_prompts")({"brief": _brief(), "character_design": "设计正文"})
+            "character_image_prompts")({"brief": _ref_brief(), "character_design": "设计正文"})
 
 
 def test_node_refuses_a_locked_entry_that_is_not_verbatim_in_the_prompt(monkeypatch):
@@ -510,7 +639,7 @@ def test_node_refuses_a_locked_entry_that_is_not_verbatim_in_the_prompt(monkeypa
     with pytest.raises(ValueError, match="原文"):
         nodes._make_image_prompt_node(
             {"image_prompt_engineer": object()}, "人物", "character_design",
-            "character_image_prompts")({"brief": _brief(), "character_design": "设计正文"})
+            "character_image_prompts")({"brief": _ref_brief(), "character_design": "设计正文"})
 
 
 def _run_image_node(monkeypatch, replies: list[str]):
@@ -532,7 +661,7 @@ def _run_image_node(monkeypatch, replies: list[str]):
         "character_image_prompts")
 
     def run():
-        return node({"brief": _brief(), "character_design": "设计正文"})
+        return node({"brief": _ref_brief(), "character_design": "设计正文"})
 
     return run, calls
 
@@ -601,7 +730,7 @@ def test_node_refuses_an_empty_locked_list_even_after_repair(monkeypatch):
 
 def test_entry_width_height_cannot_beat_the_selected_canvas(tmp_path, monkeypatch):
     """资产条目里混进的 width/height（四键契约外残留）压不过选定画布（issue #42 复审）。"""
-    state, _ = _run_stage1(tmp_path, monkeypatch)
+    state, _, _ = _run_stage1(tmp_path, monkeypatch)
     for entry in state["character_image_prompts"]:
         entry["width"] = 111
         entry["height"] = 222

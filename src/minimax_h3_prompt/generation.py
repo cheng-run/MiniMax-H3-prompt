@@ -847,6 +847,9 @@ def result_from_state(
         "prop": state.get("prop_design", ""),
         "scene": state.get("background_design", ""),
     }
+    # 资产图提示词只属于多参路线（issue #78 / 父 spec #77）：统一入口取代了 #40 回滚时
+    # 在 FL2VA 分支里单写的那份「结果置空」特例——留着就是两处口径，新增出口必漏一处。
+    image_prompts = asset_prompts_for(brief, state)
     if brief.variant.upper() == "FL2VA":
         required = {"script": values["script"], "video": values["video"]}
         missing = [kind for kind, content in required.items() if not str(content).strip()]
@@ -865,11 +868,6 @@ def result_from_state(
                 created_at=_now(),
             ),
         )
-        # 帧变体**不带**资产图提示词（#40 回滚，依据 #41 AC1「首尾帧路线不受影响」）：
-        # 资产图是多参（ref2va）素材循环的产物，首尾帧链用关键帧图＋桥接帧，拿它没有落点。
-        # #40 曾在这里无条件填满 N 资产，于是 FL2VA 的产物里多出三份多参提示词；
-        # 2026-10-23 用户现场把它看成「首帧路线变成了多参」。
-        image_prompts: tuple[ImagePromptVariant, ...] = ()
     else:
         missing = [kind for kind, content in values.items() if not str(content).strip()]
         if missing:
@@ -895,7 +893,6 @@ def result_from_state(
             if isinstance(raw_bundle, dict)
             else None
         )
-        image_prompts = image_prompt_variants(state, brief.canvases)
 
     return GenerationResult(
         generation_id=generation_id,
@@ -995,6 +992,29 @@ def image_prompt_variants(
     return tuple(variants)
 
 
+def _route_emits_asset_prompts(mode: str) -> bool:
+    """路线判据的唯一落点（issue #78 / 父 spec #77）：资产图提示词只属于多参路线。
+
+    判据取 ``Brief.mode``（``base`` / ``ref``）。**禁止**改用「变体是不是 FL2VA」或
+    「有没有首尾帧 bundle」：多参的变体是 T2VA、没有 bundle，那两条支路恰好也是多参的
+    产物出口（父 spec 逐字点名的陷阱）。``render_generation`` 拿不到 Brief，只能拿
+    ``result.mode``（那是 ``Brief.mode`` 的留存），故判据单列在这里、由入口与渲染共用。
+    """
+    return str(mode) == "ref"
+
+
+def asset_prompts_for(brief: Brief, state: dict[str, Any]) -> tuple[ImagePromptVariant, ...]:
+    """路线感知的资产图提示词取数口（issue #78）：非多参路线恒为空元组。
+
+    产物结果构造、渲染、参考素材登记、描述合并四处都从这里走，新增出口不接这条线就会
+    重演 #40「首尾帧路线凭空多出多参产物」。``canvases`` 必须透传——多参产物行的尺寸
+    只有这一个来源（未传就静默回落 profile 默认表，与用户选定自相矛盾）。
+    """
+    if not _route_emits_asset_prompts(brief.mode):
+        return ()
+    return image_prompt_variants(state, brief.canvases)
+
+
 def ref_asset_registry(state: dict[str, Any], brief: Brief | None = None) -> list[RefItem]:
     """多参路线的参考素材登记：语义名 + `<Picture N>` 编号 + 描述（生图提示词）。
 
@@ -1017,8 +1037,11 @@ def ref_asset_registry(state: dict[str, Any], brief: Brief | None = None) -> lis
     """
     if brief is not None:
         if brief.refs:
-            return _with_merged_descriptions(sorted(brief.refs, key=lambda r: r.picture), state)
-        if brief.mode != "ref":
+            # 路线必须显式交给描述合并（issue #78）：这一支在 mode 守卫**之前**返回，
+            # 不传路线的话，旧 base 会话里残留的同名资产提示词会顶替用户登记的帧描述。
+            return _with_merged_descriptions(
+                sorted(brief.refs, key=lambda r: r.picture), state, brief)
+        if not _route_emits_asset_prompts(brief.mode):
             return []
     script = str(state.get("script", ""))
 
@@ -1029,23 +1052,34 @@ def ref_asset_registry(state: dict[str, Any], brief: Brief | None = None) -> lis
             return (0, at, order)  # 有出场：按剧本首次出现位置
         return (1, order, order)   # 无出场：排最后，保持枚举序（稳定）
 
-    variants = image_prompt_variants(state)
+    # 走统一入口（issue #78）：到这里路线已确定是多参，入口只是把「透传画布」这件事
+    # 也钉在同一处；``brief`` 为 None 的旧内部调用保留无路线版。
+    variants = (asset_prompts_for(brief, state) if brief is not None
+                else image_prompt_variants(state))
     ordered = [item for _, item in sorted(enumerate(variants), key=_appearance_key)]
     return _with_merged_descriptions([
         RefItem(picture=number, name=item.name, description=item.positive_prompt)
         for number, item in enumerate(ordered, 1)
-    ], state)
+    ], state, brief)
 
 
-def _with_merged_descriptions(refs: list[RefItem], state: dict[str, Any]) -> list[RefItem]:
+def _with_merged_descriptions(refs: list[RefItem], state: dict[str, Any],
+                              brief: Brief | None = None) -> list[RefItem]:
     """素材画面事实覆盖（issue #44 AC3）：描述取校对记录的合并结果。
 
     合并结果＝生图提示词为底、定点纠偏 + 尾部补漏（``merge_asset_description``），
     细节不丢。无记录时的默认优先序与校对对照底本**同源**（评审：双源不一致会让
     校对记录一来、描述从登记文本整体换源）：合并结果 ＞ 生图提示词 ＞ 用户登记描述。
+
+    路线过滤（issue #78）：非多参路线原样返回登记的 refs——首尾帧的 refs 是首/尾帧锚点，
+    拿多参残留的资产提示词或读图校对记录改写它，就是把两条路线的指称体系搅在一起。
     """
+    if brief is not None and not _route_emits_asset_prompts(brief.mode):
+        return list(refs)
     merged = proofread_descriptions(state)
-    prompts = {v.name: v.positive_prompt for v in image_prompt_variants(state)}
+    variants = (asset_prompts_for(brief, state) if brief is not None
+                else image_prompt_variants(state))
+    prompts = {v.name: v.positive_prompt for v in variants}
     return [
         RefItem(picture=r.picture, name=r.name,
                 description=merged.get(r.name) or prompts.get(r.name) or r.description,
@@ -1194,6 +1228,12 @@ def render_generation(result: GenerationResult) -> dict[str, str]:
 
     FL2VA 的产物里**没有**资产图提示词（#40 回滚，依据 #41 AC1）：那是多参素材循环的
     产物。#40 曾在这一支追加 character/prop/scene 三键，帧链用户凭空多拿到三份多参文件。
+
+    路线判定收在 ``_route_emits_asset_prompts`` 一处（issue #78）：非多参只返回剧本与
+    视频提示词。判据取 ``result.mode``，**不能**按 ``result.image_prompts`` 空不空判——
+    修复前的 base generation.json 里还留着三键，按空表判会把三份 md 重新渲染出来。
+    也不许把它们渲染成空行：``render_image_prompt_markdown`` 会把空行回落成设计正文，
+    那正是「设计正文当生图提示词」的历史现场。
     """
     if result.fl2va_prompt_bundle is not None:
         return {
@@ -1202,6 +1242,11 @@ def render_generation(result: GenerationResult) -> dict[str, str]:
             "fl2va": render_fl2va_markdown(result),
             "first-frame": render_fl2va_frame_markdown(result, "first"),
             "last-frame": render_fl2va_frame_markdown(result, "last"),
+        }
+    if not _route_emits_asset_prompts(result.mode):
+        return {
+            "script": result.script,
+            "video": result.artifact("video").content,
         }
     return {
         "script": result.script,
@@ -1220,7 +1265,8 @@ __all__ = [
     "is_retired_image_family", "image_canvas_size",
     "composition_set", "composition_hint", "canvas_family", "canvas_display",
     "RatioPreset", "CANVAS_RATIO_PRESETS",
-    "fl2va_bundle_from_dict", "generation_directory", "ref_asset_registry", "render_generation",
+    "asset_prompts_for", "fl2va_bundle_from_dict", "generation_directory",
+    "ref_asset_registry", "render_generation",
     "strip_foreign_frames",
     "render_fl2va_frame_markdown", "render_fl2va_markdown", "result_from_state", "variant_frame_names",
     "scene_requirement_groups", "validate_fl2va_bundle",

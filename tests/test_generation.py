@@ -197,6 +197,30 @@ def test_ref_asset_registry_does_not_leak_into_base_mode():
         state, Brief(mode="base", variant="FL2VA", refs=refs))] == [(2, "尾帧")]
 
 
+def test_base_registry_keeps_user_descriptions_over_stale_asset_prompts():
+    """路线过滤（issue #78）：非多参路线不许旧会话残留顶替用户登记的参考描述。
+
+    ``brief.refs`` 那一支在 mode 守卫**之前**返回（帧路线的首/尾帧登记不走派生）；
+    描述合并若照旧取生图提示词，旧 base 会话里同名的资产残留就会改写用户写的帧描述。
+    多参侧的正向对照在同一文件：同名时取生图提示词（素材画面事实规则）。
+    """
+    state = {
+        "script": "雨夜公交站。",
+        "character_image_prompts": [{"name": "首帧", "positive_prompt": "旧多参残留提示词"}],
+        # 读图校对记录同属多参残留：路由守卫之外，描述合并本身也必须按路线早退。
+        "asset_proofreads": {
+            "首帧": {"sha256": "ab" * 32, "status": "done",
+                     "description": "旧多参读图校对描述", "deviations": [], "omissions": []},
+        },
+    }
+    brief = Brief(mode="base", variant="FL2VA", refs=[
+        RefItem(picture=1, name="首帧", description="用户登记的首帧描述"),
+    ])
+    assert [(r.picture, r.name, r.description) for r in ref_asset_registry(state, brief)] == [
+        (1, "首帧", "用户登记的首帧描述"),
+    ]
+
+
 def test_result_from_state_ref_mode_keeps_four_artifacts():
     """mode=ref 的结构化产物形状：video + 三类设计产物，mode 如实记录（issue #41）。"""
     brief = Brief(mode="ref", variant="T2VA", plot="红裙女孩走进庭院", duration=5)

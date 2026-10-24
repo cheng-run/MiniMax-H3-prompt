@@ -162,6 +162,12 @@ def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_f
     """
     def node(state: PipelineState) -> dict:
         brief: Brief = state["brief"]
+        # 路线守卫（issue #78 / 父 spec #77）：资产图提示词只属于多参路线。首尾帧把人物、
+        # 道具、场景**融合**进一张关键帧，没有「每件资产单独出图」这一步；无条件跑就是每次
+        # 白付 3 次调用，锁死清单不合规还会让整条阶段 1 失败。只早退、不改管线拓扑——
+        # 截断重跑与续跑链都不用跟着改（已知副作用：并行组合节点不产生更新、进度行不出现）。
+        if not brief.is_ref:
+            return {}
         message = (
             f"请为{kind}设计中的每个资产各生成一条 Z-Image 可直接复制的生图提示词。"
             f"设计里有几个{kind}资产就输出几条。只输出 JSON 数组。\n"

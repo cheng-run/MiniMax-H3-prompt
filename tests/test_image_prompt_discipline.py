@@ -216,7 +216,9 @@ def test_discipline_text_is_not_copied_into_other_role_prompts():
 # ---------------------------------------------------------------------------
 
 def _brief() -> Brief:
-    return Brief(mode="base", variant="I2VA", duration=5.0, style="写实", plot="秋日庭院")
+    # 资产图节点只在多参路线出词（issue #78 源头守卫）：本文件考的是节点出词后的
+    # 纪律警告，走 base 的话节点直接早退，一次请求都不会发。
+    return Brief(mode="ref", variant="T2VA", duration=5.0, style="写实", plot="秋日庭院")
 
 
 def _assets_json(name: str, prompt: str) -> str:
