@@ -41,6 +41,16 @@ def _api_timeout() -> Exception:
     )
 
 
+def _not_found() -> Exception:
+    """入口配错时的真实形态：nginx 的 404 HTML，openai 归为 ``NotFoundError``。"""
+    import httpx
+    from openai import NotFoundError
+
+    request = httpx.Request("POST", "https://gw.example/v11/chat/completions")
+    response = httpx.Response(404, request=request, text="<html>404 Not Found</html>")
+    return NotFoundError("<html>404 Not Found</html>", response=response, body=None)
+
+
 class FakeVisionModel:
     """最小假视觉模型：``invoke(request, config=...)`` 是唯一被调用的面。
 
@@ -163,6 +173,32 @@ def test_stuck_reading_does_not_fall_back_to_nonstreaming(image, monkeypatch, ev
 # ---------------------------------------------------------------------------
 # AC：网关不支持流式时报错说清楚，流程不静默
 # ---------------------------------------------------------------------------
+
+def test_config_error_status_points_at_base_url_and_skips_fallback(image, monkeypatch, capsys):
+    """404＝入口/鉴权配错：点名 base_url，且**不回退**（回退打的是同一个地址）。
+
+    2026-10-24 实测：视觉 base_url 多打一个 1（``/v11``）→ nginx 404，旧实现把它
+    报成「网关可能不支持流式」并再回退一次非流式，用户得从两段长文案里自己挑出
+    那个 404。配错就该直说配错。
+    """
+    from minimax_h3_prompt.config import config
+
+    stream = FakeVisionModel(
+        lambda call_no, handler, request: (_ for _ in ()).throw(_not_found()))
+    fallback = FakeVisionModel(
+        lambda call_no, handler, request: AIMessage(content="不该到这里"))
+    _patch_models(monkeypatch, stream=stream, fallback=fallback)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        reference_auditor.describe_image(image)
+
+    message = str(excinfo.value)
+    assert fallback.calls == 0, "入口配错时回退了非流式（同一个 404 再花一次配额）"
+    assert "404" in message and "base_url" in message
+    assert config.vision_model.base_url in message, "报错没指出该改哪个地址"
+    assert "不支持流式" not in capsys.readouterr().out, \
+        "配错被报成了「网关不支持流式」（把用户引向网关方言）"
+
 
 def test_streaming_unsupported_reports_and_falls_back(image, monkeypatch, capsys):
     """流式被判不支持 → 明说「网关不支持流式」并回退非流式，只能报已等时长。"""

@@ -31,7 +31,9 @@ models:
   vision:
     provider: dashscope
     model: MiniMax-M3.1-Flash
-    base_url: https://api.minimax.cn/v11
+    # 网关 OpenAI 兼容口只有 /v1；多打一个 1（/v11）会被 nginx 直接 404，
+    # 读图两端（首帧/多参）都会挂（2026-10-24 实测）
+    base_url: https://api.minimax.cn/v1
     api_key_env: MINIMAX_API_KEY
 
 # 旧字段：仅在新模型配置和兼容环境变量都未提供模型名时作为 fallback。

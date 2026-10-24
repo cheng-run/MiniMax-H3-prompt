@@ -472,6 +472,12 @@ class DirectCallResult:
     # 非流式：卡住说明网关根本没在干活，回退只会把 900 秒白等藏回去；不支持流式才是
     # 那条路要治的病。**不从错误文案反推**——那等于让调用方解析人话。
     timed_out: bool = False
+    # HTTP 状态码（异常带的话）。有些 4xx 是**入口/鉴权配错**，换非流式打的还是同一个
+    # URL，回退纯属再花一次配额把同一个错重演一遍（2026-10-24 实测：视觉 base_url 多打
+    # 一个 1，先被报成「网关可能不支持流式」）。调用方要能分开这两种病因，所以状态码
+    # 随结果回来，而不是让调用方去 ``error`` 人话里正则反推。
+    # openai 的 APIStatusError 带 status_code；非 HTTP 异常没有，保持 None。
+    status_code: int | None = None
 
     @property
     def text(self) -> str:
@@ -529,6 +535,7 @@ def run_direct_call(llm, request: object, *, role: str) -> DirectCallResult:
                     ),
                     attempts=attempt_no,
                     duration=now - started,
+                    status_code=getattr(exc, "status_code", None),
                 )
             if handler.first_byte_at is not None:
                 return DirectCallResult(
