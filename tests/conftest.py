@@ -17,6 +17,19 @@ import pytest
 DEFAULT_COMFY_OUTPUT = Path(
     r"D:/Comfyui/ComfyUI/output/视频/MiniMax-H3/2026-09-18")
 
+# 真实旧会话样本目录（阶段 1 产物，仓库外；`output/` 已 gitignore）。
+# 说话的是**用户机器**上的现场：清洁检出与换机器时整类用例 SKIP，不伪造样本。
+DEFAULT_SESSION_SAMPLES = Path(r"D:/项目/python/MiniMax-H3-prompt/output/sessions")
+
+
+def session_samples_dir() -> Path:
+    """真实旧会话样本目录：``H3_SESSION_SAMPLES`` 优先，空字符串视为未设。
+
+    统一入口的理由与 ``comfy_output_dir`` 同款（issue #77 复审 G）：机器专属路径
+    散在几个测试文件里各写一份默认值，换机器时总有一处忘改、那条用例就悄悄空转。
+    """
+    return Path(os.environ.get("H3_SESSION_SAMPLES") or DEFAULT_SESSION_SAMPLES)
+
 
 def comfy_output_dir() -> Path:
     """真实素材的输出目录：``H3_COMFY_OUTPUT`` 优先，空字符串视为未设。"""
@@ -58,9 +71,45 @@ def write_test_video(
     return path
 
 
+def write_h3_tier_video(path: Path, seconds: float, *, fps: int = 24) -> Path:
+    """写一段**按 H3 实测帧数档**的真视频（736×1280），供可证层判档的用例用。
+
+    与 ``write_test_video`` 的分工：那条是通用小视频（128×72，尺寸随便）；这一条必须
+    **帧数落在 ``H3_TIER_FRAMES`` 档位上、尺寸是 H3 输出尺寸**——可证层
+    （``preflight.check_segment_video``）按帧数档表判「交回来的是不是本段、用没用错时长
+    档」，96 帧的「假 4s」落不进任何档位、只报「无法确证档位」，那两条 AC 就测不出来
+    （issue #55 的用例 docstring 记着这个坑）。档位外的秒数（如 10/11s）按 ``fps`` 折算，
+    落进「区间内但不在帧数表」的 warning 档。
+    """
+    from minimax_h3_prompt.tools.frame_match import video_meta
+    from minimax_h3_prompt.tools.preflight import EXPECTED_VIDEO_SIZE, H3_TIER_FRAMES
+
+    frames = H3_TIER_FRAMES.get(int(round(seconds)), int(round(seconds * fps)))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), fps,
+                             EXPECTED_VIDEO_SIZE)
+    assert writer.isOpened(), "测试环境缺 MJPG 编码器"
+    image = np.full((EXPECTED_VIDEO_SIZE[1], EXPECTED_VIDEO_SIZE[0], 3), 128, np.uint8)
+    for i in range(frames):
+        image[:] = 128 + (i % 8)
+        writer.write(image)
+    writer.release()
+    actual = video_meta(path).get("duration_s", 0.0)
+    assert abs(actual - frames / fps) < 0.05, f"测试视频时长不可控：{actual}"
+    return path
+
+
 @pytest.fixture
 def tmp_video(tmp_path: Path):
     """返回一个可调用对象：make(name="a.mp4", **kwargs) -> Path"""
     def make(name: str = "clip.mp4", **kwargs) -> Path:
         return write_test_video(tmp_path / name, **kwargs)
+    return make
+
+
+@pytest.fixture
+def h3_tier_video(tmp_path: Path):
+    """返回一个可调用对象：make(seconds, name="seg.avi") -> Path（H3 档位帧数的真视频）。"""
+    def make(seconds: float, name: str = "clip.avi") -> Path:
+        return write_h3_tier_video(tmp_path / name, seconds)
     return make

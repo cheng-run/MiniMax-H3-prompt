@@ -27,3 +27,10 @@ build-backend = "uv_build"
 dev = [
     "pytest>=9.1.1",
 ]
+
+[tool.pytest.ini_options]
+# 并行票据工作树住在仓库根 worktree/ 下（见 .gitignore），而 pytest 默认从 rootdir
+# 递归收集——它不看 .gitignore，会把工作树里的测试副本一并收进来，撞出重复模块名
+# 与导入错（2026-10-18 合并期实测 184 errors）。限定只收 tests/，让本仓既有的
+# 「主树裸跑 pytest -q」口径在开工作树时继续成立。
+testpaths = ["tests"]

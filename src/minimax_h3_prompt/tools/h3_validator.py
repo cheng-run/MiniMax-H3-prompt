@@ -370,8 +370,27 @@ def _check_speakers(text: str, issues: list[ValidationIssue]) -> None:
                                           f"(S{num}) 首次出现时 (S{idx}) 还未出现，编号建议按出场顺序从 1 连续分配"))
 
 
-def _check_label_continuity(text: str, issues: list[ValidationIssue], prefix: str) -> None:
+def _check_label_continuity(text: str, issues: list[ValidationIssue], prefix: str,
+                            expected: list[int] | tuple[int, ...] | None = None) -> None:
+    """同类标签编号应从 1 连续；``expected`` 给了就按**声明的范围**判（段内子集）。
+
+    段内重编号（issue #75）只改 Picture，Subject 保持整片原号——于是段内的 Subject
+    号天然带洞（例如只用到 <Subject 1> 与 <Subject 11>）。「从 1 连续」是**整片**
+    编号的判据，套到段上会把每一段都判红。所以段级调用传入本段保留的 Subject 原号
+    集合，判据改成「声明的每个号都要出现」：同样是「定义块不许漏项」，但口径跟着
+    产物形态走（同一个函数、显式参数，不另写一份守卫）。
+    """
     nums = sorted({int(m.group(1)) for m in re.compile(rf"<{prefix}\s+(\d+)>").finditer(text)})
+    if not nums and not expected:
+        return
+    if expected is not None:
+        missing = sorted(set(int(n) for n in expected) - set(nums))
+        if missing:
+            issues.append(ValidationIssue(
+                "error", f"LABEL_GAP_{prefix.upper()}",
+                f"本段声明的 <{prefix} {'>, <'.join(map(str, missing))}> 没有出现在提示词里"
+                "（段内定义块必须把本段用到的标签全部写上）"))
+        return
     if not nums:
         return
     missing = [n for n in range(1, nums[-1] + 1) if n not in nums]
@@ -382,19 +401,103 @@ def _check_label_continuity(text: str, issues: list[ValidationIssue], prefix: st
 
 def _check_pictures_used(text: str, ref_meta: list[tuple[int, str, str]] | None,
                          issues: list[ValidationIssue]) -> None:
-    """ref 模式：定义过的 <Picture N> 应在正文中被引用（反之亦然）。"""
+    """ref 模式：N 张 <Picture N> 覆盖式校验（定义与引用双向对齐，issue #41）。
+
+    覆盖式（同地点词覆盖式校验的口径，ADR 0009）：每张登记图被**定义或引用任一处**
+    覆盖即可，不要求每段都出现。双向对齐的两条腿：
+
+    - **引用 → 定义**：全文出现的每个 ``<Picture N>`` 都要能在 ``subject_definitions``
+      对回定义（官方 ref-en.txt §2：标签的定义都住在那里）——正文引用没定义即报；
+    - **登记 ↔ 全文**：登记的每张图都要在提示词里出现、提示词不许引用登记外的图
+      （``PICTURE_UNUSED`` / ``PICTURE_UNDEFINED`` 这对，登记来自 N 张素材清单）。
+
+    「定义过的必须被正文再引用」**有意不查**：官方示例里图片只在 subject_definitions
+    被引（作为 subject 的来源），正文走语义名（素材指称体系，CONTEXT.md「参考素材」），
+    查它会把官方示例本身判红。
+    """
+    sections = _find_sections(text, REF_SECTIONS)
+    defs_text = sections.get("subject_definitions", ("", 0))[0]
+    defined = {int(m.group(1)) for m in _PICTURE_RE.finditer(defs_text)}
+    used = {int(m.group(1)) for m in _PICTURE_RE.finditer(text)}
+    dangling = used - defined
+    if dangling:
+        issues.append(ValidationIssue(
+            "error", "PICTURE_NO_DEFINITION",
+            f"提示词引用了未在 subject_definitions 定义的 <Picture "
+            f"{'>, <Picture '.join(map(str, sorted(dangling)))}>"
+            "（定义与引用双向对齐：每处引用都要能对回 subject_definitions 里的定义）"))
     if not ref_meta:
         return
-    defined = {p for p, _, _ in ref_meta}
-    used = {int(m.group(1)) for m in _PICTURE_RE.finditer(text)}
-    unused = defined - used
+    registry = {p for p, _, _ in ref_meta}
+    unused = registry - used
     if unused:
         issues.append(ValidationIssue("error", "PICTURE_UNUSED",
                                       f"参考图未在提示词中被引用：<Picture {'>, <Picture '.join(map(str, sorted(unused)))}>"))
-    undefined = used - defined
+    undefined = used - registry
     if undefined:
         issues.append(ValidationIssue("error", "PICTURE_UNDEFINED",
                                       f"提示词引用了未定义的 <Picture {'>, <Picture '.join(map(str, sorted(undefined)))}>"))
+
+
+# --- 正文语言守卫（issue #75）-----------------------------------------------
+# 写段模板与整片模板都要求「全部英文」（``segment_prompts`` 的写段纪律、
+# ``prompts/prompt_engineer.md``），但校验器一直没有语言判据：2026-10-22 的真实运行
+# 里 subject_definitions / retention_analysis 整段中文照样过闸。规则写在模板里、
+# 闸门不在校验器里，就是本仓「规则在、接线不在」的又一次。
+#
+# 判据是**占比 + 绝对字数**双阈值，两个都要过才报：
+# - 绝对字数挡「专名误杀」：英文句里夹「红裙女孩」（4 字）、一段定义里重复出现几十个
+#   中文专名，都是合法写法，不该判红；
+# - 占比挡「半中半英」：整段中文散文的 CJK 占比接近 1，远超阈值。
+# 只判占比会误杀专名多的英文块，只判绝对字数会让「四成中文」的段落溜过去。
+_CJK_RE = re.compile(r"[㐀-䶿一-鿿]")
+_LATIN_RE = re.compile(r"[A-Za-z]")
+# ``<d>[语言] … </d>`` 是**对白**：按设定语言写，不是散文（官方要求保留原语言）。
+_DIALOG_SPAN_RE = re.compile(r"<d>.*?</d>", re.DOTALL)
+# 引号内可见文字（招牌/字幕/屏幕）同理保留原文；只收成对引号，避免把英文撇号当边界。
+_QUOTED_SPAN_RE = re.compile(
+    r"“[^”\n]*”|\"[^\"\n]*\"|‘[^’\n]*’|「[^」\n]*」|『[^』\n]*』")
+# 判哪些段落：定义/摘要/保留分析/两条音轨。**detailed_description 不判**——它承载
+# ``<d>`` 对白，且「画面正文是否英文」另有写段纪律与既有校验，不在这里重复。
+_LANGUAGE_SECTIONS = (
+    "subject_definitions",
+    "summary",
+    "retention_analysis",
+    "overall_soundscape",
+    "non_diegetic_music",
+)
+_CJK_MIN_CHARS = 30
+_CJK_RATIO_THRESHOLD = 0.30
+
+
+def _cjk_ratio(text: str) -> tuple[int, float]:
+    """(中文字符数, 中文占「中文＋拉丁字母」的比例)；先剥对白与引号内可见文字。"""
+    stripped = _QUOTED_SPAN_RE.sub(" ", _DIALOG_SPAN_RE.sub(" ", str(text or "")))
+    cjk = len(_CJK_RE.findall(stripped))
+    latin = len(_LATIN_RE.findall(stripped))
+    total = cjk + latin
+    return cjk, (cjk / total if total else 0.0)
+
+
+def _check_body_language(text: str, issues: list[ValidationIssue]) -> None:
+    """``<d>`` 对白与引号内外文之外，正文段落是中文散文就报 error（issue #75 AC6）。
+
+    判据住在校验器而不是写段提示词里，是为了让重写循环能**看见并修**它：段级
+    ``validate_ref_segment`` 直接复用 ``validate_ref``，于是 ``MAX_SEGMENT_ATTEMPTS``
+    那几轮重写天然带着这条闸（同一份判据，不另写一套）。
+    """
+    sections = _find_sections(text, REF_SECTIONS)
+    for name in _LANGUAGE_SECTIONS:
+        body = sections.get(name, ("", 0))[0]
+        if not body.strip():
+            continue
+        cjk, ratio = _cjk_ratio(body)
+        if cjk >= _CJK_MIN_CHARS and ratio >= _CJK_RATIO_THRESHOLD:
+            issues.append(ValidationIssue(
+                "error", "BODY_NOT_ENGLISH",
+                f"{name} 是中文散文（{cjk} 个中文字符，占 {ratio:.0%}）——ref 提示词正文"
+                "必须全英文（官方 ref-en.txt 的六段式；`<d>` 对白与引号内可见文字保留"
+                "原语言，英文句中的中文专名不算违规）。请把这一段改写成英文再交付"))
 
 
 def validate_base(text: str, duration: float | None = None, variant: str = "T2VA",
@@ -442,18 +545,21 @@ def validate_base(text: str, duration: float | None = None, variant: str = "T2VA
 
 
 def validate_ref(text: str, duration: float | None = None,
-                 ref_meta: list[tuple[int, str, str]] | None = None) -> list[ValidationIssue]:
+                 ref_meta: list[tuple[int, str, str]] | None = None,
+                 subject_scope: list[int] | tuple[int, ...] | None = None,
+                 ) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     sections = _find_sections(text, REF_SECTIONS)
     body, _ = sections.get("detailed_description", ("", 0))
     _check_shots(body, duration, issues)
     _check_dialogues(body, issues)
     _check_speakers(body, issues)
-    _check_label_continuity(text, issues, "Subject")
+    _check_label_continuity(text, issues, "Subject", expected=subject_scope)
     _check_label_continuity(text, issues, "Picture")
     _check_label_continuity(text, issues, "Audio")
     _check_label_continuity(text, issues, "Video")
     _check_pictures_used(text, ref_meta, issues)
+    _check_body_language(text, issues)
     present_headers = list(sections.keys())
     if len(present_headers) != len(REF_SECTIONS):
         missing = [h for h in REF_SECTIONS if h not in sections]
@@ -491,6 +597,15 @@ def validate_prompt(text: str, mode: str, duration: float | None = None, variant
     if mode == "ref":
         return validate_ref(text, duration, ref_meta)
     return validate_base(text, duration, variant, ref_meta)
+
+
+def split_ref_sections(text: str) -> dict[str, str]:
+    """ref 六段式 → ``{段名: 内容}``（只含出现的段）。
+
+    分段组装（issue #46）用它取整片提示词里的**定义性段落原文**逐段重复——
+    切段解析与校验器同用 ``_find_sections``，「哪段从哪到哪」不许有第二份口径。
+    """
+    return {h: body for h, (body, _ln) in _find_sections(text, REF_SECTIONS).items()}
 
 
 def format_issues(issues: list[ValidationIssue]) -> str:

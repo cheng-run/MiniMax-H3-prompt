@@ -139,7 +139,74 @@ class TestSections:
         assert "SUMMARY_NO_TASKTYPE" in errors_of(issues)
 
 
-class TestLabels:
+class TestPictureCoverage:
+    """N 张 <Picture N> 覆盖式校验（定义与引用双向对齐，issue #41）。
+
+    覆盖式（同地点词 ADR-0009 口径）：每张登记图被**定义或引用任一处**覆盖即可，
+    不要求每段都出现。双向的两条腿：引用→定义（正文引用必须能在 subject_definitions
+    对回定义）、登记↔全文（登记的都要用、不许引用登记外的）。
+    """
+
+    def test_picture_referenced_without_definition(self):
+        """正文引用 <Picture N> 而 subject_definitions 没定义它 → 引用无定义。"""
+        text = (
+            "subject_definitions:\n<Subject 1> is the woman in <Picture 1>.\n\n"
+            "summary:\n[reference generation] t.\n\n"
+            "retention_analysis:\n<Subject 1>: fully_preserved - ok.\n\n"
+            "detailed_description:\n[Shot 1] The woman waves, and <Picture 2> shows her cat.\n\n"
+            "overall_soundscape: N/A\n\nnon_diegetic_music: N/A"
+        )
+        issues = validate_ref(text)
+        assert "PICTURE_NO_DEFINITION" in errors_of(issues)
+
+    def test_picture_only_cited_inside_definitions_is_covered(self):
+        """图片只在 subject_definitions 被引（官方示例形态：作为 subject 来源）不算悬空。"""
+        text = (
+            "subject_definitions:\n<Subject 1> is the woman in <Picture 1>.\n\n"
+            "summary:\n[reference generation] t.\n\n"
+            "retention_analysis:\n<Subject 1>: fully_preserved - ok.\n\n"
+            "detailed_description:\n[Shot 1] The woman waves.\n\n"
+            "overall_soundscape: N/A\n\nnon_diegetic_music: N/A"
+        )
+        issues = validate_ref(text, ref_meta=[(1, "女人", "红裙")])
+        assert "PICTURE_NO_DEFINITION" not in errors_of(issues)
+        assert "PICTURE_UNUSED" not in errors_of(issues)
+
+    def test_n_pictures_covered_bidirectionally_green(self):
+        """N=4 张登记图全部有定义、正文引用都能对回定义 → 图片检查全绿。"""
+        text = (
+            "subject_definitions:\n"
+            "<Subject 1> is the woman in <Picture 1>.\n"
+            "<Subject 2> is the man in <Picture 2>.\n"
+            "<Subject 3> is the key in <Picture 3>.\n"
+            "<Subject 4> is the garden in <Picture 4>.\n\n"
+            "summary:\n[reference generation] t.\n\n"
+            "retention_analysis:\n"
+            "<Subject 1>: fully_preserved - ok.\n"
+            "<Subject 2>: fully_preserved - ok.\n"
+            "<Subject 3>: fully_preserved - ok.\n"
+            "<Subject 4>: fully_preserved - ok.\n\n"
+            "detailed_description:\n"
+            "[Shot 1] The woman and the man stand in the garden with the key.\n"
+            "[Shot 2] At 00:03.000, <Subject 2> hands <Subject 3> to <Subject 1> near <Picture 4>.\n\n"
+            "overall_soundscape: N/A\n\nnon_diegetic_music: N/A"
+        )
+        registry = [(1, "女人", "d1"), (2, "男人", "d2"), (3, "钥匙", "d3"), (4, "庭院", "d4")]
+        issues = validate_ref(text, duration=6.0, ref_meta=registry)
+        assert errors_of(issues) == []
+
+    def test_registry_picture_missing_from_definitions(self):
+        """登记图被正文引用却没进 subject_definitions → 引用无定义照样报（登记不豁免）。"""
+        text = (
+            "subject_definitions:\n<Subject 1> is the woman in <Picture 1>.\n\n"
+            "summary:\n[reference generation] t.\n\n"
+            "retention_analysis:\n<Subject 1>: fully_preserved - ok.\n\n"
+            "detailed_description:\n[Shot 1] The woman holds <Picture 2>.\n\n"
+            "overall_soundscape: N/A\n\nnon_diegetic_music: N/A"
+        )
+        issues = validate_ref(text, ref_meta=[(1, "女人", "d1"), (2, "钥匙", "d2")])
+        assert "PICTURE_NO_DEFINITION" in errors_of(issues)
+
     def test_picture_gap(self):
         text = (
             "subject_definitions:\n<Subject 1> is <Picture 2>.\n\nsummary:\n[reference generation] t.\n\n"

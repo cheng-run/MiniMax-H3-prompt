@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -94,7 +95,11 @@ def audit_frame_images(
     return audits
 
 
-__all__ = ["FrameAudit", "required_frames", "audit_frame_images", "describe_bridge_frame", "extract_last_frame"]
+__all__ = [
+    "FrameAudit", "required_frames", "audit_frame_images",
+    "describe_bridge_frame", "describe_segment_frame",
+    "extract_first_frame", "extract_last_frame", "segment_frame_prompt",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -111,28 +116,152 @@ def bridge_frame_prompt() -> str:
     )
 
 
-def describe_bridge_frame(path: str | Path) -> str | None:
-    """读一张桥接帧图，返回画面描述；失败返回 None（调用方诚实降级，不阻塞人工流程）。
+def _read_frame_or_none(path: str | Path, prompt: str, *,
+                        label: str, on_failure: str) -> str | None:
+    """读一张帧图 → 画面描述；失败**显式警告**并返回 None（诚实降级，绝不伪造读图记录）。
 
-    与 ``audit_frame_images`` 的单帧降级一致，但失败要**显式打印警告**——绝不静默
-    （设计决定 #8）；文件不存在同样走警告降级（剥帧刚成功却读不了图不该炸掉陪跑流程）。
+    读图走 ``reference_auditor.describe_image`` **唯一口**（关键帧/桥接帧/段首末帧同源）。
+    ``label`` 用于「XX图片不存在」「XX读图失败」两句话术，``on_failure`` 是失败后的
+    去向说明（两种帧位的去向不同：桥接帧退回图片锚定，段首末帧则是「本次没有可对照的
+    画面描述」）。文件不存在同样走警告降级——刚剥出帧却读不了图，不该炸掉陪跑流程。
     """
     from .reference_auditor import describe_image
 
     p = Path(path)
     try:
         if not p.is_file():
-            raise FileNotFoundError(f"桥接帧图片不存在：{p}")
-        description = str(describe_image(p, bridge_frame_prompt())).strip()
+            raise FileNotFoundError(f"{label}图片不存在：{p}")
+        description = str(describe_image(p, prompt)).strip()
     except Exception as exc:  # noqa: BLE001 - 单帧失败降级，不阻塞陪跑流程
-        print(f"[警告] 桥接帧读图失败（{exc}），下一段提示词将退回仅按图片锚定（无读图结果）。")
+        print(f"[警告] {label}读图失败（{exc}）：{on_failure}")
         return None
     return description or None
+
+
+def describe_bridge_frame(path: str | Path) -> str | None:
+    """读一张桥接帧图，返回画面描述；失败返回 None（调用方诚实降级，不阻塞人工流程）。"""
+    return _read_frame_or_none(
+        path, bridge_frame_prompt(), label="桥接帧",
+        on_failure="下一段提示词将退回仅按图片锚定（无读图结果）。")
+
+
+# 段首/末帧读图的帧位标签（issue #56）：读的是**本段视频自己的**开场/收尾画面，
+# 不是上一段的尾帧——所以措辞里点明时刻，让读图模型把注意力放在「这一瞬间」上。
+_SEGMENT_FRAME_LABELS = {
+    "first": ("首帧", "本段 0.00s 的开场画面"),
+    "last": ("末帧", "本段的收尾画面"),
+}
+
+
+def segment_frame_prompt(role: str) -> str:
+    """段首/末帧读图提示词（措辞对齐桥接帧与关键帧读图，只换「是哪一帧」）。"""
+    try:
+        label, moment = _SEGMENT_FRAME_LABELS[str(role)]
+    except KeyError as exc:
+        raise ValueError(f"未知的段帧位：{role!r}（应为 first/last）") from exc
+    return (
+        f"这张图是一段 AI 视频执行段的{label}静态画面（{moment}）。"
+        "请精确描述画面内容：地点与环境、人物（性别/年龄/发型/服装颜色款式/姿态）、"
+        "关键动物与道具、光线方向与色调、构图（景别与主体位置）。"
+        "只描述图中真实可见的内容，不要臆测或补充不存在的细节。用中文输出，3-5 句话。"
+    )
+
+
+def describe_segment_frame(path: str | Path, role: str) -> str | None:
+    """读一张段首/末帧图（issue #56 AC1），返回画面描述；失败返回 None。
+
+    失败**显式警告**并返回 None——语义层照旧把「读图失败」并排摆出来由人判，绝不伪造
+    读图记录、也不因此跳过这一层（缺一半的并排看起来像「没问题」）。
+
+    ``role`` 取值错**响**（ValueError）而不是降级：那是编程错误，不是「量不出来」。
+    """
+    label = _SEGMENT_FRAME_LABELS.get(str(role))
+    if label is None:
+        raise ValueError(f"未知的段帧位：{role!r}（应为 first/last）")
+    return _read_frame_or_none(
+        path, segment_frame_prompt(role), label=f"段{label[0]}",
+        on_failure="本次没有可对照的画面描述。")
 
 
 # ---------------------------------------------------------------------------
 # 桥接帧：从执行输出剥尾帧（cv2，无外部 ffmpeg 依赖）
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 执行段首/末帧：剥帧（cv2，无外部 ffmpeg 依赖）与读图（issue #56）
+#
+# 与桥接链的 ``extract_last_frame`` 共用同一套 Windows 解码/落盘规避（非 ASCII 路径
+# 先复制到临时目录、imencode+tofile 落盘），差别在**取哪一帧**：桥接帧要锐利
+# （那张图当下一段的 first_frame 参考、不进成片时间线），语义核验要**真实的首帧**
+# ——挑一张更锐利的邻近帧就是另一个时刻的画面，判据当场错位。
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def _open_capture(video_path: str | Path):
+    """打开视频供解码；含非 ASCII 路径时先复制到系统临时目录（cv2 打不开那种路径）。
+
+    ``yield`` 出来的是已打开的 ``cv2.VideoCapture``，退出时释放句柄并清掉临时副本。
+    """
+    import cv2  # noqa: PLC0415 - 懒加载重依赖
+    import shutil  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+
+    source = Path(video_path)
+    if not source.is_file():
+        raise FileNotFoundError(
+            f"视频文件不存在：{source}"
+            "（提示：粘贴路径时不要带首尾引号；含空格的路径也无需加引号）"
+        )
+    decode_source = source
+    temp_dir = None
+    try:
+        str(source).encode("ascii")
+    except UnicodeEncodeError:
+        temp_dir = Path(tempfile.mkdtemp(prefix="h3-bridge-"))
+        temp_copy = temp_dir / ("source" + source.suffix.lower())
+        shutil.copy2(source, temp_copy)
+        decode_source = temp_copy
+
+    try:
+        capture = cv2.VideoCapture(str(decode_source))
+        if not capture.isOpened():
+            raise ValueError(f"无法打开视频（编码不被支持或文件损坏）：{source}")
+        try:
+            yield capture
+        finally:
+            capture.release()
+    finally:
+        if temp_dir is not None:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _write_png(frame, target: Path, source: Path) -> Path:
+    """把一帧写成 PNG（Windows 非 ASCII 路径走 imencode + tofile，绕开 cv2.imwrite 的编码坑）。"""
+    import cv2  # noqa: PLC0415
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    ok, buffer = cv2.imencode(".png", frame)
+    if not ok:
+        raise ValueError(f"帧编码为 PNG 失败：{source}")
+    buffer.tofile(str(target))
+    return target
+
+
+def extract_first_frame(video_path: str | Path, output_path: str | Path | None = None) -> Path:
+    """剥出视频的**第一帧**（0.00s）并写为 PNG（issue #56 AC1：本段开场画面）。
+
+    **不做锐度优选**（与 ``extract_last_frame`` 的区别，也是它存在的理由）：语义层
+    核验判的是「本段开场瞬间的画面是否达到声明的 start_state」，挑一张更锐利的邻近帧
+    就是另一个时刻的画面——判据会错位，而且错得看不出来。
+    """
+    source = Path(video_path)
+    with _open_capture(source) as capture:
+        ok, frame = capture.read()
+    if not ok or frame is None:
+        raise ValueError(f"能打开但一帧都没读到（可能文件损坏）：{source}")
+    target = Path(output_path) if output_path else source.with_suffix(".first-frame.png")
+    return _write_png(frame, target, source)
+
 
 def extract_last_frame(video_path: str | Path, output_path: str | Path | None = None) -> Path:
     """用 OpenCV 剥出视频尾部最锐利的一帧并写为 PNG（作下一段首帧参考）。
@@ -145,51 +274,13 @@ def extract_last_frame(video_path: str | Path, output_path: str | Path | None = 
     - Windows 下 cv2.VideoCapture 打不开非 ASCII 路径：含非 ASCII 字符时先复制到
       系统临时目录（纯 ASCII 路径）再解码，剥完删除临时文件。
     """
-    import cv2  # noqa: PLC0415 - 懒加载重依赖
-
     source = Path(video_path)
-    if not source.is_file():
-        raise FileNotFoundError(
-            f"视频文件不存在：{source}"
-            "（提示：粘贴路径时不要带首尾引号；含空格的路径也无需加引号）"
-        )
-    decode_source = source
-    temp_copy = None
-    try:
-        str(source).encode("ascii")
-    except UnicodeEncodeError:
-        import shutil
-        import tempfile
-
-        temp_dir = Path(tempfile.mkdtemp(prefix="h3-bridge-"))
-        temp_copy = temp_dir / ("source" + source.suffix.lower())
-        shutil.copy2(source, temp_copy)
-        decode_source = temp_copy
-
-    try:
-        capture = cv2.VideoCapture(str(decode_source))
-        if not capture.isOpened():
-            raise ValueError(
-                f"无法打开视频（编码不被支持或文件损坏）：{source}"
-            )
-        try:
-            frame = _read_sharpest_tail_frame(capture)
-        finally:
-            capture.release()
-    finally:
-        if temp_copy is not None:
-            shutil.rmtree(temp_copy.parent, ignore_errors=True)
-
+    with _open_capture(source) as capture:
+        frame = _read_sharpest_tail_frame(capture)
     if frame is None:
         raise ValueError(f"能打开但一帧都没读到（可能文件损坏）：{source}")
-
     target = Path(output_path) if output_path else source.with_suffix(".last-frame.png")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    ok, buffer = cv2.imencode(".png", frame)
-    if not ok:
-        raise ValueError(f"尾帧编码为 PNG 失败：{source}")
-    buffer.tofile(str(target))
-    return target
+    return _write_png(frame, target, source)
 
 
 def _read_last_frame(capture):

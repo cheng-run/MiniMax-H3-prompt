@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import operator
-import time
 from typing import Annotated, TypedDict
 
 from langchain_core.language_models import BaseChatModel
@@ -14,7 +13,6 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 
 from ..agents import _content_to_text
-from ..observability import record_agent_call, reporter
 
 DISCUSSION_PERSONAS = {
     "producer": "你是制片人：关注任务类型、时长、风格约束、成本与可交付性。",
@@ -37,14 +35,28 @@ DISCUSSION_PERSONAS = {
 _CONTINUE = "继续"
 
 
+# 直调角色名前缀（ADR 0019 决定 1 原句点名「圆桌」，复审 S1）。保留发言人后缀，
+# 成本表与进度面板仍能看出「是哪个角色说的」，同时全部以 role_roundtable 归族。
+ROUNDTABLE_ROLE_PREFIX = "role_roundtable"
+
+
 def _invoke(role: str, model: BaseChatModel, msgs: list) -> str:
-    """带观测地调用一次模型（圆桌发言/主持），返回纯文本。"""
-    reporter.emit({"type": "agent_start", "role": role})
-    t0 = time.time()
-    res = model.invoke(msgs)
-    out = _content_to_text(res.content)
-    record_agent_call(role, [res], out, time.time() - t0)
-    return out
+    """带观测地调用一次模型（圆桌发言/主持），返回纯文本。
+
+    走 ``agents.run_direct_call``（ADR 0019 决定 1）：圆桌是长调用，裸 ``model.invoke``
+    没有首字节心跳、没有卡住重试、也不进成本表——用户盯着一动不动的终端，分不出
+    「在生成」与「网关挂起」（复审 S1）。失败照旧抛异常：圆桌的空结论会流进下游
+    锁定字段，静默返回空串等于把「没讨论出结果」伪装成结论。
+    """
+    from ..agents import run_direct_call  # 延迟导入：避免入口期拉起角色装配栈
+
+    result = run_direct_call(model, msgs, role=role)
+    if not result.ok:
+        raise RuntimeError(result.error)
+    # 取文本口径不变：``DirectCallResult.text`` 只做 ``str(content)``，而圆桌的响应
+    # 可能是 blocks 列表（thinking 模型），仍由 ``_content_to_text`` 提取。
+    content = getattr(result.response, "content", result.response)
+    return _content_to_text(content)
 
 
 class RoundTableState(TypedDict):
@@ -77,7 +89,7 @@ def build_roundtable(model: BaseChatModel, participants: list[str], max_rounds: 
                     )
                 ),
             ]
-            reply = _invoke(f"圆桌·{role}", model, msgs)
+            reply = _invoke(f"{ROUNDTABLE_ROLE_PREFIX}_{role}", model, msgs)
             return {"discussion": [f"{role}：{reply}"]}
 
         return speak
@@ -97,7 +109,7 @@ def build_roundtable(model: BaseChatModel, participants: list[str], max_rounds: 
             SystemMessage(content=sys),
             HumanMessage(content=f"议题：{state['topic']}\n讨论记录：\n{past}\n\n你的判断："),
         ]
-        reply = _invoke("圆桌·主持人", model, msgs).strip()
+        reply = _invoke(f"{ROUNDTABLE_ROLE_PREFIX}_moderator", model, msgs).strip()
 
         if reply.startswith(_CONTINUE):
             if forced:
@@ -106,7 +118,7 @@ def build_roundtable(model: BaseChatModel, participants: list[str], max_rounds: 
                     SystemMessage(content="请直接把上面的讨论收束成最终「锁定决策」，不要再说继续。"),
                     HumanMessage(content=f"议题：{state['topic']}\n讨论记录：\n{past}"),
                 ]
-                reply = _invoke("圆桌·主持人", model, msgs2).strip()
+                reply = _invoke(f"{ROUNDTABLE_ROLE_PREFIX}_moderator", model, msgs2).strip()
             else:
                 return {"lock": "", "round": current_round + 1}
 

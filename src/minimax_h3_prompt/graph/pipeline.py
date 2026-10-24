@@ -11,10 +11,10 @@ from dataclasses import dataclass
 from langgraph.graph import END, START, StateGraph
 
 from ..agents import build_role_agents, run_agent
-from ..brief_parser import FRAME_VARIANTS, Brief
+from ..brief_parser import FRAME_VARIANTS, Brief, is_ref_mode
 from ..clarification import as_block
 from ..config import Config
-from ..observability import stage_saver, token_meter
+from ..observability import format_step_banner, stage_saver, token_meter
 from ..output.assembler import assemble_and_repair
 from ..tools.h3_validator import format_issues, validate_prompt
 from ..tools.ref_metadata import to_tuple
@@ -99,11 +99,19 @@ _FOLDED_NODES = frozenset(
 )
 
 def build_pipeline_graph(model, brief: Brief, config: Config, *, stage: int = 0,
-                         chain: list[str] | None = None):
+                         chain: list[str] | None = None,
+                         refs: list | None = None):
     """构建并编译主管线。stage=0 全图；1 仅阶段 1；2 仅阶段 2。
     chain：可选显式指定节点列表（用于 resume_from_node 截断链）；不传则按 stage 推导。
+    refs：可选参考素材登记（issue #41 复审 F2）——图内 agent 的 ``validate_h3_prompt``
+    工具在装配期把 ref_meta 封进闭包，向导多参路线 brief.refs 为空时必须由调用方把
+    N 资产登记传进来，否则工具层的 N 张覆盖式校验在装配期全盲（外层 QA 轮才查得出）。
+    不传则沿用 brief.refs（帧路线与 brief 文件流程的既有行为）。
     返回 (编译图, agents)。"""
-    agents = build_role_agents(model, brief.refs, brief.mode, brief.duration, brief.variant)
+    agents = build_role_agents(
+        model, brief.refs if refs is None else refs,
+        brief.mode, brief.duration, brief.variant,
+    )
     nodes = make_nodes(agents, model, brief, config)
 
     creative_rt = build_roundtable(model, ["producer", "director", "screenwriter"], config.roundtable_max_rounds)
@@ -185,10 +193,34 @@ _NODE_ARTIFACTS: dict[str, tuple[str, ...]] = {
     "parallel_sound": ("对白与环境声", "配乐"),
 }
 
-# base 模式下这两份根本不产出：身份评审与参考一致性节点直接返回空串
-# （nodes.make_identity_rt_node / _make_reference_consistency_node）。把它们列进
+# base 模式下这些产物根本不产出：身份评审与参考一致性节点直接返回空串
+# （nodes.make_identity_rt_node / _make_reference_consistency_node）；三件资产图提示词
+# 是同一形态的路线专属产物——首尾帧把人物/道具/场景**融合**进一张关键帧，没有「每件资产
+# 单独出图」这一步，资产图节点直接早退（issue #78 / 父 spec #77）。把它们列进
 # 「会被替换」就是对用户说谎——那是不存在、也就无所谓被替换的产物。
-_REF_ONLY_ARTIFACTS = frozenset({"身份一致性锁定", "参考一致性素材"})
+_REF_ONLY_ARTIFACTS = frozenset({
+    "身份一致性锁定", "参考一致性素材",
+    "人物资产图提示词", "道具资产图提示词", "场景资产图提示词",
+})
+
+
+def rerun_silent_nodes(mode: str = "base") -> frozenset[str]:
+    """该路线下不会产出任何产物的环节：产物标签**全都**落在「仅多参」集合里。
+
+    确认门用它扣掉「将重跑 N 步」与环节名（issue #81）：资产图节点在首尾帧路线早退、
+    返回空更新，``run_stage1`` 只在 update 非空时回调，所以进度行不出现；确认门若照
+    ``plan.nodes`` 全切片念，就比用户实际看到的环节多一步，而这句话正是他判断代价的依据。
+
+    从 ``_NODE_ARTIFACTS`` 现推、调用时现算：链上增删节点或调整「仅多参」集合时自动跟随。
+    另手写一份节点名清单就会像本仓既往那样——链条变了它不报错，只是悄悄说错。
+    """
+    if is_ref_mode(mode):
+        return frozenset()
+    return frozenset(
+        name
+        for name, labels in _NODE_ARTIFACTS.items()
+        if labels and all(label in _REF_ONLY_ARTIFACTS for label in labels)
+    )
 
 
 def stage1_rerun_plan(layer: str, *, mode: str = "base") -> Stage1RerunPlan:
@@ -208,7 +240,7 @@ def stage1_rerun_plan(layer: str, *, mode: str = "base") -> Stage1RerunPlan:
         label
         for name in nodes
         for label in _NODE_ARTIFACTS.get(name, ())
-        if str(mode) == "ref" or label not in _REF_ONLY_ARTIFACTS
+        if is_ref_mode(mode) or label not in _REF_ONLY_ARTIFACTS
     )
     return Stage1RerunPlan(spec=spec, start=spec.resume_from, nodes=nodes, artifacts=artifacts)
 
@@ -260,7 +292,9 @@ def run_stage1(brief: Brief, config: Config, *, on_node=None,
         "qa_issues": [],
         **base_state,  # 续跑时的已有产物
     }
-    token_meter.reset()
+    # 这里**不清零**计量表（issue #52）：阶段入口清零＝进阶段 2 就把阶段 1 的成本抹掉，
+    # 而「跑完的成本」正是指整条流程的累计。账的边界是**一份生成**（换新生成由向导开新账），
+    # 不是阶段；续跑进程则先在续跑入口把上一次的成本表接回来（``TokenMeter.restore``）。
     stage_saver.base.mkdir(parents=True, exist_ok=True)
     graph, agents = build_pipeline_graph(model, brief, config, stage=1, chain=chain)
     state: dict = dict(initial)
@@ -275,6 +309,9 @@ def run_stage1(brief: Brief, config: Config, *, on_node=None,
                     on_step_done(node_name, dict(state))
     if config.common_sense_qa:
         state = _stage1_frame_qa_loop(state, brief, agents, model, config)
+    # 成本表**不写进 state**（issue #52 复审按 ADR 0005 接线纪律核过）：它没有产品级
+    # 读者——落盘由 `session_store.save` 取活账（那份 state 副本会被覆盖），于是写进来
+    # 只是多一份没人读的真相。它的产出物是会话文件与阶段 2 断点，两处都直接取活账。
     return state, model, agents
 
 
@@ -289,6 +326,10 @@ def _stage1_frame_qa_loop(state: dict, brief: Brief, agents, model, config: Conf
     # 替换语义不该因为 state 里多了一个键就滑成「以用户上一版为基线」。
     state.pop(FRAME_BASELINE_KEY, None)
     for i in range(config.max_qa_iterations):
+        # 横幅回答「在干什么、第几轮」（ADR 0019 决定 3 / 复审 S2）：这个循环原先
+        # 只在事件总线上有动静而没人订阅，终端上就是一段没有任何输出的长等待。
+        print(format_step_banner("正在质检精修", round_no=i + 1,
+                                 total_rounds=config.max_qa_iterations), flush=True)
         bundle_dict = state.get("fl2va_prompt_bundle")
         if not isinstance(bundle_dict, dict):
             break
@@ -316,21 +357,33 @@ def run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_node
     checkpoint_dir：可选断点目录。若已有装组初稿断点，跳过组装直接进 QA 精修；
     组装完成后立刻落盘，质检每轮也更新，保证中途崩溃只重跑当前质检轮。
     """
+    from ..generation import ref_asset_registry
     from ..model_factory import build_chat_model
     from ..stage2_checkpoint import clear_checkpoint, load_checkpoint, save_checkpoint
 
     model = model or build_chat_model()
-    ref_meta = to_tuple(brief.refs)
+    # N 张素材登记（issue #41）：多参路线的 ref_meta 来自登记（编号按剧本出场顺序），
+    # 不是 brief.refs——向导路线的 brief 没有参考图段，登记是链上资产图提示词的衍生物。
+    # brief.refs 非空时登记以用户声明为准，行为与旧版逐字一致。
+    registry = ref_asset_registry(state, brief)
+    ref_meta = to_tuple(registry)
     # QA 精修循环需要 qa / prompt_engineer agent，即便是断点续跑也要先构建
-    agents = build_role_agents(model, brief.refs, brief.mode, brief.duration, brief.variant)
+    agents = build_role_agents(model, registry, brief.mode, brief.duration, brief.variant)
 
     checkpoint = load_checkpoint(checkpoint_dir) if checkpoint_dir else None
     if checkpoint is not None:
         merged = {k: v for k, v in state.items() if k not in ("final_prompt", "final_report")}
+        merged["ref_meta"] = ref_meta
         prompt = str(checkpoint["prompt_draft"])
+        # 断点里带着组装那一刻的成本表（issue #52）：组装的钱花在上一个进程里，而它
+        # 跑完只落这个断点——不接回来，跳过组装的那次续跑就永远少记这一笔。
+        token_meter.restore(checkpoint.get("cost_table"))
         print("[续接] 检测到阶段 2 断点（组装已于此前完成），直接进入质检精修。", flush=True)
     else:
-        graph, _ = build_pipeline_graph(model, brief, config, stage=2)
+        # 「正在组装」也是 ADR 0019 决定 3 点名的长步骤（复审 S2）。只在实际组装
+        # 分支打：断点续跑跳过组装，打出来就是一句假话。
+        print(format_step_banner("正在组装视频提示词"), flush=True)
+        graph, _ = build_pipeline_graph(model, brief, config, stage=2, refs=registry)
         initial: PipelineState = {
             "brief": brief,
             "mode": brief.mode,
@@ -338,7 +391,10 @@ def run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_node
             "duration": brief.duration,
             "ref_meta": ref_meta,
             "iterations": 0,
-            **{k: v for k, v in state.items() if k not in ("final_prompt", "final_report", "brief")},
+            # ref_meta 不从旧 state 继承：阶段 1 落下的那份是 brief.refs 的旧口径，
+            # 放它覆盖新登记，N 张覆盖式校验就静默退回空清单（issue #41 的接线点）。
+            **{k: v for k, v in state.items()
+               if k not in ("final_prompt", "final_report", "brief", "ref_meta")},
         }
         merged: dict = dict(initial)
         for chunk in graph.stream(initial, stream_mode="updates"):
@@ -352,10 +408,14 @@ def run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_node
         prompt = merged.get("final_prompt", "")
         prompt, _ = assemble_and_repair(prompt, brief.mode, brief.variant)
         if checkpoint_dir:
-            save_checkpoint(checkpoint_dir, prompt_draft=prompt)
+            save_checkpoint(checkpoint_dir, prompt_draft=prompt,
+                            cost_table=token_meter.snapshot())
 
     # 有界质检精修：确定性校验 → 有 error 则 qa 给建议 + prompt_engineer 修正
     for i in range(config.max_qa_iterations):
+        # 与阶段 1 的生图 qa 循环同一条横幅口径（ADR 0019 决定 3 / 复审 S2）。
+        print(format_step_banner("正在质检精修", round_no=i + 1,
+                                 total_rounds=config.max_qa_iterations), flush=True)
         issues = validate_prompt(prompt, brief.mode, duration=brief.duration,
                                  variant=brief.variant, ref_meta=ref_meta)
         theme_issues = theme_fidelity_issues(
@@ -389,7 +449,8 @@ def run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_node
         prompt, _ = assemble_and_repair(prompt, brief.mode, brief.variant)
         stage_saver.save(f"qa_refine_{i}", {"质检建议": review, "重出提示词": prompt, "主题忠实度校验": format_issues(theme_issues)})
         if checkpoint_dir:
-            save_checkpoint(checkpoint_dir, prompt_draft=prompt, status=f"qa_round_{i + 1}")
+            save_checkpoint(checkpoint_dir, prompt_draft=prompt, status=f"qa_round_{i + 1}",
+                            cost_table=token_meter.snapshot())
 
     prompt, _ = assemble_and_repair(prompt, brief.mode, brief.variant)
     merged["final_prompt"] = prompt

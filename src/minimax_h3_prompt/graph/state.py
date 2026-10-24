@@ -9,6 +9,17 @@ from typing import TypedDict
 from ..brief_parser import Brief
 
 
+# 资产图提示词三键（父 spec #77 / issue #80）：多参路线独占的产物键。
+# **唯一声明**。会话持久化白名单、读回时的路线过滤、产物出口都从这个常量派生——
+# 字面重抄一份的代价是加第四类资产（或改键名）时那些地方静默漏掉它，而且没有任何
+# 用例会红（#56 复审：守卫形态要从常量派生）。
+ASSET_PROMPT_KEYS = (
+    "character_image_prompts",
+    "prop_image_prompts",
+    "scene_image_prompts",
+)
+
+
 class PipelineState(TypedDict, total=False):
     # 输入
     brief: Brief
@@ -26,9 +37,11 @@ class PipelineState(TypedDict, total=False):
     background_design: str  # 背景设计师
     prop_design: str  # 道具设计师
     art_design: str  # 美术指导统筹结果
-    character_image_prompts: dict  # Z-Image/Flux.2 人物提示词
-    prop_image_prompts: dict  # Z-Image/Flux.2 道具提示词
-    scene_image_prompts: dict  # Z-Image/Flux.2 场景提示词
+    # 三键必须逐个声明：LangGraph 只搬运 schema 里声明过的键；键名清单见
+    # ``ASSET_PROMPT_KEYS``（上面），别在这里另立一份。
+    character_image_prompts: list  # 人物资产 Z-Image 提示词列表（每资产一条，issue #40）
+    prop_image_prompts: list  # 道具资产 Z-Image 提示词列表
+    scene_image_prompts: list  # 场景资产 Z-Image 提示词列表
     identity_lock: str  # 一致性对齐会（圆桌 3）锁定
 
     # 视觉（分镜 → 并行决策 → 并行制作）
@@ -62,3 +75,9 @@ class PipelineState(TypedDict, total=False):
     # 画面级要求悄悄丢干净（新解出的提示词里一条都不剩）。
     user_revisions: list[dict]  # 累积的用户修订（含已落地标记），真源见 user_revisions.py
     setting_revision: dict  # 本轮那条设定级修订 {layer, text}，只在一次重跑内有效
+
+    # 读图校对记录（issue #44）：语义名 → {sha256, status, description, …}。
+    # `description` 是合并后的素材画面事实，下游提示词写作经 ref_asset_registry 消费。
+    # **必须在这里声明**：提示词工程师/参考一致性节点读它（经 ref_asset_registry），
+    # LangGraph 只搬运声明过的键——漏声明就是「裁决结果到不了下游」的静默断链。
+    asset_proofreads: dict

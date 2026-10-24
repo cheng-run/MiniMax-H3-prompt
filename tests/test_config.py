@@ -25,6 +25,13 @@ def config_without_env(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
     monkeypatch.setattr(config_module, "load_dotenv", lambda *_args, **_kwargs: None)
+    # 上面是内置 provider 的固定清单，换网关（provider: opencode 等）后会漏删：
+    # 模块级 `config = Config()` 导入时已 load_dotenv 过，真 key 就留在 os.environ 里，
+    # 于是「缺 key 应当报错」的用例静默通过、断言值的用例拿到真 key。按当前 YAML
+    # 实际用的 key 名再删一遍（2026-10-20 实测 provider 换成 opencode 时踩到）。
+    probe = Config()
+    for name in (probe.primary_model.api_key_env, probe.vision_model.api_key_env):
+        monkeypatch.delenv(name, raising=False)
     return Config
 
 
@@ -43,7 +50,9 @@ def test_loads_primary_and_vision_from_yaml(config_without_env):
 
 def test_api_keys_are_resolved_from_environment(config_without_env, monkeypatch):
     cfg = config_without_env()
-    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-secret")
+    # key 名跟着 YAML 走，不硬编码某个 provider——理由同 test_loads_primary_and_vision_from_yaml
+    monkeypatch.setenv(cfg.primary_model.api_key_env, "test-secret")
+    monkeypatch.setenv(cfg.vision_model.api_key_env, "test-secret")
     assert cfg.resolve_api_key(cfg.primary_model) == "test-secret"
     assert cfg.resolve_api_key(cfg.vision_model) == "test-secret"
     assert "test-secret" not in repr(cfg.primary_model)
@@ -53,7 +62,7 @@ def test_api_keys_are_resolved_from_environment(config_without_env, monkeypatch)
 
 def test_missing_key_names_environment_variable(config_without_env):
     cfg = config_without_env()
-    with pytest.raises(ValueError, match="DASHSCOPE_API_KEY"):
+    with pytest.raises(ValueError, match=cfg.primary_model.api_key_env):
         cfg.resolve_api_key(cfg.primary_model)
 
 

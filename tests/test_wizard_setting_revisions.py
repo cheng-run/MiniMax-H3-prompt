@@ -49,6 +49,10 @@ FRAME_TEXT = "天空改成黄昏，要暖金色"
 
 # 设计节点组（重跑起点）之后到链尾的节点数：确认门念的「将重跑 N 步」。
 _STEPS_FROM_DESIGNERS = len(_STAGE1_CHAIN) - _STAGE1_CHAIN.index("parallel_designers")
+# 首尾帧路线少一步（issue #81）：资产图提示词节点在这条路线直接早退、不产出任何产物，
+# 也不报进度，确认门照全切片念就会多报一步——用户是凭这句话判断代价的。
+# 这里写的是「少一个环节」这个**规格事实**，不是把实现里的推导重算一遍当断言。
+_STEPS_FROM_DESIGNERS_BASE = _STEPS_FROM_DESIGNERS - 1
 
 
 def _bundle_payload(label: str) -> dict:
@@ -63,13 +67,15 @@ def _bundle_payload(label: str) -> dict:
     }
 
 
-# 资产图那三个节点（issue #36 起在阶段 1 链上）的请求开头与它们要的 JSON 形态。
-_ASSET_PROMPT_HEAD = "生成 Z-Image 和 Flux.2 两个可直接复制的生图提示词"
+# 资产图那三个节点（issue #36 起在阶段 1 链上）的请求开头与它们要的 JSON 形态
+# （issue #40 起：JSON 数组、每资产一项、Z-Image 单版）。
+_ASSET_PROMPT_HEAD = "各生成一条 Z-Image 可直接复制的生图提示词"
 
 
-def _asset_payload() -> dict:
-    return {"zimage": {"positive_prompt": "资产图提示词"},
-            "flux2": {"positive_prompt": "资产图提示词（Flux.2）"}}
+def _asset_payload() -> list:
+    # locked_features（issue #53）必须是正文的原文片段：这里取正文本身。
+    return [{"name": "示例资产", "positive_prompt": "资产图提示词",
+             "locked_features": ["资产图提示词"]}]
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +255,8 @@ def test_gate_defaults_to_not_rerunning(monkeypatch, capsys):
     monkeypatch.setattr(wizard, "_prompt", lambda text, *a, **k: "")  # 直接回车
     monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
 
-    assert wizard._confirm_setting_rerun(stage1_rerun_plan(LAYER_CHARACTER)) is False
+    assert wizard._confirm_setting_rerun(
+        stage1_rerun_plan(LAYER_CHARACTER), mode="base") is False
     assert "按默认 否 处理" in capsys.readouterr().out
 
 
@@ -375,8 +382,11 @@ def _run_loop(tmp_path, monkeypatch, *, prompts: list[str], confirms: list[bool]
 
 
 def _startup() -> list[str]:
-    """起步四问：主题 → 时长（默认）→ 风格（默认）→ 生成方式（1 首帧）。"""
-    return [TOPIC, "", "", "1"]
+    """起步问答：主题 → 时长（默认）→ 风格（默认）→ 生成方式（1 首帧）→ 画布两答（issue #42）。
+
+    画布选择器逐家族两问（比例→尺寸），这里都取档 1；Flux.2 退役后只剩 zimage 一家。
+    """
+    return [TOPIC, "", "", "1", "1", "1"]
 
 
 def _ledger_rows(session) -> list[dict]:
@@ -390,20 +400,94 @@ def test_gate_names_the_steps_and_the_products_it_will_replace(tmp_path, monkeyp
     """票面 AC-3：重跑前展示「将重跑 N 步 + 哪些产物会被替换」，且**在跑之前**。
 
     替换不可逆（LLM 生成不可复现同一版本），用户凭这份清单决定值不值得跑。
+    issue #81 起首尾帧路线只承诺它真的会替换的产物：三件资产图提示词不产出，
+    所以清单里没有、环节串里没有、步数也少一步。
     """
     session, _, calls = _run_loop(
         tmp_path, monkeypatch,
         prompts=[*_startup(), "1", SETTING_TEXT, "2"], confirms=[True, True, False])
 
     out = capsys.readouterr().out
-    assert f"将重跑 {_STEPS_FROM_DESIGNERS} 步" in out, "确认门没报「将重跑几步」"
+    assert f"将重跑 {_STEPS_FROM_DESIGNERS_BASE} 步" in out, "确认门没报「将重跑几步」"
     for label in ("人物形象设计", "背景设计", "道具设计", "美术统筹",
-                  "人物资产图提示词", "道具资产图提示词", "场景资产图提示词",  # 链上新增的节点
                   "分镜表", "关键帧生图提示词（首/尾帧）"):
         assert label in out, f"确认门没列出会被替换的产物：{label}"
+    for label in ("人物资产图提示词", "道具资产图提示词", "场景资产图提示词"):
+        assert label not in out, f"首尾帧确认门仍承诺了多参产物：{label}"
+    assert "资产图" not in out, "首尾帧确认门的环节串里仍出现资产图环节"
     assert len(calls) == 2, "确认之后没有真的重跑阶段 1 的链"
     assert calls[1]["resume_from_node"] == "parallel_designers"
     assert session is not None
+
+
+def _gate_output(monkeypatch, capsys, *, mode: str) -> str:
+    """把确认门对一个层次念出来的文字整段取回；默认回车＝不跑（不触发重跑动作）。"""
+    monkeypatch.setattr(wizard, "_prompt", lambda text, *a, **k: "")
+    monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
+    plan = stage1_rerun_plan(LAYER_CHARACTER, mode=mode)
+    assert wizard._confirm_setting_rerun(plan, mode=mode) is False
+    return capsys.readouterr().out
+
+
+def test_ref_gate_keeps_the_asset_artifact_prompts(monkeypatch, capsys):
+    """多参的产物承诺与步数**完全不变**（issue #81）：三件资产图提示词照旧会被替换。
+
+    与上面那条 base 用例成对：翻面首尾帧时不许把多参一起削薄。
+    """
+    out = _gate_output(monkeypatch, capsys, mode="ref")
+
+    assert f"将重跑 {_STEPS_FROM_DESIGNERS} 步" in out, "多参确认门的步数变了"
+    assert "资产图生图提示词" in out, "多参确认门的环节串里少了资产图环节"
+    for label in ("人物资产图提示词", "道具资产图提示词", "场景资产图提示词"):
+        assert label in out, f"多参确认门没承诺产物：{label}"
+
+
+def test_gate_step_filter_is_derived_from_the_artifact_tables(monkeypatch, capsys):
+    """变异检验（issue #81）：清空「仅多参」集合，资产图环节必须重新出现。
+
+    过滤若在展示层另手抄一份节点名清单，改掉来源常量这条用例仍会绿——那样就不是
+    「从常量派生」，而是第二份真相。这条同时钉住「调用时现算」而不是定义时绑死。
+    """
+    monkeypatch.setattr(pipeline, "_REF_ONLY_ARTIFACTS", frozenset())
+    out = _gate_output(monkeypatch, capsys, mode="base")
+
+    assert "资产图生图提示词" in out, "步数/环节过滤没跟着「仅多参」集合走"
+    assert f"将重跑 {_STEPS_FROM_DESIGNERS} 步" in out, "步数没跟着「仅多参」集合走"
+
+
+def test_base_rerun_steps_match_the_nodes_that_really_report(tmp_path, monkeypatch, capsys):
+    """「步数与实际执行环节一致」是实测出来的（issue #81 / 父 spec #77）。
+
+    资产图节点在首尾帧路线早退、返回空更新，``run_stage1`` 只在 ``update`` 非空时回调，
+    所以进度行本来就不会出现（issue #78 的已知副作用）。这条真跑一遍截断链，把
+    **真的报了进度的节点**与确认门念的步数对起来——只靠读代码猜，源头的早退形态
+    一改（比如返回带键的空壳）就会静默多一步。
+    """
+    reported: list[str] = []
+
+    def fake_run_agent(agent, message):
+        if "请为这一段" in message or "请只生成首帧" in message or "请只生成尾帧" in message:
+            return json.dumps(_bundle_payload("重跑版"))
+        return "产物"
+
+    monkeypatch.setattr(nodes, "run_agent", fake_run_agent)
+    monkeypatch.setattr(roundtable, "_invoke", lambda role, model, msgs: "已锁定")
+    monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
+    monkeypatch.setattr(pipeline.stage_saver, "base", tmp_path / "stages")
+
+    run_stage1(
+        _brief(), SimpleNamespace(roundtable_max_rounds=1, common_sense_qa=False),
+        resume_from_node="parallel_designers",
+        initial_state={"shot_table": "[Shot 1] 旧分镜", "character_design": "旧版人物形象设计"},
+        on_node=reported.append,
+    )
+    assert "parallel_image_prompts" not in reported, "首尾帧重跑仍报了资产图环节的进度"
+
+    out = _gate_output(monkeypatch, capsys, mode="base")
+    assert f"将重跑 {len(reported)} 步" in out, \
+        f"确认门念的步数与实际报进度的环节数不一致（实际 {len(reported)}：{reported}）"
+    for name in reported:
+        assert wizard._NODE_LABELS[name] in out, f"确认门没念实际会跑的环节：{name}"
 
 
 def test_setting_rerun_rewrites_the_artifact_and_marks_the_revision_applied(tmp_path, monkeypatch):

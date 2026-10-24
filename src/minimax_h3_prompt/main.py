@@ -61,6 +61,13 @@ def build_parser() -> argparse.ArgumentParser:
     audit_promote.add_argument("session_dir")
     audit_promote.add_argument("--label", required=True, help="基线标签，如「修复前」")
 
+    concat_parser = project.add_parser(
+        "ref-concat", help="多参成片拼接：把已通过验收的各段接成成片（重跑某段后单独触发）")
+    concat_parser.add_argument("session_dir", help="生成目录（含 segments/plan.json 与段产出账）")
+    concat_parser.add_argument("--replace", action="append", nargs=2, default=[],
+                               metavar=("SEGMENT", "PATH"),
+                               help="重跑某段后改用它的新视频（可重复；这一份未经本系统验收）")
+
     pre_parser = project.add_parser("preflight", help="提交前预检：校验输入帧与预算")
     pre_parser.add_argument("--input-frame", required=True, help="待提交的桥接帧 png")
     pre_parser.add_argument("--prev-video", default=None, help="上一段的 mp4")
@@ -78,6 +85,21 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _apply_frame_route_defaults(brief, args) -> None:
+    """帧路线的旧默认（强制 base + 缺省 FL2VA）；多参（mode=ref）不套帧变体（issue #41）。
+
+    两条 CLI 缝（_run_cli 与 _run_generate_prompts）共用这一份：级联各写一遍时
+    「--variant 对 ref 该不该生效」的答案会随缝而异（复审 Duplicated Code 项）。
+    """
+    if brief.mode == "ref":
+        return
+    brief.mode = "base"
+    if args.variant:
+        brief.variant = args.variant.upper()
+    elif brief.variant == "T2VA":
+        brief.variant = "FL2VA"
+
+
 def _topic_progress(event: dict) -> None:
     """把主题单入口的模型调用进度显示给最终用户。"""
     event_type = event.get("type")
@@ -87,6 +109,14 @@ def _topic_progress(event: dict) -> None:
     elif event_type == "agent_done":
         duration = event.get("duration", 0.0)
         print(f"[完成] {role}（{duration:.1f}s）", flush=True)
+    elif event_type == "agent_wait":
+        # 等待转折复用向导那一份格式化（ui.progress.format_wait_event）：两处各写
+        # 一份状态文案，改一处漏一处的老毛病就这么来的（issue #62）。
+        from .ui.progress import format_wait_event
+
+        line = format_wait_event(event)
+        if line:
+            print(f"[等待] {line}", flush=True)
 
 
 def _create_video_with_progress(topic: str, config, **kwargs):
@@ -137,21 +167,27 @@ def _run_generate_prompts(args) -> int:
 
     if args.brief:
         brief = parse_brief(args.brief)
-        brief.mode = "base"
-        if args.variant:
-            brief.variant = args.variant.upper()
-        elif brief.variant == "T2VA":
-            brief.variant = "FL2VA"
+        # 多参路线（issue #41）：brief 声明 ref 就走 ref，参考素材随 brief 一起传。
+        _apply_frame_route_defaults(brief, args)
         if args.dry_run:
             print(json.dumps({
                 "brief": {"mode": brief.mode, "variant": brief.variant, "duration": brief.duration,
-                          "style": brief.style, "language": brief.language, "plot": brief.plot, "draft": brief.draft},
+                          "style": brief.style, "language": brief.language, "plot": brief.plot, "draft": brief.draft,
+                          # 画布回显（issue #42）：dry-run 的用途就是「看解析对不对」，
+                          # 选定画布不回显就无从发现画布键写错/没读到。
+                          "canvases": {family: [w, h] for family, (w, h) in brief.canvases.items()}},
                 "dry_run": True,
             }, ensure_ascii=False, indent=2))
             return 0
         result, directory = create_video_from_topic(
             brief.plot, config,
-            duration=brief.duration, style=brief.style, language=brief.language, variant=brief.variant,
+            duration=brief.duration, style=brief.style, language=brief.language,
+            variant=brief.variant, mode=brief.mode, refs=brief.refs,
+            # 画布键解析出来就得递进来（issue #42 复审）：少这一参，brief 文件里的
+            # 选定画布在最后一跳被丢掉、静默回落系统默认——「规则在、接线不在」。
+            canvases=brief.canvases,
+            # 视频输出三元组同待遇（issue #45）：解析出就得递到注入卡，不许中途丢。
+            video_output=brief.video_output,
         )
         _print_generation_result(result, directory)
         return 0
@@ -298,6 +334,88 @@ def _timestamp() -> str:
     return datetime.now().strftime("%Y-%m-%dT%H%M%S")
 
 
+def _run_ref_concat(args: argparse.Namespace) -> int:
+    """多参成片的手动拼接（issue #57 AC4）：重跑某段后不必从头走完整流程。
+
+    与向导里的**自动**拼接是同一份编排（``ref_segments.assemble_final_film``）：段序取
+    ``segments/plan.json``（段序的唯一出站真源），「哪几段过了」取段产出账的
+    ``event=output`` 行。少一段就拒绝并点名——缺段的成片时长对不上总时长，是伪产物
+    （AC3），这条规矩住在被拼接的那一处，两条路共用一副牙齿。
+
+    ``--replace N <路径>`` 是「重跑某段」的落点：账上记的还是旧那一份（甚至旧文件已被
+    换版），用它把该段指到新视频上。这一份**没经过本系统验收**（命令非交互，跑不了两道
+    闸），所以当面说破、不装作它过了闸。
+    """
+    from pathlib import Path
+
+    from .asset_ledger import sha256_file
+    from .ref_segments import (
+        assemble_final_film,
+        format_final_film,
+        passed_segment_rows,
+        read_plan_file,
+    )
+
+    directory = Path(args.session_dir)
+    if not directory.is_dir():
+        print(f"[错误] 生成目录不存在：{directory}")
+        return 1
+    try:
+        plans = read_plan_file(directory)
+    except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        print(f"[错误] {exc}")
+        return 1
+
+    rows = passed_segment_rows(directory)
+    known = {plan.index + 1 for plan in plans}
+    for raw_segment, raw_path in args.replace:
+        try:
+            number = int(raw_segment)
+        except ValueError:
+            print(f"[错误] --replace 的段号不是整数：{raw_segment!r}")
+            return 1
+        if number not in known:
+            # 段号写错时**当面报**：不报的话这一份会被静默丢掉，用户以为换上了
+            print(f"[错误] 本片没有第 {number} 段（段号 1–{max(known)}）：{directory}")
+            return 1
+        video = Path(raw_path)
+        if not video.is_file():
+            print(f"[错误] 第 {number} 段的替换视频读不到：{video}")
+            return 1
+        rows[number] = {"segment": number, "video": str(video),
+                        "sha256": sha256_file(video)}
+        print(f"[替换] 第 {number} 段改用你指定的视频（**未经本系统验收**）：{video}")
+
+    planned_s = sum(plan.duration_s for plan in plans)
+    total_s = _ref_total_duration(directory)
+    if total_s is None:
+        # 取不到就**说破**再退：起步总时长是段表覆盖判据与「成片该多长」的对照物，
+        # 静默拿另一个数顶上就是拿计划值冒充用户目标（两者在末段留余量时不等）。
+        print(f"[提示] 读不到会话文件里的起步总时长：按各段计划时长之和 {planned_s}s 核对。")
+        total_s = planned_s
+    film = assemble_final_film(
+        directory=directory, plans=plans, total_s=total_s, rows=rows)
+    print(format_final_film(film))
+    return 0 if film.path is not None else 1
+
+
+def _ref_total_duration(directory: Path) -> int | None:
+    """从会话文件取**起步总时长**（手动拼接命令的「本片总长」口径）。
+
+    取不到（文件不在/坏了）返回 None，由调用方退回「各段计划时长之和」并当面说破——
+    不静默拿计划值冒充用户目标（末段留余量时两者不等）。
+    """
+    from .session_store import load_session
+
+    try:
+        session = load_session(directory)
+    except (OSError, ValueError):
+        return None
+    if session is None:
+        return None
+    return int(round(float(session.brief.duration)))
+
+
 def _run_preflight(args: argparse.Namespace) -> int:
     """提交前预检。可证规则失败返回 1，其余返回 0。"""
     from pathlib import Path
@@ -370,6 +488,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_ledger(args)
     if args.command == "audit":
         return _run_audit(args)
+    if args.command == "ref-concat":
+        return _run_ref_concat(args)
     if args.command == "preflight":
         return _run_preflight(args)
 
@@ -381,9 +501,24 @@ def main(argv: list[str] | None = None) -> int:
         try:
             return run_wizard(config)
         except (KeyboardInterrupt, EOFError):
-            print("\n已取消。")
+            # 续跑点（issue #51）：已答的内容与已做的裁决都逐条落了盘。措辞只说
+            # **已落盘的**——阶段 1 中途断掉时还没有任何答案账可写，承诺过头同样是谎报。
+            print("\n已取消。已落盘的进度会保留：重跑向导从续跑点继续，已答的不必重答。")
             return 1
     return _run_cli(args)
+
+
+def _deliver_ref_segments_cli(brief, prompt: str, out_dir) -> None:
+    """--brief 快路径的多参分段交付（issue #46）：薄接线，编排/文案与向导同一份。"""
+    from .ref_segments import deliver_ref_segments
+    from .ui.progress import step_scope
+
+    # 与向导路径同一份等待反馈（issue #67）：快路径也走直调看门狗，横幅与心跳
+    # 不许只在向导里有——两条入口打同一个拆段调用，反馈口径必须一条。
+    with step_scope("正在按镜头切点拆分执行段"):
+        _result, report = deliver_ref_segments(
+            whole_prompt=prompt, total_s=brief.duration, out_dir=out_dir, brief=brief)
+    print(report)
 
 
 def _run_cli(args: argparse.Namespace) -> int:
@@ -392,12 +527,8 @@ def _run_cli(args: argparse.Namespace) -> int:
     from .config import config
 
     brief = parse_brief(args.brief)
-    # 产品主流程固定 base 模式；生成方式默认 FL2VA，允许 brief 声明或 --variant 显式指定。
-    brief.mode = "base"
-    if args.variant:
-        brief.variant = args.variant.upper()
-    elif brief.variant == "T2VA":
-        brief.variant = "FL2VA"
+    # 多参路线（issue #41）：brief 声明 ref（输入: 多参）就走 ref——「不再强制 base」。
+    _apply_frame_route_defaults(brief, args)
     if args.model and args.model != "fl2va":
         raise ValueError("当前产品只支持 fl2va 模型")
     if args.mode and args.mode != "base":
@@ -412,6 +543,13 @@ def _run_cli(args: argparse.Namespace) -> int:
         print("参考图:")
         for r in brief.refs:
             print(f"  <Picture {r.picture}> {r.name} — {r.description[:60]}")
+        # 素材台账边界声明（issue #43）：本快路径只产提示词文本、没有生成目录，
+        # 台账与正本复制没有落点——不静默装作已建账，指路两条有生成目录的产线
+        # （同「绝不静默失败」：能力的可达边界要看得见，不许静默缺位）。
+        if brief.mode == "ref" and any(r.path for r in brief.refs):
+            print("[提示] --brief 快路径不建素材台账与注入卡（无生成目录）；需要台账"
+                  "（语义名/编号/路径/SHA256）或注入卡请用 generate-prompts --brief"
+                  " 或两阶段向导交回入库。")
     if brief.draft:
         print(f"草稿: {brief.draft[:80]}{'…' if len(brief.draft) > 80 else ''}")
 
@@ -424,7 +562,28 @@ def _run_cli(args: argparse.Namespace) -> int:
     final_prompt = run_pipeline(brief, config)
     config.output_path.parent.mkdir(parents=True, exist_ok=True)
     config.output_path.write_text(final_prompt, encoding="utf-8")
-    print(f"\n已完成，最终提示词已写入: {config.output_path}")
+    # 分流口径**从常量派生**（issue #58 复审）：这条判据与向导 `_phase2_ref_finish`、
+    # 续跑装载的 `annotated` 是**同一条契约**（整片能不能一次喂给 H3 ＝ 规划器的执行段
+    # 上限），所以走同一个 `is_single_segment_route`，不在这里再写一个字面 15。
+    from .ref_segments import is_single_segment_route
+
+    if brief.mode == "ref" and not is_single_segment_route(brief.duration):
+        # 与向导 _phase2_ref_finish 同口径（issue #46/#55）：>15 秒按镜头边界拆段，
+        # 逐段自包含六段式＋段清单/拼接顺序卡落盘；整片六段式降级为**存档预览**
+        # ——交付物是逐段落盘的段提示词。**逐段陪跑不在这条路径上**（issue #55）：
+        # 它要交回视频、过可证层闸门、落段产出账，前提是交互终端；本快路径非交互，
+        # 且 stdout 要能整份取走（脚本场景），所以整片照旧打印、只是标明是存档。
+        _deliver_ref_segments_cli(brief, final_prompt, config.output_path.parent)
+        print(f"\n已完成。整片 ref 六段式已写入: {config.output_path}（仅存档预览）")
+        print("交付物是上面逐段落盘的段提示词文件；逐段陪跑（交回视频＋可证层验收＋"
+              "段产出账）请用两阶段向导。")
+    else:
+        print(f"\n已完成，最终提示词已写入: {config.output_path}")
+        if brief.mode == "ref":
+            # ≤15 秒的收尾（交回本段视频 → 两道闸 → 成片，issue #57）与 >15s 同理要交互
+            # 终端，快路径走不了：向导里整片六段式就是那唯一一段的提示词，段文件/plan.json/
+            # 顺序卡与成片都由它产出。不静默装作这条路也能出成片。
+            print("（≤15 秒多参的逐段陪跑与成片请用两阶段向导：本快路径非交互，交不回视频。）")
     print("=" * 60)
     print(final_prompt)
     return 0

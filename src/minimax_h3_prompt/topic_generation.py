@@ -71,16 +71,29 @@ def create_video_from_topic(
     style: str | None = None,
     language: str | None = None,
     variant: str = "FL2VA",
+    mode: str = "base",
     refs: list[RefItem] | tuple[RefItem, ...] = (),
+    canvases: dict[str, tuple[int, int]] | None = None,
+    video_output=None,
 ) -> tuple[GenerationResult, Path]:
-    """由主题生成剧本与提示词并落盘；不执行任何外部媒体工作流。"""
+    """由主题生成剧本与提示词并落盘；不执行任何外部媒体工作流。
+
+    ``mode="ref"`` 走多参路线（issue #41：brief 声明 ref 时不再强制 base），
+    ``refs`` 是用户登记的参考素材（brief 文件里声明的 ``<Picture N>``）。
+    ``canvases`` 是用户选定画布（issue #42）：CLI 的 --brief 路径在解析出它之后必须
+    **递到这里**——本函数自建 Brief，少传一个参数就是「规则在、接线不在」（复审实测：
+    main.py 解析出 canvases 却在最后一跳丢掉，静默回落系统默认）。
+    ``video_output`` 同待遇（issue #45）：视频输出三元组（``VideoOutputParams``），
+    注入卡记录的就是它；None ＝ 未声明，按画布自动推导（issue #49：比例档继承画布
+    比例、megapixels 按面积反推取档）——显式声明始终优先于推导。
+    """
     if not topic or not topic.strip():
         raise ValueError("视频主题不能为空")
     topic = topic.strip()
     variant = variant.upper()
     directory = Path(config.sessions_root) / topic_slug(topic) / "GEN001"
     brief = Brief(
-        mode="base",
+        mode=mode,
         variant=variant,
         duration=duration or config.default_duration,
         style=style or config.default_style,
@@ -88,7 +101,37 @@ def create_video_from_topic(
         plot=topic,
         raw=topic,
         refs=list(refs),
+        canvases=dict(canvases or {}),
+        video_output=video_output,
     )
+    # 素材交回入库（issue #43）：brief.refs 带路径的就是交回的素材图，建素材台账。
+    # **只对 ref 模式**：base/帧变体的 refs 是首尾帧锚点，进台账就是把锚点冒充参考素材。
+    # 建账放在跑管线**之前**——缺文件/坏哈希要在烧 LLM 时间前就炸出来。
+    if brief.mode == "ref" and brief.refs:
+        from .asset_ledger import (
+            KIND_PICTURE, AssetSubmission, intake_assets, render_report,
+        )
+
+        submissions = [
+            AssetSubmission(name=item.name, kind=KIND_PICTURE, source=item.path)
+            for item in brief.refs if item.path
+        ]
+        report = intake_assets(directory, submissions, registry=brief.refs)
+        rendered = render_report(report)
+        if rendered:
+            print(rendered)
+    # 注入卡（issue #45）：台账→参考槽接线清单＋视频输出三元组。同在管线**之前**——
+    # 接线清单不依赖 LLM 产物，崩了也该拿得到；base（首尾帧链）没有参考槽，不越界。
+    # 视频输出定案（声明优先/画布推导）走 resolve_video_output 同一份接线（issue #49）；
+    # 定案值回写 brief，卡与 brief 快照同源，不两处对账。
+    if brief.mode == "ref":
+        from .injection_card import resolve_video_output, write_injection_card
+
+        directory.mkdir(parents=True, exist_ok=True)
+        resolution = resolve_video_output(brief.video_output, brief.canvases)
+        brief.video_output = resolution.params
+        card = write_injection_card(directory, resolution.params, notes=resolution.notes)
+        print(card.text)
     result = run_pipeline_structured(
         brief,
         config,

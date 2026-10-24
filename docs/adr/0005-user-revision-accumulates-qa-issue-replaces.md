@@ -48,4 +48,4 @@
 
 另：**「已落地」标记只在重跑成功后写**——重跑失败或用户中断时不得写，否则清单会谎报。
 
-**票面归属**：本裁定与配套设计出自 2026-09-25 会话；设计全文见 `docs/superpowers/specs/2026-09-25-user-revision-accumulation-design.md`，票由 `/to-tickets` 生成。
+**票面归属**：本裁定与配套设计出自 2026-09-25 会话；设计全文见 `docs/design/2026-09-25-user-revision-accumulation-design.md`，票由 `/to-tickets` 生成。

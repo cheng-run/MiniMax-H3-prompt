@@ -11,7 +11,7 @@
 物证 arm 文本固化在 tests/fixtures/flicker_arms/。
 
 用法（仓库根，venv python）：
-    ./.venv/Scripts/python.exe tools/flicker_metric.py <a.mp4> <b.mp4> ...
+    ./.venv/Scripts/python.exe scripts/flicker_metric.py <a.mp4> <b.mp4> ...
 """
 import sys
 

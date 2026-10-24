@@ -72,12 +72,14 @@ DASHSCOPE_API_KEY=xxx
 
 `LLM_PROVIDER`、各 provider 的 `*_MODEL`/`*_MODEL_NAME`/`*_BASE_URL` 仍作为旧配置兼容覆盖项；未设置时才使用 `agent.yaml` 的值。不要把真实 key 写进仓库。
 
+`provider` 不限于内置的四种：任何 OpenAI 兼容网关（自建服务、中转站、`opencode` 等）直接把 `provider` 写成网关名，并在同一节点给出 `base_url` 与 `api_key_env` 即可；只有 `provider: anthropic` 走 Anthropic 官方 SDK。
+
 ## brief 格式
 
 `examples/` 里有示例（模板 `examples/brief_template.md`）。**`输入` 键对应你喂工作流的参考方式**：
 
 ```markdown
-输入: 首尾帧     # 首帧（工作流62·1张图）| 尾帧（工作流62·1张图）| 首尾帧（工作流62·2张图）| 多参考（工作流63·N张图）
+输入: 首尾帧     # 首帧（工作流62·1张图）| 尾帧（工作流62·1张图）| 首尾帧（工作流62·2张图）| 多参（59-(多Lora改)MiniMax-H3 ref2va 多参生视频 V3（24图槽）·N 张素材）
 时长: 6          # 秒
 风格: Cinematic 武侠电影质感
 语言: Chinese
@@ -85,7 +87,7 @@ DASHSCOPE_API_KEY=xxx
 ## 剧情
 一段话描述创意……（核心输入）
 
-## 参考图          # 张数随输入：首帧/尾帧=1张；首尾帧=2张（Picture1=首帧 Picture2=尾帧）；多参考=N张（角色/场景）
+## 参考图          # 张数随输入：首帧/尾帧=1张；首尾帧=2张（Picture1=首帧 Picture2=尾帧）；多参=N 张（参考素材）
                   # 格式：Picture N: 名称 — 描述  (图片路径)；有路径 → 运行前用 qwen3.7-plus 读图自动出描述，人工确认后进管线
 - Picture 1: 首帧 — 白发仙师在竹林缓抬手  (D:\Comfyui\ComfyUI\output\图片\你的图.png)
 - Picture 2: 尾帧 — 青衫青年落地向仙师行礼
@@ -152,12 +154,15 @@ START → [制片] → [导演] → [创意会·圆桌] → [编剧]
 
 `config/agent.yaml`：`max_qa_iterations`（质检精修上限）、`roundtable_max_rounds`（圆桌轮数上限）、`default_duration`、`output_path`（默认 `output/final_prompt.txt`）。
 
+`config/workflow.yaml`：多参路线的**登记工作流名**与三型参考槽位数（默认图 24 / 视频 3 / 音频 3）。槽位数是工作流节点的物理端口数，不是模型能力（ADR 0017）——先有对应端口的工作流再改这里的数字；缺失时读取口回落默认值。与 `agent.yaml`（模型侧）分开：换模型不该误改槽位。
+
 ## 目录结构
 
 ```
 src/minimax_h3_prompt/
 ├── main.py              # CLI（wizard 向导 / brief 快路径 / create-video / generate-prompts）
 ├── config.py            # YAML + `.env` 统一配置（API key 仅从 `.env` 读取）
+├── workflow_config.py   # 工作流登记名与参考槽位数（`config/workflow.yaml`）
 ├── model_factory.py     # LLM 后端工厂（自动探测）
 ├── brief_parser.py      # brief 解析
 ├── topic_generation.py  # 主题 → 提示词单入口（落盘到 output/sessions）

@@ -45,7 +45,7 @@ def _run_loop(tmp_path, monkeypatch, *, steps: list[tuple[str, Any]],
     每次提意见都要声明；脚本里补空串＝回车＝「只改画面」，即本文件考的那条老路）：
     - ``("1", "意见文本")``：选「提修改意见并重出」，提这一条意见（层次＝只改画面）；
     - ``("2", None)``：选「整个流程重来」——循环把它交还给 ``_phase1_new``，于是重新问
-      主题/时长/风格/变体，再进一轮（脚本里自动补上这四问的答案）；
+      主题/时长/风格/变体/画布，再进一轮（脚本里自动补上这些问的答案）；
     - ``("3", [编号, ...])``：选「撤销清单里的某条」，按顺序撤这些编号，回车结束撤销
       （编号是**屏幕上当前清单的位置编号**，撤掉一条后其余条会重排序）。
 
@@ -54,14 +54,15 @@ def _run_loop(tmp_path, monkeypatch, *, steps: list[tuple[str, Any]],
     ``on_stage1``：每次 ``run_stage1`` 被调用时的回调（重来那一刻磁盘上是什么样，只能
     在**下一次阶段 1 开跑之前**看到）。
     """
-    scripted = [TOPIC, "", "", "1"]
+    scripted = [TOPIC, "", "", "1", "1", "1"]
     for kind, payload in steps:
         scripted.append(kind)
         if kind == "1":
             scripted.extend([str(payload), ""])  # 意见正文 → 层次（回车=只改画面）
         elif kind == "2":
-            # 重来回到起步：重新问主题/时长/风格/变体（澄清在配置里关掉了，不问）
-            scripted.extend([TOPIC, "", "", "1"])
+            # 重来回到起步：重新问主题/时长/风格/变体＋画布两问（issue #42 选择器，
+            # Flux.2 退役后只剩 zimage 一家；澄清在配置里关掉了，不问）
+            scripted.extend([TOPIC, "", "", "1", "1", "1"])
         else:
             scripted.extend(str(number) for number in payload)
             if payload:  # 空载荷＝选了撤销但没有可撤的条目，那一问根本不会出现

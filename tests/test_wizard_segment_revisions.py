@@ -109,7 +109,7 @@ def test_fallback_write_requests_carry_revisions_for_every_segment(tmp_path, mon
     class _RecorderLLM:
         """只记录请求、不回话的假模型：真 ``rewrite_segment_prompt`` 会把它收到的请求交出来。"""
 
-        def invoke(self, request):
+        def invoke(self, request, config=None):
             requests.append(request)
             return "REWRITTEN"
 

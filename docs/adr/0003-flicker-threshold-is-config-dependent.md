@@ -37,13 +37,13 @@
 
 **由此暴露的工具缺口**：产物 PNG 元数据里的 LoRA 只是一个**文件名**，即一个可变引用。文件被换版或删除后，元数据记录的名字在本机解析不到任何东西，而**没有任何地方会因此报错或警告**。这与「规则在、接线不在」同型：规则（只信同仪器上的 >2× 效应）在，接线（仪器身份校验）不在。最小补法是产物旁边记 LoRA 的 SHA256（或至少版本号），让「同仪器」可校验而不是靠记得——另开票。
 
-**已落地**：票 **#18**，工具 `tools/loadout_manifest.py`（2026-09-23 实施）。给定产物 PNG，提出采样配置（`steps`/`scheduler`/`denoise`/`sampler_name`/`noise_seed`/`strength_model`）与全部模型文件引用，逐个解析到 ComfyUI 实际目录并给出大小 + SHA256；**解析不到即报红并非零退出**。拿历史产物做 A/B 之前先跑它——引用已消失时那批数字只能当孤立观测。本 ADR 第 36 行那对 `00003`/`00005` 正是它的首个实测用例（`4step_v1.1_768p` 报红）。
+**已落地**：票 **#18**，工具 `scripts/loadout_manifest.py`（2026-09-23 实施）。给定产物 PNG，提出采样配置（`steps`/`scheduler`/`denoise`/`sampler_name`/`noise_seed`/`strength_model`）与全部模型文件引用，逐个解析到 ComfyUI 实际目录并给出大小 + SHA256；**解析不到即报红并非零退出**。拿历史产物做 A/B 之前先跑它——引用已消失时那批数字只能当孤立观测。本 ADR 第 36 行那对 `00003`/`00005` 正是它的首个实测用例（`4step_v1.1_768p` 报红）。
 
 **票面归属**：#11（阈值来源）；本次裁定本身无票，由 2026-09-23 会话直接产出。
 
 ## 2026-09-24：#21 八步档 A/B 复测
 
-按 `tools/flicker_metric.py` 对 #19 的两段视频复测，并与现有八步样本并列。A/B 的 PNG 元数据均核实为 8 steps、seed `383532358651684`、当前 `minimax_h3_fl2v_turbo_8step_v1.0_768p_comfyui_bf16` LoRA、strength 1.0、euler/simple、denoise 1.0、输入 `图片放大_00004_.png`；PNG 与 MP4 均为 736×1280，MP4 为 107 帧 / 24 fps。提示词与票面指定 fixture 逐字节一致，A/B 各 3 个动作节拍。两份载荷清单均解析成功，记录于 `output/issue21-evidence/loadouts/`。
+按 `scripts/flicker_metric.py` 对 #19 的两段视频复测，并与现有八步样本并列。A/B 的 PNG 元数据均核实为 8 steps、seed `383532358651684`、当前 `minimax_h3_fl2v_turbo_8step_v1.0_768p_comfyui_bf16` LoRA、strength 1.0、euler/simple、denoise 1.0、输入 `图片放大_00004_.png`；PNG 与 MP4 均为 736×1280，MP4 为 107 帧 / 24 fps。提示词与票面指定 fixture 逐字节一致，A/B 各 3 个动作节拍。两份载荷清单均解析成功，记录于 `output/issue21-evidence/loadouts/`。
 
 | 样本 | 产物 | flicker_std |
 |---|---|---:|

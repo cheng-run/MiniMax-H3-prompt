@@ -121,4 +121,7 @@ def test_prefetch_exception_does_not_hang_the_flow(tmp_path, monkeypatch, capsys
     thread.join(timeout=15)
 
     assert finished, "预取线程异常后向导卡死在 take() 的等待循环里"
-    assert "生成失败，跳过" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    # 措辞按 issue #70 改：失败不再只说「跳过」，而是先由写段层打病因与尝试次数，
+    # 这里只声明本段没有产出（病因在上一行）——同一句病因打两遍会被当成两次失败。
+    assert "第 1 段没有产出（病因见上），跳过本段" in out

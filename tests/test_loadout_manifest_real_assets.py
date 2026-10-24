@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from tools.loadout_manifest import extract_loadout, resolve_refs
+from scripts.loadout_manifest import extract_loadout, resolve_refs
 from tests.conftest import comfy_output_dir
 
 COMFY_OUTPUT = comfy_output_dir()          # <ComfyUI>/output/视频/MiniMax-H3/<日期>

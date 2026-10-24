@@ -14,12 +14,16 @@ from ..config import Config
 from ..generation import (
     IMAGE_FAMILY_LABELS,
     IMAGE_PROFILE_DEFAULTS,
+    canvas_display,
+    composition_hint,
     fl2va_bundle_from_dict,
     image_canvas_size,
+    ref_asset_registry,
     strip_foreign_frames,
     variant_frame_names,
 )
 from ..tools.h3_validator import validate_prompt
+from ..tools.image_prompt_discipline import check_image_prompt
 from ..tools.ref_metadata import format_ref_meta
 from ..tools.theme_guard import theme_requirements_text
 from ..user_revisions import (
@@ -58,6 +62,32 @@ def _brief_block(brief: Brief) -> str:
         参考资产=refs if brief_uses_refs(brief) else "",
         草稿=brief.draft or "",
     )
+
+
+def _ref_assets_block(state: PipelineState, brief: Brief) -> str:
+    """渲染【参考资产】块：N 张素材的编号登记 + 指称纪律（issue #41）。
+
+    登记由 ``ref_asset_registry`` **现算**（编号按剧本出场顺序）——它依赖资产图提示词，
+    而那是链上 ``parallel_image_prompts`` 的产物，构造节点时还不存在；这正是三个消费者
+    （reference_consistency／身份圆桌／提示词工程师）都从这里取、不再各自抄一份的原因。
+
+    多参纪律只对 ``mode="ref"`` 说：帧变体的 refs 是首/尾帧登记，套「素材语义名指称」
+    会把两套指称体系搅在一起。多参纪律与角色提示词（prompt_engineer.md）互为表里：
+    这里钉**数据侧**（哪些编号、哪些名字、描述取自哪），角色提示词钉写法。
+    """
+    if brief.mode == "ref":
+        refs = ref_asset_registry(state, brief)
+        if not refs:
+            return ""
+        return (
+            "编号按剧本出场顺序分配（编号即叙事顺序，不得改号）。"
+            "破折号后的描述就是该素材的**生图提示词**（素材画面事实：画面描述以它为描述主体）。"
+            "素材指称以**语义名为主**，<Picture N> 官方标签在格式要求处兜底。\n"
+            + format_ref_meta(refs)
+        )
+    if brief_uses_refs(brief) and brief.refs:
+        return format_ref_meta(brief.refs)
+    return ""
 
 
 def _make_producer_node(agents: dict) -> Callable:
@@ -124,15 +154,23 @@ def _make_design_node(agents: dict, role: str, output_field: str, label: str,
 
 
 def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_field: str) -> Callable:
-    """把模型无关设计资料翻译为 Z-Image/Flux.2 双版本提示词。
+    """把模型无关设计资料翻译为 N 条 Z-Image 提示词（每资产一条，issue #40）。
 
-    这是**资产图**那条路（人物／道具／场景各一张参考图），与关键帧那条路
-    （``_make_fl2va_frame_prompt_node``）是两件事，但同属生图侧、用同一份词表切片。
+    这是**资产图**那条路（人物／道具／场景参考图，按剧本设计动态枚举 N 个资产），
+    与关键帧那条路（``_make_fl2va_frame_prompt_node``）是两件事，但同属生图侧、
+    用同一份词表切片。Flux.2 版已全链取消：单资产只出 Z-Image 一版。
     """
     def node(state: PipelineState) -> dict:
         brief: Brief = state["brief"]
+        # 路线守卫（issue #78 / 父 spec #77）：资产图提示词只属于多参路线。首尾帧把人物、
+        # 道具、场景**融合**进一张关键帧，没有「每件资产单独出图」这一步；无条件跑就是每次
+        # 白付 3 次调用，锁死清单不合规还会让整条阶段 1 失败。只早退、不改管线拓扑——
+        # 截断重跑与续跑链都不用跟着改（已知副作用：并行组合节点不产生更新、进度行不出现）。
+        if not brief.is_ref:
+            return {}
         message = (
-            f"请为{kind}生成 Z-Image 和 Flux.2 两个可直接复制的生图提示词。只输出 JSON。\n"
+            f"请为{kind}设计中的每个资产各生成一条 Z-Image 可直接复制的生图提示词。"
+            f"设计里有几个{kind}资产就输出几条。只输出 JSON 数组。\n"
             + _ctx(
                 原始剧情=brief.plot,
                 起步澄清=brief.clarifications,
@@ -141,10 +179,11 @@ def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_f
                 美术统筹=state.get("art_design", ""),
                 视觉风格=brief.style,
                 语言=brief.language,
-                # 画布是**本次请求的数据**（不住在系统提示词里）：构图那套词按画幅分两套，
-                # 而两个家族的画幅不是一个形状。词表里写着「哪个模型是哪种画幅见请求里的
-                # 【画布】块」——不带这块，那条指针就没有落点（issue #33 在帧节点踩过同一个坑）。
-                画布=_canvas_block(),
+                # 画布是**本次请求的数据**（不住在系统提示词里）：构图那套词按画幅族分
+                # 两套，而用户选定的画布形状各案不同。词表里写着「画布与尺寸一律以请求里的
+                # 【画布】块为准」——不带这块，那条指针就没有落点（issue #33 在帧节点踩过
+                # 同一个坑）。
+                画布=_canvas_block(brief.canvases),
             )
         )
         raw = run_agent(agents["image_prompt_engineer"], message)
@@ -154,33 +193,243 @@ def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_f
             # 纯格式转换，但它同样用这份系统提示词——词表里的【画布】指针照样得在场。
             repair = run_agent(
                 agents["image_prompt_engineer"],
-                f"把以下内容转换为严格 JSON，不要 markdown：\n{_ctx(画布=_canvas_block())}\n{raw}",
+                f"把以下内容转换为严格 JSON 数组，不要 markdown：\n{_ctx(画布=_canvas_block(brief.canvases))}\n{raw}",
             )
             try:
                 parsed = json.loads(repair)
             except json.JSONDecodeError as exc:
                 raise ValueError(f"{kind} 生图提示词不是有效 JSON") from exc
-        if not isinstance(parsed, dict):
-            raise ValueError(f"{kind} 生图提示词 JSON 顶层必须是对象")
-        return {output_field: parsed}
+        # 清单层违约先修一次（issue #64）：条目是转述时下游的偏差判定会静默失效，
+        # 但一次违约就停住整条阶段 1 的代价与这个模型的失败模式不匹配。
+        violations = _locked_violations(parsed, kind)
+        if violations:
+            patch = run_agent(
+                agents["image_prompt_engineer"],
+                _build_locked_repair_request(kind, violations, _canvas_block(brief.canvases)),
+            )
+            merged = _apply_locked_repair(parsed, kind, patch, violations)
+            try:
+                entries = _normalize_asset_entries(merged, kind)
+            except ValueError as exc:
+                # 修复后仍不合规才停：给重跑的人留下「已试过一次修复」与逐条明细，
+                # 一眼分清是模型固执还是可修（节点原始报错里没有这层信息）。
+                raise ValueError(f"{kind} 锁死清单修复 1 次后仍不合规：{exc}") from exc
+        else:
+            entries = _normalize_asset_entries(parsed, kind)
+        # 纪律检查**排在归一之后**：只有形状合规的条目才谈得上「正文写法」，
+        # 也保证两条返回路径（修过/没修过）都经过同一道检查（issue #68）。
+        _warn_image_prompt_discipline(entries, kind)
+        return {output_field: entries}
     return node
 
 
-def _canvas_block() -> str:
-    """帧节点请求里的【画布】块（issue #33）。
+def _warn_image_prompt_discipline(entries: list[dict], kind: str) -> None:
+    """出词后打印警告级纪律检查结果（issue #68 / ADR 0018）。
 
-    模型不知道自己在给哪个画幅写构图，就会按一种画幅的直觉安排主体位置——而两个模型的
-    画布不是一个形状，同一条构图指令在两种画布上语义不同。画幅由宽高自己推，**这里不写
-    模型与画幅的对应**：那是 `IMAGE_PROFILE_DEFAULTS` 的事，换画布时请求与渲染层一起跟着动。
+    **只打印、不改产物、不阻断**：Turbo 的失败模式是「细节没画出来」，不是
+    「输出不合规」；做成 error 闸门会被合法写法误伤，把一份本来能出图的提示词停掉。
+    警告打在节点里而不是展示口：真实运行都经过节点，且本文件已有同样的先例
+    （关键帧节点剥帧的告警）。
+    """
+    for entry in entries:
+        for warning in check_image_prompt(str(entry.get("positive_prompt", ""))):
+            print(
+                f"[警告] {kind}「{entry.get('name', '')}」生图提示词：{warning.message}"
+            )
 
-    行的来源就是**那张表本身**（家族清单、尺寸、显示名三样都从 `generation` 取）：
-    本模块里再抄一份家族元组的话，将来加第三个生图家族时【画布】块会**静默少一行**。
+
+def _normalize_asset_entries(parsed: object, kind: str) -> list[dict]:
+    """把资产图节点的 JSON 回复归一成五键资产条目列表（issue #40；锁死清单 issue #53）。
+
+    只保留 ``name / positive_prompt / negative_prompt / instructions / locked_features``
+    五键：多余的键（模型键 ``zimage``/``flux2`` 等）不进 state——那是被取消的维度，
+    放它进来会让下游再长出「按模型分叉」的读法。语义名必填：素材台账／注入卡靠它对号。
+
+    **锁死清单**（issue #53）在这里连两道闸门一起把住：
+
+    - 缺席／空表 → 响。清单是对照器判偏差的**唯一判据**，空表＝不收窄＝「8 张图 39 条
+      偏差逐条三选」那场人裁灾难原样回来，而且没人看得出为什么（静默失败）；
+    - 条目不是 ``positive_prompt`` 的**原文片段** → 响。读图逐字摘录的那句要落得到条目上，
+      条目是转述的话命中判据恒不成立、偏差悄悄清空——同样是静默失败。这条不变式
+      由角色提示词要求模型「逐字摘录正文」，这里把它钉成可证的检查。
+    """
+    if not isinstance(parsed, list):
+        raise ValueError(f"{kind} 生图提示词 JSON 顶层必须是数组（每资产一项）")
+    entries: list[dict] = []
+    for index, item in enumerate(parsed):
+        if not isinstance(item, dict):
+            raise ValueError(f"{kind} 生图提示词第 {index + 1} 项不是对象")
+        name = str(item.get("name", "")).strip()
+        if not name:
+            raise ValueError(f"{kind} 生图提示词第 {index + 1} 项缺少资产语义名 name")
+        positive = str(item.get("positive_prompt", "")).strip()
+        if not positive:
+            raise ValueError(f"{kind} 资产「{name}」的 positive_prompt 为空")
+        locked = _normalize_locked_features(item.get("locked_features"), name, positive, kind)
+        entries.append({
+            "name": name,
+            "positive_prompt": positive,
+            "negative_prompt": str(item.get("negative_prompt", "")),
+            "instructions": [str(x) for x in item.get("instructions", [])],
+            "locked_features": locked,
+        })
+    return entries
+
+
+def _locked_problem(raw: object, positive: str) -> str | None:
+    """返回锁死清单的违约描述；合规时返回 ``None``（issue #53 的不变式判据）。
+
+    这是**唯一**一份清单判据：节点校验（``_normalize_locked_features``）与一次修复
+    重试（``_locked_violations``）都从这里取口径。两处各写一份子串判断的话，改一处
+    另一处就静默失效——本仓「同一契约两处口径」已经咬过两次（issue #56／#57）。
+
+    返回值接在「{kind} 资产「{name}」：」之后读，所以每句都以自己的主语起头，不带前缀。
+    """
+    if raw is None:
+        return ("缺 locked_features（锁死清单）——"
+                "它是读图校对判偏差的唯一判据，缺席等于把整篇提示词当判据（人裁被淹）")
+    if not isinstance(raw, list):
+        return f"locked_features 不是数组：{raw!r}"
+    locked = [str(x).strip() for x in raw]
+    locked = [x for x in locked if x]
+    if not locked:
+        return "locked_features 是空表——至少要一条身份特征"
+    bad = [x for x in locked if x not in positive]
+    if bad:
+        return (f"锁死清单条目 {bad[0]!r} 不是 positive_prompt 的原文片段"
+                "——条目必须逐字摘自正文，否则读图摘录的引文落不到条目上、偏差判不出来")
+    return None
+
+
+def _normalize_locked_features(raw: object, name: str, positive: str, kind: str) -> list[str]:
+    """归一一条资产的锁死清单（issue #53）；坏形状与不合不变式的条目都响。
+
+    形状坏（不是数组）与条目坏（空、或不是正文原文片段）分开报错，是为了让重跑的人
+    一眼看出是模型没交清单、还是交了一份转述——两者的修法不同（改角色提示词措辞 vs
+    让人工看一眼那条到底想锁什么）。两类现在都先走一次补丁式修复（issue #64）；
+    修复后仍不合规才到这里抛错。
+    """
+    problem = _locked_problem(raw, positive)
+    if problem is not None:
+        raise ValueError(f"{kind} 资产「{name}」：{problem}")
+    return [str(x).strip() for x in raw if str(x).strip()]
+
+
+def _locked_violations(parsed: object, kind: str) -> list[dict]:
+    """收集**清单层**违约，供节点做一次补丁式修复（issue #64）。
+
+    为什么需要修复而不是一次违约就停：条目转述时下游会**静默**把整条偏差降级成
+    「理想描述出入」（``asset_proofread._locked_hit`` 双向子串必不命中），所以闸门
+    必须响；但场景／道具的身份特征在设计资料里就是抽象描述，模型从资料概括而不是从
+    正文摘的概率不低，一次违约就让整条阶段 1 停住、重跑还要重付已成功的那几路调用，
+    代价与触发点不匹配。一次重交的成本是 1 次调用，且本仓已有同形先例（关键帧 bundle
+    外层回灌错误重写一次）。
+
+    结构性坏法（顶层不是数组、项不是对象、name／positive_prompt 缺）**不收**：修复
+    请求的格式是 ``name → locked_features``，结构坏了补丁无处落，重交只会再撞同一道闸；
+    它们仍由 ``_normalize_asset_entries`` 原样报错。
+    """
+    if not isinstance(parsed, list):
+        return []
+    violations = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            return []
+        name = str(item.get("name", "")).strip()
+        positive = str(item.get("positive_prompt", "")).strip()
+        if not name or not positive:
+            return []
+        problem = _locked_problem(item.get("locked_features"), positive)
+        if problem is not None:
+            violations.append({
+                "name": name,
+                "positive_prompt": positive,
+                "locked_features": item.get("locked_features"),
+                "problem": problem,
+            })
+    return violations
+
+
+def _build_locked_repair_request(kind: str, violations: list[dict], canvas_block: str) -> str:
+    """拼一次补丁式修复请求：只收 ``name → locked_features``，正文冻结。
+
+    为什么把 ``positive_prompt`` 全文交回去：模型要「逐字摘」，手里就得有那篇正文；
+    只给条目名的话它只能再转述一次。为什么不许它改正文：图词已经设计定稿，允许改
+    正文等于让修复顺手改产物，而且「条目在正文里」可以被改正文满足——唯一变量必须是
+    清单，diff 才审得动。
+    """
+    lines = [
+        f"以下{kind}资产的锁死清单不合规。请**只修正 locked_features**：",
+        "每一条必须是该资产 positive_prompt 里**原样存在**的连续片段（逐字复制，不改写、"
+        "不概括、不加「发色：」这类前缀），每条资产 2–5 条。",
+        "不要改动 positive_prompt，也不要输出它或其它字段。",
+        "只输出 JSON 数组，每项只含 name 与 locked_features 两个键。",
+        canvas_block,
+    ]
+    for v in violations:
+        lines.append(
+            f"- name：{v['name']}\n"
+            f"  positive_prompt：{v['positive_prompt']}\n"
+            f"  不合格的清单：{v['locked_features']!r}\n"
+            f"  问题：{v['problem']}")
+    return "\n".join(lines)
+
+
+def _apply_locked_repair(parsed: list, kind: str, raw: str, violations: list[dict]) -> list:
+    """把修复补丁按 ``name`` 合并回原条目（正文与其余字段一字不动）。
+
+    补丁缺资产就整次判失败：静默留下某个资产的坏清单，等于让下游的偏差判定继续悄悄
+    失效——正是这道闸门要防的那件事。
+    """
+    try:
+        patch = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"{kind} 锁死清单的修复结果不是有效 JSON（已修复尝试 1 次）：{raw[:200]!r}") from exc
+    if not isinstance(patch, list):
+        raise ValueError(f"{kind} 锁死清单的修复结果顶层必须是数组（已修复尝试 1 次）")
+    replacements: dict[str, object] = {}
+    for item in patch:
+        if not isinstance(item, dict) or "locked_features" not in item:
+            raise ValueError(
+                f"{kind} 锁死清单的修复结果每项只许有 name 与 locked_features（已修复尝试 1 次）：{item!r}")
+        name = str(item.get("name", "")).strip()
+        if not name:
+            raise ValueError(f"{kind} 锁死清单的修复结果有一项缺 name（已修复尝试 1 次）")
+        replacements[name] = item.get("locked_features")
+    missing = [v["name"] for v in violations if v["name"] not in replacements]
+    if missing:
+        raise ValueError(f"{kind} 锁死清单的修复结果缺了这些资产：{missing}（已修复尝试 1 次）")
+    merged = []
+    for item in parsed:
+        name = str(item.get("name", "")).strip()
+        if name in replacements:
+            # 只替换清单键；其余键（尤其 positive_prompt）原样保留——这是补丁式的全部意义。
+            item = {**item, "locked_features": replacements[name]}
+        merged.append(item)
+    return merged
+
+
+def _canvas_block(canvases: dict[str, tuple[int, int]] | None = None) -> str:
+    """生图侧请求里的【画布】块（issue #33 接线，issue #42 改为用户选定）。
+
+    模型不知道自己在给哪个画幅写构图，就会按一种画幅的直觉安排主体位置。每行带三样：
+    **用户选定的画布**（显示名+尺寸，与渲染层的画布行同取 ``canvas_display``）、
+    **画幅形状**与**构图分套指示**（``composition_hint``）——分套绑画幅族不绑模型
+    （Q21(c)），族外（横幅、极端比例）的指示明说「不用竖幅/正方任一套」，把
+    「横幅画面配竖幅构图词」的说反话堵在请求这一层。
+
+    行的来源就是**生图 profile 默认表本身**（家族清单从 `generation` 取）：本模块里
+    再抄一份家族元组的话，将来加第三个生图家族时【画布】块会**静默少一行**。尺寸经
+    ``image_canvas_size(family, canvases)`` 解析——用户选定优先、未选回落默认表。
     """
     lines = []
     for family in IMAGE_PROFILE_DEFAULTS:
-        width, height = image_canvas_size(family)
-        shape = "竖幅" if height > width else "正方" if height == width else "横幅"
-        lines.append(f"- {IMAGE_FAMILY_LABELS[family]}（{family}）：{width} × {height}（{shape}）")
+        width, height = image_canvas_size(family, canvases)
+        lines.append(
+            f"- {IMAGE_FAMILY_LABELS[family]}（{family}）："
+            f"{canvas_display(width, height)}；{composition_hint(width, height)}"
+        )
     return "\n".join(lines)
 
 
@@ -228,8 +477,8 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
             repair = run_agent(
                 agents["frame_prompt_engineer"],
                 f"把以下内容转换为严格 JSON，不要 markdown，必须保留 {required}、scene_anchor、"
-                f"continuity_constraints，以及每个模型的 composition 与 lighting 字段：\n"
-                f"{_ctx(画布=_canvas_block(), 场景词=_scene_terms_block(brief))}\n原始内容：\n{raw}",
+                f"continuity_constraints，以及 composition 与 lighting 字段：\n"
+                f"{_ctx(画布=_canvas_block(brief.canvases), 场景词=_scene_terms_block(brief))}\n原始内容：\n{raw}",
             )
             try:
                 parsed = json.loads(repair)
@@ -272,8 +521,8 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
               "主题要求的地点词以输入里的【场景词】块为准。"
             # 构图/光线两个字段（issue #33）：解析器一直支持读写，却无人写——实测仓库里
             # 9 份真实产物（5 个会话）的 18 行全是空串。字段名进请求是「有生产者」的第一步。
-            + "每个模型版本都必须给出 composition 与 lighting 两个字段"
-              "（按本模型的画布写构图、按光线的方向/强度/质感写光）。"
+            + "必须给出 composition 与 lighting 两个字段"
+              "（按画布写构图、按光线的方向/强度/质感写光）。"
             + "只输出 JSON。\n"
             + _ctx(
                 变体=brief.variant,
@@ -287,7 +536,7 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
                 语言=brief.language,
                 # 画布是**本次请求的数据**（不住在系统提示词里），所以主请求与下面的
                 # 改写重试都要带：少了它，模型只能按自己的直觉重新安排构图。
-                画布=_canvas_block(),
+                画布=_canvas_block(brief.canvases),
                 # 累积的用户修订：人机修改循环每轮重出都把它带进上下文（issue #23）。
                 # 自动质检循环不设该键 → 空值被 _ctx 跳过，它的替换语义逐字不变。
                 用户修订=render_revision_block(pending_revisions(state)),
@@ -323,7 +572,7 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
                 # 画布是数据、不是系统提示词里的常量，所以这条重写请求必须自带一份。
                 # 相对地，composition / lighting 的字段要求住在角色系统提示词里（每次调用
                 # 都在场），不必在这里重复——同「起步澄清」与「内容规则」的分工。
-                画布=_canvas_block(),
+                画布=_canvas_block(brief.canvases),
                 # 场景词同画布：数据、不在系统提示词里。少了它这条重写在信息上不可赢。
                 场景词=scene_terms,
                 起步澄清=brief.clarifications,
@@ -483,7 +732,9 @@ def _make_reference_consistency_node(agents: dict) -> Callable:
         brief: Brief = state["brief"]
         if brief.mode != "ref":
             return {"subject_defs": ""}  # base 模式不需要 subject 定义，跳过
-        refs = format_ref_meta(brief.refs) if brief.refs else "（无）"
+        # 登记现算（issue #41）：本节点跑在 parallel_image_prompts 之后，拿得到 N 资产；
+        # brief.refs 为空的向导多参路线正是靠它才有 <Picture N> 映射可锁。
+        refs = _ref_assets_block(state, brief) or "（无）"
         msg = "请给出 subject_definitions 与 retention_analysis 素材：\n" + _ctx(
             参考资产=refs, 美术设计=state.get("art_design", ""),
             人物设计=state.get("character_design", ""),
@@ -607,7 +858,9 @@ def _make_prompt_engineer_node(agents: dict) -> Callable:
             对白与环境声=state.get("sound_design", ""),
             配乐=state.get("music", ""),
             subject_definitions_素材=state.get("subject_defs", "") if brief.mode == "ref" else "",
-            参考资产=format_ref_meta(brief.refs) if (brief_uses_refs(brief) and brief.refs) else "",
+            # 编号登记 + 指称纪律（issue #41）：语义名为主、<Picture N> 格式处兜底、
+            # 画面描述以生图提示词为描述主体（素材画面事实）。
+            参考资产=_ref_assets_block(state, brief),
             质检问题=("\n".join(state.get("qa_issues") or []) or ""),
         )
 
@@ -697,13 +950,15 @@ def make_shot_rt_node(rt, model, brief) -> Callable:
 def make_identity_rt_node(rt, model, brief) -> Callable:
     if brief.mode != "ref":
         return lambda s: {"identity_lock": ""}  # base 模式不需要身份锁定
-    refs = format_ref_meta(brief.refs) if brief.refs else "（无）"
     return _make_roundtable_node(
         rt, "identity_lock", "锁定角色/场景身份定义与 <Picture N> 映射",
+        # 参考资产从 state 现算（issue #41）：<Picture N> 映射正是本圆桌的锁定对象，
+        # 向导多参路线的登记要到资产图提示词产出后才存在，构造时抄一份就是空的。
         lambda s: _ctx(统筹美术设计=s.get("art_design", ""),
                        人物设计=s.get("character_design", ""),
                        背景设计=s.get("background_design", ""),
-                       道具设计=s.get("prop_design", ""), 参考资产=refs))
+                       道具设计=s.get("prop_design", ""),
+                       参考资产=_ref_assets_block(s, brief) or "（无）"))
 
 
 def make_parallel(*nodes: Callable[[PipelineState], dict]) -> Callable[[PipelineState], dict]:

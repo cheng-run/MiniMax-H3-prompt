@@ -94,7 +94,7 @@ def test_rewrite_segment_prompt_uses_llm_and_window():
     class FakeLLM:
         def __init__(self):
             self.last_request = ""
-        def invoke(self, request):
+        def invoke(self, request, config=None):
             self.last_request = request
             return "For the target video ... [Shot 1] rewritten, scoped."
 
@@ -108,7 +108,7 @@ def test_rewrite_segment_prompt_uses_llm_and_window():
 
 def test_rewrite_segment_prompt_fallback_on_llm_error():
     class BrokenLLM:
-        def invoke(self, request):
+        def invoke(self, request, config=None):
             raise RuntimeError("quota exhausted")
 
     segments = split_shots_from_prompt(SAMPLE_PROMPT, total_duration=12.0)
@@ -146,7 +146,7 @@ class FakeLLM:
         self.last_request = ""
         self._reply = reply
 
-    def invoke(self, request):
+    def invoke(self, request, config=None):
         self.last_request = request
         return self._reply
 
@@ -857,7 +857,7 @@ class SequencedLLM:
     def calls(self) -> int:
         return len(self.requests)
 
-    def invoke(self, request):
+    def invoke(self, request, config=None):
         self.requests.append(request)
         index = min(len(self.requests), len(self._replies)) - 1
         return self._replies[index]
@@ -1162,3 +1162,338 @@ def test_write_segment_requests_no_longer_take_the_dead_brief_param():
 
     for fn in (build_segment_v2_request, write_segment_v2):
         assert "brief" not in inspect.signature(fn).parameters, f"{fn.__name__} 还收着死参数 brief"
+
+
+# ---------------------------------------------------------------------------
+# 多参分段（issue #46）：自包含六段式 + 时间轴注记 + 起止状态声明 + 禁指代前文
+# 多参无桥接帧：锚定由全片共享参考素材承担，分段**不得**套用 issue #9 的
+# 「分段恒单图开场锚」（I2VA 锚定行进 ref 段即为误用）。
+# ---------------------------------------------------------------------------
+
+from minimax_h3_prompt.segment_prompts import (  # noqa: E402
+    assemble_ref_segment,
+    render_ref_segment_annotations,
+    validate_ref_segment,
+)
+from minimax_h3_prompt.tools.h3_validator import split_ref_sections  # noqa: E402
+
+_REF_WHOLE_PROMPT = """subject_definitions:
+<Subject 1> is 红裙女孩 (the girl in <Picture 1>), with long dark hair and a red dress.
+<Subject 2> is 青铜钥匙 (the key in <Picture 2>), with an old green patina.
+
+summary:
+[reference generation] The target video shows 红裙女孩 walking into the garden and handing 青铜钥匙 over.
+
+retention_analysis:
+<Subject 1> (appears in [Shot 1], [Shot 2]): fully_preserved - the red dress and long dark hair are retained.
+<Subject 2> (appears in [Shot 1], [Shot 2]): fully_preserved - the green patina is retained.
+
+detailed_description:
+The target video is in a cinematic autumn style with warm soft lighting.
+[Shot 1] A medium shot frames the garden path. 红裙女孩 walks in holding 青铜钥匙.
+[Shot 2] At 00:04.000, the shot cuts to a close-up as she hands 青铜钥匙 to the boy.
+
+overall_soundscape:
+Soft outdoor ambience with light footsteps continues throughout the scene.
+
+non_diegetic_music:
+N/A
+"""
+
+_REF_SEGMENT_BODY = """The target video is in a cinematic autumn style with warm soft lighting.
+[Shot 1] A medium shot frames the garden path. 红裙女孩 walks in holding 青铜钥匙.
+[Shot 2] At 00:03.000, the shot cuts to a close-up as she hands 青铜钥匙 to the boy."""
+
+
+def _ref_segment_sample(anaphora: str = "", omit_annotations: bool = False) -> str:
+    """自包含六段式正样本：定义性段落逐段重复 + 时间轴注记 + 起止状态声明。"""
+    annotations = render_ref_segment_annotations(
+        segment_number=2, total_segments=3, start_s=8, end_s=15, total_s=22,
+        start_state="the girl in the red dress stands on the garden path holding the bronze key",
+        end_state="the bronze key has just been handed over to the boy",
+    )
+    sections = split_ref_sections(_REF_WHOLE_PROMPT)
+    return assemble_ref_segment(
+        subject_definitions=sections["subject_definitions"],
+        retention_analysis=sections["retention_analysis"],
+        task_type="reference generation",
+        summary_body="The girl in the red dress hands the bronze key over on the garden path.",
+        detailed_body=_REF_SEGMENT_BODY + anaphora,
+        overall_soundscape="Soft outdoor ambience with light footsteps continues.",
+        non_diegetic_music="N/A",
+        annotations="" if omit_annotations else annotations,
+    )
+
+
+def test_ref_segment_annotations_carry_order_window_and_states():
+    """时间轴注记（段序+起止秒）与起止状态声明：canonical 形态一次成型。"""
+    line = render_ref_segment_annotations(
+        segment_number=2, total_segments=4, start_s=8, end_s=15, total_s=22,
+        start_state="the girl stands at the gate", end_state="the key is handed over")
+    assert "Segment 2 of 4" in line
+    assert "covering 8s-15s of the full 22s video" in line
+    assert "This segment begins with the girl stands at the gate." in line
+    assert "This segment ends with the key is handed over." in line
+
+
+def test_validate_ref_segment_accepts_compliant_sample():
+    issues = validate_ref_segment(
+        _ref_segment_sample(), duration=7, segment_number=2, total_segments=3,
+        start_s=8, total_s=22, ref_meta=[(1, "红裙女孩", "…"), (2, "青铜钥匙", "…")])
+    errors = [i for i in issues if i.severity == "error"]
+    assert errors == [], [f"{i.code}: {i.message}" for i in errors]
+
+
+def test_validate_ref_segment_flags_anaphora():
+    """禁用指代前文的措辞（issue #46）：对无记忆模型「如前所述」是无效信息。"""
+    for phrase in ("as mentioned before", "as described earlier",
+                   "the previous segment", "如前所述"):
+        issues = validate_ref_segment(
+            _ref_segment_sample(anaphora=f" She {phrase} explained the plan."),
+            duration=7, segment_number=2, total_segments=3, start_s=8, total_s=22)
+        codes = [i.code for i in issues if i.severity == "error"]
+        assert "SEGMENT_ANAPHORA" in codes, f"{phrase!r} 未被判出：{codes}"
+
+
+def test_validate_ref_segment_requires_timeline_note():
+    issues = validate_ref_segment(
+        _ref_segment_sample(omit_annotations=True),
+        duration=7, segment_number=2, total_segments=3, start_s=8, total_s=22)
+    codes = [i.code for i in issues if i.severity == "error"]
+    assert "SEGMENT_TIMELINE_MISSING" in codes
+    assert "SEGMENT_STATE_MISSING" in codes
+
+
+def test_validate_ref_segment_requires_all_registry_pictures_in_definitions():
+    """「定义逐段重复」要有牙：登记图有一张没进 subject_definitions 即 error——
+    段 2 不带定义就是无参照描述（issue #46）。"""
+    text = _ref_segment_sample().replace(
+        "<Subject 2> is 青铜钥匙 (the key in <Picture 2>), with an old green patina.\n", "")
+    issues = validate_ref_segment(
+        text, duration=7, segment_number=2, total_segments=3, start_s=8, total_s=22,
+        ref_meta=[(1, "红裙女孩", "…"), (2, "青铜钥匙", "…")])
+    codes = [i.code for i in issues if i.severity == "error"]
+    assert "SEGMENT_DEFS_INCOMPLETE" in codes
+
+
+def test_assemble_ref_segment_repeats_definitional_sections_verbatim():
+    """组装器保证「定义性段落逐段重复」：subject_definitions / retention_analysis
+    取整片原文逐字进每段，注记置于 detailed_description 顶部。"""
+    sections = split_ref_sections(_REF_WHOLE_PROMPT)
+    annotations = render_ref_segment_annotations(
+        segment_number=1, total_segments=2, start_s=0, end_s=15, total_s=22,
+        start_state="the garden is empty", end_state="the girl stands on the path")
+    out = assemble_ref_segment(
+        subject_definitions=sections["subject_definitions"],
+        retention_analysis=sections["retention_analysis"],
+        task_type="reference generation",
+        summary_body="The girl walks into the garden.",
+        detailed_body=_REF_SEGMENT_BODY,
+        overall_soundscape="Outdoor ambience.",
+        non_diegetic_music="N/A",
+        annotations=annotations)
+    parsed = split_ref_sections(out)
+    assert parsed["subject_definitions"].strip() == sections["subject_definitions"].strip()
+    assert parsed["retention_analysis"].strip() == sections["retention_analysis"].strip()
+    assert parsed["detailed_description"].startswith(annotations)
+    assert "Segment 1 of 2" in parsed["detailed_description"]
+    assert parsed["summary"].lstrip().startswith("[reference generation]")
+
+
+def test_ref_segment_prompt_has_no_i2va_anchor_line():
+    """issue #9「分段恒单图开场锚」不进多参：ref 段不得出现 I2VA 对齐锚定行。"""
+    from minimax_h3_prompt.tools.h3_validator import has_align_instruction
+
+    text = _ref_segment_sample()
+    assert not any(has_align_instruction(line) for line in text.splitlines())
+
+
+def test_validate_ref_segment_bans_align_lines():
+    """锚定行混入多参段 → error（对抗验证 B2）：检出必须有牙——写段指令删掉禁令、
+    写手吐了 L2VA 锚定行时，ref 校验原本只会报词数 warning、0 error。"""
+    for anchor in (I2VA_ANCHOR_LINE, ALIGN_TEMPLATES["L2VA"]):
+        text = anchor + "\n\n" + _ref_segment_sample()
+        codes = [i.code for i in validate_ref_segment(
+            text, duration=7, segment_number=2, total_segments=3,
+            start_s=8, total_s=22) if i.severity == "error"]
+        assert "REF_SEGMENT_ALIGN_BANNED" in codes, f"锚定行未被判出：{anchor!r}"
+
+
+def test_rebase_keeps_in_sentence_beats_on_first_shot():
+    """首块句中节拍不是切点时间：`\\A` 锚定后不被当切点剥掉（对抗验证 B1）。
+
+    删掉 `rebase_ref_shot_blocks` 的首块剥切点逻辑、或把 `_LEADING_AT_RE` 的
+    `\\A` 锚去掉，本条都必须红——句中节拍被静默吞掉是无告警的数据损坏。
+    """
+    from minimax_h3_prompt.segment_prompts import rebase_ref_shot_blocks
+
+    body = rebase_ref_shot_blocks(
+        ["[Shot 1] Wide view of the harbor. At 00:02.500, gulls scatter as the ferry docks."], 0)
+    assert "At 00:02.500" in body  # 句中节拍保留（0 基下数值不变）
+    assert "At 00:00.000" not in body
+
+    mid = rebase_ref_shot_blocks(
+        ["[Shot 2] At 00:12.000, the shot cuts to the pier. At 00:14.000, a gull lands."], 12)
+    assert "At 00:12.000" not in mid  # 段内首镜的切点时间剥掉（[Shot 1] 无切点）
+    assert "At 00:02.000" in mid      # 句中节拍重基（14-12=2）
+
+
+# --- 多参写段请求（v2 规划式 与 规划失败回退式，同改同测）---------------------
+
+from minimax_h3_prompt.segment_planner import SegmentPlan  # noqa: E402
+from minimax_h3_prompt.segment_prompts import (  # noqa: E402
+    I2VA_ANCHOR_LINE,
+    build_ref_segment_v2_request,
+    rewrite_ref_segment_prompt,
+)
+from minimax_h3_prompt.tools.h3_validator import ALIGN_TEMPLATES  # noqa: E402
+
+
+def _ref_plans():
+    return [
+        SegmentPlan(index=0, start_s=0, end_s=8, shots_in_segment=(1,), summary="开场",
+                    end_hook="the girl stands at the gate", start_state="the garden path is empty"),
+        SegmentPlan(index=1, start_s=8, end_s=15, shots_in_segment=(2,), summary="交钥匙",
+                    end_hook="the key has been handed over",
+                    start_state="the girl stands on the garden path holding the key"),
+    ]
+
+
+def _ref_request_kwargs():
+    sections = split_ref_sections(_REF_WHOLE_PROMPT)
+    return dict(
+        sections=sections,
+        shot_texts=["[Shot 2] A close-up as she hands 青铜钥匙 to the boy."],
+        task_type="reference generation",
+        total_s=22,
+    )
+
+
+def _ref_v2_llm():
+    class _LLM:
+        def __init__(self):
+            self.requests: list[str] = []
+
+        def invoke(self, request, config=None):
+            self.requests.append(request)
+            return _ref_segment_sample()
+
+    return _LLM()
+
+
+def test_ref_v2_request_carries_multi_ref_disciplines():
+    """v2 规划式请求：时间窗纪律、起止状态、定义块照抄、禁指代前文、无 I2VA 锚定。"""
+    plan, all_plans = _ref_plans()[1], _ref_plans()
+    request = build_ref_segment_v2_request(plan, all_plans, **_ref_request_kwargs())
+    # 自包含六段式与定义逐段重复
+    assert "subject_definitions" in request and "原样复制" in request
+    assert "<Subject 1> is 红裙女孩" in request  # 定义块给到手上
+    # 时间轴注记与起止状态声明由组装器注入（写段器不得自写、不得改动）
+    assert "组装器注入" in request
+    assert "the girl stands on the garden path holding the key" in request  # 起始状态
+    assert "the key has been handed over" in request  # 末态
+    # 时间窗纪律与禁止指代前文
+    assert "时间窗" in request
+    assert "as mentioned before" in request  # 禁令点名典型形态
+    assert "无跨段记忆" in request
+    # 多参锚定语义（issue #46 AC7）：无桥接帧、不套 issue #9 单图开场锚
+    assert "桥接帧" in request and "参考素材" in request
+    assert I2VA_ANCHOR_LINE not in request
+
+
+def test_fallback_ref_rewrite_request_carries_same_disciplines():
+    """回退式（规划失败）的重写请求同改同测：漏一条就等规划一失败掉一个档次。"""
+    sections = split_ref_sections(_REF_WHOLE_PROMPT)
+
+    class _LLM:
+        last_request = ""
+
+        def invoke(self, request, config=None):
+            self.llm_last = request
+            return _ref_segment_sample()
+
+    llm = _LLM()
+    rewrite_ref_segment_prompt(
+        base_prompt=_REF_WHOLE_PROMPT, plan=_ref_plans()[1], total_segments=2,
+        total_s=22, shot_texts=["[Shot 2] A close-up as she hands the key over."], llm=llm)
+    request = llm.llm_last
+    assert "subject_definitions" in request and "原样复制" in request
+    assert "as mentioned before" in request
+    assert "无跨段记忆" in request
+    assert "组装器注入" in request
+    assert I2VA_ANCHOR_LINE not in request
+    assert sections["subject_definitions"].splitlines()[1] in request  # 定义块随请求下发
+
+
+def test_wordlist_reaches_both_ref_segment_requests():
+    """落笔侧词表（ADR 0007 同一份切片）也进两条多参写段请求——「一套有一套没有」
+    正是 ADR 0007 否决的形态，回退路径最晚暴露。"""
+    from minimax_h3_prompt import film_language
+
+    marker = film_language.video_source_headline().strip()
+    assert marker, "真源没有标题行——标记串取空会让这条断言永远为真"
+
+    plan, all_plans = _ref_plans()[1], _ref_plans()
+    v2_request = build_ref_segment_v2_request(plan, all_plans, **_ref_request_kwargs())
+    assert marker in v2_request and "## 词表：景别" in v2_request
+    # 词表前言自带「edge-stability / 锚定行」两处首尾帧链指针（对抗验证 C2 实证）——
+    # 注入必须带多参适用范围声明把它中和，否则与本请求的禁止清单自相矛盾。
+    assert "一概不用" in v2_request
+
+    class _LLM:
+        def invoke(self, request, config=None):
+            self.last = request
+            return _ref_segment_sample()
+
+    llm = _LLM()
+    rewrite_ref_segment_prompt(
+        base_prompt=_REF_WHOLE_PROMPT, plan=plan, total_segments=2,
+        total_s=22, shot_texts=["[Shot 2] …"], llm=llm)
+    assert marker in llm.last and "## 词表：景别" in llm.last
+    assert "一概不用" in llm.last
+
+
+def test_write_ref_segment_v2_returns_self_contained_document():
+    """v2 写段产出经组装器归一：定义逐字重复、注记置顶、校验零 error。"""
+    from minimax_h3_prompt.segment_prompts import write_ref_segment_v2
+
+    plan, all_plans = _ref_plans()[1], _ref_plans()
+    llm = _ref_v2_llm()
+    text = write_ref_segment_v2(
+        plan, all_plans, llm=llm,
+        ref_meta=[(1, "红裙女孩", "…"), (2, "青铜钥匙", "…")], **_ref_request_kwargs())
+    assert text is not None
+    sections = split_ref_sections(text)
+    whole = split_ref_sections(_REF_WHOLE_PROMPT)
+    assert sections["subject_definitions"].strip() == whole["subject_definitions"].strip()
+    assert "Segment 2 of 2" in sections["detailed_description"]
+    assert "covering 8s-15s of the full 22s video" in sections["detailed_description"]
+    errors = [i for i in validate_ref_segment(
+        text, duration=plan.duration_s, segment_number=2, total_segments=2,
+        start_s=8, total_s=22, ref_meta=[(1, "红裙女孩", "…"), (2, "青铜钥匙", "…")])
+        if i.severity == "error"]
+    assert errors == [], [f"{i.code}: {i.message}" for i in errors]
+
+
+def test_write_ref_segment_v2_retries_on_errors_bounded():
+    """产出含指代前文 → issue 回插重写（有界 MAX_SEGMENT_ATTEMPTS），不静默放行。"""
+    from minimax_h3_prompt.segment_prompts import MAX_SEGMENT_ATTEMPTS, write_ref_segment_v2
+
+    bad = _ref_segment_sample(anaphora=" As mentioned before, she also waves.")
+    replies = [bad, bad, bad]  # 全坏：验证重写有界
+
+    class _LLM:
+        def __init__(self):
+            self.requests: list[str] = []
+
+        def invoke(self, request, config=None):
+            self.requests.append(request)
+            return replies[len(self.requests) - 1]
+
+    llm = _LLM()
+    plan, all_plans = _ref_plans()[1], _ref_plans()
+    text = write_ref_segment_v2(
+        plan, all_plans, llm=llm, **_ref_request_kwargs())
+    assert len(llm.requests) == MAX_SEGMENT_ATTEMPTS  # 有界
+    assert "SEGMENT_ANAPHORA" in llm.requests[1]  # issue 回插重写请求
+    assert text is not None  # 仍不合格交回原文（当面给用户看），不返回 None 装死

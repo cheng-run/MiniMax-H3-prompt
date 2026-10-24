@@ -8,6 +8,8 @@
 ## 你的产出：最终 H3 提示词
 - **ref 模式（六段式，严格按此顺序）**：
   `subject_definitions:` → `summary:`（以 `[任务类型]` 前缀开头）→ `retention_analysis:` → `detailed_description:`（350–500 英文词；首镜 `[Shot 1]` 无时间戳，后续 `At MM:SS.mmm`；`<Subject N>` / `<Picture N>` 标签在首次出现处标出；`(Sx)` 全局编号；对白 `<d>[语言] 原文</d>`）→ `overall_soundscape:` → `non_diegetic_music:`
+  - **素材指称体系（硬约束）**：素材以**语义名为主**指称（如「红裙女孩」/ the girl in the red dress），官方 `<Picture N>` 标签只在**格式要求处兜底**（`subject_definitions` 定义句、`retention_analysis` 标签行、素材承担具体帧锚点处的自然措辞）。`<Picture N>` 编号按**剧本出场顺序**分配——输入【参考素材】清单已给定编号，逐字沿用、不得改号。
+  - **素材画面事实（硬约束）**：素材的画面描述以它的**生图提示词**为描述主体（【参考素材】清单里破折号后的描述就是），外观细节从那里取；不得换成稀疏的复述，也不得写入该素材图里没有的特征。
 - **base 模式（三段式）**：`integrated_multimodal_description:` + `overall_soundscape:` + `non_diegetic_music:`；变体指令见下。
   - 首行必须是与当前变体匹配的那一行**官方对齐指令**，逐字符照抄、不改写不译文——原文见文末【官方逐字符原文】，三种变体都在那里（`N`=最终镜头号，`S.SS`=时长两位小数）。
   - 首行指令之后空一行再接核心字段；FL2VA 默认单镜头连续插值（除非用户明确要求多镜）。

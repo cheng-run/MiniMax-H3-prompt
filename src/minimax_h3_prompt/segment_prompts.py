@@ -24,8 +24,10 @@ from .tools.h3_validator import (
     ValidationIssue,
     has_align_instruction,
     only_errors,
+    split_ref_sections,
     timestamps_seconds,
     validate_base,
+    validate_ref,
 )
 from .user_revisions import pending_revisions, render_revision_block
 
@@ -46,6 +48,45 @@ _FAST_CAMERA_RE = re.compile(
 _TIMESTAMP_AFTER_TAG = re.compile(r"(\[Shot\s+\d+\])\s*At\s+(\d{2}):(\d{2})\.(\d{3}),?\s*", re.IGNORECASE)
 # 镜头区之后属于全局声音/配乐段落的标记（用于界定镜头区结尾）
 _SUFFIX_MARKERS = ("overall_soundscape:", "non_diegetic_music:")
+
+# 写段直调的角色名（issue #70 / ADR 0019）：事件、成本表与进度面板都按它分账。
+# 四条路径各占一个名字——合成一行的话，成本表上看不出钱花在「写段」还是「回退写段」，
+# 而这两条路径的触发条件（规划失败）恰好是用户最需要区分的那种。
+SEGMENT_WRITER_ROLE = "role_segment_writer"
+SEGMENT_REWRITER_ROLE = "role_segment_rewriter"
+REF_SEGMENT_WRITER_ROLE = "role_ref_segment_writer"
+REF_SEGMENT_REWRITER_ROLE = "role_ref_segment_rewriter"
+
+
+def _direct_write(llm, request: str, *, role: str, label: str) -> str | None:
+    """写段类直调的唯一出口（issue #70 / ADR 0019）：接看门狗，失败把病因打给人看。
+
+    **为什么在这里打印、而不是把病因往上传**：四个写段函数的返回契约都是
+    ``str | None``（调用方据此回退机械拼装/保持原词），改返回值要把四个调用点的
+    回退分支全部重写一遍；而票面要的正是「失败那一刻的一行字」——写段是从调用方
+    看不到「调了几次、为什么失败」的地方。看门狗已把尝试次数与病因写进
+    ``DirectCallResult.error``（卡住 / 中流断流 / 其他异常三种措辞），这里原样转述，
+    不另造一套口径（本仓「同一契约不许两处口径」）。
+
+    ``label`` 由调用方给（如「第 2 段回退写段」）：只有它知道段号与路径名，
+    这里不猜。
+    """
+    # 延迟导入：agents 会拉起 langchain 角色装配栈，本模块也被 --brief 快路径直接
+    # import（理由同 ``segment_planner.plan_segments``）。
+    from .agents import run_direct_call  # noqa: PLC0415
+
+    result = run_direct_call(llm, request, role=role)
+    if not result.ok:
+        print(f"[警告] {label}调用失败（已试 {result.attempts} 次）：{result.error}",
+              flush=True)
+        return None
+    text = result.text.strip()
+    if not text:
+        # 空回复同样是失败：旧代码在这里静默返回 None，向导只打一句「跳过」。
+        print(f"[警告] {label}返回空文本（已试 {result.attempts} 次）：按失败处理，"
+              "不把空段当产物交出去。", flush=True)
+        return None
+    return text
 
 
 # 行首裸时间戳（无 [Shot N] 标记的镜头边界），用于"模型漏标镜头号"的兼容降级
@@ -195,11 +236,15 @@ def split_shots_from_prompt(prompt: str, total_duration: float | None = None) ->
     return segments
 
 
-def _shot_blocks(prompt: str) -> list[tuple[int, float, str]]:
+def _shot_blocks(prompt: str, *, keep_cut_timestamp: bool = False) -> list[tuple[int, float, str]]:
     """返回 [(shot_number, start_seconds, block_text)]；[Shot 1] 起点为 0。
 
-    时间戳取整：ComfyUI 的 H3 时长选项只有 4-10 秒整数档，LLM 若生成小数
+    时间戳取整：ComfyUI 的 H3 时长选项只有整数档，LLM 若生成小数
     时间戳（如 8.50s）会产生小数段；此处统一四舍五入到整数秒兜底。
+
+    keep_cut_timestamp：多参机械切片（issue #46）要**保留**切点时间戳再整体重基
+    ——合并镜段里的 [Shot 2] 缺切点时间会被校验器判 SHOT_NO_TIMESTAMP。默认
+    False 保持首尾帧链的既有语义（块文本剥掉切点时间）。
     """
     matches = _shot_starts(prompt)
     if not matches:
@@ -220,21 +265,23 @@ def _shot_blocks(prompt: str) -> list[tuple[int, float, str]]:
         if stamp:
             minutes, secs, millis = int(stamp.group(2)), int(stamp.group(3)), int(stamp.group(4))
             seconds = float(round(minutes * 60 + secs + millis / 1000.0))
-        blocks.append((int(match.group(1)), seconds, _TIMESTAMP_AFTER_TAG.sub(r"\1 ", block).strip()))
+        text = block if keep_cut_timestamp else _TIMESTAMP_AFTER_TAG.sub(r"\1 ", block)
+        blocks.append((int(match.group(1)), seconds, text.strip()))
     return blocks
 
 
-# ComfyUI 的 H3 时长选项区间：段时长必须落在此区间（整数秒）
+# ComfyUI 的 H3 时长选项区间：段时长必须落在此区间（整数秒）。
+# 4–15 档（issue #46 AC6）：59- 工作流时长节点实测 min=4/max=15，旧「只有 4-10」已过时。
 MIN_SEGMENT_SECONDS = 4.0
-MAX_SEGMENT_SECONDS = 10.0
+MAX_SEGMENT_SECONDS = 15.0
 
 def warn_out_of_range_durations(durations: list[float], *, stream_print=print) -> None:
-    """对落在 4-10s 区间外的段长打印警告（不阻断流程，由人工调整总时长）。"""
+    """对落在 4-15s 区间外的段长打印警告（不阻断流程，由人工调整总时长）。"""
     bad = [d for d in durations if not (MIN_SEGMENT_SECONDS <= d <= MAX_SEGMENT_SECONDS)]
     if bad:
         rendered = "、".join(f"{d:g}s" for d in bad)
         stream_print(
-            f"[警告] 段时长 {rendered} 超出 ComfyUI H3 可选区间（4-10s 整数），"
+            f"[警告] 段时长 {rendered} 超出 ComfyUI H3 可选区间（4-15s 整数），"
             "请人工调整对应镜头时长或总时长"
         )
 
@@ -469,7 +516,10 @@ def rewrite_segment_prompt(
 ) -> str | None:
     """用 LLM 把 segment 重写为本段时间窗内的独立提示词；失败返回 None（调用方回退机械拆分）。
 
-    llm 由调用方注入（测试可传 stub）；应为带 ``invoke(str)`` 接口的对象。
+    调用走直调看门狗（issue #70 / ADR 0019）：卡住会重试、失败那句会把病因与尝试
+    次数打给用户；返回 None 只表示「本段没有可用的重写稿，请回退」，不再等于静默。
+
+    llm 由调用方注入（测试可传 stub）；应为带 ``invoke(str, config=...)`` 接口的对象。
 
     position_index：本段 0-based 段号，用于从 ``bridge_frame_descriptions`` 按段号取
     桥接帧读图结果（回退路径与 v2 路径同一套锚定）；缺省 None 保持旧行为。
@@ -498,13 +548,10 @@ def rewrite_segment_prompt(
         f"{_visual_decision_block_for_request(state or {}, (segment.shot_number,))}"
         f"\n完整提示词：\n{full_prompt}"
     )
-    try:
-        response = llm.invoke(request)
-    except Exception:  # noqa: BLE001 - 任何 LLM 异常都回退机械拆分
-        return None
-    text = getattr(response, "content", response)
-    text = str(text).strip()
-    return text or None
+    return _direct_write(
+        llm, request, role=SEGMENT_REWRITER_ROLE,
+        label=(f"第 {position_index + 1} 段回退写段" if position_index is not None
+               else "本段回退写段"))
 
 
 # ---------------------------------------------------------------------------
@@ -683,7 +730,7 @@ def _segment_shot_texts(plan, state: dict) -> tuple[list[str], bool]:
     从分镜表按 ``[Shot N]`` 抽取本段覆盖的镜头——整条分镜表灌进每一段会把其他时间窗的
     事件一起喂给 H3，破坏「时间窗纪律」。
     同一根因早前已被诊断过并命名为 ``extract_segment_shots``
-    （`docs/superpowers/specs/2026-09-17-segment-lock-scoping-design.md` 根因 4：
+    （`docs/design/2026-09-17-segment-lock-scoping-design.md` 根因 4：
     「``shot_text_{n}`` 键根本不存在 → 回退整张分镜表」），但那份计划从未实现，
     且其配套结构 GLOBAL_LOCK 已被 2026-09-22 官方格式迁移废弃（同批误删的 edge-stability
     句已于 issue #8 恢复——它是官方硬要求，见 ``EDGE_STABILITY_SENTENCE``）。
@@ -814,11 +861,7 @@ def validate_segment(text: str, duration: float | None = None,
     issues = validate_base(text, duration=duration, variant=SEGMENT_ANCHOR_VARIANT)
     stamps = timestamps_seconds(text)
     _check_fast_camera_multi_beat_coexist(text, stamps, issues)
-    if start_s > 0 and stamps and min(stamps) >= start_s:
-        issues.append(ValidationIssue(
-            "warning", "TIMESTAMPS_LOOK_ABSOLUTE",
-            f"本段从整片 {start_s:g}s 起，正文所有时间戳都 ≥ {start_s:g}s（最早 {min(stamps):.3f}s）"
-            "——疑似写成绝对片时。正文时间戳必须相对本段起点（0.000＝本段第一帧）"))
+    _warn_if_timestamps_look_absolute(stamps, start_s, issues)
     return issues
 
 
@@ -826,6 +869,22 @@ def segment_errors(text: str, duration: float | None = None,
                    start_s: float = 0.0) -> list[ValidationIssue]:
     """只取 error 级 issue（warning 不阻塞交付），供重写循环用。"""
     return only_errors(validate_segment(text, duration, start_s))
+
+
+def _warn_if_timestamps_look_absolute(stamps: list[float], start_s: float,
+                                      issues: list[ValidationIssue]) -> None:
+    """时间戳疑似绝对片时的启发式 warning（base 与 ref 分段校验共用这一份）。
+
+    error 级检查抓不到这种：写成绝对片时的正文，只要绝对秒没超过片段长度，
+    就与合法写法**完全同形**（`At 00:04.000` 究竟是「片段第 4 秒」还是「整片第
+    4 秒」，正则无法区分）。故只对「本段不从 0 起却所有时间戳都 ≥ start_s」报警
+    （不阻塞，避免误伤合法写法）。复制两份就是第二处判据——base/ref 一处漂移即分叉。
+    """
+    if start_s > 0 and stamps and min(stamps) >= start_s:
+        issues.append(ValidationIssue(
+            "warning", "TIMESTAMPS_LOOK_ABSOLUTE",
+            f"本段从整片 {start_s:g}s 起，正文所有时间戳都 ≥ {start_s:g}s（最早 {min(stamps):.3f}s）"
+            "——疑似写成绝对片时。正文时间戳必须相对本段起点（0.000＝本段第一帧）"))
 
 
 def write_segment_v2(
@@ -840,6 +899,10 @@ def write_segment_v2(
     ``MAX_SEGMENT_ATTEMPTS`` 次 LLM 调用 = 首次 + 1 次重写）。仍不合格时**交回原文**
     而不是 None——返回 None 会被向导当成「生成失败」跳过，用户看不到坏在哪；
     交回原文后由向导把 issue 明细当面打给用户（warning 级不参与重写）。
+
+    调用本身走直调看门狗（issue #70）：卡住会先重试，用尽后打印病因与尝试次数再
+    返回 None。``MAX_SEGMENT_ATTEMPTS`` 只管**内容**不合格的重写（issue 回插），
+    与看门狗的存活重试是两道不同的预算，别把它们合并成一道。
     """
     duration = float(plan.duration_s)
     start_s = float(plan.start_s)
@@ -847,12 +910,12 @@ def write_segment_v2(
     request = base_request
     text: str | None = None
     for attempt in range(MAX_SEGMENT_ATTEMPTS):
-        try:
-            response = llm.invoke(request)
-        except Exception:  # noqa: BLE001 - LLM 调用异常仍按老契约返回 None
-            return None
-        text = str(getattr(response, "content", response)).strip()
-        if not text:
+        text = _direct_write(
+            llm, request, role=SEGMENT_WRITER_ROLE,
+            label=f"第 {plan.index + 1} 段写段")
+        if text is None:
+            # 调用失败（卡住到上限/中流断流/其他异常）：病因已由 ``_direct_write``
+            # 当面打出，这里照老契约返回 None 让调用方回退，但不静默（issue #70）。
             return None
         errors = segment_errors(text, duration, start_s)
         if not errors:
@@ -871,3 +934,501 @@ def _ctx(**fields: str) -> str:
     """CONTEXT 行内嵌套：key: value，跳过空值。"""
     lines = [f"- {k}: {v}" for k, v in fields.items() if v]
     return "\n".join(lines) if lines else "（空）"
+
+
+# ---------------------------------------------------------------------------
+# 多参分段（issue #46）：自包含 ref 六段式——组装、时间轴注记、校验
+#
+# 与首尾帧链的分段是两套锚定语义：多参**没有桥接帧**，跨段连续性靠
+# 「每段各自用到的参考素材（段内子集＋重编号）+ 每段起止状态声明 + 时间轴注记对位」；
+# issue #9「分段恒单图开场锚」属首尾帧链，ref 段**不得**套 I2VA 锚定行。
+# ---------------------------------------------------------------------------
+
+# 时间轴注记首句（canonical，唯一可写来源）：段序 + 起止秒 + 全片时长。
+_REF_TIMELINE_NOTE = (
+    "Segment {segment_number} of {total_segments}, covering "
+    "{start_s}s-{end_s}s of the full {total_s}s video."
+)
+_REF_START_STATE_PREFIX = "This segment begins with "
+_REF_END_STATE_PREFIX = "This segment ends with "
+
+# 指代前文的措辞：每段是独立生成、模型无跨段记忆，「如前所述」对它就是无效信息
+# （issue #46）。列表只收**跨段指代**的确定形态；段内多镜的 "the previous shot"
+# 是合法叙述，不在禁列。中文条目防写段器偶发混入中文指代（正文应全英文）。
+_ANAPHORA_RE = re.compile(
+    r"as mentioned (?:before|above|earlier|previously)"
+    r"|as (?:described|noted|stated|established|introduced) (?:before|above|earlier|previously)"
+    r"|(?:mentioned|described|noted|stated) (?:before|above|earlier|previously)"
+    r"|(?:previous|preceding|earlier|following|next) segment"
+    r"|earlier in the (?:video|film|story)"
+    r"|as we (?:saw|established|learned)"
+    r"|see above|from earlier|as before"
+    r"|如前所述|如上所述|前面提到|前述|见上文",
+    re.IGNORECASE,
+)
+
+
+def _strip_state_period(text: str) -> str:
+    """状态句嵌模板前去尾句点：模板自带句点，不叠「. .」。"""
+    return str(text).strip().rstrip(".。")
+
+
+def render_ref_segment_timeline_note(segment_number: int, total_segments: int,
+                                     start_s: int, end_s: int, total_s: int) -> str:
+    """时间轴注记首句（段序+起止秒+全片时长）。校验器同取本函数——注记与判据不分头写。"""
+    return _REF_TIMELINE_NOTE.format(
+        segment_number=int(segment_number), total_segments=int(total_segments),
+        start_s=int(start_s), end_s=int(end_s), total_s=int(total_s))
+
+
+def render_ref_segment_annotations(segment_number: int, total_segments: int,
+                                   start_s: int, end_s: int, total_s: int,
+                                   start_state: str, end_state: str) -> str:
+    """时间轴注记 ＋ 起止状态声明的 canonical 文本（issue #46 AC3）。
+
+    多参段间叙事衔接的唯一显式依据就是这两样：注记对位（本段在全片的位置）、
+    状态声明（本段首尾瞬间的画面）。三句固定形态，组装器注入、校验器按句检出。
+    """
+    return (
+        f"{render_ref_segment_timeline_note(segment_number, total_segments, start_s, end_s, total_s)} "
+        f"{_REF_START_STATE_PREFIX}{_strip_state_period(start_state)}. "
+        f"{_REF_END_STATE_PREFIX}{_strip_state_period(end_state)}."
+    )
+
+
+def split_ref_segment_detailed(detailed: str) -> tuple[str, str]:
+    """把 detailed_description 拆成 ``(锁死声明, 画面正文)``（issue #56）。
+
+    注记由组装器置于 detailed_description 顶部（``assemble_ref_segment``），所以切点
+    就是**首行**：首行是注记形态时归锁定部分，其余全归正文；没有注记行时锁定部分是
+    空串、正文原样（不把正文头一行误当注记吃掉）。
+
+    这是「改写只动画面正文」与「那两句被改动就响」两处判据的**共同切点**，而「注记长
+    什么样」这件事只有 ``_timeline_note_shape`` 一处（从 canonical 模板派生）——形态
+    重抄一份的代价不是重复，而是常量一改它就静默失效。
+    """
+    first, sep, rest = str(detailed or "").partition("\n")
+    if sep and re.match(_timeline_note_shape(), first.strip()):
+        return first.strip(), rest.strip()
+    return "", str(detailed or "").strip()
+
+
+def _timeline_note_shape() -> str:
+    """``_REF_TIMELINE_NOTE`` → 形态正则（占位符一律换通配），由 canonical 模板**派生**。
+
+    派生而不是字面重抄（ADR 0008 裁定二「只留一处可写来源，其余派生或被钉住」）：重抄
+    的代价不是重复，而是**静默失效**——模板一改，那份拷贝就再也匹配不上，拿它做的守卫
+    成了永远不响的守卫（「永不为红＝没有」）。骨架（"Segment … of …, covering … of the
+    full … video."）保留，只有占位符处放宽。
+    """
+    return re.sub(r"\\\{[^}]*\\\}", lambda _match: r"[^.\n]*", re.escape(_REF_TIMELINE_NOTE))
+
+
+def _annotation_like_shape() -> str:
+    """注记类句子的识别式：时间轴注记首句 ＋ 起止状态那两句（三条形态全部派生自常量）。
+
+    **每次调用现拼**（不在 import 时编译）：「识别式跟着常量走」因此是**当场可验**的
+    ——改掉前缀常量，守卫必须跟着改（有测试钉着，见 ``test_ref_segment_revision.py``）。
+    """
+    return "|".join([
+        re.escape(_REF_START_STATE_PREFIX) + r"[^.\n]*",
+        re.escape(_REF_END_STATE_PREFIX) + r"[^.\n]*",
+        _timeline_note_shape(),
+    ])
+
+
+def assert_locked_annotations_intact(text: str, locked: str) -> None:
+    """改写结果里若出现注记类句子，必须与锁定文本逐字一致，否则**响**（issue #56 AC5）。
+
+    为什么锁死：相邻段的末态与下一段起始态是**同一瞬间的同一画面**，改它就要级联改
+    下一段的 start_state 并回写 plan.json；不改而放过，语义层闸门的对照物（声明）与
+    正文就失了同步，判据当场作废。声明本身写错属于「计划错了」，走「停下 → 重跑分段
+    规划」，不是在这里偷偷改一句。
+
+    判据是**字面**比对，不是「出现过就报」：模型照抄一遍由组装器再注入一次无害，只有
+    **改过**的才算越权。调用方（``ref_segments.revise_ref_segment_body``）据此**不采用**
+    这一轮改写、保持原词——静默放行等于让用户拿着一份自相矛盾的提示词去生成。
+    """
+    altered = sorted({match.group(0).strip()
+                      for match in re.finditer(_annotation_like_shape(), str(text or ""))
+                      if match.group(0).strip() not in str(locked or "")})
+    if altered:
+        raise ValueError(
+            "改写结果动了锁死的时间轴注记/起止状态声明：" + "；".join(altered)
+            + "——那两句是段间衔接的显式依据（相邻段的末态与下一段起始态是同一瞬间的"
+            "同一画面），只许正文兑现它、不许改它；声明本身写错请停下重跑分段规划")
+
+
+def assemble_ref_segment(*, subject_definitions: str, retention_analysis: str,
+                         task_type: str, summary_body: str, detailed_body: str,
+                         overall_soundscape: str, non_diegetic_music: str,
+                         annotations: str = "") -> str:
+    """拼装一段自包含 ref 六段式（issue #46 AC2）。
+
+    定义性段落（subject_definitions / retention_analysis）**逐段原样重复整片定义**：
+    每段是独立生成、模型无跨段记忆，段 2 不带定义就是无参照描述；由组装器重复
+    而不是让 LLM 重写，「标签语义逐段一致」就是代码性质而不是服从性问题
+    （官方 ref-en.txt §2：标签一经定义，各段落保持同一含义）。
+    ``annotations``（时间轴注记＋起止状态声明）置于 detailed_description 顶部。
+    summary 的任务类型前缀沿用整片的（同一批素材跨段保持同一外观，任务关系不变）。
+    """
+    summary = f"[{str(task_type).strip()}] {str(summary_body).strip()}".strip()
+    detailed = f"{annotations}\n{detailed_body}".strip() if annotations else str(detailed_body).strip()
+    return (
+        f"subject_definitions:\n{str(subject_definitions).strip()}\n\n"
+        f"summary:\n{summary}\n\n"
+        f"retention_analysis:\n{str(retention_analysis).strip()}\n\n"
+        f"detailed_description:\n{detailed}\n\n"
+        f"overall_soundscape:\n{str(overall_soundscape).strip()}\n\n"
+        f"non_diegetic_music:\n{str(non_diegetic_music).strip()}\n"
+    )
+
+
+def validate_ref_segment(text: str, *, duration: float | None = None,
+                         segment_number: int = 1, total_segments: int = 1,
+                         start_s: float = 0.0, total_s: float | None = None,
+                         ref_meta: list[tuple[int, str, str]] | None = None,
+                         subject_scope: tuple[int, ...] | list[int] | None = None,
+                         ) -> list[ValidationIssue]:
+    """多参分段提示词校验（issue #46）：ref 六段式 + 分段专属纪律。
+
+    在 ``validate_ref`` 之上补四条 error 级：
+
+    - ``SEGMENT_TIMELINE_MISSING``：时间轴注记（段序+起止秒）不在——拼接后段与段
+      无从对位；注记句由 ``render_ref_segment_timeline_note`` 生成，判据与产出同源；
+    - ``SEGMENT_STATE_MISSING``：起止状态声明缺失或空——段间叙事衔接失去显式依据；
+    - ``SEGMENT_DEFS_INCOMPLETE``：登记图没全进 subject_definitions——「定义逐段
+      重复」（AC2）必须有牙，缺定义的段就是无参照描述；
+    - ``SEGMENT_ANAPHORA``：指代前文的措辞——对无记忆模型是无效信息，出现即作废。
+
+    另带两条既有纪律：时间戳疑似绝对片时（warning，同 ``validate_segment`` 的
+    启发式）、「快机位＋多拍」共存（error，同基链；该阈值量于 4 步采样，引用见
+    ``_check_fast_camera_multi_beat_coexist``——59- 工作流固定 8 步，纪律照旧执行，
+    不自行放宽）。
+
+    ``ref_meta`` / ``subject_scope`` 传**本段子集**（issue #75）：段内只喂用到的图，
+    编号从 1 连续，所以「登记图全进定义」（``SEGMENT_DEFS_INCOMPLETE``）与 Subject
+    连续性都得按本段范围判，拿整片登记判会把每一段都判红。
+    """
+    issues = validate_ref(text, duration=duration, ref_meta=ref_meta,
+                          subject_scope=subject_scope)
+    align_lines = [ln for ln in text.splitlines() if has_align_instruction(ln)]
+    if align_lines:
+        # issue #9「分段恒单图开场锚」不适用多参（ADR 0011）：锚定行出现在 ref 段
+        # 就是把首尾帧链的帧槽语义误用进来——校验必须有牙，不能只靠写段指令自觉。
+        issues.append(ValidationIssue(
+            "error", "REF_SEGMENT_ALIGN_BANNED",
+            f"{len(align_lines)} 行图片对齐指令（I2VA/FL2VA/L2VA 锚定行）混入多参分段"
+            "——多参无帧槽可锚（锚定由共享参考素材承担，见 ADR 0011），整行删除"))
+    end_s = float(start_s) + float(duration or 0.0)
+    total = float(total_s) if total_s is not None else end_s
+    expected_note = render_ref_segment_timeline_note(
+        segment_number, total_segments, int(round(float(start_s))),
+        int(round(end_s)), int(round(total)))
+    if expected_note not in text:
+        issues.append(ValidationIssue(
+            "error", "SEGMENT_TIMELINE_MISSING",
+            f"缺少时间轴注记（应含：{expected_note}）——段序+起止秒是拼接对位的唯一依据"))
+    if (not re.search(re.escape(_REF_START_STATE_PREFIX) + r"[^.\n]", text)
+            or not re.search(re.escape(_REF_END_STATE_PREFIX) + r"[^.\n]", text)):
+        issues.append(ValidationIssue(
+            "error", "SEGMENT_STATE_MISSING",
+            "缺少起止状态声明（This segment begins with … / This segment ends with …）"
+            "——多参无桥接帧，段间衔接全靠状态声明显式对位"))
+    if ref_meta:
+        defs = split_ref_sections(text).get("subject_definitions", "")
+        missing = [p for p, _name, _desc in ref_meta if f"<Picture {p}>" not in defs]
+        if missing:
+            issues.append(ValidationIssue(
+                "error", "SEGMENT_DEFS_INCOMPLETE",
+                f"subject_definitions 缺登记素材定义：<Picture "
+                f"{'>, <Picture '.join(map(str, sorted(missing)))}>"
+                "——定义性段落必须逐段重复整片定义（无参照定义＝无参照描述）"))
+    anaphora = _ANAPHORA_RE.findall(text)
+    if anaphora:
+        found = sorted({m if isinstance(m, str) else m[0] for m in anaphora})
+        issues.append(ValidationIssue(
+            "error", "SEGMENT_ANAPHORA",
+            f"出现指代前文的措辞：{'、'.join(found)}——每段是独立生成，"
+            "模型无跨段记忆，此类措辞是无效信息（把被指代的内容改写成本段自足的表述）"))
+    stamps = timestamps_seconds(text)
+    _warn_if_timestamps_look_absolute(stamps, start_s, issues)
+    _check_fast_camera_multi_beat_coexist(text, stamps, issues)
+    return issues
+
+
+# --- 多参写段请求（v2 规划式与规划失败回退式共用纪律核心，同改同测）-----------
+# 词表切片（``_WRITING_WORDLIST``，ADR 0007 落笔侧同一份）同样只接一次、两条 ref
+# 路径共用：写段请求各拼各的词表迟早漏一条，而漏掉的那条只在规划失败时才走。
+
+_REF_SEGMENT_DISCIPLINES = f"""\
+为长视频的其中一个 4-15 秒执行段写**可以直接喂给 MiniMax H3 的完整六段式提示词**（严格官方 ref-en.txt 格式，全部英文；对白、歌词、画面可见文字保留原文语言）。
+
+H3 是执行型模型：你写什么它就做什么，含糊等于失控。要求：
+
+## 多参锚定语义（与首尾帧链不同）
+- 本段**没有**首帧图、**没有桥接帧**：画面锚定由**本段参考素材**承担（请求给定的 subject_definitions 就是本段要用的那几张图＋它们的定义；段与段各自只带自己用到的素材，外观靠同一批素材图跨段保持一致）
+- **不写任何图片对齐指令行**（I2VA/FL2VA/L2VA 锚定行都属于首尾帧路线；「分段单图开场锚」裁定不适用于多参）
+
+## ⚠️ 时间窗纪律（最高优先级）
+- 产出的是「整片 N 秒中的第 [start-end] 秒」这一段自己的独立提示词
+- 正文时间基相对**本段起点**（00:00.000＝本段第一帧），取值落在 `[0, 本段时长)`；绝对片时严禁写进时间戳
+- 本段时间窗**之外**的事件（其他段的剧情）一个字都不能出现——违反＝本段作废
+- **禁止指代前文的措辞**（as mentioned before / as described earlier / the previous segment / 如前所述 等）：每段是独立生成，**模型无跨段记忆**，此类措辞是无效信息；被指代的内容要么改写成本段自足的表述，要么不写
+
+## 结构（严格官方 ref-en.txt 六段式，全部英文）
+1. `subject_definitions:` **原样复制**请求给定的定义块，一字不改（定义性段落逐段重复；标签语义必须与给定一致，不得新造标签）
+2. `summary:` 以给定的任务类型前缀开头（如 `[reference generation]`），一句话概括**本段**的主参照关系
+3. `retention_analysis:` **原样复制**请求给定的定义块，一字不改
+4. `detailed_description:` 本段正文——先一两句英文风格开场，然后 `[Shot 1]` 起的镜头（首镜无时间戳；后续镜 `At 00:0X.XXX` 相对本段起点）。指称以**语义名**为主，官方 `<Subject N>` / `<Picture N>` 标签在格式要求处兜底。**时间轴注记与起止状态声明由组装器注入，你不要写、也不要改动**。
+5. `overall_soundscape:` 为本段重写的英文摘要句（1-4 句连续段落，无时间戳，官方 §4.6）
+6. `non_diegetic_music:` 为本段重写的英文摘要句（1-3 句；无声写 `N/A`；无时间戳，官方 §4.7）
+
+## 禁止（出现即作废）
+- 不写 `GLOBAL_LOCK:` / `BRIDGE_FROM:` / `END_HOOK:` / 首行时长句 / 图片对齐指令行（均属首尾帧链或自创结构）
+- 不写时间轴注记与起止状态声明（组装器注入）
+- 不要把未来段的动作提前写进本段
+- 不要输出任何解释/markdown/前言；只输出提示词纯正文
+
+## 词表切片（ADR 0007 落笔侧同一份）
+下面词表**前言**里「edge-stability 句」「分段首行的锚定行」两处指针是首尾帧链的义务，多参分段**一概不用**（见上方禁止清单；多参格式以官方 ref-en.txt 为准，其完整示例就没有这两样）。词表正文的选词与写法照用。
+
+{_WRITING_WORDLIST}
+"""
+
+_REF_SEGMENT_V2_INSTRUCTION = (
+    "你是 H3 视频提示词的\"分段编剧·多参（ref2va）\"。\n" + _REF_SEGMENT_DISCIPLINES
+)
+_REF_SEGMENT_REWRITE_INSTRUCTION = (
+    "你是 H3 视频提示词工程师·多参（ref2va）。把整条视频的六段式提示词重写为**只覆盖指定时间窗的一段独立提示词**。\n"
+    + _REF_SEGMENT_DISCIPLINES
+)
+
+
+def _ref_defs_request_block(sections: dict[str, str]) -> str:
+    """请求里的「定义块」：v2 与回退式下发同一份（同改同测的物证点）。
+
+    调用方传**本段作用域**的 sections（issue #75：子集＋段内新号）。请求里只出现本段
+    要用的素材定义——整片 24 张定义下发给写段器，产出就会照着 24 张写，段内接线接不下。
+    """
+    return (
+        "\nsubject_definitions 定义块（**原样复制**进你的输出，一字不改）：\n"
+        f"{str(sections.get('subject_definitions', '')).strip()}\n"
+        "\nretention_analysis 定义块（**原样复制**进你的输出，一字不改）：\n"
+        f"{str(sections.get('retention_analysis', '')).strip()}\n"
+    )
+
+
+def build_ref_segment_v2_request(plan, all_plans: list, *,
+                                 sections: dict[str, str],
+                                 shot_texts: list[str], task_type: str,
+                                 total_s: float) -> str:
+    """组装多参 v2 写段请求（issue #46）。
+
+    入参全部显式（不依赖 state）：多参段的锚定素材是**本段**定义块＋本段镜头原文，
+    修订/帧锚/画面决策那套是首尾帧链的注入通道，多参路线没有它们的语义。
+    注记提示句取 ``render_ref_segment_annotations``（与组装器/校验器同源），
+    请求里不手抄第二份注记形态。
+    """
+    shots_block = (
+        "本段 Shot 原文（只含本段覆盖的镜头，按时间顺序；仅供理解，输出要按本段时间基重写）：\n"
+        + "\n\n".join(shot_texts)
+        if shot_texts else
+        "（缺本段镜头原文：按本段时间窗、剧情概述与起止状态写，不得虚构窗外事件）"
+    )
+    future_events = [
+        f"Segment {p.index + 1} ({p.start_s}-{p.end_s}s): {p.summary}"
+        for p in all_plans if p.index > plan.index
+    ]
+    future_block = (
+        "\n【时间窗外剧情禁区】以下事件属于其他视频段，本段绝对不能出现其中任何一个：\n"
+        + "\n".join(f"- {s}" for s in future_events)
+        if future_events else ""
+    )
+    annotations_hint = render_ref_segment_annotations(
+        plan.index + 1, len(all_plans), plan.start_s, plan.end_s, int(round(total_s)),
+        plan.start_state, plan.end_hook)
+    return (
+        f"{_REF_SEGMENT_V2_INSTRUCTION}\n\n"
+        f"--- \n"
+        f"本段编号：Segment {plan.index + 1}/{len(all_plans)}\n"
+        f"写段时间窗：0-{plan.duration_s}s（本段时长 {plan.duration_s}s；"
+        f"绝对片时 {plan.start_s}-{plan.end_s}s 仅作剧情定位，严禁写进提示词的时间戳）\n"
+        f"时间轴注记与起止状态声明（组装器注入，你不要写；正文叙事须与状态一致）：\n"
+        f"{annotations_hint}\n"
+        f"本段剧情概述（中文，仅供你理解剧情，不得写进提示词）：{plan.summary}\n"
+        f"{future_block}\n"
+        f"\n{shots_block}"
+        f"{_ref_defs_request_block(sections)}"
+    )
+
+
+def rewrite_ref_segment_prompt(*, base_prompt: str, plan, total_segments: int,
+                               total_s: int, shot_texts: list[str], llm) -> str | None:
+    """回退式（规划失败）：LLM 把整片六段式重写为本段时间窗的独立提示词；失败返回 None。
+
+    调用走直调看门狗（issue #70）：卡住会重试，失败那句把病因与尝试次数打给用户，
+    再由调用方回退机械拼装——回退本身是对的，静默才是错的（ADR 0019）。
+
+    ``base_prompt`` 是**本段作用域**的整片提示词（issue #75：定义块已裁成子集＋段内
+    新号）。它是「取材上下文」，塞整片 24 张定义进去，模型就会照着 24 张写。
+
+    产出同样要过 ``normalize_ref_segment_output`` 归一（调用方做）：定义逐段重复
+    与注记注入不靠 LLM 服从性。纪律声明与 v2 请求共用 ``_REF_SEGMENT_DISCIPLINES``
+    ——两条路径各拼各的纪律文本，漏一条就等规划一失败掉一个档次。注记提示句同取
+    ``render_ref_segment_annotations``（plan 携带段序/起止/状态，不拆成参数串）。
+    """
+    sections = split_ref_sections(base_prompt)
+    shots_block = (
+        "本段 Shot 原文（按时间顺序；输出要按本段时间基重写并重新编号为 [Shot 1] 起）：\n"
+        + "\n\n".join(shot_texts)
+        if shot_texts else
+        "（缺本段镜头原文：按本段时间窗写，不得虚构窗外事件）"
+    )
+    annotations_hint = render_ref_segment_annotations(
+        plan.index + 1, total_segments, plan.start_s, plan.end_s,
+        int(round(total_s)), plan.start_state, plan.end_hook)
+    request = (
+        f"{_REF_SEGMENT_REWRITE_INSTRUCTION}\n\n"
+        f"--- \n"
+        f"写段时间窗：0-{plan.duration_s}s（本段时长 {plan.duration_s}s；"
+        f"绝对片时 {plan.start_s}-{plan.end_s}s 仅作剧情定位，严禁写进提示词的时间戳）\n"
+        f"时间轴注记与起止状态声明（组装器注入，你不要写；正文叙事须与状态一致）：\n"
+        f"{annotations_hint}\n"
+        f"\n{shots_block}"
+        f"{_ref_defs_request_block(sections)}"
+        f"\n完整提示词（按本段参考素材裁剪后的六段式，供你取材；只准取本段时间窗内的内容）："
+        f"\n{base_prompt}"
+    )
+    return _direct_write(
+        llm, request, role=REF_SEGMENT_REWRITER_ROLE,
+        label=f"第 {plan.index + 1} 段多参回退写段")
+
+
+# summary 任务类型前缀（官方 ref-en.txt §3）：解析**只此一份**，组装归一与编排取任务关系共用。
+_TASK_TYPE_PREFIX_RE = re.compile(r"\s*\[([a-z\s+]+)\]\s*")
+
+
+def split_task_type(summary: str) -> tuple[str, str]:
+    """summary 段 → (任务类型, 去掉前缀的正文)。无前缀时任务类型返回空串。"""
+    match = _TASK_TYPE_PREFIX_RE.match(str(summary))
+    if not match:
+        return "", str(summary).strip()
+    return match.group(1).strip(), str(summary)[match.end():].strip()
+
+
+def normalize_ref_segment_output(text: str, *, sections: dict[str, str],
+                                 plan, total_segments: int, total_s: float,
+                                 task_type: str) -> str:
+    """LLM 产出 → 自包含六段式的归一化（v2 与回退式共用，issue #46 AC2）。
+
+    定义性段落换成**本段作用域**的原文（issue #75：子集＋段内新号，逐段重复由代码
+    保证），时间轴注记＋起止状态声明按 plan 注入 detailed_description 顶部；LLM 若
+    自写了注记行，先剥掉再注入（注记以组装器为准，重复两遍只会挤掉正文）。
+    """
+    parts = split_ref_sections(text)
+    if not parts:
+        return str(text).strip()  # 段落都没解析出来：原样交回，由校验器报缺段（不拼假内容）
+    annotations = render_ref_segment_annotations(
+        plan.index + 1, total_segments, plan.start_s, plan.end_s, int(round(total_s)),
+        plan.start_state, plan.end_hook)
+    effective_task, summary_body = split_task_type(parts.get("summary", ""))
+    effective_task = effective_task or task_type
+    # 剥掉 LLM 自写的注记行（注记以组装器为准，重复两遍只会挤掉正文）。判据与
+    # 「改写只动正文」共用 ``split_ref_segment_detailed``——两处各写一遍「首行是不是
+    # 注记」就是又一个会各自漂移的切点。
+    _self_written, detailed = split_ref_segment_detailed(
+        parts.get("detailed_description", ""))
+    return assemble_ref_segment(
+        subject_definitions=sections.get("subject_definitions")
+        or parts.get("subject_definitions", ""),
+        retention_analysis=sections.get("retention_analysis")
+        or parts.get("retention_analysis", ""),
+        task_type=effective_task,
+        summary_body=summary_body,
+        detailed_body=detailed,
+        overall_soundscape=parts.get("overall_soundscape", ""),
+        non_diegetic_music=parts.get("non_diegetic_music", ""),
+        annotations=annotations,
+    )
+
+
+def write_ref_segment_v2(plan, all_plans: list, *, sections: dict[str, str],
+                         shot_texts: list[str], task_type: str, llm,
+                         total_s: float,
+                         ref_meta: list[tuple[int, str, str]] | None = None,
+                         subject_scope: tuple[int, ...] | list[int] | None = None,
+                         ) -> str | None:
+    """多参 v2 写段（issue #46）：LLM 细写 → 归一化 → 校验，有界重写。
+
+    契约同 ``write_segment_v2``：LLM 调用失败返回 None；重试耗尽仍不合格时
+    **交回原文**（当面给用户看问题），不返回 None 装死。调用走直调看门狗
+    （issue #70）：卡住会先重试，失败那句把病因与尝试次数打给用户再回退。
+
+    ``sections`` / ``ref_meta`` / ``subject_scope`` 都是**本段作用域**（issue #75）：
+    请求只带本段定义块，校验也按本段登记判——拿整片登记判段产物，``PICTURE_UNUSED``
+    会把每一段都判红（本段本来就用不到别的图）。
+    """
+    base_request = build_ref_segment_v2_request(
+        plan, all_plans, sections=sections,
+        shot_texts=shot_texts, task_type=task_type, total_s=total_s)
+    request = base_request
+    text: str | None = None
+    for attempt in range(MAX_SEGMENT_ATTEMPTS):
+        raw = _direct_write(
+            llm, request, role=REF_SEGMENT_WRITER_ROLE,
+            label=f"第 {plan.index + 1} 段多参写段")
+        if raw is None:
+            # 调用失败：病因已当面打出（issue #70），照老契约返回 None 由调用方
+            # 回退机械拼装——回退是对的，静默才是错的。
+            return None
+        text = normalize_ref_segment_output(
+            raw, sections=sections, plan=plan,
+            total_segments=len(all_plans), total_s=total_s, task_type=task_type)
+        errors = [i for i in validate_ref_segment(
+            text, duration=plan.duration_s, segment_number=plan.index + 1,
+            total_segments=len(all_plans), start_s=plan.start_s, total_s=total_s,
+            ref_meta=ref_meta, subject_scope=subject_scope) if i.severity == "error"]
+        if not errors:
+            return text
+        if attempt + 1 == MAX_SEGMENT_ATTEMPTS:
+            break  # 重试预算用尽：交回原文，由调用方把 issue 明细当面打给用户
+        request = (
+            f"{base_request}\n\n"
+            "【上一次产出被校验器判为不合格，请按下列问题修正后重写】\n"
+            + "\n".join(f"- {i.code}: {i.message}" for i in errors)
+        )
+    return text
+
+
+# 行内节拍时间戳（At MM:SS.mmm）与块首切点时间戳：机械切片整体重基用。
+# 块首只认 `\A` 锚定的切点时间——不锚定会把首块**句中**的第一个节拍当切点删掉
+# （对抗验证 B1 实证：合法句 "Wide view. At 00:02.500, gulls scatter" 被静默吞节拍）。
+_AT_TIME_RE = re.compile(r"At\s+(\d{2}):(\d{2})\.(\d{3})")
+_LEADING_AT_RE = re.compile(r"\AAt\s+\d{2}:\d{2}\.\d{3},?\s*")
+
+
+def _rebase_at(match: re.Match, start_s: float) -> str:
+    """绝对片时 → 相对本段起点（负值归零）；段窗口 ≤15s，分恒为 00。"""
+    total = int(match.group(1)) * 60 + int(match.group(2)) + int(match.group(3)) / 1000.0
+    rebased = max(0.0, total - float(start_s))
+    secs = int(rebased)
+    millis = int(round((rebased - secs) * 1000))
+    return f"At 00:{secs:02d}.{millis:03d}"
+
+
+def rebase_ref_shot_blocks(shot_texts: list[str], start_s: float) -> str:
+    """多参机械回退的镜头切片：重新编号 [Shot 1] 起、时间戳归零重基（issue #46）。
+
+    每块去掉原 [Shot N] 标记；段内**首镜**再剥掉块首切点时间（官方规范：[Shot 1]
+    无切点时间），后续镜的切点时间保留但重基为相对本段起点。块内其余 `At MM:SS.mmm`
+    节拍同样整体重基——绝对片时进正文会把节拍排到片段长度之外（GEN003 坏片根因）。
+    """
+    out: list[str] = []
+    for index, block in enumerate(shot_texts, 1):
+        text = _SHOT_BLOCK.sub("", str(block), count=1).lstrip()
+        if index == 1:
+            text = _LEADING_AT_RE.sub("", text, count=1)
+        text = _AT_TIME_RE.sub(lambda m: _rebase_at(m, start_s), text)
+        out.append(f"[Shot {index}] {text.strip()}")
+    return "\n".join(out)
