@@ -41,7 +41,12 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .asset_ledger import KIND_PICTURE, load_asset_ledger, sha256_file
+from .asset_ledger import (
+    KIND_PICTURE,
+    load_asset_ledger,
+    resolve_asset_path,
+    sha256_file,
+)
 from .segment_planner import (
     MAX_SEG_S,
     SegmentPlan,
@@ -451,10 +456,11 @@ def _build_ref_job(*, whole_prompt: str, total_s: float, out_dir: Path,
         llm = None
         notes.append(f"[提示] 模型构造失败（{exc}）：分段提示词改走机械拼装（定义逐段重复＋切片重基）。")
     registry = ref_asset_registry(state or {}, brief)
-    # 正本路径取素材台账（与整片注入卡同一口径：`assets/picture-NN.png`），不在这里
-    # 拼路径——台账才是「哪张图对应哪个文件」的真源，拼出来的路径可能指向空。
-    asset_paths = {entry.number: entry.path
-                   for entry in load_asset_ledger(out_dir).entries
+    # 正本路径取素材台账，不在这里拼路径——台账才是「哪张图对应哪个文件」的真源。
+    # 位置一律过统一解析口（issue #85）：素材在素材库里，卡上要给人能直接找到的路径。
+    ledger = load_asset_ledger(out_dir)
+    asset_paths = {entry.number: str(resolve_asset_path(ledger, entry))
+                   for entry in ledger.entries
                    if entry.kind == KIND_PICTURE}
     job = prepare_ref_segmentation(
         whole_prompt=whole_prompt, total_s=total_s, out_dir=out_dir, llm=llm,
@@ -1271,7 +1277,7 @@ def prepare_ref_segmentation(*, whole_prompt: str, total_s: float, out_dir: Path
 
     llm：带 ``invoke(str, config=...)`` 的模型；None → 全机械（不静默失败，产物照样完整）。
     ref_meta：素材登记（(picture, name, description)），供「定义逐段重复」校验。
-    asset_paths：原号 → 正本相对路径（台账口径），进每段接线卡。
+    asset_paths：原号 → 正本路径（台账口径；新台账是库内绝对路径），进每段接线卡。
     refs_per_segment：每段参考图上限；None → 读工作流配置（``config/workflow.yaml``）。
 
     **准备阶段就把每段的素材子集算好并写进 plan.json**（issue #75）：超限的片子在这里

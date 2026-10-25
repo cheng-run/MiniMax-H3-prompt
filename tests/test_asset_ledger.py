@@ -27,6 +27,7 @@ from minimax_h3_prompt.asset_ledger import (
     remove_asset,
     render_ledger,
     render_report,
+    resolve_asset_path,
     verify_asset_ledger,
 )
 from minimax_h3_prompt.brief_parser import RefItem
@@ -59,15 +60,19 @@ def test_intake_registers_picture_with_five_fields(tmp_path):
     """交回一张素材图 → 台账落盘：语义名/类型/<Picture N>/路径/SHA256（AC2）。
 
     五字段的期望值**逐项手写**，不从实现反推：语义名与编号来自参考素材登记（剧本出场序），
-    SHA256 对交回文件内容现算，路径指向会话目录内正本（复制入库，旧产物才可复测）。
+    SHA256 对交回文件内容现算，路径指向素材库内正本（issue #85 起库外长期目录，
+    旧产物才可复测）。
     """
-    directory = tmp_path / "GEN001"
+    # 运行目录形状与生产一致：<sessions>/<主题摘要>/GEN001——库内子目录取它的上一级
+    directory = tmp_path / "sessions" / "红裙女孩-a3f2b1c0" / "GEN001"
+    directory.mkdir(parents=True)
+    library = tmp_path / "library"
     source = _write_source(tmp_path, "girl.png", b"fake-image-bytes-v1")
     registry = _registry((1, "红裙女孩"))
 
     report = intake_assets(directory, [
         AssetSubmission(name="红裙女孩", kind=KIND_PICTURE, source=str(source)),
-    ], registry=registry)
+    ], registry=registry, library_root=library)
 
     ledger = load_asset_ledger(directory)
     assert len(ledger.entries) == 1
@@ -77,10 +82,11 @@ def test_intake_registers_picture_with_five_fields(tmp_path):
     assert entry.number == 1  # <Picture 1>：编号取自参考素材登记（剧本出场序）
     expected_sha = hashlib.sha256(b"fake-image-bytes-v1").hexdigest()
     assert entry.sha256 == expected_sha
-    # 正本在会话目录内（只复制不移动，同 frames/ 入库先例）；记录的是目录内正本路径
-    assert (directory / entry.path).read_bytes() == b"fake-image-bytes-v1"
-    assert entry.path.startswith("assets/")
+    # 正本在素材库里（issue #85：生成目录不再存图）；台账记库根 + 相对路径
+    assert (library / entry.path).read_bytes() == b"fake-image-bytes-v1"
+    assert entry.path == "红裙女孩-a3f2b1c0/1-红裙女孩.png"
     assert not Path(entry.path).is_absolute()
+    assert ledger.library_root == str(library)
     assert report.registered == (entry,)
     assert report.missing == ()
 
@@ -95,6 +101,7 @@ def test_ledger_persists_as_json_artifact_and_roundtrips(tmp_path):
 
     raw = json.loads((directory / "asset-ledger.json").read_text(encoding="utf-8"))
     assert raw["schema_version"] == "asset-ledger.v1"
+    assert raw["library_root"], "台账没记库根：换机器搬库后无从上账（issue #85）"
     assert len(raw["entries"]) == 1
     # 六字段 = 票面五字段 + 溯源 source；外部成本两字段是 issue #52 的显式 schema 扩展
     # （schema 变了就必须动这条守卫，否则扩展会从后门溜进产物而没人核）
@@ -163,7 +170,8 @@ def test_reintake_changed_content_is_reported_not_silent(tmp_path):
     # 原登记保留，正本内容不动
     ledger = load_asset_ledger(directory)
     assert ledger.entries[0].sha256 == old_sha
-    assert (directory / ledger.entries[0].path).read_bytes() == b"content-v1"
+    assert resolve_asset_path(ledger, ledger.entries[0],
+                              session_dir=directory).read_bytes() == b"content-v1"
 
 
 def test_reintake_replacement_keeps_old_sha_in_history(tmp_path):
@@ -192,7 +200,11 @@ def test_reintake_replacement_keeps_old_sha_in_history(tmp_path):
     ledger = load_asset_ledger(directory)
     assert ledger.entries[0].sha256 == hashlib.sha256(b"content-v2-different").hexdigest()
     assert ledger.replacements == report.replaced
-    assert (directory / ledger.entries[0].path).read_bytes() == b"content-v2-different"
+    assert resolve_asset_path(ledger, ledger.entries[0],
+                              session_dir=directory).read_bytes() == b"content-v2-different"
+    # 换版不删旧文件（issue #85 D3）：上一版仍在盘上，可回退
+    assert resolve_asset_path(ledger, ledger.entries[0],
+                              session_dir=directory).name.endswith("-r2.png")
 
 
 def test_reintake_same_content_is_idempotent(tmp_path):
@@ -293,9 +305,10 @@ def test_verify_detects_file_swapped_behind_ledger(tmp_path):
                   registry=_registry((1, "红裙女孩")))
     old_sha = load_asset_ledger(directory).entries[0].sha256
 
-    # 换版不经交回入口：直接改会话正本（模拟别人动了文件）
+    # 换版不经交回入口：直接改库里的正本（模拟别人动了文件）
     ledger = load_asset_ledger(directory)
-    (directory / ledger.entries[0].path).write_bytes(b"swapped-content")
+    copy = resolve_asset_path(ledger, ledger.entries[0], session_dir=directory)
+    copy.write_bytes(b"swapped-content")
     drift = verify_asset_ledger(directory)
     assert len(drift) == 1
     assert drift[0].name == "红裙女孩"
@@ -303,7 +316,7 @@ def test_verify_detects_file_swapped_behind_ledger(tmp_path):
     assert drift[0].actual_sha256 == hashlib.sha256(b"swapped-content").hexdigest()
 
     # 文件被删也是一类差异（actual=None），不是静默忽略
-    (directory / ledger.entries[0].path).unlink()
+    copy.unlink()
     drift = verify_asset_ledger(directory)
     assert drift[0].actual_sha256 is None
 
@@ -316,7 +329,7 @@ def test_intake_reports_drift_of_already_registered_files(tmp_path):
     intake_assets(directory, [AssetSubmission("红裙女孩", KIND_PICTURE, str(source))],
                   registry=registry)
     ledger = load_asset_ledger(directory)
-    (directory / ledger.entries[0].path).write_bytes(b"swapped")
+    resolve_asset_path(ledger, ledger.entries[0], session_dir=directory).write_bytes(b"swapped")
 
     extra = _write_source(tmp_path, "key.png", b"key")
     report = intake_assets(directory, [AssetSubmission("青铜钥匙", KIND_PICTURE, str(extra))],
@@ -353,11 +366,13 @@ def test_render_ledger_shows_five_fields(tmp_path):
     source = _write_source(tmp_path, "girl.png", b"content-v1")
     intake_assets(directory, [AssetSubmission("红裙女孩", KIND_PICTURE, str(source))],
                   registry=_registry((1, "红裙女孩")))
-    text = render_ledger(load_asset_ledger(directory))
+    ledger = load_asset_ledger(directory)
+    text = render_ledger(ledger)
     assert "<Picture 1>" in text          # 官方编号
     assert "红裙女孩" in text              # 语义名
     assert "图" in text                    # 类型（图/视频/音频）
-    assert "assets/picture-01.png" in text # 路径
+    assert ledger.entries[0].path in text  # 路径（相对库根）
+    assert "素材库" in text and ledger.library_root in text  # 库根：路径不再是半截
     entry = load_asset_ledger(directory).entries[0]
     assert entry.sha256[:16] in text      # SHA256（终端可读口径，全量在 JSON）
 
@@ -415,7 +430,7 @@ def test_brief_refs_with_paths_build_ledger(tmp_path, monkeypatch, capsys):
     ledger = load_asset_ledger(directory)
     assert [(e.name, e.number) for e in ledger.entries] == [("红裙女孩", 1), ("青铜钥匙", 2)]
     assert ledger.entries[0].sha256 == hashlib.sha256(b"girl-bytes").hexdigest()
-    assert (directory / ledger.entries[0].path).is_file()
+    assert resolve_asset_path(ledger, ledger.entries[0], session_dir=directory).is_file()
 
 
 def test_brief_refs_without_paths_are_reported_missing(tmp_path, monkeypatch, capsys):
@@ -467,8 +482,11 @@ def test_brief_reintake_swapped_file_replaces_and_reports(tmp_path, monkeypatch,
     ledger = load_asset_ledger(_gen_dir(tmp_path))
     assert ledger.entries[0].sha256 == new_sha           # 已换成新版
     assert ledger.replacements[0].old_sha256 == old_sha  # 旧哈希留史（旧产物可复测）
-    copied = _gen_dir(tmp_path) / ledger.entries[0].path
-    assert copied.read_bytes() == b"content-v2-different"  # 正本同步更新
+    copied = resolve_asset_path(ledger, ledger.entries[0], session_dir=_gen_dir(tmp_path))
+    assert copied.read_bytes() == b"content-v2-different"  # 正本同步更新（-r2 新文件）
+    old_path = ledger.replacements[0].old_path
+    assert (Path(ledger.library_root) / old_path).read_bytes() == b"content-v1", \
+        "换版把上一版文件删了（issue #85 D3：旧文件保留）"
 
 
 def _gen_dir(tmp_path: Path) -> Path:
@@ -479,8 +497,12 @@ def _gen_dir(tmp_path: Path) -> Path:
 # 撤下登记（issue #50「显式放弃」问过人才撤）
 # ---------------------------------------------------------------------------
 
-def test_remove_asset_drops_entry_and_copy_but_keeps_replacement_history(tmp_path, monkeypatch):
-    """撤下＝台账行与正本复制一起走（废图不留槽）；换版史留着，二次撤返回 None 不报错。"""
+def test_remove_asset_drops_entry_but_keeps_history_and_library_file(tmp_path, monkeypatch):
+    """撤下＝台账行走（废图不进片）；换版史留着，二次撤返回 None 不报错。
+
+    库里的图**不删**（issue #85）：那是这件素材唯一的长期落点，向导问的是「从台账
+    撤下」，不是删文件。
+    """
     from minimax_h3_prompt.topic_generation import create_video_from_topic
 
     _stub_pipeline(monkeypatch)
@@ -500,7 +522,8 @@ def test_remove_asset_drops_entry_and_copy_but_keeps_replacement_history(tmp_pat
     after = load_asset_ledger(directory)
     assert not after.entries, "撤下后台账还留着这条登记"
     assert after.replacements == history, "撤下把换版史一起抹了（旧产物就不可复测了）"
-    assert not (directory / removed.path).is_file(), "正本复制没跟着撤"
+    assert resolve_asset_path(after, removed, session_dir=directory).is_file(), \
+        "撤登记把库里的图删了（不可逆、超出「从台账撤下」的授权）"
     assert remove_asset(directory, "红裙女孩", KIND_PICTURE) is None, "二次撤该是空操作"
 
 

@@ -99,6 +99,24 @@ def write_h3_tier_video(path: Path, seconds: float, *, fps: int = 24) -> Path:
     return path
 
 
+@pytest.fixture(autouse=True)
+def isolated_asset_library(tmp_path_factory, monkeypatch):
+    """所有用例默认把素材库根指到临时目录（issue #85）。
+
+    默认库根是用户机器上的真实目录（``D:\\素材库``）：不隔离的话，任何走生产入库
+    路径的用例（向导 / CLI / brief 路径）都会把测试图写进真实素材库——收尾清不干净，
+    而且这种污染**不会让任何断言变红**（「本机全绿」不能当反证的老教训）。
+    要验证配置读取本身的用例自己传路径或覆盖 ``LIBRARY_CONFIG_PATH``。
+    """
+    root = tmp_path_factory.mktemp("asset-library")
+    config = root.parent / f"{root.name}-library.yaml"
+    config.write_text(f"root: '{root.as_posix()}'\n", encoding="utf-8")
+    from minimax_h3_prompt import library_config
+
+    monkeypatch.setattr(library_config, "LIBRARY_CONFIG_PATH", config)
+    return root
+
+
 @pytest.fixture
 def tmp_video(tmp_path: Path):
     """返回一个可调用对象：make(name="a.mp4", **kwargs) -> Path"""

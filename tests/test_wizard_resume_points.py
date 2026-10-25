@@ -338,7 +338,7 @@ def test_returned_asset_can_be_replaced_from_resume_menu(tmp_path, monkeypatch):
 
 def test_decided_deviations_are_not_asked_again_on_resume(tmp_path, monkeypatch):
     """两条偏差裁完一条就中断：续跑只问剩下的那条，且不重付一次读图。"""
-    vision = {"picture-01": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙"),
+    vision = {"红裙女孩":_claims(deviations=[("裙色", "红裙", "宝蓝色长裙"),
                                                 ("发型", "黑发", "短发")])}
     asked = _start_ref_run(tmp_path, monkeypatch, vision=vision)
     girl = _write_source(tmp_path, "girl.png", b"girl")
@@ -447,7 +447,7 @@ def test_frame_paths_and_descriptions_are_reused_after_assembly_interrupt(tmp_pa
 
 def test_pending_regen_resume_asks_for_the_new_image(tmp_path, monkeypatch):
     """裁了「重生成」就断线：续跑直接要新图（回审查菜单），不再重问重掷菜单。"""
-    vision = {"picture-01": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
+    vision = {"红裙女孩":_claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
     asked = _start_ref_run(tmp_path, monkeypatch, vision=vision)
     girl = _write_source(tmp_path, "girl.png", b"girl")
 

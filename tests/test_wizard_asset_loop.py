@@ -19,7 +19,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from minimax_h3_prompt import model_factory
-from minimax_h3_prompt.asset_ledger import load_asset_ledger
+from minimax_h3_prompt.asset_ledger import load_asset_ledger, resolve_asset_path
 from minimax_h3_prompt import asset_loop
 from minimax_h3_prompt.asset_loop import ASSET_ROUNDS_FILENAME
 from minimax_h3_prompt.brief_parser import Brief
@@ -143,7 +143,7 @@ def _stub_stage2(monkeypatch, captured: dict | None = None) -> None:
 
 
 def _stub_vision(monkeypatch, mapping: dict[str, str]) -> list[str]:
-    """按正本文件名（picture-NN）路由读图结果；记录调用过的路径。"""
+    """按正本文件名（``<编号>-<语义名>``）路由读图结果；记录调用过的路径。"""
     seen: list[str] = []
 
     def fake_describe(path, instruction=None):
@@ -497,7 +497,7 @@ def test_review_rewrite_cancel_keeps_prompt(tmp_path, monkeypatch, capsys):
 def test_regen_defaults_to_same_prompt_reroll_and_logs(tmp_path, monkeypatch, capsys):
     """裁决「重生成」→ 回车=原词再掷：留痕 regen_reroll，词不动。"""
     girl = _write_source(tmp_path, "girl.png", b"girl")
-    vision = {"picture-01": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
+    vision = {"红裙女孩":_claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
     tail = [
         "", "1", str(girl),
         "2",          # 三选：重生成这张素材图
@@ -519,7 +519,7 @@ def test_regen_defaults_to_same_prompt_reroll_and_logs(tmp_path, monkeypatch, ca
 def test_regen_reword_exit_rewrites_and_logs(tmp_path, monkeypatch, capsys):
     """「改词再掷」：留痕 regen_reword、新词出站（词图皆错时连词一起换）。"""
     girl = _write_source(tmp_path, "girl.png", b"girl")
-    vision = {"picture-01": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
+    vision = {"红裙女孩":_claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
     rewrite_calls = _stub_rewrite(monkeypatch, "人物·红裙女孩专属生图提示词：宝蓝裙")
     tail = [
         "", "1", str(girl),
@@ -553,7 +553,7 @@ def test_proofread_adjudicates_only_locked_features(tmp_path, monkeypatch, capsy
     这条必须红（构图那条回来占第二次三选，输入脚本随即错位）。
     """
     girl = _write_source(tmp_path, "girl.png", b"girl")
-    vision = {"picture-01": _claims(deviations=[
+    vision = {"红裙女孩":_claims(deviations=[
         ("裙色", "红裙", "宝蓝色长裙"),                    # 命中锁死清单
         ("构图", "女孩站在秋日庭院里", "女孩几乎站在画面正中"),  # 清单外＝理想描述
     ])}
@@ -646,7 +646,7 @@ def test_next_prompt_backfills_the_settled_asset_facts(tmp_path, monkeypatch, ca
     """
     girl = _write_source(tmp_path, "girl.png", b"girl")
     garden = _write_source(tmp_path, "garden.png", b"garden")
-    vision = {"picture-01": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
+    vision = {"红裙女孩":_claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
     llm = _FakeLLM()
     tail = [
         "", "1", str(girl),    # 队列菜单→红裙女孩；审查满意；交回路径
@@ -705,7 +705,7 @@ def test_abandon_after_intake_asks_before_withdrawing(tmp_path, monkeypatch, cap
     from minimax_h3_prompt.asset_ledger import load_asset_ledger
 
     girl = _write_source(tmp_path, "girl.png", b"girl")
-    vision = {"picture-01": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
+    vision = {"红裙女孩":_claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
     tail = [
         "", "1", str(girl),      # 交回
         "2",                     # 三选：重生成
@@ -728,7 +728,7 @@ def test_abandon_after_intake_can_keep_the_registration(tmp_path, monkeypatch, c
     from minimax_h3_prompt.asset_ledger import load_asset_ledger
 
     girl = _write_source(tmp_path, "girl.png", b"girl")
-    vision = {"picture-01": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
+    vision = {"红裙女孩":_claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
     tail = ["", "1", str(girl), "2",
             "4",   # 重生成菜单：显式放弃（#72 起「3」是 AI 改词）
             "", "4", "", "4", "4", "8", "1"]
@@ -790,6 +790,29 @@ def test_wrong_shaped_loop_state_is_not_laundered():
     assert state["asset_loop"]["released"] == ["红裙女孩"]
 
 
+def test_proofread_reads_the_library_copy_through_the_resolver(tmp_path, monkeypatch):
+    """读图取的是素材库里的正本（issue #85 统一解析口），生成目录里不再有图片副本。
+
+    这条是「解析口被绕过」的探针：把 ``describe_image`` 的参数改回
+    ``generation_dir / entry.path``，它拿到的就是一个不存在的路径——``is_file()``
+    当场变红，而不是等到读图服务报「文件不存在」才被发现。
+    """
+    girl = _write_source(tmp_path, "girl.png", b"girl")
+    tail = ["", "1", str(girl), "", "4", "", "4", "4", "8", "1"]
+    _asked, code, calls = _run_loop(tmp_path, monkeypatch, tail)
+    assert code == 0
+
+    ledger_dir = next((tmp_path / "sessions").rglob("asset-ledger.json")).parent
+    ledger = load_asset_ledger(ledger_dir)
+    assert calls, "这张图没进读图校对"
+    read_path = Path(calls[0])
+    assert read_path.is_file(), f"读图拿到的是不存在的路径：{read_path}"
+    assert read_path == resolve_asset_path(ledger, ledger.entries[0], session_dir=ledger_dir)
+    assert Path(ledger.library_root) in read_path.parents
+    assert not (ledger_dir / "assets").exists(), "生成目录里还留着 assets/"
+    assert not list(ledger_dir.rglob("*.png")), "生成目录里还留着图片副本"
+
+
 def test_ledger_drift_is_reported_at_loop_entry(tmp_path, monkeypatch, capsys):
     """台账漂移（正本文件被换而登记没换）在循环入口照报，不静默。"""
     girl = _write_source(tmp_path, "girl.png", b"girl")
@@ -797,10 +820,11 @@ def test_ledger_drift_is_reported_at_loop_entry(tmp_path, monkeypatch, capsys):
     _asked, code, _ = _run_loop(tmp_path, monkeypatch, tail)
     assert code == 0
 
-    # 循环外动手脚：把会话里的正本复制改掉（登记里的 sha 没跟着变 → 漂移）
+    # 循环外动手脚：把库里的正本改掉（登记里的 sha 没跟着变 → 漂移）
     ledger_dir = next((tmp_path / "sessions").rglob("asset-ledger.json")).parent
-    entry = load_asset_ledger(ledger_dir).entries[0]
-    (ledger_dir / entry.path).write_bytes(b"tampered")
+    ledger = load_asset_ledger(ledger_dir)
+    entry = ledger.entries[0]
+    resolve_asset_path(ledger, entry, session_dir=ledger_dir).write_bytes(b"tampered")
 
     session = load_session(ledger_dir)
     save_session(ledger_dir, session.brief, session.stage_state, status=STATUS_AWAITING_FRAMES)
@@ -816,7 +840,7 @@ def test_ledger_drift_is_reported_at_loop_entry(tmp_path, monkeypatch, capsys):
 def test_regen_reword_cancel_stays_in_menu_and_does_not_log_reroll(tmp_path, monkeypatch, capsys):
     """重掷菜单里选「改词再掷」又留空意见＝取消：留在菜单重选，不许默默当原词再掷。"""
     girl = _write_source(tmp_path, "girl.png", b"girl")
-    vision = {"picture-01": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
+    vision = {"红裙女孩":_claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
     tail = [
         "", "1", str(girl),
         "2",        # 三选：重生成
@@ -899,7 +923,7 @@ def test_review_menu_records_external_cost_on_an_intaken_asset(tmp_path, monkeyp
     """已入库时登记：直接写台账（不用等下一次交回）——事后补登记就是这个口。"""
     from minimax_h3_prompt.resume_point import ANSWERS_KEY
 
-    vision = {"picture-01": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
+    vision = {"红裙女孩":_claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
     girl = _write_source(tmp_path, "girl.png", b"girl")
     tail = [
         "",                 # 队列菜单：默认队首
@@ -1052,7 +1076,7 @@ def test_regen_menu_offers_four_choices_plus_q(tmp_path, monkeypatch, capsys):
     「4」不再是放弃 → 本条收尾的输入错位、code 非 0。
     """
     girl = _write_source(tmp_path, "girl.png", b"girl")
-    vision = {"picture-01": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
+    vision = {"红裙女孩":_claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
     tail = [
         "", "1", str(girl),
         "2",          # 三选：重生成
@@ -1077,7 +1101,7 @@ def test_ai_reword_rewrites_by_all_deviations_and_logs_a_new_trigger(
     本轮的**全部**条目，不是「已裁过的那几条」（票面「全部偏差条目」）。
     """
     girl = _write_source(tmp_path, "girl.png", b"girl")
-    vision = {"picture-01": _claims(deviations=[
+    vision = {"红裙女孩":_claims(deviations=[
         ("裙色", "红裙", "宝蓝色长裙"),   # 人裁：重生成
         ("裙长", "红裙", "及踝长裙"),     # 还没轮到裁，deviation 已判出
     ])}
@@ -1126,7 +1150,7 @@ def test_ai_reword_failure_keeps_the_prompt_and_stays_in_the_menu(
         tmp_path, monkeypatch, capsys):
     """AI 改词失败（AC4）：提示词保持原样、不留痕，**留在重生成菜单**——不许静默换词。"""
     girl = _write_source(tmp_path, "girl.png", b"girl")
-    vision = {"picture-01": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
+    vision = {"红裙女孩":_claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
     llm = _FakeLLM(ai_reword_error=RuntimeError("网关 500"))
     captured: dict = {}
     tail = [
@@ -1157,7 +1181,7 @@ def test_ai_reword_that_drops_a_locked_feature_is_rejected(tmp_path, monkeypatch
     （静默失效）。照单收下比直接失败更坏，所以按失败处理——词不动、留在菜单。
     """
     girl = _write_source(tmp_path, "girl.png", b"girl")
-    vision = {"picture-01": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
+    vision = {"红裙女孩":_claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
     # 「红裙女孩」是这一张的锁死特征；回复里整个丢了它
     llm = _FakeLLM(ai_reword_reply="人物专属生图提示词：宝蓝色长裙")
     captured: dict = {}
@@ -1216,7 +1240,7 @@ def test_regen_menu_and_proofread_report_show_the_regen_round_hint(
     重画后的图（该出现，且只出现两处——报告一处、菜单一处）。
     """
     girl = _write_source(tmp_path, "girl.png", b"girl")
-    vision = {"picture-01": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
+    vision = {"红裙女孩":_claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
     tail = [
         "", "1", str(girl),
         "2",             # 三选：重生成
@@ -1240,7 +1264,7 @@ def test_regen_menu_and_proofread_report_show_the_regen_round_hint(
 def test_ai_reword_output_is_rechecked_against_the_discipline(tmp_path, monkeypatch, capsys):
     """AI 改词也是一次出词：结果照跑警告级纪律检查（#68 / ADR 0018）——只警告、不阻断。"""
     girl = _write_source(tmp_path, "girl.png", b"girl")
-    vision = {"picture-01": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
+    vision = {"红裙女孩":_claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
     # 含负向表述（Turbo 上是空动作）——改写结果照样写回，但要有一行警告
     llm = _FakeLLM(ai_reword_reply="人物·红裙女孩专属生图提示词：宝蓝色长裙，不要阴影")
     tail = [
@@ -1269,7 +1293,7 @@ def test_ai_reword_goes_through_the_direct_call_watchdog(tmp_path, monkeypatch, 
     from minimax_h3_prompt.observability import reporter
 
     girl = _write_source(tmp_path, "girl.png", b"girl")
-    vision = {"picture-01": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
+    vision = {"红裙女孩":_claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
     llm = _FakeLLM(ai_reword_reply="人物·红裙女孩专属生图提示词：红裙，及踝长度，宝蓝色裙面")
     events: list[dict] = []
     reporter.subscribe(events.append)

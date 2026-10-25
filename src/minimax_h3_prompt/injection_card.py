@@ -39,6 +39,7 @@ from .asset_ledger import (
     AssetRecord,
     format_tag,
     load_asset_ledger,
+    resolve_asset_path,
 )
 from .generation import image_canvas_size
 from .workflow_config import WorkflowSettings, workflow_settings
@@ -350,10 +351,12 @@ def render_injection_card(ledger: AssetLedger, params: VideoOutputParams,
             slot_cell = "（无对应槽位）"  # 越界编号不造假端口名（照卡接线不得接进空气）
         else:
             slot_cell = slot_name(entry.kind, entry.number, active)
+        # 正本位置走统一解析口（issue #85）：新台账给库内绝对路径，用户照卡找得到文件；
+        # 旧台账没有库根，解析口原样返回相对路径（旧卡面一字不变）
         lines.append(
             f"| {slot_cell} | {entry.name} "
             f"| {KIND_LABELS[entry.kind]} | {format_tag(entry.kind, entry.number)} "
-            f"| {entry.path} |")
+            f"| {resolve_asset_path(ledger, entry)} |")
     if not ledger.entries:
         lines.append("| （无登记素材） | | | | |")
     lines += [

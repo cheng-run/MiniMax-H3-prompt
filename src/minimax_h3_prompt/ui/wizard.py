@@ -1599,7 +1599,7 @@ def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: 
     对照底本恒取生图提示词最新版：换版重交/改词再掷的
     新图是按**当前词**画的，不是按上一轮合并结果画的。
     """
-    from ..asset_ledger import KIND_PICTURE, load_asset_ledger
+    from ..asset_ledger import KIND_PICTURE, load_asset_ledger, resolve_asset_path
     from ..asset_loop import count_regen_rounds, render_regen_hint
     from ..asset_proofread import (
         DECISION_LABELS,
@@ -1671,8 +1671,10 @@ def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: 
             # 读完图之前不能只有一行 `[读图校对]`（issue #71 / ADR 0019）：读图客户端
             # 走流式后首字节/生成中都是事件，横幅与订阅必须成对出现。
             with step_scope("正在读图校对"):
-                raw = describe_image(generation_dir / entry.path,
-                                     build_proofread_request(base, locked))
+                # 正本位置走统一解析口（issue #85）：素材在素材库里，不在生成目录
+                raw = describe_image(
+                    resolve_asset_path(ledger, entry, session_dir=generation_dir),
+                    build_proofread_request(base, locked))
             reading = parse_reading(raw)
         except Exception as exc:  # noqa: BLE001 — 读图失败要响且不放行
             print(f"[读图校对] {entry.name} 读图失败：{exc}")

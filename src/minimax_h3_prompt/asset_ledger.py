@@ -11,9 +11,12 @@
 
 三条既定规则落在这里：
 
-1. **正本复制入库**：交回的文件复制进 ``<目录>/assets/``（只复制不移动，同
-   ``frames/`` 先例），台账记**目录内正本**的相对路径（POSIX 斜杠）。生成目录因此
-   自包含——把整个目录搬走、拷给别人，台账与文件仍然对得上账，这才叫「旧产物可复测」。
+1. **正本复制入库**：交回的文件复制进**素材库**（``<库根>/<主题摘要>/<编号>-<语义名>``，
+   只复制不移动，同 ``frames/`` 先例），台账记库根 + 相对路径（POSIX 斜杠）。
+   2026-10-25（issue #85 / spec #84 D2）之前是复制进 ``<生成目录>/assets/``——
+   图与一次性提示词产物混在一起，换一个 GEN 就找不到上一版素材。旧台账没有
+   ``library_root`` 字段，仍按旧布局读，不迁移也不崩（旧 GEN 原样保留，spec 明确
+   不做迁移）。
 2. **编号一经分配不再变**（官方 label continuity：「Once a reference label is
    assigned… it keeps the same number」）：图的编号取自参考素材登记（``ref_asset_registry``，
    剧本出场序，编号即叙事顺序）；视频/音频按型内递增，批内按剧本出场序、无出场排尾。
@@ -35,6 +38,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Sequence
 
 from .brief_parser import RefItem
+from .library_config import library_settings, require_library_root
 from .task_package import resolve_input_path
 
 LEDGER_FILENAME = "asset-ledger.json"
@@ -52,6 +56,16 @@ KIND_LABELS = {KIND_PICTURE: "图", KIND_VIDEO: "视频", KIND_AUDIO: "音频"}
 _OFFICIAL_LABEL = {KIND_PICTURE: "Picture", KIND_VIDEO: "Video", KIND_AUDIO: "Audio"}
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+# 素材库文件名里的语义名：去掉路径分隔符与 glob 元字符（``[]`` 也是通配符，留着会让
+# 「盘上已有同号文件」的扫描看漏），截断到 40 字防超长路径。非法字符换成 ``_``，
+# 不转义——名字是给人看、给槽位对的，``枪_刀_特写`` 比 ``%2F`` 可读。
+_ILLEGAL_FILENAME_RE = re.compile(r'[<>:"/\\|?*\[\]\x00-\x1f]+')
+_MAX_STEM = 40
+_REVISION_RE = re.compile(r"-r(\d+)$")
+# 视频/音频的文件名词头：编号按型独立，词头让「图 1 某名」与「视频 1 同一名字」
+# 不撞成同名（图不带词头，见 spec #84 数据布局）。
+_FILENAME_KIND_PREFIX = {KIND_VIDEO: "Video ", KIND_AUDIO: "Audio "}
 
 
 def format_tag(kind: str, number: int) -> str:
@@ -255,10 +269,18 @@ class AssetLedger:
 
     entries: tuple[AssetRecord, ...] = ()
     replacements: tuple[Replacement, ...] = ()
+    # 素材库根（issue #85 / spec #84 D2）：空串＝旧台账（素材在生成目录 ``assets/``
+    # 里），非空＝新台账（素材在 ``library_root / entry.path``）。放在末尾、给默认值，
+    # 旧的按位置构造 ``AssetLedger(entries, replacements)`` 不受影响。
+    library_root: str = ""
 
     def __post_init__(self) -> None:
         ordered = tuple(sorted(self.entries, key=lambda e: (KINDS.index(e.kind), e.number)))
         object.__setattr__(self, "entries", ordered)
+        if self.library_root:
+            # 与 yaml 配置、intake 参数共用同一个校验口（issue #85 复审：三处各写一份，
+            # 其中一处漏挡 ``..``，坏值就从更宽松的那条路溜进来）
+            require_library_root(self.library_root, label="素材台账 library_root")
 
     def get(self, name: str, kind: str) -> AssetRecord | None:
         for item in self.entries:
@@ -269,6 +291,7 @@ class AssetLedger:
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": _SCHEMA_VERSION,
+            "library_root": self.library_root,
             "entries": [item.to_dict() for item in self.entries],
             "replacements": [item.to_dict() for item in self.replacements],
         }
@@ -277,7 +300,7 @@ class AssetLedger:
     def from_dict(cls, raw: dict[str, Any]) -> AssetLedger:
         if not isinstance(raw, dict):
             raise ValueError("素材台账顶层必须是对象")
-        unknown = set(raw) - {"schema_version", "entries", "replacements"}
+        unknown = set(raw) - {"schema_version", "library_root", "entries", "replacements"}
         if unknown:
             raise ValueError(f"素材台账包含未知字段：{', '.join(sorted(unknown))}")
         if raw.get("schema_version") != _SCHEMA_VERSION:
@@ -289,6 +312,8 @@ class AssetLedger:
         return cls(
             entries=tuple(AssetRecord.from_dict(item) for item in entries),
             replacements=tuple(Replacement.from_dict(item) for item in replacements),
+            # 旧台账没有这个键 ＝ 旧布局（素材在生成目录 assets/），读回不报错
+            library_root=str(raw.get("library_root", "") or ""),
         )
 
 
@@ -315,16 +340,17 @@ def save_asset_ledger(directory: str | Path, ledger: AssetLedger) -> Path:
 
 def _with_entry(ledger: AssetLedger, name: str, kind: str,
                 record: AssetRecord) -> AssetLedger:
-    """换掉台账里（语义名, 类型）那一条，其余条目与换版史原样保留。
+    """换掉台账里（语义名, 类型）那一条，其余条目、换版史与库根原样保留。
 
     登记/补登记/事后挂成本三处都要做这件事，各写一遍「重建 entries 元组」就是同一
     形状的第二、第三份（issue #52 复审）；换版史必须跟着走，谁忘了带就静默丢史。
+    库根同理（issue #85）：手工重建字段＝下次加字段必忘一处，``replace`` 让它无处可忘。
     """
-    return AssetLedger(
+    return replace(
+        ledger,
         entries=tuple(
             record if (e.name, e.kind) == (name, kind) else e for e in ledger.entries
         ),
-        replacements=ledger.replacements,
     )
 
 
@@ -347,8 +373,49 @@ def record_external_cost(directory: str | Path, name: str, kind: str, *,
     return updated
 
 
+def resolve_asset_path(ledger: AssetLedger, record: AssetRecord, *,
+                       session_dir: str | Path | None = None) -> Path | PurePosixPath:
+    """台账相对路径 → 盘上位置的**唯一解析口**（issue #85 / spec #84 D2）。
+
+    读图校对、SHA 对账、撤下、换版清理与卡片渲染都从这里取文件——各写一遍
+    ``base / entry.path`` 就是第二份口径，换布局时必有一处漏改（「规则在、接线不在」
+    的老形态），而且漏的那处不会报错，只会「文件不见了」。
+
+    三种情形：
+
+    - 台账记了 ``library_root``（新布局）→ ``<库根>/<相对路径>``；
+    - 没记（旧布局）且给了 ``session_dir`` → ``<会话目录>/<相对路径>``，
+      旧会话 ``assets/kind-NN.ext`` 原样可用，不迁移、不崩；
+    - 没记也没给会话目录 → 原样返回相对路径（``PurePosixPath``：台账存的就是 POSIX
+      斜杠，用 ``Path`` 会在 Windows 上改成反斜杠，旧卡面一个字都跟着变）。
+
+    渲染层拿不到会话目录时宁可给相对路径，也不该凭 ``Path(path)`` 相对 CWD 拼出个
+    假绝对路径。
+    """
+    root = _asset_file_root(ledger, session_dir=session_dir)
+    return PurePosixPath(record.path) if root is None else root / record.path
+
+
+def _asset_file_root(ledger: AssetLedger, *,
+                     session_dir: str | Path | None = None) -> Path | None:
+    """素材正本所在根：新台账＝库根，旧台账＝会话目录，都没有 → None。
+
+    **布局判别只住这一处**（issue #85 复审）：解析口与入库落盘都调它——两边各写一遍
+    ``library_root or session_dir`` 的分支，换布局时必有一处漏改，而漏的那处表现为
+    「文件不见了」，不报错。
+    """
+    if ledger.library_root:
+        return Path(ledger.library_root)
+    return None if session_dir is None else Path(session_dir)
+
+
 def remove_asset(directory: str | Path, name: str, kind: str) -> AssetRecord | None:
-    """撤下一条登记（连同会话目录里的正本复制）；没有该登记返回 None。
+    """撤下一条登记；没有该登记返回 None。
+
+    旧布局（素材在生成目录 ``assets/``）连副本一起删：那份是「交回时的副产品」，
+    原件仍在用户手里（旧行为）。新布局（issue #85）**只撤登记、不删库内文件**——
+    库里那份是这件素材唯一的长期落点，而向导问的是「从素材台账撤下（废图不进片）」，
+    人点头的是「不进片」，不是「删掉图库里的图」。换版留下的 ``-rN`` 同理不动。
 
     台账的增删只由本模块做——调用方拿 ``entries`` 自己重建是「第二处可写来源」，
     换版记录（``replacements``）也会跟着丢。撤下是**人的显式决定**（issue #50
@@ -360,9 +427,9 @@ def remove_asset(directory: str | Path, name: str, kind: str) -> AssetRecord | N
     if entry is None:
         return None
     kept = tuple(e for e in ledger.entries if (e.name, e.kind) != (name, kind))
-    save_asset_ledger(base, AssetLedger(entries=kept, replacements=ledger.replacements))
-    copied = base / entry.path
-    if copied.is_file():
+    save_asset_ledger(base, replace(ledger, entries=kept))
+    copied = resolve_asset_path(ledger, entry, session_dir=base)
+    if not ledger.library_root and copied.is_file():
         copied.unlink()
     return entry
 
@@ -421,7 +488,7 @@ def verify_asset_ledger(directory: str | Path) -> tuple[Drift, ...]:
     ledger = load_asset_ledger(base)
     drift: list[Drift] = []
     for entry in ledger.entries:
-        target = base / entry.path
+        target = resolve_asset_path(ledger, entry, session_dir=base)
         if not target.is_file():
             drift.append(Drift(entry.name, entry.kind, entry.number, entry.path,
                                entry.sha256, None))
@@ -447,6 +514,87 @@ def _next_number(taken: set[int]) -> int:
     return max(taken, default=0) + 1
 
 
+def _safe_stem(name: str) -> str:
+    """语义名 → 文件名片段：去非法字符、截断、空名兜底（D3「语义名去非法字符」）。"""
+    stem = _ILLEGAL_FILENAME_RE.sub("_", name).strip(" ._")
+    return stem[:_MAX_STEM] or "asset"
+
+
+def _recorded_library_subdir(ledger: AssetLedger) -> str | None:
+    """台账里已经记下的库内子目录（``<主题摘要>[-N]/<文件>`` 的第一段）。
+
+    同一轮里逐张交回时靠它认出「这一轮的库目录已经定过了」——不认就会每交一张
+    另开一个 ``-2``，把同一轮素材拆散到多个目录（D1 的反面）。
+    """
+    paths = [e.path for e in ledger.entries]
+    for event in ledger.replacements:
+        paths.extend((event.old_path, event.new_path))
+    for path in paths:
+        parts = PurePosixPath(path).parts
+        if len(parts) >= 2:
+            return parts[0]
+    return None
+
+
+def _library_dir_for(ledger: AssetLedger, root: Path, slug: str) -> Path:
+    """本轮运行在库里占哪个子目录：台账记过就沿用，否则挑下一个空位。
+
+    空位规则（D1）：``<主题摘要>`` 已存在则追加 ``-2``、``-3``……**绝不复用**
+    同名子目录——重跑时静默沿用上一轮的图，会让人以为这一轮也生成过。
+    """
+    recorded = _recorded_library_subdir(ledger)
+    if recorded is not None:
+        return root / recorded
+    candidate = root / slug
+    if not candidate.exists():
+        return candidate
+    suffix = 2
+    while (root / f"{slug}-{suffix}").exists():
+        suffix += 1
+    return root / f"{slug}-{suffix}"
+
+
+def _next_revision(library_dir: Path, stem: str, existing_path: str | None) -> int | None:
+    """这一版该拿的换版号：``None`` ＝ 首版（无后缀），>=2 ＝ ``-rN``（D3）。
+
+    用 ``None`` 而不是 0 表示「首版」：0 是个合法的数字，调用处得再靠
+    ``if revision`` 猜一次含义，读代码的人先要自己翻译一遍。
+
+    换版**不覆盖旧文件**：新文件追加 ``-r2``、旧文件原样留着，才能回退到上一张。
+    号取「台账里上一版」与「盘上已有同号同语义文件」两者的最大值 +1——被拒的交回、
+    中断留下的文件都算数，否则 ``-r2`` 会静默覆盖掉上一次的 ``-r2``。
+    """
+    highest = 0
+    if existing_path is not None:
+        match = _REVISION_RE.search(PurePosixPath(existing_path).stem)
+        highest = int(match.group(1)) if match else 1
+    if library_dir.is_dir():
+        pattern = re.compile(rf"^{re.escape(stem)}(?:-r(\d+))?$")
+        for path in library_dir.iterdir():
+            if not path.is_file():
+                continue
+            match = pattern.match(path.stem)
+            if match:
+                highest = max(highest, int(match.group(1) or 1))
+    return highest + 1 if highest else None
+
+
+def _library_target_name(library_dir: Path, kind: str, number: int, name: str,
+                         suffix: str, existing_path: str | None) -> str:
+    """库内相对路径：``<库内子目录>/[Video|Audio ]<编号>-<语义名>[-rN].<ext>``（D3）。
+
+    编号用官方标签的 N（三型各自独立编号）：看文件名就知道它接哪个槽。图不带词头
+    （spec 数据布局示例就是 ``1-便利店冰柜.png``）；视频/音频带 ``Video `` /
+    ``Audio ``（D3 原文 ``<Video N>-<语义名>``）——编号按型独立，不带词头时「图 1
+    某名」与「视频 1 同一名字」会撞成同一个 stem，换版扫描把它当上一版，于是**首版
+    视频被记成 ``-r2`` 而台账里没有任何换版记录**（issue #85 复审实测）。
+    """
+    stem = f"{_FILENAME_KIND_PREFIX.get(kind, '')}{number}-{_safe_stem(name)}"
+    revision = _next_revision(library_dir, stem, existing_path)
+    filename = f"{stem}{f'-r{revision}' if revision is not None else ''}{suffix}"
+    return str(PurePosixPath(library_dir.name) / filename)
+
+
 def intake_assets(
     directory: str | Path,
     submissions: Iterable[AssetSubmission],
@@ -454,8 +602,17 @@ def intake_assets(
     registry: Sequence[RefItem] | None = None,
     script: str = "",
     on_replace: Callable[[AssetRecord, AssetRecord], bool] | None = None,
+    library_root: str | Path | None = None,
 ) -> IntakeReport:
-    """交回入库：复制正本 → 算 SHA256 → 登记/换版 → 落盘台账。
+    """交回入库：复制正本进素材库 → 算 SHA256 → 登记/换版 → 落盘台账。
+
+    落点（issue #85 / spec #84 D1–D3）：正本进 ``<库根>/<主题摘要>/[Video|Audio ]<编号>-<语义名>``。
+    库根取台账里记的（同一本账不劈两处）＞``library_root`` 参数＞生效配置
+    ``config/library.yaml``；子目录＝运行目录的上一级（向导/CLI 的会话目录形状就是
+    ``<sessions>/<主题摘要>/GEN00N``，上一级正是现成的 ``topic_slug``）。**旧台账**（没有
+    ``library_root`` 但已有登记）整本按旧布局 ``<生成目录>/assets/`` 继续——
+    一半在库、一半在会话目录的混合台账，同一个解析口只能二选一，旧 GEN 因此
+    原样保留（spec Out of Scope：不做旧会话素材迁移）。
 
     编号规则（编号即叙事顺序，label continuity 保证已分配的号不改）：
 
@@ -470,9 +627,20 @@ def intake_assets(
     为 None ＝ 非交互场景（CLI 重跑）接受替换，但报告里照报不误。
     """
     base = Path(directory)
-    assets_dir = base / "assets"
-    assets_dir.mkdir(parents=True, exist_ok=True)
     ledger = load_asset_ledger(base)
+    # 库根优先级说明见 docstring；旧台账（无库根、有登记）回 None ＝ 旧布局。
+    if ledger.library_root:
+        library_root_path: Path | None = Path(ledger.library_root)
+    elif ledger.entries or ledger.replacements:
+        library_root_path = None
+    else:
+        library_root_path = require_library_root(
+            library_root if library_root is not None else library_settings().root)
+    library_dir = (None if library_root_path is None
+                   else _library_dir_for(ledger, library_root_path, base.parent.name))
+    if library_root_path is None:
+        # 旧布局才建 assets/：新布局下生成目录不留图，连空壳目录都不该出现
+        (base / "assets").mkdir(parents=True, exist_ok=True)
     numbers = _registry_numbers(registry)
     drift = verify_asset_ledger(base)
 
@@ -491,10 +659,27 @@ def intake_assets(
     replaced: list[Replacement] = []
     refused: list[Replacement] = []
     ledger_mut = ledger
+    if library_root_path is not None and not ledger_mut.library_root:
+        # 库根随第一批登记一起落盘：换机器搬库后只改台账里这一处，条目路径不用逐个改
+        ledger_mut = replace(ledger_mut, library_root=str(library_root_path))
 
-    def _target_name(number: int, kind: str, source: Path) -> str:
+    def _target_name(number: int, kind: str, source: Path, name: str,
+                     existing_path: str | None = None) -> str:
         suffix = source.suffix.lower() or ".bin"
-        return str(PurePosixPath("assets") / f"{kind}-{number:02d}{suffix}")
+        if library_dir is None:
+            return str(PurePosixPath("assets") / f"{kind}-{number:02d}{suffix}")
+        return _library_target_name(library_dir, kind, number, name, suffix, existing_path)
+
+    def _disk_path(rel_path: str) -> Path:
+        """台账相对路径 → 落盘位置（与解析口同一判别：``_asset_file_root``）。"""
+        root = _asset_file_root(ledger_mut, session_dir=base)
+        assert root is not None  # session_dir 恒在，这里不会回 None
+        return root / rel_path
+
+    def _copy(source: Path, rel_path: str) -> None:
+        target = _disk_path(rel_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
 
     def _apply(sub: AssetSubmission) -> None:
         nonlocal ledger_mut
@@ -535,7 +720,8 @@ def intake_assets(
             seconds, attempts = _cost(existing)
             candidate = AssetRecord(
                 name=sub.name, kind=sub.kind, number=existing.number,
-                path=_target_name(existing.number, sub.kind, source),
+                path=_target_name(existing.number, sub.kind, source, sub.name,
+                                  existing.path),
                 sha256=digest, source=str(source),
                 external_seconds=seconds, external_attempts=attempts,
             )
@@ -548,7 +734,8 @@ def intake_assets(
             if not accept:
                 refused.append(event)
                 return
-            ledger_mut = AssetLedger(
+            ledger_mut = replace(
+                ledger_mut,
                 entries=tuple(
                     candidate if (e.name, e.kind) == (sub.name, sub.kind) else e
                     for e in ledger_mut.entries
@@ -556,11 +743,12 @@ def intake_assets(
                 replacements=ledger_mut.replacements + (event,),
             )
             replaced.append(event)
-            if existing.path != candidate.path:
+            if library_root_path is None and existing.path != candidate.path:
+                # 旧布局沿用旧行为（路径只在换扩展名时才变）；新布局换版**保留旧文件**
                 old_file = base / existing.path
                 if old_file.is_file():
                     old_file.unlink()
-            shutil.copy2(source, base / candidate.path)
+            _copy(source, candidate.path)
             return
         # 新登记：图优先要参考素材登记的编号（剧本出场序），视频/音频型内递增。
         if sub.kind == KIND_PICTURE and sub.name in numbers:
@@ -572,17 +760,14 @@ def intake_assets(
             number = _next_number(taken)
         entry = AssetRecord(
             name=sub.name, kind=sub.kind, number=number,
-            path=_target_name(number, sub.kind, source),
+            path=_target_name(number, sub.kind, source, sub.name),
             sha256=digest, source=str(source),
             external_seconds=sub.external_seconds,
             external_attempts=sub.external_attempts,
         )
-        ledger_mut = AssetLedger(
-            entries=ledger_mut.entries + (entry,),
-            replacements=ledger_mut.replacements,
-        )
+        ledger_mut = replace(ledger_mut, entries=ledger_mut.entries + (entry,))
         registered.append(entry)
-        shutil.copy2(source, base / entry.path)
+        _copy(source, entry.path)
 
     # 图先入（编号来自参考素材登记、与批内次序无关），视频/音频按批内出场序补号。
     for sub in items:
@@ -631,6 +816,9 @@ def render_ledger(ledger: AssetLedger) -> str:
     counts = {kind: sum(1 for e in ledger.entries if e.kind == kind) for kind in KINDS}
     head = (f"[素材台账] {len(ledger.entries)} 条"
             f"（图 {counts[KIND_PICTURE]} · 视频 {counts[KIND_VIDEO]} · 音频 {counts[KIND_AUDIO]}）")
+    if ledger.library_root:
+        # 条目 path 相对库根：不把这行打出来，清单上的路径在终端里是无处可找的半截
+        head += f" · 素材库 {ledger.library_root}"
     lines = [head]
     if not ledger.entries:
         lines.append("  （空）")
@@ -688,7 +876,7 @@ __all__ = [
     "AssetRecord", "AssetLedger", "AssetSubmission", "Replacement", "Drift",
     "IntakeReport",
     "intake_assets", "load_asset_ledger", "remove_asset", "record_external_cost",
-    "save_asset_ledger",
+    "resolve_asset_path", "save_asset_ledger",
     "verify_asset_ledger",
     "render_ledger", "render_report",
 ]

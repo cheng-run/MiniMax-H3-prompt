@@ -156,6 +156,8 @@ START → [制片] → [导演] → [创意会·圆桌] → [编剧]
 
 `config/workflow.yaml`：多参路线的**登记工作流名**与三型参考槽位数（默认图 24 / 视频 3 / 音频 3）。槽位数是工作流节点的物理端口数，不是模型能力（ADR 0017）——先有对应端口的工作流再改这里的数字；缺失时读取口回落默认值。与 `agent.yaml`（模型侧）分开：换模型不该误改槽位。
 
+`config/library.yaml`：多参路线的**素材库根目录**（默认 `D:\素材库`，必须是绝对路径）。交回的素材复制成 `<库根>/<主题摘要>/<编号>-<语义名>.<ext>`，生成目录不再留图；换版追加 `-r2` 且旧文件保留，同一主题重跑另开 `<主题摘要>-2` 子目录（issue #85）。台账 `asset-ledger.json` 记库根 + 相对路径，读图/对账/撤下/卡片都经同一解析口取文件；没有库根字段的旧台账仍按旧的生成目录布局读，不迁移。
+
 ## 目录结构
 
 ```
@@ -163,6 +165,7 @@ src/minimax_h3_prompt/
 ├── main.py              # CLI（wizard 向导 / brief 快路径 / create-video / generate-prompts）
 ├── config.py            # YAML + `.env` 统一配置（API key 仅从 `.env` 读取）
 ├── workflow_config.py   # 工作流登记名与参考槽位数（`config/workflow.yaml`）
+├── library_config.py    # 素材库根目录（`config/library.yaml`，默认 `D:\素材库`）
 ├── model_factory.py     # LLM 后端工厂（自动探测）
 ├── brief_parser.py      # brief 解析
 ├── topic_generation.py  # 主题 → 提示词单入口（落盘到 output/sessions）

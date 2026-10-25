@@ -237,7 +237,17 @@ def test_prompt_bodies_carry_no_slot_names_or_asset_files(tmp_path, monkeypatch)
     """注入卡有槽位/正本名，提示词正文一个都不带——两处不许串味。"""
     card, _asked = _run_full_flow(tmp_path, monkeypatch, {"zimage": (1280, 720)})
     card_text = card.read_text(encoding="utf-8")
-    assert "ref_image_0" in card_text and "picture-01" in card_text  # 卡带槽位与正本名
+    # 卡带槽位与正本路径（issue #85：正本在素材库里，卡上要给**库内路径**；
+    # 断言的是解析口给出的那串，卡上退回台账相对路径时这条会红）
+    from minimax_h3_prompt.asset_ledger import load_asset_ledger, resolve_asset_path
+
+    assert "ref_image_0" in card_text
+    ledger = load_asset_ledger(card.parent)
+    assert ledger.entries, "注入卡用的台账是空的，本用例前提不成立"
+    for entry in ledger.entries:
+        assert str(resolve_asset_path(ledger, entry)) in card_text, \
+            f"卡上没给出正本的库内路径：{entry.name}"
     prompt = next((tmp_path / "sessions").rglob("video-prompt.md")).read_text(encoding="utf-8")
-    for leak in ("ref_image_", "ref_video_", "ref_audio_", "girl.png", "assets/"):
+    for leak in ("ref_image_", "ref_video_", "ref_audio_", "girl.png", "assets/",
+                 "1-红裙女孩.png"):
         assert leak not in prompt, f"提示词正文泄漏了接线信息：{leak}"

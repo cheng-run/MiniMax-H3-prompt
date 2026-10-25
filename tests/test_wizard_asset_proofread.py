@@ -135,7 +135,7 @@ def _stub_stage1(monkeypatch) -> None:
 
 def _stub_describe(monkeypatch, mapping: dict[str, str],
                    calls: list[str] | None = None) -> list[str]:
-    """按正本文件名（picture-NN）路由读图结果；记录调用过的路径。"""
+    """按正本文件名（``<编号>-<语义名>``）路由读图结果；记录调用过的路径。"""
     seen = calls if calls is not None else []
 
     def fake_describe(path, instruction=None):
@@ -176,7 +176,7 @@ def _run_one_picture_flow(tmp_path, monkeypatch, reading: str,
     _stub_stage1(monkeypatch)
     _stub_stage2(monkeypatch, run2_captured)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
-    calls = _stub_describe(monkeypatch, {"picture-01": reading})
+    calls = _stub_describe(monkeypatch, {"红裙女孩":reading})
     girl = _write_source(tmp_path, "girl.png", b"girl")
     # 主题/时长/风格/方式 → 素材循环：女孩（出词/审查/路径）→ 裁决答问 → 其余三张放弃
     loop = ["", "1", str(girl)] + list(extra_inputs) + ["", "4", "", "4", "4"]
@@ -274,10 +274,12 @@ def test_mid_adjudication_crash_keeps_earlier_records(tmp_path, monkeypatch):
     monkeypatch.setattr(wizard, "run_stage2",
                         lambda *a, **k: ran.__setitem__("ok", True) or (dict(a[0]), ""))
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
-    # picture-01 干净读数（直接出记录）；picture-03 有偏差（进三选时炸）
+    # <Picture 1> 干净读数（直接出记录）；<Picture 3> 有偏差（进三选时炸）。
+    # 键带编号前缀：库内子目录名就是主题摘要，里面含所有语义名（「红裙女孩走进秋日
+    # 庭院-把青铜钥匙…」），只按语义名路由会把两张图都认成第一张。
     _stub_describe(monkeypatch, {
-        "picture-01": '{"claims": []}',
-        "picture-03": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")]),
+        "1-红裙女孩": '{"claims": []}',
+        "3-青铜钥匙": _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")]),
     })
     girl = _write_source(tmp_path, "girl.png", b"girl")
     key = _write_source(tmp_path, "key.png", b"key")
@@ -342,7 +344,7 @@ def test_regenerate_choice_blocks_stage2_and_stays_resumable(tmp_path, monkeypat
     _stub_stage1(monkeypatch)
     monkeypatch.setattr(wizard, "run_stage2", fake_run_stage2)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
-    _stub_describe(monkeypatch, {"picture-01": reading})
+    _stub_describe(monkeypatch, {"红裙女孩":reading})
     girl = _write_source(tmp_path, "girl.png", b"girl")
     # 素材循环：女孩交回 → 裁决=重生成 → 重生成菜单 q=先到这里（issue #50）
     asked = _fake_inputs(monkeypatch, [TOPIC, "", "", "4", "", "1", str(girl), "2", "q"])
@@ -446,7 +448,7 @@ def test_done_record_at_same_sha_skips_reread(tmp_path, monkeypatch):
     _stub_stage1(monkeypatch)
     _stub_stage2(monkeypatch)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
-    calls = _stub_describe(monkeypatch, {"picture-01": '{"claims": []}'})
+    calls = _stub_describe(monkeypatch, {"红裙女孩":'{"claims": []}'})
     # 首跑：女孩交回落账，其余三张放弃
     _fake_inputs(monkeypatch, [TOPIC, "", "", "4", "", "1", str(girl),
                                "", "4", "", "4", "4", "8", "1"])
@@ -482,7 +484,7 @@ def test_new_sha_rereads_and_readjudicates(tmp_path, monkeypatch):
     _stub_stage2(monkeypatch, captured)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
     # 两轮都读出同一条偏差：第一轮裁重生成，第二轮裁明知故犯收尾
-    calls = _stub_describe(monkeypatch, {"picture-01": _claims(
+    calls = _stub_describe(monkeypatch, {"红裙女孩":_claims(
         deviations=[("裙色", "红裙", "宝蓝色长裙")])})
     _fake_inputs(monkeypatch, [TOPIC, "", "", "4",
                                "", "1", str(girl),   # 交回第一版

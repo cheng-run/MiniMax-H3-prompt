@@ -52,7 +52,7 @@ class SegmentAssetOverflowError(ValueError):
 
 @dataclass(frozen=True)
 class SegmentAsset:
-    """本段保留的一张参考图：段内新号 → 原号 → 语义名 → 正本相对路径。"""
+    """本段保留的一张参考图：段内新号 → 原号 → 语义名 → 正本路径（新台账为库内绝对路径）。"""
 
     new_picture: int
     original_picture: int
@@ -198,8 +198,8 @@ def compute_segment_scope(
     参照比超限报错坏得多，而超限会在这里点名报错，用户还能改。
 
     ``registry`` 是整片登记 ``(picture, name, description)``（``ref_asset_registry``
-    的形态）：编号即原号，名称进接线卡。``paths`` 是原号 → 正本相对路径（台账口径），
-    缺了就在卡上写「台账未登记正本」，不编路径。
+    的形态）：编号即原号，名称进接线卡。``paths`` 是原号 → 正本路径（台账口径；
+    新台账经统一解析口给出库内绝对路径），缺了就在卡上写「台账未登记正本」，不编路径。
 
     超过 ``refs_per_segment`` 抛 ``SegmentAssetOverflowError``（点名超限素材）。
     """

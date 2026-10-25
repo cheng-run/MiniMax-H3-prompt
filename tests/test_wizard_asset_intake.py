@@ -17,6 +17,7 @@ from minimax_h3_prompt.asset_ledger import (
     AssetSubmission,
     intake_assets,
     load_asset_ledger,
+    resolve_asset_path,
 )
 from minimax_h3_prompt.brief_parser import Brief, RefItem
 from minimax_h3_prompt.session_store import (
@@ -179,9 +180,10 @@ def test_ref_flow_collects_pictures_and_writes_ledger(tmp_path, monkeypatch, cap
     assert sorted(((e.name, e.number) for e in ledger.entries), key=lambda t: t[1]) \
         == EXPECTED_NUMBERING
     assert all(e.kind == KIND_PICTURE for e in ledger.entries)
-    # 正本复制进会话目录（可复测：生成目录自包含）
+    # 正本复制进素材库（issue #85）：位置一律过统一解析口，不在测试里另拼路径
     for entry in ledger.entries:
-        assert (ledger_dir / entry.path).is_file()
+        assert resolve_asset_path(ledger, entry, session_dir=ledger_dir).is_file()
+    assert ledger.library_root, "台账没记库根"
     assert list((tmp_path / "sessions").rglob("video-prompt.md"))
     out = capsys.readouterr().out
     assert "[素材台账]" in out
