@@ -158,7 +158,7 @@ START → [制片] → [导演] → [创意会·圆桌] → [编剧]
 
 `config/library.yaml`：多参路线的**素材库根目录**（默认 `D:\素材库`，必须是绝对路径）。交回的素材复制成 `<库根>/<主题摘要>/<编号>-<语义名>.<ext>`，生成目录不再留图；换版追加 `-r2` 且旧文件保留，同一主题重跑另开 `<主题摘要>-2` 子目录（issue #85）。台账 `asset-ledger.json` 记库根 + 相对路径，读图/对账/撤下/卡片都经同一解析口取文件；没有库根字段的旧台账仍按旧的生成目录布局读，不迁移。
 
-`config/image.yaml`：资产图（人物／道具／场景参考图）各走哪个生图模型——`z_image` / `qwen` / `moss`，默认人物 `qwen`、道具与场景 `z_image`（issue #87）。选中值决定出词请求追加哪一份纪律块（`prompts/image_prompt_disciplines/<模型>.md`）：Z-Image 中文短句全正向、Qwen-Image 英文长文不写负面、MOSS-Image 英文并填负面标签，三档共用同一个 JSON 契约。⚠ Qwen-Image 2.1 是 Qwen Research License，**仅限非商用**，商用前把 `character` 切到 `z_image` 或 `moss`。
+`config/image.yaml`：资产图（人物／道具／场景参考图）各走哪个生图模型——`z_image` / `qwen` / `moss`，默认人物 `qwen`、道具与场景 `z_image`（issue #87）。选中值决定出词请求追加哪一份纪律块（`prompts/image_prompt_disciplines/<模型>.md`）：Z-Image 中文短句全正向、Qwen-Image 英文长文不写负面、MOSS-Image 英文并填负面标签，三档共用同一个 JSON 契约。配置是**每张的起点**：该类的设计正文或该资产提示词命中文字类关键词（标签/招牌/包装/logo/文字/海报）时，那一张自动切 MOSS 并打印命中词（设计正文是整类共用的，故它命中时该类每一张都切）；素材循环审查菜单 `6=改这张的生图模型` 可逐张改，手动选择压过自动规则（issue #88）。⚠ Qwen-Image 2.1 是 Qwen Research License，**仅限非商用**，商用前把 `character` 切到 `z_image` 或 `moss`——选到 Qwen 档时出词横幅会打印这句提示。
 
 ## 目录结构
 
@@ -169,6 +169,7 @@ src/minimax_h3_prompt/
 ├── workflow_config.py   # 工作流登记名与参考槽位数（`config/workflow.yaml`）
 ├── library_config.py    # 素材库根目录（`config/library.yaml`，默认 `D:\素材库`）
 ├── image_config.py      # 资产图三档生图模型分配（`config/image.yaml`）
+├── image_routing.py     # 出图模型按张路由：文字类关键词 → MOSS、手动覆盖（issue #88）
 ├── model_factory.py     # LLM 后端工厂（自动探测）
 ├── brief_parser.py      # brief 解析
 ├── topic_generation.py  # 主题 → 提示词单入口（落盘到 output/sessions）

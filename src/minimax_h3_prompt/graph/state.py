@@ -9,15 +9,26 @@ from typing import TypedDict
 from ..brief_parser import Brief
 
 
-# 资产图提示词三键（父 spec #77 / issue #80）：多参路线独占的产物键。
-# **唯一声明**。会话持久化白名单、读回时的路线过滤、产物出口都从这个常量派生——
-# 字面重抄一份的代价是加第四类资产（或改键名）时那些地方静默漏掉它，而且没有任何
-# 用例会红（#56 复审：守卫形态要从常量派生）。
-ASSET_PROMPT_KEYS = (
-    "character_image_prompts",
-    "prop_image_prompts",
-    "scene_image_prompts",
-)
+# 资产类别 → (产物 state 键, 上游设计 state 键)。**唯一声明**（issue #88 收拢）：
+# 产物出口（``generation.image_prompt_variants`` 的降级读法）、资产图节点的注册、
+# 按张路由（读上一次的条目与设计正文）与单条重出都从它取。三处各写一份的代价是
+# 加第四类资产时总有一处静默漏掉，而且没有用例会红（#56 复审：守卫形态要从常量派生）。
+#
+# 每条条目是**四键契约**（name / positive_prompt / negative_prompt / locked_features）
+# 再加系统自己的一个字段 ``image_model``（``{model, source, keyword}``，issue #88）：
+# 它记「这条词按哪一档的纪律写成、为什么是那一档」，改写与出词横幅都按它取模型。
+# 它跟着条目走而不是另开一张 state 表——三个资产图节点在同一个组合节点里并发跑，
+# 共享一张表会被 ``make_parallel`` 的 ``merged.update`` 覆盖掉前两类的记录。
+ASSET_KIND_FIELDS: dict[str, tuple[str, str]] = {
+    "character": ("character_image_prompts", "character_design"),
+    "prop": ("prop_image_prompts", "prop_design"),
+    "scene": ("scene_image_prompts", "background_design"),
+}
+
+# 资产图提示词三键（父 spec #77 / issue #80）：多参路线独占的产物键，从上面那张表
+# 展开。会话持久化白名单、读回时的路线过滤、产物出口都从这个常量派生。
+ASSET_PROMPT_KEYS = tuple(
+    prompt_field for prompt_field, _design_field in ASSET_KIND_FIELDS.values())
 
 
 class PipelineState(TypedDict, total=False):

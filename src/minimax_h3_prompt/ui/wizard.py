@@ -990,12 +990,15 @@ _REVISION_MENU = (
     f"输入 {_MENU_REVOKE} 撤销清单里的某条：")
 
 
-def _build_frame_agents(brief: Brief):
-    """就地构建重出首帧提示词需要的 model 与角色 agents（返回 ``(model, agents)``）。
+def _build_role_agents_on_demand(brief: Brief):
+    """就地构建 model 与角色 agents（返回 ``(model, agents)``），供按需重出的各条路用。
 
-    为什么按需构建而不是进循环前一律先建好：续接到「等帧图」的会话手上没有 ``run_stage1``
-    的返回值，而那条路径原本是零 LLM 成本的——先建好的话，每个「其实没有意见要提」的续接
-    都要白付一次建客户端与 agent 的开销。
+    为什么按需构建而不是进循环前一律先建好：续接到「等帧图/等素材」的会话手上没有
+    ``run_stage1`` 的返回值，而那条路径原本是零 LLM 成本的——先建好的话，每个「其实
+    没有意见要提」的续接都要白付一次建客户端与 agent 的开销。
+
+    它同时服务两条重出路：关键帧提示词（issue #27）与素材的按模型重出（issue #88，
+    ``nodes.regenerate_asset_prompt`` 要的是同一份 ``{role: agent}`` 表）。
     """
     from ..agents import build_role_agents
     from ..model_factory import build_chat_model
@@ -1090,7 +1093,7 @@ def _user_revision_loop(state: dict, generation_dir: Path, brief: Brief, config:
             revision = record_user_revision(state, layer=LAYER_FRAME, text=feedback)
             round_index = revision["round"]
         if model is None or agents is None:
-            model, agents = _build_frame_agents(brief)
+            model, agents = _build_role_agents_on_demand(brief)
         nodes = make_nodes(agents, model, brief, config)
         frame_node = nodes["fl2va_frame_prompts"]
         updated = dict(state)
@@ -1294,6 +1297,10 @@ def _issue_asset_prompt(state: dict, brief: Brief, generation_dir: Path, item: Q
     """出一张生图提示词（issue #50 AC1）：单张展示 + 已出站行落盘。
 
     画布行走 ``brief.canvases``（issue #50 AC5）：与请求【画布】块同源，不再回落默认表。
+
+    **出词横幅带模型与理由**（issue #88 用户故事 7）：这一张是按哪一档的纪律写的、为什么
+    是那一档（关键词命中／手动指定／配置默认），用户据此复核自动判断。Qwen 档另带许可提示
+    ——非商用是交付红线（spec #84 D8），写在配置注释里看不见，出词时不说就等于没说。
     """
     from ..generation import KIND_LABELS, image_prompt_variants, render_asset_rows
 
@@ -1306,8 +1313,43 @@ def _issue_asset_prompt(state: dict, brief: Brief, generation_dir: Path, item: Q
     # 没有心跳可说，所以只有横幅——不伪造等待。
     print(format_step_banner("正在生成生图提示词"), flush=True)
     print(f"\n[素材循环] 当前待办：{item.name}（{label}）")
+    print(_render_asset_model_line(state, item))
     print(render_asset_rows([row], item.kind))
     _sync_released_asset_files(state, brief, generation_dir, item.name)
+
+
+def _asset_assignment(state: dict, item: QueueItem) -> dict[str, str]:
+    """这一张当前的模型判定：条目里记的那一份，旧条目（issue #88 之前）回落到配置默认。
+
+    回落**走同一个判定函数**（``image_routing.assignment``，不给文本＝不命中）：手搓一个
+    ``{model, source, keyword}`` 字面量就是同一份记录的第二个写点，形状一改就漂。
+    """
+    from ..image_routing import assignment, assignment_of
+
+    value = assignment_of(_find_prompt_entry(state, item))
+    if value is not None:
+        return value
+    return assignment(item.kind, texts=())
+
+
+def _render_asset_model_line(state: dict, item: QueueItem) -> str:
+    """出词横幅里那两行：模型与理由（＋ 受限模型的许可提示）。**唯一写源**（issue #88）。
+
+    内容从条目里记的判定现读，不重新判一遍：重新判会在提示词被改写后给出与当初不同的
+    答案（同 ``image_routing`` 模块注释里那条理由）。
+
+    许可提示按模型查 ``image_config.LICENSE_NOTES``：写死 ``== "qwen"`` 的话，加第二档
+    受限模型时横幅会静默不再提示。
+    """
+    from ..image_config import LICENSE_NOTES
+    from ..image_routing import described
+
+    value = _asset_assignment(state, item)
+    lines = [f"[生图模型] {item.name}：{described(value)}"]
+    note = LICENSE_NOTES.get(value["model"])
+    if note:
+        lines.append(f"[许可] {note}")
+    return "\n".join(lines)
 
 
 def _find_prompt_entry(state: dict, item: QueueItem) -> dict:
@@ -1379,6 +1421,85 @@ def _rewrite_asset_prompt_round(state: dict, brief: Brief, generation_dir: Path,
     return True
 
 
+def _change_asset_model_round(state: dict, brief: Brief, generation_dir: Path,
+                              item: QueueItem) -> bool:
+    """「改这张的生图模型」一轮（issue #88 / 父 spec #84 D8）：选档 → 按该档纪律重出词。
+
+    返回 True ＝ 已按新模型重出（调用方回外层重出提示词、重新审查）；False ＝ 没改
+    （取消、选的是同一档，或重出失败）。失败时**提示词与模型记录都保持原样**并留在菜单
+    ——静默换词等于让人在不知情下用上一条没验证过的词（同 AI 改词的口径）。
+
+    为什么是「重出」而不是「改写」：换模型的全部意义是换**纪律块**（中文短句／英文长文／
+    英文＋负面）——照旧词改一遍只会把旧档的写法带进新档。重出走的是与阶段 1 同一个
+    出词函数（``nodes.regenerate_asset_prompt``），纪律块由 agent 的 system prompt 决定。
+
+    选完记成 ``source=manual``：自动路由（关键词命中）从此不再动这一张——用户故事 8 的
+    「关键词误判不会卡住我」就靠这一条，而节点重跑时也认得出要保留人的选择。
+
+    **选的是同一档也记 ``manual``**（不重出、不花调用）：那张多半是自动规则切过去的，
+    人确认「就用这一档」本身就是一次选择；不记的话，日后重跑时关键词不再出现，它就
+    静默回落到配置默认——AC4「手动选择覆盖自动路由」在这一点上会缺口。
+    """
+    from ..asset_loop import TRIGGER_REVIEW_MODEL, log_asset_round
+    from ..graph import nodes
+    from ..image_config import IMAGE_MODEL_KEYS, image_model_label
+    from ..image_routing import SOURCE_MANUAL, put_assignment
+
+    current = _asset_assignment(state, item)["model"]
+    menu = " / ".join(f"{index}={image_model_label(key)}"
+                      for index, key in enumerate(IMAGE_MODEL_KEYS, 1))
+    while True:
+        raw = _prompt(f"[模型·{item.name}] 当前 {image_model_label(current)}；"
+                      f"改成哪个？{menu}（回车=不改）：").strip()
+        if not raw:
+            print("模型不改，提示词保持原样。")
+            return False
+        if raw.isdigit() and 1 <= int(raw) <= len(IMAGE_MODEL_KEYS):
+            model = IMAGE_MODEL_KEYS[int(raw) - 1]
+            break
+        print(f"无效输入，请选 1-{len(IMAGE_MODEL_KEYS)}（回车=不改）。")
+    if model == current:
+        entry = _find_prompt_entry(state, item)
+        put_assignment(entry, {"model": model, "source": SOURCE_MANUAL, "keyword": ""})
+        save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
+        print(f"[模型·{item.name}] 仍是 {image_model_label(model)}，已记为人选"
+              "（此后自动路由不再改动这一张）；提示词不动。")
+        return False
+    try:
+        # 横幅＋心跳（issue #71 / ADR 0019）：这次是真的一次模型调用，用户要知道在等什么。
+        with step_scope("正在按新模型重出提示词"):
+            _model, agents = _build_role_agents_on_demand(brief)
+            fresh = nodes.regenerate_asset_prompt(
+                agents, item.kind, item.name, state, brief, model=model)
+    except Exception as exc:  # noqa: BLE001 — 失败要响但不许裸崩：词与模型都不动、回菜单再定
+        print(f"[模型·{item.name}] 重出失败：{exc}；提示词与模型都保持原样。")
+        return False
+    entry = _find_prompt_entry(state, item)
+    old = str(entry.get("positive_prompt") or "")
+    # 四键契约里**动三个**：换模型就是换写法，旧词、旧负面、旧锁死清单都属于上一档的
+    # 产物（锁死清单是「逐字摘自正文」的，正文一换它就失效）。
+    entry["positive_prompt"] = str(fresh.get("positive_prompt") or "")
+    entry["negative_prompt"] = str(fresh.get("negative_prompt") or "")
+    entry["locked_features"] = list(fresh.get("locked_features") or [])
+    put_assignment(entry, {"model": model, "source": SOURCE_MANUAL, "keyword": ""})
+    # 留痕（issue #88）：换档等于整条词重写，旧词与「它原来属于哪一档」只在这本追加账里
+    # ——条目上的模型记录会被这一次覆盖，不留痕就再也查不到上一版是按哪套纪律写的。
+    log_asset_round(
+        generation_dir,
+        name=item.name, kind=item.kind, trigger=TRIGGER_REVIEW_MODEL,
+        feedback=f"审查时改生图模型：{image_model_label(current)} → {image_model_label(model)}",
+        prompt_before=old, prompt_after=entry["positive_prompt"],
+    )
+    save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
+    print(f"[模型·{item.name}] 已改为 {image_model_label(model)}（手动指定），"
+          "提示词已按该档纪律重出。")
+    # 出词后的警告级纪律检查照跑（#68 / #87）：只警告不阻断，口径跟着新模型走。
+    # 循环体与阶段 1 节点共用 ``nodes.print_image_prompt_warnings``（同一条判据、同一处接线）。
+    nodes.print_image_prompt_warnings(
+        entry["positive_prompt"], model, f"[纪律警告·{item.name}] ")
+    return True
+
+
 def _ai_reword_asset_round(state: dict, brief: Brief, generation_dir: Path, item: QueueItem,
                            deviations: Sequence[tuple[str, str, str]]) -> bool:
     """「AI 按偏差改词」一轮（issue #72 / ADR 0018）：按偏差清单强化原意 → 写回 → 留痕。
@@ -1395,9 +1516,8 @@ def _ai_reword_asset_round(state: dict, brief: Brief, generation_dir: Path, item
         ai_reword_asset_prompt,
         log_asset_round,
     )
-    from ..image_config import image_model_for
+    from ..graph import nodes
     from ..model_factory import build_chat_model
-    from ..tools.image_prompt_discipline import check_image_prompt
 
     if not deviations:
         # 防御分支：重生成菜单只在本轮判出偏差后才可达，真走到这里说明信令接错了。
@@ -1408,7 +1528,9 @@ def _ai_reword_asset_round(state: dict, brief: Brief, generation_dir: Path, item
     locked = _locked_features(state, brief, item.name)
     # 这一张按哪一档模型出的词，就按哪一档的纪律改（issue #87）：三档的写法相反
     # （中文短句／英文长文／英文＋负面），拿错纪律改写等于把这一张往另一家的口径拽。
-    model_key = image_model_for(item.kind)
+    # issue #88 起取**条目里记的那一档**：同一类里可能逐张不同（关键词命中切 MOSS、
+    # 人或手动改过），按类别配置取会把这类资产的改写拽回配置档。
+    model_key = _asset_assignment(state, item)["model"]
     try:
         new = ai_reword_asset_prompt(old, deviations, build_chat_model(),
                                      locked_features=locked, model=model_key)
@@ -1438,8 +1560,7 @@ def _ai_reword_asset_round(state: dict, brief: Brief, generation_dir: Path, item
     # 改写也是一次出词：照跑警告级纪律检查（#68 / ADR 0018）。只警告、不阻断——
     # 这份词是人要拿去生图的，纪律问题得在出图前看得见。检查口径跟着这一张的模型走
     # （issue #87）：五类里四类只在 Z-Image 档成立。
-    for warning in check_image_prompt(new, model=model_key):
-        print(f"[纪律警告·{item.name}] {warning.message}")
+    nodes.print_image_prompt_warnings(new, model_key, f"[纪律警告·{item.name}] ")
     return True
 
 
@@ -1896,7 +2017,8 @@ def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item: QueueIte
                 f"[审查·{item.name}] 这张图满意吗？{mark}\n"
                 "  1=满意，交回这张（下一步填路径）  2=打回：外部重掷（不登记被拒图）\n"
                 "  3=打回：改写提示词（留痕一轮修订）  4=显式放弃这张资产\n"
-                "  5=登记外部生成成本（耗时/次数）  q=先到这里（回车=1）："
+                "  5=登记外部生成成本（耗时/次数）  6=改这张的生图模型（换档重出词）\n"
+                "  q=先到这里（回车=1）："
             ).strip()
             if choice in ("", "1"):
                 remembered = recall_answer(state, _asset_path_key(item.name)) or ""
@@ -1950,9 +2072,14 @@ def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item: QueueIte
             if choice == "5":
                 _register_asset_external_cost(state, brief, generation_dir, item)
                 continue
+            if choice == "6":
+                # 换档重出成功＝新词要重新出站再审；没改成（取消/失败/同一档）留在菜单
+                if _change_asset_model_round(state, brief, generation_dir, item):
+                    break
+                continue
             if choice.lower() == "q":
                 return LOOP_PAUSED
-            print("无效输入，请选 1/2/3/4/5/q。")
+            print("无效输入，请选 1/2/3/4/5/6/q。")
 
         if outcome is None:
             continue  # 改写成功：新词重新出站再审

@@ -246,9 +246,14 @@ def test_each_asset_gets_exactly_one_named_zimage_prompt(tmp_path, monkeypatch):
                 f"{zh}/{name} 的 profile 不是 Z-Image 档"
     for _node, _k, _d, _t, out_field, _a in _ASSETS:
         for entry in state[out_field]:
+            # issue #88 起条目多一键 ``image_model``（系统记的「这条词按哪一档的纪律
+            # 写成」）。**契约仍是四键**：多出来的只能是系统自己的这一个字段——模型键
+            # （zimage/flux2）与已删的 instructions 照旧不许混进来。
             assert set(entry) == {"name", "positive_prompt", "negative_prompt",
-                                  "locked_features"}, \
-                f"{out_field} 的条目混入了四键之外的字段：{sorted(entry)}"
+                                  "locked_features", "image_model"}, \
+                f"{out_field} 的条目混入了契约之外的字段：{sorted(entry)}"
+            assert set(entry["image_model"]) == {"model", "source", "keyword"}, \
+                f"{out_field} 的模型记录形状不对：{entry['image_model']!r}"
 
 
 # ---------------------------------------------------------------------------

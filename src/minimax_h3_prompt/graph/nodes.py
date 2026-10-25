@@ -8,7 +8,7 @@ from typing import Callable
 
 from langgraph.graph.state import CompiledStateGraph
 
-from .. import image_config
+from .. import image_config, image_routing
 from ..agents import image_prompt_agent_key, run_agent
 from ..brief_parser import FRAME_VARIANTS, Brief, brief_uses_refs
 from ..config import Config
@@ -38,7 +38,7 @@ from ..user_revisions import (
     render_revision_block,
     setting_revision_block,
 )
-from .state import PipelineState
+from .state import ASSET_KIND_FIELDS, PipelineState
 
 
 # 各节点的上下文标签一律写字面量（与既有的「原始剧情」「分镜表」同形，读起来就是请求本身）。
@@ -175,6 +175,116 @@ def _image_prompt_agent(agents: dict, model_key: str):
     return agents[key]
 
 
+# 两张「类别 → state 键」的视图，都从 ``graph/state.ASSET_KIND_FIELDS`` 的**唯一声明**
+# 派生（issue #88 复审：nodes 里再立一张表就是同一契约的第二处口径，改一处漏一处）。
+ASSET_DESIGN_FIELDS: dict[str, str] = {
+    kind: design_field for kind, (_prompt_field, design_field) in ASSET_KIND_FIELDS.items()
+}
+# 路由读「上一次的条目」时按它取（人手动改过的模型记在那一条上）。
+_IMAGE_PROMPTS_FIELD_BY_KIND: dict[str, str] = {
+    kind: prompt_field for kind, (prompt_field, _design_field) in ASSET_KIND_FIELDS.items()
+}
+
+
+def _asset_prompt_request(kind: str, design_field: str, state: dict, brief: Brief,
+                          *, only: str = "") -> str:
+    """资产图出词请求正文；``only`` 非空时只出**那一张**（issue #88 的单条重出）。
+
+    点名资产用「资产「名字」」这个形式：它是模型手上唯一「只回这一条」的锚（请求里同时
+    给了整类的设计正文，不点名就无从知道要回哪一条）。
+
+    请求不点名**生图模型**：模型由 agent 的 system prompt（纪律块）决定，请求里再说一遍
+    就成了两处口径，改配置不改请求时两者会打架（issue #87 的裁定）。
+    """
+    scope = (
+        f"请为{kind}设计中的资产「{only}」生成一条可直接复制的生图提示词。"
+        f"设计里有几个{kind}资产都不用管：只输出这 1 条。只输出 JSON 数组。\n"
+        if only else
+        f"请为{kind}设计中的每个资产各生成一条可直接复制的生图提示词。"
+        f"设计里有几个{kind}资产就输出几条。只输出 JSON 数组。\n"
+    )
+    return scope + _ctx(
+        原始剧情=brief.plot,
+        起步澄清=brief.clarifications,
+        分场剧本=state.get("script", ""),
+        对应设计=state.get(design_field, ""),
+        美术统筹=state.get("art_design", ""),
+        视觉风格=brief.style,
+        语言=brief.language,
+        # 画布是**本次请求的数据**（不住在系统提示词里）：构图那套词按画幅族分
+        # 两套，而用户选定的画布形状各案不同。词表里写着「画布与尺寸一律以请求里的
+        # 【画布】块为准」——不带这块，那条指针就没有落点（issue #33 在帧节点踩过
+        # 同一个坑）。
+        画布=_canvas_block(brief.canvases),
+    )
+
+
+def _generate_asset_entries(agent, kind: str, design_field: str, state: dict, brief: Brief,
+                            *, only: str = "") -> list[dict]:
+    """跑一次资产图出词并归一成条目（多资产与单条重出共用这一条路）。
+
+    ``only`` 非空时要求回复里**恰好是那一张**：模型回了别的名字就响——写进这张条目的
+    词会属于另一张资产，而下游按语义名对号，串了也没人看得见（静默失败）。
+    """
+    raw = run_agent(agent, _asset_prompt_request(kind, design_field, state, brief, only=only))
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        # 纯格式转换，但它同样用这份系统提示词——词表里的【画布】指针照样得在场。
+        repair = run_agent(
+            agent,
+            f"把以下内容转换为严格 JSON 数组，不要 markdown：\n{_ctx(画布=_canvas_block(brief.canvases))}\n{raw}",
+        )
+        try:
+            parsed = json.loads(repair)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{kind} 生图提示词不是有效 JSON") from exc
+    # 清单层违约先修一次（issue #64）：条目是转述时下游的偏差判定会静默失效，
+    # 但一次违约就停住整条阶段 1 的代价与这个模型的失败模式不匹配。
+    violations = _locked_violations(parsed, kind)
+    if violations:
+        patch = run_agent(
+            agent,
+            _build_locked_repair_request(kind, violations, _canvas_block(brief.canvases)),
+        )
+        merged = _apply_locked_repair(parsed, kind, patch, violations)
+        try:
+            entries = _normalize_asset_entries(merged, kind)
+        except ValueError as exc:
+            # 修复后仍不合规才停：给重跑的人留下「已试过一次修复」与逐条明细，
+            # 一眼分清是模型固执还是可修（节点原始报错里没有这层信息）。
+            raise ValueError(f"{kind} 锁死清单修复 1 次后仍不合规：{exc}") from exc
+    else:
+        entries = _normalize_asset_entries(parsed, kind)
+    if only:
+        names = [str(entry.get("name", "")) for entry in entries]
+        if names != [only]:
+            raise ValueError(
+                f"单条重出返回的不是被点名的资产：期望 ['{only}']，实际 {names}")
+    return entries
+
+
+def regenerate_asset_prompt(agents: dict, kind_key: str, name: str, state: dict, brief: Brief,
+                            *, model: str) -> dict:
+    """按**指定模型**只重出一条资产图提示词（issue #88）。
+
+    两个调用方：自动路由命中时给那一张换 MOSS 重出，以及素材循环里人手动改模型后的
+    重出。走同一个函数的意义是「换模型＝换纪律块」这条#87 的裁量只有一处接线——
+    另写一条路径，早晚会有一条漏掉纪律块，出的词按别家的写法写而不报错。
+
+    ``kind_key`` 是英文档名（``character``/``prop``/``scene``）——本文件里中文的
+    ``kind``（人物/道具/场景）只用于请求措辞，两者不混用一个名字。
+
+    返回的是**单条条目**（四键），模型归属由调用方写进条目（``image_routing``）。
+    """
+    if kind_key not in ASSET_KIND_FIELDS:
+        raise ValueError(f"未知资产类别：{kind_key!r}（只认 {', '.join(ASSET_KIND_FIELDS)}）")
+    entries = _generate_asset_entries(
+        _image_prompt_agent(agents, model), KIND_LABELS[kind_key],
+        ASSET_DESIGN_FIELDS[kind_key], state, brief, only=name)
+    return entries[0]
+
+
 def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_field: str) -> Callable:
     """把模型无关设计资料翻译为 N 条生图提示词（每资产一条，issue #40）。
 
@@ -185,6 +295,11 @@ def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_f
     出图模型按档取（``config/image.yaml``，issue #87）：人物／道具／场景可各用不同模型，
     对应 agent 的 system prompt 里带的是**该模型**的纪律块。请求正文只说「生图提示词」，
     不点名模型——点名会与另一档的纪律块打架（改配置不改请求就成了两处口径）。
+
+    **issue #88 起按张路由**：先用该档配置的模型出词，再逐条判「文字类关键词命中／
+    人手动指定」；与刚用过的模型不同的那几张，用**目标模型的 agent 重出这一条**。
+    判定写进条目（``image_routing.ENTRY_KEY``），下游才可能知道「这条词是按哪一档的
+    纪律写的」——改写（改词再掷／AI 改词）要按同一档的纪律改它。
     """
     kind_key = _KIND_KEY_BY_LABEL.get(kind)
     if kind_key is None:
@@ -201,60 +316,67 @@ def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_f
             return {}
         # 模型在**调用时**取：配置是环境事实（换机器换模型只改 yaml），每次出词都现读。
         model_key = image_config.image_model_for(kind_key)
-        agent = _image_prompt_agent(agents, model_key)
-        message = (
-            f"请为{kind}设计中的每个资产各生成一条可直接复制的生图提示词。"
-            f"设计里有几个{kind}资产就输出几条。只输出 JSON 数组。\n"
-            + _ctx(
-                原始剧情=brief.plot,
-                起步澄清=brief.clarifications,
-                分场剧本=state.get("script", ""),
-                对应设计=state.get(design_field, ""),
-                美术统筹=state.get("art_design", ""),
-                视觉风格=brief.style,
-                语言=brief.language,
-                # 画布是**本次请求的数据**（不住在系统提示词里）：构图那套词按画幅族分
-                # 两套，而用户选定的画布形状各案不同。词表里写着「画布与尺寸一律以请求里的
-                # 【画布】块为准」——不带这块，那条指针就没有落点（issue #33 在帧节点踩过
-                # 同一个坑）。
-                画布=_canvas_block(brief.canvases),
-            )
-        )
-        raw = run_agent(agent, message)
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            # 纯格式转换，但它同样用这份系统提示词——词表里的【画布】指针照样得在场。
-            repair = run_agent(
-                agent,
-                f"把以下内容转换为严格 JSON 数组，不要 markdown：\n{_ctx(画布=_canvas_block(brief.canvases))}\n{raw}",
-            )
-            try:
-                parsed = json.loads(repair)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"{kind} 生图提示词不是有效 JSON") from exc
-        # 清单层违约先修一次（issue #64）：条目是转述时下游的偏差判定会静默失效，
-        # 但一次违约就停住整条阶段 1 的代价与这个模型的失败模式不匹配。
-        violations = _locked_violations(parsed, kind)
-        if violations:
-            patch = run_agent(
-                agent,
-                _build_locked_repair_request(kind, violations, _canvas_block(brief.canvases)),
-            )
-            merged = _apply_locked_repair(parsed, kind, patch, violations)
-            try:
-                entries = _normalize_asset_entries(merged, kind)
-            except ValueError as exc:
-                # 修复后仍不合规才停：给重跑的人留下「已试过一次修复」与逐条明细，
-                # 一眼分清是模型固执还是可修（节点原始报错里没有这层信息）。
-                raise ValueError(f"{kind} 锁死清单修复 1 次后仍不合规：{exc}") from exc
-        else:
-            entries = _normalize_asset_entries(parsed, kind)
-        # 纪律检查**排在归一之后**：只有形状合规的条目才谈得上「正文写法」，
-        # 也保证两条返回路径（修过/没修过）都经过同一道检查（issue #68）。
+        entries = _generate_asset_entries(
+            _image_prompt_agent(agents, model_key), kind, design_field, state, brief)
+        entries = _route_asset_entries(
+            agents, kind_key, entries, state, brief, default_model=model_key)
+        # 纪律检查**排在归一与路由之后**：只有形状合规的条目才谈得上「正文写法」，
+        # 也保证每条按**它自己那一档**的判据检查（四类只在 Z-Image 档成立，issue #87）。
         _warn_image_prompt_discipline(entries, kind, model_key)
         return {output_field: entries}
     return node
+
+
+def _route_asset_entries(agents: dict, kind_key: str, entries: list[dict], state: dict,
+                         brief: Brief, *, default_model: str) -> list[dict]:
+    """给每条资产定模型并按需重出（issue #88 / 父 spec #84 D8）。
+
+    判据是「该类的设计正文 ＋ 这一条自己的提示词」；人手动改过的（``source=manual``，
+    在条目上，经得住阶段 1 重跑）压过自动规则。重出只针对**模型与刚用过的那个不同**
+    的那几张：未命中的照旧用第一次的产物，不白花调用。
+
+    设计正文是**整类共用**的一段文字，故它命中的关键词会让这一类的每一张都切过去
+    （提示词里命中的才只切那一张）。这是这条规则的粒度（拿不到「设计里的哪一句属于
+    哪一张」），不是缺陷：人可以在素材循环里逐张改回来，而漏判（该切没切）在这个规则
+    下不会发生。
+    """
+    design = str(state.get(ASSET_DESIGN_FIELDS[kind_key], ""))
+    # 上一次的条目按类别键**直接取**（不用 .get 兜底）：未知类别在这里就该响——静默
+    # 取空表会让人的手动选择在重跑后无声消失，而「按配置默认」看起来一切正常。
+    previous = {
+        str(entry.get("name", "")): entry
+        for entry in (state.get(_IMAGE_PROMPTS_FIELD_BY_KIND[kind_key]) or [])
+        if isinstance(entry, dict)
+    }
+    for index, entry in enumerate(entries):
+        name = str(entry.get("name", ""))
+        manual = image_routing.manual_model_of(previous[name]) if name in previous else None
+        value = image_routing.assignment(
+            kind_key,
+            texts=(design, str(entry.get("positive_prompt", ""))),
+            manual=manual,
+        )
+        if value["model"] != default_model:
+            entry = regenerate_asset_prompt(agents, kind_key, name, state, brief,
+                                            model=value["model"])
+        image_routing.put_assignment(entry, value)
+        entries[index] = entry
+        # 只报「不是按配置默认」的那些：每张都打一行会把真正需要复核的判断淹在噪声里。
+        if value["source"] != image_routing.SOURCE_CONFIG:
+            print(f"[生图模型] {KIND_LABELS[kind_key]}「{name}」{image_routing.described(value)}")
+    return entries
+
+
+def print_image_prompt_warnings(prompt: str, model: str, prefix: str) -> None:
+    """打印一条提示词的警告级纪律检查（节点与素材循环**共用这一处循环**）。
+
+    两处各写一遍 ``for warning in check_image_prompt(...)`` 的代价是：将来加一档警告
+    文案或改判据时只改到一处，另一条出词路径就静默不再报（本仓「规则在、接线不在」的
+    典型形态）。前缀由调用方给——两边面向的位置不同（阶段 1 出词 / 菜单里的重出），
+    消息体同源。
+    """
+    for warning in check_image_prompt(prompt, model=model):
+        print(f"{prefix}{warning.message}")
 
 
 def _warn_image_prompt_discipline(entries: list[dict], kind: str, model: str) -> None:
@@ -265,16 +387,16 @@ def _warn_image_prompt_discipline(entries: list[dict], kind: str, model: str) ->
     警告打在节点里而不是展示口：真实运行都经过节点，且本文件已有同样的先例
     （关键帧节点剥帧的告警）。
 
-    ``model`` 决定跑哪几类检查：五类里四类的依据是 Turbo 自己的事实（CFG=1、编码器不认
-    权重、长文稀释注意力、空间关系弱），拿它们判 Qwen 的英文长文只会刷出一片假警告，
-    把真问题淹掉。判据住在 ``check_image_prompt`` 一处（issue #87），这里只传模型。
+    ``model`` 是**回落档**：issue #88 起同一类里可能逐张分属不同模型（命中文字类关键词
+    的那张切到 MOSS），每条的判据按它自己记录的那一档跑；没有记录（旧会话）才用 ``model``。
+    判据本身的依据（五类里四类只在 Z-Image 档成立）住在 ``check_image_prompt`` 一处。
     """
     for entry in entries:
-        for warning in check_image_prompt(
-                str(entry.get("positive_prompt", "")), model=model):
-            print(
-                f"[警告] {kind}「{entry.get('name', '')}」生图提示词：{warning.message}"
-            )
+        print_image_prompt_warnings(
+            str(entry.get("positive_prompt", "")),
+            image_routing.model_of(entry) or model,
+            f"[警告] {kind}「{entry.get('name', '')}」生图提示词：",
+        )
 
 
 def _normalize_asset_entries(parsed: object, kind: str) -> list[dict]:
@@ -956,9 +1078,14 @@ def make_nodes(agents: dict, model, brief: Brief, config: Config) -> dict[str, C
             agents, "background_designer", "background_design", "背景设计", LAYER_ART),
         "prop_designer": _make_design_node(
             agents, "prop_designer", "prop_design", "道具设计", LAYER_ART),
-        "image_prompt_character": _make_image_prompt_node(agents, "人物", "character_design", "character_image_prompts"),
-        "image_prompt_prop": _make_image_prompt_node(agents, "道具", "prop_design", "prop_image_prompts"),
-        "image_prompt_scene": _make_image_prompt_node(agents, "场景", "background_design", "scene_image_prompts"),
+        # 设计正文键走 ``ASSET_DESIGN_FIELDS``（同一份映射也被「单条重出」用）：
+        # 这里手写一遍字符串，加第四类资产时路由就会去读错的设计正文。
+        "image_prompt_character": _make_image_prompt_node(
+            agents, "人物", ASSET_DESIGN_FIELDS["character"], "character_image_prompts"),
+        "image_prompt_prop": _make_image_prompt_node(
+            agents, "道具", ASSET_DESIGN_FIELDS["prop"], "prop_image_prompts"),
+        "image_prompt_scene": _make_image_prompt_node(
+            agents, "场景", ASSET_DESIGN_FIELDS["scene"], "scene_image_prompts"),
         "fl2va_frame_prompts": _make_fl2va_frame_prompt_node(agents),
         "art_director": _make_art_director_node(agents),
         "storyboard": _make_storyboard_node(agents),

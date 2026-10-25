@@ -1379,3 +1379,128 @@ def test_ai_reword_goes_through_the_direct_call_watchdog(tmp_path, monkeypatch, 
     out = capsys.readouterr().out
     assert "锁死清单已逐条核对；其余正文请人工确认" in out
     assert "其余正文逐字保留" not in out, "成功文案仍在对用户保证系统没核对过的部分"
+
+
+# ---------------------------------------------------------------------------
+# issue #88：出词横幅带模型与理由；菜单可逐张改模型（改后重出词）
+# ---------------------------------------------------------------------------
+
+def _stub_model_regeneration(monkeypatch, *, new_prompt: str) -> list[str]:
+    """打桩「按新模型重出这一条」：记录请求、回一条只含被点名资产的新词。
+
+    与真实路径同形：素材循环经 ``nodes.regenerate_asset_prompt`` 走**该档 agent** 的
+    出词函数，所以这里替换两处——按需装配（不然会真建客户端）与 ``nodes.run_agent``。
+    """
+    from minimax_h3_prompt.agents import image_prompt_agent_key
+    from minimax_h3_prompt.graph import nodes
+
+    agents = {image_prompt_agent_key(key): SimpleNamespace(name=key)
+              for key in image_config.IMAGE_MODEL_KEYS}
+    monkeypatch.setattr(wizard, "_build_role_agents_on_demand",
+                        lambda brief: (object(), agents))
+    requests: list[str] = []
+
+    def fake_run_agent(agent, message):
+        requests.append(str(message))
+        name = str(message).split("资产「", 1)[1].split("」", 1)[0]
+        return json.dumps([{"name": name, "positive_prompt": new_prompt,
+                            "negative_prompt": "", "locked_features": [name]}],
+                          ensure_ascii=False)
+
+    monkeypatch.setattr(nodes, "run_agent", fake_run_agent)
+    return requests
+
+
+def test_review_menu_can_change_the_asset_model_and_rereleases(tmp_path, monkeypatch, capsys):
+    """审查菜单 6=改这张的生图模型：换档重出词，新词重新出站再审（issue #88 AC3/AC4）。"""
+    _pin_all_models_to(monkeypatch, tmp_path, "z_image")
+    girl = _write_source(tmp_path, "girl.png", b"girl")
+    new_prompt = "人物·红裙女孩专属生图提示词：MOSS 档重出的新词"
+    requests = _stub_model_regeneration(monkeypatch, new_prompt=new_prompt)
+
+    tail = [
+        "", "6", "3",       # 队首出词 → 审查菜单改模型 → 选 3=MOSS
+        "1", str(girl),     # 新词重新出站 → 满意交回
+        "q",                # 队列菜单：先到这里
+    ]
+    asked, code, _ = _run_loop(tmp_path, monkeypatch, tail)
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert any("改这张的生图模型" in text for text in asked), "审查菜单缺「改模型」出口"
+    assert any("改成哪个" in text for text in asked), "没问选哪个模型"
+    assert requests and "红裙女孩" in requests[0], "重出请求没点名这张资产"
+    # 新词确实重新出站了（改完回外层，再打一遍提示词与审查菜单）
+    assert out.index("MOSS 档重出的新词") > out.index("当前待办：红裙女孩")
+    assert "已改为 MOSS-Image（手动指定）" in out
+    # 模型记录落进会话：续跑与阶段 1 重跑都按它保留人的选择
+    session = load_session(next((tmp_path / "sessions").rglob("session-state.json")).parent)
+    entry = next(e for e in session.stage_state["character_image_prompts"]
+                 if e["name"] == "红裙女孩")
+    assert entry["image_model"] == {"model": "moss", "source": "manual", "keyword": ""}
+    # 换档留痕：旧词与「原来按哪一档写的」只活在追加账里（条目上的记录已被覆盖）
+    rounds = [row for row in _rounds(tmp_path) if row["name"] == "红裙女孩"]
+    assert [row["trigger"] for row in rounds] == [asset_loop.TRIGGER_REVIEW_MODEL]
+    assert rounds[0]["prompt_before"] == GIRL_PROMPT
+    assert rounds[0]["prompt_after"] == new_prompt
+    # 交回的图仍是这张的新词：落盘产物跟着换（不给用户看旧词）
+    assert "MOSS 档重出的新词" in next((tmp_path / "sessions").rglob("character-prompt.md")).read_text(
+        encoding="utf-8")
+
+
+def test_asset_prompt_banner_names_the_model_and_reason(tmp_path, monkeypatch, capsys):
+    """出词横幅写清「这一张为什么用这个模型」：用户故事 7 的复核入口。"""
+    _pin_all_models_to(monkeypatch, tmp_path, "z_image")
+    _run_loop(tmp_path, monkeypatch, ["", "q"])
+
+    out = capsys.readouterr().out
+    assert "[生图模型] 红裙女孩：按配置默认 → Z-Image Turbo" in out
+
+
+def test_qwen_asset_banner_carries_the_noncommercial_license(tmp_path, monkeypatch, capsys):
+    """选到 Qwen 档时，出词横幅必须带非商用许可提示（issue #88 AC5）。
+
+    反向断言同样重要：Z-Image 档不该出现这句——每张都印一遍就成了一片噪音，
+    真正选到 Qwen 的那一次反而看不见。
+    """
+    _pin_all_models_to(monkeypatch, tmp_path, "qwen")
+    _run_loop(tmp_path, monkeypatch, ["", "q"])
+    out = capsys.readouterr().out
+
+    assert image_config.QWEN_LICENSE_NOTE in out
+    assert "仅限非商用" in out
+
+    # 对照组：同一流程把三档钉到 Z-Image，横幅里不该有这句许可提示
+    other = tmp_path / "other"
+    other.mkdir()
+    _pin_all_models_to(monkeypatch, tmp_path, "z_image")
+    _run_loop(other, monkeypatch, ["", "q"])
+    assert image_config.QWEN_LICENSE_NOTE not in capsys.readouterr().out
+
+
+def test_confirming_the_current_model_locks_it_as_a_manual_choice(tmp_path, monkeypatch, capsys):
+    """选「同一档」也记成人选（不重出、不多花调用）：把自动判定的结果锁住（issue #88 AC4）。
+
+    缺口现场：某张被自动规则切到 MOSS，人认可这一档 -> 若这次选择不落记录，日后阶段 1
+    重跑时关键词不再出现，它就静默回落到配置默认；用户以为「我选过了」，实际没有。
+    """
+    _pin_all_models_to(monkeypatch, tmp_path, "z_image")
+    girl = _write_source(tmp_path, "girl.png", b"girl")
+    requests = _stub_model_regeneration(monkeypatch, new_prompt="不该被用到的词")
+
+    tail = [
+        "", "6", "1",       # 审查菜单改模型 → 选 1=Z-Image（就是当前这一档）
+        "1", str(girl),     # 提示词不动，满意交回
+        "q",
+    ]
+    asked, code, _ = _run_loop(tmp_path, monkeypatch, tail)
+
+    assert code == 0
+    assert not requests, "选的是同一档，不该重出词（白花一次调用）"
+    out = capsys.readouterr().out
+    assert "已记为人选" in out
+    session = load_session(next((tmp_path / "sessions").rglob("session-state.json")).parent)
+    entry = next(e for e in session.stage_state["character_image_prompts"]
+                 if e["name"] == "红裙女孩")
+    assert entry["image_model"] == {"model": "z_image", "source": "manual", "keyword": ""}
+    assert not _rounds(tmp_path), "没换词就不留改写轮（轮次账记的是改写）"

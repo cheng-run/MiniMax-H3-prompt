@@ -155,7 +155,13 @@ def test_every_asset_request_keeps_the_shared_json_contract(tmp_path, monkeypatc
 
 
 def test_output_entries_are_identical_across_models(monkeypatch, tmp_path):
-    """同一份模型回复在三档下归一出的条目**逐字段相同**：分支只影响写词，不改契约。"""
+    """同一份模型回复在三档下归一出的条目**逐字段相同**：分支只影响写词，不改契约。
+
+    issue #88 起条目多记了一个 ``image_model``（这条词按哪一档的纪律写成的），它当然
+    随档而变——比的是**契约四键**，并且顺带钉住那份记录写的就是配置的那一档。
+    """
+    from minimax_h3_prompt import image_routing
+
     reply = _asset_reply("人物")
     monkeypatch.setattr(nodes, "run_agent", lambda agent, message: reply)
     agents = {image_prompt_agent_key(m): object() for m in DISCIPLINE_MODELS}
@@ -169,7 +175,13 @@ def test_output_entries_are_identical_across_models(monkeypatch, tmp_path):
             {"brief": _ref_brief(), "character_design": "设计正文"})["character_image_prompts"]
 
     for model_key, value in entries.items():
-        assert value == entries[DEFAULT_IMAGE_MODEL], f"{model_key} 档归一出的条目与别档不同"
+        contract = [{k: v for k, v in entry.items() if k != image_routing.ENTRY_KEY}
+                    for entry in value]
+        baseline = [{k: v for k, v in entry.items() if k != image_routing.ENTRY_KEY}
+                    for entry in entries[DEFAULT_IMAGE_MODEL]]
+        assert contract == baseline, f"{model_key} 档归一出的条目与别档不同"
+        assert image_routing.model_of(value[0]) == model_key, \
+            f"{model_key} 档的条目记的模型不是它自己"
 
 
 def test_locked_feature_invariant_still_bites_under_a_non_default_model(monkeypatch, tmp_path):

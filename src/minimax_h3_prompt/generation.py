@@ -11,6 +11,7 @@ from typing import Any, Literal, NamedTuple
 
 from .asset_proofread import proofread_descriptions
 from .brief_parser import Brief, CanvasMap, RefItem, is_ref_mode
+from .graph.state import ASSET_KIND_FIELDS
 from .tools.theme_guard import (
     _CONFLICTING_OUTDOOR_TERMS,
     contains_unqualified_conflict as _contains_unqualified_conflict,
@@ -324,6 +325,10 @@ class ImagePromptVariant:
     不是渲染层的标题。``model_family`` 已随 Flux.2 版全链取消而移除：资产链只剩
     Z-Image（帧链的双模型也在 issue #48 / ADR 0013 一并退役，``FL2VAFramePrompt``
     现在同样只出 Z-Image 一版）。
+
+    **这里不携带出图模型**（issue #88）：同一类里逐张可能分属不同模型（关键词命中切
+    MOSS、人或手动改档），模型记录住在 state 条目的 ``image_model`` 字段上
+    （``image_routing``）——复制这一份结构再存一遍就是第二份会漂的真相。
     """
 
     name: str
@@ -939,12 +944,9 @@ def image_prompt_variants(
     曾经当生图提示词喂 ComfyUI 的根源，新跑的会话永远走不到那支，``tests/test_asset_image_prompts.py`` 钉住）。
     """
     variants: list[ImagePromptVariant] = []
-    kind_meta = {
-        "character": ("character_image_prompts", "character_design"),
-        "prop": ("prop_image_prompts", "prop_design"),
-        "scene": ("scene_image_prompts", "background_design"),
-    }
-    for kind, (field, design_field) in kind_meta.items():
+    # 类别 → (产物键, 设计键) 取 ``graph.state.ASSET_KIND_FIELDS`` 的唯一声明（issue #88）：
+    # 这里再抄一份，加第四类资产时就是「节点写了、出口读不到」的静默漏。
+    for kind, (field, design_field) in ASSET_KIND_FIELDS.items():
         label = KIND_LABELS[kind]
         raw = state.get(field)
         if isinstance(raw, list):

@@ -54,6 +54,19 @@ DEFAULT_IMAGE_MODELS: Mapping[str, str] = {
 # 让 tools 层另立一份就是第二个家，默认档改名时会有一处静默指向不存在的纪律文件。
 DEFAULT_IMAGE_MODEL = "z_image"
 
+# 许可红线（spec #84 D8）：Qwen-Image 2.1 是 Qwen Research License，**仅限非商用**。
+# 这句话必须出现在**出词横幅**上（issue #88 AC5）——只写在配置文件注释里，用户在终端
+# 上看不见，等于没写；而选错档的代价是一份不能交付的商用素材。
+QWEN_LICENSE_NOTE = (
+    "Qwen-Image 2.1 是 Qwen Research License，**仅限非商用**；"
+    "商用前把这一档换成 Z-Image Turbo 或 MOSS-Image（Apache-2.0）")
+
+# 「哪些模型带许可提示」的**唯一声明**：横幅按模型查这张表，不在 ui 里写
+# ``if model == "qwen"``——那样加第二档受限模型（或改键名）时，横幅会静默地不再提示，
+# 而那正是这笔交付红线要防的失败形态。没有条目的模型（Z-Image / MOSS）是 Apache-2.0，
+# 印一遍提示只是噪音，真正受限的那一次反而看不见。
+LICENSE_NOTES: Mapping[str, str] = {"qwen": QWEN_LICENSE_NOTE}
+
 
 @dataclass(frozen=True)
 class ImageSettings:
@@ -126,6 +139,6 @@ def image_model_for(kind: str) -> str:
 
 __all__ = [
     "DEFAULT_IMAGE_MODEL", "DEFAULT_IMAGE_MODELS", "IMAGE_CONFIG_PATH", "IMAGE_KINDS",
-    "IMAGE_MODEL_KEYS", "IMAGE_MODEL_LABELS", "ImageSettings", "image_model_for",
-    "image_model_label", "load_image_settings",
+    "IMAGE_MODEL_KEYS", "IMAGE_MODEL_LABELS", "ImageSettings", "LICENSE_NOTES",
+    "QWEN_LICENSE_NOTE", "image_model_for", "image_model_label", "load_image_settings",
 ]

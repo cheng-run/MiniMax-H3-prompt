@@ -42,10 +42,14 @@ _ASSET_KINDS = ("character", "scene", "prop")
 # - 校对后重生成「AI 按偏差改词」（issue #72 / ADR 0018：由模型按偏差清单把被画漏的
 #   细节写显式。与「改词再掷」分得清——那一档的意见是人写的，这一档是模型写的，
 #   事后要能分辨是谁要求的这一轮）。
+# - 审查时「改这张的生图模型」（issue #88）：换档＝整条词按另一套纪律重出，旧词与它
+#   属于哪一档只活在这本追加账里（条目上的 ``image_routing`` 记录会被新的覆盖）；
+#   它与上面几档的区别是「谁要求的」之外还有「按哪一套写法写的」。
 TRIGGER_REVIEW_REWORD = "review_reword"
 TRIGGER_REGEN_REWORD = "regen_reword"
 TRIGGER_REGEN_REROLL = "regen_reroll"
 TRIGGER_REGEN_AI_REWORD = "regen_ai_reword"
+TRIGGER_REVIEW_MODEL = "review_model"
 
 # 「重画轮次」只认因偏差重画的这三档（issue #72）：审查打回改写不算——那一档图还没交回，
 # 把它算进来会把「本张已重画 N 轮」说得比事实多。清单保持单一定义：计数口按它过滤，
@@ -469,7 +473,7 @@ __all__ = [
     "CURRENT_PROMPT_HEAD", "QueueItem",
     "REGEN_TRIGGERS", "SETTLED_FACTS_HEAD",
     "TRIGGER_REGEN_AI_REWORD", "TRIGGER_REGEN_REROLL", "TRIGGER_REGEN_REWORD",
-    "TRIGGER_REVIEW_REWORD",
+    "TRIGGER_REVIEW_MODEL", "TRIGGER_REVIEW_REWORD",
     "ai_reword_asset_prompt", "align_asset_prompt", "asset_queue",
     "build_ai_reword_request", "build_settled_align_request", "count_regen_rounds",
     "log_asset_round", "loop_state", "note_abandoned", "note_released",
