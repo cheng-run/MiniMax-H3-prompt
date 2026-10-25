@@ -562,9 +562,41 @@ def test_cli_segment_delivery_stops_readably_on_a_capacity_error(tmp_path, monke
         raise ReferenceCapacityError("第 1 段接线卡：总文件 13 个 > 12 个")
 
     monkeypatch.setattr("minimax_h3_prompt.ref_segments.deliver_ref_segments", boom)
-    main_module._deliver_ref_segments_cli(
+    stopped = main_module._deliver_ref_segments_cli(
         Brief(mode="ref", plot="主题", duration=30.0), "整片提示词", tmp_path)
+    assert stopped is False
     assert "无法按段交付" in capsys.readouterr().out
+
+
+def test_cli_run_command_does_not_claim_done_after_the_segment_gate_stops(tmp_path,
+                                                                        monkeypatch,
+                                                                        capsys):
+    """分段闸拦下时不许再打「已完成」（issue #86 复审残留）。
+
+    「报错」与「完成」同屏，用户会以为片子出好了。变异判据：删掉 ``_run_cli`` 里
+    ``if not _deliver_ref_segments_cli(...): return 1``，本条红。
+    """
+    import argparse
+
+    from minimax_h3_prompt import config as config_module
+    from minimax_h3_prompt import main as main_module
+
+    lines = "\n".join(f"- Picture {n}: 素材{n} — 描述{n}" for n in range(1, 3))
+    brief_file = tmp_path / "brief.md"
+    brief_file.write_text(
+        "输入: 多参\n时长: 30\n\n## 剧情\n主题\n\n## 角色与参考图\n" + lines,
+        encoding="utf-8")
+    monkeypatch.setattr("minimax_h3_prompt.graph.pipeline.run_pipeline",
+                        lambda *a, **k: "整片提示词")
+    monkeypatch.setattr(config_module.config, "output_path",
+                        tmp_path / "final_prompt.txt")
+    monkeypatch.setattr(main_module, "_deliver_ref_segments_cli", lambda *a, **k: False)
+
+    args = argparse.Namespace(brief=str(brief_file), variant=None, dry_run=False,
+                              model=None, mode=None, polish=False, output=None)
+    assert main_module._run_cli(args) == 1
+    output = capsys.readouterr().out
+    assert "已完成" not in output, "被拦下还报「已完成」＝谎报"
 
 
 def test_brief_path_refuses_more_than_nine_pictures_for_a_single_request_film(

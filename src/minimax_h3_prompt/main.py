@@ -516,8 +516,13 @@ def main(argv: list[str] | None = None) -> int:
     return _run_cli(args)
 
 
-def _deliver_ref_segments_cli(brief, prompt: str, out_dir) -> None:
-    """--brief 快路径的多参分段交付（issue #46）：薄接线，编排/文案与向导同一份。"""
+def _deliver_ref_segments_cli(brief, prompt: str, out_dir) -> bool:
+    """--brief 快路径的多参分段交付（issue #46）：薄接线，编排/文案与向导同一份。
+
+    返回 False ＝ 逐段容量闸拦下（issue #86）。调用方**不许再打「已完成」**——
+    「报错」与「完成」同屏出现，用户会以为片子出好了（本仓「报错＋报完成并存」
+    是老形态，复审点过一次）。
+    """
     from .ref_capacity import ReferenceCapacityError
     from .ref_segments import deliver_ref_segments
     from .ui.progress import step_scope
@@ -531,8 +536,9 @@ def _deliver_ref_segments_cli(brief, prompt: str, out_dir) -> None:
     except ReferenceCapacityError as exc:
         # 逐段容量闸（issue #86）：设计边界当边界报——点名超出的素材，指出路
         print(f"\n[错误] 本片无法按段交付：{exc}")
-        return
+        return False
     print(report)
+    return True
 
 
 def _check_brief_ref_capacity(brief) -> bool:
@@ -622,7 +628,9 @@ def _run_cli(args: argparse.Namespace) -> int:
         # ——交付物是逐段落盘的段提示词。**逐段陪跑不在这条路径上**（issue #55）：
         # 它要交回视频、过可证层闸门、落段产出账，前提是交互终端；本快路径非交互，
         # 且 stdout 要能整份取走（脚本场景），所以整片照旧打印、只是标明是存档。
-        _deliver_ref_segments_cli(brief, final_prompt, config.output_path.parent)
+        if not _deliver_ref_segments_cli(brief, final_prompt, config.output_path.parent):
+            # 逐段容量闸拦下（issue #86）：不许接着报「已完成」
+            return 1
         print(f"\n已完成。整片 ref 六段式已写入: {config.output_path}（仅存档预览）")
         print("交付物是上面逐段落盘的段提示词文件；逐段陪跑（交回视频＋可证层验收＋"
               "段产出账）请用两阶段向导。")
