@@ -169,17 +169,21 @@ def load_role_prompt(role: str, *, image_model: str | None = None) -> str:
     可判定对照物），关键帧生图提示词工程师只能拿生图半（静态图不写运镜）。
     哪些角色拿官方原文块由 ``OFFICIAL_VERBATIM_ROLES`` 声明（issue #35）。
 
-    纪律块排在公共段之后、词表之前：角色 .md 里的指针写的是「见本提示词里的『生图提示词
-    纪律』一节」，而词表是选词材料、不是写法规则，不该把纪律挤到更远的地方。
+    纪律块排在**词表之后**、原文块之前（issue #87 复核）：共用生图词表的「四条硬约束」
+    里写着「正文中文／默认不输出负向」，那是 Z-Image 的口径；Qwen／MOSS 的纪律块说的
+    是相反的话。块里那句「与另一档的差别以本节为准」只有在**后出现**时才是真话——
+    排在词表之前等于让通用条款把模型条款盖掉。词表本身**逐字不动**：它还喂着首尾帧的
+    关键帧提示词工程师（``frame_prompt_engineer``），改它就会改 base 路线的系统提示词
+    （spec #84 D11 要求逐字节不变，``tests/test_base_prompt_bytes.py`` 钉着）。
     """
     prompt = (PROMPTS_DIR / f"{role}.md").read_text(encoding="utf-8")
-    discipline = _image_discipline_block(role, image_model)
     wordlist = _role_wordlist(role)
+    discipline = _image_discipline_block(role, image_model)
     # 原文块排在最后：角色 .md 里的指针写的是「见文末【官方逐字符原文】」
     verbatim = _official_verbatim_block(role)
     # 空块不加空行：不声明词表/原文/纪律的角色，提示词逐字与改动前一致
     return "\n".join(
-        part for part in (prompt, discipline, wordlist, verbatim) if part)
+        part for part in (prompt, wordlist, discipline, verbatim) if part)
 
 
 def _make_tools(refs: list[RefItem], mode: str, duration: float, variant: str, role: str) -> list:

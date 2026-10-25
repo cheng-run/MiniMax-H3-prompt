@@ -235,10 +235,12 @@ single sustained low note as the paws land and the hand freezes.
 
 生图是**静态画面**，与视频侧是两套语言。**运镜、剪辑、时间码、H3 三段式一律不写**——写了就是错。
 
-⚠️ 2026-10-25（issue #87 / spec #84 D7）起资产图分三档生图模型：Z-Image Turbo（中文短句、
+⚠️ 2026-10-25（issue #87 / spec #84 D7）起**资产图**分三档生图模型：Z-Image Turbo（中文短句、
 全正向）、Qwen-Image 2.1（英文长文、不写负面）、MOSS-Image（英文、负面标签生效）。本节其余
 内容（画幅、词表、hex 锁色）三档共用；**按模型的写法差别在 `prompts/image_prompt_disciplines/`
 三份纪律文件里**，那份是进模型的机读真源，本节是给人读的册子。
+**关键帧（首尾帧路线）仍固定 Z-Image**，共用生图词表逐字未改——它同时喂两条路线，
+动它就会改 base 的系统提示词（spec #84 D11，`tests/test_base_prompt_bytes.py` 钉着）。
 
 ## 10.1 四条本仓硬约束
 
@@ -246,8 +248,8 @@ single sustained low note as the paws land and the hand freezes.
 |---|---|
 | 不写 video 镜头运动 / 剪辑 / 时间码 / H3 三段式 | `image_prompt_engineer.md:19`、`frame_prompt_engineer.md:66` |
 | 不堆砌无意义质量标签 | `image_prompt_engineer.md:20` |
-| 正文语言按所选模型（Z-Image 中文／Qwen、MOSS 英文；专有名词可保留原文） | `image_prompt_engineer.md:22`、`prompts/image_prompt_disciplines/` |
-| 负向按所选模型（Z-Image／Qwen 不写；MOSS 填负面标签） | `image_prompt_engineer.md:21`、`prompts/image_prompt_disciplines/` |
+| 正文语言按所选模型（Z-Image 中文／Qwen、MOSS 英文；专有名词可保留原文）；**仅资产图，关键帧仍中文** | `image_prompt_engineer.md:22`、`prompts/image_prompt_disciplines/` |
+| 负向按所选模型（Z-Image／Qwen 不写；MOSS 填负面标签）；**仅资产图，关键帧不写负向** | `image_prompt_engineer.md:21`、`prompts/image_prompt_disciplines/` |
 
 （2026-10-16 单版化后更正：「两模型必须各自重写，不能同一句」已从资产图链移除——那条链只剩 Z-Image 一版（issue #40）。2026-10-18 **Flux.2 全链退役**（issue #48 / ADR 0013）后关键帧链也只剩 Z-Image 一版，该纪律随之删除，不再有任何链适用。）
 
