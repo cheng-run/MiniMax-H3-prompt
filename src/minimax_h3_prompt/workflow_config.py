@@ -2,10 +2,13 @@
 
 与 ``config/agent.yaml``（模型侧）**分开**：两者生命周期不同——换模型不该误改
 槽位，换工作流才改这里。槽位数是**工作流节点的物理端口数**（``ref_image_0…N-1``），
-不是模型能力（ADR 0017 实测：模型接受任意长度 ``minimax_refs``，9 只是旧节点的
-UI 上限）。故它跟着工作流走：**先有对应端口的工作流，再改这里的数字**。
+不是模型能力（ADR 0017 实测：模型接受任意长度 ``minimax_refs``）。故它跟着工作流走：
+**先有对应端口的工作流，再改这里的数字**。
 
-缺文件/缺字段一律回落默认值（图 24 / 视频 3 / 音频 3）：用户没写配置文件不构成
+登记值是 **9 图**（issue #86 / spec #84 D5），依据是官方的单次请求上限「≤9 图 +
+≤3 视频 + ≤3 音频、总文件 ≤12」，不是节点 UI 的偶然限制；24 槽只作本地接线余量。
+
+缺文件/缺字段一律回落默认值（图 9 / 视频 3 / 音频 3）：用户没写配置文件不构成
 流程走不下去，与注入卡「不造假端口、把话说破」同口径。**写了的非法值则大声报**
 ——静默回默认会把笔误藏起来，而接出不存在端口正是 ADR 0017 记录的那类事故。
 """
@@ -25,10 +28,12 @@ from .asset_ledger import KIND_AUDIO, KIND_PICTURE, KIND_VIDEO, KINDS
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_CONFIG_PATH = PROJECT_ROOT / "config" / "workflow.yaml"
 
-# V3 是「24 图槽」工作流（票面 #65）；V2 保留在本机作退路，不再被登记。
-DEFAULT_REF_WORKFLOW_NAME = "59-(多Lora改)MiniMax-H3 ref2va 多参生视频 V3（24图槽）"
+# 登记工作流是 V2 的 **9 图槽**版本（issue #86 / spec #84 D5）：9 是官方 API 的单次请求
+# 上限（≤9 图 + ≤3 视频 + ≤3 音频、总文件 ≤12），不是节点 UI 上限。24 槽 V3 从一开始
+# 就不该是默认路径——24 张全喂在 16GB 卡上实测 OOM（2026-10-22，见 ADR 0017）。
+DEFAULT_REF_WORKFLOW_NAME = "59-(多Lora改)MiniMax-H3 ref2va 多参生视频 V2"
 DEFAULT_SLOT_COUNTS: Mapping[str, int] = {
-    KIND_PICTURE: 24,
+    KIND_PICTURE: 9,
     KIND_VIDEO: 3,
     KIND_AUDIO: 3,
 }

@@ -44,6 +44,70 @@ def _isolate_proofread(monkeypatch):
                         lambda path, instruction=None: '{"claims": []}')
 
 
+def _ref_brief(duration: float):
+    from minimax_h3_prompt.brief_parser import Brief
+
+    return Brief(mode="ref", plot=TOPIC, duration=duration)
+
+
+def _ledger_with_pictures(directory: Path, count: int) -> None:
+    from minimax_h3_prompt.asset_ledger import AssetLedger, AssetRecord, save_asset_ledger
+
+    directory.mkdir(parents=True, exist_ok=True)
+    save_asset_ledger(directory, AssetLedger(entries=tuple(
+        AssetRecord(name=f"素材{n}", kind="picture", number=n,
+                    path=f"assets/picture-{n:02d}.png", sha256="0" * 64)
+        for n in range(1, count + 1))))
+
+
+def _stub_phase2_upto_injection_card(monkeypatch) -> None:
+    monkeypatch.setattr(wizard, "_show_ref_registry", lambda *a, **k: None)
+    monkeypatch.setattr(wizard, "_asset_loop", lambda *a, **k: True)
+    monkeypatch.setattr(wizard, "_collect_extra_media", lambda *a, **k: None)
+
+
+def test_over_capacity_stops_the_film_before_the_expensive_assembly(tmp_path, monkeypatch):
+    """超限即停（issue #86 AC3）：交付口返回 False，阶段 2 不烧注释阶段 2 的组装。
+
+    变异判据（AC6）：删掉 ``_deliver_injection_card`` 的 ``except``/``return False``，
+    或删掉 ``_phase2_ref_finish`` 的 ``return 1``，本条都会红。
+    """
+    generation_dir = tmp_path / "GEN001"
+    _ledger_with_pictures(generation_dir, 10)  # 10 张 > 官方 9 图上限
+    _stub_phase2_upto_injection_card(monkeypatch)
+    monkeypatch.setattr(wizard, "run_stage2",
+                        lambda *a, **k: pytest.fail("超限不许再跑组装"))
+
+    session = SimpleNamespace(brief=_ref_brief(8.0), stage_state={},
+                              directory=generation_dir)
+    assert wizard._phase2_ref_finish(SimpleNamespace(), session) == 1
+
+
+def test_single_segment_route_stops_when_delivery_refuses(tmp_path, monkeypatch):
+    """≤15 秒直出被容量闸拦下时也要停（issue #86 AC4）：返回 None → 阶段 2 返回 1。
+
+    变异判据：删掉 ``_phase2_ref_finish`` 里 ``result is None → return 1`` 这一支，
+    本条红（否则会拿着 None 继续去陪跑）。
+    """
+    import contextlib
+
+    generation_dir = tmp_path / "GEN001"
+    generation_dir.mkdir(parents=True)
+    _stub_phase2_upto_injection_card(monkeypatch)
+    monkeypatch.setattr(wizard, "_deliver_injection_card", lambda *a, **k: True)
+    monkeypatch.setattr(wizard, "_progress_scope",
+                        lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(wizard, "run_stage2", lambda *a, **k: ({}, _SIX_SECTION_PROMPT))
+    monkeypatch.setattr(wizard, "save_session", lambda *a, **k: None)
+    monkeypatch.setattr(wizard, "_deliver_ref_single_segment", lambda *a, **k: None)
+    monkeypatch.setattr(wizard, "_run_ref_segment_handoff",
+                        lambda *a, **k: pytest.fail("拦下就不该去陪跑"))
+
+    session = SimpleNamespace(brief=_ref_brief(8.0), stage_state={},
+                              directory=generation_dir)
+    assert wizard._phase2_ref_finish(SimpleNamespace(), session) == 1
+
+
 def _silence(monkeypatch) -> None:
     monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
     monkeypatch.setattr(wizard.sys, "stdin", SimpleNamespace(isatty=lambda: True))

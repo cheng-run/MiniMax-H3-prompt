@@ -46,8 +46,11 @@ def _isolate_injection_card(monkeypatch):
     """注入卡（issue #45）不属本文件考题：读图校对→注入卡在 `_phase2_ref_finish`
     里前后脚，打成空操作免得校对考题捎带卡落盘/推导断言——「推导→卡」由
     test_wizard_injection_card 专测钉住（issue #49 后它不再吃交互输入）。
+
+    必须返回 **True**（issue #86）：交付口的返回值是「本片能不能继续」，假件返回
+    None 会被调用方读成「容量超限、停住」，整条流程静默走不到阶段 2。
     """
-    monkeypatch.setattr(wizard, "_deliver_injection_card", lambda *a, **k: None)
+    monkeypatch.setattr(wizard, "_deliver_injection_card", lambda *a, **k: True)
 
 
 def _silence(monkeypatch) -> None:

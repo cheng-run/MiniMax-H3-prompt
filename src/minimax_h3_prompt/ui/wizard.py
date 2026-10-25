@@ -2197,7 +2197,7 @@ def _deliver_ref_segments(state: dict, brief: Brief, prompt: str,
 
 
 def _deliver_ref_single_segment(state: dict, brief: Brief, prompt: str,
-                                generation_dir: Path) -> RefSegmentResult:
+                                generation_dir: Path) -> RefSegmentResult | None:
     """≤15 秒（issue #57 AC5）：整片六段式即本片**唯一执行段**——不拆段，收尾与 >15s 同一套。
 
     直出路线**不重写、不套分段注记**（见 ``ref_segments.single_segment_result``）：整片
@@ -2207,15 +2207,26 @@ def _deliver_ref_single_segment(state: dict, brief: Brief, prompt: str,
 
     校验问题**当面打**（同 ``format_ref_segment_report`` 的纪律）：直出文本在阶段 2 的
     质检循环里已经用同一个校验器核过一遍，但交付这一刻的结论照样不许静默。
+
+    返回 None ＝ 超出官方容量上限（issue #86 AC4）：直出把整片一次喂进去，不受「每段
+    子集」那条校验管，所以 9/3/3/12 在这里独立咬一次；拦住即停（与 >15s 的超限同款
+    收口，错误文案里已点名超出的素材）。
     """
     from ..generation import ref_asset_registry
+    from ..ref_capacity import ReferenceCapacityError
     from ..ref_segments import single_segment_result
     from ..tools.h3_validator import format_issues
 
     registry = ref_asset_registry(state, brief)
-    result = single_segment_result(
-        whole_prompt=prompt, total_s=brief.duration, out_dir=generation_dir,
-        ref_meta=[(r.picture, r.name, r.description) for r in registry])
+    try:
+        result = single_segment_result(
+            whole_prompt=prompt, total_s=brief.duration, out_dir=generation_dir,
+            ref_meta=[(r.picture, r.name, r.description) for r in registry])
+    except ReferenceCapacityError as exc:
+        print(f"\n[错误] 本片无法直出：{exc}")
+        print("  提示词与素材台账都已就绪，问题只在「一次喂进去的素材太多」——"
+              "精简素材或把时长压到更少的参考后重跑阶段 2 即可。")
+        return None
     errors = [issue for issue in result.issues[0]
               if getattr(issue, "severity", "") == "error"]
     if errors:
@@ -2575,7 +2586,7 @@ def _revise_ref_segment_round(text: str, *, position: int, total: int, plan,
     return new_text
 
 
-def _deliver_injection_card(generation_dir: Path, brief: Brief) -> None:
+def _deliver_injection_card(generation_dir: Path, brief: Brief) -> bool:
     """注入卡交付（issue #45/#49）：视频输出定案 → 回写 brief → 落盘接线清单。
 
     视频尺寸**不再单独提问**（issue #49，2026-10-18 裁定）——用户在画布已经选过
@@ -2584,8 +2595,18 @@ def _deliver_injection_card(generation_dir: Path, brief: Brief) -> None:
     ``write_injection_card``）。三元组**回写 brief**（复审：只落卡不回写，快照记
     null、卡上有值，两处对不上账）：随后 ``save_session``/``brief_snapshot`` 的
     逐字段清单就带着定案值。
+
+    返回 False ＝ 超出官方容量上限（issue #86），调用方**停止本片**：这是设计边界，
+    不是崩溃——片子还没开始生成，此刻改素材/拆段最便宜。台账与素材都还在盘上，
+    改完重跑阶段 2 即可（与 ``_deliver_ref_segments`` 的超限同一套收口语）。
+
+    容量判据按**路线**挑（``check_film_capacity``）：整片卡在 >15 秒路线上是库存清单，
+    图数留给每段判；只有 ≤15 秒（整片即一次请求）才按整片判图数。
     """
+    from ..asset_ledger import load_asset_ledger
     from ..injection_card import resolve_video_output, write_injection_card
+    from ..ref_capacity import ReferenceCapacityError, check_film_capacity
+    from ..ref_segments import is_single_segment_route
 
     resolution = resolve_video_output(brief.video_output, brief.canvases)
     params, notes = resolution.params, resolution.notes
@@ -2600,6 +2621,15 @@ def _deliver_injection_card(generation_dir: Path, brief: Brief) -> None:
               f"{params.megapixels:g} MP · 对齐 {params.multiple} → {width} × {height}")
         for note in notes:
             print(f"[提示] {note}（特殊需求可在卡上手改）")
+    try:
+        check_film_capacity(load_asset_ledger(generation_dir),
+                            single_request=is_single_segment_route(brief.duration),
+                            where="整片注入卡")
+    except ReferenceCapacityError as exc:
+        # 报错原文已点名超出的素材（第几张/哪几个文件），再补一句「接下来做什么」
+        print(f"\n[错误] 本次多参请求超出官方容量上限，已停止（未写注入卡）：\n{exc}")
+        print("  素材与台账都已落盘，改完素材或把镜头拆短后重跑阶段 2 即可。")
+        return False
     result = write_injection_card(generation_dir, params, notes=notes)
     print(result.text)
     if result.written:
@@ -2607,6 +2637,7 @@ def _deliver_injection_card(generation_dir: Path, brief: Brief) -> None:
     else:
         print(f"✓ 注入卡已存在（可能含手改），保留原卡：{result.path}"
               "（需重出请删除该文件后重跑）")
+    return True
 
 
 def _phase2_ref_finish(config: Config, session: SessionState) -> int:
@@ -2633,7 +2664,10 @@ def _phase2_ref_finish(config: Config, session: SessionState) -> int:
         return 0
     # 视频/音频按需挂账 + 无提示词登记项补交（issue #43 三型）；在注入卡之前收口。
     _collect_extra_media(state, brief, generation_dir)
-    _deliver_injection_card(generation_dir, brief)
+    if not _deliver_injection_card(generation_dir, brief):
+        # 超出官方容量上限（issue #86）：卡片面点名了超出的素材，这里停住——
+        # 再往下走只会烧掉一次注定被拒的组装。
+        return 1
     # 组装开跑前先把入参落盘（issue #51 AC3）：视频输出三元组刚由画布推导/声明定案、
     # 回写进 brief，而组装是最贵一步（可能十几分钟）。此前这里只在 run_stage2 跑完
     # 之后才 save_session，于是「组装窗口内 Ctrl-C」会把尺寸定案与整份会话状态一起丢
@@ -2668,6 +2702,10 @@ def _phase2_ref_finish(config: Config, session: SessionState) -> int:
 
     if is_single_segment_route(brief.duration):
         result = _deliver_ref_single_segment(state, brief, prompt, generation_dir)
+        if result is None:
+            # ≤15 秒直出同样受官方 9 图上限约束（issue #86 AC4）：错误已当面打全，
+            # 片子还没开始生成——与 >15s 的单段超限同一套收口。
+            return 1
         print(f"\n[本片单段] 整片 ref 六段式已写入 {output_file}"
               "——本片只有一段，整片文本就是本段提示词"
               f"（段文件 {result.segment_paths[0]} 同文），并留作存档预览。")

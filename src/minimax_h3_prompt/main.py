@@ -163,6 +163,7 @@ def _run_create_video(args) -> int:
 def _run_generate_prompts(args) -> int:
     from .brief_parser import parse_brief
     from .config import config
+    from .ref_capacity import ReferenceCapacityError
     from .topic_generation import create_video_from_topic
 
     if args.brief:
@@ -179,16 +180,23 @@ def _run_generate_prompts(args) -> int:
                 "dry_run": True,
             }, ensure_ascii=False, indent=2))
             return 0
-        result, directory = create_video_from_topic(
-            brief.plot, config,
-            duration=brief.duration, style=brief.style, language=brief.language,
-            variant=brief.variant, mode=brief.mode, refs=brief.refs,
-            # 画布键解析出来就得递进来（issue #42 复审）：少这一参，brief 文件里的
-            # 选定画布在最后一跳被丢掉、静默回落系统默认——「规则在、接线不在」。
-            canvases=brief.canvases,
-            # 视频输出三元组同待遇（issue #45）：解析出就得递到注入卡，不许中途丢。
-            video_output=brief.video_output,
-        )
+        try:
+            result, directory = create_video_from_topic(
+                brief.plot, config,
+                duration=brief.duration, style=brief.style, language=brief.language,
+                variant=brief.variant, mode=brief.mode, refs=brief.refs,
+                # 画布键解析出来就得递进来（issue #42 复审）：少这一参，brief 文件里的
+                # 选定画布在最后一跳被丢掉、静默回落系统默认——「规则在、接线不在」。
+                canvases=brief.canvases,
+                # 视频输出三元组同待遇（issue #45）：解析出就得递到注入卡，不许中途丢。
+                video_output=brief.video_output,
+            )
+        except ReferenceCapacityError as exc:
+            # 官方容量上限（issue #86）：注入卡在 create_video_from_topic 里就先挡。
+            # 不在这里收口的话，用户拿到的是 traceback 而不是「哪几张超了 + 接下来
+            # 怎么做」——设计边界要当边界报，不当崩溃报（与向导口同一套收口语）。
+            print(f"[错误] 本次多参请求超出官方容量上限，已停止：\n{exc}")
+            return 1
         _print_generation_result(result, directory)
         return 0
 
@@ -510,15 +518,51 @@ def main(argv: list[str] | None = None) -> int:
 
 def _deliver_ref_segments_cli(brief, prompt: str, out_dir) -> None:
     """--brief 快路径的多参分段交付（issue #46）：薄接线，编排/文案与向导同一份。"""
+    from .ref_capacity import ReferenceCapacityError
     from .ref_segments import deliver_ref_segments
     from .ui.progress import step_scope
 
     # 与向导路径同一份等待反馈（issue #67）：快路径也走直调看门狗，横幅与心跳
     # 不许只在向导里有——两条入口打同一个拆段调用，反馈口径必须一条。
-    with step_scope("正在按镜头切点拆分执行段"):
-        _result, report = deliver_ref_segments(
-            whole_prompt=prompt, total_s=brief.duration, out_dir=out_dir, brief=brief)
+    try:
+        with step_scope("正在按镜头切点拆分执行段"):
+            _result, report = deliver_ref_segments(
+                whole_prompt=prompt, total_s=brief.duration, out_dir=out_dir, brief=brief)
+    except ReferenceCapacityError as exc:
+        # 逐段容量闸（issue #86）：设计边界当边界报——点名超出的素材，指出路
+        print(f"\n[错误] 本片无法按段交付：{exc}")
+        return
     print(report)
+
+
+def _check_brief_ref_capacity(brief) -> bool:
+    """``--brief`` 快路径的容量闸（issue #86 AC4）：返回 False ＝停下、不要跑管线。
+
+    只对 **≤15 秒**的多参 brief 判：整片就是一次请求，图数按整片算。>15 秒要拆段，
+    图数按段判（``prepare_ref_segmentation``）——在这里按整片判图数会把「24 张素材、
+    每段 ≤9」的片子拦死，正是 spec #84 D5 要救的那种片子。
+
+    这条快路径没有生成目录、没有台账（见 ``_run_cli`` 的能力声明），所以判据取
+    ``brief.refs``——它是本路径唯一的素材声明来源。
+    """
+    from .asset_ledger import KIND_PICTURE
+    from .ref_capacity import (
+        ReferenceCapacityError,
+        ReferenceItem,
+        check_reference_capacity,
+    )
+    from .ref_segments import is_single_segment_route
+
+    if brief.mode != "ref" or not brief.refs or not is_single_segment_route(brief.duration):
+        return True
+    try:
+        check_reference_capacity(
+            [ReferenceItem(KIND_PICTURE, ref.picture, ref.name) for ref in brief.refs],
+            where="--brief 快路径（≤15 秒整片即一次请求）")
+    except ReferenceCapacityError as exc:
+        print(f"[错误] 本次多参请求超出官方容量上限，已停止：\n{exc}")
+        return False
+    return True
 
 
 def _run_cli(args: argparse.Namespace) -> int:
@@ -558,6 +602,11 @@ def _run_cli(args: argparse.Namespace) -> int:
         return 0
 
     from .graph.pipeline import run_pipeline
+
+    # ≤15 秒多参快路径：整片就是一次请求，容量闸在**烧 LLM 之前**判（issue #86 AC4）。
+    # >15 秒不在这一段——那是按段判，住在 ``prepare_ref_segmentation`` 里。
+    if not _check_brief_ref_capacity(brief):
+        return 1
 
     final_prompt = run_pipeline(brief, config)
     config.output_path.parent.mkdir(parents=True, exist_ok=True)

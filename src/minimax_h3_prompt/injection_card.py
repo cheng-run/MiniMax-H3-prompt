@@ -21,6 +21,12 @@ ComfyUI-JZL-MiniMax-H3/nodes_hailuo_video.py 实测）：
 （``derive_video_output``）——比例档继承画布比例、megapixels 预算按画布像素面积
 反推取档、对齐倍数取默认；brief 显式声明优先于推导；特殊需求在卡上手改，
 写卡不覆盖手改（``write_injection_card``）。
+
+**卡面不是请求**（issue #86 / spec #84 D4）：官方单次请求上限是 9 图 / 3 视频 / 3 音频 /
+总文件 12，但整片注入卡在 >15 秒路线上是**素材库存清单**——24 张素材的片子每段只喂
+≤9 张本来就合法，拿整片库存去判图数会把这种片子整片拦死。所以容量闸住在「一次请求」
+那两处（``prepare_ref_segmentation`` 逐段、``single_segment_result`` 直出）与产物口
+``ref_capacity.check_film_capacity``；本模块只在卡面把用量**显示**出来，不在这里拦。
 """
 from __future__ import annotations
 
@@ -42,6 +48,7 @@ from .asset_ledger import (
     resolve_asset_path,
 )
 from .generation import image_canvas_size
+from .ref_capacity import MAX_AUDIOS, MAX_FILES, MAX_PICTURES, MAX_VIDEOS
 from .workflow_config import WorkflowSettings, workflow_settings
 
 # 注入卡落盘文件名（生成目录根上，与 asset-ledger.json 同级）。
@@ -331,15 +338,25 @@ def render_injection_card(ledger: AssetLedger, params: VideoOutputParams,
     错位/接空」的坑在附注里说破（绝不静默）。``notes`` 是画布推导的说破行（issue #49
     比例回退/面积夹档），跟在三元组块下——推导替用户做的非常规选择要留底。
     ``settings`` 为空时读生效的工作流配置（登记名与槽位数同出一源，issue #65）。
+
+    **卡面只显示用量、不做容量拒绝**（issue #86）：整片卡在 >15 秒路线上是素材库存
+    清单，不是一次请求——把整片图数当请求量判，会把「24 张素材、每段 ≤9」的片子整片
+    拦死。容量闸在 ``ref_capacity`` 里，由产物口按「一次请求」调用。
     """
     active = settings or workflow_settings()
     width, height = params.size
+    pictures = [e for e in ledger.entries if e.kind == KIND_PICTURE]
+    videos = [e for e in ledger.entries if e.kind == KIND_VIDEO]
+    audios = [e for e in ledger.entries if e.kind == KIND_AUDIO]
     lines = [
         "# 注入卡（多参 ref2va 接线清单）",
         "",
         f"登记工作流：{active.ref_workflow_name}",
         "本卡是给人照抄的对照清单，不是可执行载荷：照卡进 ComfyUI 手动接线，"
         "系统不自动投喂。",
+        f"官方单次请求上限：{MAX_PICTURES} 图 / {MAX_VIDEOS} 视频 / {MAX_AUDIOS} 音频 / "
+        f"总文件 {MAX_FILES}；本片用量：图 {len(pictures)} / 视频 {len(videos)} / "
+        f"音频 {len(audios)}，共 {len(ledger.entries)} 个文件。",
         "",
         "## 参考槽接线（编号按剧本出场顺序）",
         "",
@@ -374,8 +391,7 @@ def render_injection_card(ledger: AssetLedger, params: VideoOutputParams,
         "",
         "## 附注",
     ]
-    videos = [e for e in ledger.entries if e.kind == KIND_VIDEO]
-    audios = [e for e in ledger.entries if e.kind == KIND_AUDIO]
+    # videos/audios 在函数开头已按台账分好（容量用量行要用同一份，别再算第二遍）
     video_cap = active.slot_count(KIND_VIDEO)
     for entry in videos:
         if entry.number <= video_cap:
@@ -440,9 +456,9 @@ def write_injection_card(directory: str | Path, params: VideoOutputParams,
     """
     base = Path(directory)
     path = base / CARD_FILENAME
+    ledger = load_asset_ledger(base)
     if path.exists():
         return CardWrite(path, path.read_text(encoding="utf-8"), False)
-    text = render_injection_card(load_asset_ledger(base), params, notes=notes,
-                                 settings=settings)
+    text = render_injection_card(ledger, params, notes=notes, settings=settings)
     path.write_text(text, encoding="utf-8")
     return CardWrite(path, text, True)

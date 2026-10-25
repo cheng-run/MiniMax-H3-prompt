@@ -220,26 +220,16 @@ def _load_slot_module():
     return module
 
 
-def test_slot_counts_agree_across_config_workflow_and_node_package(tmp_path) -> None:
-    """同一个物理事实只有一份真源：配置默认值 == V3 端口数 == 节点常量（复审 T1）。
+def test_slot_counts_agree_across_config_workflow_and_node_package() -> None:
+    """V3 工件内部一致：节点包常量 == V3 工作流端口数（换机可复现那半判据）。
 
-    24/3/3 此前在五处字面重抄（``workflow_config``、V3 JSON、生成脚本、校验脚本、
-    节点包），改一处而漏另一处**不会报错**——注入卡会照一个端口数写卡，而工作流只有
-    另一个数，用户接线接进空气（ADR 0017 记录的原始事故）。本测试把三处来源并排：
-    任一处单独改动都当场红。
-
-    变异检验：把 ``DEFAULT_SLOT_COUNTS[KIND_PICTURE]`` 改成 20（或把 V3 JSON 删掉
-    一个图槽、把节点包改成 20），本条红。
+    2026-10-25（issue #86 / T2）：登记工作流已回到 **V2 的 9 图槽**，官方单次请求上限
+    也是 9 图——``DEFAULT_SLOT_COUNTS`` 因此不再等于 V3 的 24 槽，原来把「配置默认值」
+    和 V3 绑在一起的那条断言随之作废（它不是被放宽，而是绑错了对象：配置现在跟 V2
+    走）。V3 这套工件本身随 T6（#90）整体退役，在那之前仍要求它自洽——否则换机复现
+    时坏掉不会被任何测试发现。
     """
     from minimax_h3_prompt.asset_ledger import KIND_AUDIO, KIND_PICTURE, KIND_VIDEO
-    from minimax_h3_prompt.workflow_config import (
-        DEFAULT_SLOT_COUNTS,
-        load_workflow_settings,
-    )
-
-    # 缺文件路径＝读「默认值」这条真源（不碰本机 config/workflow.yaml 的显式值）
-    settings = load_workflow_settings(tmp_path / "absent.yaml")
-    assert settings.slot_counts == DEFAULT_SLOT_COUNTS
 
     slots = _load_slot_module()
     node_counts = {
@@ -261,8 +251,6 @@ def test_slot_counts_agree_across_config_workflow_and_node_package(tmp_path) -> 
     for kind, prefix in ((KIND_PICTURE, "ref_image"),
                          (KIND_VIDEO, "ref_video"),
                          (KIND_AUDIO, "ref_audio")):
-        assert settings.slot_counts[kind] == node_counts[kind], (
-            f"{kind} 槽位数：配置 {settings.slot_counts[kind]} ≠ 节点包 {node_counts[kind]}")
         assert count(ref_names, prefix) == node_counts[kind], (
             f"V3 参考资产子图 {prefix}_* 端口数 {count(ref_names, prefix)} ≠ 节点包 {node_counts[kind]}")
         assert count(param_names, prefix) == node_counts[kind], (

@@ -1,8 +1,11 @@
-"""工作流配置读取口（issue #65）：登记名 + 三型参考槽位数。
+"""工作流配置读取口（issue #65 / issue #86）：登记名 + 三型参考槽位数。
 
 判据全部是**外部行为**：给一个 YAML 文件，读出来的登记名与槽位数是什么；缺文件/
-缺字段时是否回落默认值。V3 登记名与 24/3/3 这三个默认值来自票面 #65（独立来源），
+缺字段时是否回落默认值。V2 登记名与 9/3/3 这三个默认值来自票面 #86（独立来源），
 不从实现里抄——实现若把默认值改掉，这里当场红。
+
+2026-10-25（issue #86 / spec #84 D5）：官方参考上限是 ≤9 图，登记的 24 槽 V3 从一开始
+就不该是默认路径（24 张全喂在 16GB 卡上实测 OOM）。登记回 V2 的 9 图槽版本。
 """
 from __future__ import annotations
 
@@ -17,15 +20,15 @@ from minimax_h3_prompt.workflow_config import (
     workflow_settings,
 )
 
-# 票面 #65 钉死的字面量：V3 是「24 图槽」那个工作流，与 V2 并存（V2 留在本机作退路）。
-V3_WORKFLOW_NAME = "59-(多Lora改)MiniMax-H3 ref2va 多参生视频 V3（24图槽）"
+# 票面 #86 钉死的字面量：V2 是登记的 9 图槽版本（V3/24 槽已退役，见票面 D6）。
+V2_WORKFLOW_NAME = "59-(多Lora改)MiniMax-H3 ref2va 多参生视频 V2"
 
 
 def test_missing_config_file_falls_back_to_defaults(tmp_path):
-    """配置缺失不崩溃：图 24 / 视频 3 / 音频 3，登记名仍是 V3（票面 AC1）。"""
+    """配置缺失不崩溃：图 9 / 视频 3 / 音频 3，登记名仍是 V2（票面 AC1）。"""
     settings = load_workflow_settings(tmp_path / "absent.yaml")
-    assert settings.slot_counts == {KIND_PICTURE: 24, KIND_VIDEO: 3, KIND_AUDIO: 3}
-    assert settings.ref_workflow_name == V3_WORKFLOW_NAME
+    assert settings.slot_counts == {KIND_PICTURE: 9, KIND_VIDEO: 3, KIND_AUDIO: 3}
+    assert settings.ref_workflow_name == V2_WORKFLOW_NAME
 
 
 def test_missing_fields_fall_back_per_field(tmp_path):
@@ -34,7 +37,7 @@ def test_missing_fields_fall_back_per_field(tmp_path):
     path.write_text("slots:\n  picture: 6\n", encoding="utf-8")
     settings = load_workflow_settings(path)
     assert settings.slot_counts == {KIND_PICTURE: 6, KIND_VIDEO: 3, KIND_AUDIO: 3}
-    assert settings.ref_workflow_name == V3_WORKFLOW_NAME
+    assert settings.ref_workflow_name == V2_WORKFLOW_NAME
 
 
 def test_config_file_drives_the_name_and_counts(tmp_path):
@@ -81,19 +84,38 @@ def test_active_loader_reads_the_configured_path(tmp_path, monkeypatch):
     assert workflow_config.workflow_settings().slot_counts[KIND_PICTURE] == 2
 
 
-def test_repo_config_registers_v3_with_24_picture_slots():
-    """仓库里的 config/workflow.yaml 就是生效的那份：V3 名 + 24 图槽（票面 AC5）。"""
+def test_repo_config_registers_v2_with_nine_picture_slots():
+    """仓库里的 config/workflow.yaml 就是生效的那份：V2 名 + 9 图槽（票面 AC5）。
+
+    「不再出现 24 槽或 V3 字样」在**用户可见的登记口**上判：卡与菜单都从这份配置取。
+    """
     settings = workflow_settings()
-    assert settings.ref_workflow_name == V3_WORKFLOW_NAME
-    assert settings.slot_counts == {KIND_PICTURE: 24, KIND_VIDEO: 3, KIND_AUDIO: 3}
+    assert settings.ref_workflow_name == V2_WORKFLOW_NAME
+    assert "V3" not in settings.ref_workflow_name and "24" not in settings.ref_workflow_name
+    assert settings.slot_counts == {KIND_PICTURE: 9, KIND_VIDEO: 3, KIND_AUDIO: 3}
     # 默认值与票面同源（缺文件时才有意义，但两处必须一致——否则「缺配置」是另一种口径）
-    assert DEFAULT_REF_WORKFLOW_NAME == V3_WORKFLOW_NAME
-    assert DEFAULT_SLOT_COUNTS == {KIND_PICTURE: 24, KIND_VIDEO: 3, KIND_AUDIO: 3}
+    assert DEFAULT_REF_WORKFLOW_NAME == V2_WORKFLOW_NAME
+    assert DEFAULT_SLOT_COUNTS == {KIND_PICTURE: 9, KIND_VIDEO: 3, KIND_AUDIO: 3}
+
+
+def test_repo_config_file_itself_names_v2_and_nine_slots():
+    """直接读盘上那份 YAML：登记值不许再写 V3/24（防止只改常量、配置文件被漏掉）。
+
+    只判 ``ref_workflow_name:`` 这一行与 ``picture:`` 这个值——注释里提历史是允许的
+    （解释「为什么退役」的注释比沉默有用），但**生效值**必须已是 V2/9。
+    """
+    from minimax_h3_prompt.workflow_config import WORKFLOW_CONFIG_PATH
+
+    lines = WORKFLOW_CONFIG_PATH.read_text(encoding="utf-8").splitlines()
+    registered = next(line for line in lines if line.startswith("ref_workflow_name:"))
+    assert V2_WORKFLOW_NAME in registered
+    assert "V3" not in registered
+    assert "  picture: 9" in "\n".join(lines)
 
 
 # --- 每段参考图上限（issue #75）------------------------------------------------
-# 这是**另一个**边界：槽位数是工作流端口数（24），每段上限是单次生成真正喂几张。
-# 24 张全喂会 OOM（ADR 0017「代价」），所以默认 9 是票面钉死的字面量。
+# 这是**另一个**边界：槽位数是工作流端口数（登记 V2 后同为 9），每段上限是单次生成
+# 真正喂几张。24 张全喂会 OOM（ADR 0017「代价」），所以默认 9 是票面钉死的字面量。
 
 def test_missing_config_uses_nine_refs_per_segment(tmp_path):
     """缺文件 → 每段 9 张（issue #75 的默认值）。"""
@@ -136,7 +158,7 @@ def test_registered_name_constant_derives_from_the_config():
     from minimax_h3_prompt import generation
 
     assert generation.REF_WORKFLOW_NAME == workflow_settings().ref_workflow_name
-    assert generation.REF_WORKFLOW_NAME == V3_WORKFLOW_NAME
+    assert generation.REF_WORKFLOW_NAME == V2_WORKFLOW_NAME
 
 
 def test_user_facing_exits_read_the_registered_name_at_call_time(tmp_path, monkeypatch):
@@ -158,4 +180,4 @@ def test_user_facing_exits_read_the_registered_name_at_call_time(tmp_path, monke
     assert generation.REF_WORKFLOW_NAME == "临时工作流 V9", (
         "兼容别名仍停在 import 时的旧值——改配置不会改用户可见的登记名")
     text = injection_card.render_injection_card(AssetLedger(), VideoOutputParams())
-    assert "临时工作流 V9" in text and V3_WORKFLOW_NAME not in text
+    assert "临时工作流 V9" in text and V2_WORKFLOW_NAME not in text

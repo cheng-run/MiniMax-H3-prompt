@@ -17,8 +17,9 @@
    （ref-en.txt:33 附近的规则），段内编号必须自洽且从 1 连续——接线按新号落槽
    （新 ``<Picture N>`` → ``ref_image_{N-1}``），有缺口就会接错槽。
    **Subject 原号不动**：模型对 Subject 的连续性没有要求，只有 Picture 跟接线有关。
-3. **上限**（``refs_per_segment``，默认 9）：本段用到的图超过上限时**报错并点名**，
-   绝不静默截断——截断等于让暂停在一段的提示词里引用没接线的图。
+3. **上限**（``refs_per_segment``，默认 9，且取它与官方单次上限 9 图的较小值 ——
+   issue #86）：本段用到的图超过上限时**报错并点名**，绝不静默截断——截断等于让
+   暂停在一段的提示词里引用没接线的图。
 """
 from __future__ import annotations
 
@@ -26,7 +27,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
-from .workflow_config import DEFAULT_REFS_PER_SEGMENT
+from .ref_capacity import MAX_PICTURES
+from .workflow_config import DEFAULT_REFS_PER_SEGMENT, workflow_settings
 
 # 官方标签（ref-en.txt §2）：<Subject N> / <Picture N>。与校验器同一套形态，
 # 但这里只做「收集与改写」，判据（未定义/未使用/跳号）仍住在 ``tools.h3_validator``。
@@ -265,12 +267,22 @@ def compute_segment_scope(
     names = {picture: name for picture, name, _desc in registry}
     path_map = dict(paths or {})
     ordered = sorted(kept_pictures)
-    if len(ordered) > int(refs_per_segment):
+    # 每段张数取「配置值」与「官方单次上限」的较小者（issue #86 / spec #84 D4）：
+    # `refs_per_segment` 是本机想喂几张，官方上限是一次请求收得下几张——后者更硬。
+    # 不取小值的话，把配置调大就会让卡与工作流对不上，而请求照样非法。
+    configured = int(refs_per_segment)
+    cap = min(configured, MAX_PICTURES)
+    if len(ordered) > cap:
         listed = "、".join(
             f"<Picture {n}> {names.get(n, _MISSING_NAME)}" for n in ordered)
         where = f"{segment_label}：" if segment_label else ""
+        # 两个上限是谁卡住的要说破：配置 9 与官方 9 撞车时用户改配置也没用，
+        # 只报「超过每段上限 9」会给人「调大配置就能过」的错觉。
+        limit_text = (f"官方单次请求上限 {MAX_PICTURES} 图"
+                      if configured > MAX_PICTURES
+                      else f"每段上限 {configured} 张")
         raise SegmentAssetOverflowError(
-            f"{where}本段要用 {len(ordered)} 张参考图，超过每段上限 {refs_per_segment} 张"
+            f"{where}本段要用 {len(ordered)} 张参考图，超过{limit_text}"
             f"（{listed}）。超限不截断——截掉的图在正文里就没有接线可落。"
             "出路：把这一段再拆短（素材随镜头走），或精简本段真正需要的素材。")
     return SegmentAssetScope(
@@ -342,8 +354,27 @@ def render_segment_injection_card(scope: SegmentAssetScope, *, position: int,
     from .injection_card import slot_name  # 延迟导入：本模块被写段层 import，别拖配置栈
     from .asset_ledger import KIND_PICTURE
 
+    # 端口数与名字都从生效配置取一次（读盘一次，两处共用）。**端口数**是「工作流有几个
+    # 图槽」，未用槽要点到真实端口——用官方上限 9 去截会把它算成假的（配置 24 槽时
+    # 「未用槽 ref_image_9…8」是个倒着的空区间）。官方上限另行写在说明里（issue #86）。
+    active = workflow_settings()
+    ports = active.slot_count(KIND_PICTURE)
+    used = len(scope.pictures)
+    if used == 0:
+        unused = (f"未用槽：图槽全部（ref_image_0 … ref_image_{ports - 1}）留空或 bypass"
+                  "——本段不引用任何参考图。")
+    elif used >= ports:
+        unused = (f"未用槽：无（本段用满 {ports} 个图槽；官方单次请求上限 {MAX_PICTURES} 图）。")
+    else:
+        unused = (f"未用槽：ref_image_{used} … ref_image_{ports - 1} 留空或 bypass"
+                  f"（本段只喂 {used} 张，官方单次请求上限 {MAX_PICTURES} 图）——"
+                  "空槽是正常的，别把上一段的图接进来。")
     lines = [
         f"## 本段参考素材接线（段 {position}/{total}）",
+        "",
+        # 段卡也点名登记工作流（issue #86 AC1）：整片卡与段卡都只许指向 9 槽 V2，
+        # 用户照卡进 ComfyUI 时不必再回头翻菜单确认打开的是哪一张。
+        f"登记工作流：{active.ref_workflow_name}（图槽 {ports} 个）",
         "",
         "| 新号 | 原号 | 素材名 | 正本文件 | 工作流槽位 |",
         "| --- | --- | --- | --- | --- |",
@@ -359,6 +390,7 @@ def render_segment_injection_card(scope: SegmentAssetScope, *, position: int,
         "",
         "接线：按上表**新号**升序把「正本文件」接到「工作流槽位」；段内提示词里的"
         "`<Picture N>` 就是**新号**，不是整片注入卡上的号。",
+        unused,
     ]
     return "\n".join(lines) + "\n"
 

@@ -79,7 +79,7 @@ DASHSCOPE_API_KEY=xxx
 `examples/` 里有示例（模板 `examples/brief_template.md`）。**`输入` 键对应你喂工作流的参考方式**：
 
 ```markdown
-输入: 首尾帧     # 首帧（工作流62·1张图）| 尾帧（工作流62·1张图）| 首尾帧（工作流62·2张图）| 多参（59-(多Lora改)MiniMax-H3 ref2va 多参生视频 V3（24图槽）·N 张素材）
+输入: 首尾帧     # 首帧（工作流62·1张图）| 尾帧（工作流62·1张图）| 首尾帧（工作流62·2张图）| 多参（59-(多Lora改)MiniMax-H3 ref2va 多参生视频 V2·N 张素材）
 时长: 6          # 秒
 风格: Cinematic 武侠电影质感
 语言: Chinese

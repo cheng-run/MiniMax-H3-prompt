@@ -617,6 +617,99 @@ def test_semantic_check_says_so_when_a_reading_is_missing(tmp_path):
 # 7. ≤15 秒：整片六段式即唯一执行段（issue #57 AC5）
 # ---------------------------------------------------------------------------
 
+def test_single_segment_route_refuses_more_than_the_official_picture_cap(tmp_path):
+    """AC4（issue #86）：≤15 秒直出＝整片一次喂，同样受 9 图上限约束。
+
+    直出路线不拆段，所以「每段 ≤9」那条子集校验根本轮不到它——这条缺口在 spec #84
+    里是单点的（「≤15 秒单段直出可把登记的全部图一次喂进去」）。判据取**素材台账**
+    （＝这次真正要上传的文件），与注入卡同一份来源。
+    """
+    from minimax_h3_prompt.asset_ledger import AssetLedger, AssetRecord, save_asset_ledger
+    from minimax_h3_prompt.ref_capacity import ReferenceCapacityError
+    from minimax_h3_prompt.ref_segments import single_segment_result
+
+    save_asset_ledger(tmp_path, AssetLedger(entries=tuple(
+        AssetRecord(name=f"素材{i}", kind="picture", number=i,
+                    path=f"assets/picture-{i:02d}.png", sha256="0" * 64)
+        for i in range(1, 11))))  # 第 10 张超官方 9 图上限
+
+    with pytest.raises(ReferenceCapacityError) as excinfo:
+        single_segment_result(whole_prompt=_WHOLE_8S, total_s=8.0, out_dir=tmp_path)
+    assert "<Picture 10>" in str(excinfo.value) and "素材10" in str(excinfo.value)
+    # 拦住就不许落盘：半套产物会让续跑/拼接读到一份没通过闸的段
+    assert not (tmp_path / "segments" / "segment-01.md").exists()
+
+
+def test_single_segment_route_passes_with_nine_pictures(tmp_path):
+    """9 张正好是上限，不许误报（边界用例与限流例成对，防「一律拒绝」的假绿）。"""
+    from minimax_h3_prompt.asset_ledger import AssetLedger, AssetRecord, save_asset_ledger
+    from minimax_h3_prompt.ref_segments import single_segment_result
+
+    save_asset_ledger(tmp_path, AssetLedger(entries=tuple(
+        AssetRecord(name=f"素材{i}", kind="picture", number=i,
+                    path=f"assets/picture-{i:02d}.png", sha256="0" * 64)
+        for i in range(1, 10))))
+
+    result = single_segment_result(whole_prompt=_WHOLE_8S, total_s=8.0,
+                                   out_dir=tmp_path, ref_meta=_REF_META)
+    assert (tmp_path / "segments" / "segment-01.md").is_file()
+    assert len(result.plans) == 1
+
+
+def test_single_segment_route_counts_declared_refs_even_without_a_ledger(tmp_path):
+    """台账为空也要按 ``ref_meta`` 判（复审实测：只认台账的闸永不为红）。
+
+    真实现场：用户先在剧本里声明了 12 张 ``<Picture N>``，还没交回其中任何一张图——
+    此时台账是空的，但这次请求确实会引用 12 张。只按台账判 = 永远放行，而它要防的
+    正是「声明太多」这一情形。
+    """
+    from minimax_h3_prompt.ref_capacity import ReferenceCapacityError
+    from minimax_h3_prompt.ref_segments import single_segment_result
+
+    declared = [(n, f"素材{n}", "") for n in range(1, 11)]
+    with pytest.raises(ReferenceCapacityError) as excinfo:
+        single_segment_result(whole_prompt=_WHOLE_8S, total_s=8.0, out_dir=tmp_path,
+                              ref_meta=declared)
+    assert "<Picture 10>" in str(excinfo.value)
+
+
+def test_prepare_refuses_a_segment_whose_request_exceeds_the_file_budget(tmp_path):
+    """段请求总量＝本段图 + 整片视频/音频（spec #84 D4 ①）：13 个文件要停。
+
+    单看段图（7 ≤ 9）会放行、单看整片图数又会把合法片子拦死——两个判据都不够，
+    这是「12 文件」这条规则唯一能被咬到的地方，也是段接线卡那处校验的存在理由。
+    """
+    from minimax_h3_prompt.asset_ledger import AssetLedger, AssetRecord, save_asset_ledger
+    from minimax_h3_prompt.ref_capacity import ReferenceCapacityError
+    from minimax_h3_prompt.ref_segments import prepare_ref_segmentation
+
+    # 整片 3 视频 + 3 音频（没有段内子集，每个请求都带全）
+    save_asset_ledger(tmp_path, AssetLedger(entries=(
+        tuple(AssetRecord(name=f"运镜{n}", kind="video", number=n,
+                          path=f"video-{n}.mp4", sha256="0" * 64)
+              for n in range(1, 4))
+        + tuple(AssetRecord(name=f"配乐{n}", kind="audio", number=n,
+                            path=f"audio-{n}.wav", sha256="0" * 64)
+                for n in range(1, 4)))))
+
+    defs = "\n".join(f"<Picture {n}> is 素材{n}." for n in range(1, 8))
+    shot = " ".join(f"<Picture {n}>" for n in range(1, 8))
+    whole = (
+        f"subject_definitions:\n{defs}\n\n"
+        "summary:\n[reference generation] x.\n\n"
+        "retention_analysis:\n<Picture 1>: fully_preserved.\n\n"
+        f"detailed_description:\n[Shot 1] A shot using {shot}.\n\n"
+        "overall_soundscape:\nN/A\n\nnon_diegetic_music:\nN/A"
+    )
+    with pytest.raises(ReferenceCapacityError) as excinfo:
+        prepare_ref_segmentation(
+            whole_prompt=whole, total_s=8.0, out_dir=tmp_path,
+            ref_meta=[(n, f"素材{n}", "") for n in range(1, 8)])
+    message = str(excinfo.value)
+    assert "第 1 段接线卡" in message   # 卡在哪一段要说破
+    assert "13" in message             # 7 图 + 3 视频 + 3 音频
+
+
 def test_single_segment_result_keeps_whole_prompt_as_the_only_segment(tmp_path):
     """≤15 秒**不拆段**：整片六段式原样就是本片唯一执行段的文本，收尾照走同一套。
 

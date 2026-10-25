@@ -125,9 +125,19 @@ def create_video_from_topic(
     # 视频输出定案（声明优先/画布推导）走 resolve_video_output 同一份接线（issue #49）；
     # 定案值回写 brief，卡与 brief 快照同源，不两处对账。
     if brief.mode == "ref":
+        from .asset_ledger import load_asset_ledger
         from .injection_card import resolve_video_output, write_injection_card
+        from .ref_capacity import check_film_capacity
+        from .ref_segments import is_single_segment_route
 
         directory.mkdir(parents=True, exist_ok=True)
+        # 容量闸在**写卡之前**（issue #86 AC3）：整片卡在 >15 秒路线上是库存清单，
+        # 只有 ≤15 秒才等于一次请求——判据由 check_film_capacity 按路线挑（图数按
+        # 「一次请求」判，视频/音频按整片判）。这条路径没有拆段，所以它是本命令里
+        # 唯一能拦住「一次喂 12 张」的地方。抛给调用方报（CLI 口统一打「已停止」）。
+        check_film_capacity(load_asset_ledger(directory),
+                            single_request=is_single_segment_route(brief.duration),
+                            where="整片注入卡")
         resolution = resolve_video_output(brief.video_output, brief.canvases)
         brief.video_output = resolution.params
         card = write_injection_card(directory, resolution.params, notes=resolution.notes)

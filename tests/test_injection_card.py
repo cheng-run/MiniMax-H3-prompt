@@ -265,6 +265,23 @@ def test_card_carries_the_registered_workflow_name():
     assert workflow_settings().ref_workflow_name in text
 
 
+def test_card_shows_the_official_capacity_budget_and_current_usage():
+    """卡面把容量账摆出来（AC3 的可见面）：用户照卡接线前就知道还剩几个位置。
+
+    只报「超限」不报「剩多少」，用户要自己数——而这张卡的全部意义就是他不用数。
+    """
+    ledger = _ledger_with(
+        _entry("红裙女孩", KIND_PICTURE, 1, "assets/picture-01.png"),
+        _entry("秋日庭院", KIND_PICTURE, 2, "assets/picture-02.png"),
+        _entry("运镜参考", KIND_VIDEO, 1, "assets/video-01.mp4"),
+        _entry("红裙女孩音色", KIND_AUDIO, 1, "assets/audio-01.wav"),
+    )
+    text = render_injection_card(ledger, VideoOutputParams())
+    # 现行用量与官方预算同屏（图 2 / 视频 1 / 音频 1，上限 9/3/3/12）
+    assert "图 2" in text and "视频 1" in text and "音频 1" in text
+    assert "9" in text and "12" in text
+
+
 def test_card_warns_on_number_gaps_that_shift_model_labels():
     """缺号要报：空槽会让模型 <Picture N> 编号前移错位（绝不静默）。"""
     ledger = _ledger_with(
@@ -453,6 +470,125 @@ def test_cli_brief_path_forwards_video_output_to_generation(tmp_path, monkeypatc
     assert forwarded["video_output"].ratio == "3:2 (Photo)"
 
 
+def test_cli_fast_path_judges_pictures_only_when_the_film_is_one_request(capsys):
+    """--brief 快路径的容量判据按路线挑（issue #86 AC4 / spec #84 D5）。
+
+    ≤15 秒：整片即一次请求 → 10 张图停下并点名。
+    >15 秒：要拆段，图数按段判 → 快路径**不许**在这里拒（24 张素材、每段 ≤9 的片子
+    正是这条规格要救的）。
+    """
+    from minimax_h3_prompt.brief_parser import Brief, RefItem
+    from minimax_h3_prompt.main import _check_brief_ref_capacity
+
+    def _brief(duration: float, count: int) -> Brief:
+        return Brief(mode="ref", plot="主题", duration=duration,
+                     refs=[RefItem(picture=n, name=f"素材{n}", description="")
+                           for n in range(1, count + 1)])
+
+    assert _check_brief_ref_capacity(_brief(8.0, 9)) is True
+    assert _check_brief_ref_capacity(_brief(8.0, 10)) is False
+    output = capsys.readouterr().out
+    assert "超出官方容量上限" in output and "<Picture 10>" in output
+    # >15 秒：同一份 10 张的 brief 放行（按段判）
+    assert _check_brief_ref_capacity(_brief(30.0, 10)) is True
+
+
+def test_cli_brief_path_stops_readably_when_over_capacity(tmp_path, monkeypatch, capsys):
+    """CLI --brief 路径超限要**停下并给可读报错**（issue #86 AC3）。
+
+    ``write_injection_card`` 抛的是设计边界（素材太多），不是崩溃。产线上这条路径是
+    ``main._run_generate_prompts`` → ``create_video_from_topic``：不在那里收口，用户
+    拿到的是 traceback，而不是「哪几张超了 + 接下来怎么做」。
+    """
+    import argparse
+
+    from minimax_h3_prompt.main import _run_generate_prompts
+    from minimax_h3_prompt.ref_capacity import ReferenceCapacityError
+
+    brief_file = tmp_path / "brief.md"
+    brief_file.write_text("输入: 多参\n## 剧情\n主题", encoding="utf-8")
+
+    def fake_create(topic, config, **kwargs):
+        raise ReferenceCapacityError("图 10 个 > 9 个：<Picture 10>「素材10」")
+
+    monkeypatch.setattr("minimax_h3_prompt.topic_generation.create_video_from_topic",
+                        fake_create)
+    args = argparse.Namespace(brief=str(brief_file), variant=None, dry_run=False,
+                              topic=None, duration=None, style=None, language=None)
+    assert _run_generate_prompts(args) == 1
+    output = capsys.readouterr().out
+    assert "超出官方容量上限" in output
+    assert "<Picture 10>" in output, "点名超出的素材必须传到用户眼前"
+
+
+def test_cli_run_command_stops_before_the_pipeline_on_a_single_request_film(tmp_path,
+                                                                          monkeypatch,
+                                                                          capsys):
+    """`run` 快路径 ≤15 秒超 9 图：在烧管线之前停下（AC4 的**接线**判据）。
+
+    变异判据：删掉 ``_run_cli`` 里的 ``if not _check_brief_ref_capacity(brief)``，
+    本条红——单独测判定口盖不住「有没有人调用它」（本仓「规则在、接线不在」的老形态）。
+    """
+    import argparse
+
+    from minimax_h3_prompt import main as main_module
+
+    lines = "\n".join(f"- Picture {n}: 素材{n} — 描述{n}" for n in range(1, 11))
+    brief_file = tmp_path / "brief.md"
+    brief_file.write_text(
+        "输入: 多参\n时长: 6\n\n## 剧情\n主题\n\n## 角色与参考图\n" + lines,
+        encoding="utf-8")
+
+    monkeypatch.setattr("minimax_h3_prompt.graph.pipeline.run_pipeline",
+                        lambda *a, **k: pytest.fail("超限不许跑管线"))
+    args = argparse.Namespace(brief=str(brief_file), variant=None, dry_run=False,
+                              model=None, mode=None, polish=False, output=None)
+    assert main_module._run_cli(args) == 1
+    assert "超出官方容量上限" in capsys.readouterr().out
+
+
+def test_cli_segment_delivery_stops_readably_on_a_capacity_error(tmp_path, monkeypatch,
+                                                                 capsys):
+    """`run` 快路径 >15 秒：逐段容量闸抛错要当面说清，不是 traceback。
+
+    变异判据：删掉 ``_deliver_ref_segments_cli`` 的 ``except ReferenceCapacityError``，
+    本条红。
+    """
+    from minimax_h3_prompt import main as main_module
+    from minimax_h3_prompt.brief_parser import Brief
+    from minimax_h3_prompt.ref_capacity import ReferenceCapacityError
+
+    def boom(**kwargs):
+        raise ReferenceCapacityError("第 1 段接线卡：总文件 13 个 > 12 个")
+
+    monkeypatch.setattr("minimax_h3_prompt.ref_segments.deliver_ref_segments", boom)
+    main_module._deliver_ref_segments_cli(
+        Brief(mode="ref", plot="主题", duration=30.0), "整片提示词", tmp_path)
+    assert "无法按段交付" in capsys.readouterr().out
+
+
+def test_brief_path_refuses_more_than_nine_pictures_for_a_single_request_film(
+        tmp_path, monkeypatch):
+    """`generate-prompts --brief`（≤15 秒）超 9 图：写卡之前就停（AC3/AC4）。
+
+    变异判据：删掉 ``topic_generation`` 里的 ``check_film_capacity`` 调用，本条红。
+    """
+    from minimax_h3_prompt.brief_parser import RefItem
+    from minimax_h3_prompt.ref_capacity import ReferenceCapacityError
+    from minimax_h3_prompt.topic_generation import create_video_from_topic
+
+    _stub_pipeline(monkeypatch)
+    refs = []
+    for number in range(1, 11):
+        path = tmp_path / f"picture-{number}.png"
+        path.write_bytes(b"img")
+        refs.append(RefItem(picture=number, name=f"素材{number}", description="",
+                            path=str(path)))
+    with pytest.raises(ReferenceCapacityError) as excinfo:
+        create_video_from_topic("主题", _cfg(tmp_path), mode="ref", refs=refs)
+    assert "<Picture 10>" in str(excinfo.value)
+
+
 def test_brief_snapshot_records_the_video_output_triple():
     """generation.json 的 brief 快照记三元组（逐字段显式清单；漏登记＝事后对不上账）。"""
     from minimax_h3_prompt.brief_parser import Brief
@@ -465,14 +601,15 @@ def test_brief_snapshot_records_the_video_output_triple():
                                         "megapixels": 1.0, "multiple": 16}
 
 
-def test_card_maps_all_24_picture_slots_from_config():
-    """AC2（issue #65）：24 张素材逐条给出 `ref_image_0..ref_image_23`，一个都不越界。
+def test_card_maps_all_nine_picture_slots_from_config():
+    """AC2（issue #86）：9 张素材逐条给出 `ref_image_0..ref_image_8`，一个都不越界。
 
-    旧版把 9 当物理事实写死，24 张里 15 张被标「无对应槽位」——用户无端口可接
-    （ADR 0017 的真实事故）。槽位数改为读 ``config/workflow.yaml`` 后，1..24 全有槽。
+    登记工作流回到 V2 的 9 图槽版本（2026-10-25）：槽位数读 ``config/workflow.yaml``，
+    9 是**官方单次请求上限**而不是节点 UI 上限（spec #84 D4/D5）。
     """
 
     cap = workflow_settings().slot_count(KIND_PICTURE)
+    assert cap == 9, "登记工作流应是 9 图槽的 V2"
     ledger = _ledger_with(*[
         _entry(f"素材{i}", KIND_PICTURE, i, f"assets/picture-{i:02d}.png")
         for i in range(1, cap + 1)
@@ -480,43 +617,49 @@ def test_card_maps_all_24_picture_slots_from_config():
     text = render_injection_card(ledger, VideoOutputParams())
     for i in range(1, cap + 1):
         assert f"ref_image_{i - 1}" in text, f"第 {i} 张没有槽位"
-    assert "无对应槽位" not in text and "槽位越界" not in text, "24 张不该有越界告警"
-    assert "缺号" not in text, "1..24 齐全，不得误报缺号"
+    assert "无对应槽位" not in text and "槽位越界" not in text, "9 张不该有越界告警"
+    assert "缺号" not in text, "1..9 齐全，不得误报缺号"
+    # 卡面不再出现退役的 24 槽/V3（AC1）
+    assert "V3" not in text and "24 槽" not in text
 
 
 def test_card_never_maps_assets_to_nonexistent_ports():
     """溢出台账不渲假端口：标「无对应槽位」＋点名告警，缺号警告只扫真实端口范围。
 
-    边界从工作流配置派生（issue #65：不再钉死 9）——配置一改，这里跟着走。
+    边界从工作流配置派生（issue #65：不钉死数字）——这里把配置压到 3 槽来触发溢出分支。
+    默认 9 槽时「10 张」不会走到这里：官方容量校验更早一步拒绝（见
+    ``test_card_refuses_more_than_the_official_picture_cap``）。
     """
+    from minimax_h3_prompt import workflow_config
 
-    cap = workflow_settings().slot_count(KIND_PICTURE)
+    settings = workflow_config.WorkflowSettings(
+        ref_workflow_name="三槽测试工作流",
+        slot_counts={KIND_PICTURE: 3, KIND_VIDEO: 3, KIND_AUDIO: 3})
     overflowed = _ledger_with(*[
         _entry(f"人物{i}", KIND_PICTURE, i, f"assets/picture-{i:02d}.png")
-        for i in range(1, cap + 2)  # cap+1 张图：最后一张无端口
+        for i in range(1, 5)  # 4 张图：最后一张无端口
     ])
-    text = render_injection_card(overflowed, VideoOutputParams())
-    assert f"ref_image_{cap}" not in text, "越界编号不得渲出不存在的端口名"
+    text = render_injection_card(overflowed, VideoOutputParams(), settings=settings)
+    assert "ref_image_3" not in text, "越界编号不得渲出不存在的端口名"
     assert "无对应槽位" in text and "槽位越界" in text
-    assert f"人物{cap + 1}" in text    # 溢出条目仍列名（不静默丢）
-    assert "缺号" not in text          # 1..cap 齐全，不得误报缺号
+    assert "人物4" in text              # 溢出条目仍列名（不静默丢）
+    assert "缺号" not in text            # 1..3 齐全，不得误报缺号
 
 
-def test_card_25th_picture_is_marked_slotless_with_widening_guidance():
-    """AC3（issue #65）：24 槽下第 25 张标「无对应槽位」＋告警给出扩端口指引。
+def test_card_renders_even_when_the_film_has_more_pictures_than_one_request_allows():
+    """整片卡是**库存清单**，不是一次请求（issue #86 / spec #84 D5）。
 
-    不渲 `ref_image_24`（那是不存在的端口），但也不静默丢素材——照卡接线的人要
-    知道该改哪里：新建端口更多的工作流，再把槽位数写进配置。
+    24 张素材的片子每段只喂 ≤9 张本来就合法（ADR 0017 的真实运行就是这个规模），
+    拿整片图数当请求量去拒，会把这种片子整片拦死——正好废掉「按段取用」。所以卡面
+    照出全部条目（越界编号仍标「无对应槽位」），容量闸住在一次请求那两处。
     """
     ledger = _ledger_with(*[
         _entry(f"素材{i}", KIND_PICTURE, i, f"assets/picture-{i:02d}.png")
-        for i in range(1, 26)  # 25 张：第 25 张超出 24 个图槽
+        for i in range(1, 13)
     ])
     text = render_injection_card(ledger, VideoOutputParams())
-    assert "ref_image_23" in text and "ref_image_24" not in text
-    assert "无对应槽位" in text and "素材25" in text
-    assert "扩工作流端口" in text, "告警要给出「去扩工作流端口」的指引"
-    assert "缺号" not in text, "1..24 齐全，不得误报缺号"
+    assert "<Picture 12>" in text and "素材12" in text, "超限素材也要列出来（不静默丢）"
+    assert "无对应槽位" in text, "9 槽工作流下第 10 张起确实无端口，要说破"
 
 
 def test_card_boundary_follows_the_workflow_config(tmp_path, monkeypatch):

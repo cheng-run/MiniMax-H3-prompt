@@ -1,4 +1,4 @@
-# 视频 Brief — 多参出片（59-(多Lora改)MiniMax-H3 ref2va 多参生视频 V3（24图槽））
+# 视频 Brief — 多参出片（59-(多Lora改)MiniMax-H3 ref2va 多参生视频 V2）
 
 输入: 多参
 时长: 6

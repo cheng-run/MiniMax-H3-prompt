@@ -47,6 +47,11 @@ from .asset_ledger import (
     resolve_asset_path,
     sha256_file,
 )
+from .ref_capacity import (
+    ReferenceItem,
+    check_reference_capacity,
+    items_from_ledger,
+)
 from .segment_planner import (
     MAX_SEG_S,
     SegmentPlan,
@@ -399,6 +404,28 @@ def _plan_scope(plan: SegmentPlan, *, sections: dict[str, str],
         paths=asset_paths,
         segment_label=f"第 {position}/{total} 段",
     )
+
+
+def _check_segment_capacity(scopes: list[SegmentAssetScope], *,
+                            out_dir: Path) -> None:
+    """逐段按「一次请求」判官方容量（issue #86 / spec #84 D4 ①）。
+
+    每段真正上传的文件＝**本段的图**（已按段内重编号，≤9 由 ``compute_segment_scope``
+    守）+ **整片的视频/音频**（没有段内子集，见 spec #84「视频/音频的段内自动选段本轮
+    不做」，所以每一次请求都带全）。单看段图会漏掉「7 张图 + 3 视频 + 3 音频 = 13 个
+    文件」这种超总预算的段；单看整片又不够（整片图数本来就不该受 9 图约束）。
+
+    台账读不到＝空（带路径的 ref brief 快路径没有台账）——那时视频/音频本来就为 0，
+    判据退化成「段图 ≤9」，与 ``compute_segment_scope`` 同一结论，不会误伤。
+    """
+    film_media = [ReferenceItem(entry.kind, entry.number, entry.name)
+                  for entry in load_asset_ledger(out_dir).entries
+                  if entry.kind != KIND_PICTURE]
+    for position, scope in enumerate(scopes, 1):
+        items = [ReferenceItem(KIND_PICTURE, item.new_picture, item.name)
+                 for item in scope.pictures]
+        check_reference_capacity(items + film_media,
+                                 where=f"第 {position} 段接线卡")
 
 
 def _scoped_whole_prompt(sections: dict[str, str], scoped: dict[str, str]) -> str:
@@ -1328,13 +1355,17 @@ def prepare_ref_segmentation(*, whole_prompt: str, total_s: float, out_dir: Path
     # 段内素材子集（issue #75）：逐段算出「新号 → 原号」并**随 plan.json 落盘**。
     # 超限就在这里抛（点名超限素材），绝不静默截断。
     total = len(plans)
-    plans = [
-        replace(plan, assets_in_segment=_plan_scope(
+    scopes = [
+        _plan_scope(
             plan, sections=sections, blocks=blocks, total_s=total_int,
             used_fallback=used_fallback, ref_meta=ref_meta, asset_paths=asset_paths,
-            refs_per_segment=refs_per_segment, position=position, total=total).to_dict())
+            refs_per_segment=refs_per_segment, position=position, total=total)
         for position, plan in enumerate(plans, 1)
     ]
+    # 逐段按「一次请求」判官方容量（issue #86 / spec #84 D4 ①「生成段接线卡时」）
+    _check_segment_capacity(scopes, out_dir=Path(out_dir))
+    plans = [replace(plan, assets_in_segment=scope.to_dict())
+             for plan, scope in zip(plans, scopes)]
 
     job = RefSegmentJob(
         plans=list(plans), sections=sections, blocks=blocks, whole_prompt=whole_prompt,
@@ -1421,6 +1452,19 @@ def single_segment_result(*, whole_prompt: str, total_s: float, out_dir: Path,
     的对照物因此就是「这份提示词自己声明的开场与收尾」，不是另写一份会漂的声明。
     """
     sections = split_ref_sections(whole_prompt)
+    # 容量闸在**落任何产物之前**（issue #86 AC4）：直出＝整片一次喂，不走「每段子集」
+    # 那条校验，所以 9 图/3 视频/3 音频/12 文件的官方上限必须在这里独立咬一次。
+    # 拦住就不落段文件——半套产物会让续跑与拼接读到一份没通过闸的段。
+    #
+    # 判据取**两路并集**（复审实测的「永不为红的闸」）：台账＝已经交回的文件（视频/
+    # 音频只有这一路）；``ref_meta``＝剧本声明的 ``<Picture N>``——还没交回图的会话
+    # 台账是空的，只认台账这条闸就永远放行，而它要防的正是「声明了 12 张」这种情形。
+    items = items_from_ledger(load_asset_ledger(out_dir))
+    declared = {(item.kind, item.number) for item in items}
+    for picture, name, _description in ref_meta or ():
+        if (KIND_PICTURE, picture) not in declared:
+            items.append(ReferenceItem(KIND_PICTURE, picture, name))
+    check_reference_capacity(items, where="≤15 秒直出")
     total_int = int(round(total_s))
     body = sections.get("detailed_description", "")
     blocks = _shot_blocks(body, keep_cut_timestamp=True) if body.strip() else []

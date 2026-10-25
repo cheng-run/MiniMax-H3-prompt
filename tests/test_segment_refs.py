@@ -170,6 +170,56 @@ def test_injection_card_lists_new_original_name_and_file_in_one_table():
     assert "| <Picture 2> | <Picture 3> | 门厅 | assets/picture-03.png |" in card
 
 
+def test_official_nine_picture_cap_wins_over_a_larger_configured_value():
+    """把 ``refs_per_segment`` 调到 9 以上也不放行（issue #86）：官方上限是硬契约。
+
+    配置是「本机想喂几张」，官方上限是「一次请求收得下几张」——后者更硬。调大前者
+    只会让卡与工作流对不上，不会让请求变合法，所以取两者较小值。
+    """
+    registry = [(n, f"素材{n}", "") for n in range(1, 11)]
+    defs = "\n".join(f"<Picture {n}> is 素材{n}." for n in range(1, 11))
+    shot = " ".join(f"<Picture {n}>" for n in range(1, 11))
+    with pytest.raises(SegmentAssetOverflowError) as excinfo:
+        compute_segment_scope(shot_text=shot, subject_definitions=defs,
+                              registry=registry, refs_per_segment=12)
+    message = str(excinfo.value)
+    assert "9" in message and "<Picture 10>" in message
+
+
+def test_card_lists_only_this_segments_pictures_and_names_the_unused_slots():
+    """AC2（issue #86）：卡上只列本段 k 张（k ≤ 9），并写明未用槽留空/bypass。
+
+    为什么必须写这一句：段内只有 k 张图，工作流却有 9 个图槽。不写清楚，用户面对
+    7 个空槽会怀疑自己漏接了素材，或把上一段的图接到本段空槽上（静默串图）。
+    """
+    scope = _scope("The camera rests on <Picture 3>.")
+    card = render_segment_injection_card(scope, position=1, total=4)
+    rows = [line for line in card.splitlines() if line.startswith("| <Picture")]
+    assert len(rows) == 1, "本段只有 1 张图，卡上不许出现别的素材行"
+    assert "留空" in card and "bypass" in card
+    # 未用槽点名到具体端口：ref_image_1 … ref_image_8（本段用掉 ref_image_0）
+    assert "ref_image_1" in card and "ref_image_8" in card
+    assert "ref_image_9" not in card, "9 槽工作流没有 ref_image_9"
+    # 卡上点名登记工作流（AC1）：用户照卡进 ComfyUI 要能一眼找到那张；且不许再出现
+    # 退役的 24 槽/V3 字样
+    from minimax_h3_prompt.workflow_config import workflow_settings
+    card_workflow = workflow_settings().ref_workflow_name
+    assert card_workflow in card
+    assert "V3" not in card and "24 槽" not in card
+
+
+def test_card_says_so_when_every_slot_is_used():
+    """用满 9 张时也要说清楚（「没有未用槽」≠「这一句可以省」）。"""
+    registry = [(n, f"素材{n}", "") for n in range(1, 10)]
+    defs = "\n".join(f"<Picture {n}> is 素材{n}." for n in range(1, 10))
+    shot = " ".join(f"<Picture {n}>" for n in range(1, 10))
+    scope = compute_segment_scope(shot_text=shot, subject_definitions=defs,
+                                  registry=registry, refs_per_segment=9)
+    card = render_segment_injection_card(scope, position=3, total=3)
+    assert len([l for l in card.splitlines() if l.startswith("| <Picture")]) == 9
+    assert "无未用槽" in card or "用满" in card
+
+
 # ---------------------------------------------------------------------------
 # 反向闭包的边界（issue #75 实测：段 1 被拉成 8 张，其中 4 张本段根本不用）
 # ---------------------------------------------------------------------------
