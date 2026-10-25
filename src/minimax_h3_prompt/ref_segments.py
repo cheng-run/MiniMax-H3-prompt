@@ -121,6 +121,9 @@ class RefSegmentResult:
     segment_paths: list[Path] = field(default_factory=list)
     order_card_path: Path | None = None
     plan_path: Path | None = None
+    # 多参专属四列分镜表（issue #89）：≤15s 直出没有分段规划阶段，故为 None
+    # （那条路整片即唯一执行段，四列的值都已写在段里）。
+    shot_table_path: Path | None = None
     used_fallback: bool = False
     # 段文本是否带**分段注记**（时间轴注记＋起止状态声明）。>15s 拆段恒为 True；≤15s
     # 直出为 False——整片六段式就是它自己的唯一执行段，注记是给「段与全片对位」用的，
@@ -132,6 +135,17 @@ class RefSegmentResult:
     # 纯机械路线（llm=None）与规划成功都是空串，两者不该被说成「失败了」。
     # 只有「回复不合格」也不进这里——那是内容病，调用本身是通的。
     planning_failure: str = ""
+
+
+def _stored_scope(plan: SegmentPlan) -> SegmentAssetScope | None:
+    """plan 上**定案**的段内素材子集；旧 plan.json（无该键）返回 None ＝ 整片定义原样。
+
+    一处读法供多处用（写段、段接线卡、多参分镜表）：各写一遍 ``from_dict`` 早晚会有
+    一处漏掉 ``None`` 分支，而「表上 3 张、卡上 2 张」正是从那里开始的（issue #89）。
+    """
+    if plan.assets_in_segment is None:
+        return None
+    return SegmentAssetScope.from_dict(plan.assets_in_segment)
 
 
 @dataclass
@@ -194,6 +208,11 @@ class RefSegmentJob:
     def order_card_path(self) -> Path:
         return Path(self.out_dir) / "segments" / "order-card.md"
 
+    @property
+    def shot_table_path(self) -> Path:
+        """多参专属四列分镜表（issue #89）：住 ``segments/``，与段表、接线卡同址。"""
+        return Path(self.out_dir) / "segments" / SHOT_TABLE_FILENAME
+
     def _shot_texts(self, plan: SegmentPlan) -> list[str]:
         """本段 Shot 原文（写段请求与素材子集**共用这一份**，不各取一套）。
 
@@ -204,23 +223,13 @@ class RefSegmentJob:
         return _segment_shot_texts(plan, self.blocks, self.total_s,
                                    used_fallback=self.used_fallback)
 
-    def _scope_for(self, plan: SegmentPlan) -> SegmentAssetScope | None:
-        """本段的素材子集；旧 plan.json（没有该字段）返回 None ＝ 整片定义原样。
-
-        **读 plan 上的映射、不重算**（issue #75 AC5）：续跑重写某段必须用交付时定案
-        的那张表，重算会得到另一套号，新写出的段与已通过的段就数着不同的 Picture。
-        """
-        if plan.assets_in_segment is None:
-            return None
-        return SegmentAssetScope.from_dict(plan.assets_in_segment)
-
     def segment_asset_card(self, position: int) -> str:
         """本段接线卡文本（终端打印与 ``injection-card-NN.md`` **同一份**）。
 
         旧 plan.json（无子集映射）返回空串：那一路本就没有段内重编号，接线看整片
         注入卡（``injection_card.md``）。
         """
-        scope = self._scope_for(self.plans[position - 1])
+        scope = _stored_scope(self.plans[position - 1])
         if scope is None:
             return ""
         return render_segment_injection_card(
@@ -248,7 +257,7 @@ class RefSegmentJob:
         else:
             text = self._generate(plan)
             path.write_text(text, encoding="utf-8")
-        scope = self._scope_for(plan)
+        scope = _stored_scope(plan)
         issues = validate_segment_text(
             text, annotated=self.annotated, duration=plan.duration_s,
             segment_number=position, total_segments=len(self.plans),
@@ -262,7 +271,7 @@ class RefSegmentJob:
     def _generate(self, plan) -> str:
         """调模型写一段（或回退机械拼装）——请求只带**本段**定义块（issue #75）。"""
         total_segments = len(self.plans)
-        scope = self._scope_for(plan)
+        scope = _stored_scope(plan)
         # 段内作用域：定义块裁到本段素材并重编号；旧 plan.json（scope=None）保持整片。
         sections = self.sections if scope is None else scope_ref_sections(self.sections, scope)
         shot_texts = self._shot_texts(plan)
@@ -551,6 +560,10 @@ def format_ref_segment_report(result: RefSegmentResult | RefSegmentJob) -> str:
         lines.append(
             f"  段清单与拼接顺序卡：{result.order_card_path}"
             "（拼接归系统：全段验收通过后自动接成成片）")
+    if result.shot_table_path is not None:
+        lines.append(
+            f"  多参分镜表：{result.shot_table_path}"
+            "（每段一行：镜头/时长、参考锚点、连续性交接、描述摘要）")
     for position, issues in enumerate(result.issues, 1):
         lines.extend(format_segment_issue_lines(position, issues))
     return "\n".join(lines)
@@ -582,6 +595,91 @@ def render_ref_order_card(plans: list[SegmentPlan], segment_paths: list[Path],
             f"| {plan.duration_s}s | {path.name} |")
     lines.append("")
     lines.append(f"分段规划明细见 plan.json（同目录）。登记工作流见注入卡。")
+    return "\n".join(lines) + "\n"
+
+
+# 多参专属四列分镜表（issue #89 / spec #84 D10）。它回答「每段用哪几张图、段与段怎么
+# 交接」——用户不必再从整片提示词里反推。**与段接线卡同源**（plan 的
+# ``assets_in_segment``）：表上每段的锚点就是卡上的「新号 ↔ 原号」，两处各算一遍就会
+# 出现「表上 3 张、卡上 2 张」这种各自都合理、却对不上号的产物。
+SHOT_TABLE_FILENAME = "ref-shot-table.md"
+
+# 单元格里压平一切空白：状态句与摘要都是模型写的，可能带折行——折行会把一行表格
+# 撑成两行，整张表当场错位；竖线不转义同样会多出一列。
+_CELL_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _table_cell(text: str) -> str:
+    """Markdown 表格单元格：折行压平 ＋ 竖线转义。"""
+    return _CELL_WHITESPACE_RE.sub(" ", str(text or "")).strip().replace("|", "\\|")
+
+
+def _shots_label(shots: tuple[int, ...]) -> str:
+    """本段覆盖的镜头号：连续写 ``Shot 1–2``，跳号逐个数，无号写破折号。"""
+    numbers = sorted({int(number) for number in shots})
+    if not numbers:
+        return "—"
+    if len(numbers) == 1:
+        return f"Shot {numbers[0]}"
+    if numbers == list(range(numbers[0], numbers[-1] + 1)):
+        return f"Shot {numbers[0]}–{numbers[-1]}"
+    return "Shot " + "、".join(str(number) for number in numbers)
+
+
+def _anchor_cell(plan: SegmentPlan) -> str:
+    """参考锚点列：读 plan 上定案的段内映射（新号 ＋ 整片原号 ＋ 语义名），不重算。
+
+    重算（按 Shot 原文再收一次料）会得到另一套号，而接线卡与段提示词用的是交付时
+    定案的这一套——那正是票面要求做变异检验的形态。读法与写段/接线卡同取
+    ``_stored_scope``，不在这里再写一遍 ``from_dict``。
+    """
+    scope = _stored_scope(plan)
+    if scope is None:
+        # 旧 plan.json 没有段内子集：那时的段用整片定义，接线看整片注入卡。
+        return "（无段内素材子集：接线看整片注入卡）"
+    if not scope.pictures:
+        return "（本段不引用参考图）"
+    return "；".join(
+        f"<Picture {item.new_picture}>（整片 <Picture {item.original_picture}>）{item.name}"
+        for item in scope.pictures)
+
+
+def render_ref_shot_table(plans: list[SegmentPlan], *, total_s: int) -> str:
+    """四列分镜表：镜头/时长 | 参考锚点 | 连续性交接 | 镜头描述摘要（issue #89 AC1）。
+
+    一行＝一个**执行段**，不是 ``[Shot N]``：起止状态声明（``start_state``/``end_hook``）、
+    剧情摘要与段内素材子集都只在段这一层存在；按镜头分行就得拿本段的状态句冒充单镜
+    状态、从 Shot 原文截半句当摘要，那是编造。行序即段序，与 ``order-card.md`` 对位。
+
+    两条边界写在这里，免得下一个人按错判据推断：
+
+    - **路线判据仍是 ``Brief.mode``**（ADR 0020）：本表只服务多参；base 路线连这里都
+      走不到。≤15s 直出不产出它，缺的是**分段规划阶段**（那条路整片即唯一执行段，
+      也没有 ``assets_in_segment``），不是路线换了——别把它读成「ref 有时不产出」。
+    - 「分镜表」这个词在 ``CONTEXT.md`` 的「分析表」词条里是**避用词**（那个词条说的是
+      base 的整片镜头清单）。本件是另一个产物，术语收口在 #91（T7）；在它落地前，
+      别把两者混成一个词条。
+    """
+    lines = [
+        "# 多参分镜表（执行段）",
+        "",
+        f"总时长 {total_s:g}s → {len(plans)} 个执行段。一行一个执行段，行序即段序。",
+        "「参考锚点」是**段内新号**（括号里是整片原号），与段提示词、"
+        "`injection-card-NN.md` 同一套编号。",
+        "",
+        "| 镜头/时长 | 参考锚点 | 连续性交接 | 镜头描述摘要 |",
+        "| --- | --- | --- | --- |",
+    ]
+    for plan in plans:
+        lines.append(
+            f"| {_table_cell(_shots_label(plan.shots_in_segment))} · "
+            f"{plan.start_s}–{plan.end_s}s（{plan.duration_s}s） "
+            f"| {_table_cell(_anchor_cell(plan))} "
+            f"| {_table_cell(plan.start_state)} → {_table_cell(plan.end_hook)} "
+            f"| {_table_cell(plan.summary)} |")
+    lines.append("")
+    lines.append("本表由分段规划阶段按 plan.json 的 `assets_in_segment` 生成——"
+                 "照表备图与照段接线卡接线用的是同一套编号。")
     return "\n".join(lines) + "\n"
 
 
@@ -1379,6 +1477,11 @@ def prepare_ref_segmentation(*, whole_prompt: str, total_s: float, out_dir: Path
     # 它与「段正文写没写」无关，别为了等写段把它也推到后面去。
     job.order_card_path.write_text(
         render_ref_order_card(job.plans, job.segment_paths, total_int), encoding="utf-8")
+    # 多参专属分镜表（issue #89）：规划一结束就写，与段接线卡同一份锚点来源。
+    # 规划失败回退式也写——表的内容取自 plan 与 assets_in_segment，与用哪条路径
+    # 规划无关；不写就会让回退式交付少一份出站清单。
+    job.shot_table_path.write_text(
+        render_ref_shot_table(job.plans, total_s=total_int), encoding="utf-8")
     return job
 
 
@@ -1412,7 +1515,8 @@ def write_all_ref_segments(job: RefSegmentJob) -> RefSegmentResult:
     return RefSegmentResult(
         plans=list(job.plans), texts=texts, total_s=job.total_s, issues=issues,
         segment_paths=job.segment_paths, order_card_path=job.order_card_path,
-        plan_path=job.plan_path, used_fallback=job.used_fallback,
+        plan_path=job.plan_path, shot_table_path=job.shot_table_path,
+        used_fallback=job.used_fallback,
         planning_failure=job.planning_failure)
 
 
