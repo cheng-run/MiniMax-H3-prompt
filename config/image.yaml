@@ -1,0 +1,16 @@
+# 资产图（人物／道具／场景参考图）走哪个生图模型（issue #87 / spec #84 D8）。
+#
+# 三档各选一个：z_image / qwen / moss。选中值同时决定出词请求追加哪一份纪律块
+# （prompts/image_prompt_disciplines/<模型>.md）——**换模型必须同时换纪律**：
+# 同一个模型换错纪律，出来的词会按另一家的写法写（Z-Image 要中文短句、Qwen 要英文长文、
+# MOSS 要英文＋负面标签），产物照样生成、只是质量掉一档，不报错。
+#
+# 默认：人物 Qwen、道具与场景 Z-Image（spec #84 D8 的外部调研结论：人物参考／转身板
+# Qwen 强，Z-Image 弱，MOSS 不支持 reference）。
+#
+# ⚠ 许可红线：Qwen-Image 2.1 是 Qwen Research License，**仅限非商用**。
+#   商用前把 character 切到 z_image 或 moss（Z-Image / MOSS 为 Apache-2.0）。
+
+character: qwen
+prop: z_image
+scene: z_image

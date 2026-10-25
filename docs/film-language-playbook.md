@@ -1,7 +1,7 @@
 # 提示词的电影语言速查（我学会了什么 + 怎么用）
 
 2026-09-26 起，我（Claude）写提示词时按这份执行。**视频侧与生图侧分开成章**：
-第一~九节是**视频侧（MiniMax H3）**，第十节是**生图侧（Z-Image）**——两套语言不能混用。
+第一~九节是**视频侧（MiniMax H3）**，第十节是**生图侧（Z-Image／Qwen-Image／MOSS）**——两套语言不能混用。
 
 **证据链**在两份调研报告里（调研过程、逐条核实/证伪、未能证实的项全在里面）：
 - 视频侧：`docs/research/2026-09-26-film-language-prompt-sources.md`
@@ -231,9 +231,14 @@ single sustained low note as the paws land and the hand freezes.
 
 ---
 
-# 十、生图侧（静态画面）：Z-Image
+# 十、生图侧（静态画面）：Z-Image／Qwen-Image／MOSS
 
 生图是**静态画面**，与视频侧是两套语言。**运镜、剪辑、时间码、H3 三段式一律不写**——写了就是错。
+
+⚠️ 2026-10-25（issue #87 / spec #84 D7）起资产图分三档生图模型：Z-Image Turbo（中文短句、
+全正向）、Qwen-Image 2.1（英文长文、不写负面）、MOSS-Image（英文、负面标签生效）。本节其余
+内容（画幅、词表、hex 锁色）三档共用；**按模型的写法差别在 `prompts/image_prompt_disciplines/`
+三份纪律文件里**，那份是进模型的机读真源，本节是给人读的册子。
 
 ## 10.1 四条本仓硬约束
 
@@ -241,8 +246,8 @@ single sustained low note as the paws land and the hand freezes.
 |---|---|
 | 不写 video 镜头运动 / 剪辑 / 时间码 / H3 三段式 | `image_prompt_engineer.md:19`、`frame_prompt_engineer.md:66` |
 | 不堆砌无意义质量标签 | `image_prompt_engineer.md:20` |
-| 正文中文（模型不认识的专有名词可保留原文） | `image_prompt_engineer.md:22` |
-| 默认不输出负向提示词（除非输入说明工作流有独立负向输入） | `image_prompt_engineer.md:21` |
+| 正文语言按所选模型（Z-Image 中文／Qwen、MOSS 英文；专有名词可保留原文） | `image_prompt_engineer.md:22`、`prompts/image_prompt_disciplines/` |
+| 负向按所选模型（Z-Image／Qwen 不写；MOSS 填负面标签） | `image_prompt_engineer.md:21`、`prompts/image_prompt_disciplines/` |
 
 （2026-10-16 单版化后更正：「两模型必须各自重写，不能同一句」已从资产图链移除——那条链只剩 Z-Image 一版（issue #40）。2026-10-18 **Flux.2 全链退役**（issue #48 / ADR 0013）后关键帧链也只剩 Z-Image 一版，该纪律随之删除，不再有任何链适用。）
 
@@ -335,7 +340,7 @@ single sustained low note as the paws land and the hand freezes.
 ⚠️ **个人仓库，不是权威源**（95 star）。但它是本次**最丰富的静态画面词库**：`references/` 下 6 个文件、两列表 `| Prompt (EN) | Giải thích (VI) |`——**左列是可进提示词的英文词，右列是越南语解释**（不是中文，得自己转译）。已读 4 份约 510 条，全量在报告 §3A-7（光线 83 / 构图 68 / 镜头·胶片质感 151 / 风格·色彩·情绪 212）。
 
 **三条使用纪律**：
-1. **只当选词池，不当模板**——它全是英文术语，撞本仓「生图正文中文」（`image_prompt_engineer.md:22`）→ 取词后**译成中文写进正文**，专有名词（`bokeh`、`anamorphic`、胶片型号如 `Kodak Portra 400`）可保留原文。
+1. **只当选词池，不当模板**——它全是英文术语，而本仓正文语言**按所选生图模型**（`image_prompt_engineer.md:22`、`prompts/image_prompt_disciplines/`）→ 取词后按那一档的语言写进正文（Z-Image 译成中文，Qwen／MOSS 直接用英文），专有名词（`bokeh`、`anamorphic`、胶片型号如 `Kodak Portra 400`）可保留原文。
 2. **`04-lens-technical-film.md` 的「快门与运动」整节剔除**：`motion blur`、`Shutter Speed 1/8000s`、`rack focus`、`time-lapse`、`Camera Shake` 都是动态语言，生图侧禁。
 3. **`8K Resolution` / `4K` / `hyperdetailed` 撞「禁堆质量标签」**（`image_prompt_engineer.md:20`）**不用**；但 `hyperrealistic` / `photorealistic` 是**有内容的风格词**，可用——别一刀切。
 

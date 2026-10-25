@@ -25,7 +25,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from minimax_h3_prompt import model_factory
+from minimax_h3_prompt import image_config, model_factory
+from minimax_h3_prompt.agents import image_prompt_agent_key
 from minimax_h3_prompt.brief_parser import Brief
 from minimax_h3_prompt.generation import (
     IMAGE_PROFILE_DEFAULTS,
@@ -42,7 +43,16 @@ TOPIC = "秋日庭院里的橘猫"
 
 # 节点请求的开头（``nodes._make_image_prompt_node`` 里那句要求）。用它把资产图节点与
 # 关键帧节点、设计节点区分开——本文件考的是「请求真的发出去了」，不是角色提示词。
-_ASSET_HEAD = "各生成一条 Z-Image 可直接复制的生图提示词"
+_ASSET_HEAD = "各生成一条可直接复制的生图提示词"
+
+
+def _image_agents() -> dict:
+    """三个模型档的占位 agent（issue #87）：节点按 ``config/image.yaml`` 取其中一档。
+
+    本文件不关心取到哪一档——纪律分支由 ``tests/test_image_model_discipline*.py`` 钉。
+    这里按 ``IMAGE_MODEL_KEYS`` 现建，配置默认值改了也不会让夹具失配。
+    """
+    return {image_prompt_agent_key(key): object() for key in image_config.IMAGE_MODEL_KEYS}
 
 # 三类资产：节点名 → (请求里的资产名, 上游设计 state 键, 上游设计正文, 产物 state 键, 资产清单)
 # 资产清单 = ((语义名, 正向提示词), ...)。人物给两条（多角色），道具／场景各一条（固定 3 资产场景）。
@@ -303,7 +313,7 @@ def test_asset_prompt_request_carries_the_canvas_block(monkeypatch):
     monkeypatch.setattr(nodes, "run_agent",
                         lambda agent, message: requests.append(message) or _assets_json((("甲", "甲的提示词"),)))
     brief = _ref_brief()
-    agents = {"image_prompt_engineer": object()}
+    agents = _image_agents()
 
     for _node, kind, design_field, _design, out_field, _assets in _ASSETS:
         requests.clear()
@@ -331,7 +341,7 @@ def _canvas_request(monkeypatch, canvases: dict) -> str:
     # 节点只在多参路线出词（issue #78 源头守卫）：这里考的是请求里的【画布】块
     brief = Brief(mode="ref", variant="T2VA", duration=5.0, style="写实", plot=TOPIC,
                   canvases=canvases)
-    agents = {"image_prompt_engineer": object()}
+    agents = _image_agents()
     nodes._make_image_prompt_node(agents, "人物", "character_design", "character_image_prompts")(
         {"brief": brief, "character_design": "设计正文"})
     assert captured, "节点没有发出请求"
@@ -658,7 +668,7 @@ def test_node_refuses_a_reply_without_a_locked_list(monkeypatch):
     with pytest.raises(ValueError, match="锁死清单"):
         # 节点只在多参路线出词（issue #78）：路线守卫的用例另有一条，这里直接走 ref。
         nodes._make_image_prompt_node(
-            {"image_prompt_engineer": object()}, "人物", "character_design",
+            _image_agents(), "人物", "character_design",
             "character_image_prompts")({"brief": _ref_brief(), "character_design": "设计正文"})
 
 
@@ -672,7 +682,7 @@ def test_node_refuses_a_locked_entry_that_is_not_verbatim_in_the_prompt(monkeypa
         [{"name": "甲", "positive_prompt": "甲的提示词", "locked_features": ["发色：银白"]}]))
     with pytest.raises(ValueError, match="原文"):
         nodes._make_image_prompt_node(
-            {"image_prompt_engineer": object()}, "人物", "character_design",
+            _image_agents(), "人物", "character_design",
             "character_image_prompts")({"brief": _ref_brief(), "character_design": "设计正文"})
 
 
@@ -691,7 +701,7 @@ def _run_image_node(monkeypatch, replies: list[str]):
 
     monkeypatch.setattr(nodes, "run_agent", fake_run_agent)
     node = nodes._make_image_prompt_node(
-        {"image_prompt_engineer": object()}, "人物", "character_design",
+        _image_agents(), "人物", "character_design",
         "character_image_prompts")
 
     def run():

@@ -318,7 +318,7 @@ class PromptArtifact:
 
 @dataclass(frozen=True)
 class ImagePromptVariant:
-    """一份资产的 Z-Image 可直接复制提示词（issue #40：N 资产 × 单模型）。
+    """一份资产的可直接复制生图提示词（issue #40：N 资产 × 单模型；出图模型按档，issue #87）。
 
     ``name`` 是资产语义名——素材台账／注入卡靠它对号，所以它是**产物的一部分**，
     不是渲染层的标题。``model_family`` 已随 Flux.2 版全链取消而移除：资产链只剩
@@ -926,7 +926,7 @@ def image_prompt_variants(
     state: dict[str, Any],
     canvases: CanvasMap | None = None,
 ) -> tuple[ImagePromptVariant, ...]:
-    """从结构化适配器结果构造 N 份可复制提示词（每资产一版 Z-Image）；旧 state 缺少时保留兼容降级。
+    """从结构化适配器结果构造 N 份可复制提示词（每资产一版）；旧 state 缺少时保留兼容降级。
 
     ``canvases`` 是用户选定画布（issue #42）：产物行的尺寸从它解析（未选回落默认表），
     显示串在渲染处取 ``canvas_display``——与请求【画布】块同源。

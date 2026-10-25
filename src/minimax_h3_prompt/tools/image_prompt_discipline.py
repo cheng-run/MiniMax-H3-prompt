@@ -1,12 +1,22 @@
-"""生图提示词纪律的读取口与警告级确定性检查（issue #68 / ADR 0018）。
+"""生图提示词纪律的读取口与警告级确定性检查（issue #68 / ADR 0018 / issue #87）。
 
-**规则文本只有一份可写来源**：``prompts/image_prompt_engineer.md`` 末尾那一节。
-本模块只读取它（``discipline_text``），不复制正文——AI 改词（#72）也从同一个口取。
-两份文本就会各自漂移，本仓吃过「同一句原文 3 份硬拷贝」的亏（issue #35）。
+**规则文本只有一份可写来源**：``prompts/image_prompt_disciplines/<模型>.md``，一档一份
+（``z_image`` / ``qwen`` / ``moss``，issue #87 / spec #84 D7）。本模块只读取它们
+（``discipline_text``），不复制正文——AI 改词（#72）也从同一个口取。两份文本就会各自
+漂移，本仓吃过「同一句原文 3 份硬拷贝」的亏（issue #35）。
+
+**为什么按模型分文件**：同一个模型写错纪律不会报错，只会少出东西——Z-Image Turbo 要
+中文短句、全正向；Qwen-Image 2.1 要英文长文、不写负面；MOSS-Image 要英文并填负面标签。
+以前只有 Z-Image 一档，纪律就写在角色 .md 末尾；三档并存后必须各占一份文件，否则
+「换模型」与「换写法」只能一起改，改漏一处就是静默掉一档质量。
 
 **只警告、不阻断**：Z-Image Turbo 的失败模式是「细节没画出来」，不是「输出不合规」。
 把判据做成 error 闸门，会被合法写法误伤、把一份本来能出图的提示词停掉
 （ADR 0018「考虑过的备选」）。检查在节点出词后打印，不改产物、不改历史会话。
+
+**检查按模型分口径**：五类检查里除了「质量套话」（本仓通用的写法纪律）之外，其余四类
+都以 CFG=1 与 Turbo 的弱项为据（ADR 0018），对 Qwen/MOSS 没有依据——拿它们去判一份
+英文长文，会给出成片的假警告，把真问题淹掉。故非 Z-Image 档只跑通用那一类。
 
 **为什么规则文本不落在本模块的常量里**：ADR 0018 明写纪律写进角色提示词，且角色 .md
 是被逐字读进模型请求的那份文本。常量再抄一份就是第二个可写来源；读取口从 .md 现取，
@@ -18,13 +28,19 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-# 纪律小节的标题。读取口认它定位；它同时是「八条纪律在文件末尾」的守卫判据。
-# 只有这一处定义——标题改这里，读取口与测试一并跟着走，不会各自漂移。
-DISCIPLINE_HEADING = "## 生图提示词纪律（Z-Image Turbo）"
+from ..image_config import DEFAULT_IMAGE_MODEL, IMAGE_MODEL_KEYS, image_model_label
 
-# 角色提示词文件。tools/ 上一级就是包根（与 agents.PROMPTS_DIR 同指一处，但刻意各走各的
-# 定位：目录常量写错时不该两边一起错——同 tests/test_role_prompts.py 的理由）。
-PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "image_prompt_engineer.md"
+# 可加载纪律的模型键。**真源是 ``image_config.IMAGE_MODEL_KEYS``**（值域与配置文件同一处），
+# 这里只做转发：两处各写一份时，新增一个模型会只改到一边（配置认它、纪律文件找不到）。
+# 默认档 ``DEFAULT_IMAGE_MODEL`` 同样是转发（它住在模型词表那一处）。
+DISCIPLINE_MODELS = IMAGE_MODEL_KEYS
+
+# 纪律文件目录与标题前缀。标题前缀是「文件确实是一节纪律」的守卫判据——纪律文件若被
+# 覆写成别的东西（空文件、正文片段），读取口要大声报，而不是把半截文本送进系统提示词。
+DISCIPLINES_DIR = (
+    Path(__file__).resolve().parents[1] / "prompts" / "image_prompt_disciplines"
+)
+DISCIPLINE_HEADING_PREFIX = "## 生图提示词纪律"
 
 # 「长度约 600 字内」的上限。按**非空白字符**计数：中文一字算一字，空格与换行不计
 # （排版的换行不该把提示词判成超长）。超了只警告——见模块头「只警告不阻断」。
@@ -39,19 +55,29 @@ class DisciplineWarning:
     message: str
 
 
-def discipline_text() -> str:
-    """返回 .md 末尾的纪律小节全文（含标题）。
+def discipline_path(model: str = DEFAULT_IMAGE_MODEL) -> Path:
+    """某一档的纪律文件路径；未知模型报错（别猜文件、也别回落到默认档）。"""
+    if model not in DISCIPLINE_MODELS:
+        raise ValueError(
+            f"生图模型无效：{model!r}（只认 {', '.join(DISCIPLINE_MODELS)}）")
+    return DISCIPLINES_DIR / f"{model}.md"
 
-    取**最后一次**出现的位置：文件前面若出现同名字样的指针句，也不会截错。
-    找不到就大声报错——静默返回空串会让 AI 改词与守卫一起「看起来正常、其实没规则」。
+
+def discipline_text(model: str = DEFAULT_IMAGE_MODEL) -> str:
+    """返回某一档的纪律小节全文（含标题）。
+
+    找不到文件、或文件不以「## 生图提示词纪律」起头，都大声报错——静默返回空串会让
+    AI 改词与守卫一起「看起来正常、其实没规则」；把半截文本送进系统提示词同样是
+    「规则在、接线不在」的变体。
     """
-    text = PROMPT_PATH.read_text(encoding="utf-8")
-    index = text.rfind(DISCIPLINE_HEADING)
-    if index < 0:
+    path = discipline_path(model)
+    if not path.exists():
+        raise RuntimeError(f"缺少生图提示词纪律文件：{path}（{image_model_label(model)} 档）")
+    text = path.read_text(encoding="utf-8").strip()
+    if not text.startswith(DISCIPLINE_HEADING_PREFIX):
         raise RuntimeError(
-            f"{PROMPT_PATH} 里找不到生图提示词纪律小节（{DISCIPLINE_HEADING}）"
-        )
-    return text[index:].strip()
+            f"{path} 不是一节生图提示词纪律（应以「{DISCIPLINE_HEADING_PREFIX}」起头）")
+    return text
 
 
 # --- 五类检查 -----------------------------------------------------------------
@@ -147,6 +173,15 @@ def _cliche_hit(text: str) -> str | None:
     return _first(_QUALITY_EN, text) or _first(_QUALITY_CN, text)
 
 
+def _cliche_warning(hit: str) -> DisciplineWarning:
+    """质量套话警告的**唯一**构造处：Z-Image 档与其余档共用同一句文案。"""
+    return DisciplineWarning(
+        "QUALITY_CLICHE",
+        f"出现质量套话「{hit}」——masterpiece／8K 这类元标签不描述画面，"
+        "官方生图提示词模板也明令禁止；请删掉。",
+    )
+
+
 def _cn_direction_has_anchor(text: str, start: int) -> bool:
     """从方位词往前回溯：跳过助词/介词/动词后，遇到实词才算有锚点。
 
@@ -185,17 +220,37 @@ def _unanchored_direction(text: str) -> str | None:
     return None
 
 
-def check_image_prompt(prompt: str) -> list[DisciplineWarning]:
-    """对一条 ``positive_prompt`` 跑五类警告级检查（纯函数，不改入参）。
+def check_image_prompt(prompt: str, *, model: str = DEFAULT_IMAGE_MODEL
+                       ) -> list[DisciplineWarning]:
+    """对一条 ``positive_prompt`` 跑警告级检查（纯函数，不改入参）。
 
     返回顺序固定（负向、权重、套话、超长、方位），每类最多一条。空文本不报：
     空提示词由上游的 ``_normalize_asset_entries`` 报错，不归这里管。
+
+    **只有 Z-Image 档跑满五类**：负向、权重、超长、方位四类的依据都是 Turbo 自己的
+    事实（CFG=1、编码器不认权重、长文稀释注意力、空间关系是它的弱项，见 ADR 0018）；
+    拿它们判 Qwen 的英文长文会冒出成片假警告。其余档只跑「质量套话」——那是本仓通用
+    的写法纪律（「四条硬约束」第 2 条），与模型无关。
     """
+    # 值域先验：放在空文本早退之前——否则 `check_image_prompt("", model="flux")` 会
+    # 静默返回空表，看起来「这个模型没违规」，实际是从没认过这个模型。
+    if model not in DISCIPLINE_MODELS:
+        raise ValueError(
+            f"生图模型无效：{model!r}（只认 {', '.join(DISCIPLINE_MODELS)}）")
+
     text = str(prompt or "")
     if not text.strip():
         return []
 
     warnings: list[DisciplineWarning] = []
+
+    if model != DEFAULT_IMAGE_MODEL:
+        # 这一档只有「质量套话」一类：文案与下面 Z-Image 档用的是**同一个构造函数**，
+        # 两处各写一份时改一处漏一处，两个模型会得到不一样的措辞（本仓「同一契约不许
+        # 两处口径」）。
+        if hit := _cliche_hit(text):
+            warnings.append(_cliche_warning(hit))
+        return warnings
 
     if hit := _negative_hit(text):
         warnings.append(DisciplineWarning(
@@ -212,11 +267,7 @@ def check_image_prompt(prompt: str) -> list[DisciplineWarning]:
         ))
 
     if hit := _cliche_hit(text):
-        warnings.append(DisciplineWarning(
-            "QUALITY_CLICHE",
-            f"出现质量套话「{hit}」——masterpiece／8K 这类元标签不描述画面，"
-            "官方生图提示词模板也明令禁止；请删掉。",
-        ))
+        warnings.append(_cliche_warning(hit))
 
     visible = len(re.sub(r"\s+", "", text))
     if visible > MAX_PROMPT_CHARS:

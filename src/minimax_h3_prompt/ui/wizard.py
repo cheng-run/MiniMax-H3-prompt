@@ -692,7 +692,7 @@ def _phase1_new(config: Config) -> SessionState | None:
     if _user_revision_loop(state, generation_dir, brief, config,
                             model=model, agents=agents) == RESTART_FLOW:
         return _phase1_new(config)
-    print("\n阶段 1 完成。请复制上面的生图提示词到 ComfyUI（Z-Image）生成图片。")
+    print("\n阶段 1 完成。请复制上面的生图提示词到 ComfyUI 对应生图节点生成图片。")
     return load_session(generation_dir)
 
 
@@ -1395,6 +1395,7 @@ def _ai_reword_asset_round(state: dict, brief: Brief, generation_dir: Path, item
         ai_reword_asset_prompt,
         log_asset_round,
     )
+    from ..image_config import image_model_for
     from ..model_factory import build_chat_model
     from ..tools.image_prompt_discipline import check_image_prompt
 
@@ -1405,9 +1406,12 @@ def _ai_reword_asset_round(state: dict, brief: Brief, generation_dir: Path, item
         return False
     old = _current_prompt_text(state, item)
     locked = _locked_features(state, brief, item.name)
+    # 这一张按哪一档模型出的词，就按哪一档的纪律改（issue #87）：三档的写法相反
+    # （中文短句／英文长文／英文＋负面），拿错纪律改写等于把这一张往另一家的口径拽。
+    model_key = image_model_for(item.kind)
     try:
         new = ai_reword_asset_prompt(old, deviations, build_chat_model(),
-                                     locked_features=locked)
+                                     locked_features=locked, model=model_key)
     except Exception as exc:  # noqa: BLE001 — 失败要响但不许裸崩：词不动、回菜单再定
         print(f"[AI 改词·{item.name}] 改写失败：{exc}；提示词保持原样。")
         return False
@@ -1432,8 +1436,9 @@ def _ai_reword_asset_round(state: dict, brief: Brief, generation_dir: Path, item
           f"（锁死清单已逐条核对；其余正文请人工确认），"
           f"并记入轮次账（{ASSET_ROUNDS_FILENAME}）。")
     # 改写也是一次出词：照跑警告级纪律检查（#68 / ADR 0018）。只警告、不阻断——
-    # 这份词是人要拿去生图的，纪律问题得在出图前看得见。
-    for warning in check_image_prompt(new):
+    # 这份词是人要拿去生图的，纪律问题得在出图前看得见。检查口径跟着这一张的模型走
+    # （issue #87）：五类里四类只在 Z-Image 档成立。
+    for warning in check_image_prompt(new, model=model_key):
         print(f"[纪律警告·{item.name}] {warning.message}")
     return True
 

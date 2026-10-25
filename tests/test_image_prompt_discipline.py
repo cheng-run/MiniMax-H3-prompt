@@ -18,7 +18,8 @@ from pathlib import Path
 
 import pytest
 
-from minimax_h3_prompt.agents import load_role_prompt
+from minimax_h3_prompt import image_config
+from minimax_h3_prompt.agents import image_prompt_agent_key, load_role_prompt
 from minimax_h3_prompt.brief_parser import Brief
 from minimax_h3_prompt.graph import nodes
 from minimax_h3_prompt.tools import image_prompt_discipline as discipline
@@ -29,6 +30,9 @@ from minimax_h3_prompt.tools.image_prompt_discipline import (
 
 PROMPTS_DIR = Path(__file__).parents[1] / "src" / "minimax_h3_prompt" / "prompts"
 ROLE_MD = PROMPTS_DIR / "image_prompt_engineer.md"
+# issue #87 起纪律按模型分文件：本文件考的八条属于 **Z-Image 档**（其余两档由
+# tests/test_image_model_discipline.py 钉）。角色 .md 里只剩一条指针。
+ZIMAGE_DISCIPLINE_MD = discipline.discipline_path("z_image")
 
 # 五类违规的稳定代号。测试认代号而不是完整文案：文案会为可读性微调，
 # 代号是下游（#72 与将来的展示层）真正依赖的契约。
@@ -170,14 +174,16 @@ def _discipline_is_complete(text: str) -> bool:
     return True
 
 
-def test_the_eight_rules_end_the_role_prompt_file():
-    """八条纪律在 .md **末尾**（不中间插行）：追加在文件尾，旧文档的行号引用不会漂。"""
-    text = ROLE_MD.read_text(encoding="utf-8").rstrip()
+def test_the_eight_rules_are_the_whole_zimage_discipline_file():
+    """八条纪律是 Z-Image 档纪律文件的**全部内容**（issue #87 起按模型分文件）。"""
+    text = ZIMAGE_DISCIPLINE_MD.read_text(encoding="utf-8").rstrip()
 
-    assert text.endswith(discipline_text()), "纪律小节不在 image_prompt_engineer.md 末尾"
-    assert _discipline_is_complete(discipline_text()), "末尾那一节不是完整的八条纪律"
-    assert ROLE_MD.read_text(encoding="utf-8").count(discipline.DISCIPLINE_HEADING) == 1, \
-        "纪律小节标题在 .md 里出现多次：读取口会取到不确定的一份"
+    assert text == discipline_text(), "纪律文件正文与读取口返回的不一致"
+    assert _discipline_is_complete(discipline_text()), "Z-Image 档不是完整的八条纪律"
+    # 角色 .md 里只剩一条指针：纪律正文留在那里就会成为第二份可写来源（三档并存后
+    # 更糟——公共段出现一套写法，模型不知道听哪份）。
+    assert ROLE_MD.read_text(encoding="utf-8").count(discipline.DISCIPLINE_HEADING_PREFIX) == 1, \
+        "角色提示词里仍有纪律正文（或指针重复）"
 
 
 def test_discipline_reaches_the_role_prompt():
@@ -185,7 +191,7 @@ def test_discipline_reaches_the_role_prompt():
 
     这是「规则在、接线不在」的守卫：只写在文件里但加载口没读它，模型永远看不到。
     """
-    assert discipline_text() in load_role_prompt("image_prompt_engineer")
+    assert discipline_text() in load_role_prompt("image_prompt_engineer", image_model="z_image")
 
 
 def test_guard_bites_when_the_source_loses_a_rule():
@@ -229,18 +235,23 @@ def _assets_json(name: str, prompt: str) -> str:
     ])
 
 
-def _run_node(monkeypatch, prompt: str) -> dict:
+def _run_node(tmp_path, monkeypatch, prompt: str) -> dict:
+    """跑一次人物出词节点，**钉在 Z-Image 档**：本文件的五类警告是那一档的口径。"""
+    config_path = tmp_path / "image.yaml"
+    config_path.write_text("character: z_image\n", encoding="utf-8")
+    monkeypatch.setattr(image_config, "IMAGE_CONFIG_PATH", config_path)
     monkeypatch.setattr(nodes, "run_agent", lambda agent, message: _assets_json("甲", prompt))
     node = nodes._make_image_prompt_node(
-        {"image_prompt_engineer": object()}, "人物", "character_design", "character_image_prompts",
+        {image_prompt_agent_key(m): object() for m in image_config.IMAGE_MODEL_KEYS},
+        "人物", "character_design", "character_image_prompts",
     )
     return node({"brief": _brief(), "character_design": "设计正文"})
 
 
-def test_node_prints_warnings_but_still_returns_the_prompt(monkeypatch, capsys):
+def test_node_prints_warnings_but_still_returns_the_prompt(tmp_path, monkeypatch, capsys):
     """违规照常出词：警告只打印，节点仍返回原提示词（只警告不阻断）。"""
     bad = "左上角有一盏灯，不要有阴影，masterpiece。"
-    out = _run_node(monkeypatch, bad)
+    out = _run_node(tmp_path, monkeypatch, bad)
 
     printed = capsys.readouterr().out
     assert "[警告]" in printed, "节点没有把纪律警告打到用户面前"
@@ -251,9 +262,9 @@ def test_node_prints_warnings_but_still_returns_the_prompt(monkeypatch, capsys):
     assert entries[0]["positive_prompt"] == bad, "检查器改写了提示词（只该警告）"
 
 
-def test_node_is_quiet_on_a_legal_prompt(monkeypatch, capsys):
+def test_node_is_quiet_on_a_legal_prompt(tmp_path, monkeypatch, capsys):
     """合法提示词不许刷警告：警告要有信息量，不能每条都报。"""
-    _run_node(monkeypatch, "穿红裙的女孩站在床头柜的右侧，距离柜沿约一掌宽。")
+    _run_node(tmp_path, monkeypatch, "穿红裙的女孩站在床头柜的右侧，距离柜沿约一掌宽。")
 
     assert "[警告]" not in capsys.readouterr().out
 
@@ -264,3 +275,33 @@ def test_checker_does_not_mutate_the_prompt_string():
     before = prompt
     check_image_prompt(prompt)
     assert prompt == before
+
+
+# ---------------------------------------------------------------------------
+# 4. 检查按模型分口径（issue #87）
+# ---------------------------------------------------------------------------
+
+def test_non_zimage_models_only_get_the_generic_cliche_check():
+    """Qwen／MOSS 档只跑「质量套话」：其余四类的依据都是 Turbo 自己的事实。
+
+    负向、权重、超长、方位四类都建立在 ADR 0018 的实测上（CFG=1、编码器不认权重、
+    长文稀释注意力、空间关系是 Turbo 弱项）。拿它们判 Qwen 要的英文长文，会刷出一片
+    假警告——真问题被淹掉，警告失去信息量（本仓对警告的唯一要求就是有信息量）。
+    """
+    long_english = (
+        "A girl in a red dress stands beside a wooden cabinet in a quiet room. "
+        * 20
+    ) + "8K"
+
+    zimage_codes = _codes(long_english)
+    assert TOO_LONG in zimage_codes, "Z-Image 档不再报超长——判据被削弱了"
+    assert CLICHE in zimage_codes
+
+    assert [w.code for w in check_image_prompt(long_english, model="qwen")] == [CLICHE]
+    assert [w.code for w in check_image_prompt(long_english, model="moss")] == [CLICHE]
+
+
+def test_checker_rejects_an_unknown_model():
+    """未知模型不许静默按默认档判：那会让「按档检查」变成一句空话。"""
+    with pytest.raises(ValueError, match="flux"):
+        check_image_prompt("随便一条", model="flux")

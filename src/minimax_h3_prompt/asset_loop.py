@@ -15,6 +15,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NamedTuple, Sequence
 
+# 模型展示名与纪律读取口（issue #87 起按模型各一份）。放在模块顶层而不是函数内：
+# 纪律正文与展示名都必须现取，抄一份进请求构造器就是第二个可写来源。
+from .image_config import image_model_label
+from .tools.image_prompt_discipline import discipline_text
+
 # 追加式轮次记录文件名（issue #50 AC2/AC3「留痕」）。放生成目录下，与
 # frame-rounds.jsonl 同址；两者并存——帧的修订台账管首尾帧提示词重出，
 # 这本管资产图提示词的改写轮次，混一本会让「一轮」指代两种节奏。
@@ -279,7 +284,9 @@ def rewrite_asset_prompt(old_prompt: str, feedback: str, llm) -> str:
     全篇重写会把没提到的细节一并漂走（同修订基线「未提到的部分原样保留」的用意）。
     """
     request = (
-        "请按用户意见改写下面这条 Z-Image 生图提示词。\n"
+        # 不点名模型：这一条按用户意见改，三档都可能走到；写死「Z-Image」会在 Qwen／
+        # MOSS 的资产上说错对象，模型可能顺手把写法也换成 Turbo 口径（issue #87）。
+        "请按用户意见改写下面这条资产图生图提示词。\n"
         "纪律：只落实意见点名的问题；没提到的部分逐字保留；"
         "仍然输出一条可直接复制进生图工具的提示词正文，不要解释、不要前后缀。\n\n"
         f"{CURRENT_PROMPT_HEAD}\n{old_prompt.strip()}\n\n"
@@ -310,7 +317,9 @@ def build_settled_align_request(prompt: str, settled: Sequence[tuple[str, str]])
     """
     facts = "\n".join(f"- {name}：{description}" for name, description in settled)
     return (
-        "下面是一条 Z-Image 生图提示词，以及本片**已定稿**的其他素材的画面事实。\n"
+        # 不点名模型（理由同 rewrite_asset_prompt）：回灌只管跨素材一致性，写法应保持
+        # 这一张原本那一档的口径，不该被请求文本带回 Z-Image（issue #87）。
+        "下面是一条资产图生图提示词，以及本片**已定稿**的其他素材的画面事实。\n"
         "请让当前提示词与这些事实在**跨素材一致性**上对齐：同一个人物、同一件标志物"
         "在两张图里必须是同一副样子（同一发色/服装/纹样/材质）。\n"
         "纪律：只做一致性对齐；没被这些事实点到的部分**逐字保留**，"
@@ -365,6 +374,8 @@ def build_ai_reword_request(
     deviations: Sequence[tuple[str, str, str]],
     locked_features: Sequence[str] = (),
     discipline: str = "",
+    *,
+    model_label: str,
 ) -> str:
     """AI 改词请求文本（纯函数，返回字符串即契约，issue #72）。
 
@@ -377,15 +388,18 @@ def build_ai_reword_request(
     的活（改素材画面事实），与这里改生图提示词是两件事。这条纪律必须写进请求——不给它，
     模型最省力的做法就是照 observed 抄一遍，图的问题被固化成设计。
 
-    ``discipline`` 由调用方从 ``image_prompt_discipline.discipline_text()`` 现取（#68 的
-    单一来源），本函数不复制正文：两份纪律文本必然各自漂。
+    ``discipline`` 由调用方从 ``image_prompt_discipline.discipline_text(model)`` 现取
+    （#68 的单一来源，issue #87 起按模型各一份），本函数不复制正文：两份纪律文本必然
+    各自漂。``model_label`` 是**必填关键字参数、没有默认值**——默认值就是第二处
+    「默认档是谁」的口径（真源在 ``image_config``），而这一张的资产可能是 Qwen 或 MOSS
+    出的词，请求里说错模型名，模型就会按另一家的写法改写。
     """
     items = [
         f"- {aspect}：描述「{quote}」→ 图中「{observed}」"
         for aspect, quote, observed in deviations
     ]
     lines = [
-        "下面是一条 Z-Image 生图提示词，以及读图校对给出的偏差清单。",
+        f"下面是一条 {model_label} 生图提示词，以及读图校对给出的偏差清单。",
         "请**按偏差清单改写这条提示词**：方向是**强化原意**——把被画漏、被画错的那几处"
         "写得更显式（具体、可看见、正向陈述），让下一轮出图更可能画对。",
         "纪律：",
@@ -413,12 +427,14 @@ def ai_reword_asset_prompt(
     llm,
     *,
     locked_features: Sequence[str] = (),
+    model: str,
 ) -> str:
     """按偏差清单改写一条资产生图提示词（AI 改词，一轮，issue #72）。
 
     ``llm`` 由调用方注入（带 ``invoke(request, config=...)`` 接口，测试可传 stub）。
-    纪律文本**现取** ``discipline_text()``：改 .md 即改模型看到的那一份，
-    与角色提示词不可能只改到一半（#68 的单一来源）。
+    纪律文本按**这一张的模型**现取 ``discipline_text(model)``（issue #87）：改 .md 即改
+    模型看到的那一份，与角色提示词不可能只改到一半（#68 的单一来源）。模型名同时进请求
+    开头——写错模型名，模型就会按另一家的写法改写，而结果照样写回、不报错。
 
     **调用走直调等待看门狗**（issue #67 / ADR 0019）：ADR 的裁定是「所有直接
     ``llm.invoke`` 改走它」，AI 改词是这条规则落地之后新增的直调点——裸调就没有首字节
@@ -429,9 +445,9 @@ def ai_reword_asset_prompt(
     丢了这一张的偏差就再也判不出来（静默失效）。调用方据此不采用改写结果、保持原词。
     结果是空串也响：空词写回等于把这张图的提示词删了。
     """
-    from .tools.image_prompt_discipline import discipline_text
-
-    request = build_ai_reword_request(prompt, deviations, locked_features, discipline_text())
+    request = build_ai_reword_request(
+        prompt, deviations, locked_features, discipline_text(model),
+        model_label=image_model_label(model))
     # 复用同文件的 ``_call_direct``（复审 T4）：它已经把「run_direct_call → 失败翻异常」
     # 这段接好了，这里再抄一遍就是第二份会各自漂移的接线。空串/锁死清单校验留在下面
     # ——那是 AI 改词特有的结果契约，与调用包装不是一回事。

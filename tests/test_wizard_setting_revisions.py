@@ -68,7 +68,7 @@ def _bundle_payload(label: str) -> dict:
 
 # 资产图那三个节点（issue #36 起在阶段 1 链上）的请求开头与它们要的 JSON 形态
 # （issue #40 起：JSON 数组、每资产一项、Z-Image 单版）。
-_ASSET_PROMPT_HEAD = "各生成一条 Z-Image 可直接复制的生图提示词"
+_ASSET_PROMPT_HEAD = "各生成一条可直接复制的生图提示词"
 
 
 def _asset_payload() -> list:

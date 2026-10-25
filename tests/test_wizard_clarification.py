@@ -15,7 +15,8 @@ from typing import Callable
 
 import pytest
 
-from minimax_h3_prompt import clarification, config as config_module, model_factory
+from minimax_h3_prompt import clarification, config as config_module, image_config, model_factory
+from minimax_h3_prompt.agents import image_prompt_agent_key
 from minimax_h3_prompt.brief_parser import Brief
 from minimax_h3_prompt.graph import nodes
 from minimax_h3_prompt.session_store import load_session
@@ -282,10 +283,16 @@ def test_clarifications_survive_session_round_trip(tmp_path, monkeypatch):
 _AGENTS = {
     key: object() for key in (
         "producer", "director", "screenwriter", "character_designer",
-        "image_prompt_engineer", "art_director", "storyboard", "cinematographer",
+        "art_director", "storyboard", "cinematographer",
         "frame_prompt_engineer", "prompt_engineer",
     )
 }
+# 资产图提示词按生图模型各装一个 agent（issue #87，**没有裸的 image_prompt_engineer 键**）：
+# 节点按 ``config/image.yaml`` 取，本文件不关心取到哪一档，按值域现建占位对象即可。
+_AGENTS.update({
+    image_prompt_agent_key(key): object()
+    for key in image_config.IMAGE_MODEL_KEYS
+})
 
 # issue #40 起资产图节点收 JSON 数组（每资产一项、Z-Image 单版）
 _IMAGE_JSON = json.dumps([{"name": "橘猫", "positive_prompt": "庭院橘猫",

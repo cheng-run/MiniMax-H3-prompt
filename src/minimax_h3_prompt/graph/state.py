@@ -39,9 +39,9 @@ class PipelineState(TypedDict, total=False):
     art_design: str  # 美术指导统筹结果
     # 三键必须逐个声明：LangGraph 只搬运 schema 里声明过的键；键名清单见
     # ``ASSET_PROMPT_KEYS``（上面），别在这里另立一份。
-    character_image_prompts: list  # 人物资产 Z-Image 提示词列表（每资产一条，issue #40）
-    prop_image_prompts: list  # 道具资产 Z-Image 提示词列表
-    scene_image_prompts: list  # 场景资产 Z-Image 提示词列表
+    character_image_prompts: list  # 人物资产生图提示词列表（每资产一条，issue #40 起）
+    prop_image_prompts: list  # 道具资产生图提示词列表
+    scene_image_prompts: list  # 场景资产生图提示词列表
     identity_lock: str  # 一致性对齐会（圆桌 3）锁定
 
     # 视觉（分镜 → 并行决策 → 并行制作）

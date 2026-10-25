@@ -18,7 +18,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import tool
 
-from .. import film_language, model_factory
+from .. import film_language, image_config, model_factory
 from ..brief_parser import FRAME_VARIANTS, RefItem
 from ..config import config
 from ..observability import record_agent_call, reporter
@@ -28,6 +28,7 @@ from ..tools.h3_validator import (
     format_issues,
     validate_prompt,
 )
+from ..tools.image_prompt_discipline import DEFAULT_IMAGE_MODEL, discipline_text
 from ..tools.ref_metadata import format_ref_meta, to_tuple
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
@@ -122,22 +123,63 @@ def _official_verbatim_block(role: str) -> str:
     )
 
 
-def load_role_prompt(role: str) -> str:
-    """读角色提示词；命中的角色在文末附上电影语言词表切片（issue #31 / #33）与官方原文块。
+# 资产图提示词工程师的角色键。它的 system prompt 按生图模型分支（issue #87），所以
+# 装配后另有一组键 ``image_prompt_engineer:<模型>``（见 ``image_prompt_agent_key``）。
+IMAGE_PROMPT_ROLE = "image_prompt_engineer"
 
-    两种附加都发生在**加载处**而不是各份 .md 里：它们都是逐字读入的纯文本，抄进角色 .md
+
+def image_prompt_agent_key(model: str) -> str:
+    """资产图提示词工程师按模型装配后的 agents 键。
+
+    为什么键里带模型而不另开一个字典：``agents`` 是节点唯一的注入面（``make_nodes`` 只接它），
+    多开一条通道就得改每一个节点工厂的签名。键的形式只在 ``build_role_agents`` 与
+    取用它的节点两处出现，统一从这里派生，不各写一份。
+    """
+    if model not in image_config.IMAGE_MODEL_KEYS:
+        raise ValueError(
+            f"生图模型无效：{model!r}"
+            f"（只认 {', '.join(image_config.IMAGE_MODEL_KEYS)}）")
+    return f"{IMAGE_PROMPT_ROLE}:{model}"
+
+
+def _image_discipline_block(role: str, image_model: str | None) -> str:
+    """该角色文末要附的生图纪律块；只有资产图提示词工程师拿得到（issue #87）。
+
+    **为什么按模型取**：同一段系统提示词里写两套相反的写法（中文／英文、写不写负面），
+    模型只会挑一套——分支必须发生在装配处，不能靠公共段里「如果……则……」的条件句。
+    ``image_model`` 为空时取历史默认档（Z-Image）：本票之前只有这一档，不带参数的
+    调用点（AI 改词等）行为因此不变。
+    """
+    if role != IMAGE_PROMPT_ROLE:
+        return ""
+    # 末尾补一个换行：拼进系统提示词后与下一块（词表）之间留一个空行——纪律块原先在
+    # 角色 .md 末尾时，靠的是 .md 自带的收尾换行，搬出来后必须显式补上，否则
+    # 「…元标签。」与词表标题会粘在一起（改动前的排版因此逐字保留）。
+    return discipline_text(image_model or DEFAULT_IMAGE_MODEL) + "\n"
+
+
+def load_role_prompt(role: str, *, image_model: str | None = None) -> str:
+    """读角色提示词；命中的角色在文末附上生图纪律块（#87）、电影语言词表切片（#31／#33）
+    与官方原文块（#35）。
+
+    三种附加都发生在**加载处**而不是各份 .md 里：它们都是逐字读入的纯文本，抄进角色 .md
     就等于同一份内容有 N 份硬拷贝（本仓吃过「同一句官方原文 3 份硬拷贝」的亏）。
     哪些角色拿哪几节词表由 ``film_language.VIDEO_SLICES`` / ``IMAGE_SLICES`` 声明，
     不声明的角色拿到空串——分段规划师尤其不能拿到（段尾钩子要留作锚帧语义校验的
     可判定对照物），关键帧生图提示词工程师只能拿生图半（静态图不写运镜）。
     哪些角色拿官方原文块由 ``OFFICIAL_VERBATIM_ROLES`` 声明（issue #35）。
+
+    纪律块排在公共段之后、词表之前：角色 .md 里的指针写的是「见本提示词里的『生图提示词
+    纪律』一节」，而词表是选词材料、不是写法规则，不该把纪律挤到更远的地方。
     """
     prompt = (PROMPTS_DIR / f"{role}.md").read_text(encoding="utf-8")
+    discipline = _image_discipline_block(role, image_model)
     wordlist = _role_wordlist(role)
     # 原文块排在最后：角色 .md 里的指针写的是「见文末【官方逐字符原文】」
     verbatim = _official_verbatim_block(role)
-    # 空块不加空行：不声明词表/原文的角色，提示词逐字与改动前一致
-    return "\n".join(part for part in (prompt, wordlist, verbatim) if part)
+    # 空块不加空行：不声明词表/原文/纪律的角色，提示词逐字与改动前一致
+    return "\n".join(
+        part for part in (prompt, discipline, wordlist, verbatim) if part)
 
 
 def _make_tools(refs: list[RefItem], mode: str, duration: float, variant: str, role: str) -> list:
@@ -176,15 +218,38 @@ def build_role_agents(
     duration: float,
     variant: str,
 ) -> dict[str, object]:
-    """构建 15 个角色 agent。返回 {role_key: agent}。"""
+    """构建各角色 agent。返回 ``{role_key: agent}``，外加资产图提示词工程师的按模型变体。
+
+    资产图提示词工程师一个人跑**三种资产**（人物／道具／场景），每档的生图模型可以不同，
+    而 system prompt 里的纪律块正是按模型写的——所以它按模型各装一个 agent，键是
+    ``image_prompt_engineer:<模型>``（issue #87）。其余角色仍是一角色一个。
+
+    **没有裸的 ``image_prompt_engineer`` 键**：它的 system prompt 必须绑一个模型才有
+    意义，留一个「默认档」别名就是给后来者一条静默回落的路——取错档不报错、只是按另一
+    家的写法出词。要它就按模型取（``nodes._image_prompt_agent`` 缺键即响）。
+
+    ``name`` 仍是 ``role_image_prompt_engineer``：模型不是角色，成本表与进度事件按角色
+    归集，不该因为换了模型就多出几行。
+    """
     agents: dict[str, object] = {}
     for role in ROLE_KEYS:
+        if role == IMAGE_PROMPT_ROLE:
+            continue  # 按模型分支构建，见下
         tools = _make_tools(refs, mode, duration, variant, role)
         agents[role] = create_agent(
             model=model,
             system_prompt=load_role_prompt(role),
             tools=tools or None,
             name=f"role_{role}",
+        )
+    for model_key in image_config.IMAGE_MODEL_KEYS:
+        # ``_make_tools`` 对资产图提示词工程师返回空表（它不在任何工具白名单里），
+        # 这里显式传 None 与上面 ``tools or None`` 同形。
+        agents[image_prompt_agent_key(model_key)] = create_agent(
+            model=model,
+            system_prompt=load_role_prompt(IMAGE_PROMPT_ROLE, image_model=model_key),
+            tools=None,
+            name=f"role_{IMAGE_PROMPT_ROLE}",
         )
     return agents
 

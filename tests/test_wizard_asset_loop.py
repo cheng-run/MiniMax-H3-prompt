@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import pytest
 from langchain_core.messages import AIMessage
 
-from minimax_h3_prompt import model_factory
+from minimax_h3_prompt import image_config, model_factory
 from minimax_h3_prompt.asset_ledger import load_asset_ledger, resolve_asset_path
 from minimax_h3_prompt import asset_loop
 from minimax_h3_prompt.asset_loop import ASSET_ROUNDS_FILENAME
@@ -244,6 +244,20 @@ def _rounds(tmp_path: Path) -> list[dict]:
         out.extend(json.loads(line) for line in
                    path.read_text(encoding="utf-8").splitlines() if line.strip())
     return out
+
+
+def _pin_all_models_to(monkeypatch, tmp_path, model: str) -> None:
+    """把三档生图模型钉到同一个值（写临时 ``config/image.yaml``）。
+
+    本文件多数用例考的是「纪律/检查有没有接上」而不是「按档取哪一档」（那条由
+    tests/test_image_model_discipline_nodes.py 钉），默认配置（人物=qwen）会让
+    Turbo 专属的警告与纪律不出现，故显式钉住。
+    """
+    path = tmp_path / "image.yaml"
+    path.write_text(
+        "\n".join(f"{kind}: {model}" for kind in image_config.IMAGE_KINDS) + "\n",
+        encoding="utf-8")
+    monkeypatch.setattr(image_config, "IMAGE_CONFIG_PATH", path)
 
 
 def _run_loop(tmp_path, monkeypatch, tail: list[str], *,
@@ -1099,7 +1113,11 @@ def test_ai_reword_rewrites_by_all_deviations_and_logs_a_new_trigger(
 
     第二条偏差（裙长）**还没来得及裁**就被 voided——AI 改词仍必须看到它：偏差清单取
     本轮的**全部**条目，不是「已裁过的那几条」（票面「全部偏差条目」）。
+
+    三档钉在 Z-Image：本用例考的是「纪律文本进了请求」，而八条 Turbo 纪律只属于那一档
+    （按档取哪一档由 tests/test_image_model_discipline_nodes.py 钉）。
     """
+    _pin_all_models_to(monkeypatch, tmp_path, "z_image")
     girl = _write_source(tmp_path, "girl.png", b"girl")
     vision = {"红裙女孩":_claims(deviations=[
         ("裙色", "红裙", "宝蓝色长裙"),   # 人裁：重生成
@@ -1262,7 +1280,11 @@ def test_regen_menu_and_proofread_report_show_the_regen_round_hint(
 
 
 def test_ai_reword_output_is_rechecked_against_the_discipline(tmp_path, monkeypatch, capsys):
-    """AI 改词也是一次出词：结果照跑警告级纪律检查（#68 / ADR 0018）——只警告、不阻断。"""
+    """AI 改词也是一次出词：结果照跑警告级纪律检查（#68 / ADR 0018）——只警告、不阻断。
+
+    钉在 Z-Image 档：负向表述这一类只在那一档成立（issue #87）。
+    """
+    _pin_all_models_to(monkeypatch, tmp_path, "z_image")
     girl = _write_source(tmp_path, "girl.png", b"girl")
     vision = {"红裙女孩":_claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
     # 含负向表述（Turbo 上是空动作）——改写结果照样写回，但要有一行警告
@@ -1280,6 +1302,38 @@ def test_ai_reword_output_is_rechecked_against_the_discipline(tmp_path, monkeypa
     out = capsys.readouterr().out
     assert "不要阴影" in out, "改写结果没写回出站"
     assert "[纪律警告" in out and "负向表述" in out, "AI 改词结果没跑纪律检查"
+
+
+def test_ai_reword_follows_the_assets_image_model(tmp_path, monkeypatch, capsys):
+    """AI 改词按**这一张的模型**取纪律与检查口径（issue #87）。
+
+    人物默认走 Qwen：请求里要说 Qwen、带 Qwen 那一份纪律；而「负向表述」是 Turbo 专属
+    的检查（CFG=1），Qwen 档不该报——报出来就是一片假警告。变异检验：把向导里
+    ``image_model_for(item.kind)`` 换成默认档，本用例必红。
+    """
+    from minimax_h3_prompt.tools.image_prompt_discipline import discipline_text
+
+    # 三档显式钉成 Qwen：本用例考「按这一张的模型取纪律」，不该被用户本机的
+    # config/image.yaml（他可以合法地换成别的模型）带红。
+    _pin_all_models_to(monkeypatch, tmp_path, "qwen")
+    girl = _write_source(tmp_path, "girl.png", b"girl")
+    vision = {"红裙女孩":_claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
+    llm = _FakeLLM(ai_reword_reply="人物·红裙女孩专属生图提示词：宝蓝色长裙，不要阴影")
+    tail = [
+        "", "1", str(girl),
+        "2", "3",      # 三选：重生成 → AI 改词
+        "4",           # 放弃收尾
+        "", "4", "", "4", "4",
+        "8", "1",
+    ]
+    _asked, code, _ = _run_loop(tmp_path, monkeypatch, tail, vision=vision, llm=llm)
+
+    assert code == 0
+    request = next(text for text in llm.requests if _AI_REWORD_HEAD in text)
+    assert "Qwen-Image 2.1" in request, "AI 改词请求没按这一张的模型说话"
+    assert discipline_text("qwen") in request, "AI 改词请求带的是别档的纪律"
+    assert discipline_text("z_image") not in request, "AI 改词请求混进了 Z-Image 纪律"
+    assert "负向表述" not in capsys.readouterr().out, "Qwen 档仍按 Turbo 的口径报负向警告"
 
 
 def test_ai_reword_goes_through_the_direct_call_watchdog(tmp_path, monkeypatch, capsys):

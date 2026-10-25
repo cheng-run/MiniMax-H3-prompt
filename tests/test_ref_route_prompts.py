@@ -116,7 +116,7 @@ def _run_pipeline(tmp_path, monkeypatch, *, first_video_prompt: str | None = Non
     def fake_run_agent(agent, message):
         requests.append(message)
         for _node, kind, _out, assets in _ASSETS:
-            if "各生成一条 Z-Image" in message and f"请为{kind}" in message:
+            if "各生成一条可直接复制的生图提示词" in message and f"请为{kind}" in message:
                 return _assets_json(assets)
         # 主组装请求与质检修复轮都走 prompt_engineer：修复轮数得出来，才知道 N 张登记
         # 真的接进了校验（缺图不修复＝接线断了）。

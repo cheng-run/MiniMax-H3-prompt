@@ -8,12 +8,14 @@ from typing import Callable
 
 from langgraph.graph.state import CompiledStateGraph
 
-from ..agents import run_agent
+from .. import image_config
+from ..agents import image_prompt_agent_key, run_agent
 from ..brief_parser import FRAME_VARIANTS, Brief, brief_uses_refs
 from ..config import Config
 from ..generation import (
     IMAGE_FAMILY_LABELS,
     IMAGE_PROFILE_DEFAULTS,
+    KIND_LABELS,
     canvas_display,
     composition_hint,
     fl2va_bundle_from_dict,
@@ -153,13 +155,42 @@ def _make_design_node(agents: dict, role: str, output_field: str, label: str,
     return node
 
 
+# 中文资产类（节点请求里说的话）→ 配置里的键（``image_config.IMAGE_KINDS``）。
+# **逆映射自 ``generation.KIND_LABELS``**：那份是「键 → 中文」的唯一定义处，这里再抄一份
+# 「人物=character」就是第二份会各自漂移的映射（改键名时漏一处，节点会去取不存在的档）。
+_KIND_KEY_BY_LABEL = {label: key for key, label in KIND_LABELS.items()}
+
+
+def _image_prompt_agent(agents: dict, model_key: str):
+    """取该档模型的资产图提示词 agent；缺键就**点名缺哪个模型**，不回落。
+
+    静默回落是这里最坏的失败形态：出的词按另一家的写法写（Z-Image 要中文短句、Qwen 要
+    英文长文），产物照样生成、不报错，只是质量掉一档。所以键不在就直接响。
+    """
+    key = image_prompt_agent_key(model_key)
+    if key not in agents:
+        raise ValueError(
+            f"没有为生图模型 {model_key!r} 装配资产图提示词 agent（缺键 {key!r}）——"
+            "装配处应按 image_config.IMAGE_MODEL_KEYS 为每档各建一个")
+    return agents[key]
+
+
 def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_field: str) -> Callable:
-    """把模型无关设计资料翻译为 N 条 Z-Image 提示词（每资产一条，issue #40）。
+    """把模型无关设计资料翻译为 N 条生图提示词（每资产一条，issue #40）。
 
     这是**资产图**那条路（人物／道具／场景参考图，按剧本设计动态枚举 N 个资产），
     与关键帧那条路（``_make_fl2va_frame_prompt_node``）是两件事，但同属生图侧、
-    用同一份词表切片。Flux.2 版已全链取消：单资产只出 Z-Image 一版。
+    用同一份词表切片。Flux.2 版已全链取消：单资产只出一版。
+
+    出图模型按档取（``config/image.yaml``，issue #87）：人物／道具／场景可各用不同模型，
+    对应 agent 的 system prompt 里带的是**该模型**的纪律块。请求正文只说「生图提示词」，
+    不点名模型——点名会与另一档的纪律块打架（改配置不改请求就成了两处口径）。
     """
+    kind_key = _KIND_KEY_BY_LABEL.get(kind)
+    if kind_key is None:
+        raise ValueError(
+            f"未知资产类别：{kind!r}（只认 {', '.join(KIND_LABELS.values())}）")
+
     def node(state: PipelineState) -> dict:
         brief: Brief = state["brief"]
         # 路线守卫（issue #78 / 父 spec #77）：资产图提示词只属于多参路线。首尾帧把人物、
@@ -168,8 +199,11 @@ def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_f
         # 截断重跑与续跑链都不用跟着改（已知副作用：并行组合节点不产生更新、进度行不出现）。
         if not brief.is_ref:
             return {}
+        # 模型在**调用时**取：配置是环境事实（换机器换模型只改 yaml），每次出词都现读。
+        model_key = image_config.image_model_for(kind_key)
+        agent = _image_prompt_agent(agents, model_key)
         message = (
-            f"请为{kind}设计中的每个资产各生成一条 Z-Image 可直接复制的生图提示词。"
+            f"请为{kind}设计中的每个资产各生成一条可直接复制的生图提示词。"
             f"设计里有几个{kind}资产就输出几条。只输出 JSON 数组。\n"
             + _ctx(
                 原始剧情=brief.plot,
@@ -186,13 +220,13 @@ def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_f
                 画布=_canvas_block(brief.canvases),
             )
         )
-        raw = run_agent(agents["image_prompt_engineer"], message)
+        raw = run_agent(agent, message)
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError:
             # 纯格式转换，但它同样用这份系统提示词——词表里的【画布】指针照样得在场。
             repair = run_agent(
-                agents["image_prompt_engineer"],
+                agent,
                 f"把以下内容转换为严格 JSON 数组，不要 markdown：\n{_ctx(画布=_canvas_block(brief.canvases))}\n{raw}",
             )
             try:
@@ -204,7 +238,7 @@ def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_f
         violations = _locked_violations(parsed, kind)
         if violations:
             patch = run_agent(
-                agents["image_prompt_engineer"],
+                agent,
                 _build_locked_repair_request(kind, violations, _canvas_block(brief.canvases)),
             )
             merged = _apply_locked_repair(parsed, kind, patch, violations)
@@ -218,21 +252,26 @@ def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_f
             entries = _normalize_asset_entries(parsed, kind)
         # 纪律检查**排在归一之后**：只有形状合规的条目才谈得上「正文写法」，
         # 也保证两条返回路径（修过/没修过）都经过同一道检查（issue #68）。
-        _warn_image_prompt_discipline(entries, kind)
+        _warn_image_prompt_discipline(entries, kind, model_key)
         return {output_field: entries}
     return node
 
 
-def _warn_image_prompt_discipline(entries: list[dict], kind: str) -> None:
-    """出词后打印警告级纪律检查结果（issue #68 / ADR 0018）。
+def _warn_image_prompt_discipline(entries: list[dict], kind: str, model: str) -> None:
+    """出词后打印警告级纪律检查结果（issue #68 / ADR 0018 / issue #87）。
 
     **只打印、不改产物、不阻断**：Turbo 的失败模式是「细节没画出来」，不是
     「输出不合规」；做成 error 闸门会被合法写法误伤，把一份本来能出图的提示词停掉。
     警告打在节点里而不是展示口：真实运行都经过节点，且本文件已有同样的先例
     （关键帧节点剥帧的告警）。
+
+    ``model`` 决定跑哪几类检查：五类里四类的依据是 Turbo 自己的事实（CFG=1、编码器不认
+    权重、长文稀释注意力、空间关系弱），拿它们判 Qwen 的英文长文只会刷出一片假警告，
+    把真问题淹掉。判据住在 ``check_image_prompt`` 一处（issue #87），这里只传模型。
     """
     for entry in entries:
-        for warning in check_image_prompt(str(entry.get("positive_prompt", ""))):
+        for warning in check_image_prompt(
+                str(entry.get("positive_prompt", "")), model=model):
             print(
                 f"[警告] {kind}「{entry.get('name', '')}」生图提示词：{warning.message}"
             )
