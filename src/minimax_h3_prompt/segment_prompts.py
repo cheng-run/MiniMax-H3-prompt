@@ -33,17 +33,6 @@ from .user_revisions import pending_revisions, render_revision_block
 
 # 镜头块标记：[Shot N]（允许中括号与数字间任意空白）
 _SHOT_BLOCK = re.compile(r"\[Shot\s+(\d+)\]")
-# 「快机位」措辞（issue #11：致闪因素之一）。覆盖实测物证形态
-# 「a fast low tracking shot」「at fast speed」，兼顾 rapid/whip 等同义。
-_FAST_CAMERA_RE = re.compile(
-    r"\b(?:a\s+)?(?:fast|rapid|swift|whip)[\w-]*\s+"
-    r"(?:low\s+|high\s+|wide\s+|tight\s+|close\s+|handheld\s+|tracking\s+|pan\s+"
-    r"|dolly\s+|zoom\s+|push-in\s+|crane\s+|aerial\s+|overhead\s+)*"
-    r"\w*(?:shot|tracking|pan|dolly|zoom|camera move|push-in|crane|handheld)\b"
-    r"|at fast speed|rapid(?:ly)?\s+(?:tracking|pan|dolly|zoom|camera)|whip pan"
-    r"|fast-paced camera",
-    re.IGNORECASE,
-)
 # 镜头块首的绝对时间戳：[Shot 2] At 00:03.500, the camera ...
 _TIMESTAMP_AFTER_TAG = re.compile(r"(\[Shot\s+\d+\])\s*At\s+(\d{2}):(\d{2})\.(\d{3}),?\s*", re.IGNORECASE)
 # 镜头区之后属于全局声音/配乐段落的标记（用于界定镜头区结尾）
@@ -490,12 +479,8 @@ _REWRITE_INSTRUCTION = f"""你是 H3 视频提示词工程师。把整条视频�
   **每个 Shot 块必须以官方 edge-stability 原句收尾**（逐字符照抄，不改写、不译文）：
   `{EDGE_STABILITY_SENTENCE}`
   官方要求它的理由就是本流程的桥接帧链——抽出的尾帧要保持轮廓锐利，留给下一段当首帧参考；
-  **机位与节拍二选一**：快机位（fast/rapid tracking、whip pan、`at fast speed` 等）与 ≥3 个动作节拍
-  （正文 ≥3 个 `At 00:XX.XXX`）不得同段共存。**依据只在 4 步采样档成立**——那档同 seed 单变量对照
-  （同图、同节拍数，只差机位措辞）：慢机位 0.78 / 快机位+3 拍 4.865，阈值取在 4.1–4.9；
-  8 步档下同一文本实测 0.869，但 **8 步的慢机位对照与独立载荷样本都还没有**，所以「8 步下这条处置
-  是否还需要」**未验证**：纪律照旧执行，**不许自行放宽**，要放宽先补那两组样本。
-  默认降机位为静态/慢速中景、节拍照写，剧情必须快镜时把本段节拍压到 2 个以内；
+  **机位速度按剧情选**：静场、克制段落才用 `Static Shot`；有动作的段写完整的「运动类型 + 幅度 +
+  速度」自然句（词表见下），不要把「静态/慢速中景」当默认；
 - overall_soundscape: **为本段重写**（不是从整条裁切，按段重写）：1-4 句 English 连续段落，
   描述本段时间窗内的环境声与动作声，无时间戳（官方 §4.6）；
 - non_diegetic_music: **为本段重写**：1-3 句 English，或无声时只写 N/A，无时间戳（官方 §4.7）。
@@ -587,14 +572,8 @@ H3 是执行型模型：你写什么它就做什么，含糊等于失控；把**
      它必须是**该块的最后一句**；**多镜段里每个 `[Shot N]` 块各加一次**，不是只在段尾加一次，
      逐字符照抄、不改写不译文（官方 base-en.txt 2.1 硬要求；理由见下）：
      `{EDGE_STABILITY_SENTENCE}`
-   - **机位与节拍二选一（实测纪律）**：快机位（fast/rapid tracking、whip pan、`at fast speed` 等）
-     与 **≥3 个动作节拍**（正文里 ≥3 个 `At 00:XX.XXX`）**不得同段共存**。**依据只在 4 步采样档
-     成立**——那档同 seed 单变量对照（同图、同节拍数，只差机位措辞）：慢机位 0.78 / 快机位+3 拍
-     4.865，阈值取在 4.1–4.9；8 步档下同一文本实测 0.869。但 **8 步的慢机位对照与独立载荷样本
-     都还没有**，所以「8 步下这条处置是否还需要」**未验证**：纪律照旧执行，**不许自行放宽**，
-     要放宽先补那两组样本。默认**降机位**：改静态/慢速中景
-     （`a static medium shot with small amplitude at slow speed`），节拍照写；剧情确实必须快镜时，
-     把本段节拍压缩到 2 个以内，或把后续节拍拆给相邻段
+   - **机位速度按剧情选**：静场、克制段落才用 `Static Shot`；有动作的段写完整的「运动类型 + 幅度 +
+     速度」自然句（词表见下），不要把「静态/慢速中景」当默认——全片默认静态会让动作被摊平、成片像慢放
 2. `overall_soundscape:` **为本段重写**英文摘要句（官方 §4.6）：1-4 句 English 连续段落，描述本段的环境声与动作声；**无时间戳**。
 3. `non_diegetic_music:` **为本段重写**英文摘要句（官方 §4.7）：1-3 句 English，写观众能听到、角色听不到的配乐（乐器/速度/节奏）；无声时只写 `N/A`；**无时间戳**。
 
@@ -806,41 +785,6 @@ def build_segment_v2_request(
 MAX_SEGMENT_ATTEMPTS = 2
 
 
-def _check_fast_camera_multi_beat_coexist(text: str, stamps: list[float],
-                                          issues: list[ValidationIssue]) -> None:
-    """「快机位 + 多拍动作」同段共存 → error（issue #11，钉 seed 2×2 实测）。
-
-    两因素单独出现都不致闪（R1：快机位 + 2 拍 = 0.173 绿；R2：慢机位 + 3 拍 = 0.78 可接受），
-    共存才致闪（00016 0.78 → 00017 4.865，同 seed 只差机位措辞，6.2 倍）。
-    故两个条件必须同时命中才报。多拍阈值 ≥3 个时间戳：快机位 + ≥3 拍的物证全部
-    落在 4.1–4.9（红），快机位 + 2 拍为 0.173（绿）——阈值落在实测分离边界上。
-
-    **上述阈值与「共存才致闪」的结论都是在 4 步采样下测得的（2026-09-23 复测修正）。**
-    钉 seed 单变量对照显示**采样总步数才是主因**：同 seed 同文本同 LoRA，
-    4 步 2.715 / 8 步 0.869（3.1 倍）；且本检查判 red 的 armA 文本在 8 步下得 0.869，
-    与 4 步下的低运动对照 00016（0.78）相当——被判「必闪」的内容在 8 步下并不闪。
-    另：闪动与 **LoRA 标称步数是否与采样步数对齐无关**（4step LoRA + 4 步 = 4.420，
-    8step LoRA + 4 步 = 4.473，同 seed 同文本，4 步档五发全落在 2.7–5.7）。
-
-    故本规则**判定逻辑保持不变**，但引用它时必须声明采样步数——4 步是其成立的前提。
-    ADR 0003 记此裁定。
-
-    无条件运行（不按 duration 门控）：判定只用绝对节拍数，漏传时长不该让检查静默失效
-    ——「规则在、接线不在」的同型风险，不留给未来调用方。
-    """
-    if len(stamps) < 3:
-        return
-    if not _FAST_CAMERA_RE.search(text):
-        return
-    issues.append(ValidationIssue(
-        "error", "FAST_CAMERA_MULTI_BEAT_COEXIST",
-        f"本段同时存在快机位措辞（fast/rapid tracking 等）与 {len(stamps)} 个动作节拍"
-        "——「快机位 + 多拍动作」同段共存实测致闪（4 步采样下 flicker_std 4.1–4.9；"
-        "单因素均绿）。默认降机位（改静态/慢速中景）；剧情必须快镜时，把动作节拍"
-        "压缩到 2 个以内或拆到相邻段。（该阈值量于 4 步采样：同一文本 8 步下实测 "
-        "0.869，故本规则以 4 步为前提，改采样配置前先重测）"))
-
-
 def validate_segment(text: str, duration: float | None = None,
                      start_s: float = 0.0) -> list[ValidationIssue]:
     """按本段时长校验一段分段提示词（返回 issue 列表，error 级需阻塞）。
@@ -860,7 +804,6 @@ def validate_segment(text: str, duration: float | None = None,
     """
     issues = validate_base(text, duration=duration, variant=SEGMENT_ANCHOR_VARIANT)
     stamps = timestamps_seconds(text)
-    _check_fast_camera_multi_beat_coexist(text, stamps, issues)
     _warn_if_timestamps_look_absolute(stamps, start_s, issues)
     return issues
 
@@ -1110,10 +1053,7 @@ def validate_ref_segment(text: str, *, duration: float | None = None,
       的定义，而这一层此前没有任何检查、0 条 issue 静默放过；
     - ``SEGMENT_ANAPHORA``：指代前文的措辞——对无记忆模型是无效信息，出现即作废。
 
-    另带两条既有纪律：时间戳疑似绝对片时（warning，同 ``validate_segment`` 的
-    启发式）、「快机位＋多拍」共存（error，同基链；该阈值量于 4 步采样，引用见
-    ``_check_fast_camera_multi_beat_coexist``——59- 工作流固定 8 步，纪律照旧执行，
-    不自行放宽）。
+    另带一条既有纪律：时间戳疑似绝对片时（warning，同 ``validate_segment`` 的启发式）。
 
     ``ref_meta`` / ``subject_scope`` 传**本段子集**（issue #75）：段内只喂用到的图，
     编号从 1 连续，所以「登记图全进定义」（``SEGMENT_DEFS_INCOMPLETE``）与 Subject
@@ -1178,7 +1118,6 @@ def validate_ref_segment(text: str, *, duration: float | None = None,
             "模型无跨段记忆，此类措辞是无效信息（把被指代的内容改写成本段自足的表述）"))
     stamps = timestamps_seconds(text)
     _warn_if_timestamps_look_absolute(stamps, start_s, issues)
-    _check_fast_camera_multi_beat_coexist(text, stamps, issues)
     return issues
 
 
@@ -1200,6 +1139,9 @@ H3 是执行型模型：你写什么它就做什么，含糊等于失控。要�
 - 正文时间基相对**本段起点**（00:00.000＝本段第一帧），取值落在 `[0, 本段时长)`；绝对片时严禁写进时间戳
 - 本段时间窗**之外**的事件（其他段的剧情）一个字都不能出现——违反＝本段作废
 - **禁止指代前文的措辞**（as mentioned before / as described earlier / the previous segment / 如前所述 等）：每段是独立生成，**模型无跨段记忆**，此类措辞是无效信息；被指代的内容要么改写成本段自足的表述，要么不写
+
+## 机位速度
+- **机位速度按剧情选**：静场、克制段落才用 `Static Shot`；有动作的段写完整的「运动类型 + 幅度 + 速度」自然句，不要把「静态/慢速中景」当默认——全片默认静态会把动作摊平，成片像慢放
 
 ## 结构（严格官方 ref-en.txt 六段式，全部英文）
 1. `subject_definitions:` **原样复制**请求给定的定义块，一字不改（定义性段落逐段重复；标签语义必须与给定一致，不得新造标签）

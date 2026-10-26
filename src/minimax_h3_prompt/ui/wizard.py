@@ -2669,7 +2669,7 @@ def _revise_ref_segment_round(text: str, *, position: int, total: int, plan,
     的纪律）；校验能拦的那类（模型动了锁死声明）在 ``revise_ref_segment_body`` 里已经拦下。
 
     定义块在改写里逐字取回（只动正文），交付时已按登记素材校验过 ``SEGMENT_DEFS_INCOMPLETE``，
-    所以这里重过的是**正文相关**的那几条（指代前文/时间戳/快机位/对齐行/注记与状态句在位）。
+    所以这里重过的是**正文相关**的那几条（指代前文/时间戳/对齐行/注记与状态句在位）。
 
     ``annotated``＝本段文本带不带分段注记（``RefSegmentResult.annotated``），**决定校验口径**：
     ≤15 秒直出的段是整片文本原样（不套注记），拿分段校验器去判它，那两条注记判据是

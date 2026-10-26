@@ -175,46 +175,30 @@ def test_rewrite_instruction_asks_rewrite_not_crop():
     assert "按段重写" in request or "rewrite" in request.lower()
 
 
-def test_both_segment_paths_carry_coexist_discipline():
-    """两条分段路径（v2 规划式 + 回退式）都必须带「快机位 + 多拍不同段共存」纪律。
+def test_segment_paths_no_longer_carry_the_coexist_ban():
+    """三条写段路径都不得再带「快机位 + 多拍」共存禁令，且都要保留「机位速度按剧情选」。
 
-    这是模板层的锚：改模板名/重构时纪律句丢了会在此报红（两条路径都要改，别只改主路径）。
+    2026-10-26 用户裁定：那条禁令是为旧模型 + 旧 LoRA 组合下的闪动设的；换成稳定方案后
+    它把全片默认压成静态/慢速中景（实测 5/5 段 static 或 slow，成片帧间运动量掉到
+    MAD≈0.3），直接造成「像慢放」。撤禁令后必须留一句正向指引，否则模板对机位速度失语，
+    写段器仍会惯性回到静态。
+
+    三条路径都要钉：首尾帧 v2、首尾帧回退、多参（v2 与回退共用同一条）。
     """
     from minimax_h3_prompt.segment_prompts import (
+        _REF_SEGMENT_DISCIPLINES,
         _REWRITE_INSTRUCTION,
         _SEGMENT_V2_INSTRUCTION,
     )
 
-    for name, tpl in (("v2", _SEGMENT_V2_INSTRUCTION), ("fallback", _REWRITE_INSTRUCTION)):
-        assert "不得同段共存" in tpl, f"{name} 模板缺共存禁令"
-        assert "降机位" in tpl, f"{name} 模板缺默认处置（降机位）"
-
-
-def test_both_segment_paths_state_the_sampling_premise_of_the_coexist_rule():
-    """共存禁令的**采样前提与成立状态**必须写进两条路径的模板（ADR 0003 / issue #11）。
-
-    那组阈值的物证是 4 步采样下量的（00016 慢机位 0.78 vs 00017 快机位+3 拍 4.865——
-    同 seed、同图、同节拍数，只差机位措辞）；同一文本在 8 步下只有 0.869。
-    模板里只写「否则产出剧烈闪动」是把一个带前提的实测结论说成了因果事实，而这两句正是
-    写段 LLM 直接读到的文本。
-
-    只补「4 步」还不够，必须把**状态**说全，否则 8 步的读者会读到「理由在我这档不成立，
-    但规矩照守」——那是本项目的「说反话」形态。三件事都要在：
-    - 缺哪两组样本（8 步的慢机位对照 / 独立载荷）→ 所以「8 步下是否还需要」未验证
-    - **不许自行放宽**（要放宽先补样本）
-    """
-    from minimax_h3_prompt.segment_prompts import (
-        _REWRITE_INSTRUCTION,
-        _SEGMENT_V2_INSTRUCTION,
-    )
-
-    for name, tpl in (("v2", _SEGMENT_V2_INSTRUCTION), ("fallback", _REWRITE_INSTRUCTION)):
-        assert "4 步" in tpl, f"{name} 模板没写阈值量于 4 步采样"
-        assert "8 步" in tpl, f"{name} 模板没写同一文本在 8 步下的对照"
-        assert "未验证" in tpl, f"{name} 模板没说清「8 步下是否还需要」是未验证的"
-        assert "独立载荷" in tpl, f"{name} 模板没点出缺的是哪两组样本"
-        assert "不许自行放宽" in tpl, \
-            f"{name} 模板缺「不许自行放宽」——缺了它，补上前提会被读成可以无视这条纪律"
+    for name, tpl in (
+        ("v2", _SEGMENT_V2_INSTRUCTION),
+        ("fallback", _REWRITE_INSTRUCTION),
+        ("ref", _REF_SEGMENT_DISCIPLINES),
+    ):
+        assert "不得同段共存" not in tpl, f"{name} 模板仍带共存禁令"
+        assert "降机位" not in tpl, f"{name} 模板仍把「降机位」写成默认处置"
+        assert "机位速度按剧情选" in tpl, f"{name} 模板缺机位速度的正向指引"
 
 
 def test_both_segment_paths_require_edge_stability_sentence():
@@ -983,8 +967,8 @@ def test_write_segment_v2_retry_is_bounded_and_never_silent():
 
 
 # ---------------------------------------------------------------------------
-# 「快机位 + 多拍动作」同段共存检查（issue #11，2026-09-23 钉 seed 2×2 实测裁定：
-# error 级、多拍阈值 ≥3 个时间戳、物证正负样本在 tests/fixtures/flicker_arms/）
+# 闸门接线（原「快机位 + 多拍」共存用例已于 2026-10-26 随禁令一并撤除；
+# tests/fixtures/flicker_arms/ 作为历史物证保留，但不再有检查消费它）
 # ---------------------------------------------------------------------------
 
 ARMS = Path(__file__).parent / "fixtures" / "flicker_arms"
@@ -995,80 +979,12 @@ def _arm(name: str) -> str:
     return (ARMS / f"{name}{suffix}").read_text(encoding="utf-8")
 
 
-def test_coexist_check_flags_real_flaring_artifacts():
-    """负样本必须报红：armA（00017，flicker 4.865）与 original（00012，4.163）。"""
-    from minimax_h3_prompt.segment_prompts import validate_segment
+def test_gate_surfaces_validation_issue(tmp_path, monkeypatch, capsys):
+    """接线断言（调用点）：写段产出有 error 时，向导闸门必须当面报红，不得静默交付。
 
-    for name in ("armA_H1_state_only", "original_00012"):
-        issues = validate_segment(_arm(name), 4.0)
-        codes = {i.code for i in issues if i.severity == "error"}
-        assert "FAST_CAMERA_MULTI_BEAT_COEXIST" in codes, f"{name}（致闪物证）未被报红"
-
-
-def test_coexist_check_single_factor_green():
-    """单因素不得误报：R1 只有快机位（2 拍，0.173）、R2 只有多拍（慢机位，0.78）。"""
-    from minimax_h3_prompt.segment_prompts import validate_segment
-
-    for name in ("R1_camera_only", "R2_action_only"):
-        issues = validate_segment(_arm(name), 4.0)
-        codes = {i.code for i in issues if i.severity == "error"}
-        assert "FAST_CAMERA_MULTI_BEAT_COEXIST" not in codes, f"{name} 是单因素反例，不该报"
-
-
-def test_coexist_check_positive_samples_clean():
-    """票面正样本全绿：executed_00014（静态低运动 0.092）。"""
-    from minimax_h3_prompt.segment_prompts import validate_segment
-
-    issues = validate_segment(_arm("executed_00014"), 4.0)
-    assert "FAST_CAMERA_MULTI_BEAT_COEXIST" not in {i.code for i in issues}
-
-
-def test_coexist_check_runs_even_without_duration():
-    """无时长（duration=None）时检查仍运行——判定只用绝对节拍数，
-    漏传时长不得让检查静默失效（「规则在、接线不在」同型风险的护栏）。"""
-    from minimax_h3_prompt.segment_prompts import validate_segment
-
-    issues = validate_segment(_arm("armA_H1_state_only"))
-    assert "FAST_CAMERA_MULTI_BEAT_COEXIST" in {i.code for i in issues}
-
-
-def test_coexist_check_two_beats_still_green():
-    """快机位 + 2 拍是合法边界（R1 物证 0.173），加一个节拍才越线。"""
-    from minimax_h3_prompt.segment_prompts import I2VA_ANCHOR_LINE, validate_segment
-
-    text = (
-        f"{I2VA_ANCHOR_LINE}\n\n"
-        "integrated_multimodal_description: [Shot 1] Live-action, cinematic, a fast low "
-        "tracking shot with small amplitude at fast speed frames the store. "
-        "At 00:00.500, the door swings open. At 00:02.000, the cat lands on the counter. "
-        "The shot settles on the landed cat.\n\n"
-        "overall_soundscape: A low hum sits under the room tone.\n\n"
-        "non_diegetic_music: N/A"
-    )
-    assert "FAST_CAMERA_MULTI_BEAT_COEXIST" not in {
-        i.code for i in validate_segment(text, 4.0)
-    }
-
-
-def test_coexist_rewrites_segment_until_clean():
-    """重写循环消费新检查：首稿共存 → 带原因重写 → 合格稿收工。"""
-    from minimax_h3_prompt.segment_prompts import write_segment_v2
-
-    good = _arm("executed_00014")
-    llm = SequencedLLM([_arm("armA_H1_state_only"), good])
-    plans = _v2_plans()  # 第 2 段时长 6s
-    text = write_segment_v2(plans[1], plans, {"shot_table": "x"}, llm)
-
-    assert llm.calls == 2
-    assert text == good
-    assert "FAST_CAMERA_MULTI_BEAT_COEXIST" in llm.requests[1], "重写请求没带上共存问题"
-
-
-def test_gate_surfaces_coexist_issue_for_gen004_shot02(tmp_path, monkeypatch, capsys):
-    """接线断言（调用点）：GEN004 shot-02.md 走向导闸门必须当面报红，不得静默交付。
-
-    票面闸门缺口：validate_segment 对该文本曾返回零 issue，而它正是产出坏片的文本。
-    物证已固化为 fixture（原件在未跟踪的 output/sessions/ 下，CI 不可达）。
+    原用例钉的是「快机位 + 多拍」共存码（GEN004 shot-02 物证）；禁令撤除后那条码不存在，
+    但**闸门本身不能跟着失效**——所以改钉另一条仍然有牙的 error
+    （``LAST_TIMESTAMP_TOO_CLOSE_TO_END``：末节拍压在段尾），断言点不变。
     """
     from types import SimpleNamespace
 
@@ -1077,7 +993,9 @@ def test_gate_surfaces_coexist_issue_for_gen004_shot02(tmp_path, monkeypatch, ca
     from minimax_h3_prompt.segment_planner import SegmentPlan
     from minimax_h3_prompt.ui import wizard
 
-    bad = _arm("gen004_shot02.md")
+    # R1_camera_only 在 4s 档下会报 LAST_TIMESTAMP_TOO_CLOSE_TO_END（末节拍压在段尾），
+    # 用它代替已失去牙口的共存物证，确保本用例测的始终是「闸门会不会报」而非某条具体规则。
+    bad = _arm("R1_camera_only")
     brief = Brief(mode="base", variant="I2VA", duration=10.0, style="写实", plot="便利店橘猫")
     generation_dir = tmp_path / "GEN001"
     generation_dir.mkdir()
@@ -1095,7 +1013,7 @@ def test_gate_surfaces_coexist_issue_for_gen004_shot02(tmp_path, monkeypatch, ca
     wizard._run_segmented_flow_v2(session, plans, {}, SimpleNamespace())
 
     out = capsys.readouterr().out
-    assert "FAST_CAMERA_MULTI_BEAT_COEXIST" in out, "闸门对新检查静默了"
+    assert "LAST_TIMESTAMP_TOO_CLOSE_TO_END" in out, "闸门对 error 静默了"
     assert "可立即复制到 H3" not in out
 
 
@@ -1513,3 +1431,40 @@ def test_write_ref_segment_v2_retries_on_errors_bounded():
     assert len(llm.requests) == MAX_SEGMENT_ATTEMPTS  # 有界
     assert "SEGMENT_ANAPHORA" in llm.requests[1]  # issue 回插重写请求
     assert text is not None  # 仍不合格交回原文（当面给用户看），不返回 None 装死
+
+
+def test_camera_speed_guidance_reaches_all_four_segment_requests():
+    """「机位速度按剧情选」必须真发到**四条**写段请求里（2026-10-26 撤禁令时的接线断言）。
+
+    只断言模板常量是「被测物自身的单测」——常量对了、请求组装时漏掉，照样不报红。
+    本仓已多次吃过「规则在、接线不在」，所以这里在四个调用点直接钉：
+    首尾帧 v2 / 首尾帧回退 / 多参 v2 / 多参回退。
+    """
+    from minimax_h3_prompt.segment_prompts import (
+        build_segment_v2_request,
+        rewrite_ref_segment_prompt,
+        rewrite_segment_prompt,
+    )
+
+    marker = "机位速度按剧情选"
+
+    plans = _v2_plans()
+    base_v2 = build_segment_v2_request(plans[1], plans, {"shot_table": "x"})
+    assert marker in base_v2, "首尾帧 v2 请求没带上机位速度指引"
+
+    segments = split_shots_from_prompt(SAMPLE_PROMPT, total_duration=15.0)
+    llm = FakeLLM()
+    rewrite_segment_prompt(segments[1], SAMPLE_PROMPT, llm)
+    assert marker in llm.last_request, "首尾帧回退请求没带上机位速度指引"
+
+    plan, all_plans = _ref_plans()[1], _ref_plans()
+    ref_v2 = build_ref_segment_v2_request(plan, all_plans, **_ref_request_kwargs())
+    assert marker in ref_v2, "多参 v2 请求没带上机位速度指引"
+
+    ref_llm = _ref_v2_llm()
+    rewrite_ref_segment_prompt(
+        base_prompt=_REF_WHOLE_PROMPT, plan=plan, total_segments=len(all_plans),
+        total_s=22, shot_texts=["[Shot 2] A close-up as she hands 青铜钥匙 to the boy."],
+        llm=ref_llm,
+    )
+    assert marker in ref_llm.requests[-1], "多参回退请求没带上机位速度指引"

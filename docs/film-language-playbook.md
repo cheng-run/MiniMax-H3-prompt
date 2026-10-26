@@ -120,9 +120,9 @@ The push-in reveals the tension in his face.
 | **`cinematic`、`4k` 这类词不干活，删掉**（原文注释：`they're doing no work`） | `[已核实]` Runway |
 | 正向措辞，别写 `no` / `don't`；要排除的用名词（`wall, frame`） | `[已核实]` Google（S3 Negative prompts） |
 | 静态镜头最难落地 → 先写画面里该有的运动，再补一句自然语言**加固** | `[已核实]` Runway |
-| 静态加固句（实测**不命中**本仓快机位正则，可安全用）：`The camera is entirely motionless for the duration of the scene, with movement only occurring from the subject.` | `[已核实]` Runway + `[仓内]` 我实跑验证 |
+| 静态加固句：`The camera is entirely motionless for the duration of the scene, with movement only occurring from the subject.`（**只在确实要静场时用**——2026-10-26 起不再作为默认处置；原「不命中快机位正则」的验证已随该正则删除而失效） | `[已核实]` Runway + `[仓内]` 实跑验证 |
 | 只改距离或轻微角度时**优先用运镜，别切镜** | `[官方]` `base-en.txt:98` |
-| 一镜一运镜只是漂移时的**兜底**，不是通则（Runway 明说鼓励组合运镜） | `[已核实]` Runway — 但见下节，本仓另有硬约束 |
+| 一镜一运镜只是漂移时的**兜底**，不是通则（Runway 明说鼓励组合运镜） | `[已核实]` Runway（本仓原有「机位×节拍」硬约束已于 2026-10-26 撤除） |
 
 ---
 
@@ -134,7 +134,7 @@ The push-in reveals the tension in his face.
 | 时间戳相对**本段起点**，绝不许写绝对片时 | `[仓内]` `CONTEXT.md:97`（GEN003 坏片实测根因） |
 | 每镜块必须以官方 edge-stability 句**逐字符**收尾 | `[官方]` `base-en.txt:92-96` |
 | 默认**单镜头**；段内切镜是显式例外 | `[仓内]` `prompt_engineer.md:51` |
-| **快机位（fast/rapid/swift/whip + 机位词、`at fast speed`）+ ≥3 个动作节拍不得同段共存**（error）；默认处置是**降机位为静态/慢速**。引用时必须声明：该阈值量于 **4 步采样** | `[仓内]` `segment_prompts.py:35-41, 673-705`、ADR 0003 |
+| ~~**快机位 + ≥3 个动作节拍不得同段共存**（error）；默认处置是降机位~~ **2026-10-26 已撤除**：换模型+LoRA 后该纪律把全片压成静态/慢速（实测成片 MAD≈0.3，像慢放）。现行口径：**机位速度按剧情选，静场才用 `Static Shot`** | `[仓内]` ADR 0003 末节（撤除记录） |
 | 最后一个节拍距段尾 **≥1s** | `[仓内]` `prompt_engineer.md:52` |
 | 禁止自创结构（`GLOBAL_LOCK:` / `BRIDGE_FROM:` / `END_HOOK:` / 首行时长句） | `[官方]` 无此结构；validator 报 error |
 
@@ -144,7 +144,7 @@ The push-in reveals the tension in his face.
 
 ## 七、我不会用的东西（都是一手证据支持「不用」）
 
-- **不在官方白名单的运镜名**：`crane`、`handheld`、`orbit`、`crash zoom`、`dolly zoom`、`whip pan`、`Steadicam`、`Gimbal` —— 官方只列了 12 个 motion type（`base-en.txt` §4.3 表里 `Motion type` 的行数；2026-09-27 更正，原写 13 是错数）。尤其 `crash zoom` / `snap zoom` 语义就是极快，会绕过本仓快机位正则（快词表只有 `fast|rapid|swift|whip`），用了等于钻闸门空子。
+- **不在官方白名单的运镜名**：`crane`、`handheld`、`orbit`、`crash zoom`、`dolly zoom`、`whip pan`、`Steadicam`、`Gimbal` —— 官方只列了 12 个 motion type（`base-en.txt` §4.3 表里 `Motion type` 的行数；2026-09-27 更正，原写 13 是错数）。（2026-10-26 注：原文此处还有一句「`crash zoom` 会绕过本仓快机位正则」——那条正则已随共存禁令一并删除，不再有闸门可钻；本条现在只剩「官方白名单之外」这一个理由。）
 - **Hailuo 的方括号运镜指令**（`[Truck left]` 等）：那是 Hailuo **API 产品线**的能力；官方模型表只有 `MiniMax-Hailuo-2.3` / `MiniMax-Hailuo-02` / `T2V-01-Director` / `T2V-01`，**H3 不在其中**，方括号结构与 H3 的 ComfyUI 提示词格式是两套东西，照搬即自创结构。
 - **把景别/光线/镜头词写进静态生图提示词**：本仓明令禁止（`prompt_engineer.md:31`），生图侧和视频侧是两套词表。
 - **「一镜一运镜」当成通则**：Runway 原文明确说 `combining camera terms is encouraged`、`One move per clip is the reliable fallback, not the rule` —— 它论的是运镜**个数**，与本仓「机位速度 × 节拍数」不是同一个维度，**不能互相引证**。
@@ -171,6 +171,8 @@ small amplitude at fast speed frames the interior of a small convenience store a
 error:FAST_CAMERA_MULTI_BEAT_COEXIST
 warning:EDGE_STABILITY_MISSING
 ```
+
+（2026-10-26 注：`FAST_CAMERA_MULTI_BEAT_COEXIST` 已随共存禁令撤除，以上是撤除前的实跑输出；同一份文本今天跑只剩 warning。）
 
 ### 改写（**节拍一个没动**，同样的 4 个时间戳，只补电影语言）
 
@@ -227,7 +229,7 @@ single sustained low note as the paws land and the hand freezes.
 6. 有没有一句话说清**这镜揭示了什么**？
 7. `cinematic` / `4k` 这类不干活的词删了吗？
 8. 官方 **edge-stability 句**逐字符在镜块收尾了吗？
-9. 跑校验器：无 error；顺带确认**快机位 + ≥3 节拍**没踩（踩了就降机位，别压节拍）。
+9. 跑校验器：无 error。（原第 9 条还要求确认「快机位 + ≥3 节拍」没踩——该共存禁令 2026-10-26 已撤除，改为按剧情选机位速度。）
 
 ---
 
