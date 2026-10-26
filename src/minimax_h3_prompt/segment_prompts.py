@@ -1065,10 +1065,15 @@ def assemble_ref_segment(*, subject_definitions: str, retention_analysis: str,
                          annotations: str = "") -> str:
     """拼装一段自包含 ref 六段式（issue #46 AC2）。
 
-    定义性段落（subject_definitions / retention_analysis）**逐段原样重复整片定义**：
-    每段是独立生成、模型无跨段记忆，段 2 不带定义就是无参照描述；由组装器重复
-    而不是让 LLM 重写，「标签语义逐段一致」就是代码性质而不是服从性问题
+    ``subject_definitions`` 与 ``retention_analysis`` 由调用方给定、这里原样拼入，
+    不让 LLM 重写——「标签语义逐段一致」于是是代码性质而不是服从性问题
     （官方 ref-en.txt §2：标签一经定义，各段落保持同一含义）。
+
+    但**两者给进来的内容不同**：定义块逐段重复整片（每段独立生成、段 2 不带定义
+    就是无参照描述），留存分析只带**本段镜头**的条目（2026-10-26 实测：整片重复会
+    把别的段的动作一起交给写段器，段 2 因此重演了段 1 的构图）。裁剪在调用方做
+    （``segment_refs.scope_retention_to_shots``），本函数不区分只拼装。
+
     ``annotations``（时间轴注记＋起止状态声明）置于 detailed_description 顶部。
     summary 的任务类型前缀沿用整片的（同一批素材跨段保持同一外观，任务关系不变）。
     """
@@ -1210,6 +1215,8 @@ def _ref_defs_request_block(sections: dict[str, str]) -> str:
 
     调用方传**本段作用域**的 sections（issue #75：子集＋段内新号）。请求里只出现本段
     要用的素材定义——整片 24 张定义下发给写段器，产出就会照着 24 张写，段内接线接不下。
+    ``retention_analysis`` 同样只带本段镜头条目（``scope_retention_to_shots``）：那里面
+    写的是逐镜头的动作，整片下发等于把别的段的剧情也交给写段器（2026-10-26 实测）。
     """
     return (
         "\nsubject_definitions 定义块（**原样复制**进你的输出，一字不改）：\n"

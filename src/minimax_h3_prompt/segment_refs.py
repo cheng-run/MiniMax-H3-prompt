@@ -315,7 +315,9 @@ def scope_ref_sections(sections: Mapping[str, str],
     - ``subject_definitions``：裁掉本段用不到的 Subject/Picture 条目，图号换新号；
       **Subject 原号不动**（模型对 Subject 连续性没有要求，只有 Picture 跟接线有关）。
     - ``retention_analysis``：同样按条目裁剪并改写图号；[Shot N] 的出现记录**原样
-      保留**——那是整片的出现事实，改成段内编号反而是编造。
+      保留**——那是整片的出现事实，改成段内编号反而是编造。按**本段镜头**再裁一次
+      是另一件事，由 ``scope_retention_to_shots`` 在写段前做（这里只管素材范围：
+      镜头范围与素材范围不是一回事，段 2 用的图可以出现在段 5 的镜头里）。
     - ``summary`` / 音轨两段：只改写图号（它们本来就该是段内视角的文本）。
     - ``detailed_description``：原样返回——正文的段内化由写段器负责（机械路径由
       ``rebase_ref_shot_blocks`` 重编号镜头），这里替它改就成第二份写段逻辑。
