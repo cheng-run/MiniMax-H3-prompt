@@ -439,3 +439,19 @@ def test_plan_segments_still_returns_none_on_bad_reply():
     assert plan_segments("分镜表：[Shot 1] ……", 9, llm) is None
     # 只调一次：内容病没有重试（重发同样的问题没有意义）
     assert llm.last_request
+
+
+def test_both_planner_prompts_no_longer_default_to_longer_simple_segments():
+    """两条规划路线必须共用同一条时长分配口径（2026-10-26）。
+
+    首尾帧与多参各有一份规划师提示词（`segment_planner.md` / `segment_planner_ref.md`），
+    「改一处漏半处」是本仓反复吃过的那类缺陷。旧规则「简单场景可以拉长 8-10s / 8-15s」
+    会让「一个呼吸＋两次抬眼」摊满整段，成片像慢放（实测帧间 MAD 0.26，同参数带拍点
+    的上批 1.5–9.9）；两份都已改成「也不默认拉长」，这里把两条路径一起钉住。
+    """
+    from minimax_h3_prompt.segment_planner import _load_instruction
+
+    for mode in ("base", "ref"):
+        text = _load_instruction(mode)
+        assert "也不默认拉长" in text, f"{mode} 规划指令仍把简单场景默认拉长"
+        assert "简单场景可以拉长" not in text, f"{mode} 规划指令保留了旧的默认拉长措辞"
