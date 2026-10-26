@@ -199,6 +199,25 @@ def test_retention_returns_original_when_no_entry_is_recognised():
     assert scope_retention_to_shots(text, [2]) == text
 
 
+def test_retention_drops_fragments_about_subjects_missing_from_this_segment():
+    """素材子集裁掉的角色，留存分析里也不许再点名（2026-10-26 段 4 实测）。
+
+    段 4 只剩 A（``<Subject 3>``→段内 ``<Subject 3>``），缩到 Shot 4 的那条却仍写着
+    ``<Subject 1>``/``<Subject 4>``/``<Subject 5>``——本段定义块里没有它们，就是悬空
+    标签；校验器查不到这一层，0 条问题静默放过。
+    """
+    text = (
+        "Shot 4, 00:16-00:22: <Subject 1> partially_preserved as the interior is "
+        "pressed darker, <Subject 4> and <Subject 5> fully_preserved and motionless, "
+        "<Subject 3> attribute_transfer into a near-silent breath, a lowered look "
+        "and a lifted gaze, <Subject 2> staying off screen, <Subject 6> fully_preserved.")
+    scoped = scope_retention_to_shots(text, [4], defined_subjects=[3])
+    assert "<Subject 3>" in scoped and "near-silent breath" in scoped
+    assert "a lowered look and a lifted gaze" in scoped  # 无标签的延续跟着前一片段
+    for gone in ("<Subject 1>", "<Subject 2>", "<Subject 4>", "<Subject 5>", "<Subject 6>"):
+        assert gone not in scoped
+
+
 def test_injection_card_lists_new_original_name_and_file_in_one_table():
     """每段接线卡：新号 ↔ 原号 ↔ 素材名 ↔ 正本文件（AC4 的四列）。"""
     scope = compute_segment_scope(

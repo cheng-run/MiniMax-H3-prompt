@@ -278,9 +278,14 @@ class RefSegmentJob:
         # retention_analysis 再按**本段镜头**裁一次：素材子集管的是「喂几张图」，
         # 镜头范围管的是「哪几段剧情进本段」，两件事各有各的失败形态。整片重复这份块
         # 会把别的段的动作一起交给写段器（2026-10-26 实测：段 2 重演了段 1 的构图）。
+        # 同时按**本段定义块**过滤：素材子集裁掉的角色，留存分析里也不该再点名
+        # （段 4 只剩 A，却还写着 <Subject 1>/<Subject 4>/<Subject 5> 的保留关系）。
         sections = dict(sections)
+        defined_subjects = {int(n) for n in re.findall(
+            r"<Subject\s+(\d+)>", sections.get("subject_definitions", ""))}
         sections["retention_analysis"] = scope_retention_to_shots(
-            sections.get("retention_analysis", ""), plan.shots_in_segment)
+            sections.get("retention_analysis", ""), plan.shots_in_segment,
+            defined_subjects=defined_subjects)
         shot_texts = self._shot_texts(plan)
         if scope is not None:
             shot_texts = [rewrite_picture_labels(text, scope.picture_map)

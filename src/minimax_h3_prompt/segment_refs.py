@@ -354,7 +354,8 @@ _APPEARS_RE = re.compile(r"\(\s*appears in\s+([^)]*)\)", re.IGNORECASE)
 _EDGE_SHOT_RE = re.compile(r"^\s*Shot\s+(\d+)\s*[,:]\s*", re.IGNORECASE)
 
 
-def scope_retention_to_shots(text: str, shots: Iterable[int]) -> str:
+def scope_retention_to_shots(text: str, shots: Iterable[int], *,
+                             defined_subjects: Iterable[int] | None = None) -> str:
     """retention_analysis 只留本段镜头涉及的条目（2026-10-26 实测）。
 
     为什么：这份块整片重复时，会把**其它段**的动作清单一起喂给写段器。实测段 2 的
@@ -367,11 +368,18 @@ def scope_retention_to_shots(text: str, shots: Iterable[int]) -> str:
     本段就整行删。不带镜头号的条目（``<Subject 6> stays fully_preserved in every
     shot``、音频标记说明）是全局说明，原样保留。
 
+    ``defined_subjects`` 给了就再按**本段定义块**过滤一层：素材子集（``compute_segment_
+    scope``）按图裁，留存分析按镜头裁，两者不同源——段 4 只剩 A 时，缩到 Shot 4 的
+    那条仍写着 ``<Subject 1>``/``<Subject 4>``/``<Subject 5>``，全是本段没有定义的
+    悬空标签（2026-10-26 实测，校验器不查这一层，静默放过）。按标签切段、整段丢弃
+    未定义的那个，同一片段里并存的已定义标签照留。
+
     一条都没认出来时**原样返回**（不是「没删行就返回」——只改括号里镜头列表也算认出来），
     一条都没留下时也原样返回：格式变了就整块清空，比重复更坏——那等于本段没有留存
     分析，模型失去全部素材约束。
     """
     keep = {int(n) for n in shots}
+    defined = {int(n) for n in defined_subjects} if defined_subjects is not None else None
     original = str(text or "").strip()
     if not keep or not original:
         return original
@@ -398,6 +406,10 @@ def scope_retention_to_shots(text: str, shots: Iterable[int]) -> str:
                 recognised = True
                 if int(edge.group(1)) not in keep:
                     continue
+        if defined is not None:
+            line = _drop_undefined_subject_fragments(line, defined)
+            if not line.strip():
+                continue
         kept_lines.append(line)
 
     # 一条都没认出来＝格式变了，原样交回给校验器报，别在这里悄悄清空
@@ -405,6 +417,30 @@ def scope_retention_to_shots(text: str, shots: Iterable[int]) -> str:
         return original
     body = "\n".join(kept_lines).strip()
     return body or original
+
+
+# 按标签切「片段」：一个片段 = 一个标签 + 它后面的描述，直到下一个标签。这样
+# ``<Subject 1> partially_preserved ..., <Subject 3> attribute_transfer ...`` 能按
+# 实体分别取舍，而不是把整行一起判死。
+_TAG_SPLIT_RE = re.compile(r"(?=<(?:Subject|Picture)\s+\d+>)")
+
+
+def _drop_undefined_subject_fragments(line: str, defined: set[int]) -> str:
+    """丢掉只提未定义 Subject 的片段；不带标签的碎片跟着前一个片段走。"""
+    chunks = _TAG_SPLIT_RE.split(line)
+    kept: list[str] = []
+    for chunk in chunks:
+        tags = [int(n) for n in _SUBJECT_RE.findall(chunk)]
+        if not tags:
+            # 前缀（``Shot 4, 00:16-00:22: ``）或无标签的延续（``a lowered look and a
+            # lifted gaze``）：延续要紧跟它前面被保留的那个片段，所以照留。
+            kept.append(chunk)
+            continue
+        if any(n in defined for n in tags):
+            kept.append(chunk)
+    # 被丢片段留下的分隔逗号会挂在句尾（``... a lifted gaze,``）：它不是原文语义，
+    # 只是切分残留，收掉。
+    return "".join(kept).strip().rstrip(",").strip()
 
 
 def render_segment_injection_card(scope: SegmentAssetScope, *, position: int,
