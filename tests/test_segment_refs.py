@@ -19,6 +19,7 @@ from minimax_h3_prompt.segment_refs import (
     render_segment_injection_card,
     rewrite_picture_labels,
     scope_ref_sections,
+    scope_retention_to_shots,
 )
 
 # 整片定义：三个 Picture、四个 Subject（Subject 4 引用了 Subject 1，用来钉闭包）
@@ -156,6 +157,46 @@ def test_scoped_sections_keep_subject_numbers_but_filter_and_renumber_pictures()
     assert "<Subject 4>" in retention and "<Subject 2>" not in retention
     assert "<Picture 2> (appears in [Shot 3])" in retention
     assert "<Picture 3>" not in retention
+
+
+def test_retention_keeps_only_the_shots_of_this_segment():
+    """``Shot N, ...`` 形态：别的段的条目整行删，不带镜头号的全局说明原样留。
+
+    样本取 2026-10-26 真实产物的形态——段 2 的 retention 里还列着段 1 的
+    ``backward glance``，模型据此重演了段 1 的构图（首帧 MAD 27.68）。
+    """
+    text = (
+        "Shot 1, 00:00-00:04: <Subject 2> attribute_transfer into a backward glance.\n"
+        "Shot 2, 00:04-00:10: <Subject 2> and <Subject 3> attribute_transfer into a half-step.\n"
+        "Shot 3, 00:10-00:16: <Subject 3> attribute_transfer into a lowered gaze.\n"
+        "<Subject 6> stays fully_preserved in every shot so the look never slips.\n"
+        "No audio reference labels exist in this batch."
+    )
+    scoped = scope_retention_to_shots(text, [2])
+    assert "Shot 2," in scoped and "half-step" in scoped
+    assert "Shot 1," not in scoped and "backward glance" not in scoped
+    assert "Shot 3," not in scoped
+    # 全局说明（无镜头号）不是「别的段的内容」，删掉会让本段失去全部素材约束
+    assert "stays fully_preserved in every shot" in scoped
+    assert "No audio reference labels exist" in scoped
+
+
+def test_retention_trims_shot_list_inside_appears_in_entries():
+    """官方形态一行跨多镜：裁的是括号里的镜头列表，不是整行删。"""
+    text = (
+        "<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - red dress.\n"
+        "<Subject 2> (appears in [Shot 1]): fully_preserved - patina."
+    )
+    scoped = scope_retention_to_shots(text, [2, 3])
+    assert "<Subject 1> (appears in [Shot 2], [Shot 3])" in scoped
+    # 只出现在别的段的条目整行消失（它在本段没有留存关系可讲）
+    assert "<Subject 2>" not in scoped
+
+
+def test_retention_returns_original_when_no_entry_is_recognised():
+    """格式认不出就整块清空，比重复更坏——宁可原样交回给校验器报。"""
+    text = "The red dress and the patina both survive the scene unscathed."
+    assert scope_retention_to_shots(text, [2]) == text
 
 
 def test_injection_card_lists_new_original_name_and_file_in_one_table():

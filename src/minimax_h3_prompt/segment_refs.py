@@ -343,6 +343,68 @@ def scope_ref_sections(sections: Mapping[str, str],
     return out
 
 
+# retention_analysis 的两种条目形态（官方示例与模型实际产出各一种）：
+#   <Subject 1> (appears in [Shot 1], [Shot 3]): fully_preserved - ...
+#   Shot 2, 00:04-00:10: <Subject 1> partially_preserved, ...
+# 前者一行跨多个镜头，后者一行只讲一个镜头——两种都要按本段镜头裁。
+_SHOT_TAG_RE = re.compile(r"\[Shot\s+(\d+)\]")
+_APPEARS_RE = re.compile(r"\(\s*appears in\s+([^)]*)\)", re.IGNORECASE)
+_EDGE_SHOT_RE = re.compile(r"^\s*Shot\s+(\d+)\s*[,:]\s*", re.IGNORECASE)
+
+
+def scope_retention_to_shots(text: str, shots: Iterable[int]) -> str:
+    """retention_analysis 只留本段镜头涉及的条目（2026-10-26 实测）。
+
+    为什么：这份块整片重复时，会把**其它段**的动作清单一起喂给写段器。实测段 2 的
+    retention 里还写着段 1 的 ``a backward glance and a lowered gaze``，同一 seed 下
+    产出的首帧与段 1 首帧 MAD 只有 27.68（几乎同一构图）——模型把上一段重演了一遍。
+    裁到只剩本段镜头后 MAD 升到 46.59，重复消失。
+
+    两种条目形态都要认：``<Subject N> (appears in [Shot 1], [Shot 3])`` 一行跨多镜，
+    裁的是**括号里的镜头列表**（保留原文顺序）；``Shot 2, ...`` 一行一镜，镜头号不在
+    本段就整行删。不带镜头号的条目（``<Subject 6> stays fully_preserved in every
+    shot``、音频标记说明）是全局说明，原样保留。
+
+    一条都没认出来时**原样返回**（不是「没删行就返回」——只改括号里镜头列表也算认出来），
+    一条都没留下时也原样返回：格式变了就整块清空，比重复更坏——那等于本段没有留存
+    分析，模型失去全部素材约束。
+    """
+    keep = {int(n) for n in shots}
+    original = str(text or "").strip()
+    if not keep or not original:
+        return original
+
+    kept_lines: list[str] = []
+    recognised = False
+    for line in original.splitlines():
+        appears = _APPEARS_RE.search(line)
+        if appears:
+            recognised = True
+            picked: list[int] = []
+            for raw in _SHOT_TAG_RE.findall(appears.group(1)):
+                number = int(raw)
+                if number in keep and number not in picked:
+                    picked.append(number)
+            if not picked:
+                continue
+            line = _APPEARS_RE.sub(
+                "(appears in " + ", ".join(f"[Shot {n}]" for n in picked) + ")",
+                line, count=1)
+        else:
+            edge = _EDGE_SHOT_RE.match(line)
+            if edge:
+                recognised = True
+                if int(edge.group(1)) not in keep:
+                    continue
+        kept_lines.append(line)
+
+    # 一条都没认出来＝格式变了，原样交回给校验器报，别在这里悄悄清空
+    if not recognised:
+        return original
+    body = "\n".join(kept_lines).strip()
+    return body or original
+
+
 def render_segment_injection_card(scope: SegmentAssetScope, *, position: int,
                                   total: int) -> str:
     """本段接线卡（issue #75 AC4）：新号 ↔ 原号 ↔ 素材名 ↔ 正本文件 ↔ 工作流槽位。
@@ -409,5 +471,6 @@ __all__ = [
     "render_segment_injection_card",
     "rewrite_picture_labels",
     "scope_ref_sections",
+    "scope_retention_to_shots",
     "total_pictures",
 ]

@@ -64,6 +64,7 @@ from .segment_refs import (
     render_segment_injection_card,
     rewrite_picture_labels,
     scope_ref_sections,
+    scope_retention_to_shots,
 )
 from .segment_prompts import (
     _shot_blocks,
@@ -274,6 +275,12 @@ class RefSegmentJob:
         scope = _stored_scope(plan)
         # 段内作用域：定义块裁到本段素材并重编号；旧 plan.json（scope=None）保持整片。
         sections = self.sections if scope is None else scope_ref_sections(self.sections, scope)
+        # retention_analysis 再按**本段镜头**裁一次：素材子集管的是「喂几张图」，
+        # 镜头范围管的是「哪几段剧情进本段」，两件事各有各的失败形态。整片重复这份块
+        # 会把别的段的动作一起交给写段器（2026-10-26 实测：段 2 重演了段 1 的构图）。
+        sections = dict(sections)
+        sections["retention_analysis"] = scope_retention_to_shots(
+            sections.get("retention_analysis", ""), plan.shots_in_segment)
         shot_texts = self._shot_texts(plan)
         if scope is not None:
             shot_texts = [rewrite_picture_labels(text, scope.picture_map)

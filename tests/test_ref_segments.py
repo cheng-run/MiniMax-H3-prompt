@@ -125,6 +125,23 @@ def test_mechanical_segments_are_self_contained_six_section(tmp_path):
     assert "青铜钥匙" in third and "红裙女孩" not in third
 
 
+def test_mechanical_segments_scope_retention_to_their_own_shots(tmp_path):
+    """retention 只列本段镜头（2026-10-26 实测）：整片重复会把别的段的动作交给写段器。
+
+    段 2 覆盖整片 [Shot 3]/[Shot 4]，所以它的留存分析只该谈这两个镜头。整片版本里
+    每个 Subject 都 "appears in" 全部五个镜头——模型读到别的段的动作就会重演
+    （实测段 2 首帧与段 1 首帧 MAD 27.68）。
+    """
+    result = _run(tmp_path, llm=None)
+    second = split_ref_sections(result.texts[1])["retention_analysis"]
+    assert "[Shot 3]" in second and "[Shot 4]" in second
+    assert "[Shot 1]" not in second and "[Shot 2]" not in second
+    assert "[Shot 5]" not in second
+    # 段 3 覆盖 [Shot 5]：同样只留自己那一个
+    third = split_ref_sections(result.texts[2])["retention_analysis"]
+    assert "[Shot 5]" in third and "[Shot 1]" not in third
+
+
 def test_mechanical_segments_rebase_timestamps_to_segment_start(tmp_path):
     """机械切片重新编号 [Shot 1] 起、时间戳归零重基——绝对片时不得进正文。"""
     result = _run(tmp_path, llm=None)
