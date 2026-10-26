@@ -1097,13 +1097,17 @@ def validate_ref_segment(text: str, *, duration: float | None = None,
                          ) -> list[ValidationIssue]:
     """多参分段提示词校验（issue #46）：ref 六段式 + 分段专属纪律。
 
-    在 ``validate_ref`` 之上补四条 error 级：
+    在 ``validate_ref`` 之上补五条 error 级：
 
     - ``SEGMENT_TIMELINE_MISSING``：时间轴注记（段序+起止秒）不在——拼接后段与段
       无从对位；注记句由 ``render_ref_segment_timeline_note`` 生成，判据与产出同源；
     - ``SEGMENT_STATE_MISSING``：起止状态声明缺失或空——段间叙事衔接失去显式依据；
     - ``SEGMENT_DEFS_INCOMPLETE``：登记图没全进 subject_definitions——「定义逐段
       重复」（AC2）必须有牙，缺定义的段就是无参照描述；
+    - ``SEGMENT_RETENTION_UNDEFINED``：retention_analysis 点名了 subject_definitions
+      里没有的 Subject——素材子集与留存分析裁剪不同源时会留下悬空标签（2026-10-26
+      段 4 实测：定义块只剩 A，留存分析仍写着另外五个 Subject），模型拿不到那些实体
+      的定义，而这一层此前没有任何检查、0 条 issue 静默放过；
     - ``SEGMENT_ANAPHORA``：指代前文的措辞——对无记忆模型是无效信息，出现即作废。
 
     另带两条既有纪律：时间戳疑似绝对片时（warning，同 ``validate_segment`` 的
@@ -1140,8 +1144,24 @@ def validate_ref_segment(text: str, *, duration: float | None = None,
             "error", "SEGMENT_STATE_MISSING",
             "缺少起止状态声明（This segment begins with … / This segment ends with …）"
             "——多参无桥接帧，段间衔接全靠状态声明显式对位"))
+    sections = split_ref_sections(text)
+    # 悬空标签：留存分析点名的 Subject 必须有定义。素材子集按图裁、留存分析按镜头
+    # 裁，两者不同源——段 4 只剩 A 时，缩到 Shot 4 的那条仍写着另外五个 Subject，
+    # 模型引用它们却拿不到定义（2026-10-26 实测，此前这一层 0 条 issue）。
+    defined_subjects = {int(n) for n in re.findall(
+        r"<Subject\s+(\d+)>", sections.get("subject_definitions", ""))}
+    cited_subjects = {int(n) for n in re.findall(
+        r"<Subject\s+(\d+)>", sections.get("retention_analysis", ""))}
+    dangling = sorted(cited_subjects - defined_subjects)
+    if dangling:
+        issues.append(ValidationIssue(
+            "error", "SEGMENT_RETENTION_UNDEFINED",
+            "retention_analysis 点名了 subject_definitions 里没有的 Subject："
+            f"<Subject {'>, <Subject '.join(map(str, dangling))}>"
+            "——悬空标签让模型引用拿不到定义的实体；"
+            "留存分析裁剪必须按本段定义块过滤"))
     if ref_meta:
-        defs = split_ref_sections(text).get("subject_definitions", "")
+        defs = sections.get("subject_definitions", "")
         missing = [p for p, _name, _desc in ref_meta if f"<Picture {p}>" not in defs]
         if missing:
             issues.append(ValidationIssue(

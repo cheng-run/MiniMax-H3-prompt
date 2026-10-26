@@ -1236,6 +1236,22 @@ def test_ref_segment_annotations_carry_order_window_and_states():
     assert "This segment ends with the key is handed over." in line
 
 
+def test_validate_ref_segment_flags_retention_subject_without_definition():
+    """留存分析点名了定义块里没有的 Subject（2026-10-26 段 4 实测）。
+
+    素材子集按图裁、留存分析按镜头裁，两者不同源时就会留下悬空标签：段 4 的定义块
+    只剩 A，缩到 Shot 4 的那条仍写着另外五个 Subject。此前这一层没有任何检查，
+    校验器给 0 条 issue——必须有牙，否则只能靠组装器悄悄兜底。
+    """
+    text = _ref_segment_sample().replace(
+        "<Subject 2> (appears in", "<Subject 9> (appears in")
+    issues = validate_ref_segment(
+        text, duration=7, segment_number=2, total_segments=3, start_s=8, total_s=22,
+        ref_meta=[(1, "红裙女孩", "…"), (2, "青铜钥匙", "…")])
+    codes = [i.code for i in issues if i.severity == "error"]
+    assert "SEGMENT_RETENTION_UNDEFINED" in codes, codes
+
+
 def test_validate_ref_segment_accepts_compliant_sample():
     issues = validate_ref_segment(
         _ref_segment_sample(), duration=7, segment_number=2, total_segments=3,
