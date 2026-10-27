@@ -263,11 +263,23 @@ def extract_first_frame(video_path: str | Path, output_path: str | Path | None =
     return _write_png(frame, target, source)
 
 
-def extract_last_frame(video_path: str | Path, output_path: str | Path | None = None) -> Path:
-    """用 OpenCV 剥出视频尾部最锐利的一帧并写为 PNG（作下一段首帧参考）。
+def extract_last_frame(video_path: str | Path, output_path: str | Path | None = None, *,
+                       sharpest: bool = True) -> Path:
+    """剥出视频尾部的一帧并写为 PNG，两种取帧口径（issue #98，父 spec #92）。
 
-    - 取最后 5 帧候选，按 Laplacian 方差选最锐利的一张；全部低于阈值时回退
-      最后一帧并打印警告（见 ``_read_sharpest_tail_frame``）。
+    - ``sharpest=True``（默认，**旧口径一个字不改**）：取最后 5 帧候选里按 Laplacian
+      方差最锐利的一张；全部低于阈值时回退最后一帧并打印警告。多参语义层的段末帧
+      用它（``wizard._capture_ref_segment_frames``），判的是「接近尾部的画面」，挑一张
+      更锐利的邻近帧不改判据。
+    - ``sharpest=False``（首尾帧链的桥接帧）：**恒取末帧**，锐度只降级为**告警**。
+
+    为什么首尾帧链不能用「最锐利」选帧（spec #92 实测 100.9/100.8/100.0/99.8/101.9）：
+    段尾落定时最后五帧的锐度是一条平盘，``max()`` 等于随机。桥接帧是**下一段的第一帧
+    输入**，成片要在接缝处裁掉下一段的首帧——取到倒数第几帧直接决定「回退了几帧」，
+    也决定「裁多少帧」；随机取帧会让这两件事都不可确定（2026-10-26 实测四道接缝里
+    三道退回 4 帧 = 0.167s，肉眼不可辨只因段尾被冻住）。
+
+    其余行为两条口径一致：
     - cv2 懒加载：只为段桥接流程引入解码依赖，不拖慢主流程 import。
     - 先按总帧数 seek；seek 失败（部分编码不允许随机访问）则顺序遍历兜底。
     - Windows 非 ASCII 路径用 ``imencode + tofile`` 落盘，绕开 ``cv2.imwrite`` 的编码坑。
@@ -276,7 +288,11 @@ def extract_last_frame(video_path: str | Path, output_path: str | Path | None = 
     """
     source = Path(video_path)
     with _open_capture(source) as capture:
-        frame = _read_sharpest_tail_frame(capture)
+        if sharpest:
+            frame = _read_sharpest_tail_frame(capture)
+        else:
+            frame, sharpness = _read_exact_tail_frame(capture)
+            _warn_if_blurred_tail(sharpness)
     if frame is None:
         raise ValueError(f"能打开但一帧都没读到（可能文件损坏）：{source}")
     target = Path(output_path) if output_path else source.with_suffix(".last-frame.png")
@@ -318,12 +334,39 @@ def _frame_sharpness(frame) -> float:
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
-def _read_sharpest_tail_frame(capture):
-    """从已打开的 VideoCapture 取最后 N 帧中最锐利的一帧作桥接参考帧。
+def _read_exact_tail_frame(capture):
+    """从已打开的 VideoCapture 取**最后一帧**，连同它的锐度一起返回（issue #98）。
 
-    参考帧只作为下一段 H3 的 first_frame 输入、不进成片时间线，因此取倒数
-    第几帧都不会造成成片跳接；最多有几帧动作提前量（约毫秒级）。seek 失败
-    或总帧数未知时回退单帧策略（_read_last_frame）。
+    锐度不参与选帧，只供调用方决定要不要告警——这就是首尾帧链要的「恒取末帧」。
+    """
+    frame = _read_last_frame(capture)
+    if frame is None:
+        return None, 0.0
+    return frame, _frame_sharpness(frame)
+
+
+def _warn_if_blurred_tail(sharpness: float) -> None:
+    """末帧锐度低于阈值只说一句、**不换帧**（spec #92）。
+
+    旧口径在这里会退回「最锐利的那张」，但那等于偷偷换掉了下一段的首帧输入；本口径
+    把「这一帧可能不可靠」当信息交给用户（他可以选择重跑本段），而不是替他换一帧。
+    """
+    if sharpness >= _MIN_SHARPNESS:
+        return
+    print(
+        f"[警告] 本段末可能有运动模糊（末帧锐度 {sharpness:.1f}，低于阈值 "
+        f"{_MIN_SHARPNESS:g}），下一段识别可能不稳；桥接图照旧用末帧——"
+        "若下一段人物识别失败，请重跑本段"
+    )
+
+
+def _read_sharpest_tail_frame(capture):
+    """从已打开的 VideoCapture 取最后 N 帧中最锐利的一帧（**默认口径**）。
+
+    读者是多参语义层的段末帧（以及任何「接近尾部的画面就行」的场合）；首尾帧链的
+    桥接帧**不再走这里**（issue #98 起改走 ``_read_exact_tail_frame``）——那一路要的
+    是确定的那一帧，因为成片要在接缝处裁掉它。seek 失败或总帧数未知时回退单帧策略
+    （``_read_last_frame``）。
     """
     import cv2  # noqa: PLC0415
 

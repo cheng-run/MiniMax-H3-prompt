@@ -137,7 +137,8 @@ def test_v2_path_concats_the_film_after_every_segment_passes(
     final = gen / "final.mp4"
     out = capsys.readouterr().out
     assert final.is_file(), out
-    assert video_meta(final)["frames"] == 192, "两段各 96 帧，stream-copy 直接接起来"
+    assert video_meta(final)["frames"] == 96 + 96 - 1, \
+        "两段各 96 帧，接缝裁掉第 2 段的首帧（issue #98）"
     assert str(final) in out, "落点必须当面给出"
     assert "2 段" in out, "段数必须当面给出"
     assert load_session(gen).status == session_store.STATUS_COMPLETED
@@ -172,7 +173,7 @@ def test_fallback_path_writes_its_segment_table_and_concats(
     final = gen / "final.mp4"
     out = capsys.readouterr().out
     assert final.is_file(), out
-    assert video_meta(final)["frames"] == 192
+    assert video_meta(final)["frames"] == 96 + 96 - 1
     plan = json.loads((gen / "segments" / "plan.json").read_text(encoding="utf-8"))
     assert [(item["start_s"], item["end_s"]) for item in plan] == [(0, 4), (4, 8)]
     assert [item["shots_in_segment"] for item in plan] == [[1], [2]]

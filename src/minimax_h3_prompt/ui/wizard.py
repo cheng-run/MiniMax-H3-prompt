@@ -3606,6 +3606,10 @@ def _capture_bridge_frame(video_path: str, position: int, generation_dir: Path, 
     末段收尾核验（#16）用 ``end``——它没有下一段，核的是**整条视频的最后画面**，
     放进 ``-start`` 会名不副实。
 
+    **取帧口径恒为末帧**（issue #98，``sharpest=False``）：两个 ``frame_suffix`` 都走
+    这一档——``start`` 是下一段的第一帧输入、成片要在接缝处裁掉它，``end`` 是「整条
+    视频的最后画面」，两者要的都是**确定的那一帧**，不是「尾部最锐利的一张」。
+
     **本函数只判与说，不写 state、不做流程决策**：语义层判定（#14）还在后面，判定之前
     就往 state 里写读图结果，一旦人判「重跑本段」，那段错锚就留在了 state 里
     （``_bridge_frame_descriptions`` 同段号取最后一个，会把它当成事实喂给写段 LLM）。
@@ -3623,9 +3627,14 @@ def _capture_bridge_frame(video_path: str, position: int, generation_dir: Path, 
     if errors:
         return errors, None, None
     try:
+        # 恒取末帧（issue #98）：接缝处成片要裁掉下一段的首帧，所以桥接图取的是哪一帧
+        # 必须是确定的。旧口径「最后五帧里最锐利的一张」在段尾落定时是随机取帧
+        # （spec #92 实测最后五帧锐度 100.9/100.8/100.0/99.8/101.9），随机＝回退帧数
+        # 不可确定＝该裁多少帧不可确定。锐度不足只由 ``extract_last_frame`` 告警。
         frame = extract_last_frame(
             Path(video_path),
             Path(generation_dir) / "bridge_frames" / f"shot-{position + 1:02d}-{frame_suffix}.png",
+            sharpest=False,
         )
         size_kb = frame.stat().st_size / 1024
         print("[桥接帧] ✓ 已从上一段视频提取尾帧：")
@@ -3988,9 +3997,11 @@ def _assemble_film_and_complete(directory: Path, brief: Brief,
             # 成片落点与多参同名（成片是同一件产物）；「放哪」是路线的事，由这一层定
             # （见 ``ref_segments.FINAL_FILM_FILENAME`` 的同一口径）。
             out_path=directory / "final.mp4",
-            # 本票不裁接缝首帧（#98 才把这一档换成 TRIM_FIRST_FRAME）：先用多参同款
-            # 「优先 stream-copy」，画质档按 spec #92 取 CRF 16。
-            strategy=ConcatStrategy.STREAM_COPY_FIRST,
+            # 首尾帧链恒为「裁首帧 + 重编码」（issue #98，spec #92）：第 N+1 段的第一帧
+            # 就是第 N 段的末帧（尾帧接力），原样接起来每个接缝都会重一帧。多参那一档
+            # 「优先 stream-copy」不受影响——拼接口径是入参，不是共用件里的 if。
+            # 画质档按 spec #92 取 CRF 16。
+            strategy=ConcatStrategy.TRIM_FIRST_FRAME,
             reencode_crf=16,
             # 出路必须是**本路**的：首尾帧链没有换段拼接命令，替它讲一句
             # ``ref-concat --replace`` 就是误导（spec #92 明令不提供该命令）。

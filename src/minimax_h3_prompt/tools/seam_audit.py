@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -188,6 +189,98 @@ def merge_videos(videos: list[Path], out_path: Path, *,
     finally:
         list_file.unlink(missing_ok=True)
     return False, last_error
+
+
+def probe_streams(video: Path) -> set[str]:
+    """这条视频里有哪些流类型（``{"video"}`` / ``{"video", "audio"}``）。
+
+    imageio-ffmpeg 只带 ffmpeg、**不带 ffprobe**，所以流类型只能从 ``ffmpeg -i`` 的
+    stderr 里认。``ffmpeg -i <文件>`` 不给输出时返回码恒为 1，这是它的正常形态，
+    不能当成失败（真正的失败是 stderr 里既没有 Stream 行也读不到容器信息）。
+    """
+    proc = subprocess.run(
+        [str(find_ffmpeg()), "-hide_banner", "-i", str(video)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    kinds: set[str] = set()
+    for line in (proc.stderr or "").splitlines():
+        match = re.search(r"Stream #\d+:\d+.*?: (Video|Audio|Subtitle|Data):", line)
+        if match:
+            kinds.add(match.group(1).lower())
+    return kinds
+
+
+def merge_videos_trimming_first_frames(videos: list[Path], out_path: Path, *,
+                                       reencode_crf: int, fps: float,
+                                       with_audio: bool) -> tuple[bool, str]:
+    """单次 filter 图拼接：**裁掉第 2..N 段的首帧**再整体 concat，不落中间文件。
+
+    ``merge_videos`` 用的是 concat demuxer（先 stream-copy、失败转重编码），它只能
+    「原样接」——接缝处的重复首帧会被照搬进成片。首尾帧链的第 N+1 段是从第 N 段末帧
+    起步生成的，两段交界本来就是同一次衔接的两端（spec #92 实测重复/回退 4 帧 =
+    0.167s），所以这一档必须用 filter 图逐段裁帧。
+
+    为什么是**单次** filter 图（而不是逐段裁成临时文件再拼）：每多一次编码就多损失
+    一代画质，而本项目的瓶颈本来就是画质（spec #92 用户故事 20）；同时中间文件会在
+    失败时留在生成目录里，用户分不清哪个才是成片。
+
+    - 视频：``trim=start_frame=1`` 按**帧**裁，不按秒——按秒会因 fps 换算的四舍五入
+      裁掉 0 帧或 2 帧，而本票的验收判据是帧数算式。
+    - 音频：同步裁掉一帧时长（``atrim=start=1/fps``），否则接缝处音画会错开一帧。
+    - ``fps`` 由调用方给（实测元数据），这里**不写死 24**：写死会让 25fps 素材的音频
+      裁剪量差 4%。
+    - 先写 ``<名>.partial<后缀>``、成功后才改名：半成品不许占住成片名（``final.mp4``
+      一旦存在，下一次续拼/人眼都以为成片已经有了）。
+
+    返回 ``(是否成功, 失败时 ffmpeg 的 stderr 尾巴)``；不自作降级——降级是调用方的
+    **策略**（要不要退回朴素拼接、退回了怎么对用户说破），不是这个原语的判断。
+    """
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    # 临时文件名**保留原后缀**：ffmpeg 靠后缀推输出容器，``final.partial`` 会让它
+    # 猜不出 muxer 而直接失败。
+    partial = out.with_name(f"{out.stem}.partial{out.suffix}")
+    frame_s = 1.0 / float(fps)
+
+    graphs: list[str] = []
+    labels: list[str] = []
+    for index in range(len(videos)):
+        if index == 0:
+            # 第 1 段不裁：它的第一帧是用户提交的首帧图，整条链的起点。
+            graphs.append(f"[{index}:v]setpts=PTS-STARTPTS[v{index}]")
+        else:
+            graphs.append(f"[{index}:v]trim=start_frame=1,setpts=PTS-STARTPTS[v{index}]")
+        labels.append(f"[v{index}]")
+        if not with_audio:
+            continue
+        if index == 0:
+            graphs.append(f"[{index}:a]asetpts=PTS-STARTPTS[a{index}]")
+        else:
+            graphs.append(
+                f"[{index}:a]atrim=start={frame_s:.6f},asetpts=PTS-STARTPTS[a{index}]")
+        labels.append(f"[a{index}]")
+    graphs.append("".join(labels)
+                  + f"concat=n={len(videos)}:v=1:a={1 if with_audio else 0}"
+                  + ("[outv][outa]" if with_audio else "[outv]"))
+
+    command = [str(find_ffmpeg()), "-y"]
+    for video in videos:
+        command += ["-i", str(video)]
+    command += ["-filter_complex", ";".join(graphs), "-map", "[outv]"]
+    if with_audio:
+        command += ["-map", "[outa]", "-c:a", "aac", "-b:a", "192k"]
+    command += ["-c:v", "libx264", "-crf", str(int(reencode_crf)),
+                "-pix_fmt", "yuv420p", str(partial)]
+    try:
+        proc = subprocess.run(command, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace")
+        if proc.returncode != 0 or not partial.is_file() or partial.stat().st_size == 0:
+            return False, (proc.stderr or "")[-1500:]
+        partial.replace(out)
+        return True, ""
+    finally:
+        # 失败时半成品必须清掉：留着会让下一次续拼读到一条没拼接完的片子。
+        partial.unlink(missing_ok=True)
 
 
 def analyze(videos: list[Path], out_dir: Path, *, merge: bool = True) -> AuditReport:
@@ -367,6 +460,8 @@ __all__ = [
     "load_baseline",
     "longest_run",
     "merge_videos",
+    "merge_videos_trimming_first_frames",
+    "probe_streams",
     "promote_baseline",
     "render_markdown",
     "sanity_check",

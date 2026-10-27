@@ -111,7 +111,7 @@ def test_v2_flow_describes_bridge_frame_before_writing_segment(tmp_path, monkeyp
     video = tmp_path / "prev-seg.mp4"
     video.write_bytes(b"fake video")
 
-    def fake_extract(video_path, output_path):
+    def fake_extract(video_path, output_path, **_kwargs):
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(b"\x89PNG\r\n\x1a\nfake")
@@ -178,7 +178,7 @@ def test_v2_flow_reading_failure_degrades_loudly(tmp_path, monkeypatch, capsys):
     video = tmp_path / "prev-seg.mp4"
     video.write_bytes(b"fake video")
 
-    def fake_extract(video_path, output_path):
+    def fake_extract(video_path, output_path, **_kwargs):
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(b"\x89PNG\r\n\x1a\nfake")
@@ -229,7 +229,7 @@ def test_fallback_flow_describes_bridge_frame_before_rewriting(tmp_path, monkeyp
     video = tmp_path / "prev-seg.mp4"
     video.write_bytes(b"fake video")
 
-    def fake_extract(video_path, output_path):
+    def fake_extract(video_path, output_path, **_kwargs):
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(b"\x89PNG\r\n\x1a\nfake")

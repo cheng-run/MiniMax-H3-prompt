@@ -28,6 +28,18 @@ from .segment_planner import SegmentPlan
 # 7s 档）差的是好几秒，照样咬得住。
 _FINAL_FILM_FRAME_S = 1.0 / 24.0
 
+# 帧率一致性的实测容差：同一个帧率在不同容器里读回来的小数位会差一点
+# （23.976023976… vs 23.976），而「24 vs 30」这种真不一致差的是整数级。
+_FPS_TOLERANCE = 0.01
+
+# 兜底档（裁首帧重编码失败 → 退回朴素拼接）的拼接方式取值。它**不能**与多参的
+# ``stream-copy`` 同值：两者产出的片子接缝不一样（一个留重复首帧），同值时用户与
+# 事后复测都分不清手里这条是哪一档。
+_FALLBACK_HOW = "stream-copy-no-trim"
+
+# 兜底档必须当面说破（spec #92「不许静默降级」）。
+_DUPLICATE_SEAM_NOTICE = "接缝保留了重复首帧（裁首帧重编码失败，已退回朴素拼接）。"
+
 
 class ConcatStrategy(str, Enum):
     """拼接口径。**必须是入参、不许写死在共用件里**（issue #93）。
@@ -37,9 +49,9 @@ class ConcatStrategy(str, Enum):
     时「顺手统一」等于悄悄改变多参的成片行为——所以两档各是一个**可辨识取值**，
     而不是共用件里的一个 if 分支。
 
-    ``TRIM_FIRST_FRAME`` 本票只定义取值，实现留给 #96/#98：未实现的那一档必须**显式
-    返回失败原因**，绝不静默退回 stream-copy（静默降级＝用户拿到一条接缝抽帧的成片，
-    却以为问题出在别处）。
+    ``TRIM_FIRST_FRAME`` 由 #98 实现（``_produce_trimmed``）：裁掉第 2..N 段的首帧、
+    单次 filter 图重编码；重编码那一路挂掉时退回朴素拼接，但结果里必须说破「接缝保留
+    了重复首帧」——静默降级等于用户拿到一条接缝抽帧的成片却以为问题在别处。
     """
 
     STREAM_COPY_FIRST = "stream-copy-first"   # 多参现状：先 stream copy，失败转重编码
@@ -152,20 +164,38 @@ def assemble_film(*, plans: Sequence[SegmentPlan],
         sources.append(video)
 
     out = Path(out_path)
-    ok, how = _produce(sources, out, strategy, reencode_crf)
+    ok, how, extra_warnings = _produce(sources, out, strategy, reencode_crf)
     if not ok:
         return _refuse(how)
 
-    measured = float(video_meta(out).get("duration_s") or 0.0) or None
-    warnings: list[str] = []
+    meta = video_meta(out)
+    measured = float(meta.get("duration_s") or 0.0) or None
+    warnings: list[str] = list(extra_warnings)
     if measured is None:
         warnings.append(f"读不到成片的时长元数据：{out}（跳过时长核对）")
-    elif measured + len(sources) * _FINAL_FILM_FRAME_S < planned_s:
-        warnings.append(
-            f"成片实测 {measured:.2f}s，短于各段计划时长之和 {planned_s}s——"
-            "可能有段没接上，或某段交回的不是计划时长档的产出")
+    else:
+        # 裁首帧那一档的预期值要扣掉裁掉的那几帧：`(段数−1)` 帧按**各段实测 fps** 折算
+        # （spec #92：不写死 24）。多参那一档不扣、口径一字不动——两条路线在「成片该
+        # 多长」上本来就不一样，硬统一会把多参的「只报短」口径改坏。
+        #
+        # fps 取**输入段**的、不取成品的：cv2 的 ``CAP_PROP_FPS`` 在重编码产物上是估出来的
+        # ——容器 duration 不含末帧时长，212 帧会被读成 24.1137fps（实测），拿它折算
+        # 会把该扣掉的量算小、反而制造假告警。
+        expected_s: float = planned_s
+        if strategy == ConcatStrategy.TRIM_FIRST_FRAME:
+            fps = float(video_meta(sources[0]).get("fps") or 0.0) or 24.0
+            expected_s = planned_s - (len(sources) - 1) / fps
+        if measured + len(sources) * _FINAL_FILM_FRAME_S < expected_s:
+            warnings.append(
+                f"成片实测 {measured:.2f}s，短于各段计划时长之和 {_seconds_text(expected_s)}s——"
+                "可能有段没接上，或某段交回的不是计划时长档的产出")
     return FinalFilm(path=out, how=how, total_s=int(total_s), planned_s=planned_s,
                      measured_s=measured, warnings=warnings)
+
+
+def _seconds_text(seconds: float) -> str:
+    """秒数的当面写法：整数就不带小数点（多参那条路的历史文案逐字不变）。"""
+    return f"{seconds:.2f}" if abs(seconds - round(seconds)) > 1e-9 else str(int(round(seconds)))
 
 
 def _sha_remedy_hint(hint: str | None, segment: int) -> str:
@@ -181,21 +211,19 @@ def _sha_remedy_hint(hint: str | None, segment: int) -> str:
 
 
 def _produce(sources: list[Path], out: Path, strategy: ConcatStrategy,
-             reencode_crf: int) -> tuple[bool, str]:
-    """按**拼接口径**把各段接成 ``out``；返回 (成功?, 成功时的拼接方式／失败时的原因)。
+             reencode_crf: int) -> tuple[bool, str, list[str]]:
+    """按**拼接口径**把各段接成 ``out``；返回 (成功?, 成功时的拼接方式／失败时的原因, 附带提醒)。
 
-    策略分派**先于**「段数=1 退化为拷贝」：``TRIM_FIRST_FRAME`` 那一档还没实现时，若先
-    撞上拷贝分支，就会静默产出一条**没裁接缝首帧**的成片——用户拿到的片子抽帧，原因却
-    不在任何提示里。所以未实现的档位一律显式失败（spec #92「不许静默降级」）。
+    未知档位一律显式失败（spec #92「不许静默降级」）：猜一个最像的去拼，用户拿到的
+    片子接缝抽帧、却以为问题出在别处。
 
     ``reencode_crf`` 只在这一档真正要重编码时才有意义，但它是**调用方给路线属性**，
     共用件不做任何取值判断（判了就等于替路线定了画质）。
     """
     if strategy == ConcatStrategy.TRIM_FIRST_FRAME:
-        return False, ("拼接策略「裁首帧 + 重编码」尚未实现（#96/#98）："
-                       "不产出成片，也不退回 stream-copy——退回会静默留下接缝的重复首帧。")
+        return _produce_trimmed(sources, out, reencode_crf)
     if strategy != ConcatStrategy.STREAM_COPY_FIRST:
-        return False, f"未知的拼接策略：{strategy!r}——不产出成片。"
+        return False, f"未知的拼接策略：{strategy!r}——不产出成片。", []
 
     from .tools.seam_audit import merge_videos
 
@@ -205,7 +233,7 @@ def _produce(sources: list[Path], out: Path, strategy: ConcatStrategy,
         out.parent.mkdir(parents=True, exist_ok=True)
         if out.resolve() != sources[0].resolve():
             shutil.copy2(sources[0], out)
-        return True, "copy"
+        return True, "copy", []
 
     try:
         moved, how = merge_videos(sources, out, reencode_crf=reencode_crf)
@@ -213,11 +241,96 @@ def _produce(sources: list[Path], out: Path, strategy: ConcatStrategy,
         # ``find_ffmpeg`` 找不到时抛 RuntimeError（它是给「调用方自己报错」用的）。
         # 但走到这里，用户已经跑完整条链、全部段都验收过了：一个缺依赖不该把收尾炸成
         # 异常栈，而该跟「拼接失败」走同一条路（返回结果对象、会话不标完成、可续拼）。
-        return False, f"拼接失败（找不到可用的 ffmpeg 或调用失败）：{exc}"
+        return False, f"拼接失败（找不到可用的 ffmpeg 或调用失败）：{exc}", []
     if not moved:
         # 失败线索是 ffmpeg 的 stderr 尾巴，原样带出——用户在成片这一层只看得见这条。
-        return False, f"拼接失败（先 stream copy、失败转重编码都没成）：{how}"
-    return True, how
+        return False, f"拼接失败（先 stream copy、失败转重编码都没成）：{how}", []
+    return True, how, []
+
+
+def _media_problem(metas: Sequence[Mapping]) -> str:
+    """各段尺寸与帧率必须一致；不一致（或读不出）就返回一句点名（空串＝没问题）。
+
+    这既是**产品判断**（尺寸/帧率不同说明有人把别的片子的产出交了回来），也是
+    concat filter 的**技术前提**——ffmpeg 不会替人拦：它会把 128×72 与 736×1280
+    按第一段的尺寸硬接，或者按各自节奏接出一条时长悄悄不对的片子，全程不报错。
+    所以必须在拼之前核、并且**点名是哪几段**（让人直接去换那段，而不是读 stderr）。
+    """
+    unreadable = [index + 1 for index, meta in enumerate(metas)
+                  if not meta or not meta.get("fps")
+                  or not meta.get("width") or not meta.get("height")]
+    if unreadable:
+        return ("第 " + "、".join(str(n) for n in unreadable) + " 段读不出尺寸/帧率："
+                "无从核对各段是不是一套输出，不产出成片。")
+    base = metas[0]
+    mismatched = [
+        number for number, meta in enumerate(metas[1:], start=2)
+        if (meta["width"], meta["height"]) != (base["width"], base["height"])
+        or abs(float(meta["fps"]) - float(base["fps"])) > _FPS_TOLERANCE
+    ]
+    if mismatched:
+        return ("第 " + "、".join(str(n) for n in mismatched)
+                + f" 段的尺寸或帧率与第 1 段不一致（第 1 段 {base['width']}×"
+                f"{base['height']}@{float(base['fps']):g}fps）：段间硬接不上，"
+                "不产出成片——请确认这几段是不是本片的输出。")
+    return ""
+
+
+def _produce_trimmed(sources: list[Path], out: Path,
+                     reencode_crf: int) -> tuple[bool, str, list[str]]:
+    """首尾帧链那一档：裁掉第 2..N 段的首帧后重编码接起来（spec #92）。
+
+    接缝处重一帧是这个流程的结构性产物：第 N+1 段的第一帧**就是**第 N 段的末帧
+    （尾帧接力），原样接起来成片会在每个接缝抽一下。裁掉之后接缝两侧是「段 N 末帧｜
+    段 N+1 第二帧」——画面往前走，而不是停一帧。
+
+    **兜底不是静默的**：重编码这一路挂掉（编码器缺失、filter 图被拒等）时退回朴素
+    拼接，但那意味着接缝又保留了重复首帧——结果对象里必须说破，拼接方式也得能辨识，
+    否则用户手里是一条「看起来接好了」的坏片子。
+    """
+    from .tools.frame_match import video_meta
+    from .tools.seam_audit import merge_videos_trimming_first_frames, probe_streams
+
+    if len(sources) == 1:
+        # 没有接缝可裁（与 stream-copy 档同一形态：≤10 秒不分段的片子不走到这里，
+        # 但共用件不为「本路线最少两段」这条路线属性开洞）。
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if out.resolve() != sources[0].resolve():
+            shutil.copy2(sources[0], out)
+        return True, "copy", []
+
+    metas = [video_meta(path) for path in sources]
+    problem = _media_problem(metas)
+    if problem:
+        return False, problem, []
+
+    fps = float(metas[0]["fps"])
+    try:
+        streams = [probe_streams(path) for path in sources]
+        with_audio = all("audio" in kinds for kinds in streams)
+        if any("audio" in kinds for kinds in streams) and not with_audio:
+            mixed = [index + 1 for index, kinds in enumerate(streams) if "audio" not in kinds]
+            return False, ("第 " + "、".join(str(n) for n in mixed)
+                           + " 段没有音轨，而其它段有：音轨不一致的几段接起来会音画错位，"
+                           "不产出成片。"), []
+        ok, detail = merge_videos_trimming_first_frames(
+            sources, out, reencode_crf=reencode_crf, fps=fps, with_audio=with_audio)
+    except Exception as exc:  # noqa: BLE001——与 stream-copy 档同款：缺依赖不炸收尾
+        ok, detail = False, f"找不到可用的 ffmpeg 或调用失败：{exc}"
+    if ok:
+        return True, ConcatStrategy.TRIM_FIRST_FRAME.value, []
+
+    from .tools.seam_audit import merge_videos
+
+    try:
+        moved, how = merge_videos(sources, out, reencode_crf=reencode_crf)
+    except Exception as exc:  # noqa: BLE001
+        return False, (f"拼接失败（先裁首帧重编码、再退回朴素拼接都没成）："
+                       f"{detail}；{exc}"), []
+    if not moved:
+        return False, (f"拼接失败（先裁首帧重编码、再退回朴素拼接都没成）："
+                       f"{detail}；{how}"), []
+    return True, _FALLBACK_HOW, [_DUPLICATE_SEAM_NOTICE]
 
 
 def format_final_film(film: FinalFilm) -> str:

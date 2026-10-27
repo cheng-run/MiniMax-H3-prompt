@@ -171,7 +171,8 @@ def test_reentering_after_a_failed_concat_only_reattaches_the_film(
     out = capsys.readouterr().out
     final = gen / "final.mp4"
     assert final.is_file(), out
-    assert video_meta(final)["frames"] == 192, "两段各 96 帧，stream-copy 直接接起来"
+    assert video_meta(final)["frames"] == 96 + 96 - 1, \
+        "两段各 96 帧，接缝裁掉第 2 段首帧（issue #98）"
     assert load_session(gen).status == session_store.STATUS_COMPLETED
     assert hits == {}, f"续拼时重跑了不该重跑的步骤：{hits}"
     assert asked, "向导没被真正驱动起来（续接菜单都没问）"
@@ -230,7 +231,7 @@ def test_reentering_with_the_film_already_written_still_converges(
     assert wizard.run_wizard(_cfg(tmp_path)) == 0
 
     out = capsys.readouterr().out
-    assert video_meta(gen / "final.mp4")["frames"] == 192, out
+    assert video_meta(gen / "final.mp4")["frames"] == 96 + 96 - 1, out
     assert load_session(gen).status == session_store.STATUS_COMPLETED
     assert hits == {}
 
