@@ -3803,6 +3803,67 @@ def _read_cached_summary(directory: Path):
                          shots=shots if isinstance(shots, list) else [])
 
 
+# 续拼短路（issue #97）的三种判读，见 ``_film_only_resume``。
+RESUME_ASSEMBLE = "assemble"        # 全段已过 + 段表在 → 直接拼接
+RESUME_NO_TABLE = "no-table"        # 账满 1..N、但段表缺席 → 停住（别重跑规划）
+RESUME_KEEP_GOING = "keep-going"    # 还没到「只差成片」→ 走常规续跑
+
+
+def _film_only_resume(directory: Path) -> str:
+    """「只差成片」了吗？该直接拼、还是停住？（issue #97 续拼短路的判据）
+
+    为什么要在跑任何流程**之前**问这一句：拼接失败之后会话停在 ``segmented_running``
+    （#96 的失败语义），用户重进向导就落回这条续接路径。若先跑 ``_run_segmented_flow``，
+    它会在 ``cached and done`` 分支里**先构造模型**——哪怕一段都不用写——模型构造失败
+    就直接停在拼接口之前，用户已经付过的生成与验收成本永远换不回成片；FL2VA/L2VA 下
+    它还会无条件走末段核验，把末段视频**再要一遍**（勘察 §F-6）。段已全过时这些都该
+    整段跳过。
+
+    为什么不干脆把「账满但没有段表」也交给下游：``_cached_plans`` 返回 None 时那条路径
+    会**先重跑一次 ``plan_segments``**（LLM 调用），之后才因为「账已满 + 这是另一套分段」
+    停下——一次纯浪费的付费调用，而「这条片子拼不了」盘上早就看得出来。机械回退路径的
+    段表只在全部段通过之后补写（``_write_mechanical_plan``），段提示词没有可用时间戳时
+    它压根不写，所以这条现场真实存在（#96 交接）。
+
+    三种判读：
+    - ``RESUME_ASSEMBLE``：段表读得回来 + 账上每段都有通过行 + 账与段表对得上；
+    - ``RESUME_NO_TABLE``：账是满的（1..N 连续、非空）却**没有** ``segments/plan.json``；
+    - ``RESUME_KEEP_GOING``：其余（还没跑完，或读不回来）。
+
+    **读不回来一律走常规续跑、不在这里报错**——那条既有路径
+    （``_run_segmented_flow`` → ``_segment_progress`` / ``validate_shot_progress``）会用
+    同一套口径把病因打出来并停住；在这里再打一份就是同一句话两处口径（#56/#57 的教训）。
+    那也**不是**「从第 1 段重来」：账读不回来时那条路径同样会停住，不会重做任何段。
+
+    旧会话（没有新账、只有 ``segments/progress.json``）**不算**只差成片：它从没记过段
+    视频路径，拼接本来就不可用（#96 已当面说破），走既有路径标完成即可。
+
+    已知边界（没有段表就看不出总段数）：「账满 1..N」既可能是全过，也可能是一份**半途**
+    的机械回退账——两种都判 ``RESUME_NO_TABLE``。后者的出路与今天一样（补段表，或删账
+    从第 1 段重做），少的只是一次白跑的规划调用。
+    """
+    from ..shot_ledger import passed_shot_rows, validate_shot_progress
+
+    try:
+        passed = passed_shot_rows(directory)
+    except (OSError, ValueError):
+        return RESUME_KEEP_GOING
+    # 只有 1..N 连续（非空）才谈得上「账满」；跳号/越界交给下游按跳号口径报出来。
+    if sorted(passed) != list(range(1, len(passed) + 1)):
+        return RESUME_KEEP_GOING
+    try:
+        plans = _cached_plans(directory)
+    except ValueError:
+        return RESUME_KEEP_GOING
+    if plans is None:
+        return RESUME_NO_TABLE if passed else RESUME_KEEP_GOING
+    try:
+        validate_shot_progress(passed, total_segments=len(plans))
+    except ValueError:
+        return RESUME_KEEP_GOING
+    return RESUME_ASSEMBLE if len(passed) == len(plans) else RESUME_KEEP_GOING
+
+
 def _run_long_form(brief: Brief, session: SessionState, prompt: str, summary, state: dict,
                    directory: Path) -> dict[int, dict]:
     """长视频分段陪跑：跑之前标「分段进行中」，**全部段确认完成**才转「已完成」。
@@ -3819,7 +3880,11 @@ def _run_long_form(brief: Brief, session: SessionState, prompt: str, summary, st
     **返回值＝全部通过行**（``{段号: 账行}``，段号从 1 起连续），供收尾处的成片拼接
     （#96）直接取用；未跑完返回空表。旧会话（无新账）也返回空表——那正是「拼接不可用」
     的形态，与账读口同一份语义（见 ``_segment_progress``）。
-    拼接本身不在本函数里（#96）；这里只保证「全段已过」那一刻能拿到拼接输入。
+
+    **续拼短路**（issue #97）：段已全过、只差成片时**整段跳过** ``_run_segmented_flow``，
+    直接进拼接；账满而段表缺席时同样不进它，就地停住（那条路径会先重跑一次分段规划）。
+    理由见 ``_film_only_resume``：那条路径会先构造模型、再走末段核验，两条都与「只差
+    成片」无关，却都能把用户挡在拼接口之前。
 
     **收尾处自动接出成片**（#96）：全段通过之后、标完成之前，按 ``segments/plan.json``
     的段序与段产出账的通过行拼出 ``<生成目录>/final.mp4``。拼接判据（缺段／SHA256／
@@ -3827,6 +3892,51 @@ def _run_long_form(brief: Brief, session: SessionState, prompt: str, summary, st
     拼接的那一处，不能退化成调用方的 if（本仓「规则在、接线不在」已犯过多次）。
     拼不出来（含找不到段表）**不标完成**：会话停在 ``segmented_running``，续拼由 #97
     接着做；标早了下次重跑会另开新 GEN，已通过的段全白做（同 #17 的代价）。
+    """
+    save_session(directory, brief, state, status=STATUS_SEGMENTED_RUNNING)
+
+    verdict = _film_only_resume(directory)
+    if verdict == RESUME_NO_TABLE:
+        # 第一句与 #96 收尾处**同一句**（不另造一套）：段表缺席＝段序无从确定。
+        # 放在流程之前说，是因为下游那条路会先花一次 LLM 重跑规划才得出同一个结论。
+        print("\n[成片] 成片未产出：找不到分段规划 segments/plan.json——段序无从确定。")
+        # 第二句不能沿用 #96 的「从拼接这一步继续」：这里也可能是一份**半途**的机械
+        # 回退账（没有段表就看不出总段数，见 ``_film_only_resume`` 的已知边界），那种
+        # 情况下恢复段表后重进是接着往下走、不是从拼接继续。说「接着往下走」两种都真。
+        print("[续接] 会话保持「分段进行中」：恢复段表后重进向导会接着往下走"
+              "（已通过的段不重跑）。")
+        return {}
+    if verdict == RESUME_ASSEMBLE:
+        # 续拼（#97）：不再问段视频、不重剥帧、不重跑闸门，也不再构造模型。
+        # 这里**必须**早于 ``_run_segmented_flow``：它内部的两处 LLM 相关步骤（构造模型、
+        # 末段核验）都与「只差成片」无关，却任一失败都能把用户永久挡在拼接口之前。
+        print("\n[续拼] 全部段已通过验收，只差成片：直接从拼接这一步继续"
+              "（不再要段视频、不重剥帧、不重跑闸门）。")
+        return _assemble_film_and_complete(directory, brief, state)
+
+    finished = _run_segmented_flow(brief, session, prompt, summary=summary, state=state)
+    if not finished:
+        print(f"\n[续接] 本次没有跑完全部段，会话保持「分段进行中」：下次重跑向导会落回 "
+              f"{directory.name}，从已完成的那一段之后继续（阶段 1/2 不重跑）。")
+        return {}
+    return _assemble_film_and_complete(directory, brief, state)
+
+
+def _assemble_film_and_complete(directory: Path, brief: Brief,
+                                state: dict) -> dict[int, dict]:
+    """收尾：把已通过的段接成 ``<生成目录>/final.mp4``，**成功才**标完成（issue #96）。
+
+    首跑与续拼（#97）共用这一份：两条路只是「怎么走到这里」不同，走到之后要做的事
+    一模一样，各写一遍迟早出现一份改了另一份没改。
+
+    返回全部通过行（成功）或空表（拼不出来／账读不回来）。**拼不出来不标完成**：会话
+    停在 ``segmented_running``，下次重进向导还能续拼；标早了下次重跑会另开新 GEN，
+    已通过的段全白做（同 #17 的代价）。
+
+    幂等（issue #97）：账上全过而 ``final.mp4`` 已存在时（写完成片、还没标完成就崩了，
+    或用户重复进入）照样重跑一次拼接——同名的旧成片会被覆盖，换来的是「重进就收敛到
+    完成」，而不是一条永远停在 running 的会话。被覆盖的那份是**这套段**接出来的，
+    重接不会换来一份不同的片子（段视频的身份由账上的 SHA256 钉住，见共用件）。
     """
     from ..final_film import ConcatStrategy, assemble_film, format_final_film
     from ..shot_ledger import (
@@ -3836,12 +3946,6 @@ def _run_long_form(brief: Brief, session: SessionState, prompt: str, summary, st
         validate_shot_progress,
     )
 
-    save_session(directory, brief, state, status=STATUS_SEGMENTED_RUNNING)
-    finished = _run_segmented_flow(brief, session, prompt, summary=summary, state=state)
-    if not finished:
-        print(f"\n[续接] 本次没有跑完全部段，会话保持「分段进行中」：下次重跑向导会落回 "
-              f"{directory.name}，从已完成的那一段之后继续（阶段 1/2 不重跑）。")
-        return {}
     try:
         # 收尾点（#96 的拼接落点）：账上的全部通过行在这里取得。读不回来就**不标完成**
         # ——账是续跑的进度来源，标了完成会让下次重跑另开新 GEN（同 #17 的代价）。
@@ -3911,6 +4015,10 @@ def _resume_segmented(config: Config, session: SessionState) -> int:
 
     阶段 2 的产物（``video-prompt.md``、``summary-zh.json``、带帧图读图结果的
     ``stage_state``）都在会话目录里，所以这里零 LLM 调用就能续接。
+
+    「零 LLM」不是本函数保证的，而是 ``_run_long_form`` 的续拼短路保证的（issue #97）：
+    段已全过、只差成片时它整段跳过陪跑，连模型都不构造——否则一个与成片无关的失败
+    （缺 API key）就能让用户永远拿不到那份已经该有的成片。
     """
     directory = session.directory
     prompt_file = directory / "video-prompt.md"
