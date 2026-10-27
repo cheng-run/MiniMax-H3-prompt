@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -142,3 +143,55 @@ def test_merge_videos_leaves_no_concat_list(tmp_path, tmp_video):
     assert ok, f"合并应成功，实际返回 {how!r}"
     assert out.is_file()
     assert not (tmp_path / "audit" / "concat_list.txt").exists()
+
+
+# --- 重编码画质档是**路线**的参数（issue #93，勘察 §F-8）-----------------------
+
+class _Proc:
+    returncode = 0
+    stderr = ""
+
+
+def _stub_ffmpeg(monkeypatch):
+    """把 ffmpeg 调用换掉：stream-copy 那一趟「成功但没产出文件」，逼它走到重编码。
+
+    只看命令行的 ``-crf`` 取值——画质档本来就只体现在这里，没有别的地方可观测。
+    """
+    from minimax_h3_prompt.tools import seam_audit
+
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        commands.append(list(cmd))
+        if "-crf" in cmd:                       # 只有重编码那一趟带 -crf
+            Path(cmd[-1]).write_bytes(b"stub")
+        return _Proc()
+
+    monkeypatch.setattr(seam_audit, "find_ffmpeg", lambda: Path("ffmpeg"))
+    monkeypatch.setattr(seam_audit.subprocess, "run", fake_run)
+    return commands
+
+
+def _crf_of(commands: list[list[str]]) -> str:
+    cmd = commands[-1]
+    return cmd[cmd.index("-crf") + 1]
+
+
+def test_merge_videos_honours_the_requested_reencode_crf(monkeypatch, tmp_path):
+    """``reencode_crf`` 必须真的进命令行：base 档要 16、多参档要 18。"""
+    commands = _stub_ffmpeg(monkeypatch)
+
+    ok, how = merge_videos([tmp_path / "a.mp4"], tmp_path / "out.mp4", reencode_crf=16)
+
+    assert ok and how == "re-encode"
+    assert _crf_of(commands) == "16"
+
+
+def test_merge_videos_keeps_crf_18_when_the_caller_says_nothing(monkeypatch, tmp_path):
+    """不传时仍是历史值 18：``analyze()`` 与既有调用点不许被这次参数化悄悄改画质。"""
+    commands = _stub_ffmpeg(monkeypatch)
+
+    ok, _ = merge_videos([tmp_path / "a.mp4"], tmp_path / "out.mp4")
+
+    assert ok
+    assert _crf_of(commands) == "18"

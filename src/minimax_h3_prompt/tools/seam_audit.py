@@ -155,11 +155,17 @@ class AuditReport:
     merged_path: str = ""
 
 
-def merge_videos(videos: list[Path], out_path: Path) -> tuple[bool, str]:
+def merge_videos(videos: list[Path], out_path: Path, *,
+                 reencode_crf: int = 18) -> tuple[bool, str]:
     """ffmpeg concat。先试 stream copy（无损且快），失败再重编码。
 
     中间产物 ``concat_list.txt`` 无论成败都会清理掉——失败线索由返回的
     ffmpeg stderr 承载，不需要靠残留文件，也别在输出目录里留垃圾。
+
+    ``reencode_crf`` 为什么是参数而不是常量（issue #93，勘察 §F-8）：画质档是**拼接口径**
+    的选择，不是这个函数的属性。多参沿用历史上写死的 18（成片已经交付过，改它等于悄悄
+    改变既有产物的画质）；首尾帧链的瓶颈本来就是画质，按 spec #92 取 16、由 #98 传。
+    写死在函数里，另一条路线要么继承一个错的值，要么被迫把整个 concat 流程抄一遍。
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     list_file = out_path.parent / "concat_list.txt"
@@ -168,7 +174,8 @@ def merge_videos(videos: list[Path], out_path: Path) -> tuple[bool, str]:
     base = [str(find_ffmpeg()), "-y", "-f", "concat", "-safe", "0", "-i", str(list_file)]
     attempts = [
         ("stream-copy", ["-c", "copy"]),
-        ("re-encode", ["-c:v", "libx264", "-crf", "18", "-c:a", "aac", "-b:a", "192k"]),
+        ("re-encode", ["-c:v", "libx264", "-crf", str(int(reencode_crf)),
+                       "-c:a", "aac", "-b:a", "192k"]),
     ]
     last_error = ""
     try:

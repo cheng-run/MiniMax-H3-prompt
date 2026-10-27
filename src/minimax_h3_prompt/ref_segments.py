@@ -22,7 +22,8 @@
 「拼接归用户」）：段间硬切、用各段自身帧，缺一段就拒绝（缺段成片是伪产物）。≤15 秒
 直出走同一套收尾——整片六段式即唯一执行段（``single_segment_result``），段数=1 时
 拼接退化为拷贝改名。重跑某段后可单独跑一次手动拼接（CLI ``ref-concat``，与自动拼接
-同一份编排）。
+同一份编排）。**判据与拼接本体自 issue #93 起属于共用件 ``final_film``**（首尾帧链
+#96/#98 接的是同一份）——这里的 ``assemble_final_film`` 只是薄包装，只定落点与拼接口径。
 
 陪跑中断后由**续跑**接回（issue #58）：``load_ref_segments_for_resume`` 从
 ``segments/plan.json`` ＋ ``video-prompt.md`` 重建**按需写段作业**（已落盘的段零
@@ -36,7 +37,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,6 +46,12 @@ from .asset_ledger import (
     load_asset_ledger,
     resolve_asset_path,
     sha256_file,
+)
+from .final_film import (
+    ConcatStrategy,
+    FinalFilm,
+    assemble_film,
+    format_final_film,
 )
 from .ref_capacity import (
     ReferenceItem,
@@ -867,37 +873,12 @@ def read_segment_ledger(directory: str | Path, *, event: str | None) -> list[dic
     return out
 
 
-# --- 成片拼接（issue #57）-----------------------------------------------------
+# --- 成片拼接（issue #57；共用件抽出见 issue #93）--------------------------------
 # 成片落生成目录根部：`segments/` 里是逐段的中间物（段提示词、账、帧图），成片是**最终
 # 产物**，与 video-prompt.md（整片存档）同级——它是用户在剪辑软件/播放器里要打开的那一个。
+# **落点与文件名归本路薄包装**（共用件只收 ``out_path``）：两条路线此刻同名，但「成片放哪」
+# 是路线自己的事，不该让共用件替它们定。
 FINAL_FILM_FILENAME = "final.mp4"
-
-# 成片短于起步总时长的告警容差：H3 产出**从不是整数秒**（4s 档恒 4.458s，见
-# ``preflight.H3_TIER_FRAMES``），所以「等于总时长」的可证形态是**结构**的（各段计划
-# 时长之和 ＝ 起步总时长），实测时长只做**只报短**的核对。容差按**一帧/段**给：档位
-# 量化误差是帧级的（±2 帧 ≈ 0.08s），跨段累积不会超过这个量级；真短掉一档（如 10s 段
-# 交回 7s 档）差的是好几秒，照样咬得住。
-_FINAL_FILM_FRAME_S = 1.0 / 24.0
-
-
-@dataclass
-class FinalFilm:
-    """一次成片拼接的结果。
-
-    ``path`` 为 None ＝ **没产出成片**，``reason`` 说清卡在哪（缺段／账上视频对不上／
-    拼接失败）——缺一段的成片时长对不上总时长，是伪产物，比没有更坏（spec #54）。
-    """
-
-    path: Path | None
-    how: str            # "copy"（段数=1 退化为拷贝改名）/ "stream-copy" / "re-encode"
-    total_s: int        # 起步输入的总时长（用户的目标成片时长）
-    # 各段计划时长之和。**可以大于 total_s**：规划器允许末段 end 略超 total 留余量
-    # （``segment_planner.parse_segment_plan``），所以成片比起步总时长长一点是设计使然，
-    # 不是缺陷——判「段表对不对」要用覆盖式判据（``_coverage_problem``），不是相等。
-    planned_s: int
-    measured_s: float | None
-    reason: str = ""
-    warnings: list[str] = field(default_factory=list)
 
 
 def validate_segment_text(text: str, *, annotated: bool, duration: float | None = None,
@@ -1108,127 +1089,28 @@ def read_ref_handoff_progress(directory: str | Path, *,
     return passed
 
 
-def _coverage_problem(plans: list[SegmentPlan], total_s: int) -> str:
-    """段表必须无缝覆盖 ``[0, 起步总时长]``；不覆盖就返回一句「哪儿不对」（空串＝没问题）。
-
-    **末段 end 允许略超 total**（规划器留余量：``segment_planner.parse_segment_plan``
-    写着「最后一段 end 可以略超 total（留余量）但不许欠」），所以判据是「≥」不是「＝」。
-    拿「各段计划时长之和 ＝ 起步总时长」当判据，末段一留余量就会把**全段通过**的片子
-    判成「段表与本次生成不是一套」而拒绝出片——同一份契约两处口径，本仓已犯过（issue
-    #56 的假 ``SEGMENT_TIMELINE_MISSING`` 就是这个形态；本票复审实测末段超 total 的
-    规划产物可达）。
-    """
-    if not plans:
-        return "段表是空的（segments/plan.json 里没有段）"
-    if plans[0].start_s != 0:
-        return f"段表不从 0 起（首段从 {plans[0].start_s}s 起）"
-    for previous, following in zip(plans, plans[1:]):
-        if previous.end_s != following.start_s:
-            return (f"段表有缺口/重叠：{previous.start_s}-{previous.end_s}s 之后是 "
-                    f"{following.start_s}-{following.end_s}s")
-    if plans[-1].end_s < total_s:
-        return f"段表只覆盖到 {plans[-1].end_s}s，欠起步总时长 {total_s}s"
-    return ""
-
-
 def assemble_final_film(*, directory: str | Path, plans: list[SegmentPlan],
                         total_s: int, rows: dict[int, dict]) -> FinalFilm:
-    """把**已通过验收**的各段按段序接成成片（issue #57）。
+    """多参成片的**薄包装**（issue #93 起）：共用件在 ``final_film.assemble_film``。
 
-    ``rows`` 是段产出账里 ``event=output`` 的行（``passed_segment_rows``）；**取数是调用
-    方的事，拼不拼由这里说了算**——「未通过即不拼」这条规矩必须住在被拼接的那一处，
-    否则它就是一个可以被绕过的调用方约定（本仓「规则在、接线不在」已犯七次）。
+    这一层只做两件与路线有关的事：成片落点（生成目录根部的 ``final.mp4``）与拼接口径
+    （多参这一档恒为「优先无损 stream-copy、失败转重编码」）。四道可证核对——段表覆盖
+    判据、缺段、账上视频读不到、SHA256 不符——连同实测时长的「只报短」核对都住在共用件
+    里：首尾帧链（#96/#98）接的是同一份判据，两处各写一遍迟早漂（本仓已咬过两次，
+    见 ``final_film._coverage_problem`` 的注释）。
 
-    段序取 ``plans``（不是 ``rows`` 的插入顺序、也不是交回顺序）：plan.json 是段序的
-    唯一出站真源，自动与手动两条路都照它走。段数=1 时拼接退化为**拷贝改名**——≤15 秒
-    直出走的就是这一档，不劳 ffmpeg 一趟（spec #54「段数=1，拼接退化为拷贝改名」）。
-
-    四道可证核对都在这里做，任一不过就**不产出成片**并说清卡在哪：段表不覆盖整条片子
-    （``_coverage_problem``）、账上记的视频读不到（改名/搬走）、SHA256 对不上（换版）、
-    拼接本身失败。实测时长只做**只报短**的核对（H3 产出比标称长是设计使然，见
-    ``_FINAL_FILM_FRAME_S``）。
+    签名与行为保持不变：``ui/wizard.py`` 与 CLI ``ref-concat`` 两处调用点照旧。
     """
-    from .tools.frame_match import video_meta
-    from .tools.seam_audit import merge_videos
-
-    directory = Path(directory)
-    planned_s = sum(int(plan.duration_s) for plan in plans)
-
-    def _refuse(reason: str) -> FinalFilm:
-        return FinalFilm(path=None, how="", total_s=int(total_s), planned_s=planned_s,
-                         measured_s=None, reason=reason)
-
-    missing = [plan.index + 1 for plan in plans if (plan.index + 1) not in rows]
-    if missing:
-        return _refuse(
-            "第 " + "、".join(str(n) for n in missing)
-            + f" 段尚未通过验收：缺一段的成片时长对不上起步总时长 {int(total_s)}s，"
-            "是伪产物——不产出成片。")
-    problem = _coverage_problem(plans, int(total_s))
-    if problem:
-        return _refuse(f"{problem}：段表与本次生成不是一套，不产出成片。")
-
-    sources: list[Path] = []
-    for plan in plans:
-        number = plan.index + 1
-        row = rows[number]
-        video = Path(str(row.get("video", "")))
-        if not video.is_file():
-            return _refuse(f"第 {number} 段账上记的视频读不到：{video}"
-                           "（改名/搬走了？）——不产出成片。")
-        recorded = str(row.get("sha256") or "")
-        if recorded and sha256_file(video) != recorded:
-            return _refuse(
-                f"第 {number} 段的文件与验收时记下的 SHA256 不一致：{video}"
-                "（换版/被覆盖？）——它已经不是通过验收的那一份，不产出成片。"
-                "重跑该段后请用 `ref-concat <生成目录> --replace "
-                f"{number} <新视频>` 显式指定。")
-        sources.append(video)
-
-    out = directory / FINAL_FILM_FILENAME
-    if len(sources) == 1:
-        # 段数=1：拼接退化为拷贝改名（≤15 秒直出走这一档）
-        out.parent.mkdir(parents=True, exist_ok=True)
-        if out.resolve() != sources[0].resolve():
-            shutil.copy2(sources[0], out)
-        how = "copy"
-    else:
-        ok, how = merge_videos(sources, out)
-        if not ok:
-            return _refuse(f"拼接失败（先 stream copy、失败转重编码都没成）：{how}")
-
-    measured = float(video_meta(out).get("duration_s") or 0.0) or None
-    warnings: list[str] = []
-    if measured is None:
-        warnings.append(f"读不到成片的时长元数据：{out}（跳过时长核对）")
-    elif measured + len(sources) * _FINAL_FILM_FRAME_S < planned_s:
-        warnings.append(
-            f"成片实测 {measured:.2f}s，短于各段计划时长之和 {planned_s}s——"
-            "可能有段没接上，或某段交回的不是计划时长档的产出")
-    return FinalFilm(path=out, how=how, total_s=int(total_s), planned_s=planned_s,
-                     measured_s=measured, warnings=warnings)
-
-
-def format_final_film(film: FinalFilm) -> str:
-    """成片结果的当面文案（AC3/AC7）：落点、时长、拼接方式，以及卡在哪一段。
-
-    起步总时长与各段计划时长之和**分别给**：末段留余量时两者不等（成片会比目标长一点），
-    只报一个数会让人以为成片超了是缺陷——那是规划器的余量，不是错。
-    """
-    if film.path is None:
-        return "\n[成片] 未产出成片：" + film.reason
-    planned = (f"起步总时长 {film.total_s}s"
-               if film.planned_s == film.total_s
-               else f"起步总时长 {film.total_s}s（各段计划时长之和 {film.planned_s}s，"
-                    "末段留余量）")
-    lines = [
-        f"\n[成片] 已接成成片：{film.path}",
-        f"  段间硬切、用各段自身帧；{planned}，"
-        + (f"实测 {film.measured_s:.2f}s" if film.measured_s else "实测时长读不出")
-        + f"（拼接方式：{'拷贝改名' if film.how == 'copy' else film.how}）。",
-    ]
-    lines += [f"  [提醒] {note}" for note in film.warnings]
-    return "\n".join(lines)
+    return assemble_film(
+        plans=plans, rows=rows, total_s=int(total_s),
+        out_path=Path(directory) / FINAL_FILM_FILENAME,
+        # 策略**显式传**、不给共用件留「默认值」：默认值会让「多参用的是哪一档」变成一个
+        # 看不见的约定——将来谁把默认值改成裁首帧，多参的成片行为就静默变了。
+        strategy=ConcatStrategy.STREAM_COPY_FIRST,
+        # 18＝续用 ``merge_videos`` 历史上写死的重编码画质档（多参成片已交付过，改它等于
+        # 悄悄改变既有产物的画质）。首尾帧链按 spec #92 取 16，由 #98 传。
+        reencode_crf=18,
+    )
 
 
 def render_ref_segment_briefing(plan: SegmentPlan, position: int, total: int,
