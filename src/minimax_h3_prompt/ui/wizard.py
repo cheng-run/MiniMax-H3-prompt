@@ -3820,8 +3820,21 @@ def _run_long_form(brief: Brief, session: SessionState, prompt: str, summary, st
     （#96）直接取用；未跑完返回空表。旧会话（无新账）也返回空表——那正是「拼接不可用」
     的形态，与账读口同一份语义（见 ``_segment_progress``）。
     拼接本身不在本函数里（#96）；这里只保证「全段已过」那一刻能拿到拼接输入。
+
+    **收尾处自动接出成片**（#96）：全段通过之后、标完成之前，按 ``segments/plan.json``
+    的段序与段产出账的通过行拼出 ``<生成目录>/final.mp4``。拼接判据（缺段／SHA256／
+    段表覆盖）住在共用件 ``final_film.assemble_film`` 里——「未通过即不拼」必须住在被
+    拼接的那一处，不能退化成调用方的 if（本仓「规则在、接线不在」已犯过多次）。
+    拼不出来（含找不到段表）**不标完成**：会话停在 ``segmented_running``，续拼由 #97
+    接着做；标早了下次重跑会另开新 GEN，已通过的段全白做（同 #17 的代价）。
     """
-    from ..shot_ledger import passed_shot_rows
+    from ..final_film import ConcatStrategy, assemble_film, format_final_film
+    from ..shot_ledger import (
+        legacy_progress_path,
+        passed_shot_rows,
+        shot_ledger_path,
+        validate_shot_progress,
+    )
 
     save_session(directory, brief, state, status=STATUS_SEGMENTED_RUNNING)
     finished = _run_segmented_flow(brief, session, prompt, summary=summary, state=state)
@@ -3836,6 +3849,59 @@ def _run_long_form(brief: Brief, session: SessionState, prompt: str, summary, st
     except (OSError, ValueError) as exc:
         print(f"[错误] 段产出账读不回来（{exc}）：不把会话标成完成——账是续跑的进度来源。")
         return {}
+
+    # 旧会话没有新账（只有旧的 progress.json）：它从没记过段视频路径与 SHA256，
+    # 拼接所需的输入根本不存在。这不是失败——旧会话的既定边界，照旧标完成。
+    legacy = (legacy_progress_path(directory).is_file()
+              and not shot_ledger_path(directory).is_file())
+    if legacy:
+        print("\n[成片] 旧会话没记段视频，拼接不可用。")
+    else:
+        try:
+            plans = _cached_plans(directory)
+        except ValueError as exc:
+            print(f"\n[成片] 成片未产出：分段规划读不回来（{exc}）")
+            print("[续接] 会话保持「分段进行中」：修好 segments/plan.json 后重进向导"
+                  "会从拼接这一步继续（已通过的段不重跑）。")
+            return {}
+        if plans is None:
+            # 段序真源缺席：机械回退路径在收尾补写 plan.json（见 _write_mechanical_plan），
+            # 规划式在开跑时就写了。两处都没有＝落盘物不一致，不猜段序。
+            print("\n[成片] 成片未产出：找不到分段规划 segments/plan.json——段序无从确定。")
+            print("[续接] 会话保持「分段进行中」：恢复段表后重进向导会从拼接这一步继续"
+                  "（已通过的段不重跑）。")
+            return {}
+        try:
+            # 账与段表必须对得上（越界/跳号都算）：账上的段号只对产出它的那套分段有意义，
+            # 拿一份对不上的账去拼接，等于把另一次拆段的产物接进这条片子（全程不报错）。
+            validate_shot_progress(passed, total_segments=len(plans))
+        except ValueError as exc:
+            print(f"\n[成片] 成片未产出：{exc}")
+            print("[续接] 会话保持「分段进行中」：修好段产出账后重进向导会从拼接这一步继续。")
+            return {}
+        film = assemble_film(
+            plans=plans, rows=passed, total_s=int(brief.duration),
+            # 成片落点与多参同名（成片是同一件产物）；「放哪」是路线的事，由这一层定
+            # （见 ``ref_segments.FINAL_FILM_FILENAME`` 的同一口径）。
+            out_path=directory / "final.mp4",
+            # 本票不裁接缝首帧（#98 才把这一档换成 TRIM_FIRST_FRAME）：先用多参同款
+            # 「优先 stream-copy」，画质档按 spec #92 取 CRF 16。
+            strategy=ConcatStrategy.STREAM_COPY_FIRST,
+            reencode_crf=16,
+            # 出路必须是**本路**的：首尾帧链没有换段拼接命令，替它讲一句
+            # ``ref-concat --replace`` 就是误导（spec #92 明令不提供该命令）。
+            remedy_hint="重跑本段并重新验收通过后，成片会自动取用最新的那份视频。",
+        )
+        if film.path is None:
+            print(f"\n[成片] 成片未产出：{film.reason}")
+            print("[续接] 会话保持「分段进行中」：重进向导会从拼接这一步继续"
+                  "（已通过的段不重跑，也不必重新交回视频）。")
+            return {}
+        print(format_final_film(film))
+        # 段数当面给出（落点已由 format_final_film 给出）：它是「这条片子由几段接成」的
+        # 直接答案，也是与段表现场对账时最短的一句。
+        print(f"  段数：{len(plans)} 段")
+
     save_session(directory, brief, state, status=STATUS_COMPLETED)
     return passed
 
@@ -4010,6 +4076,46 @@ def _segment_progress(directory: Path) -> _SegmentProgress:
               f"（已完成 {done} 段）。但旧进度只记了段数、没记各段视频路径——"
               "**拼接不可用**：成片需要每段的视频路径与 SHA256。")
     return _SegmentProgress(start=done, passed={}, legacy=True)
+
+
+def _write_mechanical_plan(directory: Path, segments: list) -> bool:
+    """把机械拆分的段表补写成 ``segments/plan.json``（issue #96）。
+
+    回退路径没有 plan 层，而收尾的成片拼接只认 ``plan.json`` 当段序真源（与多参同一
+    份口径：不按文件名、不按时间排）。**只在全部段通过之后写**：中途写会让中断后的续跑
+    在 ``_run_segmented_flow`` 的 ``cached and done`` 分支误走规划式重写——机械段边界与
+    规划器不是一套，按它续写等于换了一套段（issue #17 的原形态）。
+
+    机械拆分没有 plan 层的概述与末态声明：``summary``/``end_hook`` 留空，不编一句
+    （编出来的话会被后续读者当成「规划器确实写过这句话」）。
+
+    返回 False＝段提示词里没有可用的起止时间戳：没有时间窗就核不出「段表覆盖
+    ``[0, 起步总时长]``」，不写一份对不上总时长的段表，由调用方说破拼接不可用。
+    """
+    import json
+
+    from ..segment_planner import SegmentPlan
+
+    plans: list[SegmentPlan] = []
+    for position, segment in enumerate(segments, 1):
+        start, duration = segment.start_seconds, segment.duration_seconds
+        if start is None or duration is None:
+            return False
+        plans.append(SegmentPlan(
+            index=position - 1,
+            # 段边界按契约是整数秒（``_shot_blocks`` 已把时间戳取整），这里只是落类型。
+            start_s=int(round(start)),
+            end_s=int(round(start + duration)),
+            shots_in_segment=(segment.shot_number,),
+            summary="",
+            end_hook="",
+        ))
+    seg_dir = Path(directory) / "segments"
+    seg_dir.mkdir(parents=True, exist_ok=True)
+    (seg_dir / "plan.json").write_text(
+        json.dumps([plan.to_dict() for plan in plans], ensure_ascii=False, indent=2),
+        encoding="utf-8")
+    return True
 
 
 def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summary=None,
@@ -4263,7 +4369,12 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
                                   on_pass=lambda video, shot=segments[-1]:
                                       record_pass(total, shot, video)):
             return False
-    print(f"\n✓ 全部 {total} 段已人工确认完成。可在剪辑工具中按顺序拼接 segments/ 下的各段输出。")
+    # 段序真源（#96）：机械回退路径没有 plan 层，全部段通过之后补写段表，收尾处的成片
+    # 拼接照它排段。只在**全部段通过**时写（中途写的后果见函数 docstring）；旧会话不写
+    # ——它没有段视频账，拼接本就不可用（票面 Out of Scope：不回溯补账）。
+    if not progress.legacy and not _write_mechanical_plan(session.directory, segments):
+        print("[成片] 分段的提示词里没有可用的起止时间戳：段表补不出来，拼接不可用。")
+    print(f"\n✓ 全部 {total} 段已人工确认完成。")
     return True
 
 
@@ -4575,7 +4686,7 @@ def _run_segmented_flow_v2(session: SessionState, plans: list, state: dict, llm,
                                   on_pass=lambda video, current=last_plan:
                                       record_pass(total, current, video)):
             return False
-    print(f"\n✓ 全部 {total} 段已人工确认完成。可在剪辑工具中按顺序拼接 segments/ 下的各段输出。")
+    print(f"\n✓ 全部 {total} 段已人工确认完成。")
     return True
 
 

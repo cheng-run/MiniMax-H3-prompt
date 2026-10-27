@@ -352,13 +352,20 @@ def test_new_session_without_any_ledger_is_not_treated_as_legacy(tmp_path, monke
     assert [row["segment"] for row in _rows(session.directory)] == [1, 2]
 
 
-def test_long_form_hands_the_passed_rows_to_the_finish_point(tmp_path, monkeypatch):
-    """收尾处（#96 的拼接落点）能拿到全部通过行；没跑完就是空表。"""
-    session = _session(tmp_path)
+def test_long_form_hands_the_passed_rows_to_the_finish_point(tmp_path, monkeypatch,
+                                                             tmp_video):
+    """收尾处（#96 的拼接落点）能拿到全部通过行，并把它接成成片；没跑完就是空表。
+
+    这里必须用**真视频**：收尾现在会把账上的视频真的接起来（#96），拿字节串冒充视频
+    的话，拒绝的是拼接本身而不是落账——那就测不到本函数要钉的那件事了。
+    """
+    session = _session(tmp_path, duration=8.0)
     _write_plan(session.directory, 2)
     for number in (1, 2):
-        _seed_row(session.directory, number, start_s=(number - 1) * 4, end_s=number * 4,
-                  name=f"passed{number}.mp4")
+        video = tmp_video(f"passed{number}.mp4", frames=96, fps=24, width=128, height=72)
+        shot_ledger.append_shot_output(
+            session.directory, segment=number, start_s=(number - 1) * 4,
+            end_s=number * 4, video_path=video)
     monkeypatch.setattr(wizard, "_run_segmented_flow", lambda *a, **k: True)
 
     passed = wizard._run_long_form(session.brief, session, "prompt", None, {},
@@ -366,6 +373,7 @@ def test_long_form_hands_the_passed_rows_to_the_finish_point(tmp_path, monkeypat
 
     assert sorted(passed) == [1, 2]
     assert passed[2]["video"].endswith("passed2.mp4")
+    assert (session.directory / "final.mp4").is_file()
     assert session_store.load_session(session.directory).status == \
         session_store.STATUS_COMPLETED
 
