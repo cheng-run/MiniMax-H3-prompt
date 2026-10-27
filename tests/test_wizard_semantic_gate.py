@@ -54,6 +54,13 @@ def _answers(monkeypatch, sequence: list[str], *, reached: bool = True):
     monkeypatch.setattr(wizard, "_confirm", lambda *a, **k: reached)
 
 
+def _video(tmp_path, name: str = "v.mp4") -> str:
+    """流程级用例要真文件：段产出账写入时要算 SHA256（issue #94）。"""
+    path = tmp_path / name
+    path.write_bytes(b"fake-mp4")
+    return str(path)
+
+
 def _log(session) -> list[dict]:
     path = session.directory / "segments" / "gate-log.jsonl"
     if not path.is_file():
@@ -95,7 +102,7 @@ def test_semantic_layer_runs_on_the_fallback_path_too(tmp_path, monkeypatch, cap
     monkeypatch.setattr(segment_prompts, "rewrite_segment_prompt",
                         lambda segment, *a, **k: f"REWRITTEN {segment.shot_number}\n末尾节拍：猫落上柜台")
     _patch_strip(monkeypatch)
-    _answers(monkeypatch, ["", "some_video.mp4"], reached=True)
+    _answers(monkeypatch, ["", _video(tmp_path)], reached=True)
 
     prompt = ("For the target video, at 0.00 seconds into the target video, "
               "<Picture 1> (from [Shot 1]) is fully referenced.\n\n"
@@ -299,7 +306,7 @@ def test_v2_flow_passes_the_current_segments_end_hook(tmp_path, monkeypatch, cap
     ]
     monkeypatch.setattr(segment_prompts, "write_segment_v2", lambda *a, **k: "SEG")
     _patch_strip(monkeypatch)
-    _answers(monkeypatch, ["", "a.mp4", ""], reached=True)
+    _answers(monkeypatch, ["", _video(tmp_path), ""], reached=True)
 
     wizard._run_segmented_flow_v2(session, plans, {"shot_table": "[Shot 1] x"},
                                   SimpleNamespace())

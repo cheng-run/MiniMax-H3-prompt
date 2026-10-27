@@ -67,6 +67,13 @@ def _answers(monkeypatch, sequence: list[str]):
     monkeypatch.setattr(wizard, "_prompt", lambda *a, **k: next(iterator, ""))
 
 
+def _video(tmp_path, name: str = "video.mp4") -> str:
+    """真文件：段产出账写入时要算 SHA256（issue #94）。"""
+    path = tmp_path / name
+    path.write_bytes(b"fake-mp4")
+    return str(path)
+
+
 def _log(session) -> list[dict]:
     path = session.directory / "segments" / "gate-log.jsonl"
     if not path.is_file():
@@ -82,7 +89,7 @@ def test_v2_records_the_anchor_segment_and_the_judged_video_segment(tmp_path, mo
     monkeypatch.setattr(segment_prompts, "write_segment_v2", lambda *a, **k: FIXTURE.read_text(encoding="utf-8"))
     _patch(monkeypatch, tmp_path)
     # 段1 已生成好 → 交段1 的输出视频 → 段2（末段）已生成好
-    _answers(monkeypatch, ["", "video.mp4", ""])
+    _answers(monkeypatch, ["", _video(tmp_path), ""])
 
     wizard._run_segmented_flow_v2(session, _plans(),
                                   {"shot_table": "[Shot 1] 深夜空店内……"}, SimpleNamespace())
@@ -100,7 +107,7 @@ def test_v2_judgement_title_names_the_anchor_segment(tmp_path, monkeypatch, caps
     session = _session(tmp_path)
     monkeypatch.setattr(segment_prompts, "write_segment_v2", lambda *a, **k: FIXTURE.read_text(encoding="utf-8"))
     _patch(monkeypatch, tmp_path)
-    _answers(monkeypatch, ["", "video.mp4", ""])
+    _answers(monkeypatch, ["", _video(tmp_path), ""])
 
     wizard._run_segmented_flow_v2(session, _plans(),
                                   {"shot_table": "[Shot 1] 深夜空店内……"}, SimpleNamespace())
@@ -123,7 +130,7 @@ def test_fallback_records_the_anchor_segment_and_the_judged_video_segment(tmp_pa
     monkeypatch.setattr(segment_prompts, "rewrite_segment_prompt", lambda *a, **k: FIXTURE.read_text(encoding="utf-8"))
     _patch(monkeypatch, tmp_path)
     monkeypatch.setattr(wizard, "_prompt", lambda *a, **k: "")
-    answers = iter(["", "video.mp4", ""])
+    answers = iter(["", _video(tmp_path), ""])
     monkeypatch.setattr(wizard, "_prompt", lambda *a, **k: next(answers, ""))
 
     prompt = ("For the target video, at 0.00 seconds into the target video, "

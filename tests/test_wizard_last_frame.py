@@ -15,6 +15,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from minimax_h3_prompt import session_store
 from minimax_h3_prompt.brief_parser import Brief
 from minimax_h3_prompt.tools import frame_auditor
@@ -66,6 +68,13 @@ def _answers(monkeypatch, sequence: list[str], *, reached: bool = True):
     monkeypatch.setattr(wizard, "_confirm", lambda *a, **k: reached)
 
 
+def _video(tmp_path, name: str = "v.mp4") -> str:
+    """末段视频必须是真文件：段产出账要给它算 SHA256（issue #94）。"""
+    path = tmp_path / name
+    path.write_bytes(b"fake-mp4")
+    return str(path)
+
+
 def _log(session) -> list[dict]:
     path = session.directory / "segments" / "gate-log.jsonl"
     if not path.is_file():
@@ -75,34 +84,46 @@ def _log(session) -> list[dict]:
 
 # --- 不该误报的情形 -----------------------------------------------------
 
-def test_no_promised_last_frame_means_no_check(tmp_path, monkeypatch, capsys):
-    """无尾帧变体（I2VA / T2VA）不得误报：没有 role=last 就什么都不做、直接放行。"""
+def test_no_promised_last_frame_still_requires_the_output_video(tmp_path, monkeypatch, capsys):
+    """无尾帧变体（I2VA / T2VA）：不核画面，但**末段输出视频仍要交回**（issue #94）。
+
+    成片由各段视频接成，末段缺席就拼不出成片；而这时凭空报「画面未达到」仍是误报
+    （#16 的裁定不变）——所以只做可证层，不剥帧、不读图、不写 gate-log。
+    """
     session = _session(tmp_path)
     _patch_strip(monkeypatch, tmp_path)
-    _answers(monkeypatch, [])
+    video = _video(tmp_path, "last.mp4")
+    _answers(monkeypatch, [video])
+    monkeypatch.setattr(frame_auditor, "extract_last_frame",
+                        lambda *a, **k: pytest.fail("没有尾帧承诺时不该剥帧核验"))
+    seen: list[str] = []
 
     allowed = wizard._verify_last_frame(_state(with_last=False), 1, session.directory,
                                         end_hook=END_HOOK, segment_number=2, total=2,
-                                        expected_seconds=4.0)
+                                        expected_seconds=4.0, on_pass=seen.append)
 
     assert allowed is True
+    assert seen == [video], "末段通过后要把视频路径交给落账回调"
     out = capsys.readouterr().out
     assert "[末段尾帧核验]" not in out, "无尾帧变体被误报了"
+    assert "[末段产出]" in out
     assert _log(session) == [], "无尾帧变体不该产生闸门遭遇记录"
 
 
-def test_empty_frame_descriptions_means_no_check(tmp_path, monkeypatch, capsys):
-    """T2VA 连帧图都没有：同样不得冒出来一个空核对。"""
+def test_empty_frame_descriptions_still_requires_the_output_video(tmp_path, monkeypatch, capsys):
+    """T2VA 连帧图都没有：同样不核画面，但视频照收。"""
     session = _session(tmp_path)
     _patch_strip(monkeypatch, tmp_path)
-    _answers(monkeypatch, [])
+    _answers(monkeypatch, [_video(tmp_path, "last.mp4")])
 
     allowed = wizard._verify_last_frame({"shot_table": "[Shot 1] x"}, 1, session.directory,
                                         end_hook=None, segment_number=2, total=2,
                                         expected_seconds=None)
 
     assert allowed is True
-    assert "[末段尾帧核验]" not in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "[末段尾帧核验]" not in out
+    assert "[末段产出]" in out
 
 
 # --- 三方对照 -----------------------------------------------------------
@@ -230,7 +251,8 @@ def test_strip_failure_warns_and_does_not_block(tmp_path, monkeypatch, capsys):
         raise RuntimeError("视频读不了")
 
     monkeypatch.setattr(frame_auditor, "extract_last_frame", boom)
-    _answers(monkeypatch, ["v.mp4"], reached=True)
+    # 视频文件要真实存在：文件不在是可证错误（#94），而本用例测的是「剥帧失败」这条降级
+    _answers(monkeypatch, [_video(tmp_path)], reached=True)
 
     allowed = wizard._verify_last_frame(_state(), 1, session.directory, end_hook=END_HOOK,
                                         segment_number=2, total=2, expected_seconds=4.0)
@@ -257,7 +279,7 @@ def test_v2_flow_runs_the_last_frame_check_after_the_loop(tmp_path, monkeypatch,
     monkeypatch.setattr(segment_prompts, "write_segment_v2", lambda *a, **k: "SEG")
     monkeypatch.setattr(wizard, "_acquire_bridge_frame", lambda *a, **k: True)
     _patch_strip(monkeypatch, tmp_path)
-    _answers(monkeypatch, ["", "", "last_seg.mp4"], reached=True)
+    _answers(monkeypatch, ["", "", _video(tmp_path, "last_seg.mp4")], reached=True)
 
     finished = wizard._run_segmented_flow_v2(session, plans, state,
                                              SimpleNamespace())
@@ -300,7 +322,8 @@ def test_fallback_flow_also_runs_the_last_frame_check(tmp_path, monkeypatch, cap
                         lambda segment, *a, **k: f"REWRITTEN {segment.shot_number}")
     _patch_strip(monkeypatch, tmp_path)
     # 段1 生成好 → 第 2 段的桥接视频 → 段2 生成好 → 末段核验的视频
-    _answers(monkeypatch, ["", "seg1.mp4", "", "last_seg.mp4"], reached=True)
+    _answers(monkeypatch, ["", _video(tmp_path, "seg1.mp4"), "",
+                           _video(tmp_path, "last_seg.mp4")], reached=True)
 
     prompt = ("For the target video, at 0.00 seconds into the target video, "
               "<Picture 1> (from [Shot 1]) is fully referenced.\n\n"

@@ -121,7 +121,7 @@ def test_v2_flow_describes_bridge_frame_before_writing_segment(tmp_path, monkeyp
     monkeypatch.setattr(reference_auditor, "describe_image", lambda path, instruction=None: BRIDGE_DESC)
     # 序列：段1末确认("") → 段1视频路径(为段2剥帧) → 段2末确认("")
     #       → 段2视频路径(为段3剥帧) → 段3末确认("")
-    answers = iter(["", str(video), "", str(video), ""])
+    answers = iter(["", str(video), "", str(video), "", str(video)])
     monkeypatch.setattr(wizard, "_confirm", lambda *a, **k: True)
     monkeypatch.setattr(wizard, "_prompt", lambda *a, **k: next(answers))
 
@@ -191,8 +191,8 @@ def test_v2_flow_reading_failure_degrades_loudly(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr(reference_auditor, "describe_image", boom)
     # 序列：段1末确认("") → 段1视频路径(为段2剥帧) → 段2末确认("")
-    #       → 段2视频路径(为段3剥帧) → 段3末确认("")
-    answers = iter(["", str(video), "", str(video), ""])
+    #       → 段2视频路径(为段3剥帧) → 段3末确认("") → 末段输出视频
+    answers = iter(["", str(video), "", str(video), "", str(video)])
     monkeypatch.setattr(wizard, "_confirm", lambda *a, **k: True)
     monkeypatch.setattr(wizard, "_prompt", lambda *a, **k: next(answers))
 
@@ -237,8 +237,8 @@ def test_fallback_flow_describes_bridge_frame_before_rewriting(tmp_path, monkeyp
 
     monkeypatch.setattr(frame_auditor, "extract_last_frame", fake_extract)
     monkeypatch.setattr(reference_auditor, "describe_image", lambda path, instruction=None: BRIDGE_DESC)
-    # 序列：段 1 末确认("") → 段 2 剥帧视频路径 → 段 2 末确认("")
-    answers = iter(["", str(video), ""])
+    # 序列：段 1 末确认("") → 段 2 剥帧视频路径 → 段 2 末确认("") → 末段输出视频
+    answers = iter(["", str(video), "", str(video)])
     monkeypatch.setattr(wizard, "_confirm", lambda *a, **k: True)
     monkeypatch.setattr(wizard, "_prompt", lambda *a, **k: next(answers))
 

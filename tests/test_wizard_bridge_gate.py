@@ -12,14 +12,19 @@
 **当场真能报错**的可证检查（段视频时长 / 尺寸），``check_input_frame`` 的 MAD 档
 留给「用户回报实际投喂的那张图」的输入点（#14），那里它才有牙齿。
 """
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import cv2
 import numpy as np
 
-from minimax_h3_prompt import model_factory, segment_planner, segment_prompts, session_store
+from minimax_h3_prompt import (
+    model_factory,
+    segment_planner,
+    segment_prompts,
+    session_store,
+    shot_ledger,
+)
 from minimax_h3_prompt.brief_parser import Brief
 from minimax_h3_prompt.segment_planner import SegmentPlan
 from minimax_h3_prompt.tools import reference_auditor
@@ -126,6 +131,19 @@ def test_unmeasurable_video_is_warning_not_error(tmp_path):
     assert issues and {i.severity for i in issues} == {"warning"}
 
 
+def test_missing_video_is_a_provable_error_not_a_degrade(tmp_path):
+    """文件不在是可证错误，不是「量不出来」（issue #94）。
+
+    ``check_segment_video`` 对读不到的文件只报 warning（测不出事实就不许阻断），而剥帧
+    失败那条降级路会让它一路放行——段产出账要给这段视频算 SHA256，账上还必须留一条
+    #96 拼得动的路径，所以这条必须在入口就拦下。
+    """
+    issues = wizard._gate_segment_handoff(str(tmp_path / "nope.mp4"), 4.0)
+
+    assert {issue.code for issue in issues} == {"segment_video_missing"}
+    assert {issue.severity for issue in issues} == {"error"}
+
+
 def test_unexpected_size_is_warning(tmp_path):
     """尺寸不符是启发式（H3 输出尺寸是我们的假设，用户可以改工作流）→ warning。"""
     video = _make_video(tmp_path / "seg.avi", 4.0, size=(640, 360))
@@ -175,8 +193,8 @@ def test_v2_flow_blocks_on_bad_handoff_and_keeps_progress(tmp_path, monkeypatch,
     assert "第 1/2 段没有拿到输出视频" in out, "段号必须是 1-based，与同文件其他话术一致"
 
 
-def test_v2_flow_passes_good_handoff_and_writes_progress(tmp_path, monkeypatch):
-    """合规视频照常走完：闸门不得误伤（否则每段都要人工绕）。"""
+def test_v2_flow_passes_good_handoff_and_records_it_in_the_ledger(tmp_path, monkeypatch):
+    """合规视频照常走完：闸门不得误伤（否则每段都要人工绕），并且**记进段产出账**。"""
     brief, session = _session(tmp_path)
     state = {"shot_table": "[Shot 1] 深夜空店内……"}
     plans = _plans2()
@@ -199,8 +217,12 @@ def test_v2_flow_passes_good_handoff_and_writes_progress(tmp_path, monkeypatch):
     wizard._run_segmented_flow_v2(session, plans, state, SimpleNamespace())
 
     assert written == [0, 1], "合规交接不得被拦"
-    progress = json.loads((session.directory / "segments" / "progress.json").read_text(encoding="utf-8"))
-    assert progress["done"] == 2
+    # issue #94：新会话的进度只住段产出账（旧 progress.json 停写）
+    rows = shot_ledger.read_shot_ledger(session.directory)
+    assert [row["segment"] for row in rows] == [1], "第 1 段通过后应当落一行"
+    assert rows[0]["video"] == str(video.resolve())
+    assert not (session.directory / "segments" / "progress.json").exists(), \
+        "新会话不该再写旧进度文件"
 
 
 def test_v2_flow_prints_size_warning_and_continues(tmp_path, monkeypatch, capsys):
@@ -270,8 +292,10 @@ def test_fallback_flow_blocks_and_does_not_mark_segment_done(tmp_path, monkeypat
     wizard._run_segmented_flow(brief, session, TWO_SHOT_PROMPT, state=state)
 
     assert rewritten == [1], "第 2 段被拦下后不得继续重写"
-    progress = json.loads((session.directory / "segments" / "progress.json").read_text(encoding="utf-8"))
-    assert progress["done"] == 1, "进度不得把被拦下的第 2 段记成已完成"
+    # issue #94：被拦下的段不得落通过行；新会话也不再写旧进度文件
+    assert shot_ledger.read_shot_ledger(session.directory) == [], \
+        "被拦下的第 2 段不得被记成已通过"
+    assert not (session.directory / "segments" / "progress.json").exists()
     out = capsys.readouterr().out
     assert "segment_video_duration_mismatch" in out
     # 回退路径的 position 是 0-based，直接打出去会少一段（评审揪出的 off-by-one）

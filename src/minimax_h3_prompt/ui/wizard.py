@@ -3097,6 +3097,18 @@ def _phase2_collect_and_finish(
         # 必须传**阶段 2 之后的 state**：帧读图结果写在上面的局部副本里（旧 session 对象上没有），
         # 分段流程拿不到它就会退回照分镜表写（2026-09-22 首帧不锚定缺陷）。
         print(f"\n✓ 完整提示词已写入：{output_file}（供存档，长视频请按下方分段执行）")
+        # 走到这里就说明会话没有「分段进行中」的进度（那种会话由 run_wizard 路由到
+        # ``_resume_segmented``），所以这**是一次新的分段陪跑**：同一个 GEN 里可能还
+        # 躺着上一次交付的段产出账与旧进度（用户拒绝了续接、重走一遍流程）。不挪开
+        # 就会被读成本轮进度（追加账从不清理，多参侧实测过同形缺陷，issue #58），
+        # 或者让本轮被永久判成旧会话（于是新账永远不写、成片永远拼不出来）。
+        from ..shot_ledger import rotate_shot_progress
+
+        rotated = rotate_shot_progress(generation_dir)
+        if rotated:
+            print("[提示] 本生成目录里还留着上一次陪跑的进度记录，已挪到 "
+                  + "、".join(str(path) for path in rotated)
+                  + "（本轮从第 1 段重新记）。")
         _run_long_form(brief, session, prompt, summary_obj, final_state, generation_dir)
     else:
         # 短视频：直接展示完整提示词，方便立即复制进 ComfyUI。
@@ -3188,9 +3200,19 @@ def _gate_segment_handoff(video_path: str, expected_seconds: float | None) -> li
     （见 issue #14）。
     """
     from ..tools.h3_validator import format_issues
-    from ..tools.preflight import check_segment_video
+    from ..tools.preflight import Issue, check_segment_video
 
-    issues = check_segment_video(Path(video_path), expected_seconds)
+    path = Path(video_path)
+    if path.is_file():
+        issues = check_segment_video(path, expected_seconds)
+    else:
+        # 「文件不在」是**可证错误**，不是「量不出来」：``check_segment_video`` 对读不到的
+        # 文件只报 warning（测不出事实就不许阻断），而剥帧失败那条降级路会让它一路放行。
+        # 后果在 #94 之后变成硬的：段产出账要给这段视频算 SHA256，账上还必须留一条
+        # #96 拼得动的路径。多参陪跑早就是这条口径（``_run_ref_segment_handoff`` 先判
+        # ``is_file``），这里只是把同一条补上。
+        issues = [Issue("error", "segment_video_missing",
+                        f"读不到这段输出视频：{path}（文件不在，或路径打错了）")]
     if not issues:
         return []
     errors = [i for i in issues if i.severity == "error"]
@@ -3483,7 +3505,8 @@ def _acquire_bridge_frame(state: dict, position: int, generation_dir: Path, *,
                           segment_number: int, total: int,
                           anchor_segment: int, judged_video_segment: int,
                           reference: str | None = None,
-                          reference_label: str = "（上一段 plan.end_hook）") -> bool:
+                          reference_label: str = "（上一段 plan.end_hook）",
+                          on_pass: Callable[[str], None] | None = None) -> bool:
     """拿到锚帧：索要输出视频 → 剥帧 → **可证层**判定 → 读图 → **语义层**人判。
 
     顺序按 #14 重排：**剥帧读图在前，「本段满意」的判断在后**——证据必须在决策时刻
@@ -3501,6 +3524,10 @@ def _acquire_bridge_frame(state: dict, position: int, generation_dir: Path, *,
     ``..._until_clean``，那个词把这个覆盖行为藏起来了，反而更容易让人误判安全性。
 
     返回 True = 放行；False = 停下（默认出路，或用户交不出东西）。
+
+    ``on_pass``：放行那一刻把**被放行的那段视频**交出去（issue #94 的段产出账）。
+    放在这里而不是让调用方再问一遍路径：路径是用户在闸门内部交的，调用方手上没有；
+    而「行在＝这段过了」必须写在**两道闸都放行之后**的同一个点位上。
 
     出路做在会话内（改交一段正确的视频即可重剥），不是"从头重跑"：这条出路过去其实
     不成立——阶段 2 结束就把会话标成 ``completed``，向导重跑会**另开一个新 GEN**、
@@ -3534,6 +3561,8 @@ def _acquire_bridge_frame(state: dict, position: int, generation_dir: Path, *,
             description=description, frame_path=frame, attempt=attempt + 1)
         if outcome in (GATE_CONTINUE, GATE_ACCEPT):
             _anchor_state(state, position, description)
+            if on_pass is not None:
+                on_pass(video_raw)
             return True
         if outcome == GATE_RERUN:
             attempt += 1
@@ -3550,6 +3579,16 @@ def _acquire_bridge_frame(state: dict, position: int, generation_dir: Path, *,
             with _progress_scope("正在读取你给的这张图的画面……"):
                 supplied_description = describe_bridge_frame(supplied)
             _anchor_state(state, position, supplied_description)
+            # 「手工换帧 / 改用关键帧图另起」换的是**下一段的锚图**，本段输出视频照样
+            # 通过了可证层，流程也照样越过这一段——所以它和「接受并继续」一样算通过。
+            # 口径（用户 2026-10-27 裁定）：票面「判为换帧的轮次不落通过行」按
+            # **「失败轮次不落行」**解释——被判「未达到」的那一轮遭遇不落行，最终被
+            # 接受的换帧结果仍落行，且记的是**那段视频**（已过可证层、成片要用它），
+            # 不是锚帧。GATE_RERUN / GATE_STOP / 被可证层拦下的轮次照旧不落行。
+            # 不落行的后果是这段在账上永久缺席，而流程已经往下走（续跑从错位置起、
+            # 账跳号、#96 以「缺第 N 段」拒绝出片）。
+            if on_pass is not None:
+                on_pass(video_raw)
             return True
         return False  # GATE_STOP
 
@@ -3558,7 +3597,7 @@ def _capture_bridge_frame(video_path: str, position: int, generation_dir: Path, 
                           expected_seconds: float | None = None,
                           frame_suffix: str = "start"
                           ) -> tuple[list, str | None, Path | None]:
-    """剥一段视频的尾帧 → 可证层交接校验 → 读图（issue #12 / #13）。
+    """可证层交接校验 → 剥一段视频的尾帧 → 读图（issue #12 / #13 / #94）。
 
     ``expected_seconds``＝交出这段视频的那一段的**计划时长**，供可证层校验（交错段、
     用错时长档都会在这里被拦下）。
@@ -3577,6 +3616,12 @@ def _capture_bridge_frame(video_path: str, position: int, generation_dir: Path, 
     """
     from ..tools.frame_auditor import describe_bridge_frame, extract_last_frame
 
+    # 可证层**先**判：不合格的视频不必再花一次剥帧/读图调用，也绝不把错误的交接物喂进
+    # state。顺序放在剥帧之前还有一处硬理由（issue #94）：「文件不在」曾是这条路径的
+    # 降级放行口（剥帧失败只警告），而段产出账要给它算 SHA256——先判就把这条路堵在入口。
+    errors = _gate_segment_handoff(video_path, expected_seconds)
+    if errors:
+        return errors, None, None
     try:
         frame = extract_last_frame(
             Path(video_path),
@@ -3592,10 +3637,6 @@ def _capture_bridge_frame(video_path: str, position: int, generation_dir: Path, 
         print(f"[警告] 剥帧失败（{exc}）：本次没有取到帧，绝不伪造读图记录，"
               "按「量不出来」降级（桥接帧可手动截图代替；末段核验本次跳过）。")
         return [], None, None
-    # 可证层先判：不合格就不必再花一次读图调用，也绝不把错误的交接物喂进 state
-    errors = _gate_segment_handoff(video_path, expected_seconds)
-    if errors:
-        return errors, None, frame
     with _progress_scope("正在读取桥接帧实际画面……"):
         description = describe_bridge_frame(frame)
     if description:
@@ -3647,24 +3688,68 @@ def _judge_last_frame(*, directory: Path, segment_number: int, total: int,
     return outcome
 
 
+def _acquire_last_video(*, segment_number: int, total: int,
+                        expected_seconds: float | None,
+                        on_pass: Callable[[str], None] | None = None) -> bool:
+    """无尾帧变体的末段收尾：**只**做可证层，不剥帧、不读图（issue #94）。
+
+    为什么无尾帧也要索要视频：成片由各段视频接成，末段没有视频就拼不出来（#96）。
+    但**没有可核的承诺**时不许凭空报「画面未达到」——I2VA / T2VA 没有承诺尾帧，
+    凭空报一句「未达到」就是误报（#16 的裁定仍然成立）。所以这里只判阶段之外
+    可证的事实：时长档与尺寸（``_gate_segment_handoff``）。
+    """
+    attempt = 0
+    while True:
+        video_raw = _clean_path_input(
+            _prompt("末段输出视频路径（必填，用于拼成片）："))
+        if not video_raw:
+            print(f"\n⚠ 第 {segment_number}/{total} 段没有拿到末段输出视频：没有它拼不出"
+                  "成片，已停在这里。", flush=True)
+            return False
+        errors = _gate_segment_handoff(video_raw, expected_seconds)
+        if errors:
+            attempt += 1
+            print("→ 请**重新交回**末段正确的输出视频（时长需与本段计划一致）；"
+                  "回车则放弃继续。", flush=True)
+            if attempt >= 2:
+                print(f"  ⚠ 第 {segment_number}/{total} 段已连续被拦下 {attempt} 次："
+                      "交上来的是不是**本段**的输出视频？", flush=True)
+            continue
+        if on_pass is not None:
+            on_pass(video_raw)
+        return True
+
+
 def _verify_last_frame(state: dict, position: int, generation_dir: Path, *,
                        end_hook: str | None, segment_number: int, total: int,
-                       expected_seconds: float | None) -> bool:
-    """末段尾帧核验（issue #16）：链的**另一端**，此前无人校验。
+                       expected_seconds: float | None,
+                       on_pass: Callable[[str], None] | None = None) -> bool:
+    """末段收尾（issue #16/#94）：链的**另一端**，并且**一律索要末段输出视频**。
 
     链式闸门只管**段间**（末段不剥帧：``if position + 1 < total``）。而 FL2VA/L2VA 下
     末段必须收在用户提交的那张尾帧上——此前只有提示词里的一句**声明**
-    （``_frame_anchor_note``），没有任何校验，末段连输出视频路径都不会索要。整条视频的
-    最后画面是否真的落在承诺的那张尾帧上，是 FL2VA/L2VA 的核心承诺，不能只靠人自己盯。
+    （``_frame_anchor_note``），没有任何校验。整条视频的最后画面是否真的落在承诺的
+    那张尾帧上，是 FL2VA/L2VA 的核心承诺，不能只靠人自己盯。
 
-    没有 ``role: last`` 的读图结果（I2VA / T2VA / 用户没交尾帧）→ 什么都不做直接放行：
-    没有可核的承诺，凭空报一句「未达到」就是误报。
+    **无论有没有尾帧承诺，都必须拿到末段输出视频**（issue #94）：成片由各段视频接成，
+    末段缺席就拼不出成片（#96）。两份行为的差别只在语义层：
+    - 有承诺（FL2VA/L2VA）→ 剥末帧读图，三方并排人判（#16 原样）；
+    - 无承诺（I2VA/T2VA）→ **只**做可证层，不剥帧不读图，也不写 gate-log：没有可核
+      的承诺，凭空报「未达到」就是误报。
 
-    返回 True = 放行（含「没东西可核」与「量不出来」两种降级）；False = 停下。
+    ``on_pass``：通过那一刻交出末段视频路径（段产出账，issue #94）——与段间闸门
+    同一个「两道闸都放行之后」的点位。
+
+    返回 True = 放行（含「量不出来」的降级）；False = 停下。
     """
     promised = _promised_last_frame_description(state)
     if promised is None:
-        return True
+        print(f"\n[末段产出] 本会话没有承诺尾帧：末段无画面可核，但**末段输出视频**仍要"
+              f"交回——它是成片 final.mp4 的最后一段，没有它拼不出成片。"
+              f"本次只做可证层（时长/尺寸）校验。")
+        return _acquire_last_video(
+            segment_number=segment_number, total=total,
+            expected_seconds=expected_seconds, on_pass=on_pass)
     print(f"\n[末段尾帧核验] 本会话提交了尾帧：FL2VA/L2VA 下整条视频必须收在它上面，"
           f"现在核第 {segment_number}/{total} 段的末帧。")
     attempt = 0
@@ -3687,6 +3772,8 @@ def _verify_last_frame(state: dict, position: int, generation_dir: Path, *,
             end_hook=end_hook, promised=promised, description=description,
             frame_path=frame, attempt=attempt + 1)
         if outcome in (GATE_CONTINUE, GATE_ACCEPT):
+            if on_pass is not None:
+                on_pass(video_raw)
             return True
         if outcome == GATE_RERUN:
             attempt += 1
@@ -3717,25 +3804,40 @@ def _read_cached_summary(directory: Path):
 
 
 def _run_long_form(brief: Brief, session: SessionState, prompt: str, summary, state: dict,
-                   directory: Path) -> None:
+                   directory: Path) -> dict[int, dict]:
     """长视频分段陪跑：跑之前标「分段进行中」，**全部段确认完成**才转「已完成」。
 
     这两次状态写入就是 #17 的全部要点。标成未完成，中断（闸门硬阻断 / Ctrl-C / 重启）
-    之后重跑向导会落回**同一个 GEN**，并由 ``segments/progress.json`` 从第 N+1 段续接；
-    半途而废**不得**被标成完成——那会让下次重跑另开新 GEN、阶段 2 重做（实测可超
-    10 分钟）＋ 已完成的所有段重来，``progress.json`` 永远读不到。
+    之后重跑向导会落回**同一个 GEN**，并由段产出账从第 N+1 段续接；半途而废**不得**
+    被标成完成——那会让下次重跑另开新 GEN、阶段 2 重做（实测可超 10 分钟）＋ 已完成
+    的所有段重来，账永远读不到。
 
     ``state`` 必须是**阶段 2 之后的**那份：它带着 ``fl2va_frame_descriptions``（帧图
     读图结果），拿旧 session 对象落盘会把它丢掉，分段提示词就退回照分镜表写
     （2026-09-22 首帧不锚定缺陷）。
+
+    **返回值＝全部通过行**（``{段号: 账行}``，段号从 1 起连续），供收尾处的成片拼接
+    （#96）直接取用；未跑完返回空表。旧会话（无新账）也返回空表——那正是「拼接不可用」
+    的形态，与账读口同一份语义（见 ``_segment_progress``）。
+    拼接本身不在本函数里（#96）；这里只保证「全段已过」那一刻能拿到拼接输入。
     """
+    from ..shot_ledger import passed_shot_rows
+
     save_session(directory, brief, state, status=STATUS_SEGMENTED_RUNNING)
     finished = _run_segmented_flow(brief, session, prompt, summary=summary, state=state)
     if not finished:
         print(f"\n[续接] 本次没有跑完全部段，会话保持「分段进行中」：下次重跑向导会落回 "
               f"{directory.name}，从已完成的那一段之后继续（阶段 1/2 不重跑）。")
-        return
+        return {}
+    try:
+        # 收尾点（#96 的拼接落点）：账上的全部通过行在这里取得。读不回来就**不标完成**
+        # ——账是续跑的进度来源，标了完成会让下次重跑另开新 GEN（同 #17 的代价）。
+        passed = passed_shot_rows(directory)
+    except (OSError, ValueError) as exc:
+        print(f"[错误] 段产出账读不回来（{exc}）：不把会话标成完成——账是续跑的进度来源。")
+        return {}
     save_session(directory, brief, state, status=STATUS_COMPLETED)
+    return passed
 
 
 def _resume_segmented(config: Config, session: SessionState) -> int:
@@ -3871,6 +3973,45 @@ def _show_revisions_vs_frame(state: dict) -> None:
     print("=" * 60)
 
 
+class _SegmentProgress(NamedTuple):
+    """续跑起点与已通过段（issue #94）。
+
+    ``start``：本次从第 ``start + 1`` 段（1-based）开始。
+    ``passed``：新账（``segments/shot-ledger.jsonl``）的通过行；旧会话为空表。
+    ``legacy``：旧会话回退读 ``segments/progress.json``——真时不写新账、继续写旧进度
+    （理由见 ``_segment_progress``）。
+    """
+
+    start: int
+    passed: dict[int, dict]
+    legacy: bool
+
+
+def _segment_progress(directory: Path) -> _SegmentProgress:
+    """读「第几段过了」：**新账是唯一真源**，旧会话回退读旧进度并当面说破。
+
+    判定顺序（票面「旧会话判定」）：新账在 → 只认它；新账不在 + ``progress.json`` 在
+    → 旧会话；两者都不在 → 新会话、从第 1 段起。
+
+    旧会话**不回溯补账**（票面 Out of Scope：段视频多已不在），所以它继续用旧进度
+    续跑、继续写旧进度文件。不写新账还有一条硬理由：从 ``done=N`` 继跑时前 N 段本来
+    就没有行，新账会立刻出现**跳号**，下一次续跑就会响错停住——等于亲手把会话弄坏。
+    """
+    from ..shot_ledger import legacy_progress_path, passed_shot_rows, shot_ledger_path
+
+    if shot_ledger_path(directory).is_file():
+        passed = passed_shot_rows(directory)
+        return _SegmentProgress(start=len(passed), passed=passed, legacy=False)
+    if not legacy_progress_path(directory).is_file():
+        return _SegmentProgress(start=0, passed={}, legacy=False)
+    done = _segments_done(directory)
+    if done:
+        print("[提示] 旧会话：沿用 segments/progress.json 的进度续跑"
+              f"（已完成 {done} 段）。但旧进度只记了段数、没记各段视频路径——"
+              "**拼接不可用**：成片需要每段的视频路径与 SHA256。")
+    return _SegmentProgress(start=done, passed={}, legacy=True)
+
+
 def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summary=None,
                         state: dict | None = None) -> bool:
     """把整条提示词按 [Shot N] 拆成单镜头提示词，逐段陪跑。返回**是否跑完全部段**。
@@ -3881,7 +4022,7 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
     循环规则：先尽量用 LLM 把本段 soundscape/music 按时间窗重写成独立提示词（
     失败自动回退机械拆分并明示）；显示信息卡（段号/Shot/时长/文件路径）→ 人工复制
     到 H3 生成 → 回车确认 → 才显示下一段；第 2 段起可提交上一段视频路径，自动剥尾帧
-    作为本段首帧图；中断后由 progress.json 续接。
+    作为本段首帧图；中断后由段产出账续接（旧会话回退读 progress.json）。
 
     返回值是给调用方判「该不该把会话标成 completed」用的（issue #17）：闸门硬阻断、
     Ctrl-C 都走不到正常结尾，那种情况必须保持「分段进行中」，否则下次重跑另开新 GEN。
@@ -3903,7 +4044,18 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
     # 写段前核对（issue #26）：两条产出路径都在本函数内分叉，故摆块也只需这一处——
     # 摆在分叉之前，v2 与回退路径都只看到一次。
     _show_revisions_vs_frame(state)
-    done = _segments_done(session.directory)
+    try:
+        progress = _segment_progress(session.directory)
+    except (OSError, ValueError) as exc:
+        # 账行错形/读不出必须**响错停住**（issue #94 AC6）：静默从第 1 段重来会把
+        # 已通过的段当没做过，也没人会知道账上有过哪几段。
+        print(f"[错误] 段产出账读不回来：{exc}")
+        print("  这不是「一段都没做」——静默从第 1 段重来会把已通过的段当没做过"
+              "（已生成的视频要重新交回）。")
+        print(f"  出路：恢复 {session.directory / 'segments' / 'shot-ledger.jsonl'} 后重跑；"
+              "或删掉它让它从第 1 段重做（已通过的段视频不会被认回）。")
+        return False
+    done = progress.start
     try:
         cached = _cached_plans(session.directory)
     except ValueError as exc:
@@ -3927,7 +4079,7 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
             return False
         print(f"[续接] 复用已落盘的分段规划（{len(cached)} 段），不重跑规划。")
         return _run_segmented_flow_v2(session, cached, state, llm, summary=summary,
-                                      plans_from_cache=True)
+                                      plans_from_cache=True, progress=progress)
 
     plans = None
     try:
@@ -3967,8 +4119,23 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
     seg_dir = session.directory / "segments"
     seg_dir.mkdir(parents=True, exist_ok=True)
     progress_path = seg_dir / "progress.json"
-    done = _segments_done(session.directory)
+    done = progress.start
     total = len(segments)
+    # 账与段表必须对得上（跳号/越界都算），**两条路径都要核**：v2 在
+    # ``_run_segmented_flow_v2`` 里核，回退这里若不核，``progress.start = len(passed)``
+    # 会把 {1,3} 读成「过了 2 段」并从第 3 段（position=2）起跑——**第 2 段永远不做、
+    # 还不报错**，正是 AC6 要拦的形态（2026-10-27 复审实测缺口）。
+    from ..shot_ledger import validate_shot_progress
+
+    try:
+        validate_shot_progress(progress.passed, total_segments=total)
+    except ValueError as exc:
+        print(f"[错误] 段产出账与本次分段对不上：{exc}")
+        print("  这不是「一段都没做」——按错的账续跑会跳过从没做过的段。")
+        print("  出路：恢复与账配套的分段后重跑（走续接）；或删掉 "
+              f"{seg_dir / 'shot-ledger.jsonl'}（旧会话是 segments/progress.json）"
+              "让它从第 1 段重做（已通过的段视频不会被认回）。")
+        return False
     print(f"\n已按镜头拆分为 {total} 段逐次执行（每段提示词同时存入 {seg_dir}）。")
     if done:
         print(f"[续接] 检测到已完成 {done}/{total} 段，从第 {done + 1} 段继续。")
@@ -3978,15 +4145,33 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
     except Exception:
         rewrite_llm = None
 
+    from ..shot_ledger import append_shot_output
+
+    def record_pass(segment_number: int, shot, video: str) -> None:
+        """回退路径的落账口径：段号＝**被核那段**（1-based），起止秒取它自己的时间窗。
+
+        旧会话不写新账（见 ``_segment_progress``：从 done=N 继跑会让前 N 段在账上缺席，
+        下一次续跑立刻跳号）。
+        """
+        if progress.legacy:
+            return
+        start_s = shot.start_seconds
+        end_s = (start_s + shot.duration_seconds
+                 if start_s is not None and shot.duration_seconds is not None else None)
+        append_shot_output(session.directory, segment=segment_number, start_s=start_s,
+                           end_s=end_s, video_path=video)
+
     for position in range(done, total):
         segment = segments[position]
         # ① 桥接帧：剥上一段尾帧 → 可证层交接校验 → 读图 → 写进 state（先于本段重写，
         #    否则写段 LLM 在信息上不可能写出与桥接帧一致的开场状态；issue #12/#13）
         # 非末段必须交出上一段视频（同上：不给 opt-out，否则闸门可被静默绕过）
-        if position > 0:
+        # 续跑时已通过的那一段不再问路径（issue #94：账上记着的就是它交回的那份）。
+        if position > 0 and position not in progress.passed:
+            judged = segments[position - 1]
             if not _acquire_bridge_frame(
                 state, position, session.directory,
-                expected_seconds=segments[position - 1].duration_seconds,
+                expected_seconds=judged.duration_seconds,
                 ask="上一段输出视频路径（必填，用于剥尾帧作本段首帧）：",
                 segment_number=position + 1, total=total,
                 # 回退路径在**本段开头**调闸门：交上来的是上一段的视频（judged＝position），
@@ -3995,6 +4180,9 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
                 # 回退路径没有 plan 层，末态参照取上一段**落盘那份**提示词的收尾句
                 reference=_previous_segment_tail(seg_dir, position),
                 reference_label="（上一段提示词收尾句；本路径无 plan 末态声明）",
+                # 落账点在闸门放行那一刻：被拦下/判重跑/停下的轮次走不到这里
+                on_pass=lambda video, number=position, shot=judged:
+                    record_pass(number, shot, video),
             ):
                 return False  # 硬阻断（issue #13）：交接物不合格，不能算「已跑完」
         # ② 每段重写：soundscape/music 为本段重写英文摘要句（官方 §4.6/§4.7）；失败回退机械拆分并明示
@@ -4054,25 +4242,37 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
                 print(render_summary_zh(summary, shot_number=segment.shot_number))
                 continue
             print("回车=已生成好，r=重显完整提示词，s=重看中文摘要。")
-        progress_path.write_text(
-            json.dumps({"done": position + 1, "total": total}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        if progress.legacy:
+            # 旧会话仍以 progress.json 为进度（新账不回溯补账，见 _segment_progress）；
+            # 新会话**停写**它：段产出账是唯一真源。
+            progress_path.write_text(
+                json.dumps({"done": position + 1, "total": total},
+                           ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
         if position + 1 < total:
             print(f"[完成] 第 {position + 1}/{total} 段。下面给出第 {position + 2} 段……")
     # 链的另一端（#16）：末段没有下一段的锚可核，这里补上「是否收在承诺的尾帧上」。
-    if not _verify_last_frame(state, total - 1, session.directory,
-                              # 回退路径没有 plan 层，末态参照取末段**落盘那份**提示词的收尾句
-                              end_hook=_previous_segment_tail(seg_dir, total),
-                              segment_number=total, total=total,
-                              expected_seconds=segments[-1].duration_seconds):
-        return False
+    # 并且**一律索要末段输出视频**（issue #94）：成片要用它。续跑时账上已通过就不再问。
+    if total not in progress.passed:
+        if not _verify_last_frame(state, total - 1, session.directory,
+                                  # 回退路径没有 plan 层，末态参照取末段**落盘那份**提示词的收尾句
+                                  end_hook=_previous_segment_tail(seg_dir, total),
+                                  segment_number=total, total=total,
+                                  expected_seconds=segments[-1].duration_seconds,
+                                  on_pass=lambda video, shot=segments[-1]:
+                                      record_pass(total, shot, video)):
+            return False
     print(f"\n✓ 全部 {total} 段已人工确认完成。可在剪辑工具中按顺序拼接 segments/ 下的各段输出。")
     return True
 
 
 def _segments_done(directory: Path) -> int:
-    """``segments/progress.json`` 里已完成（**该段提示词已交付并确认**）的段数。
+    """``segments/progress.json`` 里的 ``done=N``：**旧会话兼容读口**（issue #94）。
+
+    新会话**不再写**这个文件——段产出账（``segments/shot-ledger.jsonl``）是「第几段
+    过了」的唯一真源。它留着只为两件事：旧会话没有新账时回退读它（并当面说破「拼接
+    不可用」，见 ``_segment_progress``），以及旧会话继续写它作为自己的进度。
 
     读不到文件即 0；**文件在但读不出来会显式告警**（静默返回 0 与「一段都没做过」
     无法区分——那正是本票要消灭的形态）。
@@ -4136,16 +4336,22 @@ def _cached_plans(directory: Path) -> list | None:
 
 
 def _run_segmented_flow_v2(session: SessionState, plans: list, state: dict, llm,
-                           summary=None, *, plans_from_cache: bool = False) -> bool:
+                           summary=None, *, plans_from_cache: bool = False,
+                           progress: _SegmentProgress | None = None) -> bool:
     """v2 陪跑：边生成边展示——当前段确认完成后，先剥本段尾帧读图（下一段的
     Picture 1 锚，issue #12），再后台预写下一段；用户看第 N 段提示词、去 ComfyUI
     生成、贴回尾帧，回车进入下一段时若已写完直接展示，否则等待。segments/shot-NN.md
-    逐段落盘，progress.json 支持中断续跑（已写入文件的段不重写）。返回值＝是否跑完全部段。
+    逐段落盘，**段产出账**（``segments/shot-ledger.jsonl``）支持中断续跑。返回值＝
+    是否跑完全部段。
 
     ``plans_from_cache``：``plans`` 是否是从 ``segments/plan.json`` 读回来的。**这条
-    不变量是硬要求**：``progress.json`` 的 ``done=N`` 只对产出它那套分段有意义，所以
-    只要 ``done > 0``，就只允许用读回来的那一份继续；否则（重规划过／plan.json 被删）
-    新分段边界配旧进度会**跳过从没写过的段**，而且不报错。
+    不变量是硬要求**：账里的段号只对产出它的那套分段有意义，所以只要账上有通过行，
+    就只允许用读回来的那一份继续；否则（重规划过／plan.json 被删）新分段边界配旧
+    进度会**跳过从没写过来的段**，而且不报错。
+
+    ``progress``：续跑起点与已通过段（issue #94）。不传就现读——直接调用本函数的
+    测试与兄弟入口走这条路；生产路径由 ``_run_segmented_flow`` 读一次后传进来，
+    免得旧会话的「拼接不可用」提示打两遍。
 
     预取收益建立在「下一段的桥接帧已就位」之上：下一段桥接帧来自本段输出视频，
     本段完成前它不存在，所以预取必须在本段剥帧读图之后启动（正确性优先于并行）。
@@ -4158,26 +4364,54 @@ def _run_segmented_flow_v2(session: SessionState, plans: list, state: dict, llm,
     import time
 
     from ..segment_prompts import write_segment_v2
+    from ..shot_ledger import append_shot_output, validate_shot_progress
 
     seg_dir = session.directory / "segments"
     seg_dir.mkdir(parents=True, exist_ok=True)
     progress_path = seg_dir / "progress.json"
     plan_cache = seg_dir / "plan.json"
-    done = _segments_done(session.directory)
+    total = len(plans)
+    if progress is None:
+        try:
+            progress = _segment_progress(session.directory)
+        except (OSError, ValueError) as exc:
+            print(f"[错误] 段产出账读不回来：{exc}")
+            print("  这不是「一段都没做」——静默从第 1 段重来会把已通过的段当没做过。")
+            return False
+    try:
+        # 段表与账必须对得上（段号越界/跳号都算）：按错的账续跑会跳过从没做过的段。
+        validate_shot_progress(progress.passed, total_segments=total)
+    except ValueError as exc:
+        print(f"[错误] 段产出账与本次分段对不上：{exc}")
+        print("  出路：恢复与账配套的 segments/plan.json 后重跑；或删掉 "
+              f"{seg_dir / 'shot-ledger.jsonl'} 让它从第 1 段重做"
+              "（已通过的段视频不会被认回）。")
+        return False
+    done = progress.start
     if done and not plans_from_cache:
-        # 进度说做过 done 段，但这次的分段不是产出那份进度的分段。重规划换掉了边界，
+        # 账说做过 done 段，但这次的分段不是产出那份账的分段。重规划换掉了边界，
         # ``done`` 就不再指向同一批段——照旧从第 done+1 段开始会跳过没写过的段。
         # 停在这里，并且**先不覆盖 plan.json**（它可能是唯一能救回正确分段的东西）。
-        print(f"[错误] progress.json 说已完成 {done} 段，但本次的分段规划不是产出它的那一份"
+        print(f"[错误] 段产出账说已通过 {done} 段，但本次的分段规划不是产出它的那一份"
               f"（重规划过，或 {plan_cache} 缺失）。拿旧进度索引新分段会跳过没写过的段，"
               "所以不能继续。")
-        print("  出路：恢复 segments/plan.json 后重跑（走续接）；或删掉 segments/progress.json "
+        print("  出路：恢复 segments/plan.json 后重跑（走续接）；或删掉 "
+              f"{seg_dir / 'shot-ledger.jsonl'}（旧会话是 segments/progress.json）"
               "让它从第 1 段重做。")
         return False
+
+    def record_pass(segment_number: int, plan, video: str) -> None:
+        """本段落账（issue #94）：段号 1-based，起止秒取本段 plan 的时间窗。
+
+        旧会话不写新账：它从 done=N 起跑，前 N 段没有行，写进去就是一条**跳号**的账。
+        """
+        if progress.legacy:
+            return
+        append_shot_output(session.directory, segment=segment_number,
+                           start_s=plan.start_s, end_s=plan.end_s, video_path=video)
     plan_cache.write_text(
         json.dumps([p.to_dict() for p in plans], ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    total = len(plans)
     print(f"\n已规划为 {total} 段逐次执行（每段文件存入 {seg_dir}）。")
     if done:
         print(f"[续接] 检测到已完成 {done}/{total} 段，从第 {done + 1} 段继续。")
@@ -4305,15 +4539,22 @@ def _run_segmented_flow_v2(session: SessionState, plans: list, state: dict, llm,
                     # 语义层参照＝**本段**（刚跑完的这段）声明的末态，而锚帧正是它的尾帧
                     reference=plan.end_hook,
                     reference_label="（本段 plan.end_hook）",
+                    # 落账点＝闸门放行那一刻（issue #94）：被拦下/判重跑/停下的轮次
+                    # 走不到这里，账上就不会有这一段的通过行。
+                    on_pass=lambda video, number=position + 1, current=plan:
+                        record_pass(number, current, video),
                 ):
                     # 硬阻断（issue #13）：错误的交接物不得被当成下一段的事实喂下去。
-                    # 进度也**不得**落盘——否则被拦下的这一段的锚会被续跑直接跳过。
+                    # 账（旧会话是进度）也**不得**落盘——否则被拦下的这一段会被续跑跳过。
                     return False
-            # 闸门通过后才落盘进度：被拦下的段不能被记成已完成
-            progress_path.write_text(
-                json.dumps({"done": position + 1, "total": total}, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            if progress.legacy:
+                # 旧会话仍以 progress.json 为进度（新账不回溯补账，见 _segment_progress）；
+                # 新会话**停写**它：段产出账是唯一真源。
+                progress_path.write_text(
+                    json.dumps({"done": position + 1, "total": total},
+                               ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
             # 立即预取下一级（此时 state 已含下一段桥接帧的读图结果）
             start_prefetch(position + 1)
             if position + 1 < total:
@@ -4322,12 +4563,18 @@ def _run_segmented_flow_v2(session: SessionState, plans: list, state: dict, llm,
     finally:
         reporter.unsubscribe(loader)
     # 链的另一端（#16）：末段不剥帧，所以段间闸门从没管过「整条视频是否收在承诺的尾帧上」。
-    # 放在宣布完成**之前**：没通过就不算跑完，会话保持「分段进行中」。
-    if not _verify_last_frame(state, total - 1, session.directory,
-                              end_hook=plans[-1].end_hook,
-                              segment_number=total, total=total,
-                              expected_seconds=float(plans[-1].duration_s)):
-        return False
+    # 并**一律索要末段输出视频**（issue #94）：成片要用它。放在宣布完成**之前**：
+    # 没通过就不算跑完，会话保持「分段进行中」。续跑时账上已通过就不再问一次。
+    if total not in progress.passed:
+        # 账上只会在「前 total 段都通过」时含 total 这一行，所以这里取 plans[-1] 安全。
+        last_plan = plans[-1]
+        if not _verify_last_frame(state, total - 1, session.directory,
+                                  end_hook=last_plan.end_hook,
+                                  segment_number=total, total=total,
+                                  expected_seconds=float(last_plan.duration_s),
+                                  on_pass=lambda video, current=last_plan:
+                                      record_pass(total, current, video)):
+            return False
     print(f"\n✓ 全部 {total} 段已人工确认完成。可在剪辑工具中按顺序拼接 segments/ 下的各段输出。")
     return True
 
