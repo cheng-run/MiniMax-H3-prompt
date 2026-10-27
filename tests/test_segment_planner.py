@@ -81,7 +81,10 @@ def test_reject_incomplete_coverage():
 
 def test_end_can_extend_past_total():
     # 末段允许略长（4-10s 硬约束，超 1-2 秒留剪辑余量）
-    text = '{"segments": [{"index": 0, "start_s": 0, "end_s": 10, "shots_in_segment": [1]}]}'
+    # issue #95 起新写的规划必须声明末态，故 fixture 带上 end_hook——这条测的是时长
+    # 余量，不是末态契约（末态契约由下面专门的两条用例钉）。
+    text = ('{"segments": [{"index": 0, "start_s": 0, "end_s": 10, "shots_in_segment": [1],'
+            ' "summary": "A", "end_hook": "她收住脚步、肩膀仍微微前倾"}]}')
     plans = parse_segment_plan(text, total_s=9)
     assert plans is not None
     assert plans[0].end_s == 10
@@ -120,6 +123,70 @@ def test_base_plan_still_needs_no_start_state():
     plans = parse_segment_plan(text, total_s=8)
     assert plans is not None
     assert plans[0].start_state == ""
+
+
+def test_base_parse_rejects_missing_or_blank_end_hook():
+    """issue #95：新写的首尾帧链规划必须声明本段末态（与多参对齐）。
+
+    末态声明是写段器「动作在本段时长内落定」的唯一对照物，也是锚帧语义校验判
+    「尾帧到没到」的参照——空串照样过等于让每段自己随意收尾。
+    """
+    missing = ('{"segments": [{"index": 0, "start_s": 0, "end_s": 8, "shots_in_segment": [1],'
+               ' "summary": "A"}]}')
+    empty = ('{"segments": [{"index": 0, "start_s": 0, "end_s": 8, "shots_in_segment": [1],'
+             ' "summary": "A", "end_hook": ""}]}')
+    blank = ('{"segments": [{"index": 0, "start_s": 0, "end_s": 8, "shots_in_segment": [1],'
+             ' "summary": "A", "end_hook": "   "}]}')
+    assert parse_segment_plan(missing, total_s=8) is None
+    assert parse_segment_plan(empty, total_s=8) is None
+    assert parse_segment_plan(blank, total_s=8) is None
+
+
+def test_old_plan_json_without_end_hook_key_still_reads():
+    """向后兼容：旧 plan.json 缺 ``end_hook`` 键仍可读、不得炸（issue #95）。
+
+    严格化只针对**新写的**规划（``parse_segment_plan`` 解析模型输出）；已落盘的旧
+    分段是续跑的唯一依据，因缺一个键就读不回来等于把用户的进度变成废纸。
+    """
+    old = {"index": 0, "start_s": 0, "end_s": 4,
+           "shots_in_segment": [1], "summary": "旧规划"}
+    plan = SegmentPlan.from_dict(old)
+    assert plan.end_hook == ""
+
+
+def test_planner_instructions_forbid_cutting_mid_action():
+    """issue #95：两份规划提示词都必须明文「不得在动作中途切开」。
+
+    此前只有 base 的「优先在剧情节拍处切」——那是偏好，不是禁令；规划师照样可以把
+    一个动作拦腰切成两段，写段器只能把半个动作压进时长里。2026-10-27 用户裁定多参
+    侧同样加入；ref 必须保留它**既有**的例外：单个镜头本身超过 15 秒时允许镜内再切
+    （那是装不进执行窗口的唯一合法例外，不许被这条禁令挤掉）。
+    """
+    for mode in ("base", "ref"):
+        text = _load_instruction(mode)
+        assert "不得在动作中途切开" in text, f"{mode} 规划指令缺动作切分禁令"
+    # 例外必须长在**这条禁令自己身上**：只查全文会让上方「硬约束」里的同一句话
+    # 冒充通过——那条规则管的是拆段入口，读者读到「不得中途切开」时看不到它。
+    ref = _load_instruction("ref")
+    bullet = next(
+        (blk for blk in ref.split("\n- ") if "不得在动作中途切开" in blk), "")
+    assert "唯一例外" in bullet and "超过 15 秒" in bullet and "镜内" in bullet, (
+        "ref 的『不得在动作中途切开』没带超长镜头的镜内切例外")
+
+
+def test_planner_instruction_example_agrees_with_static_ban():
+    """规划提示词的示例与正文禁令不得自相矛盾（issue #95）。
+
+    旧版示例写「她停住脚步」，正文却把「停住不动」列成坏例子——照示例写就违规。
+    用户裁定（2026-10-27）：示例改成**动作刚落定的姿态**（不与禁令字面撞词）；正文
+    禁令收窄为只禁「画面完全静止／定格／冻结」，并明说「停住、站定、收住脚步」这类
+    落定姿态可接受。
+    """
+    text = _load_instruction()
+    assert "她停住脚步" not in text, "示例仍用与禁令字面撞的「停住脚步」"
+    assert "她停住不动" not in text, "禁令仍把「停住」本身列为坏例子"
+    assert "站定" in text and "收住脚步" in text, "没写明落定姿态（停住/站定/收住脚步）可接受"
+    assert "画面完全静止" in text and "定格" in text and "冻结" in text
 
 
 def test_parse_ref_plan_rejects_boundaries_off_shot_cuts():

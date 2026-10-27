@@ -553,6 +553,8 @@ H3 是执行型模型：你写什么它就做什么，含糊等于失控；把**
   取值必须落在 `[0, 本段时长)` 内。绝对片时严禁出现——若本段从整片第 8 秒开始，正文**不能**写 `At 00:08.200`，
   要写 `At 00:00.200`。喂给 H3 的是本段这一条片段，它的时钟从 0 开始；超出时长的节拍会被挤成一团或凭空乱动
 - 你只负责写**本段时间窗发生的事**。分析表/人物设定里出现的、发生在其他时间窗的事件（比如整片第 N1 秒才会破碎的窗户、第 N2 秒的转折动作），**本段一个字都不能出现**
+- **本段是一个完整的动作单元**：本段的动作必须在**本段时长内落定**（做完并停在该有的姿态上），
+  不许做到一半就收尾留给下一段（请求若给出本段末态声明，正文结束时的画面必须达到它）
 - 违反这条 = 本段作废
 
 ## 结构（严格官方 base-en.txt 格式，全部英文）
@@ -726,6 +728,33 @@ def _segment_shot_texts(plan, state: dict) -> tuple[list[str], bool]:
     return texts, (exact and bool(texts))
 
 
+# 本段末态声明块的标题（issue #95）。常量供测试按名认块，不重抄字面量。
+SEGMENT_END_STATE_HEADER = "【本段末态声明（规划层给定）】"
+
+
+def _segment_end_state_block_for_request(plan) -> str:
+    """把本段 ``end_hook`` 注入写段请求；没有声明时返回空串（不注入空标题）。
+
+    为什么必须有这一块（issue #95）：规划师每段写下「动作刚落定成什么样」，写段
+    请求此前**完全看不到它**——写段模型只能按分镜表自由收尾，于是动作常做到一半
+    时间就到了，下一段只能接着演（这正是「规则在、接线不在」的又一形态）。
+    措辞把两件事绑在一起：末态是什么（``end_hook``）＋什么时候必须落完
+    （本段时长），只给末态不给时限，模型仍可能把动作拖到最后一帧才起步。
+
+    空声明不注入空块：旧 plan.json 缺这一键时读到空串，给模型一个只有标题没有
+    内容的「依据」比不给更坏（同 ``_visual_decision_block_for_request`` 的降级纪律）。
+    """
+    end_hook = str(getattr(plan, "end_hook", "") or "").strip()
+    if not end_hook:
+        return ""
+    return (
+        f"\n{SEGMENT_END_STATE_HEADER}\n"
+        f"本段结束时的画面必须达到：{end_hook}\n"
+        f"本段全部动作必须在**本段时长内落定**（{plan.duration_s}s 之内），"
+        "不许做到一半留给下一段。\n"
+    )
+
+
 def build_segment_v2_request(
     plan,  # SegmentPlan
     all_plans: list,
@@ -768,6 +797,9 @@ def build_segment_v2_request(
         f"绝对片时 {plan.start_s}-{plan.end_s}s 仅作剧情定位，严禁写进提示词的时间戳）\n"
         f"包含 Shot：{plan.shots_in_segment}\n"
         f"本段剧情概述（中文，仅供你理解剧情，不得写进提示词）：{plan.summary}\n"
+        # 末态声明紧跟剧情概述：它是「这一段的动作要落成什么样」的那句话，读者
+        # 先看到剧情、再看到收尾目标，然后才是首帧锚定与修订（issue #95）。
+        f"{_segment_end_state_block_for_request(plan)}"
         f"{_frame_anchor_note(plan.index == 0, plan.index == len(all_plans) - 1, state, segment_index=plan.index)}\n"
         f"{_revision_block_for_request(state)}"
         f"{future_block}\n"

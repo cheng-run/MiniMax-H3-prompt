@@ -83,7 +83,11 @@ class SegmentPlan:
             end_s=int(raw["end_s"]),
             shots_in_segment=tuple(int(s) for s in raw["shots_in_segment"]),
             summary=str(raw["summary"]),
-            end_hook=str(raw["end_hook"]),
+            # issue #95：旧 plan.json 的末态声明可能**整个键都没有**（当时首尾帧链
+            # 不强制声明）。兼容读旧档是续跑的唯一入口，不能因为严格化就把用户的
+            # 进度读废；新写规划的空末态在 ``parse_segment_plan`` 就拒收，两道口
+            # 各管一头（读旧档＝兼容，写新档＝契约），不要混成一层。
+            end_hook=str(raw.get("end_hook", "")),
             # 旧 plan.json 没有这个键：缺省空串（首尾帧链的既有产物）
             start_state=str(raw.get("start_state", "")),
             # issue #75：旧 plan.json 没有 assets_in_segment → None（整片定义原样兼容）。
@@ -216,13 +220,18 @@ def parse_segment_plan(text: str, total_s: int, *, mode: str = "base",
     """解析并校验 segment planner 输出。失败返回 None。
 
     时长上限分路线（ADR 0012）：base 4–10（首尾帧链规划保守档，硬闸不动），
-    ref 4–15（59- 节点契约）。ref 另外要求：
+    ref 4–15（59- 节点契约）。两条路线都要求：
 
-    - ``start_state`` 与 ``end_hook`` 都非空——多参没有桥接帧，起止状态声明是段间
+    - ``end_hook`` 非空——它是本段「动作落定成什么样」的唯一声明：写段请求拿它
+      当约束（issue #95，此前写段器完全看不到），锚帧语义校验拿它当判据；
+    - ref 另外要求 ``start_state`` 也非空——多参没有桥接帧，起止状态声明是段间
       叙事衔接的唯一显式依据，缺一个整段产物就不合格（拒收→调用方回退机械拆分）；
     - 给定 ``shot_cuts``（镜头切点表）时，内部段边界必须落在切点上（「不均匀硬切，
       边界落在镜头切点」）；唯一例外是镜头本身超过执行窗口（> MAX_SEG_S）时允许
       镜内切——长镜头拆段本来就没有切点可用。
+
+    严格化只作用于**新写的**规划（本函数解析模型输出）；已落盘的旧 plan.json
+    走 ``SegmentPlan.from_dict``，缺键读成空串，不在此处拒收（issue #95）。
     """
     limit = MAX_SEG_S if mode == "ref" else BASE_MAX_SEG_S
     data = _extract_json(text)
@@ -252,7 +261,11 @@ def parse_segment_plan(text: str, total_s: int, *, mode: str = "base",
             shots = [shots]  # 容错
         start_state = str(item.get("start_state", ""))
         end_hook = str(item.get("end_hook", ""))
-        if mode == "ref" and (not start_state.strip() or not end_hook.strip()):
+        # issue #95：末态声明两条路线都必填——写段请求要拿它要求「动作在本段时长内
+        # 落定」，锚帧语义校验也要拿它判尾帧到没到；空串放过去等于每段自己随意收尾。
+        if not end_hook.strip():
+            return None
+        if mode == "ref" and not start_state.strip():
             return None
         plans.append(SegmentPlan(
             index=i,

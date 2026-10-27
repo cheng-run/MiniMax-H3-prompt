@@ -443,6 +443,82 @@ def _v2_plans():
     ]
 
 
+def _official_segment_reply():
+    """过交付前校验的官方格式回复（v2 写段用例共用，避免每条测试各抄一份）。"""
+    from minimax_h3_prompt.segment_prompts import I2VA_ANCHOR_LINE
+
+    return (
+        f"{I2VA_ANCHOR_LINE}\n\n"
+        "integrated_multimodal_description: [Shot 1] Live-action, cinematic, "
+        "a close shot frames an orange tabby cat landing on a checkout counter "
+        "under warm light. At 00:02.000, the cat rubs its head against the "
+        "clerk's hand. The scene settles on the cat leaning into her palm. "
+        "Keep every character's silhouette, facial outline, and clothing edges "
+        "crisp and stable throughout; no rippling, warping, or edge shimmer.\n\n"
+        "overall_soundscape: A low refrigerator hum continues while soft purring "
+        "rises near the counter. The clerk's sleeve rustles as the cat leans in.\n\n"
+        "non_diegetic_music: N/A"
+    )
+
+
+def test_write_segment_v2_request_carries_this_segments_end_state():
+    """issue #95：写段模型必须看得到本段末态声明（此前完全看不到）。
+
+    这是「规则在、接线不在」的又一形态：规划师写下了「动作刚落定」，写段请求却
+    只带剧情概述——写段模型按分镜表自由收尾，动作常做到一半就把时间用完了。
+    记录型桩模型抓的是**真实出站请求**（先例：上面 edge-stability / 词表两条），
+    不猜 ``create_agent`` 的图结构。
+    """
+    from minimax_h3_prompt.segment_prompts import (
+        SEGMENT_END_STATE_HEADER,
+        write_segment_v2,
+    )
+
+    plans = _v2_plans()
+    plan = plans[1]
+    # 用记**全部**请求的桩（§C4 写段侧先例），不用只记最后一次的 FakeLLM：
+    # 若校验触发重写，末态声明在重写请求里也得在，最后一串覆盖不了这一点。
+    llm = SequencedLLM([_official_segment_reply()])
+    text = write_segment_v2(plan, plans, {"shot_table": "x"}, llm)
+    assert text
+    assert llm.calls == 1, "合规回复不应触发重写，出站应只有一份请求"
+    request = llm.requests[0]
+    assert plan.end_hook in request, "出站写段请求没带本段末态声明"
+    assert SEGMENT_END_STATE_HEADER in request
+    assert "本段时长内落定" in request
+    # 禁令不冲突：末态是**上下文声明块**，不是要求模型输出 END_HOOK: 字段
+    assert "不写 `END_HOOK:`" in request
+
+
+def test_segment_v2_instruction_requires_action_to_settle_within_segment():
+    """写段指令本身要求动作在本段时长内落定（issue #95 AC4）。
+
+    请求块给的是「落成什么样」，指令句给的是「什么时候必须落完」——只给末态不
+    给时限，模型仍可能把动作拖到最后一帧才起步。
+    """
+    from minimax_h3_prompt.segment_prompts import _SEGMENT_V2_INSTRUCTION
+
+    assert "本段时长内落定" in _SEGMENT_V2_INSTRUCTION
+
+
+def test_segment_v2_request_omits_end_state_block_for_old_plans():
+    """旧 plan.json 缺末态声明时诚实降级：不注入空块（issue #95 的兼容面）。
+
+    旧分段是续跑的唯一依据，它们的 ``end_hook`` 读到空串；此时给模型一个只有标题
+    没有内容的「末态声明」比不写更坏（同画面决策块的降级纪律）。
+    """
+    from minimax_h3_prompt.segment_planner import SegmentPlan
+    from minimax_h3_prompt.segment_prompts import (
+        SEGMENT_END_STATE_HEADER,
+        build_segment_v2_request,
+    )
+
+    plan = SegmentPlan(index=0, start_s=0, end_s=4, shots_in_segment=(1,),
+                       summary="旧规划", end_hook="")
+    request = build_segment_v2_request(plan, [plan], {"shot_table": "x"})
+    assert SEGMENT_END_STATE_HEADER not in request
+
+
 def test_segment_v2_request_official_format_discipline():
     """v2 请求模板要求官方英文格式：I2VA 指令行、英文正文、节拍纪律、单 Shot 默认。"""
     from minimax_h3_prompt.segment_prompts import build_segment_v2_request
@@ -480,23 +556,10 @@ def test_segment_v2_request_no_legacy_structures():
 
 def test_write_segment_v2_output_official_shape():
     """v2 写段 mock：模板纪律 + validator 断言新产出过 T1 新裁判。"""
-    from minimax_h3_prompt.segment_planner import SegmentPlan
-    from minimax_h3_prompt.segment_prompts import I2VA_ANCHOR_LINE, write_segment_v2
+    from minimax_h3_prompt.segment_prompts import write_segment_v2
     from minimax_h3_prompt.tools.h3_validator import validate_base
 
-    official_reply = (
-        f"{I2VA_ANCHOR_LINE}\n\n"
-        "integrated_multimodal_description: [Shot 1] Live-action, cinematic, "
-        "a close shot frames an orange tabby cat landing on a checkout counter "
-        "under warm light. At 00:02.000, the cat rubs its head against the "
-        "clerk's hand. The scene settles on the cat leaning into her palm. "
-        "Keep every character's silhouette, facial outline, and clothing edges "
-        "crisp and stable throughout; no rippling, warping, or edge shimmer.\n\n"
-        "overall_soundscape: A low refrigerator hum continues while soft purring "
-        "rises near the counter. The clerk's sleeve rustles as the cat leans in.\n\n"
-        "non_diegetic_music: N/A"
-    )
-
+    official_reply = _official_segment_reply()
     plans = _v2_plans()
     text = write_segment_v2(plans[1], plans, {"shot_table": "x"}, FakeLLM(official_reply))
     assert text == official_reply
