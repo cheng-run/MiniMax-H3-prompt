@@ -24,7 +24,9 @@ from minimax_h3_prompt import (
 )
 from minimax_h3_prompt.brief_parser import Brief
 from minimax_h3_prompt.segment_planner import SegmentPlan
+from minimax_h3_prompt.segment_prompts import ShotPrompt
 from minimax_h3_prompt.session_store import load_session, save_session
+from minimax_h3_prompt.tools import reference_auditor
 from minimax_h3_prompt.tools.frame_match import video_meta
 from minimax_h3_prompt.ui import wizard
 
@@ -206,6 +208,313 @@ def test_fallback_writes_no_table_until_every_segment_has_passed(
     assert not (gen / "segments" / "plan.json").exists(), \
         "没跑完就写段表，会把中断后的续跑引到规划式重写"
     assert not (gen / "final.mp4").exists()
+    assert load_session(gen).status == session_store.STATUS_SEGMENTED_RUNNING
+
+
+# ---------------------------------------------------------------------------
+# 2b. 机械回退但段提示词没有时间戳：拼不出成片，但会话必须收尾（不循环）
+# ---------------------------------------------------------------------------
+
+def _no_timestamp_segments() -> list[ShotPrompt]:
+    """机械拆分的段**没有时间窗**：补不出段表（``_write_mechanical_plan`` 的 False 形态）。"""
+    return [
+        ShotPrompt(shot_number=1, text="[Shot 1] The store interior is still.",
+                   start_seconds=None, duration_seconds=None),
+        ShotPrompt(shot_number=2, text="[Shot 2] The cat walks to the counter.",
+                   start_seconds=None, duration_seconds=None),
+    ]
+
+
+def _stub_timestampless_fallback(monkeypatch, tmp_path) -> list[str]:
+    """打桩「规划失败 → 机械回退」且段提示词没有时间窗；返回用户输入序列。"""
+    first = _fake_video(tmp_path, "seg1.mp4")
+    last = _fake_video(tmp_path, "seg2.mp4")
+    _stub_flow(monkeypatch, tmp_path)
+    monkeypatch.setattr(segment_planner, "plan_segments", _broken_planner)
+    monkeypatch.setattr(segment_prompts, "rewrite_segment_prompt", lambda *a, **k: None)
+    monkeypatch.setattr(segment_prompts, "split_shots_from_prompt",
+                        lambda *a, **k: _no_timestamp_segments())
+    return ["", "", str(first), "", str(last)]
+
+
+def _fake_video(tmp_path, name: str) -> Path:
+    """一个真实存在的占位视频文件（本组用例不真拼它，账上只需路径可读）。"""
+    path = tmp_path / name
+    path.write_bytes(b"fake-mp4")
+    return path
+
+
+def _broken_planner(*_a, **_k):
+    raise RuntimeError("规划挂了，按 [Shot N] 机械拆分")
+
+
+def test_timestampless_mechanical_fallback_completes_instead_of_looping(
+        tmp_path, monkeypatch, capsys):
+    """没有时间戳 → 成片不可用，但**会话必须标成完成**（复审裁定，2026-10-27）。
+
+    修复前的形态：回退流程只打一句「拼接不可用」就 ``return True``，收尾处因
+    ``plan.json`` 缺席拒绝拼接、**不**标完成；重进命中 ``RESUME_NO_TABLE``，出口还是
+    不标完成——用户每进一次向导都回到同一句话，永远收不了尾。而这种形态**补不出**
+    段表（段提示词本来就没有时间窗），「恢复段表」这条路对它根本不存在。
+    所以它必须像旧会话「拼接不可用」那样**说破原因并收尾**。
+    """
+    gen, _ = _start_session(tmp_path)
+    _answers(monkeypatch, _stub_timestampless_fallback(monkeypatch, tmp_path))
+
+    wizard.run_wizard(_cfg(tmp_path))
+
+    out = capsys.readouterr().out
+    assert not (gen / "final.mp4").exists(), "段表补不出来，不能产出伪成片"
+    assert "成片不可用" in out, out[-800:]
+    assert "时间戳" in out, "原因必须写清（不是笼统的「拼接不可用」）"
+    assert load_session(gen).status == session_store.STATUS_COMPLETED, \
+        "这种形态补不出段表，停在 running 只会让重进向导无限循环"
+
+
+def test_reentering_after_a_timestampless_film_is_not_offered_for_resume(
+        tmp_path, monkeypatch, capsys):
+    """收尾之后**再进向导不再回到这条续接**：它已不在「未完成」列表里。
+
+    死循环的全部机制就是「会话停在 segmented_running + 重进落回续接」；标成完成
+    之后那两件事都不成立。这里直接把续接入口打成断言，防的是将来谁把它改回 running。
+    """
+    gen, _ = _start_session(tmp_path)
+    _answers(monkeypatch, _stub_timestampless_fallback(monkeypatch, tmp_path))
+    wizard.run_wizard(_cfg(tmp_path))
+    capsys.readouterr()
+
+    resumable = [s.directory for s in session_store.find_awaiting_sessions(
+        tmp_path / "sessions")]
+    assert gen not in resumable, "已收尾的会话还被列为可续接——下次进向导又会绕回来"
+
+    def boom(*_a, **_k):
+        raise AssertionError("已收尾的会话又被送进分段陪跑续接")
+
+    monkeypatch.setattr(wizard, "_resume_segmented", boom)
+    monkeypatch.setattr(wizard, "_phase1_new", lambda config: None)
+    assert wizard.run_wizard(_cfg(tmp_path)) == 1
+
+
+# ---------------------------------------------------------------------------
+# 2c. 部分续跑不丢首帧锚：每段通过后落盘（issue #94 复审）
+# ---------------------------------------------------------------------------
+
+ANCHOR_DESC = "便利店收银台中景：玻璃店门完整关闭，画面中没有猫；店员右手平放在台面上。"
+
+# 未被任何用例打桩过的真写段函数（见 ``test_fallback_resume_keeps_...`` 的说明）。
+_REAL_REWRITE = segment_prompts.rewrite_segment_prompt
+
+
+class _RecordingLLM:
+    """记录写段请求的桩模型：断言的是**出站请求**里有没有那个读图描述。"""
+
+    def __init__(self) -> None:
+        self.requests: list[str] = []
+
+    def invoke(self, request, config=None):
+        self.requests.append(request)
+        return "For the target video, at 0.00 seconds, [Shot 1] a rewrite."
+
+
+def test_fallback_resume_keeps_the_bridge_anchor_for_the_next_segment(
+        tmp_path, monkeypatch, capsys):
+    """第 1 段通过后中断 → 续跑时第 2 段的**写段请求**必须仍带着第 1 段桥接帧的读图结果。
+
+    修复前：``_anchor_state`` 只写内存，``save_session`` 只在 ``_run_long_form`` 首尾各
+    一次——续跑时账上已通过的那段不再过闸门（不再剥帧读图），而 state 里又没有这条锚，
+    写段请求就退回「图片是唯一事实源」（issue #94 引入的回归）。修法是**每段通过后
+    落盘**，让续跑零额外提问、零额外读图。
+    """
+    gen, _ = _start_session(tmp_path)
+    video = _make_fake_video(monkeypatch, tmp_path)
+    reads: list[str] = []
+
+    def fake_describe(path, instruction=None):
+        reads.append(str(path))
+        return ANCHOR_DESC
+
+    monkeypatch.setattr(reference_auditor, "describe_image", fake_describe)
+    monkeypatch.setattr(model_factory, "build_chat_model", lambda: SimpleNamespace())
+    monkeypatch.setattr(segment_planner, "plan_segments", _broken_planner)
+    monkeypatch.setattr(wizard, "_confirm", lambda *a, **k: True)
+
+    # 第一轮：段 1 确认 → 段 1 视频（闸门通过，锚写进 state 并落盘）→ 段 2 确认
+    #        → 末段视频回车（放弃继续）＝一次「跑完第 1 段后中断」。
+    monkeypatch.setattr(segment_prompts, "rewrite_segment_prompt",
+                        lambda *a, **k: "REWRITTEN")
+    _answers(monkeypatch, ["", str(video), "", ""])
+    session = load_session(gen)
+    wizard._run_segmented_flow(session.brief, session, TWO_SHOT_PROMPT,
+                               state=session.stage_state)
+    capsys.readouterr()
+
+    # 续跑：从盘上重新读会话（这正是修复前丢锚的那一步）。
+    resumed = load_session(gen)
+    assert resumed.stage_state.get("bridge_frame_descriptions") == [
+        {"segment": 1, "description": ANCHOR_DESC},
+    ], "第 1 段通过后锚没有落盘——续跑时下一段就退回无锚定"
+
+    recorder = _RecordingLLM()
+    # 真 ``rewrite_segment_prompt``（真组装写段请求）＋记录桩模型：要断言的是**出站请求**。
+    # 原函数在**模块导入时**就摘下来（``_REAL_REWRITE``）：打桩之后
+    # ``segment_prompts.rewrite_segment_prompt`` 已经变成壳，再取它就是自我递归。
+    monkeypatch.setattr(
+        segment_prompts, "rewrite_segment_prompt",
+        lambda segment, full_prompt, llm, **kw:
+            _REAL_REWRITE(segment, full_prompt, recorder, **kw))
+    reads.clear()
+    _answers(monkeypatch, ["", ""])  # 段 2 确认 → 末段视频回车
+
+    wizard._run_segmented_flow(resumed.brief, resumed, TWO_SHOT_PROMPT,
+                               state=resumed.stage_state)
+
+    assert recorder.requests, "续跑没有重写第 2 段？"
+    assert ANCHOR_DESC in recorder.requests[0], \
+        "续跑后第 2 段的写段请求丢了第 1 段桥接帧的读图描述"
+    assert reads == [], "已通过段的桥接帧在续跑时被重新读图了（多付一次、并要求重交视频）"
+    assert shot_ledger.read_shot_ledger(gen) != [], "第 1 段的通过行不该丢"
+
+
+def _broken_planner(*_a, **_k):
+    raise RuntimeError("规划挂了，按 [Shot N] 机械拆分")
+
+
+def _make_fake_video(monkeypatch, tmp_path) -> Path:
+    """真剥帧/读图都打桩，但视频文件本身要存在（段产出账要算 SHA256）。"""
+    from minimax_h3_prompt.tools import frame_auditor
+
+    video = tmp_path / "seg1.mp4"
+    video.write_bytes(b"fake-mp4")
+
+    def fake_extract(video_path, output_path, **_kwargs):
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+        return out
+
+    monkeypatch.setattr(frame_auditor, "extract_last_frame", fake_extract)
+    monkeypatch.setattr(wizard, "_gate_segment_handoff", lambda *a, **k: [])
+    return video
+
+
+def test_v2_resume_keeps_the_bridge_anchor_for_the_next_segment(
+        tmp_path, monkeypatch, capsys):
+    """同一条回归的 v2 一侧：第 1 段通过后中断，续跑写第 2 段时锚仍在。
+
+    两条产出路径各存一次（v2 在闸门放行处、回退在下一段闸门放行处）——只修一条的话，
+    另一条照样在续跑时丢锚，而丢的是「不报错」的那种。
+    """
+    gen, _ = _start_session(tmp_path)
+    video = _make_fake_video(monkeypatch, tmp_path)
+    monkeypatch.setattr(reference_auditor, "describe_image",
+                        lambda path, instruction=None: ANCHOR_DESC)
+    monkeypatch.setattr(wizard, "_confirm", lambda *a, **k: True)
+
+    class _FirstOnlyLLM:
+        """第 1 次调用给合格正文（让段 1 过闸），之后一律空串＝写段失败（模拟中断）。"""
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def invoke(self, request, config=None):
+            self.calls += 1
+            return FIXTURE.read_text(encoding="utf-8") if self.calls == 1 else ""
+
+    session = load_session(gen)
+    _answers(monkeypatch, ["", str(video), ""])  # 段 1 确认 → 段 1 视频 → 末段视频回车
+    wizard._run_segmented_flow_v2(session, _plans(2), session.stage_state,
+                                  _FirstOnlyLLM())
+    capsys.readouterr()
+
+    resumed = load_session(gen)
+    assert resumed.stage_state.get("bridge_frame_descriptions") == [
+        {"segment": 1, "description": ANCHOR_DESC},
+    ], "v2 路径第 1 段通过后锚没有落盘"
+    assert not (gen / "segments" / "shot-02.md").exists(), \
+        "第 2 段没写出来才不会在续跑时被复用——否则这里测不到出站请求"
+
+    recorder = _RecordingLLM()
+    _answers(monkeypatch, ["", ""])  # 段 2 确认 → 末段视频回车
+    wizard._run_segmented_flow_v2(resumed, _plans(2), resumed.stage_state,
+                                  recorder, plans_from_cache=True)
+
+    assert recorder.requests, "续跑没有重写第 2 段？"
+    assert ANCHOR_DESC in recorder.requests[0], \
+        "v2 续跑后第 2 段的写段请求丢了第 1 段桥接帧的读图描述"
+
+
+def test_missing_table_with_timestamps_is_not_treated_as_unavailable(
+        tmp_path, monkeypatch, tmp_video, capsys):
+    """段表**丢了**但段提示词有时间戳 → 这不是「补不出」，仍按原行为停住等恢复。
+
+    两种「plan.json 缺席」必须分开（2026-10-27 复审）：段提示词没有时间窗时永远补不出
+    段表（说破原因并收尾）；而这里只是文件丢了，恢复 segments/plan.json 后还能拼——
+    若也标完成，用户就再也拼不出那条**本来拼得出来**的片子。收尾处直接调
+    （``_run_long_form`` 的续拼短路会在同一形态先说「恢复段表」并停住，走不到这里）。
+    """
+    gen, session = _start_session(tmp_path)
+    shot_ledger.append_shot_output(
+        gen, segment=1, start_s=0, end_s=4, video_path=_video(tmp_video, "s1.mp4"))
+    shot_ledger.append_shot_output(
+        gen, segment=2, start_s=4, end_s=8, video_path=_video(tmp_video, "s2.mp4"))
+
+    result = wizard._assemble_film_and_complete(
+        gen, session.brief, session.stage_state, prompt=TWO_SHOT_PROMPT)
+
+    out = capsys.readouterr().out
+    assert result == {}
+    assert "找不到分段规划" in out, out[-600:]
+    assert "成片不可用" not in out, "段表能恢复，不该按「补不出」判死"
+    assert load_session(gen).status == session_store.STATUS_SEGMENTED_RUNNING
+
+
+def test_reentry_with_a_full_ledger_and_timestampless_prompts_completes(
+        tmp_path, monkeypatch, capsys):
+    """账满 1..N + 无 ``plan.json`` + 段提示词缺时间戳 → 重进向导也必须收尾。
+
+    这是「缺时间戳 → 标完成」那条裁定在**重进入口**的同一形态：收尾处已经说破并收尾，
+    但中断若恰好落在收尾之前（或旧版本留下的会话），重进会落到 ``RESUME_NO_TABLE``——
+    那里一律打「恢复段表后重进」，而这条形态**没有**段表可恢复，于是每进一次向导都回到
+    同一句、永远收不了尾（2026-10-27 复审第二轮的残留窗口）。
+    """
+    gen, _session = _start_session(tmp_path)
+    for number in (1, 2):
+        shot_ledger.append_shot_output(
+            gen, segment=number, start_s=(number - 1) * 4, end_s=number * 4,
+            video_path=_fake_video(tmp_path, f"seg{number}.mp4"))
+    _stub_flow(monkeypatch, tmp_path)
+    monkeypatch.setattr(segment_prompts, "split_shots_from_prompt",
+                        lambda *a, **k: _no_timestamp_segments())
+    _answers(monkeypatch, [""])  # 续接菜单：回车＝1
+
+    wizard.run_wizard(_cfg(tmp_path))
+
+    out = capsys.readouterr().out
+    assert "成片不可用" in out and "时间戳" in out, out[-800:]
+    assert "恢复段表后重进" not in out, "这条形态没有段表可恢复，别再让用户去找它"
+    assert load_session(gen).status == session_store.STATUS_COMPLETED
+
+
+def test_reentry_with_a_missing_table_but_timestamped_prompts_still_stops(
+        tmp_path, monkeypatch, capsys):
+    """同一条重进入口：段提示词有时间戳（段表只是丢了）→ 仍按原行为停住等恢复。
+
+    两支必须是同一个判据（``_mechanical_table_reason``）：把这一支也判死，用户就再也
+    拼不出那条**本来拼得出来**的片子。
+    """
+    gen, _session = _start_session(tmp_path)
+    for number in (1, 2):
+        shot_ledger.append_shot_output(
+            gen, segment=number, start_s=(number - 1) * 4, end_s=number * 4,
+            video_path=_fake_video(tmp_path, f"seg{number}.mp4"))
+    _stub_flow(monkeypatch, tmp_path)
+    _answers(monkeypatch, [""])
+
+    wizard.run_wizard(_cfg(tmp_path))
+
+    out = capsys.readouterr().out
+    assert "恢复段表后重进" in out, out[-800:]
+    assert "成片不可用" not in out
     assert load_session(gen).status == session_store.STATUS_SEGMENTED_RUNNING
 
 

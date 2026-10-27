@@ -19,8 +19,9 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from minimax_h3_prompt import session_store
+from minimax_h3_prompt import segment_prompts, session_store
 from minimax_h3_prompt.brief_parser import Brief
+from minimax_h3_prompt.segment_planner import SegmentPlan
 from minimax_h3_prompt.ui import wizard
 
 END_HOOK = "店员右手刚从扫码枪上收回，猫还没出现在画面里"
@@ -87,6 +88,62 @@ def test_evidence_is_printed_side_by_side(tmp_path, monkeypatch, capsys):
     assert BRIDGE_DESC in out, "尾帧实际画面没有出现在决策时刻"
     assert out.index(END_HOOK) < out.index(BRIDGE_DESC), "证据没有并排（末态在前、画面在后）"
     assert "该达到的末态" in out and "尾帧实际画面" in out, "两半证据的标签必须标明"
+
+
+def test_rerun_outcome_names_the_segment_whose_video_was_judged(tmp_path, monkeypatch,
+                                                               capsys):
+    """「重跑本段」要用户重做的是**被核那段**的视频，不是正在写的这一段。
+
+    回退路径在本段**开头**调闸门：交上来的是上一段（``judged_video_segment``），而
+    ``segment_number`` 是正在写的段。用后者的话用户会被支去重做一段已经过闸的片子，
+    交回来的视频也对不上闸门要核的东西（2026-10-27 复审的 off-by-one）。
+    """
+    session = _session(tmp_path)
+    from minimax_h3_prompt import model_factory, segment_planner
+
+    monkeypatch.setattr(model_factory, "build_chat_model", lambda: SimpleNamespace())
+    monkeypatch.setattr(segment_planner, "plan_segments", lambda *a, **k: None)
+    monkeypatch.setattr(segment_prompts, "rewrite_segment_prompt",
+                        lambda segment, *a, **k: f"REWRITTEN {segment.shot_number}")
+    _patch_strip(monkeypatch)
+    # 段 1 确认 → 段 1 视频（闸门判未达到）→ 出路 2（重跑本段）→ 再交一次视频：回车放弃
+    answers = iter(["", _video(tmp_path), "2", ""])
+    monkeypatch.setattr(wizard, "_prompt", lambda *a, **k: next(answers, ""))
+    monkeypatch.setattr(wizard, "_confirm", lambda *a, **k: False)
+
+    prompt = ("For the target video, at 0.00 seconds into the target video, "
+              "<Picture 1> (from [Shot 1]) is fully referenced.\n\n"
+              "[Shot 1] The store interior is still.\n"
+              "[Shot 2] At 00:06.000, the cat walks to the counter.\n\n"
+              "overall_soundscape: a low hum.\n\n"
+              "non_diegetic_music: N/A\n")
+    wizard._run_segmented_flow(session.brief, session, prompt, state={})
+
+    out = capsys.readouterr().out
+    assert "重做第 1/2 段" in out, f"重跑话术指错了段号：{out[-600:]}"
+    assert "重做第 2/2 段" not in out, "那段已经过闸了，重做它等于白做一次"
+
+
+def test_v2_rerun_outcome_still_names_its_own_segment(tmp_path, monkeypatch, capsys):
+    """v2 两数相等（交上来的就是本段视频）：改段号不许改变 v2 的话术。"""
+    session = _session(tmp_path)
+    plans = [
+        SegmentPlan(index=0, start_s=0, end_s=9, shots_in_segment=(1,),
+                    summary="店员守店", end_hook="右手停在台面"),
+        SegmentPlan(index=1, start_s=9, end_s=18, shots_in_segment=(2,),
+                    summary="猫冲进店内", end_hook="猫落上柜台"),
+    ]
+    monkeypatch.setattr(segment_prompts, "write_segment_v2",
+                        lambda plan, *a, **k: f"SEGMENT {plan.index + 1}")
+    _patch_strip(monkeypatch)
+    answers = iter(["", _video(tmp_path), "2", ""])
+    monkeypatch.setattr(wizard, "_prompt", lambda *a, **k: next(answers, ""))
+    monkeypatch.setattr(wizard, "_confirm", lambda *a, **k: False)
+
+    wizard._run_segmented_flow_v2(session, plans, {}, SimpleNamespace())
+
+    out = capsys.readouterr().out
+    assert "重做第 1/2 段" in out, f"v2 的话术被改了：{out[-600:]}"
 
 
 def test_semantic_layer_runs_on_the_fallback_path_too(tmp_path, monkeypatch, capsys):

@@ -21,12 +21,10 @@ from typing import Mapping, Sequence
 from .asset_ledger import sha256_file
 from .segment_planner import SegmentPlan
 
-# 成片短于各段计划时长之和的告警容差：H3 产出**从不是整数秒**（4s 档恒 4.458s，见
-# ``preflight.H3_TIER_FRAMES``），所以「等于总时长」的可证形态是**结构**的（段表覆盖
-# ``[0, 起步总时长]``），实测时长只做**只报短**的核对。容差按**一帧/段**给：档位量化
-# 误差是帧级的（±2 帧 ≈ 0.08s），跨段累积不会超过这个量级；真短掉一档（如 10s 段交回
-# 7s 档）差的是好几秒，照样咬得住。
-_FINAL_FILM_FRAME_S = 1.0 / 24.0
+# 「只报短」容差的兜底帧率：读不到输入段 fps 时才用它。容差本身按**实测 fps** 折算
+# 一帧/段（``len(sources) / fps``）——写死 1/24 时，60fps 素材上一帧只有 1/60 秒，
+# 每个接缝白得多给 1.5 帧的余量，真短掉几帧会被静默吞掉（2026-10-27 复审实测）。
+_FALLBACK_FPS = 24.0
 
 # 帧率一致性的实测容差：同一个帧率在不同容器里读回来的小数位会差一点
 # （23.976023976… vs 23.976），而「24 vs 30」这种真不一致差的是整数级。
@@ -174,21 +172,32 @@ def assemble_film(*, plans: Sequence[SegmentPlan],
     if measured is None:
         warnings.append(f"读不到成片的时长元数据：{out}（跳过时长核对）")
     else:
-        # 裁首帧那一档的预期值要扣掉裁掉的那几帧：`(段数−1)` 帧按**各段实测 fps** 折算
-        # （spec #92：不写死 24）。多参那一档不扣、口径一字不动——两条路线在「成片该
-        # 多长」上本来就不一样，硬统一会把多参的「只报短」口径改坏。
-        #
-        # fps 取**输入段**的、不取成品的：cv2 的 ``CAP_PROP_FPS`` 在重编码产物上是估出来的
-        # ——容器 duration 不含末帧时长，212 帧会被读成 24.1137fps（实测），拿它折算
-        # 会把该扣掉的量算小、反而制造假告警。
+        # 「只报短」的容差与预期值都按**输入段实测 fps** 折算（spec #92 复审 2026-10-27）：
+        # H3 产出从不是整数秒，档位量化误差是帧级的，所以容差按一帧/段给；而「一帧」
+        # 多长随 fps 变——写死 1/24 在 60fps 素材上每段多给 1.5 帧余量，真短掉几帧会被
+        # 吞掉。fps 取**输入段**的、不取成品的：cv2 的 ``CAP_PROP_FPS`` 在重编码产物上
+        # 是估出来的——容器 duration 不含末帧时长，212 帧会被读成 24.1137fps（实测），
+        # 拿它折算会把该扣掉的量算小、反而制造假告警。
+        fps = float(video_meta(sources[0]).get("fps") or 0.0) or _FALLBACK_FPS
         expected_s: float = planned_s
         if strategy == ConcatStrategy.TRIM_FIRST_FRAME:
-            fps = float(video_meta(sources[0]).get("fps") or 0.0) or 24.0
+            # 裁首帧那一档的预期值要扣掉裁掉的那几帧；多参那一档不扣、口径一字不动
+            # ——两条路线在「成片该多长」上本来就不一样，硬统一会把多参的「只报短」改坏。
             expected_s = planned_s - (len(sources) - 1) / fps
-        if measured + len(sources) * _FINAL_FILM_FRAME_S < expected_s:
-            warnings.append(
-                f"成片实测 {measured:.2f}s，短于各段计划时长之和 {_seconds_text(expected_s)}s——"
-                "可能有段没接上，或某段交回的不是计划时长档的产出")
+        if measured + len(sources) / fps < expected_s:
+            if strategy == ConcatStrategy.TRIM_FIRST_FRAME:
+                # 这一档比的是「扣掉接缝裁帧后的预期」，说成「各段计划时长之和」就是
+                # 两套口径（复审 2026-10-27）：8.92s 从来不是哪一段的和，它是 9s 减两帧。
+                warnings.append(
+                    f"成片实测 {measured:.2f}s，短于扣除接缝裁帧后的预期 "
+                    f"{_seconds_text(expected_s)}s（各段计划时长之和 "
+                    f"{_seconds_text(planned_s)}s，{len(sources) - 1} 个接缝各裁 1 帧）——"
+                    "可能有段没接上，或某段交回的不是计划时长档的产出")
+            else:
+                # 多参那一档的用户可见文案逐字不变。
+                warnings.append(
+                    f"成片实测 {measured:.2f}s，短于各段计划时长之和 {_seconds_text(expected_s)}s——"
+                    "可能有段没接上，或某段交回的不是计划时长档的产出")
     return FinalFilm(path=out, how=how, total_s=int(total_s), planned_s=planned_s,
                      measured_s=measured, warnings=warnings)
 
@@ -210,6 +219,22 @@ def _sha_remedy_hint(hint: str | None, segment: int) -> str:
             f"{segment} <新视频>` 显式指定。")
 
 
+def _copy_single_source(source: Path, out: Path) -> tuple[bool, str, list[str]]:
+    """段数=1：拼接退化为拷贝改名（两档共用，2026-10-27 复审抽出一份）。
+
+    段数=1 时两档都没有接缝可处理（≤15 秒直出的片子走这一档，不劳 ffmpeg 一趟）；
+    逐字重复两遍的结果是「一份改了口径另一份没改」——本仓「同一契约两处口径」已经
+    咬过两次（#56/#57）。
+
+    **源与目标同一路径时跳过拷贝**：``ref-concat`` 允许用户把段视频放在生成目录里，
+    此时 ``shutil.copy2`` 会抛 ``SameFileError``（自己拷自己）。
+    """
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if out.resolve() != source.resolve():
+        shutil.copy2(source, out)
+    return True, "copy", []
+
+
 def _produce(sources: list[Path], out: Path, strategy: ConcatStrategy,
              reencode_crf: int) -> tuple[bool, str, list[str]]:
     """按**拼接口径**把各段接成 ``out``；返回 (成功?, 成功时的拼接方式／失败时的原因, 附带提醒)。
@@ -228,12 +253,7 @@ def _produce(sources: list[Path], out: Path, strategy: ConcatStrategy,
     from .tools.seam_audit import merge_videos
 
     if len(sources) == 1:
-        # 段数=1：拼接退化为拷贝改名（≤15 秒直出走这一档，不劳 ffmpeg 一趟）。
-        # 源就是成片名时跳过拷贝（``ref-concat`` 允许用户把段视频放在生成目录里）。
-        out.parent.mkdir(parents=True, exist_ok=True)
-        if out.resolve() != sources[0].resolve():
-            shutil.copy2(sources[0], out)
-        return True, "copy", []
+        return _copy_single_source(sources[0], out)
 
     try:
         moved, how = merge_videos(sources, out, reencode_crf=reencode_crf)
@@ -293,11 +313,8 @@ def _produce_trimmed(sources: list[Path], out: Path,
 
     if len(sources) == 1:
         # 没有接缝可裁（与 stream-copy 档同一形态：≤10 秒不分段的片子不走到这里，
-        # 但共用件不为「本路线最少两段」这条路线属性开洞）。
-        out.parent.mkdir(parents=True, exist_ok=True)
-        if out.resolve() != sources[0].resolve():
-            shutil.copy2(sources[0], out)
-        return True, "copy", []
+        # 但共用件不为「本路线最少两段」这条路线属性开洞）。两档共用一份退化逻辑。
+        return _copy_single_source(sources[0], out)
 
     metas = [video_meta(path) for path in sources]
     problem = _media_problem(metas)

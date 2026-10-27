@@ -70,6 +70,11 @@ _STATE_KEYS = (
     # 「续跑不再问帧图路径、不重付读图」全靠它（issue #51）：漏登记则组装窗口一断，
     # 用户要重填路径、视觉模型要把同一张图再读一遍。
     "frame_images",
+    # `bridge_frame_descriptions` 是各段桥接帧（上一段末帧）的读图结果，按 0-based 段号
+    # 取用（issue #12）。**不在这份白名单里就等于没有**（issue #94 复审实测，2026-10-27）：
+    # 续跑时账上已通过的那段不再过闸门、不再剥帧读图，锚只能从这条键读回；save 时静默
+    # 丢掉它，下一段的写段请求就退回「图片是唯一事实源」——桥接链在中断处断掉且不报错。
+    "bridge_frame_descriptions",
     "sound_design", "music", "final_prompt", "final_report", "_progress",
     "user_revisions", "frame_round", "asset_proofreads", "asset_loop",
     "resume_answers", "asset_proofread_progress",

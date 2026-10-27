@@ -3329,6 +3329,20 @@ def _anchor_state(state: dict, position: int, description: str | None) -> None:
     )
 
 
+def _save_after_segment_pass(directory: Path, brief: Brief, state: dict) -> None:
+    """一段通过（闸门放行）之后立刻把会话落盘——桥接帧锚只写在内存里撑不过中断。
+
+    为什么必须**每段**存一次（issue #94 复审，2026-10-27 实测）：``_anchor_state`` 只写
+    内存，而 ``save_session`` 原本只在 ``_run_long_form`` 首尾各一次。续跑时账上已通过
+    的那段不再过闸门（不再剥帧、不再读图），state 里又没有那条锚——下一段的写段请求
+    退回「图片是唯一事实源」，桥接链正好在中断处断掉，而且**不报错**。
+
+    落盘点选在放行之后：``_anchor_state`` 已把这张图写进 state，``on_pass`` 也已落账。
+    状态仍写 ``segmented_running``——这里没有跑完，标完成会让下次重跑另开 GEN（#17）。
+    """
+    save_session(directory, brief, state, status=STATUS_SEGMENTED_RUNNING)
+
+
 def _promised_last_frame_description(state: dict) -> str | None:
     """用户提交的**尾帧**读图结果；没有则 None。
 
@@ -3514,8 +3528,8 @@ def _acquire_bridge_frame(state: dict, position: int, generation_dir: Path, *,
     「锚帧已就位**且**人看着并排证据判了继续」。
 
     ``position``：这一帧要当**哪一段**（0-based）的开场锚，决定帧图文件名与 state 段号。
-    ``segment_number``：只用于**话术**（「第 N/M 段没有拿到输出视频」），两条路径各自
-    取与自己的提问措辞一致的那个段号。
+    ``segment_number``：**其余**话术用的段号（「第 N/M 段没有拿到输出视频」等），两条
+    路径各自取与自己的提问措辞一致的那个段号。「重跑本段」那一条例外，见调用处。
     ``anchor_segment`` / ``judged_video_segment``：写进 gate-log 的两个事实，由调用点
     各自声明——两条路径调用本闸门的时机相反，用一个数字当「段号」会指向不同的段。
 
@@ -3566,7 +3580,11 @@ def _acquire_bridge_frame(state: dict, position: int, generation_dir: Path, *,
             return True
         if outcome == GATE_RERUN:
             attempt += 1
-            print(f"→ 重跑本段：回 ComfyUI 重做第 {segment_number}/{total} 段，"
+            # 要用户重做的是**被核那段**的输出视频，不是正在写的这一段（2026-10-27 复审
+            # 的 off-by-one）：回退路径在**本段开头**调闸门，交上来的是上一段
+            # （``judged_video_segment``），用 ``segment_number``（＝正在写的段）会把
+            # 用户支去重做一段已经过闸的片子。v2 两数相等，行为不变。
+            print(f"→ 重跑本段：回 ComfyUI 重做第 {judged_video_segment}/{total} 段，"
                   "然后把**新的**输出视频路径交上来。", flush=True)
             continue
         if outcome in (GATE_MANUAL_FRAME, GATE_KEYFRAME_RESTART):
@@ -3891,7 +3909,8 @@ def _run_long_form(brief: Brief, session: SessionState, prompt: str, summary, st
     的形态，与账读口同一份语义（见 ``_segment_progress``）。
 
     **续拼短路**（issue #97）：段已全过、只差成片时**整段跳过** ``_run_segmented_flow``，
-    直接进拼接；账满而段表缺席时同样不进它，就地停住（那条路径会先重跑一次分段规划）。
+    直接进拼接；账满而段表缺席时同样不进它，分两种：段表只是丢了就就地停住（等恢复），
+    段提示词缺时间戳（永远补不出段表）则按同一句原因收尾、标完成。
     理由见 ``_film_only_resume``：那条路径会先构造模型、再走末段核验，两条都与「只差
     成片」无关，却都能把用户挡在拼接口之前。
 
@@ -3906,6 +3925,17 @@ def _run_long_form(brief: Brief, session: SessionState, prompt: str, summary, st
 
     verdict = _film_only_resume(directory)
     if verdict == RESUME_NO_TABLE:
+        # 「段表缺席」有两种形态，判据与收尾处同一份（``_mechanical_table_reason``）：
+        # - 段提示词**根本没有时间戳** → 段表永远补不出来，成片不可用。收尾处已经这样
+        #   说破并收尾；这一支覆盖的是中断恰好落在收尾之前（或旧版本留下的会话）。
+        #   对它喊「恢复段表」等于让用户去找一份不存在的东西，而且每进一次向导都回到
+        #   同一句、永远收不了尾（2026-10-27 复审第二轮的残留窗口）。
+        # - 段表只是丢了 → 恢复后还能续拼，仍按原行为停住、不标完成。
+        reason = _mechanical_table_reason(prompt, brief.duration)
+        if reason:
+            print(f"\n[成片] {reason}")
+            save_session(directory, brief, state, status=STATUS_COMPLETED)
+            return {}
         # 第一句与 #96 收尾处**同一句**（不另造一套）：段表缺席＝段序无从确定。
         # 放在流程之前说，是因为下游那条路会先花一次 LLM 重跑规划才得出同一个结论。
         print("\n[成片] 成片未产出：找不到分段规划 segments/plan.json——段序无从确定。")
@@ -3921,22 +3951,27 @@ def _run_long_form(brief: Brief, session: SessionState, prompt: str, summary, st
         # 末段核验）都与「只差成片」无关，却任一失败都能把用户永久挡在拼接口之前。
         print("\n[续拼] 全部段已通过验收，只差成片：直接从拼接这一步继续"
               "（不再要段视频、不重剥帧、不重跑闸门）。")
-        return _assemble_film_and_complete(directory, brief, state)
+        return _assemble_film_and_complete(directory, brief, state, prompt=prompt)
 
     finished = _run_segmented_flow(brief, session, prompt, summary=summary, state=state)
     if not finished:
         print(f"\n[续接] 本次没有跑完全部段，会话保持「分段进行中」：下次重跑向导会落回 "
               f"{directory.name}，从已完成的那一段之后继续（阶段 1/2 不重跑）。")
         return {}
-    return _assemble_film_and_complete(directory, brief, state)
+    return _assemble_film_and_complete(directory, brief, state, prompt=prompt)
 
 
 def _assemble_film_and_complete(directory: Path, brief: Brief,
-                                state: dict) -> dict[int, dict]:
+                                state: dict, *, prompt: str = "") -> dict[int, dict]:
     """收尾：把已通过的段接成 ``<生成目录>/final.mp4``，**成功才**标完成（issue #96）。
 
     首跑与续拼（#97）共用这一份：两条路只是「怎么走到这里」不同，走到之后要做的事
     一模一样，各写一遍迟早出现一份改了另一份没改。
+
+    ``prompt`` 是整条提示词（回退流程拆段用的同一个输入）：只在「段表缺席」时用来判
+    **这条片子还拼不拼得出来**（见 ``_mechanical_table_reason``）——段提示词没有时间戳
+    的机械回退补不出段表，那种形态必须说破原因并收尾，否则重进向导会无限循环。省略它
+    只是退回既有停住路径（测试与旧调用点无需关心这一支）。
 
     返回全部通过行（成功）或空表（拼不出来／账读不回来）。**拼不出来不标完成**：会话
     停在 ``segmented_running``，下次重进向导还能续拼；标早了下次重跑会另开新 GEN，
@@ -3978,8 +4013,18 @@ def _assemble_film_and_complete(directory: Path, brief: Brief,
                   "会从拼接这一步继续（已通过的段不重跑）。")
             return {}
         if plans is None:
-            # 段序真源缺席：机械回退路径在收尾补写 plan.json（见 _write_mechanical_plan），
-            # 规划式在开跑时就写了。两处都没有＝落盘物不一致，不猜段序。
+            # 段序真源缺席。先分清两种形态（2026-10-27 复审）：
+            # - 段提示词没有时间戳 → 机械回退补不出段表，这条片子**永远**拼不出成片。
+            #   那种形态停在 running 就是死循环（重进命中 RESUME_NO_TABLE，出口同样
+            #   「恢复段表」），而它没有段表可恢复——所以必须说破原因并收尾，与旧会话
+            #   「拼接不可用」同款；
+            # - 段表只是丢了（提示词有时间窗）→ 恢复 segments/plan.json 后还能续拼，
+            #   按既有行为停住，别把一条本来拼得出来的片子判死。
+            reason = _mechanical_table_reason(prompt, brief.duration)
+            if reason:
+                print(f"\n[成片] {reason}")
+                save_session(directory, brief, state, status=STATUS_COMPLETED)
+                return {}
             print("\n[成片] 成片未产出：找不到分段规划 segments/plan.json——段序无从确定。")
             print("[续接] 会话保持「分段进行中」：恢复段表后重进向导会从拼接这一步继续"
                   "（已通过的段不重跑）。")
@@ -4197,6 +4242,70 @@ def _segment_progress(directory: Path) -> _SegmentProgress:
     return _SegmentProgress(start=done, passed={}, legacy=True)
 
 
+# 机械回退补不出段表时对人说的那一句（2026-10-27 复审裁定）。必须同时含「时间戳」与
+# 「成片不可用」：它与旧会话那句「拼接不可用」是同一件事的两个原因，但不能混成一句
+# ——旧会话缺的是**账**（段视频路径从没记过），这条缺的是**时间窗**（段提示词里根本
+# 没有起止秒）。用户看到「恢复段表」会以为文件是自己弄丢的，而这条形态恢复不了。
+_NO_TIMESTAMPS_REASON = ("段提示词的起止时间戳缺失，段表补不出来——成片不可用"
+                         "（段序无从确定，不产出 final.mp4）。")
+
+
+def _mechanical_plans(segments: list) -> tuple[list | None, str]:
+    """机械拆分的段 → ``SegmentPlan`` 列表；补不出段表时返回 ``(None, 原因)``。
+
+    **补不出来只有一种形态**：段提示词没有可用的起止时间戳（``start_seconds`` /
+    ``duration_seconds`` 为 None）。没有时间窗就核不出「段表覆盖 ``[0, 起步总时长]``」
+    这条判据，写出来的段表是一份对不上总时长的伪产物。
+
+    判据住在这里、两个读点共用（``_write_mechanical_plan`` 补写段表、
+    ``_mechanical_table_reason`` 收尾时判「这条片子还能不能拼」）——两处各写一遍就是
+    「同一契约两处口径」（#56 假 ``SEGMENT_TIMELINE_MISSING``、#57 末段余量的教训），
+    而这类漂移不会让任何用例变红。
+    """
+    from ..segment_planner import SegmentPlan
+
+    plans: list[SegmentPlan] = []
+    for position, segment in enumerate(segments, 1):
+        start, duration = segment.start_seconds, segment.duration_seconds
+        if start is None or duration is None:
+            return None, _NO_TIMESTAMPS_REASON
+        plans.append(SegmentPlan(
+            index=position - 1,
+            # 段边界按契约是整数秒（``_shot_blocks`` 已把时间戳取整），这里只是落类型。
+            start_s=int(round(start)),
+            end_s=int(round(start + duration)),
+            shots_in_segment=(segment.shot_number,),
+            summary="",
+            end_hook="",
+        ))
+    return plans, ""
+
+
+def _mechanical_table_reason(prompt: str, duration: float | None) -> str:
+    """这条会话还能不能补出机械段表：补不出来返回原因（空串＝能补，或无从判断）。
+
+    收尾处用它把两种「``plan.json`` 缺席」分开（2026-10-27 复审）：
+
+    - 段提示词**根本没有时间戳** → 无论重进多少次都补不出段表，成片不可用 → 说破并收尾。
+      不这么做就是死循环：收尾处拒绝拼接、不标完成，重进命中 ``RESUME_NO_TABLE``，出口
+      还是「恢复段表后重进」——而这条形态**没有**段表可恢复。
+    - 段表只是丢了（提示词有时间戳）→ 恢复段表后还能续拼 → 按既有行为停住，不标完成。
+      后者若也标完成，用户就再也拼不出那条**本来拼得出来**的片子。
+
+    重跑一次 ``split_shots_from_prompt`` 是安全的：它是纯解析（无 LLM），段提示词就是
+    回退流程开跑时用的那份同一个输入。
+    """
+    from ..segment_prompts import split_shots_from_prompt
+
+    if not prompt.strip():
+        return ""  # 整片提示词也不在（续接时文件丢了）：无从判断，走既有停住路径
+    segments = split_shots_from_prompt(prompt, total_duration=duration)
+    if len(segments) < 2:
+        return ""  # 这段流程本就不出多段，不是本形态——交给既有路径
+    plans, reason = _mechanical_plans(segments)
+    return "" if plans is not None else reason
+
+
 def _write_mechanical_plan(directory: Path, segments: list) -> bool:
     """把机械拆分的段表补写成 ``segments/plan.json``（issue #96）。
 
@@ -4208,33 +4317,52 @@ def _write_mechanical_plan(directory: Path, segments: list) -> bool:
     机械拆分没有 plan 层的概述与末态声明：``summary``/``end_hook`` 留空，不编一句
     （编出来的话会被后续读者当成「规划器确实写过这句话」）。
 
-    返回 False＝段提示词里没有可用的起止时间戳：没有时间窗就核不出「段表覆盖
-    ``[0, 起步总时长]``」，不写一份对不上总时长的段表，由调用方说破拼接不可用。
+    返回 False＝段提示词里没有可用的起止时间戳（判据在 ``_mechanical_plans``）：没有
+    时间窗就核不出「段表覆盖 ``[0, 起步总时长]``」，不写一份对不上总时长的段表。结果由
+    **收尾处**说破（``_assemble_film_and_complete``）：这里只落事实、不宣判成片。
     """
     import json
 
-    from ..segment_planner import SegmentPlan
-
-    plans: list[SegmentPlan] = []
-    for position, segment in enumerate(segments, 1):
-        start, duration = segment.start_seconds, segment.duration_seconds
-        if start is None or duration is None:
-            return False
-        plans.append(SegmentPlan(
-            index=position - 1,
-            # 段边界按契约是整数秒（``_shot_blocks`` 已把时间戳取整），这里只是落类型。
-            start_s=int(round(start)),
-            end_s=int(round(start + duration)),
-            shots_in_segment=(segment.shot_number,),
-            summary="",
-            end_hook="",
-        ))
+    plans, _reason = _mechanical_plans(segments)
+    if plans is None:
+        return False
     seg_dir = Path(directory) / "segments"
     seg_dir.mkdir(parents=True, exist_ok=True)
     (seg_dir / "plan.json").write_text(
         json.dumps([plan.to_dict() for plan in plans], ensure_ascii=False, indent=2),
         encoding="utf-8")
     return True
+
+
+def _print_ledger_way_out(directory: Path) -> None:
+    """段产出账出问题时那条**共用**出路（三处调用同一份，2026-10-27 复审）。
+
+    这三句话此前各写各的，已经漂过：一处说「恢复与账配套的分段」，一处点名
+    ``segments/plan.json``，而 v2 那条「读不回来」干脆没有出路栏。用户看到的是同一件
+    事，却要按自己走的是哪条分段路径读到不同说法——文案住在这里，改一次三处同时改。
+    """
+    from ..shot_ledger import shot_ledger_path
+
+    ledger = shot_ledger_path(directory)
+    print(f"  出路：恢复与账配套的落盘物（{ledger} 与对应的分段 segments/plan.json）后"
+          "重跑（走续接）；")
+    print(f"        或删掉 {ledger}（旧会话是 segments/progress.json）让它从第 1 段重做"
+          "（已通过的段视频不会被认回）。")
+
+
+def _report_ledger_unreadable(directory: Path, exc: Exception) -> None:
+    """段产出账读不回来：响错停住，绝不静默从第 1 段重来（issue #94 AC6）。"""
+    print(f"[错误] 段产出账读不回来：{exc}")
+    print("  这不是「一段都没做」——静默从第 1 段重来会把已通过的段当没做过"
+          "（已生成的视频要重新交回）。")
+    _print_ledger_way_out(directory)
+
+
+def _report_ledger_mismatch(directory: Path, exc: Exception) -> None:
+    """账与本次分段对不上（跳号/越界）：按错的账续跑会跳过从没做过的段，还不报错。"""
+    print(f"[错误] 段产出账与本次分段对不上：{exc}")
+    print("  这不是「一段都没做」——按错的账续跑会跳过从没做过的段，而且全程不报错。")
+    _print_ledger_way_out(directory)
 
 
 def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summary=None,
@@ -4273,12 +4401,8 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
         progress = _segment_progress(session.directory)
     except (OSError, ValueError) as exc:
         # 账行错形/读不出必须**响错停住**（issue #94 AC6）：静默从第 1 段重来会把
-        # 已通过的段当没做过，也没人会知道账上有过哪几段。
-        print(f"[错误] 段产出账读不回来：{exc}")
-        print("  这不是「一段都没做」——静默从第 1 段重来会把已通过的段当没做过"
-              "（已生成的视频要重新交回）。")
-        print(f"  出路：恢复 {session.directory / 'segments' / 'shot-ledger.jsonl'} 后重跑；"
-              "或删掉它让它从第 1 段重做（已通过的段视频不会被认回）。")
+        # 已通过的段当没做过，也没人会知道账上有过哪几段。文案与 v2 一处（见 helper）。
+        _report_ledger_unreadable(session.directory, exc)
         return False
     done = progress.start
     try:
@@ -4355,11 +4479,7 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
     try:
         validate_shot_progress(progress.passed, total_segments=total)
     except ValueError as exc:
-        print(f"[错误] 段产出账与本次分段对不上：{exc}")
-        print("  这不是「一段都没做」——按错的账续跑会跳过从没做过的段。")
-        print("  出路：恢复与账配套的分段后重跑（走续接）；或删掉 "
-              f"{seg_dir / 'shot-ledger.jsonl'}（旧会话是 segments/progress.json）"
-              "让它从第 1 段重做（已通过的段视频不会被认回）。")
+        _report_ledger_mismatch(session.directory, exc)
         return False
     print(f"\n已按镜头拆分为 {total} 段逐次执行（每段提示词同时存入 {seg_dir}）。")
     if done:
@@ -4410,6 +4530,9 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
                     record_pass(number, shot, video),
             ):
                 return False  # 硬阻断（issue #13）：交接物不合格，不能算「已跑完」
+            # 闸门放行＝上一段过了、本段的锚已写进 state：立刻落盘（issue #94 复审）。
+            # 续跑时账上已通过的那段不再过闸门，锚只能从会话文件里读回。
+            _save_after_segment_pass(session.directory, brief, state)
         # ② 每段重写：soundscape/music 为本段重写英文摘要句（官方 §4.6/§4.7）；失败回退机械拆分并明示
         rewritten: str | None = None
         if rewrite_llm is not None:
@@ -4491,8 +4614,12 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
     # 段序真源（#96）：机械回退路径没有 plan 层，全部段通过之后补写段表，收尾处的成片
     # 拼接照它排段。只在**全部段通过**时写（中途写的后果见函数 docstring）；旧会话不写
     # ——它没有段视频账，拼接本就不可用（票面 Out of Scope：不回溯补账）。
-    if not progress.legacy and not _write_mechanical_plan(session.directory, segments):
-        print("[成片] 分段的提示词里没有可用的起止时间戳：段表补不出来，拼接不可用。")
+    #
+    # 补不出来时**不在这里宣布结果**：成片能不能拼由收尾处（唯一标完成的地方）判并说破
+    # ——两处各说一遍迟早一份改了口径另一份没改（#56/#57 的教训）。也不重新判一次
+    # 「为什么补不出」：判据在 ``_mechanical_plans`` 一份，两处调用同一个函数。
+    if not progress.legacy:
+        _write_mechanical_plan(session.directory, segments)
     print(f"\n✓ 全部 {total} 段已人工确认完成。")
     return True
 
@@ -4605,17 +4732,13 @@ def _run_segmented_flow_v2(session: SessionState, plans: list, state: dict, llm,
         try:
             progress = _segment_progress(session.directory)
         except (OSError, ValueError) as exc:
-            print(f"[错误] 段产出账读不回来：{exc}")
-            print("  这不是「一段都没做」——静默从第 1 段重来会把已通过的段当没做过。")
+            _report_ledger_unreadable(session.directory, exc)
             return False
     try:
         # 段表与账必须对得上（段号越界/跳号都算）：按错的账续跑会跳过从没做过的段。
         validate_shot_progress(progress.passed, total_segments=total)
     except ValueError as exc:
-        print(f"[错误] 段产出账与本次分段对不上：{exc}")
-        print("  出路：恢复与账配套的 segments/plan.json 后重跑；或删掉 "
-              f"{seg_dir / 'shot-ledger.jsonl'} 让它从第 1 段重做"
-              "（已通过的段视频不会被认回）。")
+        _report_ledger_mismatch(session.directory, exc)
         return False
     done = progress.start
     if done and not plans_from_cache:
@@ -4777,6 +4900,9 @@ def _run_segmented_flow_v2(session: SessionState, plans: list, state: dict, llm,
                     # 硬阻断（issue #13）：错误的交接物不得被当成下一段的事实喂下去。
                     # 账（旧会话是进度）也**不得**落盘——否则被拦下的这一段会被续跑跳过。
                     return False
+                # 闸门放行＝这一段过了，锚已写进 state：立刻落盘（issue #94 复审）。
+                # 不落盘的话，续跑会跳过这一段、连带丢掉它剥出的锚（见函数 docstring）。
+                _save_after_segment_pass(session.directory, session.brief, state)
             if progress.legacy:
                 # 旧会话仍以 progress.json 为进度（新账不回溯补账，见 _segment_progress）；
                 # 新会话**停写**它：段产出账是唯一真源。

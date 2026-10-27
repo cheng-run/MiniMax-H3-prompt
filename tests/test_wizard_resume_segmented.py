@@ -292,6 +292,47 @@ def test_resume_stops_loudly_when_the_model_cannot_be_built(tmp_path, monkeypatc
     assert "回到同一条续接路径" in out, "必须告诉用户重跑是安全的、不必重做任何段"
 
 
+def test_ledger_error_copy_is_the_same_on_both_segment_paths(tmp_path, monkeypatch, capsys):
+    """同一种病因，两条分段路径给出**同一份**文案与出路（复审 2026-10-27）。
+
+    这三句近似文案此前各写各的，已经漂过：一处说「恢复与账配套的分段」、一处点名
+    ``segments/plan.json``，而 v2 的「读不回来」连出路栏都没有。用户读到的是同一件事，
+    却要按自己走了哪条路径读到不同说法——同一契约两处口径。
+    """
+    def way_out(out: str) -> list[str]:
+        lines = out.splitlines()
+        start = next(i for i, line in enumerate(lines) if "出路" in line)
+        return lines[start:start + 2]
+
+    # v2 一侧
+    gen_v2 = _interrupted_gen(tmp_path / "v2", done=1, total=4)
+    (gen_v2 / "segments" / "shot-ledger.jsonl").write_text("{ 坏行\n", encoding="utf-8")
+    session_v2 = session_store.load_session(gen_v2)
+    _silence(monkeypatch)
+    wizard._run_segmented_flow_v2(session_v2, _plans(4), session_v2.stage_state,
+                                  SimpleNamespace())
+    v2_out = capsys.readouterr().out
+
+    # 回退一侧（同一个坏账，不必走到规划）
+    gen_fb = tmp_path / "fb" / "GEN001"
+    (gen_fb / "segments").mkdir(parents=True)
+    (gen_fb / "segments" / "shot-ledger.jsonl").write_text("{ 坏行\n", encoding="utf-8")
+    session_fb = session_store.SessionState(
+        directory=gen_fb, brief=_brief(), stage_state={},
+        status=session_store.STATUS_SEGMENTED_RUNNING)
+    wizard._run_segmented_flow(session_fb.brief, session_fb, "任意提示词", state={})
+    fb_out = capsys.readouterr().out
+
+    assert "段产出账读不回来" in v2_out, v2_out[-500:]
+    assert "段产出账读不回来" in fb_out, fb_out[-500:]
+    assert "出路" in v2_out, "v2 那条读不回来没有给出路（复审指出的漂移）"
+    # 两个临时目录不同，比对前把各自的 GENERATION 路径归一化（要钉的是**措辞**）。
+    assert way_out(v2_out.replace(str(gen_v2), "<GEN>")) \
+        == way_out(fb_out.replace(str(gen_fb), "<GEN>")), \
+        f"两条路径对同一种病因的说法不一致：\n{v2_out[-400:]}\n---\n{fb_out[-400:]}"
+    assert "shot-ledger.jsonl" in v2_out, "出路必须点名账文件，用户才知道恢复什么"
+
+
 def test_corrupt_progress_is_reported_not_silently_zero(tmp_path, capsys):
     """progress.json 读不出来要显式告警——静默返回 0 与「一段都没做过」无法区分。"""
     gen = tmp_path / "GEN001"

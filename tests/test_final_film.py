@@ -221,6 +221,25 @@ def test_core_concats_in_plan_order_and_keeps_every_frame(tmp_path, tmp_video):
     assert film.warnings == [], "末段留余量不是「短了」，不该报「只报短」的提醒"
 
 
+def test_core_shortness_tolerance_follows_the_measured_frame_rate(tmp_path, tmp_video):
+    """「只报短」的容差是**每段一帧、按输入段实测 fps 折算**，不是写死的 1/24。
+
+    60fps 素材上一帧只有 1/60 秒：写死 1/24 等于每个接缝多给 1.5 帧的余量，真短掉
+    3 帧（0.05s）也会被吞掉。这里两段各计划 2s、实测合计 3.95s——按 60fps 折算
+    （容差 2/60≈0.033s）必须报；按 1/24 折算（0.083s）就静默放行（2026-10-27 复审）。
+    """
+    first = tmp_video("s1.mp4", frames=120, fps=60)    # 2.00s，计划 2s
+    second = tmp_video("s2.mp4", frames=117, fps=60)   # 1.95s，计划 2s（短 3 帧）
+    rows = {1: _row(1, first), 2: _row(2, second)}
+    plans = [_plan_of(0, 0, 2), _plan_of(1, 2, 4)]
+    out = tmp_path / "final.mp4"
+
+    film = _assemble(plans, rows, 4, out)
+
+    assert film.path is not None, film.reason
+    assert any("短于各段计划时长之和 4s" in note for note in film.warnings), film.warnings
+
+
 def test_core_warns_but_still_produces_when_the_film_runs_short(tmp_path, tmp_video):
     """成片短于各段计划时长之和只**报**、不拒（「只报短」）。
 
@@ -437,6 +456,26 @@ def test_trim_strategy_degrades_to_copy_for_a_single_segment(tmp_path, tmp_video
     assert out.read_bytes() == only.read_bytes()
 
 
+@pytest.mark.parametrize("strategy", [ConcatStrategy.STREAM_COPY_FIRST,
+                                      ConcatStrategy.TRIM_FIRST_FRAME])
+def test_single_segment_copy_is_skipped_when_the_target_is_the_source(
+        tmp_path, tmp_video, strategy):
+    """段数=1 且成片落点**就是**段视频本身 → 跳过拷贝。
+
+    ``ref-concat`` 允许用户把段视频放在生成目录里，落点与源同名时再 ``copy2`` 一次
+    会抛 ``SameFileError``（自己拷自己）。两档共用同一份退化逻辑（2026-10-27 复审
+    把两处逐字重复的拷贝分支抽成一个 helper，这条钉住抽出后的行为）。
+    """
+    only = tmp_video("same.mp4", frames=120)
+    before = only.stat().st_mtime_ns
+
+    film = _assemble([_plan_of(0, 0, 5)], {1: _row(1, only)}, 5, only,
+                     strategy=strategy, reencode_crf=16)
+
+    assert film.path == only and film.how == "copy"
+    assert only.stat().st_mtime_ns == before, "同路径时不该再拷贝一次"
+
+
 def test_trim_strategy_refuses_mismatched_size_and_names_the_segments(tmp_path, tmp_video):
     """某段尺寸与其它段不一致 → 拒绝并点名，而不是让用户去看 ffmpeg 报错尾巴。
 
@@ -540,7 +579,8 @@ def test_trim_strategy_checks_shortness_against_the_trimmed_expectation(tmp_path
 
     段 2 只交回 40 帧（计划 3s）——确实短了，必须报。报出来的**数字**才是这条用例的
     判据：三段两接缝，预期 9 − 2/24 = 8.9167s，所以文案里是「8.92s」；没扣的话会说
-    「9s」。裁掉的那两帧不是「没接上」，不该被算进缺口里。
+    「9s」。裁掉的那两帧不是「没接上」，不该被算进缺口里。文案也必须按策略说准：
+    它比的已经不是「各段计划时长之和」（2026-10-27 复审）。
     """
     first = tmp_video("s1.mp4", frames=48)      # 2.0s，计划 2s
     second = tmp_video("s2.mp4", frames=40)     # 1.667s，计划 3s（真短了）
@@ -553,7 +593,9 @@ def test_trim_strategy_checks_shortness_against_the_trimmed_expectation(tmp_path
                      reencode_crf=16)
 
     assert film.path == out, film.reason
-    assert any("短于各段计划时长之和 8.92s" in note for note in film.warnings), film.warnings
+    assert any("扣除接缝裁帧后的预期 8.92s" in note for note in film.warnings), film.warnings
+    assert any("各段计划时长之和 9s" in note for note in film.warnings), \
+        "两个数都要给：计划之和与扣掉接缝后的预期不是一回事"
     assert not any("短于各段计划时长之和 9s" in note for note in film.warnings), \
         "预期值没扣掉裁掉的帧数"
 
