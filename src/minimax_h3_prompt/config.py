@@ -80,7 +80,7 @@ _DIRECTOR_DEFAULTS = {
     "width": 736,
     "height": 1280,
     "ref_max_size": 864,
-    "ref_image_size": "max",
+    "ref_image_size": "match",
 }
 
 # 段缓存根目录的默认值（issue #105）：与本机 ComfyUI 输出目录一致，只是**兜底**——
@@ -161,10 +161,11 @@ class Config:
         """导演包参数（``director:`` 节，issue #104）：画布宽高、参考图尺寸。
 
         默认值与插件侧口径一致（``width/height`` 736×1280 是 H3 竖幅原生尺寸，
-        ``ref_max_size`` 864 是导演台节点默认值，``ref_image_size`` 走官方节点认的
-        ``max``），YAML 里显式写了一份、这里只是老配置的兜底。**读的时候就过打包器的
-        校验门**（32 对齐 / match|max）：配置错了应当在这一步响亮报错，而不是等用户
-        导入导演包、点了运行才发现后端拒绝画布。
+        ``ref_max_size`` 864 是导演台节点默认值，``ref_image_size`` 取插件与官方节点的
+        默认值 ``match``——``max`` 是「按 ref_max_size 上限送图」的备选，2026-10-29
+        用户裁定先按 ``match``），YAML 里显式写了一份、这里只是老配置的兜底。**读的时候
+        就过打包器的校验门**（32 对齐 / match|max）：配置错了应当在这一步响亮报错，而不是
+        等用户导入导演包、点了运行才发现后端拒绝画布。
         """
         from .director.pack import (
             DirectorPackSettings,

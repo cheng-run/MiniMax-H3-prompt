@@ -47,7 +47,9 @@ director:
   width: 736
   height: 1280
   ref_max_size: 864
-  ref_image_size: "max"
+  # match = 参考图按生成尺寸缩放（插件与官方节点的默认值，2026-10-29 用户裁定）；
+  # max = 按 ref_max_size 上限送图，参考图更清晰但更费显存。改这一行即可切换。
+  ref_image_size: "match"
   # ComfyUI 输出目录（issue #105）：段缓存落在 <这里>/minimax_seg_cache/<缓存名>_<节点id>/。
   # 换机器不用改这份文件：环境变量 H3_COMFY_OUTPUT_ROOT 优先级更高。
   comfy_output_root: "D:/Comfyui/ComfyUI/output"

@@ -744,13 +744,17 @@ def test_empty_segment_prompt_is_refused_by_number(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_director_settings_are_read_from_config_and_canvas_aligned():
-    """默认 736×1280、refImageSize=max、refMaxSize=864，且画布 32 对齐（设计 §4）。"""
+    """默认 736×1280、refImageSize=match、refMaxSize=864，且画布 32 对齐（设计 §4）。
+
+    ``match`` 是插件与官方节点的默认值（2026-10-29 用户裁定）；``max`` 是备选旋钮，
+    改 ``config/agent.yaml`` 一行即可——这条断言钉的是「发出去的默认值」。
+    """
     from minimax_h3_prompt.config import config
 
     settings = config.director_settings()
     assert (settings.width, settings.height) == (736, 1280)
     assert settings.width % 32 == 0 and settings.height % 32 == 0
-    assert settings.ref_image_size == "max"
+    assert settings.ref_image_size == "match"
     assert settings.ref_max_size == 864
 
 
