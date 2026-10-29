@@ -916,8 +916,70 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
             break
 
     print(f"\n✓ 全部 {total} 段已通过可证层并记入段产出账。")
-    # 交付不是本票的事（#108 的票）：成片合并、最终包归档与比对都在那边。
-    print("成片合并与最终包归档由 #108 跟进。")
+    # 交付（#108）接在陪跑末尾：问成片与最终包路径、归档、补改写账。
+    # #106 若在末尾加了「首尾各问一次重跑」，那段提问必须排在交付**之前**——用户改完
+    # 段应该回到陪跑，不该带着一段没跑的词直接交付。
+    return _finish_director_delivery(plan, session)
+
+
+def _prompt_existing_file(question: str, *, what: str) -> Path | None:
+    """问一个**必须已存在**的文件路径；不存在就报错重问（2026-10-29 用户裁定）。
+
+    返回 ``None`` ＝ 用户输入 q 停下——这不是失败：已通过的段留在账上，重跑向导回到
+    这里。**不扫目录自动挑**：导出目录里往往躺着上一次的同名文件，自动挑中的那一个用户
+    没看过，拿错成片/拿错包都不会有人发现。
+    """
+    while True:
+        # 用户多半是从资源管理器「复制文件地址」粘过来的，会带一对引号。
+        raw = _prompt(question).strip().strip('"').strip("'")
+        if raw.lower() in ("q", "quit"):
+            return None
+        if not raw:
+            print(f"[错误] {what}路径不能为空。")
+            continue
+        path = Path(raw)
+        if not path.is_file():
+            print(f"[错误] {what}不存在：{path}")
+            print("  请确认路径后重输（项目不会自动搜目录：猜错的文件发现不了）。")
+            continue
+        return path
+
+
+def _finish_director_delivery(plan, session: SessionState) -> int:
+    """全段通过后的交付（issue #108，设计 §3.9）：成片记录 ＋ 最终包归档 ＋ 补改写行。
+
+    成功才把会话置 ``STATUS_COMPLETED``：不置就永远出现在续接清单里（每次启动都问一次
+    「是否继续」）；失败时**必须不置**——交付坏掉的会话要能重进，而重进靠的就是这个状态。
+    """
+    from ..director import delivery
+
+    print("\n全部段已通过。接下来在导演台里合并成片、导出最终包，再把两者交给项目。")
+    film = _prompt_existing_file(
+        "成片 mp4 路径（导演台合并导出的文件；输入 q 停下）：", what="成片 mp4")
+    if film is None:
+        print("\n⚠ 停在交付前（成片路径）：段产出账仍写着全部通过，"
+              "重跑向导会回到这里。")
+        return 0
+    pack_zip = _prompt_existing_file(
+        "导演台导出的最终包 zip 路径（输入 q 停下）：", what="最终包")
+    if pack_zip is None:
+        print("\n⚠ 停在交付前（最终包路径）：重跑向导会回到这里。")
+        return 0
+
+    try:
+        report = delivery.deliver(session.directory, plan=plan,
+                                  film_path=film, pack_zip=pack_zip)
+    except (OSError, ValueError) as exc:
+        # 交付失败不静默、不置完成：包坏了/段数不对这类问题用户能自己修，重跑即可重试。
+        print(f"\n[错误] 交付失败：{exc}")
+        print("  会话仍停在导演台逐段陪跑：修好上面的问题后重跑向导可重试交付"
+              "（已通过的段不会重跑）。")
+        return 1
+    print(report.render())
+    # 交付成功才落完成态（设计 §4「交付之后才置 completed」）。
+    save_session(Path(session.directory), session.brief, session.stage_state,
+                 status=STATUS_COMPLETED)
+    print("\n本次导演台生成已完成。")
     return 0
 
 

@@ -653,15 +653,25 @@ def test_handoff_passes_every_segment_and_records_the_ledger(tmp_path, monkeypat
     _plant_cache(cache_directory, 2, 153)   # 有引导段：等于导出帧
 
     monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
-    monkeypatch.setattr(wizard, "_prompt", lambda text: "")
+    asked: list[str] = []
+
+    def fake_prompt(text: str) -> str:
+        asked.append(text)
+        # 全段通过后接的是**交付**（#108）：本用例只验陪跑落账，交付一进来就停下。
+        if "成片 mp4 路径" in text:
+            return "q"
+        return ""
+
+    monkeypatch.setattr(wizard, "_prompt", fake_prompt)
 
     assert wizard._resume_director_handoff(config, session) == 0
 
     out = capsys.readouterr().out
     # 出站必须写明只用 runSelection 勾当前段（设计 §3.7 最后一条）。
     assert "runSelection" in out and "第 1 段" in out and "第 2 段" in out
-    # 全通过后的下一步指向 #108，本票不做交付。
-    assert "#108" in out
+    # 全通过后下一步是交付（#108）：成片与最终包两条路径由用户逐项给。
+    assert any("成片 mp4 路径" in question for question in asked)
+    assert "停在交付前" in out
     rows = ledger.passed_director_rows(session.directory)
     assert sorted(rows) == [1, 2]
     assert rows[1]["actual_frames"] == 107
@@ -684,7 +694,10 @@ def test_handoff_refuses_a_mistaken_selection_then_accepts_the_rerun(
     # 第 2 段**没跑**：用户以为自己勾了第 2 段，实际只跑了第 1 段。
     calls = {"n": 0}
 
-    def prompt_and_plant(_text: str) -> str:
+    def prompt_and_plant(text: str) -> str:
+        # 全段通过后会进交付（#108）：这里只数**陪跑**的问数，交付一进来就停下。
+        if "成片 mp4 路径" in text:
+            return "q"
         calls["n"] += 1
         if calls["n"] == 3:   # 第三次回车之前，用户回导演台补跑了第 2 段
             _plant_cache(cache_directory, 2, 153)
@@ -719,6 +732,9 @@ def test_handoff_skips_segments_already_passed(tmp_path, monkeypatch, capsys):
 
     def fake_prompt(text: str) -> str:
         asked.append(text)
+        # 全段通过后会进交付（#108）：这里只数**陪跑**的问数。
+        if "成片 mp4 路径" in text:
+            return "q"
         return ""
 
     monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
@@ -727,8 +743,9 @@ def test_handoff_skips_segments_already_passed(tmp_path, monkeypatch, capsys):
     assert wizard._resume_director_handoff(config, session) == 0
     out = capsys.readouterr().out
     assert "已通过验收，跳过" in out and "第 1/2 段" in out
-    assert len(asked) == 1, "只该为第 2 段问一次回车"
-    assert "第 2/2 段" in asked[0]
+    segment_questions = [text for text in asked if "跑完后按回车" in text]
+    assert len(segment_questions) == 1, "只该为第 2 段问一次回车"
+    assert "第 2/2 段" in segment_questions[0]
 
 
 def test_handoff_stops_cleanly_without_recording_a_failed_segment(
@@ -780,7 +797,9 @@ def test_handoff_writes_the_tailframe_prompt_when_the_segment_needs_one(
 
     monkeypatch.setattr(tailframe, "describe_image", fake_describe)
     monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
-    monkeypatch.setattr(wizard, "_prompt", lambda text: "")
+    # 全段通过后会进交付（#108）：交付一问就停下（本用例只看尾帧接线）。
+    monkeypatch.setattr(wizard, "_prompt",
+                        lambda text: "q" if "成片 mp4 路径" in text else "")
 
     assert wizard._resume_director_handoff(
         config, session, llm=_TailLLM()) == 0
@@ -821,7 +840,9 @@ def test_handoff_reuses_an_existing_tailframe_prompt(tmp_path, monkeypatch, caps
 
     monkeypatch.setattr(tailframe, "describe_image", _boom)
     monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
-    monkeypatch.setattr(wizard, "_prompt", lambda text: "")
+    # 全段通过后会进交付（#108）：交付一问就停下（本用例只看尾帧复用）。
+    monkeypatch.setattr(wizard, "_prompt",
+                        lambda text: "q" if "成片 mp4 路径" in text else "")
 
     class _TailLLM:
         def invoke(self, request, config=None):

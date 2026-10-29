@@ -122,6 +122,10 @@ AUDIO_MODE_GENERATE = "generate"
 # 导演包在会话里的落点（设计 §3.4）：解包目录 + 直接导入的 zip。
 PACK_DIRNAME = "pack"
 PACK_ZIP_NAME = "initial.mmxpack.zip"
+# 包内时间线的文件名。**读口与写口共用这一个常量**：插件按包根 ``timeline.json``
+# 读取（插件 ``pack.py:1033``），#108 的最终包比对也从这里取——两处各写一份字面量，
+# 改一处漏一处时不会有人报错，只会「包读出来了但段数对不上」。
+TIMELINE_FILENAME = "timeline.json"
 
 # ``pack.json.widgets``（``pack.py:589-599``）：插件只搬这 8 个键。取值全部是
 # 导演台节点的控件默认值（``nodes/director.py:144-180``：steps 25 / res_multistep /
@@ -877,7 +881,7 @@ def _write_pack(pack_dir: Path, zip_path: Path, pack_json: dict[str, Any],
     pack_dir.mkdir(parents=True)
     (pack_dir / "pack.json").write_text(
         json.dumps(pack_json, ensure_ascii=False, indent=2), encoding="utf-8")
-    (pack_dir / "timeline.json").write_text(
+    (pack_dir / TIMELINE_FILENAME).write_text(
         json.dumps(timeline, ensure_ascii=False, indent=2), encoding="utf-8")
     shared_path = pack_dir / "shared_params" / "shared_params.json"
     shared_path.parent.mkdir(parents=True, exist_ok=True)
