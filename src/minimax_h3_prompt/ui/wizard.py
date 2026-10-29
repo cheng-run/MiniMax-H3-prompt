@@ -524,17 +524,65 @@ def run_wizard(config: Config) -> int:
     return _phase2_collect_and_finish(config, session, show_frame_prompts=not frames_shown)
 
 
-def _run_director_flow(session: SessionState) -> int:
-    """导演台路线接线（#102 段规划 + #103 逐段方言）：规划 → ``director/plan.json``
-    → 逐段写 ``director/segment-NN.md`` → 出站清单。
+def _ask_director_pack_settings(session: SessionState) -> None:
+    """进导演台流程前问一次打包参数并落 Brief（issue #104，设计 §4）。
 
-    导演包、逐段陪跑、可证层与成片归档在 #104–#108。出站必须**逐段**给段类型、
-    给图清单与文件路径——段类型误判会让该段静默丢弃首帧（spec 的风险清单），
-    用户只有在这一步能核。
+    三问答都只问**一次**：节点 id 与缓存名决定段缓存目录名（插件口径是
+    ``<缓存名>_<节点id>``，#105 靠它找 ``seg_XXXX.frames.mkv``），引导模式是包内
+    ``continuityMode``。Brief 里已有节点 id 就整组沿用——续跑反复追问同一件事既是
+    噪音，也容易被误答覆盖。
 
-    规划与写段都是长阻塞（直调看门狗要等首字节），每段结束后 ``_drain_stdin()``
-    清行缓冲，否则用户误敲的键会被下一个 ``input()`` 吞掉（本仓既有纪律）。
+    节点 id **没有默认值**：缺了 #105 会在用户的 ComfyUI 输出目录里找不到任何缓存，
+    而那时的报错只能是一句「目录不存在」。空输入重问，不是静默留空。
     """
+    brief = session.brief
+    if brief.director_node_id:
+        return
+    node_id = ""
+    while not node_id:
+        raw = _prompt("导演台节点的 unique_id（ComfyUI 里选中导演台节点后显示的 id，必填）：").strip()
+        if not raw:
+            print("[提示] 节点 id 不能为空：段缓存目录名是「缓存名_节点id」，"
+                  "缺了 #105 找不到段缓存。")
+            continue
+        if not all(ch.isalnum() or ch in "_.-" for ch in raw):
+            # 它会拼进目录名；分隔符/空格会让「缓存目录」这个字符串变成别的路径。
+            print("[提示] 节点 id 只能由字母、数字、下划线、点、短横线组成，请重输。")
+            continue
+        node_id = raw
+    cache_name = _prompt(
+        "段缓存名（导演台性能组的 cache_name；回车=空，缓存目录只用节点 id）：").strip()
+    from ..director.pack import CONTINUITY_DEFAULT, CONTINUITY_MODES
+
+    continuity = ""
+    while continuity not in CONTINUITY_MODES:
+        raw = _prompt(
+            f"段间引导模式（{' / '.join(CONTINUITY_MODES)}；回车={CONTINUITY_DEFAULT}）："
+        ).strip().lower()
+        continuity = raw or CONTINUITY_DEFAULT
+        if continuity not in CONTINUITY_MODES:
+            print(f"[提示] 只能是 {' / '.join(CONTINUITY_MODES)}。")
+    brief.director_node_id = node_id
+    brief.director_cache_name = cache_name
+    brief.director_continuity_mode = continuity
+    # 立刻落盘：这三个答案决定了后面找缓存与写包的参数，重跑向导不该再问一遍。
+    save_session(session.directory, brief, session.stage_state, status=session.status)
+
+
+def _run_director_flow(session: SessionState) -> int:
+    """导演台路线接线（#102 段规划 + #103 逐段方言 + #104 导演包）：规划 → 段表
+    → 逐段写 ``director/segment-NN.md`` → 打包 ``director/initial.mmxpack.zip`` → 出站清单。
+
+    出站必须**逐段**给段类型、给图清单与包内路径，并同时给两个总帧数（时间线 Σ 声明
+    vs 成片预计 Σ 导出）——段类型误判会让该段静默丢弃首帧（spec 的风险清单），而两个
+    总帧数差「12×有引导段数」，只写一个用户会以为导演台里显示的长度是错的。
+    逐段陪跑、级联与成片归档在 #105–#108。
+
+    规划、写段、打包都是长阻塞或可能失败的动作，每段结束后 ``_drain_stdin()`` 清行
+    缓冲，否则用户误敲的键会被下一个 ``input()`` 吞掉（本仓既有纪律）。放包失败
+    **大声报错并返回非零**：残缺包被导入后插件只会「成功但少图」。
+    """
+    from ..director.pack import prepare_director_pack
     from ..director.planning import (
         plan_director_segments,
         plan_path,
@@ -550,8 +598,10 @@ def _run_director_flow(session: SessionState) -> int:
     shot_table = str(state.get("shot_table", ""))
     if not shot_table.strip():
         # 没有分镜表就没有可规划的叙事单元：宁可停在这里，也不拿空表让模型自由发挥。
+        # 先判这一条再问打包参数：跑不下去的会话不该先让用户答三道题。
         print("[错误] 导演台路线：会话里没有分镜表（阶段 1 产物缺失），无法做段规划。")
         return 1
+    _ask_director_pack_settings(session)
     # 规划与写段共用同一个模型实例：两段长阻塞之间再建一次客户端只是多一次握手。
     llm = build_chat_model()
     try:
@@ -594,8 +644,26 @@ def _run_director_flow(session: SessionState) -> int:
 
     print()
     print(render_written_listing(plan, written))
-    print("\n导演包、逐段陪跑与成片归档随后续票据（#104–#108）接线；"
-          "本次不进入首尾帧链的阶段 2。")
+
+    # 打包：段表 + 段提示词 + 素材 → ``director/pack/`` 与 ``director/initial.mmxpack.zip``。
+    # 参数从配置读（画布/参考图尺寸），不在这里写死（设计 §4）。
+    from ..config import config as app_config
+
+    try:
+        _, report = prepare_director_pack(
+            session.directory, plan,
+            settings=app_config.director_settings(),
+            continuity_mode=brief.director_continuity_mode,
+        )
+    except (ValueError, OSError) as exc:
+        # 失败就是失败：不许只打一行警告继续。残缺包导入导演台后，插件只会
+        # 「导入成功、缺失清单非空」，用户到点运行才发现少图。
+        print(f"\n[错误] 导演包构建失败：{exc}")
+        return 1
+    print()
+    print(report)
+    # 出站最后一行必须停在「逐段执行由 #105 跟进」（report 的末行）——它是用户读完
+    # 之后的下一步，别在它后面再接别的输出。
     return 0
 
 

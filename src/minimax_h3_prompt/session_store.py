@@ -140,6 +140,11 @@ def _brief_to_dict(brief: Brief) -> dict[str, Any]:
         # 导演台路线选定的生成模式（issue #101）。brief 的字段逐个显式列出，漏登记就是
         # 静默丢——重启后按模式分派（#102 段规划、#103 提示词方言）会拿不到用户选过的值。
         "director_mode": brief.director_mode,
+        # 导演台打包参数（issue #104）：节点 id / 缓存名 / 引导模式。同上一句——漏登记
+        # 就是静默丢，重启续接后 #105 找不到段缓存目录、包里也没有引导模式。
+        "director_node_id": brief.director_node_id,
+        "director_cache_name": brief.director_cache_name,
+        "director_continuity_mode": brief.director_continuity_mode,
         "duration": brief.duration,
         "style": brief.style,
         "language": brief.language,
@@ -236,14 +241,51 @@ def _director_mode_from_dict(raw: dict[str, Any], mode: str) -> str:
     return ""
 
 
+def _director_pack_settings_from_dict(raw: dict[str, Any], mode: str) -> tuple[str, str, str]:
+    """读回导演台打包参数（节点 id / 缓存名 / 引导模式），返回三元组。
+
+    严格口径与 ``_director_mode_from_dict`` 同一套（issue #104，设计 §4）：
+
+    - 非导演台路线带任一非空值 → 报错（否则一条 base 会话会带着「节点 42」被续接，
+      而它根本不会打包，这个值只会在下一次误读时冒出来）；
+    - 导演台路线的引导模式非空时必须合法——它是插件的 ``continuityMode``，写错等于
+      让插件按默认猜；空串保留给 #102/#103 期间的旧会话（进打包前会再问一次）。
+    """
+    values = {
+        "director_node_id": raw.get("director_node_id", ""),
+        "director_cache_name": raw.get("director_cache_name", ""),
+        "director_continuity_mode": raw.get("director_continuity_mode", ""),
+    }
+    for key, value in values.items():
+        if not isinstance(value, str):
+            raise ValueError(f"{key} 必须是字符串：{value!r}")
+    if not is_director_mode(mode):
+        for key, value in values.items():
+            if value:
+                raise ValueError(f"路线 {mode!r} 不该带 {key}：{value!r}")
+        return "", "", ""
+    continuity = values["director_continuity_mode"]
+    if continuity:
+        # 延迟导入：``director.pack`` 会拉起素材台账与帧数学，会话读回不该为它付入口成本。
+        from .director.pack import validate_continuity_mode
+
+        validate_continuity_mode(continuity)
+    return values["director_node_id"], values["director_cache_name"], continuity
+
+
 def _brief_from_dict(raw: dict[str, Any]) -> Brief:
     # 路线值先过校验（issue #101 AC3）：判据对拼错值一律返回 False，单看判据会把
     # ``Director`` 静默当成 base——用户以为在跑导演台、实际在跑首尾帧链。
     mode = validate_route_mode(str(raw.get("mode", "base")))
+    director_node_id, director_cache_name, director_continuity = \
+        _director_pack_settings_from_dict(raw, mode)
     brief = Brief(
         mode=mode,
         variant=str(raw.get("variant", "T2VA")),
         director_mode=_director_mode_from_dict(raw, mode),
+        director_node_id=director_node_id,
+        director_cache_name=director_cache_name,
+        director_continuity_mode=director_continuity,
         duration=float(raw.get("duration", 5.0)),
         style=str(raw.get("style", "")),
         language=str(raw.get("language", "Chinese")),

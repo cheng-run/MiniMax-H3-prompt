@@ -74,6 +74,15 @@ _DEFAULTS = {
     ),
 }
 
+# 导演包参数的老配置兜底（issue #104）：值由插件侧口径决定，改动要同时改
+# ``config/agent.yaml`` 的同名键与 ``director/pack.py`` 的注释。
+_DIRECTOR_DEFAULTS = {
+    "width": 736,
+    "height": 1280,
+    "ref_max_size": 864,
+    "ref_image_size": "max",
+}
+
 
 class Config:
     """应用级配置。字段只读（兼容既有运行时对 save_stages 的测试修改）。"""
@@ -142,6 +151,43 @@ class Config:
         base_url = _env("DASHSCOPE_BASE_URL") or str(raw.get("base_url") or "").strip() or default_base_url
         key_env = str(raw.get("api_key_env") or default_key_env).strip()
         return ModelSettings(provider, model, base_url or None, key_env, "视觉模型")
+
+    def director_settings(self):
+        """导演包参数（``director:`` 节，issue #104）：画布宽高、参考图尺寸。
+
+        默认值与插件侧口径一致（``width/height`` 736×1280 是 H3 竖幅原生尺寸，
+        ``ref_max_size`` 864 是导演台节点默认值，``ref_image_size`` 走官方节点认的
+        ``max``），YAML 里显式写了一份、这里只是老配置的兜底。**读的时候就过打包器的
+        校验门**（32 对齐 / match|max）：配置错了应当在这一步响亮报错，而不是等用户
+        导入导演包、点了运行才发现后端拒绝画布。
+        """
+        from .director.pack import (
+            DirectorPackSettings,
+            validate_canvas,
+            validate_ref_image_size,
+        )
+
+        raw = self.raw.get("director", {}) or {}
+        if not isinstance(raw, dict):
+            raise ValueError(f"config/agent.yaml 的 director 节必须是对象：{raw!r}")
+
+        def _read_int(key: str, fallback: int) -> int:
+            value = raw.get(key, fallback)
+            # bool 是 int 的子类：`width: true` 不该被当成 1 静默放行。
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(
+                    f"config/agent.yaml 的 director.{key} 必须是整数，实际 {value!r}")
+            return value
+
+        settings = DirectorPackSettings(
+            width=_read_int("width", _DIRECTOR_DEFAULTS["width"]),
+            height=_read_int("height", _DIRECTOR_DEFAULTS["height"]),
+            ref_max_size=_read_int("ref_max_size", _DIRECTOR_DEFAULTS["ref_max_size"]),
+            ref_image_size=str(raw.get("ref_image_size", _DIRECTOR_DEFAULTS["ref_image_size"])),
+        )
+        validate_canvas(settings.width, settings.height)
+        validate_ref_image_size(settings.ref_image_size)
+        return settings
 
     def resolve_api_key(self, settings: ModelSettings) -> str:
         """从已加载的 `.env` 环境中读取 key；绝不从 YAML 读取 key 值。"""

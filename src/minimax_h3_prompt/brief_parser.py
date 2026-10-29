@@ -73,6 +73,13 @@ class Brief:
     # （T2VA/I2VA/FL2VA/L2VA），导演台模式是导演包的任务类型（t2v/…/mixed）。混用会让
     # 帧链判据（``FRAME_VARIANTS``）把一条导演台会话读成首尾帧（ADR 0024）。
     director_mode: str = ""
+    # 导演台打包与会话参数（issue #104，设计 §4）：节点 id 与缓存名决定段缓存目录名
+    # （插件口径是 ``<缓存名>_<节点id>``，#105 按它找段缓存），引导模式是包内
+    # ``continuityMode``。三个值**只住 Brief**——复制进 state 就是第二份会变旧的真相
+    # （ADR 0005 接线纪律），而 state 里的副本没人记得同步。
+    director_node_id: str = ""
+    director_cache_name: str = ""
+    director_continuity_mode: str = ""
     duration: float = 5.0
     style: str = "Cinematic"
     language: str = "Chinese"

@@ -600,7 +600,10 @@ def _director_session(tmp_path):
     return SessionState(
         directory=tmp_path / "GEN001",
         brief=Brief(mode="director", variant="T2VA", director_mode="t2v",
-                    duration=30.0, plot="雨夜旧信"),
+                    duration=30.0, plot="雨夜旧信",
+                    # #104 起进导演台流程会先问打包参数（节点 id / 缓存名 / 引导模式）；
+                    # 本文件测的是**写段**，把答案预先填好跳过那三问。
+                    director_node_id="42", director_continuity_mode="guide"),
         stage_state={"shot_table": "分镜表：[Shot 1] 雨夜便利店……"},
         status="awaiting_frames",
     )
@@ -627,7 +630,8 @@ def test_wizard_director_flow_writes_segment_prompts_and_lists_them(tmp_path, mo
 
     out = capsys.readouterr().out
     assert "段2" in out and "续接" in out and "segment-02.md" in out, "出站清单要能逐段核"
-    assert "导演包" in out and "#104" in out, "打包与陪跑的后续票号必须说出来"
+    # #104 已把打包接进这条流程：出站里「导演包」是**真产物**，逐段执行留给 #105。
+    assert "导演包" in out and "#105" in out, "打包已完成，后续票号必须说出来"
 
 
 def test_wizard_director_flow_stops_when_a_segment_cannot_be_written(tmp_path, monkeypatch,

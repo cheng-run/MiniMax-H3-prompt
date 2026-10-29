@@ -457,7 +457,11 @@ def _director_session(tmp_path, shot_table: str = "分镜表：[Shot 1] 雨夜�
     return SessionState(
         directory=tmp_path / "GEN001",
         brief=Brief(mode="director", variant="T2VA", director_mode="r2v",
-                    duration=30.0, plot="雨夜旧信"),
+                    duration=30.0, plot="雨夜旧信",
+                    # #104 起进导演台流程会先问打包参数；本文件测的是**段表**，
+                    # 把三个答案预先填好即可跳过那三问（问一次的逻辑在
+                    # ``tests/test_director_pack.py`` 里覆盖）。
+                    director_node_id="42", director_continuity_mode="guide"),
         stage_state={"shot_table": shot_table} if shot_table is not None else {},
         status="awaiting_frames",
     )
@@ -476,6 +480,15 @@ def test_wizard_director_flow_writes_plan_and_prints_listing(tmp_path, monkeypat
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: _FakeLLM(_ADR_SHAPE))
     monkeypatch.setattr(prompts, "write_director_segments",
                         lambda plan, **kwargs: [])
+    # 打包（#104）在本用例里打桩：本票的接缝是**段表**，包的布局与八条约束由
+    # ``tests/test_director_pack.py`` 覆盖（r2v 打包还需要素材台账，与本票无关）。
+    from types import SimpleNamespace
+
+    from minimax_h3_prompt.director import pack as pack_module
+
+    monkeypatch.setattr(
+        pack_module, "prepare_director_pack",
+        lambda *args, **kwargs: (SimpleNamespace(), "导演包已构建（本用例打桩）"))
 
     assert wizard._run_director_flow(_director_session(tmp_path)) == 0
 
@@ -487,7 +500,7 @@ def test_wizard_director_flow_writes_plan_and_prints_listing(tmp_path, monkeypat
     out = capsys.readouterr().out
     assert "段1" in out and "开场" in out and "续接" in out
     assert "719" in out and "目标 720" in out and "差 1 帧" in out
-    assert "导演包" in out and "随后续票据" in out
+    assert "导演包" in out
 
 
 def test_wizard_director_flow_without_shot_table_stops_loudly(tmp_path, capsys):

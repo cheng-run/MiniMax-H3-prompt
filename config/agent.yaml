@@ -39,6 +39,16 @@ models:
 # 旧字段：仅在新模型配置和兼容环境变量都未提供模型名时作为 fallback。
 # model: ""
 
+# 导演台路线（issue #104）：导演包的画布与参考图参数。
+# 宽高必须是 32 的倍数（MiniMax H3 画布按 32 对齐，后端会拒绝非对齐尺寸），
+# 打包与配置读取时各校验一次；ref_image_size 只认 match / max（官方节点口径），
+# ref_max_size 是导演台节点的 ref_max_size 默认值。
+director:
+  width: 736
+  height: 1280
+  ref_max_size: 864
+  ref_image_size: "max"
+
 defaults:
   style: "Cinematic"
   language: "Chinese"
