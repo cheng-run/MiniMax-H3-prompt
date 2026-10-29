@@ -281,7 +281,8 @@ def test_run_wizard_director_does_not_enter_base_stage2(tmp_path, monkeypatch, c
     """选完导演台后不得落进首尾帧链的阶段 2（本票唯一的自加护栏）。
 
     `run_wizard` 原先只认 ref 一个分叉，第三条路线会静默掉进 base 的收帧/出词流程。
-    后续步骤（#102–#108）接线前，这里必须明确退出并说明，而不是拿另一条路线的步骤跑它。
+    #102 起这个分叉改走 `_run_director_flow`（段规划 → director/plan.json → 出站段表），
+    这里只钉**路由**：导演台会话必须交给它，绝不给另一条路线的阶段 2。
     """
     from minimax_h3_prompt.session_store import STATUS_AWAITING_FRAMES, SessionState
 
@@ -299,9 +300,13 @@ def test_run_wizard_director_does_not_enter_base_stage2(tmp_path, monkeypatch, c
 
     monkeypatch.setattr(wizard, "_phase2_collect_and_finish", _boom)
     monkeypatch.setattr(wizard, "_phase2_ref_finish", _boom)
+    routed: list = []
+    monkeypatch.setattr(wizard, "_run_director_flow",
+                        lambda s: routed.append(s) or 0)
 
     assert wizard.run_wizard(_cfg(tmp_path)) == 0
-    assert "导演台" in capsys.readouterr().out
+    assert routed and routed[0] is session
+    capsys.readouterr()
 
 
 def test_resume_director_session_skips_base_revision_loop(tmp_path, monkeypatch):

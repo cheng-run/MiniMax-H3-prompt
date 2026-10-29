@@ -511,18 +511,68 @@ def run_wizard(config: Config) -> int:
         # 帧路线在修改循环首步展示过；多参路线不再在这里展示（issue #50：素材循环
         # 逐张出词，出站节奏由 `_asset_loop` 管），这个标志只管帧路线的补展示。
         frames_shown = True
-    # 导演台路线（issue #101）：阶段 1 产物已落会话，但段规划/导演包/陪跑要等
-    # #102–#108 接线。这里**必须**早于下面 base 的分支退出——否则第三条路线会被静默
-    # 塞进首尾帧链的阶段 2（收帧图、写 fl2va 正文），比直接报错更难发现。
+    # 导演台路线（issue #101/#102）：**必须**早于下面 base 的分支——否则第三条路线会
+    # 被静默塞进首尾帧链的阶段 2（收帧图、写 fl2va 正文），比直接报错更难发现。
+    # #102 起这里做最小接线：段规划 → 写 ``GENxxx/director/plan.json`` → 出站段表；
+    # 打包与逐段陪跑仍等 #104–#108。
     if session.brief.is_director:
-        print("\n导演台路线：阶段 1 产物已写入会话。段规划、导演包与逐段陪跑随后续票据接线，"
-              "本次不进入首尾帧链的阶段 2。")
-        return 0
+        return _run_director_flow(session)
     # 阶段 1 完成后直接进入阶段 2（生图很快，无需暂停等人工确认）。
     # 多参路线（issue #41）走直出：不收帧图、不进桥接链，≤15 秒一份 ref 六段式。
     if session.brief.mode == "ref":
         return _phase2_ref_finish(config, session)
     return _phase2_collect_and_finish(config, session, show_frame_prompts=not frames_shown)
+
+
+def _run_director_flow(session: SessionState) -> int:
+    """导演台路线最小接线（#102）：段规划 → 写 ``director/plan.json`` → 出站段表。
+
+    本票只做「规划 + 展示」：导演包、逐段陪跑、可证层与成片归档在 #104–#108。出站
+    必须**逐段**给段类型与给图清单——段类型误判会让该段静默丢弃首帧（spec 的风险
+    清单），用户只有在这一步能核。
+
+    规划是长阻塞（直调看门狗要等首字节），结束后 ``_drain_stdin()`` 清行缓冲，否则
+    用户误敲的键会被下一个 ``input()`` 吞掉（本仓既有纪律）。
+    """
+    from ..director.planning import (
+        plan_director_segments,
+        plan_path,
+        render_plan_listing,
+        write_plan_json,
+    )
+    from ..model_factory import build_chat_model
+    from ..segment_prompts import frame_anchor_context, render_revision_context
+
+    brief = session.brief
+    state = dict(session.stage_state)
+    shot_table = str(state.get("shot_table", ""))
+    if not shot_table.strip():
+        # 没有分镜表就没有可规划的叙事单元：宁可停在这里，也不拿空表让模型自由发挥。
+        print("[错误] 导演台路线：会话里没有分镜表（阶段 1 产物缺失），无法做段规划。")
+        return 1
+    try:
+        with step_scope("正在按导演台帧网格规划分段"):
+            plan = plan_director_segments(
+                shot_table, brief.duration, build_chat_model(),
+                mode=brief.director_mode,
+                # 与 base 的规划调用同源：真实关键帧画面压过分镜表、修订按优先序注入。
+                frame_context=frame_anchor_context(state),
+                revision_context=render_revision_context(state),
+            )
+    except (RuntimeError, ValueError) as exc:
+        # 两种病分开表达（ADR 0019）：调用失败（卡住/断流）与回复不合格都说明白；
+        # 这条路线没有机械回退，不能静默降级成别的分段口径。
+        print(f"[错误] 导演台段规划失败：{exc}")
+        return 1
+    finally:
+        _drain_stdin()
+
+    plan_file = write_plan_json(plan_path(session.directory), plan)
+    print()
+    print(render_plan_listing(plan))
+    print(f"\n段表已写入：{plan_file}")
+    print("导演包与逐段陪跑随后续票据接线；本次不进入首尾帧链的阶段 2。")
+    return 0
 
 
 # ---------------------------------------------------------------------------
