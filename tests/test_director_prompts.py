@@ -619,6 +619,10 @@ def test_wizard_director_flow_writes_segment_prompts_and_lists_them(tmp_path, mo
     plan = parse_director_plan(_PLAN_JSON, 30.0, mode="t2v")
     llm = _DirectorFlowLLM(plan)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: llm)
+    # #105 起打包之后接逐段陪跑（要用户回导演台跑再回车）：本用例只测写段，
+    # 在陪跑的第一问输入 q 停下，别让它去读真的 stdin。
+    monkeypatch.setattr(wizard, "_prompt", lambda text: "q")
+    monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
 
     assert wizard._run_director_flow(_director_session(tmp_path)) == 0
 

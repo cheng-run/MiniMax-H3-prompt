@@ -873,13 +873,19 @@ def test_wizard_asks_pack_settings_once_and_saves_them(tmp_path, monkeypatch, ca
 
     def fake_prompt(text: str) -> str:
         asked.append(text)
+        # #105 起打包之后会接着逐段陪跑（要用户回导演台跑再回车）。本文件测的是
+        # **打包参数问答**，陪跑一进来就输入 q 停下，别让它去读真的 stdin。
+        if "跑完后按回车" in text:
+            return "q"
         return next(answers)
 
     monkeypatch.setattr(wizard, "_prompt", fake_prompt)
     monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
 
     assert wizard._run_director_flow(session) == 0
-    assert len(asked) == 4, "节点 id 空输入必须重问一次（其余各问一次）"
+    pack_questions = [q for q in asked if any(key in q for key in (
+        "unique_id", "段缓存名", "段间引导模式"))]
+    assert len(pack_questions) == 4, "节点 id 空输入必须重问一次（其余各问一次）"
     loaded = load_session(session.directory)
     assert loaded is not None
     assert loaded.brief.director_node_id == "42"
@@ -896,10 +902,13 @@ def test_wizard_does_not_ask_again_when_the_answers_are_known(tmp_path, monkeypa
     session = _wizard_session(tmp_path, director_node_id="42",
                               director_cache_name="", director_continuity_mode="guide")
 
-    def _boom(*args, **kwargs):
+    def _boom_if_pack_question(text: str) -> str:
+        # 打包参数三问不该再出现；陪跑的第一问（#105）照常返回 q 停下。
+        if "跑完后按回车" in text:
+            return "q"
         raise AssertionError("已知答案还在追问")
 
-    monkeypatch.setattr(wizard, "_prompt", _boom)
+    monkeypatch.setattr(wizard, "_prompt", _boom_if_pack_question)
     monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
     assert wizard._run_director_flow(session) == 0
     capsys.readouterr()
@@ -913,13 +922,17 @@ def test_wizard_flow_packs_and_prints_the_report(tmp_path, monkeypatch, capsys):
     session = _wizard_session(tmp_path, director_node_id="42",
                               director_cache_name="", director_continuity_mode="guide")
     monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
+    # #105 的逐段陪跑接在打包之后：输入 q 停在轮到第 1 段处，本用例只看打包出站。
+    monkeypatch.setattr(wizard, "_prompt", lambda text: "q")
 
     assert wizard._run_director_flow(session) == 0
     out = capsys.readouterr().out
     assert "时间线总帧" in out and "671" in out
     assert "成片预计帧" in out and "719" in out
     assert "initial.mmxpack.zip" in out
-    assert out.rstrip().splitlines()[-1].strip().endswith("#105 跟进")
+    # 打包报告的末行是「导入后逐段执行由 #105 跟进」，#105 的陪跑就接在它后面。
+    assert "导入后逐段执行由 #105 跟进" in out
+    assert "runSelection" in out, "#105 起打包之后直接进逐段陪跑"
     assert (session.directory / "director" / "initial.mmxpack.zip").is_file()
 
 

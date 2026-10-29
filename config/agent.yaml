@@ -48,6 +48,13 @@ director:
   height: 1280
   ref_max_size: 864
   ref_image_size: "max"
+  # ComfyUI 输出目录（issue #105）：段缓存落在 <这里>/minimax_seg_cache/<缓存名>_<节点id>/。
+  # 换机器不用改这份文件：环境变量 H3_COMFY_OUTPUT_ROOT 优先级更高。
+  comfy_output_root: "D:/Comfyui/ComfyUI/output"
+  # 有引导段允许的「实际比计划少」的帧数（issue #105，设计 §3.7）。默认值住在
+  # director/companion.py 的 DIRECTOR_FRAME_TOLERANCE（判据真源）；写在这里是给用户的
+  # 旋钮，删掉这一行就回落到那个常量。
+  frame_tolerance: 5
 
 defaults:
   style: "Cinematic"

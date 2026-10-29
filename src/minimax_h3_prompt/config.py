@@ -83,6 +83,11 @@ _DIRECTOR_DEFAULTS = {
     "ref_image_size": "max",
 }
 
+# 段缓存根目录的默认值（issue #105）：与本机 ComfyUI 输出目录一致，只是**兜底**——
+# 真正的口径是 ``director:`` 节，环境变量 ``H3_COMFY_OUTPUT_ROOT`` 优先级最高。
+_COMFY_OUTPUT_ROOT_ENV = "H3_COMFY_OUTPUT_ROOT"
+_DEFAULT_COMFY_OUTPUT_ROOT = "D:/Comfyui/ComfyUI/output"
+
 
 class Config:
     """应用级配置。字段只读（兼容既有运行时对 save_stages 的测试修改）。"""
@@ -188,6 +193,48 @@ class Config:
         validate_canvas(settings.width, settings.height)
         validate_ref_image_size(settings.ref_image_size)
         return settings
+
+    def director_comfy_output_root(self) -> Path:
+        """ComfyUI 输出目录（段缓存的根，issue #105）。
+
+        优先级：``H3_COMFY_OUTPUT_ROOT`` > ``director.comfy_output_root`` > 本机默认。
+        **段缓存路径不写死在模块里**：同一份代码在不同机器上指着不同的 ComfyUI，
+        写死默认只会让换机器的用户看到「一段缓存都找不到」而不知道该改哪。
+
+        空值/非字符串**报错**：空根会让定位落到当前工作目录上，随后「扫缓存」就会
+        扫错地方且不报错（那是最坏的一类失败）。
+        """
+        raw = self.raw.get("director", {}) or {}
+        if not isinstance(raw, dict):
+            raise ValueError(f"config/agent.yaml 的 director 节必须是对象：{raw!r}")
+        value = _env(_COMFY_OUTPUT_ROOT_ENV) or raw.get(
+            "comfy_output_root", _DEFAULT_COMFY_OUTPUT_ROOT)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                f"config/agent.yaml 的 director.comfy_output_root 必须是非空字符串，"
+                f"实际 {value!r}")
+        return Path(value.strip())
+
+    def director_frame_tolerance(self) -> int:
+        """有引导段的帧容差（issue #105，设计 §3.7）。
+
+        默认值从 ``director.companion.DIRECTOR_FRAME_TOLERANCE`` 现取，不在本文件里抄
+        一份字面量：判据住在 companion，配置只是用户的旋钮（本仓「守卫形态从常量派生」
+        的纪律）。**方法内 import** 与 ``director_settings`` 同一形态，避免 config 顶层
+        把 director 包整个拉进来。
+        """
+        from .director.companion import DIRECTOR_FRAME_TOLERANCE
+
+        raw = self.raw.get("director", {}) or {}
+        if not isinstance(raw, dict):
+            raise ValueError(f"config/agent.yaml 的 director 节必须是对象：{raw!r}")
+        value = raw.get("frame_tolerance", DIRECTOR_FRAME_TOLERANCE)
+        # bool 是 int 的子类：`frame_tolerance: true` 会被当成 1 静默放行。
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(
+                f"config/agent.yaml 的 director.frame_tolerance 必须是非负整数，"
+                f"实际 {value!r}")
+        return value
 
     def resolve_api_key(self, settings: ModelSettings) -> str:
         """从已加载的 `.env` 环境中读取 key；绝不从 YAML 读取 key 值。"""

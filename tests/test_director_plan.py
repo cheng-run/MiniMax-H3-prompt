@@ -489,6 +489,9 @@ def test_wizard_director_flow_writes_plan_and_prints_listing(tmp_path, monkeypat
     monkeypatch.setattr(
         pack_module, "prepare_director_pack",
         lambda *args, **kwargs: (SimpleNamespace(), "导演包已构建（本用例打桩）"))
+    # #105 起打包之后接逐段陪跑（要用户回导演台跑再回车）：本用例只测段表，输入 q 停下。
+    monkeypatch.setattr(wizard, "_prompt", lambda text: "q")
+    monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
 
     assert wizard._run_director_flow(_director_session(tmp_path)) == 0
 

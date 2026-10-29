@@ -43,6 +43,12 @@ STATUS_COMPLETED = "completed"
 STATUS_STAGE1_RUNNING = "stage1_running"
 STATUS_SEGMENTED_RUNNING = "segmented_running"
 STATUS_REF_SEGMENTS_RUNNING = "ref_segments_running"
+# director_segments_running = 导演台逐段陪跑进行中（issue #105）。与上面两个陪跑态是
+# **同一条教训的第三次**，但**不能复用任何既有值**：导演台的续接路径既不走 base 的
+# ``_run_long_form``（写 shot-NN.md、剥桥接帧），也不走多参的段产出账语义层（读首末帧、
+# 五档出路），它读的是**段缓存的帧数**。同一个值会让导演台会话被别的路线续接，等于拿
+# 另一条路线的步骤去走它（2026-10-20 #55 复核已标记该风险）。
+STATUS_DIRECTOR_SEGMENTS_RUNNING = "director_segments_running"
 
 # state 中允许持久化的键；brief 对象单独序列化。`_progress` 是阶段 1 断点的元数据（哪个节点跑完了）。
 # `fl2va_frame_descriptions` 是用户提交帧图的读图结果——阶段 2 分段流程的唯一画面事实源，
@@ -389,18 +395,19 @@ def load_session(directory: str | Path) -> SessionState | None:
 
 
 def find_awaiting_sessions(root_dir: str | Path) -> list[SessionState]:
-    """扫描会话根目录下所有可续接的会话（阶段 1 中断的 + 等帧图的 + 分段陪跑中的）。
+    """扫描会话根目录下所有可续接的会话（阶段 1 中断的 + 等帧图的 + 三种陪跑中的）。
 
-    只读，不猜测内容归属。两个陪跑中的态都必须在列表里：分段陪跑的中断（硬阻断、
+    只读，不猜测内容归属。三个陪跑中的态都必须在列表里：分段陪跑的中断（硬阻断、
     Ctrl-C、机器重启）代价原本是阶段 2 重做 + 已完成的所有段重来（issue #17）；多参
-    逐段陪跑（issue #58）是同一条教训，漏了这个值，向导就不会把中断的多参会话端出来。
+    逐段陪跑（issue #58）与导演台逐段陪跑（issue #105）是同一条教训的后两次，漏了
+    对应值，向导就不会把中断的会话端出来——用户只能重开 GEN，也就是重做阶段 1/2。
     """
     root = Path(root_dir)
     results: list[SessionState] = []
     if not root.is_dir():
         return results
     resumable = (STATUS_AWAITING_FRAMES, STATUS_STAGE1_RUNNING, STATUS_SEGMENTED_RUNNING,
-                 STATUS_REF_SEGMENTS_RUNNING)
+                 STATUS_REF_SEGMENTS_RUNNING, STATUS_DIRECTOR_SEGMENTS_RUNNING)
     for session_file in sorted(root.glob("**/" + SESSION_FILENAME)):
         try:
             session = load_session(session_file.parent)
@@ -417,5 +424,6 @@ def find_awaiting_sessions(root_dir: str | Path) -> list[SessionState]:
 __all__ = [
     "SessionState", "SESSION_FILENAME", "STATUS_AWAITING_FRAMES", "STATUS_COMPLETED",
     "STATUS_STAGE1_RUNNING", "STATUS_SEGMENTED_RUNNING", "STATUS_REF_SEGMENTS_RUNNING",
+    "STATUS_DIRECTOR_SEGMENTS_RUNNING",
     "save_session", "load_session", "find_awaiting_sessions",
 ]
