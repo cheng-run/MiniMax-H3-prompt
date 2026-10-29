@@ -373,7 +373,7 @@ class DirectorSegment:
 
 @dataclass(frozen=True)
 class DirectorPlan:
-    """导演台的段表（``GENxxx/segments/plan.json``）。
+    """导演台的段表（``GENxxx/director/plan.json``，设计 §3.2 2026-10-29 修订）。
 
     与 ``segment_planner.SegmentPlan`` **是两套契约**：后者按整数秒、被 base/ref 两处
     规划与成片覆盖判据共用（设计 §3.2「不碰 SegmentPlan」）。这里以帧为真源。
@@ -382,8 +382,8 @@ class DirectorPlan:
     mode: str
     total_frames: int
     segments: tuple[DirectorSegment, ...]
-    # 规划期生成的出站说明（例如重排）。**不写进 plan.json**：它是「这一次规划怎么
-    # 定的」，读回的表不该带上一轮的说明（同一契约两处口径）。
+    # 规划期生成的总长说明（目标与可达总量的差）。**不写进 plan.json**：它是「这一次
+    # 规划怎么定的」，读回的表不该带上一轮的说明（同一契约两处口径）。
     notes: tuple[str, ...] = ()
 
     @property
