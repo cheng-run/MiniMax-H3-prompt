@@ -15,6 +15,7 @@ from .brief_parser import (
     Brief,
     RefItem,
     is_director_mode,
+    route_emits_asset_prompts,
     validate_director_mode,
     validate_route_mode,
 )
@@ -107,9 +108,11 @@ def _route_filtered_state(raw_state: Any, brief: Brief) -> dict[str, Any]:
     `_video_output_from_dict`、以及本函数 `dict(...)` 的形状要求都不动），两者不许混为
     一谈：坏数据要响，错路线的数据要静默但确定地丢掉。
 
-    判据只认 `Brief.mode`（多参＝ref，经 `Brief.is_ref` → `brief_parser.is_ref_mode`，
-    与产物出口同一真源）。**禁止**改用「变体是不是 FL2VA」或「有没有首尾帧 bundle」——多参
-    的变体是 T2VA、没有 bundle，这两条正是父 spec 逐字点名的错判据。
+    判据只认路线能力判据（``brief_parser.route_emits_asset_prompts``，issue #103 换成它）：
+    多参恒真，导演台按生成模式（r2v/rv2v/mixed 真、t2v/i2v/fl2v 假），base 恒假。
+    **禁止**改用「变体是不是 FL2VA」或「有没有首尾帧 bundle」——多参的变体是 T2VA、
+    没有 bundle，这两条正是父 spec 逐字点名的错判据。也别写成「``is_ref`` 或
+    ``is_director``」：导演台 t2v 没有资产图，留下三键就是给续跑喂错产物。
 
     多参会话**原样保留**（含读图校对记录 `asset_proofreads`）：三键是素材台账与素材
     循环的输入，读回丢键等于中断续跑后素材全丢。
@@ -119,7 +122,7 @@ def _route_filtered_state(raw_state: Any, brief: Brief) -> dict[str, Any]:
     ``save``——过滤后的 state 落盘，三键自然不在了。
     """
     stage_state = dict(raw_state)
-    if brief.is_ref:
+    if route_emits_asset_prompts(brief):
         return stage_state
     for key in _ASSET_PROMPT_KEYS:
         stage_state.pop(key, None)

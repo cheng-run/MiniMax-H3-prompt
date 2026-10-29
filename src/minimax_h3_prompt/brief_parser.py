@@ -180,6 +180,58 @@ def validate_director_mode(value: str) -> str:
     return value
 
 
+# 导演台里**产资产图提示词**的生成模式（设计 §4；父 spec #100「阶段 1 的产出随模式变化」）。
+# r2v 用 `<Picture N>` 指称参考素材，rv2v/mixed 也含参考素材段；t2v/i2v/fl2v 没有参考素材，
+# v2v 只吃源视频——给它们出资产图就是白付三次调用，还会让素材登记凭空多出条目。
+DIRECTOR_ASSET_MODES = ("r2v", "rv2v", "mixed")
+
+# 导演台生成模式 → 首尾帧链的帧变体（``director_frame_variant`` 的唯一映射）。
+# 导演台的 ``Brief.variant`` 恒为 T2VA 占位（ADR 0024：模式与变体是两套口径），照读它
+# 会让 i2v/fl2v 都按 T2VA 出词——首帧词静默不产，用户要等到导入导演包才发现段里没图。
+_DIRECTOR_FRAME_VARIANTS = {"i2v": "I2VA", "fl2v": "FL2VA"}
+
+
+def route_emits_asset_prompts(brief: Brief) -> bool:
+    """该 brief 是否产**资产图提示词**（人物/道具/场景的生图词）。
+
+    路线能力判据的**唯一真源**（设计 §4）：替换 ``graph/nodes.py`` 里三处 ``brief.is_ref``
+    早退与 ``session_store._route_filtered_state`` 的过滤判据。为什么必须按模式分派而不是
+    「``is_ref`` 或 ``is_director``」：导演台的 t2v/i2v/fl2v 根本没有参考素材，
+    一句 ``or`` 会让每个导演台模式都白跑三个资产图节点，并把三键写进会话。
+
+    ref 恒为真、base 恒为假——两条老路线的判定与改动前逐位相同。
+    """
+    if is_director_mode(brief.mode):
+        return brief.director_mode in DIRECTOR_ASSET_MODES
+    return is_ref_mode(brief.mode)
+
+
+def director_frame_variant(brief: Brief) -> str:
+    """该 brief 的**有效帧变体**：导演台按生成模式映射，其余路线用它自己的 ``variant``。
+
+    为什么要有这一层：导演台的 ``variant`` 是 T2VA 占位（ADR 0024），而 ``i2v``/``fl2v``
+    实际需要首帧/首尾帧生图词。``_make_fl2va_frame_prompt_node`` 若照 ``brief.variant``
+    取句式，两条模式都会落进「T2VA 不需要帧」的早退（或按 T2VA 出词）——静默少图。
+    非导演台路线的返回值与 ``str(brief.variant).upper()`` 逐字相同（零变化）。
+    """
+    if is_director_mode(brief.mode):
+        return _DIRECTOR_FRAME_VARIANTS.get(brief.director_mode, "")
+    return str(brief.variant).upper()
+
+
+def route_emits_frame_prompts(brief: Brief) -> bool:
+    """该 brief 是否产**关键帧生图提示词**（首帧/尾帧）。
+
+    导演台只有 ``i2v``（首帧）与 ``fl2v``（首尾帧）要帧图；base 按变体判；ref 恒为假
+    （多参没有帧槽，锚定由参考素材承担，ADR 0011）。判据同样只住这一处。
+    """
+    if is_director_mode(brief.mode):
+        return director_frame_variant(brief) in FRAME_VARIANTS
+    # 非导演台路线的判据与改动前逐字相同（``variant not in FRAME_VARIANTS`` 的补集）：
+    # 老会话里 ref+T2VA 恒为假、base+I2VA/FL2VA/L2VA 恒为真，一处行为都不动。
+    return str(brief.variant).upper() in FRAME_VARIANTS
+
+
 def brief_uses_refs(brief: Brief) -> bool:
     """该 brief 是否需要参考图：ref 模式（角色/场景）或帧变体（首/尾帧锚点）。"""
     return brief.mode == "ref" or brief.variant in FRAME_VARIANTS

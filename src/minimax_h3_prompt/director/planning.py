@@ -374,7 +374,8 @@ _IMAGE_LABELS = {
 }
 
 
-def _render_give_images(segment: DirectorSegment, mode: str) -> str:
+def render_give_images(segment: DirectorSegment, mode: str) -> str:
+    """给图清单的中文展示（段表清单与写段出站清单**同一份**，不各写一份 token 翻译）。"""
     required = [_IMAGE_LABELS[token] for token in segment.give_images]
     optional = [f"{_IMAGE_LABELS[token]}（可选）"
                 for token in optional_images_for(segment.type, mode)]
@@ -400,7 +401,7 @@ def render_plan_listing(plan: DirectorPlan) -> str:
         lines.append(
             f"  段{segment.index} {segment_type_label(segment.type)}  "
             f"声明 {segment.declared_frames} / 导出 {segment.export_frames}  "
-            f"给图：{_render_give_images(segment, plan.mode)}")
+            f"给图：{render_give_images(segment, plan.mode)}")
     total = sum(segment.export_frames for segment in plan.segments)
     lines.append(f"  合计导出 {total} 帧 = 总帧 {plan.total_frames} 帧")
     for note in plan.notes:

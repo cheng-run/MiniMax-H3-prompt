@@ -525,14 +525,15 @@ def run_wizard(config: Config) -> int:
 
 
 def _run_director_flow(session: SessionState) -> int:
-    """导演台路线最小接线（#102）：段规划 → 写 ``director/plan.json`` → 出站段表。
+    """导演台路线接线（#102 段规划 + #103 逐段方言）：规划 → ``director/plan.json``
+    → 逐段写 ``director/segment-NN.md`` → 出站清单。
 
-    本票只做「规划 + 展示」：导演包、逐段陪跑、可证层与成片归档在 #104–#108。出站
-    必须**逐段**给段类型与给图清单——段类型误判会让该段静默丢弃首帧（spec 的风险
-    清单），用户只有在这一步能核。
+    导演包、逐段陪跑、可证层与成片归档在 #104–#108。出站必须**逐段**给段类型、
+    给图清单与文件路径——段类型误判会让该段静默丢弃首帧（spec 的风险清单），
+    用户只有在这一步能核。
 
-    规划是长阻塞（直调看门狗要等首字节），结束后 ``_drain_stdin()`` 清行缓冲，否则
-    用户误敲的键会被下一个 ``input()`` 吞掉（本仓既有纪律）。
+    规划与写段都是长阻塞（直调看门狗要等首字节），每段结束后 ``_drain_stdin()``
+    清行缓冲，否则用户误敲的键会被下一个 ``input()`` 吞掉（本仓既有纪律）。
     """
     from ..director.planning import (
         plan_director_segments,
@@ -540,6 +541,7 @@ def _run_director_flow(session: SessionState) -> int:
         render_plan_listing,
         write_plan_json,
     )
+    from ..director.prompts import render_written_listing, write_director_segments
     from ..model_factory import build_chat_model
     from ..segment_prompts import frame_anchor_context, render_revision_context
 
@@ -550,10 +552,12 @@ def _run_director_flow(session: SessionState) -> int:
         # 没有分镜表就没有可规划的叙事单元：宁可停在这里，也不拿空表让模型自由发挥。
         print("[错误] 导演台路线：会话里没有分镜表（阶段 1 产物缺失），无法做段规划。")
         return 1
+    # 规划与写段共用同一个模型实例：两段长阻塞之间再建一次客户端只是多一次握手。
+    llm = build_chat_model()
     try:
         with step_scope("正在按导演台帧网格规划分段"):
             plan = plan_director_segments(
-                shot_table, brief.duration, build_chat_model(),
+                shot_table, brief.duration, llm,
                 mode=brief.director_mode,
                 # 与 base 的规划调用同源：真实关键帧画面压过分镜表、修订按优先序注入。
                 frame_context=frame_anchor_context(state),
@@ -571,7 +575,27 @@ def _run_director_flow(session: SessionState) -> int:
     print()
     print(render_plan_listing(plan))
     print(f"\n段表已写入：{plan_file}")
-    print("导演包与逐段陪跑随后续票据接线；本次不进入首尾帧链的阶段 2。")
+
+    try:
+        with step_scope("正在逐段写导演台提示词"):
+            written = write_director_segments(
+                plan, llm=llm, session_dir=session.directory,
+                shot_table=shot_table,
+                # r2v 的六节外壳第 1、3 节取阶段 1 的素材定义（同一条参考素材纪律）；
+                # 其余模式没有参考素材，不传也不会用到。
+                subject_defs=str(state.get("subject_defs", "")),
+            )
+    except (RuntimeError, ValueError) as exc:
+        # 写段失败不写半段假内容（半份段表比没写更糟：用户会拿它去打包）。
+        print(f"[错误] 导演台写段失败：{exc}")
+        return 1
+    finally:
+        _drain_stdin()
+
+    print()
+    print(render_written_listing(plan, written))
+    print("\n导演包、逐段陪跑与成片归档随后续票据（#104–#108）接线；"
+          "本次不进入首尾帧链的阶段 2。")
     return 0
 
 

@@ -464,11 +464,18 @@ def _director_session(tmp_path, shot_table: str = "分镜表：[Shot 1] 雨夜�
 
 
 def test_wizard_director_flow_writes_plan_and_prints_listing(tmp_path, monkeypatch, capsys):
-    """真实向导路径上 AC3 可验：段表落 ``director/plan.json``，出站逐段展示。"""
+    """真实向导路径上 AC3 可验：段表落 ``director/plan.json``，出站逐段展示。
+
+    写段（#103）在本用例里打桩：本票的接缝是**段表**，逐段方言与落盘由
+    ``tests/test_director_prompts.py`` 的向导用例覆盖（那里的假模型会真的回段正文）。
+    """
     from minimax_h3_prompt import model_factory
+    from minimax_h3_prompt.director import prompts
     from minimax_h3_prompt.ui import wizard
 
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: _FakeLLM(_ADR_SHAPE))
+    monkeypatch.setattr(prompts, "write_director_segments",
+                        lambda plan, **kwargs: [])
 
     assert wizard._run_director_flow(_director_session(tmp_path)) == 0
 
@@ -480,7 +487,7 @@ def test_wizard_director_flow_writes_plan_and_prints_listing(tmp_path, monkeypat
     out = capsys.readouterr().out
     assert "段1" in out and "开场" in out and "续接" in out
     assert "719" in out and "目标 720" in out and "差 1 帧" in out
-    assert "导演包" in out and "随后续票据接线" in out
+    assert "导演包" in out and "随后续票据" in out
 
 
 def test_wizard_director_flow_without_shot_table_stops_loudly(tmp_path, capsys):

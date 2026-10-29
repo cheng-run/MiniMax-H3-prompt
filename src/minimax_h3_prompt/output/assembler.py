@@ -18,15 +18,27 @@ def extract_fenced_block(text: str) -> str:
 
 
 def assemble_and_repair(prompt: str, mode: str, variant: str = "T2VA") -> tuple[str, str]:
-    """确定性格式保障：抽围栏 → 段头齐全 → 声音段规范为 N/A。返回 (修复后提示词, 说明)。"""
+    """确定性格式保障：抽围栏 → 段头齐全 → 声音段规范为 N/A。返回 (修复后提示词, 说明)。
+
+    ``director`` 必须走显式分支（issue #103）：改动前这里是 ``mode == "ref"`` 的二元分叉，
+    ``director`` 会落进 base 分支被补上三节——一段逐段方言的产出被判成「缺
+    integrated_multimodal_description」并强行补齐，产物形状当场错位。导演台的产物是
+    ``director/prompts.py`` 的逐段方言，整片提示词只是阶段 1 占位，这里只做无损的抽围栏。
+    不抛错：阶段 1 管线对每条路线都会调本函数（抛错会炸掉导演台会话的阶段 1）。
+    """
     notes: list[str] = []
-    sections = REF_SECTIONS if mode == "ref" else BASE_SECTIONS
 
     # 0) 抽代码围栏（prompt_engineer 有时把提示词包在 ```text 里并附前言/结尾说明）
     fenced = extract_fenced_block(prompt)
     if fenced != prompt.strip():
         notes.append("抽取代码围栏内正文")
         prompt = fenced
+
+    if mode == "director":
+        notes.append("导演台路线不补段头：交付物是逐段方言（director/prompts.py）")
+        return prompt, "；".join(notes)
+
+    sections = REF_SECTIONS if mode == "ref" else BASE_SECTIONS
 
     # 1) 缺失段头补齐
     existing = [h for h in sections if re.search(rf"^{re.escape(h)}\s*[:：]", prompt, re.MULTILINE)]

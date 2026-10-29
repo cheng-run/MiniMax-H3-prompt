@@ -594,6 +594,20 @@ def validate_ref(text: str, duration: float | None = None,
 
 def validate_prompt(text: str, mode: str, duration: float | None = None, variant: str = "T2VA",
                     ref_meta: list[tuple[int, str, str]] | None = None) -> list[ValidationIssue]:
+    """整片提示词校验：ref 走六段式、base 走三节式。
+
+    ``director`` 是**第三条路线**、不是 base 的同义词（issue #103）：它的产物是逐段方言
+    （``director.prompts.validate_director_segment``），阶段 1 的整片提示词只是占位，
+    不参与交付。改动前这里是 ``mode == "ref"`` 的二元分叉，``director`` 会静默落进 base
+    分支被按三节判红——「反正不走那条路」正是本仓反复吃过的接线缺陷。
+    这里给显式分支 + 一条 warning，把读者指回正确的口；不抛错，因为阶段 1 管线
+    对每条路线都会走一遍这条校验（抛错会把导演台会话的整条阶段 1 炸掉）。
+    """
+    if mode == "director":
+        return [ValidationIssue(
+            "warning", "DIRECTOR_WHOLE_PROMPT_UNUSED",
+            "导演台路线的交付物是逐段提示词（director/prompts.py），整片提示词只作阶段 1 占位，"
+            "不按 base/ref 的段落结构校验")]
     if mode == "ref":
         return validate_ref(text, duration, ref_meta)
     return validate_base(text, duration, variant, ref_meta)
