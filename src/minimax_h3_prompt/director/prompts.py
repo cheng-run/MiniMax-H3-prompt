@@ -28,6 +28,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import film_language
+# 跨模块取那两个下划线常量与直调出口，是**刻意的复用**而不是抄近路：
+# - ``_REF_START/END_STATE_PREFIX`` 是「起止状态句」的唯一可写来源。导演台**禁止**这两句，
+#   但「怎么认出来」必须跟着那边走——重抄一份字面，ref 的措辞一改，这里的禁令就再也咬不住
+#   （「永不为红＝没有」，本仓吃过多次）。
+# - ``_direct_write`` 是写段直调的唯一出口（看门狗 + 失败当场打印，ADR 0019/issue #70）；
+#   在导演台另写一遍就是把重试与失败措辞分成两套会各自漂的口径。
 from ..segment_prompts import (
     _REF_END_STATE_PREFIX,
     _REF_START_STATE_PREFIX,
