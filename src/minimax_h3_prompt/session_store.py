@@ -11,7 +11,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .brief_parser import Brief, RefItem
+from .brief_parser import (
+    Brief,
+    RefItem,
+    is_director_mode,
+    validate_director_mode,
+    validate_route_mode,
+)
 from .graph.state import ASSET_PROMPT_KEYS
 from .observability import COST_TABLE_KEY, token_meter
 
@@ -78,6 +84,10 @@ _STATE_KEYS = (
     "sound_design", "music", "final_prompt", "final_report", "_progress",
     "user_revisions", "frame_round", "asset_proofreads", "asset_loop",
     "resume_answers", "asset_proofread_progress",
+    # **故意不在**这里的：`director_mode`（导演台选定的生成模式，issue #101）。它是
+    # ``mode``/``variant`` 的同族——路线级选择只住 brief 一份，`run_stage1` 每次从 brief
+    # 现取进图 state。落一份进白名单就等于同一契约两处口径：brief 与 stage_state 一旦
+    # 不一致（外人改写、旧代码写脏），节点读 state、向导读 brief，两边各说各话且不报错。
 )
 
 # 资产图提示词三键（父 spec #77 / issue #80）：只属于多参路线。键名从 `graph/state.py`
@@ -124,6 +134,9 @@ def _brief_to_dict(brief: Brief) -> dict[str, Any]:
     return {
         "mode": brief.mode,
         "variant": brief.variant,
+        # 导演台路线选定的生成模式（issue #101）。brief 的字段逐个显式列出，漏登记就是
+        # 静默丢——重启后按模式分派（#102 段规划、#103 提示词方言）会拿不到用户选过的值。
+        "director_mode": brief.director_mode,
         "duration": brief.duration,
         "style": brief.style,
         "language": brief.language,
@@ -200,10 +213,34 @@ def _video_output_from_dict(raw: Any):
     )
 
 
+def _director_mode_from_dict(raw: dict[str, Any], mode: str) -> str:
+    """读回导演台模式；缺值/脏值**大声报错**（issue #101）。
+
+    后续步骤按模式分派（#102 段规划、#103 提示词方言）：空模式等于没有方言可选，
+    静默回落任何一档都是拿用户没选过的口径出词。
+
+    与 ``_route_filtered_state`` 的「静默丢跨路线数据」不冲突：那边丢的是**产物级**
+    键（旧会话里合法残留的资产图提示词），丢掉不会让谁读错路线；这里是一个**单值
+    字段**，值不对只可能是文件损坏或外人改写——吞掉它等于让分派拿错口径。
+    """
+    value = raw.get("director_mode", "")
+    if not isinstance(value, str):
+        raise ValueError(f"director_mode 必须是字符串：{value!r}")
+    if is_director_mode(mode):
+        return validate_director_mode(value)
+    if value:
+        raise ValueError(f"路线 {mode!r} 不该带 director_mode：{value!r}")
+    return ""
+
+
 def _brief_from_dict(raw: dict[str, Any]) -> Brief:
+    # 路线值先过校验（issue #101 AC3）：判据对拼错值一律返回 False，单看判据会把
+    # ``Director`` 静默当成 base——用户以为在跑导演台、实际在跑首尾帧链。
+    mode = validate_route_mode(str(raw.get("mode", "base")))
     brief = Brief(
-        mode=str(raw.get("mode", "base")),
+        mode=mode,
         variant=str(raw.get("variant", "T2VA")),
+        director_mode=_director_mode_from_dict(raw, mode),
         duration=float(raw.get("duration", 5.0)),
         style=str(raw.get("style", "")),
         language=str(raw.get("language", "Chinese")),

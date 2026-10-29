@@ -254,11 +254,15 @@ def _confirm(text: str, default: bool = True) -> bool:
 
 
 def _choose_generation_mode() -> str:
-    """阶段 1 视频生成方式四选一：首帧(I2VA)/尾帧(L2VA)/首尾帧(FL2VA，默认)/多参(REF2VA)。
+    """阶段 1 视频生成方式五选一：首帧(I2VA)/尾帧(L2VA)/首尾帧(FL2VA，默认)/多参(REF2VA)/导演台(DIRECTOR)。
 
     多参（issue #41）：与首尾帧**并存**的另一条路线，参考素材＋文本驱动、无桥接帧。
     返回 "REF2VA" 不是帧变体——由 ``_phase1_new`` 转成 ``Brief(mode="ref")``，
     帧逻辑一律按 ``FRAME_VARIANTS`` 判，不看它。
+
+    导演台（issue #101，父 spec #100）：第三条路线，返回 "DIRECTOR"，由 ``_phase1_new``
+    转为 ``Brief(mode="director")`` **并接着问七种模式之一**（``_choose_director_mode``）。
+    前四项与回车默认值一字未变——两条老路线的行为不变是本票的硬要求。
     """
     from ..workflow_config import workflow_settings
 
@@ -269,13 +273,46 @@ def _choose_generation_mode() -> str:
     print("  2. 尾帧生成视频（L2VA，从合理开场逐步收敛到尾帧图）")
     print("  3. 首尾帧生成视频（FL2VA，首尾帧锚定，默认）")
     print(f"  4. 多参生成视频（ref2va，参考素材＋文本驱动；登记工作流：{name}）")
+    print("  5. 导演台生成视频（director，导演包＋段间引导，由 ComfyUI 导演台执行）")
     while True:
-        raw = _prompt("输入 1/2/3/4（回车=3 首尾帧）：").strip()
+        raw = _prompt("输入 1/2/3/4/5（回车=3 首尾帧）：").strip()
         if not raw:
             return "FL2VA"
-        if raw in ("1", "2", "3", "4"):
-            return {1: "I2VA", 2: "L2VA", 3: "FL2VA", 4: "REF2VA"}[int(raw)]
-        print("无效输入，请输入 1/2/3/4。")
+        if raw in ("1", "2", "3", "4", "5"):
+            return {1: "I2VA", 2: "L2VA", 3: "FL2VA", 4: "REF2VA", 5: "DIRECTOR"}[int(raw)]
+        print("无效输入，请输入 1/2/3/4/5。")
+
+
+# 导演台七种模式的中文说明（issue #101）：序号即 ``DIRECTOR_MODES`` 的顺序。
+# 二期三项在菜单上如实标注——本轮只接线选路与记录，按模式分派的产物在 #103 起。
+_DIRECTOR_MODE_LABELS = {
+    "t2v": "文生视频",
+    "i2v": "图生视频（给首帧）",
+    "fl2v": "首尾帧生视频",
+    "r2v": "参考主体生视频",
+    "v2v": "视频转视频（二期）",
+    "rv2v": "参考素材改视频（二期）",
+    "mixed": "混合模式（二期）",
+}
+
+
+def _choose_director_mode() -> str:
+    """导演台路线的七种生成模式之一（父 spec #100「选完路线再选模式」）。
+
+    **没有回车默认**：模式决定后续提示词方言与给图清单（#103/#104），静默替用户选一档
+    等于拿没选过的口径出词。空输入与坏输入都重问，合法值只来自 ``DIRECTOR_MODES``
+    （菜单编号→值这一处映射，返回值不经 ``validate_director_mode`` 再转一遍）。
+    """
+    from ..brief_parser import DIRECTOR_MODES
+
+    print("请选择导演台生成模式：")
+    for index, mode in enumerate(DIRECTOR_MODES, 1):
+        print(f"  {index}. {mode} — {_DIRECTOR_MODE_LABELS[mode]}")
+    while True:
+        raw = _prompt(f"输入 1–{len(DIRECTOR_MODES)}（必选）：").strip()
+        if raw.isdigit() and 1 <= int(raw) <= len(DIRECTOR_MODES):
+            return DIRECTOR_MODES[int(raw) - 1]
+        print(f"无效输入，请输入 1–{len(DIRECTOR_MODES)}。")
 
 
 def _choose_canvases() -> dict[str, tuple[int, int]]:
@@ -419,6 +456,16 @@ def _progress_scope(title: str):
         print(f"[完成] 本段用时 {m} 分 {s:02d} 秒。\n", flush=True)
 
 
+def _skips_base_frame_loop(brief: Brief) -> bool:
+    """这条路线是否**不走** base 的人机修改循环（锚在 fl2va 首尾帧提示词上的那一份）。
+
+    新跑收尾与两条续接入口共用这一个判据（issue #41 多参、issue #101 导演台）。四处
+    各写一份「是不是 ref/是不是 director」的代价是：加第三条路线时总有一个入口漏改，
+    表现成那条路线上「重启后忽然要你交帧图」——本仓「改一处漏一处」的老形态。
+    """
+    return brief.is_ref or brief.is_director
+
+
 def run_wizard(config: Config) -> int:
     """无参数主入口：两阶段向导。返回进程退出码。"""
     if not sys.stdin.isatty():
@@ -464,6 +511,13 @@ def run_wizard(config: Config) -> int:
         # 帧路线在修改循环首步展示过；多参路线不再在这里展示（issue #50：素材循环
         # 逐张出词，出站节奏由 `_asset_loop` 管），这个标志只管帧路线的补展示。
         frames_shown = True
+    # 导演台路线（issue #101）：阶段 1 产物已落会话，但段规划/导演包/陪跑要等
+    # #102–#108 接线。这里**必须**早于下面 base 的分支退出——否则第三条路线会被静默
+    # 塞进首尾帧链的阶段 2（收帧图、写 fl2va 正文），比直接报错更难发现。
+    if session.brief.is_director:
+        print("\n导演台路线：阶段 1 产物已写入会话。段规划、导演包与逐段陪跑随后续票据接线，"
+              "本次不进入首尾帧链的阶段 2。")
+        return 0
     # 阶段 1 完成后直接进入阶段 2（生图很快，无需暂停等人工确认）。
     # 多参路线（issue #41）走直出：不收帧图、不进桥接链，≤15 秒一份 ref 六段式。
     if session.brief.mode == "ref":
@@ -538,10 +592,10 @@ def _resume_stage1(config: Config, session: SessionState) -> SessionState | None
         state.pop("_progress")
     save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
     print("\n阶段 1 已恢复完成。")
-    if brief.mode == "ref":
-        # 多参路线（issue #41）：直进阶段 2 直出，人机修改循环（画面级锚在帧提示词上）
-        # 对它无意义。资产图提示词**不在这里批量展**（issue #50 AC1 一次只出一张）——
-        # 素材循环逐张出词，画布行走 brief.canvases（AC5）。
+    if _skips_base_frame_loop(brief):
+        # 多参（issue #41）与导演台（issue #101）都没有 base 修改循环的锚（首尾帧提示词）：
+        # 多参下一步走素材循环，导演台的后续步骤在后续票据。两条共用同一判据，
+        # 不再各写一份「跳过」——本仓「改一处漏一处」的老形态就从这里长出来。
         return load_session(generation_dir)
     # 新跑路径（_phase1_new）在进阶段 2 前会展示生图提示词；续接路径漏了这一步，
     # 用户没有提示词就无法生成关键帧图，阶段 2 的「首帧图片路径」无从提交（2026-09-24 实测）。
@@ -562,11 +616,13 @@ def _resume_awaiting_frames(config: Config, session: SessionState) -> SessionSta
     model/agents 留给循环**按需就地构建**：这条路径手上没有 ``run_stage1`` 的返回值，
     而它原本是零 LLM 成本的一步，不该为「看一眼提示词」先建一个客户端。
     """
-    if session.brief.mode == "ref":
+    if _skips_base_frame_loop(session.brief):
         # 多参路线（issue #41）：没有帧图可等、没有帧提示词可改，直接交回主流程
         # 进 _phase2_ref_finish——素材循环逐张出词（issue #50），再直出视频提示词。
         # 不再在这里补展全量提示词：一次只出一张（AC1），出站由素材循环按队列驱动；
         # 落盘也随出站逐张累积（`_sync_released_asset_files`），断点续接不丢。
+        # 导演台路线（issue #101）：同样没有帧提示词可改——后续步骤由 `run_wizard`
+        # 的导演台出口统一说明（#102–#108 接线前没有可续的产物）。
         return load_session(session.directory)
     state = dict(session.stage_state)
     if _user_revision_loop(state, session.directory, session.brief, config) == RESTART_FLOW:
@@ -644,12 +700,18 @@ def _phase1_new(config: Config) -> SessionState | None:
     # 多参路线（issue #41）：mode=ref，与首尾帧并存。variant 对多参无意义，取 T2VA 占位
     # ——帧逻辑一律按 FRAME_VARIANTS 判，不读它。
     is_ref = route == "REF2VA"
+    # 导演台路线（issue #101）：选完路线再选七种模式之一。variant 同样取 T2VA 占位，
+    # 理由更强——导演台模式（t2v/…/mixed）与帧变体是两套口径，带着 FL2VA 进管道会让
+    # 帧链判据把这条会话读成首尾帧（ADR 0024）。
+    is_director_route = route == "DIRECTOR"
+    director_mode = _choose_director_mode() if is_director_route else ""
     # 画布选择器（issue #42）：选定值进 brief，请求【画布】块与产物画布行同取。
     canvases = _choose_canvases()
 
     brief = Brief(
-        mode="ref" if is_ref else "base",
-        variant="T2VA" if is_ref else route,
+        mode="director" if is_director_route else ("ref" if is_ref else "base"),
+        variant="T2VA" if (is_ref or is_director_route) else route,
+        director_mode=director_mode,
         duration=duration,
         style=style or "",
         language=config.default_language,
@@ -663,11 +725,14 @@ def _phase1_new(config: Config) -> SessionState | None:
     # 阶段 1 标题按路线说对话（issue #66）：多参路线的实际产出是**资产图**生图提示词，
     # 沿用「首尾帧」措辞会让用户误以为自己在跑首尾帧链（票面用户现场）。首尾帧链措辞
     # 原样保留——≤9 张的既有流程与老产物描述不受影响。
-    stage1_title = (
-        "[阶段 1] 正在生成剧本、设计与资产图生图提示词……（预计几分钟，期间无需输入）"
-        if brief.mode == "ref" else
-        "[阶段 1] 正在生成剧本、设计与首尾帧生图提示词……（预计几分钟，期间无需输入）"
-    )
+    # 导演台（issue #101）在按模式分派（#103）接线前，阶段 1 产出与 base 同形；标题只
+    # 说「剧本与设计」，既不说首尾帧也不说资产图——两边都不是它这一提的产物。
+    if brief.is_ref:
+        stage1_title = "[阶段 1] 正在生成剧本、设计与资产图生图提示词……（预计几分钟，期间无需输入）"
+    elif brief.is_director:
+        stage1_title = "[阶段 1] 正在生成剧本与设计产物……（导演台专属出词随后续步骤接线，期间无需输入）"
+    else:
+        stage1_title = "[阶段 1] 正在生成剧本、设计与首尾帧生图提示词……（预计几分钟，期间无需输入）"
     with _progress_scope(stage1_title):
         state, model, agents = run_stage1(
             brief, config, on_node=_report_node,
@@ -679,12 +744,16 @@ def _phase1_new(config: Config) -> SessionState | None:
     state.setdefault("frame_images", [])
     save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
 
-    if brief.mode == "ref":
+    if _skips_base_frame_loop(brief):
         # 多参路线（issue #41）：无关键帧提示词可改、无帧图可交——人机修改循环的
         # 画面级重出锚在 fl2va_frame_prompts 上，对多参是空转。
         # 资产图提示词由**素材循环逐张出站**（issue #50 AC1，一次只出一张、画布同源 AC5），
         # 这里不再一次性全量给出——「8 条一口气全出、全生完才发现问题」正是要杀的节奏。
-        print("\n阶段 1 完成。下一步进入素材循环：逐张出词→生成→审查→交回→校对→裁决。")
+        if brief.is_ref:
+            print("\n阶段 1 完成。下一步进入素材循环：逐张出词→生成→审查→交回→校对→裁决。")
+        # 导演台路线（issue #101）：阶段 1 产物已落会话，**不**进 base 的人机修改循环。
+        # 该循环的画面级重出锚在 fl2va 首尾帧提示词上，对导演台路线是另一套产物；
+        # 段规划/导演包/陪跑由 #102–#108 接线，`run_wizard` 在那里统一退出。
         return load_session(generation_dir)
 
     # 修改循环是与两条续接路径**共用**的那一份（issue #27）：三处各写一遍的代价本仓见过

@@ -286,6 +286,9 @@ def run_stage1(brief: Brief, config: Config, *, on_node=None,
         "brief": brief,
         "mode": brief.mode,
         "variant": brief.variant,
+        # 导演台路线选定的模式随图下发（issue #101）：后续按模式分派的节点从 state
+        # 读它，而不是各自再回 brief 里取——那份数据在续接 state 与图之间只该有一个来路。
+        "director_mode": brief.director_mode,
         "duration": brief.duration,
         "ref_meta": ref_meta,
         "iterations": 0,

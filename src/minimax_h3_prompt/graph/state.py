@@ -34,8 +34,12 @@ ASSET_PROMPT_KEYS = tuple(
 class PipelineState(TypedDict, total=False):
     # 输入
     brief: Brief
-    mode: str  # ref | base
+    mode: str  # base | ref | director
     variant: str  # T2VA/I2VA/FL2VA/L2VA
+    # 导演台路线选定的生成模式（issue #101）。**必须在这里声明**：LangGraph 只搬运
+    # schema 里声明过的键，未声明的键传得进图、到节点手上却没了（静默，#28 实测）。
+    # 七值与校验见 ``brief_parser.DIRECTOR_MODES`` / ``validate_director_mode``。
+    director_mode: str
     duration: float
     ref_meta: list[tuple[int, str, str]]
 
