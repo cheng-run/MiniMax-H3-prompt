@@ -877,6 +877,10 @@ def test_wizard_asks_pack_settings_once_and_saves_them(tmp_path, monkeypatch, ca
 
     def fake_prompt(text: str) -> str:
         asked.append(text)
+        # #106 的陪跑首问（有要重跑的段吗）：本文件只测打包参数，不重跑任何段。
+        # 按问题文本作答，别往下面的答案表里追加——那张表按次序取，多一问就整体错位。
+        if "有要重跑的段吗" in text:
+            return ""
         # #105 起打包之后会接着逐段陪跑（要用户回导演台跑再回车）。本文件测的是
         # **打包参数问答**，陪跑一进来就输入 q 停下，别让它去读真的 stdin。
         if "跑完后按回车" in text:
@@ -907,7 +911,9 @@ def test_wizard_does_not_ask_again_when_the_answers_are_known(tmp_path, monkeypa
                               director_cache_name="", director_continuity_mode="guide")
 
     def _boom_if_pack_question(text: str) -> str:
-        # 打包参数三问不该再出现；陪跑的第一问（#105）照常返回 q 停下。
+        # 打包参数三问不该再出现；#106 的陪跑首问照常答「不用」，#105 的段问答 q 停下。
+        if "有要重跑的段吗" in text:
+            return ""
         if "跑完后按回车" in text:
             return "q"
         raise AssertionError("已知答案还在追问")
@@ -927,7 +933,10 @@ def test_wizard_flow_packs_and_prints_the_report(tmp_path, monkeypatch, capsys):
                               director_cache_name="", director_continuity_mode="guide")
     monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
     # #105 的逐段陪跑接在打包之后：输入 q 停在轮到第 1 段处，本用例只看打包出站。
-    monkeypatch.setattr(wizard, "_prompt", lambda text: "q")
+    # #106 的首问（有要重跑的段吗）答「不用」，否则 q 会停在陪跑开始前、看不到 runSelection。
+    monkeypatch.setattr(
+        wizard, "_prompt",
+        lambda text: "" if "有要重跑的段吗" in text else "q")
 
     assert wizard._run_director_flow(session) == 0
     out = capsys.readouterr().out

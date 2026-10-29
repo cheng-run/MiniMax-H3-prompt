@@ -762,6 +762,7 @@ def _write_director_tailframe(plan, segment, session: SessionState,
     from dataclasses import replace
 
     from ..director import cache
+    from ..director import tailframe as tailframe_module
     from ..director.tailframe import (
         tailframe_path, validate_tailframe_prompt, write_tailframe_prompts,
     )
@@ -783,9 +784,10 @@ def _write_director_tailframe(plan, segment, session: SessionState,
         return False
     frames_file = cache.frames_path(cache_directory, previous)
     try:
+        # 落点由 tailframe.last_frame_png_path 给：级联重跑按同一个名字删（#106），
+        # 在这里再拼一份字面就是两处会各自漂的口径。
         image = cache.export_last_frame(
-            frames_file,
-            Path(session.directory) / "director" / f"frame-{previous:02d}-last.png")
+            frames_file, tailframe_module.last_frame_png_path(session.directory, previous))
     except ValueError as exc:
         print(f"[错误] 第 {segment.index} 段要终点画面，但取不到上一段的末帧：{exc}")
         return False
@@ -804,6 +806,49 @@ def _write_director_tailframe(plan, segment, session: SessionState,
     return True
 
 
+def _ask_segment_number(question: str, *, total: int) -> tuple[str, int | None]:
+    """问一个段号（#106 的陪跑首尾两问共用）：返回 ``(动作, 段号)``。
+
+    动作三种：``ok``（合法段号）／``none``（回车＝不用）／``quit``（q＝停下）。
+
+    非法输入**重问**而不是当「不用」：用户打了「3段」或越界段号时，若静默按「不用」
+    处理，他会以为重跑已经排上——而实际上什么都不会发生。这正是 #106 要治的
+    「重跑像什么都没发生」，只是换了个位置发生。
+    """
+    while True:
+        raw = _prompt(question)
+        text = raw.strip().lower()
+        if text in ("q", "quit"):
+            return "quit", None
+        if not text:
+            return "none", None
+        if text.isdigit() and 1 <= int(text) <= total:
+            return "ok", int(text)
+        print(f"  [提示] 无效段号：{raw!r}"
+              f"（请填 1..{total} 之间的段号；回车＝不用，q＝停下）。")
+
+
+def _apply_director_cascade(*, directory: Path, cache_directory: Path,
+                            from_segment: int, total: int) -> dict[int, dict] | None:
+    """执行一次级联、念出结果，返回**刷新后**的通过表；失败返回 ``None``（调用方停住）。
+
+    为什么连通过表一起返回：级联作废的就是这张表（第 N 段起全部失效）。让调用方自己
+    从返回值里删键等于在第二处重复账本判据（「同一契约不许两处口径」）；重读账本才
+    只有一个真源。
+    """
+    from ..director import cascade, ledger
+
+    try:
+        result = cascade.cascade_rerun(
+            directory, from_segment=from_segment, total_segments=total,
+            cache_directory=cache_directory)
+        print(cascade.render_cascade_notice(result))
+        return ledger.read_director_progress(directory, total_segments=total)
+    except (OSError, ValueError) as exc:
+        print(f"[错误] 级联重跑失败：{exc}")
+        return None
+
+
 def _run_director_segment_handoff(plan, session: SessionState, *, config: Config,
                                   passed: dict[int, dict] | None = None,
                                   rotate: bool = False, llm=None) -> int:
@@ -818,6 +863,10 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
 
     ``rotate``：新一次交付的开头要轮转账本（复用 GEN 时追加账不会自动清空，#58 实测）。
     续跑不走轮转。
+
+    **首尾各问一次重跑**（#106，2026-10-29 用户裁定，不新增独立菜单、不加每段一问）：
+    开跑前问「有要重跑的段吗」，全部通过后再问「有要改哪一段重来吗」——两处都回到
+    第 N 段重跑；中间那段循环里**不问**，免得每段都要多按一次回车。
     """
     from ..director import cache, ledger
     from ..director.companion import judge_segment
@@ -854,71 +903,111 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
     total = len(plan.segments)
     print(f"\n导演台逐段陪跑：共 {total} 段；段缓存目录 {cache_directory}"
           f"（帧容差 {tolerance} 帧）")
-    for segment in plan.segments:
-        if segment.index in passed:
-            row = passed[segment.index]
-            print(f"[续接] 第 {segment.index}/{total} 段已通过验收，跳过"
-                  f"（不重跑：{row.get('cache', '')}）")
-            continue
-        # 轮到该段才写它的终点画面提示词：起点画面是**上一段**的末帧，此刻才存在。
-        if needs_tailframe(segment.type):
-            if llm is None:
-                llm = _build_director_llm()
-                if llm is None:
-                    return 1
-            if not _write_director_tailframe(
-                    plan, segment, session, cache_directory, llm=llm):
-                return 1
-        announced = False
-        while True:
-            if not announced:
-                print(_render_director_segment_briefing(
-                    plan, segment, directory, cache_directory))
-                announced = True
-            raw = _prompt(
-                f"第 {segment.index}/{total} 段在导演台里跑完后按回车，我来数该段缓存的帧数"
-                "（输入 q 停下）：")
-            if raw.strip().lower() in ("q", "quit"):
-                # 停下不是失败：已通过的段留在账上，重跑向导会从这一段接着走。
-                print(f"\n⚠ 停在轮到第 {segment.index}/{total} 段：这一段不落账。"
-                      "已通过的段留在段产出账里，重跑向导会从这一段接着走。")
-                return 0
-            cached = cache.cached_segments(cache_directory)
-            actual = None
-            if segment.index in cached:
-                try:
-                    actual = cache.actual_frames_for_segment(
-                        cache_directory, segment.index)
-                except ValueError as exc:
-                    # 编码不对（raw/.pt）或文件读不出：这是环境问题，不是「0 帧」。
-                    # 停在原地重问，让用户处置完再回车。
-                    print(f"[错误] {exc}")
-                    continue
-            verdict = judge_segment(segment, actual_frames=actual,
-                                    cached_segments=cached, tolerance=tolerance)
-            print(f"\n→ {verdict.message}")
-            if not verdict.passed:
-                print(f"   （判定 {verdict.status.upper()} / {verdict.code}）"
-                      "回导演台重跑**本段**后再回车；输入 q 停下。")
-                continue
-            ledger.log_director_output(
-                directory,
-                segment=segment.index,
-                start_frame=segment.start_frame,
-                end_frame=segment.end_frame,
-                declared_frames=segment.declared_frames,
-                export_frames=segment.export_frames,
-                actual_frames=actual,
-                cache_path=cache.frames_path(cache_directory, segment.index),
-            )
-            print(f"[完成] 第 {segment.index}/{total} 段已记入段产出账"
-                  "（含缓存路径与实际帧数）。")
-            break
 
-    print(f"\n✓ 全部 {total} 段已通过可证层并记入段产出账。")
+    # 首问（#106）：先把「答了这一问要付什么代价」念在问题前面，用户才知道自己在决定
+    # 删哪些产物。放在轮转与读账之后：作废要基于这一轮的真实通过表。
+    print("\n[重跑] 若某段要重做，现在告诉我段号：我会作废该段及其后所有段的通过记录，"
+          "并删掉它们的段缓存（**前面的段不动**）。")
+    action, target = _ask_segment_number(
+        "有要重跑的段吗？（段号，回车=不用，q=停下）：", total=total)
+    if action == "quit":
+        print("停在陪跑开始前：没有改动任何段的通过行与缓存。")
+        return 0
+    start_at = 1
+    if action == "ok":
+        refreshed = _apply_director_cascade(
+            directory=directory, cache_directory=cache_directory,
+            from_segment=target, total=total)
+        if refreshed is None:
+            return 1
+        passed, start_at = refreshed, target
+
+    while True:
+        for segment in plan.segments:
+            if segment.index < start_at:
+                # 级联只从第 N 段起动手：第 1..N-1 段一个都不碰，连「跳过」都不必念。
+                continue
+            if segment.index in passed:
+                row = passed[segment.index]
+                print(f"[续接] 第 {segment.index}/{total} 段已通过验收，跳过"
+                      f"（不重跑：{row.get('cache', '')}）")
+                continue
+            # 轮到该段才写它的终点画面提示词：起点画面是**上一段**的末帧，此刻才存在。
+            if needs_tailframe(segment.type):
+                if llm is None:
+                    llm = _build_director_llm()
+                    if llm is None:
+                        return 1
+                if not _write_director_tailframe(
+                        plan, segment, session, cache_directory, llm=llm):
+                    return 1
+            announced = False
+            while True:
+                if not announced:
+                    print(_render_director_segment_briefing(
+                        plan, segment, directory, cache_directory))
+                    announced = True
+                raw = _prompt(
+                    f"第 {segment.index}/{total} 段在导演台里跑完后按回车，我来数该段缓存的帧数"
+                    "（输入 q 停下）：")
+                if raw.strip().lower() in ("q", "quit"):
+                    # 停下不是失败：已通过的段留在账上，重跑向导会从这一段接着走。
+                    print(f"\n⚠ 停在轮到第 {segment.index}/{total} 段：这一段不落账。"
+                          "已通过的段留在段产出账里，重跑向导会从这一段接着走。")
+                    return 0
+                cached = cache.cached_segments(cache_directory)
+                actual = None
+                if segment.index in cached:
+                    try:
+                        actual = cache.actual_frames_for_segment(
+                            cache_directory, segment.index)
+                    except ValueError as exc:
+                        # 编码不对（raw/.pt）或文件读不出：这是环境问题，不是「0 帧」。
+                        # 停在原地重问，让用户处置完再回车。
+                        print(f"[错误] {exc}")
+                        continue
+                verdict = judge_segment(segment, actual_frames=actual,
+                                        cached_segments=cached, tolerance=tolerance)
+                print(f"\n→ {verdict.message}")
+                if not verdict.passed:
+                    print(f"   （判定 {verdict.status.upper()} / {verdict.code}）"
+                          "回导演台重跑**本段**后再回车；输入 q 停下。")
+                    continue
+                ledger.log_director_output(
+                    directory,
+                    segment=segment.index,
+                    start_frame=segment.start_frame,
+                    end_frame=segment.end_frame,
+                    declared_frames=segment.declared_frames,
+                    export_frames=segment.export_frames,
+                    actual_frames=actual,
+                    cache_path=cache.frames_path(cache_directory, segment.index),
+                )
+                print(f"[完成] 第 {segment.index}/{total} 段已记入段产出账"
+                      "（含缓存路径与实际帧数）。")
+                break
+
+        print(f"\n✓ 全部 {total} 段已通过可证层并记入段产出账。")
+        # 尾问（#106）：看完成片才发现某段要改是常态（老师在整片语境里才看得出问题），
+        # 所以全部通过之后再给一次入口，答了就回到那一段重跑。
+        action, target = _ask_segment_number(
+            "有要改哪一段重来吗？（段号，回车=不用，q=停下）：", total=total)
+        if action == "quit":
+            # 尾问里按 q 与「停在交付前」是同一件事：段全过了，交付没做，重跑向导回到这里。
+            print("停在交付之前：全部段已通过，重跑向导会回到交付。")
+            return 0
+        if action == "none":
+            break
+        refreshed = _apply_director_cascade(
+            directory=directory, cache_directory=cache_directory,
+            from_segment=target, total=total)
+        if refreshed is None:
+            return 1
+        passed, start_at = refreshed, target
+
     # 交付（#108）接在陪跑末尾：问成片与最终包路径、归档、补改写账。
-    # #106 若在末尾加了「首尾各问一次重跑」，那段提问必须排在交付**之前**——用户改完
-    # 段应该回到陪跑，不该带着一段没跑的词直接交付。
+    # 尾问（#106）排在它**之前**：用户改完段应该回到陪跑，不该带着一段没跑的词直接
+    # 交付（#108 的用例与注释也按这个次序写）。
     return _finish_director_delivery(plan, session)
 
 

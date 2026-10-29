@@ -622,6 +622,20 @@ def _run_config(monkeypatch, tmp_path: Path):
     return _config_with(monkeypatch, {"comfy_output_root": str(tmp_path)})
 
 
+def _is_rerun_question(text: str) -> bool:
+    """陪跑首尾那两问（#106）：作答按**问题文本**匹配，不按调用次序数。
+
+    按次序数会在每次加一问时整体错位（#57 实测：追加一行输入被上游菜单吃掉，流程挪
+    一步还发了真请求）——所以判据是问题里那句话。
+    """
+    return "有要重跑的段吗" in text or "有要改哪一段重来吗" in text
+
+
+def _is_segment_question(text: str) -> bool:
+    """「第 N 段跑完后按回车」那一问（每段一次）。"""
+    return "在导演台里跑完后按回车" in text
+
+
 def test_director_running_status_is_resumable_and_distinct(tmp_path):
     """新状态必须在 ``find_awaiting_sessions`` 的可续接元组里，且不复用多参那个值。
 
@@ -695,6 +709,8 @@ def test_handoff_refuses_a_mistaken_selection_then_accepts_the_rerun(
     calls = {"n": 0}
 
     def prompt_and_plant(text: str) -> str:
+        if _is_rerun_question(text):   # #106 的首尾两问：这一条用例不重跑任何段
+            return ""
         # 全段通过后会进交付（#108）：这里只数**陪跑**的问数，交付一进来就停下。
         if "成片 mp4 路径" in text:
             return "q"
@@ -732,6 +748,8 @@ def test_handoff_skips_segments_already_passed(tmp_path, monkeypatch, capsys):
 
     def fake_prompt(text: str) -> str:
         asked.append(text)
+        if _is_rerun_question(text):   # #106 的首问：这条用例不重跑任何段
+            return ""
         # 全段通过后会进交付（#108）：这里只数**陪跑**的问数。
         if "成片 mp4 路径" in text:
             return "q"
@@ -743,9 +761,9 @@ def test_handoff_skips_segments_already_passed(tmp_path, monkeypatch, capsys):
     assert wizard._resume_director_handoff(config, session) == 0
     out = capsys.readouterr().out
     assert "已通过验收，跳过" in out and "第 1/2 段" in out
-    segment_questions = [text for text in asked if "跑完后按回车" in text]
-    assert len(segment_questions) == 1, "只该为第 2 段问一次回车"
-    assert "第 2/2 段" in segment_questions[0]
+    segment_asks = [text for text in asked if _is_segment_question(text)]
+    assert len(segment_asks) == 1, "只该为第 2 段问一次回车"
+    assert "第 2/2 段" in segment_asks[0]
 
 
 def test_handoff_stops_cleanly_without_recording_a_failed_segment(
@@ -757,7 +775,10 @@ def test_handoff_stops_cleanly_without_recording_a_failed_segment(
     session = _director_session(tmp_path)
     config = _run_config(monkeypatch, tmp_path)
     monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
-    monkeypatch.setattr(wizard, "_prompt", lambda text: "q")
+    # 首问（#106）答回车＝不重跑；q 只对「段跑完后按回车」那一问被按下。
+    monkeypatch.setattr(
+        wizard, "_prompt",
+        lambda text: "" if _is_rerun_question(text) else "q")
 
     assert wizard._resume_director_handoff(config, session) == 0
     assert ledger.passed_director_rows(session.directory) == {}

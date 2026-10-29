@@ -83,6 +83,10 @@ _START_READING_INSTRUCTION = (
 # 尾帧文档的落点：``GENxxx/director/tailframe-NN.md``（1 起，与 ``segment-NN.md`` 同目录）。
 # 编号跟**段号**而不是第几个产物：用户是拿「第 3 段的终点画面」去挂导演台的，重编号会挂错槽。
 TAILFRAME_FILENAME = "tailframe-{position:02d}.md"
+# 一段缓存末帧的导出图：``GENxxx/director/frame-KK-last.png``（``KK`` 是**被取帧的那一段**，
+# 即下一段的起点画面）。名字原先只写在 ``ui.wizard._write_director_tailframe`` 里，
+# 级联重跑（#106）要按同一个名字删，照抄一份就是两处会各自漂的口径（本条即为此抽出）。
+LAST_FRAME_FILENAME = "frame-{segment:02d}-last.png"
 
 
 def tailframe_segment_types() -> tuple[str, ...]:
@@ -117,6 +121,15 @@ def load_instruction() -> str:
 def tailframe_path(session_dir: str | Path, position: int) -> Path:
     """第 ``position`` 段（1 起）的尾帧文档路径。"""
     return Path(session_dir) / "director" / TAILFRAME_FILENAME.format(position=position)
+
+
+def last_frame_png_path(session_dir: str | Path, segment: int) -> Path:
+    """第 ``segment`` 段（1 起）缓存**末帧**的导出图路径。
+
+    它是下一段的起点画面（设计 §3.3），所以这张图的编号是「被取帧的那一段」而不是
+    「要用它的那一段」——级联重跑按同一编号删（#106），编号口径必须只有一个来源。
+    """
+    return Path(session_dir) / "director" / LAST_FRAME_FILENAME.format(segment=segment)
 
 
 # ---------------------------------------------------------------------------
