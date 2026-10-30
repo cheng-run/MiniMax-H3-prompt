@@ -64,3 +64,13 @@ htmlcov/
 to-questionnaire-*.md
 architecture-review-*.html
 
+# 只留本机、不入库（2026-10-30 用户裁定）：文档、测试、脚本、项目说明书。
+# 仓库只发布 src/ 与运行所需配置。前导斜杠锚定仓库根——不带斜杠会连 src/ 下的
+# 同名目录一起吞（同 output/ 的教训：那一次让源码包整包从未入库，clone 即崩）。
+# 注意物理事实：这四类文件仍在本机磁盘上，只是不再被 git 跟踪。
+/docs/
+/tests/
+/scripts/
+/AGENTS.md
+
+
