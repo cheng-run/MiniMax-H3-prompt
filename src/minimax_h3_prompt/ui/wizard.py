@@ -544,18 +544,19 @@ def _ask_director_pack_settings(session: SessionState) -> None:
     brief = session.brief
     if brief.director_node_id:
         return
+    from ..director import cache as director_cache
+
     node_id = ""
     while not node_id:
-        raw = _prompt("导演台节点的 unique_id（ComfyUI 里选中导演台节点后显示的 id，必填）：").strip()
-        if not raw:
-            print("[提示] 节点 id 不能为空：段缓存目录名是「缓存名_节点id」，"
-                  "缺了 #105 找不到段缓存。")
+        raw = _prompt("导演台节点的 unique_id（ComfyUI 里选中导演台节点后显示的 id，必填）：")
+        # 合法性判据只住 ``director/cache.py``（复审 H3）：向导原先自写
+        # ``isalnum() or "_.-"``，恰好放过 ``..``——用户答完三问、进陪跑才在
+        # ``cache_dir`` 炸。这里提前问，报错就在同一道题上。
+        try:
+            node_id = director_cache.validate_node_id(raw)
+        except ValueError as exc:
+            print(f"[提示] {exc}。")
             continue
-        if not all(ch.isalnum() or ch in "_.-" for ch in raw):
-            # 它会拼进目录名；分隔符/空格会让「缓存目录」这个字符串变成别的路径。
-            print("[提示] 节点 id 只能由字母、数字、下划线、点、短横线组成，请重输。")
-            continue
-        node_id = raw
     cache_name = _prompt(
         "段缓存名（导演台性能组的 cache_name；回车=空，缓存目录只用节点 id）：").strip()
     from ..director.pack import CONTINUITY_DEFAULT, CONTINUITY_MODES
@@ -608,6 +609,18 @@ def _run_director_flow(session: SessionState) -> int:
         print("[错误] 导演台路线：会话里没有分镜表（阶段 1 产物缺失），无法做段规划。")
         return 1
     _ask_director_pack_settings(session)
+    # 产资产图的导演台模式（当前＝r2v）先跑**素材循环**再规划（2026-10-29 用户裁定；
+    # 复审 S2）：打包时 `pack._picture_sources` 只认素材台账里已登记的正本，而段词里的
+    # `<Picture N>` 编号又来自同一份登记——不先跑循环，r2v 端到端不可用（打包必然报
+    # 「台账是空的」）。循环复用多参那一段（`_asset_loop`），不复制实现。
+    # t2v/i2v/fl2v/v2v 不产资产图，一步都不多走。
+    from ..brief_parser import route_emits_asset_prompts
+
+    if route_emits_asset_prompts(brief):
+        # False ＝ 用户「先到这里」：进度已逐张落盘、状态仍是 awaiting_frames，
+        # 重跑向导会路由回本函数、重新进入同一张待办（不重付已出过的词）。
+        if not _asset_loop(state, brief, session.directory):
+            return 0
     # 规划与写段共用同一个模型实例：两段长阻塞之间再建一次客户端只是多一次握手。
     llm = build_chat_model()
     try:
@@ -744,7 +757,9 @@ def _build_director_llm():
     try:
         return build_chat_model()
     except Exception as exc:  # noqa: BLE001 - 病因原样交回，别让建客户端失败伪装成别的问题
-        print(f"[错误] 模型构造失败（{exc}）：第 N 段的终点画面提示词写不出来。")
+        # 不写具体段号：这里拿不到「轮到哪一段」，写死「第 N 段」会变成一句永远
+        # 不替换的模板（复审 H4）。
+        print(f"[错误] 模型构造失败（{exc}）：接下来这一段的终点画面提示词写不出来。")
         return None
 
 
@@ -957,7 +972,14 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
                     return 0
                 cached = cache.cached_segments(cache_directory)
                 actual = None
-                if segment.index in cached:
+                # 判定前先探 raw 编码（`seg_XXXX.pt`）：`cached_segments` 只认终稿
+                # `.frames.mkv`，插件默认的 `cache_frames_codec="raw"` 写出的 `.pt`
+                # 永远不在里面。只看 `segment.index in cached` 决定要不要读缓存的话，
+                # 用户会一直看到「这一段还没跑」（SEGMENT_NOT_RUN），而真正该看到的处置提示
+                # （把 cache_frames_codec 切成 ffv1 后重跑）永远出不来——#105 硬口径
+                # 在产线不可达（复审 S1 实测）。`.pt` 不许被静默当成「没跑」。
+                raw_cached = cache.raw_frames_path(cache_directory, segment.index).is_file()
+                if segment.index in cached or raw_cached:
                     try:
                         actual = cache.actual_frames_for_segment(
                             cache_directory, segment.index)
@@ -2749,10 +2771,18 @@ def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item: QueueIte
 def _asset_loop(state: dict, brief: Brief, generation_dir: Path) -> bool:
     """素材循环（issue #50）：队列驱动的逐张闭环，一次只维持一张「当前待办」。
 
+    **两条路线共用这一个循环**（复审 S2）：多参直出，以及导演台里产资产图提示词的
+    模式（当前＝r2v）。资产图的词与素材台账本来就是同一份（``image_prompt_variants``
+    / 台账文件），各复制一份循环就会长出第二套「什么时候算一张落账」的判据；导演台的
+    r2v 打包又依赖台账里已登记的正本（``pack._picture_sources``），不接这一处 r2v
+    端到端不可用。**不要再包一层同名转发**——那只是把调用点与实现隔开一层（复审
+    Standards 轴 Middle Man）。
+
     队列顺序＝纯 ``<Picture N>`` 升序（issue #66 起；＝剧本出场序＝接线序），支持
     跳号/指定下一个出谁（AC4）；每张要么裁决落账、要么显式放弃才轮到下一张（AC1）。
     返回 True ＝ 队列清空，继续注入卡与阶段 2；
-    False ＝ 用户「先到这里」，会话保持可续接（进度已逐张落盘）。
+    False ＝ 用户「先到这里」，会话保持可续接（进度已逐张落盘）。调用方必须原样停下：
+    重跑向导会回到同一张待办，不重付已出过的词。
     """
     from ..asset_ledger import KIND_PICTURE, IntakeReport, load_asset_ledger, render_report, verify_asset_ledger
     from ..asset_loop import asset_queue, loop_state, set_current

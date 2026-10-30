@@ -97,15 +97,47 @@ def resolve_cache_key(cache_name: object, node_id: object) -> str:
     return node or name
 
 
+def _require_safe_key(key: str) -> str:
+    """缓存目录名（键）的安全判据——``cache_dir`` 与 ``validate_node_id`` 共用的唯一一份。
+
+    空键、``.``/``..`` 与含路径分隔符的键会让拼出的目录跳出缓存根（或被 Windows
+    重定向）；**判据只住这里**，向导别再写一份「字符白名单」——两份口径一旦分家，
+    用户会在答完问题、进到陪跑那一刻才炸（复审 H3 的 ``..`` 就是这种形态）。
+    """
+    if not key or key in {".", ".."} or "/" in key or "\\" in key:
+        raise ValueError(f"段缓存键不安全或为空：{key!r}（缓存名与节点 id 至少要有一个）")
+    return key
+
+
+def validate_node_id(node_id: object) -> str:
+    """导演台节点的 id 是否能用（**唯一真源**）：向导问完就地校验，别等陪跑才炸。
+
+    为什么判据是「和 ``cache_dir`` 同一条」而不是另写一套字符白名单：节点 id 原样
+    拼进缓存目录名（插件不规范化它，``resolve_segment_cache_key`` 只对缓存名归一），
+    所以「能不能当目录名」正是 ``cache_dir`` 的那条判据。此前向导自己写
+    ``isalnum() or "_.-"``：``..``/``.`` 全在里面，缓存名非空时拼成 ``名字_..``
+    还能活，缓存名为空时直接拼成 ``..``——用户答完三道题、进陪跑才在 ``cache_dir``
+    报错（复审 H3）。
+
+    返回去空白后的 id；非法/为空抛 ``ValueError``（调用方翻成用户能读的一句提示）。
+    """
+    try:
+        node = str(node_id or "").strip()
+    except Exception:  # noqa: BLE001 - 与 normalize_cache_name 同一纪律：清洗口不裸抛
+        node = ""
+    if not node:
+        raise ValueError(
+            "节点 id 不能为空：段缓存目录名是「缓存名_节点id」，缺了这段就找不到缓存")
+    return _require_safe_key(node)
+
+
 def cache_dir(comfy_output_root: str | Path, cache_name: object, node_id: object) -> Path:
     """一个缓存键的绝对目录（**不**创建目录：读缓存是只读动作）。
 
     键为空（既没缓存名也没节点 id）时**报错**：拼出来的路径会落在缓存根自己身上，
     后续数帧/删除就有可能在根目录上乱扫（插件 ``_sanitize_dir_token`` 同一防线）。
     """
-    key = resolve_cache_key(cache_name, node_id)
-    if not key or key in {".", ".."} or "/" in key or "\\" in key:
-        raise ValueError(f"段缓存键不安全或为空：{key!r}（缓存名与节点 id 至少要有一个）")
+    key = _require_safe_key(resolve_cache_key(cache_name, node_id))
     return Path(comfy_output_root) / CACHE_ROOT_DIRNAME / key
 
 

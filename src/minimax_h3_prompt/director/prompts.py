@@ -50,6 +50,10 @@ from ..tools.h3_validator import (
     split_ref_sections,
 )
 from .frames import FPS, PLAN_MODES, DirectorPlan, DirectorSegment
+# 产物目录名只有 ``planning.DIRECTOR_DIRNAME`` 一处声明（复审 H1）：段文件、段表、
+# 尾帧与导演包必须落在**同一个** ``GENxxx/director/`` 下，各写一份字面量就是几条
+# 会各自漂的路径口径（某一条改了，另一条只会表现为「读不到/缺文件」）。
+from .planning import DIRECTOR_DIRNAME
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 _INSTRUCTION_NAME = "segment_writer_director.md"
@@ -61,7 +65,9 @@ WRITE_MODES = PLAN_MODES
 # 直调路径在事件与成本表里的角色名：**必须**与多参/首尾帧的写段角色分开（ADR 0019）——
 # 混在一处就分不清钱花在哪条路线上。
 DIRECTOR_SEGMENT_WRITER_ROLE = "role_director_segment_writer"
-DIRECTOR_SEGMENT_REWRITER_ROLE = "role_director_segment_rewriter"
+# 写段的「改写轮」没有独立角色名：改写与首写走同一个 writer 出口（同一份看门狗、
+# 同一套失败措辞）。此前这里备了一个 ``..._REWRITER_ROLE`` 的常量，全仓无人引用
+# ——死常量会让人以为存在一条独立的改写记账口径（复审 H2，已删）。
 
 # 绝对时间轴注记的唯一模板。占位符全部由**帧**现算（成片坐标，ADR 0025 的两套坐标
 # 之「成片坐标」）：秒不是第二份真源，`plan.json` 里的 start_s/end_s 只是派生显示值。
@@ -94,8 +100,12 @@ def _require_write_mode(mode: str) -> str:
 
 
 def segment_path(session_dir: str | Path, position: int) -> Path:
-    """第 ``position`` 段（1 起）的提示词文件路径：``GENxxx/director/segment-NN.md``。"""
-    return Path(session_dir) / "director" / SEGMENT_FILENAME.format(position=position)
+    """第 ``position`` 段（1 起）的提示词文件路径：``GENxxx/director/segment-NN.md``。
+
+    目录名取 ``planning.DIRECTOR_DIRNAME``（#104 复审 H1）：本模块原先硬写 ``"director"``，
+    常量一改就会写到别处而不报错——段文件与段表分家，打包时表现为「缺提示词」。
+    """
+    return Path(session_dir) / DIRECTOR_DIRNAME / SEGMENT_FILENAME.format(position=position)
 
 
 def load_instruction(mode: str) -> str:

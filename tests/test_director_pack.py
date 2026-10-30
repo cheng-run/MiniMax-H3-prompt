@@ -902,6 +902,36 @@ def test_wizard_asks_pack_settings_once_and_saves_them(tmp_path, monkeypatch, ca
     capsys.readouterr()
 
 
+def test_wizard_rejects_an_unsafe_node_id_at_the_question(tmp_path, monkeypatch, capsys):
+    """H3：``..`` 这类节点 id 必须在**问答这一步**被拒，不许等进陪跑才炸。
+
+    判据住 ``director/cache.py``（与 ``cache_dir`` 同一条）。向导原先自写的字符白名单
+    ``isalnum() or "_.-"`` 恰好放过 ``..``：用户答完三问、进陪跑才在 ``cache_dir`` 报错，
+    那时另外两个答案也已经落盘。这里钉「同一道题上重问」。
+    """
+    from minimax_h3_prompt.ui import wizard
+
+    _stub_llm(monkeypatch, "t2v")
+    session = _wizard_session(tmp_path)
+    answers = iter(["..", "42", "雨夜", ""])
+
+    def fake_prompt(text: str) -> str:
+        # #106 的陪跑首问与 #105 的段问答按文本匹配，不占用答案表（#57 的教训）。
+        if "有要重跑的段吗" in text:
+            return ""
+        if "跑完后按回车" in text:
+            return "q"
+        return next(answers)
+
+    monkeypatch.setattr(wizard, "_prompt", fake_prompt)
+    monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
+
+    assert wizard._run_director_flow(session) == 0
+    out = capsys.readouterr().out
+    assert "缓存键不安全或为空" in out, "不安全的节点 id 没有在问句上被拒"
+    assert session.brief.director_node_id == "42", "重问后的合法值应被采用"
+
+
 def test_wizard_does_not_ask_again_when_the_answers_are_known(tmp_path, monkeypatch, capsys):
     """Brief 里已有答案就不再问：续跑反复追问同一件事是噪音，也容易被误答覆盖。"""
     from minimax_h3_prompt.ui import wizard
@@ -962,3 +992,115 @@ def test_wizard_pack_failure_is_loud_and_returns_nonzero(tmp_path, monkeypatch, 
     out = capsys.readouterr().out
     assert "[错误]" in out and "第 1 段" in out
     assert not (session.directory / "director" / "initial.mmxpack.zip").exists()
+
+
+# ---------------------------------------------------------------------------
+# 复审修复（2026-10-29）：常量唯一真源、任务类型一致性、结论由实际值生成
+# ---------------------------------------------------------------------------
+
+def test_artifact_paths_all_derive_from_the_shared_director_dirname(tmp_path, monkeypatch):
+    """H1：段表/段文件/尾帧/导演包共用 ``planning.DIRECTOR_DIRNAME``。
+
+    改动前 ``prompts.py`` / ``tailframe.py`` / ``pack.py`` 各硬写一份 ``"director"``：
+    常量一改，段文件写到 A 目录、段表读 B 目录，**没有任何一处会报错**——打包时才表现为
+    「缺提示词」。这里逐模块改常量，证明每一条路径都真的跟着走。
+    """
+    from minimax_h3_prompt.director import pack, planning, prompts, tailframe
+
+    for module in (pack, planning, prompts, tailframe):
+        monkeypatch.setattr(module, "DIRECTOR_DIRNAME", "moved")
+
+    root = tmp_path / "GEN001"
+    assert planning.plan_path(root) == root / "moved" / "plan.json"
+    assert prompts.segment_path(root, 1) == root / "moved" / "segment-01.md"
+    assert tailframe.tailframe_path(root, 2) == root / "moved" / "tailframe-02.md"
+    assert tailframe.last_frame_png_path(root, 2) == root / "moved" / "frame-02-last.png"
+    assert pack.pack_dir_for(root) == root / "moved" / "pack"
+    assert pack.zip_path_for(root) == root / "moved" / "initial.mmxpack.zip"
+    still = root / "moved" / "assets" / "01" / "start.png"
+    still.parent.mkdir(parents=True)
+    still.write_bytes(b"png")
+    assert pack._find_still(root, 1, pack.START_STEM) == still
+
+
+def test_pack_task_type_mismatch_is_refused():
+    """H5：``widgets.task_type`` 与 ``timeline.global.taskType`` 不一致必须抛。
+
+    一致性检查抽成纯函数后，可以**直接构造**不匹配入参证明它咬得住——此前内联在
+    ``_validate_all`` 末尾，两侧都由 ``plan.mode`` 构造，正常流程不可能触发，
+    也没有任何用例能证明这道闸真的存在。
+    """
+    from minimax_h3_prompt.director.pack import validate_pack_task_type
+
+    timeline = {"global": {"taskType": "r2v"}}
+    validate_pack_task_type({"widgets": {"task_type": "r2v"}}, timeline)
+    with pytest.raises(ValueError, match="task_type"):
+        validate_pack_task_type({"widgets": {"task_type": "t2v"}}, timeline)
+    with pytest.raises(ValueError, match="task_type"):
+        validate_pack_task_type({}, timeline)
+
+
+def test_conclusions_report_failure_when_a_validator_is_emptied(tmp_path, monkeypatch):
+    """H5：八条结论由**实际值/校验结果**生成，校验器被改坏时结论必须写成「不通过」。
+
+    手写「通过」常量的话，校验器删空、包已经导不进去，报告照样八行全绿——用户判断
+    「能不能导入」的唯一依据就是这份报告。这里把画布校验改成空操作、把画布改成
+    100（不是 32 的倍数），结论第 3 条必须自己报红并带上实际值。
+    """
+    from minimax_h3_prompt.director import pack
+
+    plan = _plan("t2v")
+    job, _ = pack.prepare_director_pack(_session(tmp_path, plan), plan,
+                                        settings=_settings())
+    timeline = json.loads((job.pack_dir / "timeline.json").read_text(encoding="utf-8"))
+    pack_json = json.loads((job.pack_dir / "pack.json").read_text(encoding="utf-8"))
+    shared = json.loads(
+        (job.pack_dir / "shared_params" / "shared_params.json").read_text(encoding="utf-8"))
+
+    timeline["width"] = 100
+    monkeypatch.setattr(pack, "validate_canvas", lambda *args, **kwargs: None)
+    conclusions = pack._validate_all(
+        job.plan, timeline, pack_json, shared, job.segments,
+        pack._collect_media(job.segments))
+
+    assert "不通过" in conclusions[2], f"结论没有反映失败的校验：{conclusions[2]}"
+    assert "100" in conclusions[2]
+
+
+def test_group_json_mirrors_the_timeline_segment(tmp_path):
+    """H8：``group.json`` 与 timeline 的同段对象**逐键相同**（不另抄一份键表）。
+
+    插件在某段 ``prompt`` 为空时拿 group.json 兜底；重抄一份键表会在
+    ``_segment_dict`` 将来加键时静默少一个——兜底读到的段与时间线不同形。
+    """
+    from minimax_h3_prompt.director.pack import prepare_director_pack
+
+    plan = _plan("t2v")
+    job, _ = prepare_director_pack(_session(tmp_path, plan), plan, settings=_settings())
+    timeline = json.loads((job.pack_dir / "timeline.json").read_text(encoding="utf-8"))
+    for position, row in enumerate(timeline["segments"], 1):
+        group_path = job.pack_dir / "asset_groups" / f"{position:02d}" / "group.json"
+        group = json.loads(group_path.read_text(encoding="utf-8"))
+        assert group == row, f"第 {position} 段的 group.json 与 timeline 段不同形"
+
+
+def test_group_json_follows_a_new_key_on_the_segment_object(tmp_path, monkeypatch):
+    """H8 的变异检验：段对象多出一个键，``group.json`` 必须跟着有。
+
+    逐键重抄的实现会在这里静默少一个键（这正是「兜底来源与时间线不同形」的形态）。
+    """
+    from minimax_h3_prompt.director import pack
+
+    original = pack._segment_dict
+
+    def with_extra_key(segment, *, start, settings):
+        row = original(segment, start=start, settings=settings)
+        row["futureKey"] = "x"
+        return row
+
+    monkeypatch.setattr(pack, "_segment_dict", with_extra_key)
+    plan = _plan("t2v")
+    job, _ = pack.prepare_director_pack(_session(tmp_path, plan), plan, settings=_settings())
+    first_group = json.loads(
+        (job.pack_dir / "asset_groups" / "01" / "group.json").read_text(encoding="utf-8"))
+    assert first_group.get("futureKey") == "x", "group.json 没有从段对象派生"

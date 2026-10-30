@@ -489,3 +489,24 @@ def test_q_before_the_paths_leaves_the_session_resumable(tmp_path, monkeypatch, 
     loaded = load_session(session.directory)
     assert loaded is not None
     assert loaded.status == STATUS_DIRECTOR_SEGMENTS_RUNNING
+
+
+# ---------------------------------------------------------------------------
+# 复审修复（2026-10-29 H7/H11）：时间戳一份真源，交付不读回自己刚写的记录
+# ---------------------------------------------------------------------------
+
+def test_delivery_reuses_the_ledger_timestamp_helper():
+    """H7：``delivery`` 的时间戳必须就是 ``ledger`` 那一份（两份会在改格式时各漂）。"""
+    from minimax_h3_prompt.director import delivery, ledger
+
+    assert delivery.utc_now_iso is ledger.utc_now_iso
+
+
+def test_record_final_film_returns_the_record_it_wrote(tmp_path):
+    """H11：落盘函数把**写进去的那份记录**交回，交付报告不再从盘上读回。"""
+    from minimax_h3_prompt.director import delivery
+
+    session_dir, plan, film, _pack_zip = _ready_session(tmp_path)
+    path, record = delivery.record_final_film(session_dir, plan=plan, film_path=film)
+    assert json.loads(path.read_text(encoding="utf-8")) == record
+    assert record["total_frames"] == 260

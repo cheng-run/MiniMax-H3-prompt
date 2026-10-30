@@ -785,6 +785,51 @@ def test_handoff_stops_cleanly_without_recording_a_failed_segment(
     assert "停在轮到第 1/2 段" in capsys.readouterr().out
 
 
+def test_handoff_surfaces_the_raw_codec_disposal_instead_of_not_run(
+        tmp_path, monkeypatch, capsys):
+    """插件默认 ``cache_frames_codec="raw"`` 写的是 ``seg_0000.pt``：必须打出处置
+    （切成 ffv1 后重跑），不能当成「这一段还没跑」静默过去（复审 S1）。
+
+    现场：``cache.cached_segments`` 只认终稿 ``.frames.mkv``，所以只按「段号在不在
+    ``cached`` 里」决定要不要读缓存时，``actual_frames_for_segment`` 的 ``.pt`` 分支
+    在**生产路径上永远不可达**——用户只会一直看到 ``SEGMENT_NOT_RUN``，#105 的
+    「`.pt` 明确报错并给处置」成了只活在单元测试里的规则（本仓「规则在、接线不在」）。
+    """
+    from minimax_h3_prompt.director import cache, ledger
+    from minimax_h3_prompt.ui import wizard
+
+    session = _director_session(tmp_path, ("opening",))
+    config = _run_config(monkeypatch, tmp_path)
+    cache_directory = _cache_dir_for(config, session.brief)
+    # 只造 `.pt`（torch 张量，本项目没有 torch 读不了），没有任何 `.frames.mkv`。
+    raw = cache.raw_frames_path(cache_directory, 1)
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_bytes(b"torch uint8 [N,H,W,3] placeholder")
+
+    segment_asks = {"n": 0}
+
+    def fake_prompt(text: str) -> str:
+        if _is_rerun_question(text):   # #106 的首问：不重跑任何段
+            return ""
+        if _is_segment_question(text):
+            segment_asks["n"] += 1
+            # 第一次回车：读到 `.pt` → 打处置并**继续重问**；第二次 q 停下。
+            return "" if segment_asks["n"] == 1 else "q"
+        raise AssertionError(f"意外的问题：{text}")
+
+    monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
+    monkeypatch.setattr(wizard, "_prompt", fake_prompt)
+
+    assert wizard._resume_director_handoff(config, session) == 0
+    out = capsys.readouterr().out
+
+    assert "cache_frames_codec" in out, "看不到处置提示：`.pt` 被判成了「没跑」"
+    assert "ffv1" in out
+    assert "SEGMENT_NOT_RUN" not in out, "有 `.pt` 就不能报「该跑未跑」"
+    assert segment_asks["n"] == 2, "打出处之后必须继续重问，而不是落账或前进"
+    assert ledger.passed_director_rows(session.directory) == {}, "没读到帧就不许落账"
+
+
 def test_handoff_writes_the_tailframe_prompt_when_the_segment_needs_one(
         tmp_path, monkeypatch, capsys):
     """轮到运镜段时产出 ``tailframe-NN.md`` 并把校验问题打在终端上（#107 接线）。

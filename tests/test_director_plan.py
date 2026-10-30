@@ -513,3 +513,207 @@ def test_wizard_director_flow_without_shot_table_stops_loudly(tmp_path, capsys):
     assert wizard._run_director_flow(_director_session(tmp_path, shot_table=None)) == 1
     assert "分镜表" in capsys.readouterr().out
     assert not (tmp_path / "GEN001" / "director" / "plan.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# r2v 复用多参素材循环（2026-10-29 用户裁定；复审 S2）
+# ---------------------------------------------------------------------------
+
+_ASSET_STATE = {
+    "script": "林小满推开门，把旧信放在便利店柜台上。",
+    "character_image_prompts": [
+        {"name": "林小满", "positive_prompt": "人物·林小满专属生图提示词"},
+    ],
+    "scene_image_prompts": [
+        {"name": "便利店", "positive_prompt": "场景·便利店专属生图提示词"},
+    ],
+}
+
+
+class _FlowLLM:
+    """规划请求回段表 JSON；回灌请求原词回吐（提示词不动，省一次解析失败）。
+
+    回灌请求靠 ``asset_loop.SETTLED_FACTS_HEAD`` 认出来——那是块标题的唯一真源
+    （ADR 0008 裁定二），本文件不另抄一份字面量。
+    """
+
+    def __init__(self, planning_reply: str) -> None:
+        self.planning_reply = planning_reply
+        self.requests: list[str] = []
+
+    def invoke(self, request, config=None):
+        from minimax_h3_prompt.asset_loop import CURRENT_PROMPT_HEAD, SETTLED_FACTS_HEAD
+
+        text = str(request)
+        self.requests.append(text)
+        for callback in (config or {}).get("callbacks") or []:
+            callback.on_llm_new_token("…")
+        if SETTLED_FACTS_HEAD in text:
+            # 回灌：原词回吐，保证 locked_features / 正文逐字不变。
+            return text.split(f"{CURRENT_PROMPT_HEAD}\n", 1)[-1].split(
+                f"\n\n{SETTLED_FACTS_HEAD}", 1)[0].strip()
+        return self.planning_reply
+
+
+def _stub_director_heavy_steps(monkeypatch, llm) -> None:
+    """打桩写段、打包与视觉读图：本组用例的接缝是**流程顺序**，不是产物内容。"""
+    from types import SimpleNamespace
+
+    from minimax_h3_prompt import model_factory
+    from minimax_h3_prompt.director import pack as pack_module
+    from minimax_h3_prompt.director import prompts as prompts_module
+    from minimax_h3_prompt.tools import reference_auditor
+
+    monkeypatch.setattr(model_factory, "build_chat_model", lambda: llm)
+    monkeypatch.setattr(reference_auditor, "describe_image",
+                        lambda path, instruction=None: '{"claims": []}')
+    monkeypatch.setattr(prompts_module, "write_director_segments", lambda plan, **kw: [])
+    monkeypatch.setattr(
+        pack_module, "prepare_director_pack",
+        lambda *args, **kwargs: (SimpleNamespace(), "导演包已构建（本用例打桩）"))
+
+
+def _asset_image(tmp_path, name: str):
+    path = tmp_path / "returned" / f"{name}.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(name.encode("utf-8"))
+    return path
+
+
+def test_wizard_director_r2v_runs_the_asset_loop_before_planning(
+        tmp_path, monkeypatch, capsys):
+    """r2v 先走素材循环，循环结束才做段规划并落 ``director/plan.json``（S2）。
+
+    不接这一处：`pack._picture_sources` 只认素材台账里已登记的正本 → r2v 端到端
+    不可用（打包必然报「台账是空的」）。t2v 的对照在下一个用例。
+    """
+    from minimax_h3_prompt.ui import wizard
+
+    session = _director_session(tmp_path)
+    session.stage_state.update({key: value for key, value in _ASSET_STATE.items()})
+    image = _asset_image(tmp_path, "林小满")
+    plan_file = session.directory / "director" / "plan.json"
+
+    llm = _FlowLLM(_ADR_SHAPE)
+    _stub_director_heavy_steps(monkeypatch, llm)
+    monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
+
+    seen = {"plan_exists_inside_loop": None}
+
+    def fake_prompt(text: str) -> str:
+        if "[审查·" in text:
+            # 素材循环还没跑完：段表必须**还不存在**（顺序反了就是「先规划后收素材」）。
+            seen["plan_exists_inside_loop"] = plan_file.exists()
+            return "1"
+        if "素材图路径" in text:
+            return str(image)
+        if "下一个出谁" in text:
+            return ""            # 两张：第一张走默认队首
+        if "有要重跑的段吗" in text:
+            return "q"           # 段表已出，停在陪跑开始前
+        raise AssertionError(f"意外的问题：{text}")
+
+    monkeypatch.setattr(wizard, "_prompt", fake_prompt)
+    assert wizard._run_director_flow(session) == 0
+
+    out = capsys.readouterr().out
+    assert seen["plan_exists_inside_loop"] is False, "素材循环没跑完就规划了"
+    assert "[素材循环]" in out and "林小满" in out
+    assert plan_file.is_file(), "素材循环跑完后必须接着做段规划并落盘"
+
+
+def test_wizard_director_t2v_skips_the_asset_loop(tmp_path, monkeypatch, capsys):
+    """t2v 不产资产图：一步都不进素材循环（与 #104 的行为逐字相同）。"""
+    from minimax_h3_prompt.ui import wizard
+
+    session = _director_session(tmp_path)
+    session.brief.director_mode = "t2v"
+    _stub_director_heavy_steps(monkeypatch, _FlowLLM(_ADR_SHAPE))
+    monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
+    monkeypatch.setattr(wizard, "_prompt", lambda text: "q")
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("t2v 走进了素材循环")
+
+    # 判据接在共用入口的下游：入口被判错时才咬得住（只打桩入口本身挡不住接线错误）。
+    monkeypatch.setattr(wizard, "_asset_loop", _boom)
+
+    assert wizard._run_director_flow(session) == 0
+    out = capsys.readouterr().out
+    assert "[素材循环]" not in out
+    assert (session.directory / "director" / "plan.json").is_file()
+
+
+def test_wizard_director_r2v_asset_loop_pause_resumes_at_the_same_asset(
+        tmp_path, monkeypatch, capsys):
+    """循环中途「先到这里」：停在同一阶段，重跑回到素材循环，不重付已出过的词（S2）。
+
+    续接的判据是**当前待办已落盘**（``asset_loop`` 的 ``current``）：重跑直接回到
+    第二张的审查，不再问「下一个出谁」；已落账的那张也不重新出词（出词是纯渲染，
+    但回灌会花一次 LLM——本用例按模型调用次数钉住「没有重复花钱」）。
+    """
+    from minimax_h3_prompt.session_store import load_session
+    from minimax_h3_prompt.ui import wizard
+
+    session = _director_session(tmp_path)
+    session.stage_state.update({key: value for key, value in _ASSET_STATE.items()})
+    image = _asset_image(tmp_path, "林小满")
+    plan_file = session.directory / "director" / "plan.json"
+
+    llm = _FlowLLM(_ADR_SHAPE)
+    _stub_director_heavy_steps(monkeypatch, llm)
+    monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
+
+    def first_run_prompt(text: str) -> str:
+        if "[审查·" in text:
+            return "q" if "便利店" in text else "1"   # 第二张停在审查＝先到这里
+        if "素材图路径" in text:
+            return str(image)
+        if "下一个出谁" in text:
+            return ""
+        raise AssertionError(f"意外的问题：{text}")
+
+    monkeypatch.setattr(wizard, "_prompt", first_run_prompt)
+    assert wizard._run_director_flow(session) == 0
+    assert not plan_file.exists(), "循环没清空就不许规划"
+    assert "已保留进度" in capsys.readouterr().out
+
+    resumed = load_session(session.directory)
+    assert resumed is not None
+    calls_before = len(llm.requests)
+    asked: list[str] = []
+
+    def second_run_prompt(text: str) -> str:
+        asked.append(text)
+        if "[审查·" in text:
+            assert "便利店" in text, "续跑没有回到同一张待办"
+            return "1"
+        if "素材图路径" in text:
+            return str(image)
+        if "下一个出谁" in text:
+            raise AssertionError("续跑不该再问「下一个出谁」")
+        if "有要重跑的段吗" in text:
+            return "q"
+        raise AssertionError(f"意外的问题：{text}")
+
+    monkeypatch.setattr(wizard, "_prompt", second_run_prompt)
+    assert wizard._run_director_flow(resumed) == 0
+
+    out = capsys.readouterr().out
+    assert "[素材循环] 当前待办：便利店" in out
+    assert plan_file.is_file(), "续接跑完循环后必须接着规划"
+    # 第二段里唯一的模型调用是段规划本身：回灌（如果重做）会多一次。
+    assert len(llm.requests) == calls_before + 1
+
+
+def test_planner_instruction_example_numbers_segments_from_one():
+    """H10：规划指令里的示例 ``index`` 必须是 1 起——与段号、出站「段1」同口径。
+
+    示例写 0 起时模型会照抄 0 号段，而 ``read_plan_json`` 的读回判据是
+    ``index == position``（1 起）：一次往返就报错，且报的是「第 1 段 index 是 0」。
+    """
+    from minimax_h3_prompt.director.planning import load_instruction
+
+    text = load_instruction()
+    assert '"index": 0' not in text
+    assert '"index": 1' in text and '"index": 2' in text

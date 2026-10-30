@@ -19,6 +19,7 @@ import pytest
 
 from minimax_h3_prompt.brief_parser import (
     Brief,
+    RefItem,
     director_frame_variant,
     route_emits_asset_prompts,
     route_emits_frame_prompts,
@@ -135,6 +136,57 @@ def test_assembler_does_not_append_base_sections_for_director():
     assert "integrated_multimodal_description" in base_out
     ref_out, _ = assemble_and_repair("body", "ref")
     assert "subject_definitions" in ref_out
+
+
+def test_reference_consistency_request_carries_the_registry_for_director_r2v(monkeypatch):
+    """H6：导演台 r2v 的 reference_consistency 请求必须带【参考资产】登记。
+
+    判据原先读 ``brief.mode == "ref"``，导演台 r2v 恒得空串 → 节点拿到的参考资产是
+    「（无）」，六节外壳的 subject_definitions 只能凭空编，指称与挂图对不上。
+    判据必须走能力函数 ``route_emits_asset_prompts``（与资产图节点同一真源）。
+    """
+    from minimax_h3_prompt.graph import nodes
+
+    captured: dict = {}
+
+    def fake_run_agent(agent, message):
+        captured["request"] = message
+        return "草稿"
+
+    monkeypatch.setattr(nodes, "run_agent", fake_run_agent)
+    node = nodes._make_reference_consistency_node({"reference_consistency": object()})
+    state = {
+        "brief": Brief(mode="director", director_mode="r2v"),
+        "script": "林小满推开门",
+        "character_image_prompts": [
+            {"name": "林小满", "positive_prompt": "a young woman in a grey coat"}],
+    }
+
+    assert node(state) == {"subject_defs": "草稿"}
+    request = captured["request"]
+    assert "<Picture 1>：林小满" in request
+    assert "a young woman in a grey coat" in request, "描述没取生图提示词"
+    assert "生图提示词" in request
+
+
+def test_frame_routes_keep_their_own_refs_block_without_the_director_judge(monkeypatch):
+    """H6 的另一半：base 的帧登记与导演台 i2v 的行为**一点不变**。
+
+    base/FL2VA 的 refs 是首尾帧登记：仍由 ``_ref_assets_block`` 的第二支渲染，但
+    **不许**套多参的「语义名指称」纪律（那会把两套指称体系搅在一起）。这个节点对
+    base 本来就早退（``route_emits_asset_prompts`` 恒假），所以直接测那个渲染口；
+    导演台 i2v 走节点，必须与改动前一样给出空定义。
+    """
+    from minimax_h3_prompt.graph import nodes
+
+    base_brief = Brief(mode="base", variant="FL2VA", refs=[
+        RefItem(picture=1, name="首帧", description="", path="first.png")])
+    block = nodes._ref_assets_block({"brief": base_brief}, base_brief)
+    assert "<Picture 1>" in block
+    assert "编号按剧本出场顺序" not in block, "帧路线被套上了多参的语义名指称纪律"
+
+    node = nodes._make_reference_consistency_node({"reference_consistency": object()})
+    assert node({"brief": Brief(mode="director", director_mode="i2v")}) == {"subject_defs": ""}
 
 
 def test_director_r2v_registers_asset_prompts_for_the_subject_definitions():

@@ -38,7 +38,7 @@
 {
   "segments": [
     {
-      "index": 0,
+      "index": 1,
       "start_s": 0,
       "end_s": 6,
       "type": "opening",
@@ -46,7 +46,7 @@
       "end_hook": "她推开玻璃门，右手仍搭在伞柄上"
     },
     {
-      "index": 1,
+      "index": 2,
       "start_s": 6,
       "end_s": 12,
       "type": "continue",

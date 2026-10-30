@@ -45,7 +45,14 @@ _REQUIRED_OUTPUT_FIELDS = (
 )
 
 
-def _now() -> str:
+def utc_now_iso() -> str:
+    """导演台产物时间戳的唯一实现（复审 H7）：账本与交付记录共用一份。
+
+    此前 ``ledger._now`` 与 ``delivery._now`` 各写一遍 ``datetime.now(timezone.utc)
+    .isoformat()``——两处各写一次时，改一处（比如换成带毫秒的格式）另一处不跟着变，
+    同一本会话里的时间戳就会长出两种口径。时间戳是「这是哪一次运行」的唯一线索，
+    不多此一举地做成两份。
+    """
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -79,7 +86,7 @@ def log_director_output(
         "actual_frames": int(actual_frames),
         "cache": str(Path(cache_path).resolve()),
         "sha256": sha256_file(Path(cache_path)),
-        "at": _now(),
+        "at": utc_now_iso(),
     }
     _append_row(path, record)
     return path
@@ -96,7 +103,7 @@ def log_director_invalidate(directory: str | Path, *, segment: int, reason: str)
         "event": DIRECTOR_EVENT_INVALIDATE,
         "segment": int(segment),
         "reason": str(reason),
-        "at": _now(),
+        "at": utc_now_iso(),
     }
     _append_row(path, record)
     return path

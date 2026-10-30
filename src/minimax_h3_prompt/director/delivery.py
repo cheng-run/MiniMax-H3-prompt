@@ -27,13 +27,13 @@ import json
 import shutil
 import zipfile
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from ..asset_ledger import sha256_file
 from ..ref_segments import log_segment_rewrite_round
 from .frames import DirectorPlan
+from .ledger import utc_now_iso
 from .pack import TIMELINE_FILENAME, pack_dir_for
 from .planning import DIRECTOR_DIRNAME
 
@@ -46,10 +46,6 @@ FINAL_SHA_FILENAME = "final.sha256"
 # （``ref_segments.log_segment_rewrite_round``），事后按这一句就能分清「项目里改的」
 # 与「导演台 UI 里改的」。
 REWRITE_FEEDBACK = "导演台 UI 内修改"
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def director_dir(session_dir: str | Path) -> Path:
@@ -253,8 +249,14 @@ def compare_prompts(initial: dict[str, Any],
 # ---------------------------------------------------------------------------
 
 def record_final_film(session_dir: str | Path, *, plan: DirectorPlan,
-                      film_path: str | Path) -> Path:
-    """写 ``director/final-film.json``：路径 + **成片坐标**帧数 + 段数 + 时间。"""
+                      film_path: str | Path) -> tuple[Path, dict[str, Any]]:
+    """写 ``director/final-film.json``：路径 + **成片坐标**帧数 + 段数 + 时间。
+
+    返回 ``(路径, 写进去的那份 record)``（复审 H11）：``deliver`` 要用同一个记录里的
+    帧数/段数，原先把刚写的文件再读回来——写盘与读盘之间多一次 I/O 不是问题，问题是
+    它把「落盘的字节」当成了第二个真相来源（格式一改、读回解析一错，交付报告与记录
+    就会各说各话，而文件本身看起来完全正常）。
+    """
     film = Path(film_path)
     if not film.is_file():
         raise ValueError(f"成片 mp4 不存在：{film}（导演台合并导出之后再交付）")
@@ -265,13 +267,13 @@ def record_final_film(session_dir: str | Path, *, plan: DirectorPlan,
         "path": str(film.resolve()),
         "total_frames": total_frames,
         "segments": len(plan.segments),
-        "at": _now(),
+        "at": utc_now_iso(),
     }
     path = final_film_path(session_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(record, ensure_ascii=False, indent=2),
                     encoding="utf-8")
-    return path
+    return path, record
 
 
 def archive_final_pack(session_dir: str | Path,
@@ -357,14 +359,14 @@ def deliver(session_dir: str | Path, *, plan: DirectorPlan,
     changes = compare_prompts(initial, final)
 
     pack_path, digest = archive_final_pack(session_dir, pack_zip=pack_zip)
-    record_path = record_final_film(session_dir, plan=plan, film_path=film)
+    record_path, record = record_final_film(session_dir, plan=plan, film_path=film)
     for change in changes:
         # 唯一写口：不在这里另写一份追加逻辑（账行形态只住 ref_segments）。
         log_segment_rewrite_round(
             session_dir, segment=change.segment, feedback=REWRITE_FEEDBACK,
             prompt_before=change.prompt_before, prompt_after=change.prompt_after)
 
-    record = json.loads(record_path.read_text(encoding="utf-8"))
+    # 报告取**刚写进去的那份记录**，不再从盘上读回（复审 H11）。
     return DeliveryReport(
         film_path=film.resolve(),
         total_frames=int(record["total_frames"]),

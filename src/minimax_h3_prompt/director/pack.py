@@ -43,7 +43,7 @@ from .frames import (
     duration_sec_for_declared,
     validate_segment_types,
 )
-from .planning import render_give_images
+from .planning import DIRECTOR_DIRNAME, render_give_images
 from .prompts import segment_path
 
 # ---------------------------------------------------------------------------
@@ -206,7 +206,7 @@ class PackedSegment:
     type: str
     task_type: str
     guided: bool
-    declare_frames: int
+    declared_frames: int
     duration_sec: float
     prompt: str
     refs: tuple[PackedMedia, ...] = ()
@@ -240,7 +240,7 @@ class DirectorPackJob:
     @property
     def timeline_total_frames(self) -> int:
         """时间线总帧 = Σ 声明帧（导演台里显示的长度）。"""
-        return sum(segment.declare_frames for segment in self.segments)
+        return sum(segment.declared_frames for segment in self.segments)
 
     @property
     def film_total_frames(self) -> int:
@@ -448,12 +448,12 @@ def validate_segment_media_fields(segments: Sequence[dict]) -> None:
 
 def pack_dir_for(session_dir: str | Path) -> Path:
     """解包目录：``GENxxx/director/pack/``（设计 §3.4）。"""
-    return Path(session_dir) / "director" / PACK_DIRNAME
+    return Path(session_dir) / DIRECTOR_DIRNAME / PACK_DIRNAME
 
 
 def zip_path_for(session_dir: str | Path) -> Path:
     """直接导入的包：``GENxxx/director/initial.mmxpack.zip``。"""
-    return Path(session_dir) / "director" / PACK_ZIP_NAME
+    return Path(session_dir) / DIRECTOR_DIRNAME / PACK_ZIP_NAME
 
 
 def _require_pack_mode(mode: str) -> str:
@@ -533,7 +533,7 @@ def _picture_sources(session_dir: Path) -> tuple[tuple[Path, str], ...]:
 
 def _find_still(session_dir: Path, position: int, stem: str) -> Path | None:
     """段目录里的首/尾帧：``director/assets/NN/<start|end>.<ext>``（按扩展名偏好取第一张）。"""
-    folder = session_dir / "director" / ASSETS_DIRNAME / f"{position:02d}"
+    folder = session_dir / DIRECTOR_DIRNAME / ASSETS_DIRNAME / f"{position:02d}"
     for ext in _ASSET_EXTS:
         candidate = folder / f"{stem}{ext}"
         if candidate.is_file():
@@ -545,7 +545,7 @@ def _require_start_still(session_dir: Path, position: int) -> Path:
     """开场首帧缺了**点名段号**：i2v 漏给首图会静默变成文生视频（设计 §3.4.1）。"""
     found = _find_still(session_dir, position, START_STEM)
     if found is None:
-        expected = session_dir / "director" / ASSETS_DIRNAME / f"{position:02d}"
+        expected = session_dir / DIRECTOR_DIRNAME / ASSETS_DIRNAME / f"{position:02d}"
         raise ValueError(
             f"第 {position} 段缺开场首帧：应放在 {expected}"
             f"/{START_STEM}.png（接受 {'/'.join(_ASSET_EXTS)}）——"
@@ -643,8 +643,8 @@ def _segment_dict(segment: PackedSegment, *, start: int,
     row: dict[str, Any] = {
         "id": f"seg{segment.index:02d}",
         "start": start,
-        "length": segment.declare_frames,
-        "frameCount": segment.declare_frames,
+        "length": segment.declared_frames,
+        "frameCount": segment.declared_frames,
         "durationSec": segment.duration_sec,
         "prompt": segment.prompt,
         "negativePrompt": (FL2V_DEFAULT_NEGATIVE
@@ -687,7 +687,7 @@ def _shot_dict(segment: PackedSegment, row: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": row["id"],
         "durationSec": segment.duration_sec,
-        "frameCount": segment.declare_frames,
+        "frameCount": segment.declared_frames,
         "prompt": segment.prompt,
         "negativePrompt": row["negativePrompt"],
         "continuityFromPrev": segment.guided,
@@ -728,7 +728,7 @@ def _build_timeline(plan: DirectorPlan, segments: Sequence[PackedSegment], *,
     cursor = 0
     for segment in segments:
         rows.append(_segment_dict(segment, start=cursor, settings=settings))
-        cursor += segment.declare_frames
+        cursor += segment.declared_frames
     timeline: dict[str, Any] = {
         "version": TIMELINE_VERSION,
         "timelineMode": (TIMELINE_MODE_FL2V if plan.mode == "fl2v"
@@ -798,31 +798,14 @@ def _build_shared_params(timeline: dict[str, Any]) -> dict[str, Any]:
 
 
 def _build_group_json(row: dict[str, Any]) -> dict[str, Any]:
-    """``asset_groups/NN/group.json``：与 timeline 段同形（``pack.py:417-451``）。
+    """``asset_groups/NN/group.json``：与 timeline 段同形（插件 ``pack.py:417-451``）。
 
-    timeline.json 存在时导入不会读它，但它是包布局的一部分（UI 导出时同形），
-    而且 ``segments[].prompt`` 为空时插件会拿它兜底——保持同源，免得两处说法不同。
+    **直接由段对象派生**（``dict(row)``），不逐键重抄一份键表（复审 H8）：实测两者的
+    键集合完全一致（都是 ``_segment_dict`` 的 18 个键，无增减）。重抄的那份在
+    ``_segment_dict`` 将来加键时会静默少一个——而 ``segments[].prompt`` 为空时插件
+    会拿 group.json 兜底，少一个键就是兜底读到的段与时间线不同形。
     """
-    return {
-        "id": row["id"],
-        "prompt": row["prompt"],
-        "negativePrompt": row["negativePrompt"],
-        "durationSec": row["durationSec"],
-        "frameCount": row["frameCount"],
-        "length": row["length"],
-        "start": row["start"],
-        "taskType": row["taskType"],
-        "refs": row["refs"],
-        "refAudios": [],
-        "refVideos": [],
-        "continuityFromPrev": row["continuityFromPrev"],
-        "refImageSize": row["refImageSize"],
-        "loras": [],
-        "genImage": row["genImage"],
-        "imageFile": row["imageFile"],
-        "startImage": row["startImage"],
-        "endImage": row["endImage"],
-    }
+    return dict(row)
 
 
 def _collect_media(segments: Sequence[PackedSegment]) -> list[PackedMedia]:
@@ -830,6 +813,109 @@ def _collect_media(segments: Sequence[PackedSegment]) -> list[PackedMedia]:
     for segment in segments:
         collected.extend(segment.media)
     return collected
+
+
+def validate_pack_task_type(pack_json: dict[str, Any], timeline: dict[str, Any]) -> None:
+    """``pack.json.widgets.task_type`` 与 ``timeline.global.taskType`` 必须一致。
+
+    导入时 widgets 优先（插件 ``pack.py:1056-1061``），不一致＝用户会用一个没选过的
+    模式跑片。**抽成纯函数**是为了能直接构造不匹配入参证明它咬得住（复审 H5）：
+    此前这段内联在 ``_validate_all`` 末尾，两侧都由 ``plan.mode`` 构造、正常流程
+    不可能触发，也没有用例能证明它真的会抛。
+    """
+    widgets_value = pack_json.get("widgets", {}).get("task_type")
+    timeline_value = timeline.get("global", {}).get("taskType")
+    if widgets_value != timeline_value:
+        raise ValueError(
+            f"pack.json.widgets.task_type={widgets_value!r} 与 "
+            f"timeline.global.taskType={timeline_value!r} 不一致："
+            "导入时 widgets 优先，用户会用一个没选过的模式跑片")
+
+
+def _pass_fail(ok: bool) -> str:
+    return "通过" if ok else "**不通过**"
+
+
+def _canvas_is_aligned(value: object) -> bool:
+    """画布单边是否合格：正整数且是 ``CANVAS_ALIGN`` 的倍数（bool 不是合法画布）。"""
+    return (not isinstance(value, bool) and isinstance(value, int)
+            and value > 0 and value % CANVAS_ALIGN == 0)
+
+
+def _refs_are_continuous(refs: object) -> bool:
+    """``refs[].index`` 是否从 0 连续（插件把 index 直接当槽号，跳号会错位）。"""
+    rows = refs if isinstance(refs, list) else []
+    return [row.get("index") for row in rows] == list(range(len(rows)))
+
+
+def _fl2v_media_ok(segment: dict[str, Any]) -> bool:
+    """mixed 里的 fl2v 段是否把图挂在首尾帧字段（而不是会被剥掉的 refs）。"""
+    if segment.get("refs"):
+        return False
+    start = segment.get("startImage") or segment.get("genImage") or {}
+    end = segment.get("endImage") or {}
+    return bool((isinstance(start, dict) and start.get("imageFile"))
+                or (isinstance(end, dict) and end.get("imageFile")))
+
+
+def _render_conclusions(plan: DirectorPlan, timeline: dict[str, Any],
+                        shared: dict[str, Any],
+                        all_paths: Sequence[str]) -> tuple[str, ...]:
+    """八条装配约束的逐条结论——**从实际值/校验结果生成**，不是手写的「通过」常量（复审 H5）。
+
+    为什么不能手写：校验器被改坏（或被删空）时，报告照样写八行「通过」，而包已经
+    导不进去——那份报告正是用户判断「能不能导入」的唯一依据。这里每条结论都各自
+    重算一次判据并带上实际值（路径数、画布、模式、最多几张图），写错的结论至少能被
+    读报告的人当场看出（用例 ``test_conclusions_report_failure_when_a_validator_is_emptied``
+    就是把这个形态钉死）。
+    """
+    rows = timeline["segments"]
+    output = timeline["output"]
+
+    bad_paths = [path for path in all_paths if not is_ascii_pack_path(path)]
+    shared_common = shared.get("commonEnabled")
+    timeline_common = timeline.get("global", {}).get("commonEnabled")
+    max_refs = max((len(row.get("refs") or []) for row in rows), default=0)
+    refs_ok = (max_refs <= PICTURE_SLOT_LIMIT
+               and all(_refs_are_continuous(row.get("refs")) for row in rows))
+    missing_output = {
+        key: output.get(key) for key, value in REQUIRED_OUTPUT.items()
+        if output.get(key) != value}
+    output_ok = (not missing_output
+                 and output.get("mode") == OUTPUT_MODE_FIXED
+                 and bool(str(output.get("continuityMode") or "").strip()))
+    if plan.mode == "mixed":
+        fl2v_rows = [row for row in rows if row.get("taskType") == "fl2v"]
+        bad_fl2v = [row for row in fl2v_rows if not _fl2v_media_ok(row)]
+        bad_tasks = [row.get("taskType") for row in rows
+                     if row.get("taskType") not in MIXED_SEGMENT_TASKS]
+        mixed_shape = (f"{_pass_fail(not bad_fl2v)}（{len(fl2v_rows)} 个 fl2v 段，"
+                       f"违规 {len(bad_fl2v)} 个）")
+        mixed_tasks = (f"{_pass_fail(not bad_tasks)}（{len(rows)} 段，"
+                       f"非法任务类型 {len(bad_tasks)} 个）")
+    else:
+        # 非 mixed 时间线没有 fl2v 段与段内任务类型；写清「按哪个模式预检」而不是
+        # 一句无信息的「本期非 mixed」——模式写错时（比如 r2v 混进 mixed 校验）能看出来。
+        mixed_shape = f"通过（本期非 mixed：taskType={plan.mode}，无 fl2v 段）"
+        mixed_tasks = f"通过（本期非 mixed：taskType={plan.mode}）"
+    return (
+        f"1. 包内路径 ASCII：{_pass_fail(not bad_paths)}"
+        f"（共 {len(all_paths)} 个路径，不合规 {len(bad_paths)} 个）",
+        f"2. commonEnabled=false（shared_params={shared_common!r} / "
+        f"timeline.global={timeline_common!r}）："
+        f"{_pass_fail(shared_common is False and timeline_common is False)}",
+        f"3. 画布 {timeline['width']}×{timeline['height']} 是 {CANVAS_ALIGN} 的倍数："
+        f"{_pass_fail(_canvas_is_aligned(timeline['width']) and _canvas_is_aligned(timeline['height']))}",
+        f"4. refImageSize={output.get('refImageSize')!r}（只认 "
+        f"{'/'.join(REF_IMAGE_SIZES)}）：{_pass_fail(output.get('refImageSize') in REF_IMAGE_SIZES)}",
+        f"5. 每段参考图 ≤ {PICTURE_SLOT_LIMIT} 且 index 从 0 连续："
+        f"{_pass_fail(refs_ok)}（最多 {max_refs} 张/段）",
+        f"6. mixed 的 fl2v 段用首尾帧字段而非 refs：{mixed_shape}",
+        f"7. output 五条引导/导出配置齐备且挂在 output 下：{_pass_fail(output_ok)}"
+        f"（mode={output.get('mode')!r}，continuityMode={output.get('continuityMode')!r}，"
+        f"continuityOverlapFrames={output.get('continuityOverlapFrames')!r}）",
+        f"8. mixed 段类型只允许 {'/'.join(sorted(MIXED_SEGMENT_TASKS))}：{mixed_tasks}",
+    )
 
 
 def _validate_all(plan: DirectorPlan, timeline: dict[str, Any], pack_json: dict[str, Any],
@@ -852,22 +938,8 @@ def _validate_all(plan: DirectorPlan, timeline: dict[str, Any], pack_json: dict[
     validate_output_config(timeline["output"])
     validate_mixed_segment_tasks(timeline["segments"], task_type=plan.mode)
     validate_segment_media_fields(timeline["segments"])
-    if pack_json["widgets"]["task_type"] != timeline["global"]["taskType"]:
-        raise ValueError(
-            f"pack.json.widgets.task_type={pack_json['widgets']['task_type']!r} 与 "
-            f"timeline.global.taskType={timeline['global']['taskType']!r} 不一致："
-            "导入时 widgets 优先，用户会用一个没选过的模式跑片")
-    return (
-        f"1. 包内路径 ASCII：通过（{len(all_paths)} 个路径全部匹配插件白名单）",
-        "2. commonEnabled=false（shared_params 与 timeline.global 两处）：通过",
-        f"3. 画布 {timeline['width']}×{timeline['height']} 是 {CANVAS_ALIGN} 的倍数：通过",
-        f"4. refImageSize={timeline['output']['refImageSize']}（只认 "
-        f"{'/'.join(REF_IMAGE_SIZES)}）：通过",
-        f"5. 每段参考图 ≤ {PICTURE_SLOT_LIMIT} 且 index 从 0 连续：通过",
-        "6. mixed 的 fl2v 段用首尾帧字段而非 refs：通过（本期非 mixed，按契约预检）",
-        "7. output 五条引导/导出配置齐备且挂在 output 下：通过",
-        "8. mixed 段类型只允许 t2v/i2v/fl2v/r2v：通过（本期非 mixed，按契约预检）",
-    )
+    validate_pack_task_type(pack_json, timeline)
+    return _render_conclusions(plan, timeline, shared, all_paths)
 
 
 def _write_pack(pack_dir: Path, zip_path: Path, pack_json: dict[str, Any],
@@ -940,7 +1012,7 @@ def prepare_director_pack(session_dir: str | Path, plan: DirectorPlan, *,
             type=segment.type,
             task_type=plan.mode,
             guided=segment.guided,
-            declare_frames=segment.declared_frames,
+            declared_frames=segment.declared_frames,
             duration_sec=duration_sec_for_declared(segment.declared_frames),
             prompt=texts[segment.index],
             refs=media_by_segment[segment.index].refs,

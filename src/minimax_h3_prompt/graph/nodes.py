@@ -82,11 +82,14 @@ def _ref_assets_block(state: PipelineState, brief: Brief) -> str:
     而那是链上 ``parallel_image_prompts`` 的产物，构造节点时还不存在；这正是三个消费者
     （reference_consistency／身份圆桌／提示词工程师）都从这里取、不再各自抄一份的原因。
 
-    多参纪律只对 ``mode="ref"`` 说：帧变体的 refs 是首/尾帧登记，套「素材语义名指称」
-    会把两套指称体系搅在一起。多参纪律与角色提示词（prompt_engineer.md）互为表里：
-    这里钉**数据侧**（哪些编号、哪些名字、描述取自哪），角色提示词钉写法。
+    多参纪律只对**产资产图的路线**说（``route_emits_asset_prompts``：ref 与导演台
+    r2v/rv2v/mixed，复审 H6）：帧变体的 refs 是首/尾帧登记，套「素材语义名指称」
+    会把两套指称体系搅在一起。判据原先读 ``brief.mode == "ref"``：导演台 r2v 的资产图
+    提示词照常产出、素材登记却恒为空串，reference_consistency 与写段拿到的参考资产
+    是「（无）」——指称与挂图对不上。多参纪律与角色提示词（prompt_engineer.md）互为
+    表里：这里钉**数据侧**（哪些编号、哪些名字、描述取自哪），角色提示词钉写法。
     """
-    if brief.mode == "ref":
+    if route_emits_asset_prompts(brief):
         refs = ref_asset_registry(state, brief)
         if not refs:
             return ""
@@ -96,6 +99,8 @@ def _ref_assets_block(state: PipelineState, brief: Brief) -> str:
             "素材指称以**语义名为主**，<Picture N> 官方标签在格式要求处兜底。\n"
             + format_ref_meta(refs)
         )
+    # 帧路线的 refs 是首/尾帧登记（base 的 FL2VA/I2VA 等）：判据与改动前逐字相同，
+    # ``route_emits_asset_prompts`` 对 base 恒为假、对导演台 i2v/fl2v 也为假。
     if brief_uses_refs(brief) and brief.refs:
         return format_ref_meta(brief.refs)
     return ""

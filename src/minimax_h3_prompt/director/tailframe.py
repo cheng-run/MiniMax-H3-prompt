@@ -50,6 +50,9 @@ from .frames import (
     is_guided,
     segment_type_label,
 )
+# 产物目录名只取常量（复审 H1）：尾帧文档与末帧图必须和段表/段文件落在同一个
+# ``GENxxx/director/``，硬写一份字面量会在常量改动时静默写到别处。
+from .planning import DIRECTOR_DIRNAME
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 _INSTRUCTION_NAME = "tailframe_writer_director.md"
@@ -120,7 +123,7 @@ def load_instruction() -> str:
 
 def tailframe_path(session_dir: str | Path, position: int) -> Path:
     """第 ``position`` 段（1 起）的尾帧文档路径。"""
-    return Path(session_dir) / "director" / TAILFRAME_FILENAME.format(position=position)
+    return Path(session_dir) / DIRECTOR_DIRNAME / TAILFRAME_FILENAME.format(position=position)
 
 
 def last_frame_png_path(session_dir: str | Path, segment: int) -> Path:
@@ -129,7 +132,7 @@ def last_frame_png_path(session_dir: str | Path, segment: int) -> Path:
     它是下一段的起点画面（设计 §3.3），所以这张图的编号是「被取帧的那一段」而不是
     「要用它的那一段」——级联重跑按同一编号删（#106），编号口径必须只有一个来源。
     """
-    return Path(session_dir) / "director" / LAST_FRAME_FILENAME.format(segment=segment)
+    return Path(session_dir) / DIRECTOR_DIRNAME / LAST_FRAME_FILENAME.format(segment=segment)
 
 
 # ---------------------------------------------------------------------------
