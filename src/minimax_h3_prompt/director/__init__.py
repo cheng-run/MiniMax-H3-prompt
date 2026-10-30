@@ -19,8 +19,11 @@ from .frames import (
     is_guided,
     is_on_grid,
     land_exports,
+    max_segments_for_mode,
+    max_total_seconds_for_mode,
     optional_images_for,
     segment_type_label,
+    segment_types_for_mode,
     validate_segment_types,
 )
 
@@ -38,7 +41,10 @@ __all__ = [
     "is_guided",
     "is_on_grid",
     "land_exports",
+    "max_segments_for_mode",
+    "max_total_seconds_for_mode",
     "optional_images_for",
     "segment_type_label",
+    "segment_types_for_mode",
     "validate_segment_types",
 ]

@@ -42,7 +42,6 @@ from ..tools.image_prompt_discipline import check_image_prompt, discipline_text
 from ..tools.reference_auditor import describe_image
 from .frames import (
     IMAGE_END,
-    PLAN_MODES,
     SEGMENT_TYPES,
     DirectorPlan,
     DirectorSegment,
@@ -92,23 +91,30 @@ TAILFRAME_FILENAME = "tailframe-{position:02d}.md"
 LAST_FRAME_FILENAME = "frame-{segment:02d}-last.png"
 
 
-def tailframe_segment_types() -> tuple[str, ...]:
-    """需要终点画面的段类型：必填给图清单在**所有**可规划模式下都含终点画面。
+def tailframe_segment_types(mode: str) -> tuple[str, ...]:
+    """该模式下需要终点画面的段类型：**该模式的**必填给图清单里含终点画面。
 
     现算而不是常量快照：给图契约（``frames.give_images_for``）是唯一真源，这里只在它上面
-    加一层「恒含终点画面」的筛选。调用时求值，改契约的用例才咬得住（测试用 monkeypatch
-    把 ``continue`` 改成要终点画面，断言触发集合跟着变）。
+    加一层筛选。调用时求值，改契约的用例才咬得住（测试用 monkeypatch 把 ``continue``
+    改成要终点画面，断言触发集合跟着变）。
+
+    为什么要 ``mode``（2026-10-30 用户裁定）：i2v 段内不要终点画面，触发集合随模式变空。
+    原先按「所有可规划模式都含终点画面」筛选，是假设终点画面与模式无关——i2v 证伪了它。
     """
     return tuple(
         segment_type for segment_type in SEGMENT_TYPES
-        if all(IMAGE_END in give_images_for(segment_type, mode) for mode in PLAN_MODES)
+        if IMAGE_END in give_images_for(segment_type, mode)
     )
 
 
-def needs_tailframe(segment_type: str) -> bool:
-    """该段类型要不要终点画面；未知类型**报错**（同 ``frames.is_guided`` 的口径，不回落）。"""
+def needs_tailframe(segment_type: str, mode: str) -> bool:
+    """该段类型在该模式下要不要终点画面；未知类型**报错**（同 ``frames.is_guided`` 的口径）。
+
+    ``mode`` 不给默认值：默认值会让漏传的调用点在 i2v 下按别的模式判，静默多写一份
+    用户拿不到对应图片的尾帧词（本仓「规则在、接线不在」的老形态）。
+    """
     is_guided(segment_type)
-    return segment_type in tailframe_segment_types()
+    return segment_type in tailframe_segment_types(mode)
 
 
 def tailframe_sections() -> tuple[str, str, str]:
@@ -139,7 +145,8 @@ def last_frame_png_path(session_dir: str | Path, segment: int) -> Path:
 # 请求 → 归一 → 校验（纯函数）
 # ---------------------------------------------------------------------------
 
-def build_tailframe_request(segment: DirectorSegment, *, start_image: str | Path,
+def build_tailframe_request(segment: DirectorSegment, *, mode: str,
+                            start_image: str | Path,
                             start_frame_description: str,
                             model: str = DEFAULT_IMAGE_MODEL) -> str:
     """组装一次图生图写作请求（入参全部显式，不依赖 state——issue #26 的教训）。
@@ -147,12 +154,15 @@ def build_tailframe_request(segment: DirectorSegment, *, start_image: str | Path
     起点画面的内容由**视觉模型读图**给出（``describe_image`` 是读图唯一口），写词模型
     拿到的是一段可复述的事实文本：让它凭空想「上一段结束时画面里有什么」，保留项声明
     就会写成设计稿而不是这张图上真有的东西。
+
+    ``mode`` 是**触发判据的一部分**（i2v 下运镜/收尾段不要终点画面，2026-10-30 用户裁定），
+    所以它必填：默认值会让「忘了传」在 i2v 会话上静默按别的模式产词。
     """
-    if not needs_tailframe(segment.type):
+    if not needs_tailframe(segment.type, mode):
         raise ValueError(
             f"第 {segment.index} 段类型 {segment.type!r}（{segment_type_label(segment.type)}）"
-            "不需要终点画面：尾帧变换只对运镜段与收尾定格段产出"
-            f"（触发集合：{'/'.join(tailframe_segment_types())}）")
+            f"在 {mode} 下不需要终点画面：尾帧变换只对运镜段与收尾定格段产出"
+            f"（触发集合：{'/'.join(tailframe_segment_types(mode)) or '空'}）")
     heads = "\n".join(tailframe_sections())
     return (
         f"{load_instruction()}\n\n"
@@ -297,7 +307,7 @@ class WrittenTailframe:
         return tuple(issue for issue in self.issues if issue.severity == "error")
 
 
-def write_tailframe_prompt(segment: DirectorSegment, *, llm,
+def write_tailframe_prompt(segment: DirectorSegment, *, mode: str, llm,
                            start_image: str | Path,
                            start_frame_description: str,
                            model: str = DEFAULT_IMAGE_MODEL) -> str | None:
@@ -308,7 +318,7 @@ def write_tailframe_prompt(segment: DirectorSegment, *, llm,
     用户的面摆出来，不返回 ``None`` 装死（那会把「模型写歪了」与「网关卡住了」混成一件）。
     """
     base_request = build_tailframe_request(
-        segment, start_image=start_image,
+        segment, mode=mode, start_image=start_image,
         start_frame_description=start_frame_description, model=model)
     request = base_request
     text: str | None = None
@@ -354,7 +364,7 @@ def write_tailframe_prompts(plan: DirectorPlan, *, llm, session_dir: str | Path,
     descriptions: dict[Path, str] = {}
     written: list[WrittenTailframe] = []
     for segment in plan.segments:
-        if not needs_tailframe(segment.type):
+        if not needs_tailframe(segment.type, plan.mode):
             continue
         if image not in descriptions:
             try:
@@ -364,7 +374,7 @@ def write_tailframe_prompts(plan: DirectorPlan, *, llm, session_dir: str | Path,
                 raise RuntimeError(
                     f"第 {segment.index} 段起点画面读图失败：{exc}") from exc
         text = write_tailframe_prompt(
-            segment, llm=llm, start_image=image,
+            segment, mode=plan.mode, llm=llm, start_image=image,
             start_frame_description=descriptions[image], model=model)
         if text is None:
             raise RuntimeError(

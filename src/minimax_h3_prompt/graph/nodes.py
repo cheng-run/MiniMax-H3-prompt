@@ -707,7 +707,10 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
               "（按画布写构图、按光线的方向/强度/质感写光）。"
             + "只输出 JSON。\n"
             + _ctx(
-                变体=brief.variant,
+                # 送**有效变体**，不送 ``brief.variant``：导演台那是 T2VA 占位（ADR 0024），
+                # 而上面那句要求已经让模型按 i2v/fl2v 出帧——两处口径相反，模型两边都能
+                # 自圆其说（2026-10-30 实跑复审）。
+                变体=variant,
                 原始主题=brief.plot,
                 # 词表是**本次请求的数据**、不在系统提示词里，故三条请求各自带一份。
                 # 为什么、以及词该落在哪儿，见 `_scene_terms_block`。

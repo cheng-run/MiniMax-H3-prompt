@@ -28,6 +28,61 @@ KEEP_TAIL_FRAMES = 12
 # 引导开关、给图清单、plan.json 的合法性校验都从这里派生，别在调用点各写一份。
 SEGMENT_TYPES = ("opening", "continue", "camera_same", "camera_cut", "ending")
 
+# 各模式**允许**的段类型（ADR 0026，2026-10-30 修订版）：i2v 只允许开场，且整条段表
+# 只能一段（见下面的 ``_MODE_MAX_SEGMENTS``）。依据是插件执行分支，不是风格偏好：
+#
+# 1. ``gen_timeline.py:304-310``：i2v 的**每一段**都必须自带源图——``GEN_IMAGE_KEYS``
+#    （``:22``）只收 i2v，而我们的包写 ``timelineMode="prompt_batch"``，插件在
+#    ``:393-394`` 把 ``edit_mode`` 强制成 ``"segment"``，于是 ``_resolve_gen_image_ref``
+#    （``:126-144``）只读段内 ``genImage``/段级 ``imageFile``，「全局一张图」分支不可达。
+# 2. ``executor_core.py:851-856``：``i2v_new_anchor = task_key == "i2v" and first_frame
+#    is not None`` → ``use_motion_context`` 恒假。i2v 段必然有首帧图，于是**段间引导
+#    对 i2v 永久失效**。
+#
+# 两条合起来＝i2v 在插件里没有「续接」这个语义：多段只会得到 N 个互不相接的片段，接缝
+# 是硬切。``continue``/``ending`` 这类靠「起点就是上一段终点」成立的类型，在 i2v 下是
+# 做不到的声明；运镜/切镜同理属 fl2v（用户原话：「fl2v 是一个高级 i2v，因为有首尾帧
+# 可以运镜……你 i2v 来凑什么热闹」）。
+# 没登记的模式＝全部五型（t2v/r2v/fl2v 与二期的 v2v/rv2v/mixed 一个都不收窄）。
+_SEGMENT_TYPES_BY_MODE: dict[str, tuple[str, ...]] = {
+    "i2v": ("opening",),
+}
+
+# 各模式段表**最多几段**（未登记＝不限）。i2v 恒为 1：插件的 i2v 是「一张首帧 → 一段
+# 视频」，分段对它没有意义（依据见上一条）。单段制顺带让插件「每段都要有源图」这条
+# 契约在我们的产物里恒成立——包里只有一段，也就只有一张首帧，第 2 段不可能缺图。
+_MODE_MAX_SEGMENTS: dict[str, int] = {
+    "i2v": 1,
+}
+
+# 单段模式的时长上限：全仓「单段视频 4–15 秒」的口径住 ``tools/preflight.py:32-33``。
+# 这里刻意不 import 它——preflight 会拉 cv2/numpy，而本模块是纯算术件。两个 15 由用例
+# ``test_single_segment_max_matches_preflight`` 交叉校验：改一处不改另一处当场报红。
+SINGLE_SEGMENT_MAX_S = 15.0
+
+
+def segment_types_for_mode(mode: str) -> tuple[str, ...]:
+    """该模式允许的段类型清单；规划请求、解析与读回校验**都从这里取**。
+
+    为什么要有这一层：清单若在解析处与请求处各写一份，改一处漏一处，模型照着旧清单
+    产出的段类型会在读回时才被判红——用户已经为那次规划付过钱。
+    """
+    return _SEGMENT_TYPES_BY_MODE.get(mode, SEGMENT_TYPES)
+
+
+def max_segments_for_mode(mode: str) -> int | None:
+    """该模式的段表最多几段；``None``＝不限（ADR 0026：i2v 单段）。"""
+    return _MODE_MAX_SEGMENTS.get(mode)
+
+
+def max_total_seconds_for_mode(mode: str) -> float | None:
+    """该模式整片最多多少**秒**；``None``＝不限。
+
+    单段模式（i2v）的整片就是那一段，所以整片上限＝单段上限。用秒而不是帧，是因为
+    这道闸要拦在用户刚答完总时长的时候——那时手上只有秒，还没有段表。
+    """
+    return SINGLE_SEGMENT_MAX_S if max_segments_for_mode(mode) == 1 else None
+
 SEGMENT_TYPE_LABELS = {
     "opening": "开场",
     "continue": "续接",
@@ -93,20 +148,39 @@ def segment_type_label(segment_type: str) -> str:
     return SEGMENT_TYPE_LABELS[segment_type]
 
 
-def validate_segment_types(types: Sequence[str]) -> None:
-    """校验整条段表类型序列：非空、类型合法、首段必须是开场。
+def validate_segment_types(types: Sequence[str], mode: str) -> None:
+    """校验整条段表类型序列：非空、段数不超本模式上限、类型属于**本模式允许清单**、
+    首段必须是开场。
 
     首段约束不是风格要求：段间引导要求「段数 ≥ 2、段号 > 0、引用上段」三条同时成立
     （CONTEXT 术语「段间引导」），首段写成引导型等于声明一件插件做不到的事，且插件
     会**静默硬切**——正是本仓要抢在它前面报错的那类降级。
+
+    ``mode`` 必填（ADR 0026）：i2v 下运镜/切镜段是**做不到的声明**，不静默改判成别的
+    类型（改判会擅改用户内容），也不留给打包时才发现。**段数上限**同理：i2v 单段，
+    多段在插件里必然缺源图（``gen_timeline.py:304-310``）或互不衔接
+    （``executor_core.py:851-856``），所以在这里拦，而不是让用户导入后看英文报错。
     """
     if not types:
         raise ValueError("段表为空：导演台至少要有一段")
+    limit = max_segments_for_mode(mode)
+    if limit is not None and len(types) > limit:
+        raise ValueError(
+            f"{mode} 模式的段表最多 {limit} 段，实际 {len(types)} 段："
+            "插件的 i2v 是「一张首帧 → 一段视频」，每段都必须自带源图、且只要有首帧"
+            "就跳过段间引导（gen_timeline.py:304-310 / executor_core.py:851-856），"
+            "多段只会得到互不相接的片段。长片请走 fl2v（ADR 0026）")
+    allowed = segment_types_for_mode(mode)
     for index, segment_type in enumerate(types, 1):
         if segment_type not in SEGMENT_TYPES:
             raise ValueError(
                 f"第 {index} 段类型非法：{segment_type!r}"
                 f"（应为 {'/'.join(SEGMENT_TYPES)} 之一）")
+        if segment_type not in allowed:
+            raise ValueError(
+                f"第 {index} 段类型 {segment_type!r} 不属于 {mode} 模式："
+                f"本模式只允许 {'/'.join(allowed)}"
+                "（运镜与切镜段要首尾帧才能钉住起止点，属于 fl2v——ADR 0026）")
     if types[0] != FIRST_SEGMENT_TYPE:
         raise ValueError(
             f"第 1 段必须是 {FIRST_SEGMENT_TYPE}（开场），实际 {types[0]!r}："
@@ -118,7 +192,7 @@ def give_images_for(segment_type: str, mode: str) -> tuple[str, ...]:
 
     尾帧（终点画面）打包时还不存在：它由 #107 的尾帧变换提示词产出、用户在导演台
     UI 里逐段挂。``opening`` 段按模式分派；``fl2v`` 的尾帧与 ``r2v`` 的首帧是**可选**
-    的，见 ``optional_images_for``。
+    的，见 ``optional_images_for``。``i2v`` 段内不要终点画面（见下方分支）。
     """
     if mode not in PLAN_MODES:
         raise ValueError(
@@ -127,6 +201,11 @@ def give_images_for(segment_type: str, mode: str) -> tuple[str, ...]:
     is_guided(segment_type)  # 类型合法性
     if segment_type == "continue":
         return ()
+    # i2v 单段（ADR 0026 修订版）：唯一那段就是开场，给首帧；其余段类型在本模式下
+    # 根本不允许出现（``segment_types_for_mode`` 只放行 opening，段数上限又是 1），
+    # 所以这里不再给不可达情形发明规则——给不可达分支写规则就是下一个误读源。
+    if mode == "i2v":
+        return (IMAGE_FIRST,) if segment_type == "opening" else ()
     if segment_type == "camera_same":
         return (IMAGE_END,)
     if segment_type == "camera_cut":
@@ -239,7 +318,7 @@ def _export_of(segment_type: str, declared_frames: int) -> int:
 
 
 def land_exports(types: Sequence[str], raw_frames: Sequence[int],
-                 target_frames: int) -> tuple[list[int], str | None]:
+                 target_frames: int, *, mode: str) -> tuple[list[int], str | None]:
     """把每段声明帧落到 17k+5 网格，并让导出合计尽量逼近 ``target_frames``（AC1/AC4）。
 
     ADR 0025 的两条硬规则决定这里不能「先均分再四舍五入」：
@@ -258,7 +337,7 @@ def land_exports(types: Sequence[str], raw_frames: Sequence[int],
     为 None。这条路线不可能精确到任意秒（ADR 0025「后果」），说明必须出站，不能静默。
     """
     types = list(types)
-    validate_segment_types(types)
+    validate_segment_types(types, mode)
     raw = [_require_positive_int(value, f"第 {index} 段提议帧")
            for index, value in enumerate(raw_frames, 1)]
     if len(raw) != len(types):

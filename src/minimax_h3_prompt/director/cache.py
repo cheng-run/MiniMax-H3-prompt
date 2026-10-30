@@ -125,6 +125,12 @@ def validate_node_id(node_id: object) -> str:
         node = str(node_id or "").strip()
     except Exception:  # noqa: BLE001 - 与 normalize_cache_name 同一纪律：清洗口不裸抛
         node = ""
+    # ComfyUI 节点标题栏显示的是 `#365`，而插件拿到的 ``unique_id`` 是 `365`。用户照抄
+    # 标题就会多一个 `#`，我们拼的目录名与插件写盘的不是同一个——陪跑数帧时才发现
+    # 「目录不存在」（2026-10-30 真实会话里存的正是 `#365`）。剥前导 `#` 是归一
+    # **展示符号**，不动用户真正的 id。
+    if node.startswith("#"):
+        node = node[1:].strip()
     if not node:
         raise ValueError(
             "节点 id 不能为空：段缓存目录名是「缓存名_节点id」，缺了这段就找不到缓存")

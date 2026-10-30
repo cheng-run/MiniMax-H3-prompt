@@ -32,8 +32,11 @@ from .frames import (
     is_guided,
     is_on_grid,
     land_exports,
+    max_segments_for_mode,
+    max_total_seconds_for_mode,
     optional_images_for,
     segment_type_label,
+    segment_types_for_mode,
     validate_segment_types,
 )
 # 关键帧读图块与 JSON 抓取都**复用 base/ref 那一份**（同一段文本、同一套宽容度）：
@@ -88,6 +91,21 @@ def _require_number(value: object, what: str) -> float:
     return float(value)
 
 
+def _require_mode_duration(mode: str, total_s: float) -> None:
+    """单段模式（i2v）的整片时长上限；超了**当场**报错，不把请求发给模型。
+
+    这道闸必须在调模型之前（``plan_director_segments`` 也调它）：i2v 单段时整片＝那
+    一段，而一段的时长上限是全仓口径 4–15 秒（``frames.SINGLE_SEGMENT_MAX_S``）。
+    等模型答完再拦，用户为一次注定作废的规划付过钱（ADR 0026 修订版）。
+    """
+    limit_s = max_total_seconds_for_mode(mode)
+    if limit_s is not None and total_s > limit_s + _BOUNDARY_TOLERANCE:
+        raise ValueError(
+            f"{mode} 模式的整片时长 {total_s:g} 秒超过单段上限 {limit_s:g} 秒："
+            "该模式在插件里是「一张首帧 → 一段视频」（单段），这一段的时长就是整片"
+            "时长。要更长的片子请选 fl2v（ADR 0026）")
+
+
 def _build_segments(mode: str, types: list[str], exports: list[int],
                     summaries: list[str], hooks: list[str]) -> tuple[DirectorSegment, ...]:
     """确定性层：把「类型 + 已落位导出帧」装配成段表（声明帧/累计帧/给图全在这里派生）。"""
@@ -126,6 +144,7 @@ def parse_director_plan(text: str, total_s: float, *, mode: str) -> DirectorPlan
     total_s = _require_number(total_s, "视频总时长")
     if total_s <= 0:
         raise ValueError(f"视频总时长必须为正，实际 {total_s}")
+    _require_mode_duration(mode, total_s)
     total_frames = round(total_s * FPS)
 
     data = _extract_json(text)
@@ -140,6 +159,7 @@ def parse_director_plan(text: str, total_s: float, *, mode: str) -> DirectorPlan
     summaries: list[str] = []
     hooks: list[str] = []
     windows: list[tuple[float, float]] = []
+    allowed_types = segment_types_for_mode(mode)
     for position, item in enumerate(raw_segments, 1):
         if not isinstance(item, dict):
             raise ValueError(f"第 {position} 段不是 JSON 对象：{item!r}")
@@ -148,6 +168,13 @@ def parse_director_plan(text: str, total_s: float, *, mode: str) -> DirectorPlan
             raise ValueError(
                 f"第 {position} 段类型非法：{segment_type!r}"
                 f"（应为 {'/'.join(SEGMENT_TYPES)} 之一；缺失同样算非法）")
+        if segment_type not in allowed_types:
+            # ADR 0026：i2v 下判出运镜/切镜段是**做不到的声明**。不静默改判成
+            # continue——那会把一段本要换镜的内容写成连续镜头，擅改用户内容。
+            raise ValueError(
+                f"第 {position} 段类型 {segment_type!r} 不属于 {mode} 模式："
+                f"本模式只允许 {'/'.join(allowed_types)}"
+                "（运镜与切镜段要首尾帧才能钉住起止点，属于 fl2v）")
         start = _require_number(item.get("start_s"), f"第 {position} 段 start_s")
         end = _require_number(item.get("end_s"), f"第 {position} 段 end_s")
         if end - start <= 0:
@@ -163,7 +190,7 @@ def parse_director_plan(text: str, total_s: float, *, mode: str) -> DirectorPlan
             "落位，前面不许留空")
     # 类型序列先于窗口校验：首段不是开场是**结构性**错误（引导在段号 0 上不生效），
     # 比「没覆盖到总时长」更该先报——顺带让 `land_exports` 的校验不被窗口 mess 掩住。
-    validate_segment_types(types)
+    validate_segment_types(types, mode)
     for position, (start, end) in enumerate(windows, 1):
         if position > 1 and abs(start - windows[position - 2][1]) > _BOUNDARY_TOLERANCE:
             raise ValueError(
@@ -186,7 +213,7 @@ def parse_director_plan(text: str, total_s: float, *, mode: str) -> DirectorPlan
         max(1, round(target_frames * (end - start) / total_s))
         for start, end in windows
     ]
-    exports, note = land_exports(types, raw_frames, target_frames)
+    exports, note = land_exports(types, raw_frames, target_frames, mode=mode)
     segments = _build_segments(mode, types, exports, summaries, hooks)
     # plan.json 的 ``total_frames`` 是**实际落位**（成片坐标），不是目标：读回校验
     # 要求 ``Σ export == total_frames``，而目标只出现在出站说明里（ADR 0025）。
@@ -215,15 +242,30 @@ def plan_director_segments(shot_table: str, total_s: float, llm, *, mode: str,
     """
     _require_mode(mode)
     total_s = _require_number(total_s, "视频总时长")
+    # 时长上限必须在调模型之前拦：i2v 单段时整片＝那一段，等模型答完再拒，用户为一次
+    # 注定作废的规划付过钱（ADR 0026 修订版）。
+    _require_mode_duration(mode, total_s)
     total_frames = round(total_s * FPS)
     frame_block = (
         f"\n{FRAME_CONTEXT_HEADER}\n{frame_context}\n"
         if frame_context.strip() else ""
     )
     revision_block = f"\n{revision_context}\n" if revision_context.strip() else ""
+    allowed = segment_types_for_mode(mode)
+    # 允许清单是**本次请求的数据**（系统提示词是五型共用一份，不知道模式）：写死在
+    # 提示词里，i2v 就会照着别的模式的口径判运镜段，用户已经付过规划的钱才发现。
+    mode_scope = (
+        f"本视频是导演台 {mode} 模式，段类型只能从以下清单里选：{'/'.join(allowed)}\n"
+        f"（其他段类型在本模式下一律不许出现，程序会判为不合格。）\n"
+    )
+    if max_segments_for_mode(mode) == 1:
+        # 段数上限也要进请求：系统提示词不知道模式，不写在这里模型会照「多段叙事」的
+        # 习惯给五段，然后整份回复被判不合格——同样白付一次规划（ADR 0026 修订版）。
+        mode_scope += "本模式的段表只能有 1 段：整片就是一个镜头，不要拆分段。\n"
     request = (
         f"{load_instruction()}\n\n"
         f"视频总时长：{total_s:g} 秒（总帧 {total_frames} 帧，{FPS}fps）\n"
+        f"{mode_scope}"
         f"{frame_block}"
         f"{revision_block}"
         f"\n分镜表：\n{shot_table}"
@@ -298,6 +340,12 @@ def read_plan_json(path: Path) -> DirectorPlan:
             raise ValueError(
                 f"{where}未知段类型：{segment_type!r}"
                 f"（应为 {'/'.join(SEGMENT_TYPES)} 之一）")
+        if segment_type not in segment_types_for_mode(mode):
+            # 读回也要按模式校验：旧表或手改过的表在续跑时同样不许带进 i2v 的运镜段
+            # （ADR 0026）。判据与规划期同源（``segment_types_for_mode``）。
+            raise ValueError(
+                f"{where}类型 {segment_type!r} 不属于 {mode} 模式："
+                f"本模式只允许 {'/'.join(segment_types_for_mode(mode))}")
         index = item.get("index")
         # bool 是 int 的子类：True == 1 会让首段的 index 校验静默放行，得单独挡。
         if isinstance(index, bool) or not isinstance(index, int) or index != position:
@@ -349,6 +397,10 @@ def read_plan_json(path: Path) -> DirectorPlan:
             give_images=tuple(expected_images),
         ))
 
+    # 整表规则（段数上限、首段必须是开场）也要在读回时跑一遍：手改过的表、或按旧口径
+    # 留下的 5 段 i2v 表（2026-10-30 那一版假定 i2v 能靠引导续接），续跑时同样不许
+    # 带进打包——那时的表会让插件在建计划期抛 ``Segment #2 has no source image``。
+    validate_segment_types([segment.type for segment in segments], mode)
     if sum(segment.export_frames for segment in segments) != total_frames:
         raise ValueError(
             f"导出合计 {sum(segment.export_frames for segment in segments)} 帧 ≠ "
@@ -380,7 +432,10 @@ def render_give_images(segment: DirectorSegment, mode: str) -> str:
     optional = [f"{_IMAGE_LABELS[token]}（可选）"
                 for token in optional_images_for(segment.type, mode)]
     if not required and not optional:
-        if segment.type == "continue":
+        # 引导段靠上一段末帧接续，不是「纯文字」：后者会让用户以为这一段没有任何
+        # 画面来源（2026-10-30 的 i2v 给图改动暴露了这句）。i2v 单段制下不会走到
+        # 这里（唯一段是 opening，必给首帧），但 t2v/fl2v/r2v 的引导段仍靠它。
+        if segment.guided:
             return "无（只靠段间引导）"
         return "无（纯文字）"
     return " + ".join(required + optional)

@@ -541,15 +541,38 @@ def _find_still(session_dir: Path, position: int, stem: str) -> Path | None:
     return None
 
 
+def opening_start_still_missing(session_dir: str | Path, mode: str) -> Path | None:
+    """开场首帧还没就位时，返回它**应该放**的目录；不需要或已就位返回 ``None``。
+
+    i2v/fl2v 的开场段必须有这张图（设计 §3.4.1）。判据住在这里而不是向导里，是因为
+    扩展名偏好与落点目录是打包的契约：向导另写一份，换了扩展名列表就会「向导说放好了、
+    打包说没有」。调用点＝阶段 1 收尾之前的那道等待（2026-10-30 真实跑现场：用户拿到
+    生图提示词后没有机会在图就位前停下来，直接撞上「第 1 段缺开场首帧」）。
+    """
+    if mode not in ("i2v", "fl2v"):
+        return None
+    directory = Path(session_dir)
+    if _find_still(directory, 1, START_STEM) is not None:
+        return None
+    return directory / DIRECTOR_DIRNAME / ASSETS_DIRNAME / "01"
+
+
 def _require_start_still(session_dir: Path, position: int) -> Path:
-    """开场首帧缺了**点名段号**：i2v 漏给首图会静默变成文生视频（设计 §3.4.1）。"""
+    """开场首帧缺了**点名段号**：i2v 段没有源图会被插件**直接拒绝**。
+
+    依据是插件的 ``_build_gen_source_clips``（``gen_timeline.py:304-310``）：i2v 属于
+    ``GEN_IMAGE_KEYS``，每段都必须有 ``genImage``/段级 ``imageFile``，缺了在建计划阶段
+    就抛 ``Segment #N has no source image``——不是「静默变文生视频」（旧注释写错了：
+    那个降级只发生在编辑型的其它路径上）。打包前拦下，用户才不会导入后看英文报错。
+    """
     found = _find_still(session_dir, position, START_STEM)
     if found is None:
         expected = session_dir / DIRECTOR_DIRNAME / ASSETS_DIRNAME / f"{position:02d}"
         raise ValueError(
             f"第 {position} 段缺开场首帧：应放在 {expected}"
             f"/{START_STEM}.png（接受 {'/'.join(_ASSET_EXTS)}）——"
-            "缺首图的 i2v 段会被插件当成纯文生视频，整段的起笔约束静默失效")
+            "缺首图的 i2v 包导入后会被插件拒绝"
+            "（Segment #N has no source image），整段跑不起来")
     return found
 
 
@@ -998,7 +1021,7 @@ def prepare_director_pack(session_dir: str | Path, plan: DirectorPlan, *,
     # 引导型段排第一，图就会挂到一段「起点在上一段终点」的段上——插件执行时首帧与
     # 段间引导互斥，画面直接换因果。规划器与 plan.json 读回都校验过，这里兜住
     # 「本函数被直接调用」这条入口。
-    validate_segment_types([segment.type for segment in plan.segments])
+    validate_segment_types([segment.type for segment in plan.segments], plan.mode)
     continuity_mode = validate_continuity_mode(continuity_mode)
     validate_canvas(settings.width, settings.height)
     validate_ref_image_size(settings.ref_image_size)

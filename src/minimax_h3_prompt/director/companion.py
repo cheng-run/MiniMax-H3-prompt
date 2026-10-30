@@ -136,6 +136,30 @@ def judge_segment(segment: DirectorSegment, *,
         actual_frames, expected)
 
 
+def judge_single_shot(segment: DirectorSegment, *,
+                      actual_frames: int | None,
+                      tolerance: int | None = None) -> DirectorVerdict:
+    """单段计划（插件**不会**为它写段缓存）的判定：证据是成片视频，不是段缓存。
+
+    为什么必须单列一条：插件的磁盘缓存是给「分段重跑 / refine / 段间引导」用的
+    （``executor_core.py:106-125`` 的 ``_segment_disk_cache_needed``）。单段计划三样
+    都不成立——``segment_continuity.py:192-207`` 在 ``segment_count < 2`` 时直接关掉
+    段间引导，于是插件**一份缓存都不写**。2026-10-30 真实跑现场：单段 i2v 跑完 243 帧
+    （`MiniMax-H3视频_00001_.mp4`，243 帧 ＠24fps，与声明帧一致），
+    ``output/minimax_seg_cache`` 目录根本不存在，陪跑却报 `SEGMENT_NOT_RUN`
+    「这一段还没跑」——错的是**证据来源**，不是用户没跑。
+
+    帧数口径**复用** ``judge_segment``（无引导段：实际必须等于声明帧），这里只替掉
+    「段在不在缓存清单里」这一层：视频已经交到手里，那层判断既不可达，也只会误报。
+    """
+    if actual_frames is None:
+        raise ValueError(
+            "单段判定的实际帧数不能为 None：这一情形的证据是用户交回来的视频文件，"
+            "读不出帧数应当由调用方先报错，不能走到判定这一步")
+    return judge_segment(segment, actual_frames=actual_frames,
+                         cached_segments=(segment.index,), tolerance=tolerance)
+
+
 def _expected(segment: DirectorSegment) -> int:
     """该段的期望帧数：有引导段看导出帧，无引导段看声明帧（两者在无引导时相等）。"""
     return segment.export_frames if segment.guided else segment.declared_frames

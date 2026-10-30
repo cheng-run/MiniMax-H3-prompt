@@ -10,7 +10,14 @@ from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
 from .asset_proofread import proofread_descriptions
-from .brief_parser import Brief, CanvasMap, RefItem, is_ref_mode, route_emits_asset_prompts
+from .brief_parser import (
+    Brief,
+    CanvasMap,
+    RefItem,
+    director_frame_variant,
+    is_ref_mode,
+    route_emits_asset_prompts,
+)
 from .graph.state import ASSET_KIND_FIELDS
 from .tools.theme_guard import (
     _CONFLICTING_OUTDOOR_TERMS,
@@ -680,9 +687,19 @@ def strip_foreign_frames(raw: dict[str, Any], variant: str) -> tuple[dict[str, A
 
 def fl2va_bundle_from_dict(raw: dict[str, Any], brief: Brief) -> FL2VAPromptBundle:
     """把模型 JSON 补齐为项目协议（只留该变体自己的帧），并执行主题地点约束校验。"""
+    # 有效变体**在这里现取**，不读 ``brief.variant``（2026-10-30 真实运行现场）：导演台的
+    # ``variant`` 是 T2VA 占位（ADR 0024），照读它会在 ``variant_frame_names`` 上
+    # ``KeyError: 'T2VA'``——i2v 的阶段 1 直接崩；而且即使不崩，i2v 的外来尾帧剥不掉、
+    # fl2v 的「必须同时有首尾帧」校验也会被静默跳过。
+    #
+    # 为什么取在这里、而不是让调用方传进来：这条链上有 strip / 帧校验 / 地点校验三个消费者，
+    # 传参版本要求每个调用方各记得传一次——本仓「规则在、接线不在」已经咬过九次，而
+    # ``director_frame_variant`` 对非导演台 brief 与原表达式（``str(variant).upper()``）
+    # 逐字相同，就地取零行为变化、且没有人能漏传。
+    variant = director_frame_variant(brief)
     # 这一剥是**不变量**：任何调用方都绕不过它。被剥掉的帧名在这里不报告——真实运行
     # 都经过帧节点，告警由它打（见 `strip_foreign_frames`）。
-    enriched, _dropped = strip_foreign_frames(dict(raw), brief.variant)
+    enriched, _dropped = strip_foreign_frames(dict(raw), variant)
     enriched["required_scene_terms"] = [list(group) for group in scene_requirement_groups(brief.plot)]
     for frame_name, default_time in (("first", 0.0), ("last", brief.duration)):
         value = enriched.get(frame_name)
@@ -701,9 +718,9 @@ def fl2va_bundle_from_dict(raw: dict[str, Any], brief: Brief) -> FL2VAPromptBund
     # width/height、帧级回退形状的残留一律不认——画布是请求下发的数据，不是模型的
     # 自由发挥；不认它就成了「产物尺寸与请求【画布】块漂开」，AC3 的同源被破坏。
     bundle = FL2VAPromptBundle.from_dict(enriched, brief.canvases)
-    if str(brief.variant).upper() == "FL2VA" and (not bundle.first or not bundle.last):
+    if variant == "FL2VA" and (not bundle.first or not bundle.last):
         raise ValueError("FL2VA 必须同时包含首帧和尾帧提示词")
-    issues = validate_fl2va_bundle(bundle, duration=brief.duration, variant=brief.variant)
+    issues = validate_fl2va_bundle(bundle, duration=brief.duration, variant=variant)
     if issues:
         raise ValueError("FL2VA 首尾帧提示词校验失败：" + ", ".join(issues))
     return bundle
