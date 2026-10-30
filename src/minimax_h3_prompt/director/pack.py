@@ -145,6 +145,10 @@ PACK_WIDGETS = {
 ASSETS_DIRNAME = "assets"
 START_STEM = "start"
 END_STEM = "end"
+# 全片终点画面（用户按尾帧提示词生成的那张）。它**不是**某个段目录里的 ``end``：
+# 首尾帧路线的口径是「末段落到的画面」（``segment_prompts.py:666``），导演台里对应
+# 最后一段的终点画面。放在 assets 根下、不带段号，免得被当作第 1 段的终点。
+FILM_END_STEM = "film-end"
 # 允许的素材扩展名按偏好顺序取第一个存在的：先 png（用户手里最常见的无损格式），
 # 其余常见格式兜底。**多张并存取第一张**并出站点名——不静默挑一张不同内容的图。
 _ASSET_EXTS = (".png", ".jpg", ".jpeg", ".webp")
@@ -541,6 +545,19 @@ def _find_still(session_dir: Path, position: int, stem: str) -> Path | None:
     return None
 
 
+def film_end_still(session_dir: str | Path) -> Path | None:
+    """全片终点画面：``director/assets/film-end.<ext>``（扩展名偏好同 ``_find_still``）。
+
+    公开给向导用：多段 fl2v 时它不进包，用户必须知道**挂到哪一段**（最后一段）。
+    """
+    folder = Path(session_dir) / DIRECTOR_DIRNAME / ASSETS_DIRNAME
+    for ext in _ASSET_EXTS:
+        candidate = folder / f"{FILM_END_STEM}{ext}"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def opening_start_still_missing(session_dir: str | Path, mode: str) -> Path | None:
     """开场首帧还没就位时，返回它**应该放**的目录；不需要或已就位返回 ``None``。
 
@@ -599,8 +616,16 @@ def _plan_media(session_dir: Path, plan: DirectorPlan) -> dict[int, SegmentMedia
         opening = plan.segments[0]  # 首段必是开场（frames.validate_segment_types 保证）
         folder = f"asset_groups/{opening.index:02d}"
         start_path = _require_start_still(session_dir, opening.index)
-        end_path = (_find_still(session_dir, opening.index, END_STEM)
-                    if plan.mode == "fl2v" else None)
+        end_path = None
+        if plan.mode == "fl2v":
+            # 段目录里显式给的 ``assets/NN/end`` 优先（用户就是要这一段落到那张图）。
+            end_path = _find_still(session_dir, opening.index, END_STEM)
+            if end_path is None and len(plan.segments) == 1:
+                # **单段 fl2v**：整片就是这一段，全片尾帧就是它的终点画面——参考首尾帧
+                # 路线「末段落尾帧」的口径（``segment_prompts.py:666``）。多段时全片尾帧
+                # 属于**最后一段**，挂到开场段会让第 1 段在几秒里跑完整片（2026-10-30
+                # 实跑现场：4×5 秒的片子，第 1 段被要求从雾中远景直接到隧道深处）。
+                end_path = film_end_still(session_dir)
         empty[opening.index] = SegmentMedia(
             start=PackedMedia(source=start_path,
                               pack_rel=f"{folder}/{START_STEM}{start_path.suffix.lower()}"),

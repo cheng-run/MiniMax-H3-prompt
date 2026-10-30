@@ -31,7 +31,7 @@ from ..generation import (
     variant_frame_names,
 )
 from ..tools.h3_validator import validate_prompt
-from ..tools.image_prompt_discipline import check_image_prompt
+from ..tools.image_prompt_discipline import check_image_prompt, check_self_contained
 from ..tools.ref_metadata import format_ref_meta
 from ..tools.theme_guard import theme_requirements_text
 from ..user_revisions import (
@@ -611,6 +611,50 @@ def _canvas_block(canvases: dict[str, tuple[int, int]] | None = None) -> str:
     return "\n".join(lines)
 
 
+def _frame_model_line(model: str) -> str:
+    """帧请求里「本次按哪一档出词」的一行。
+
+    模型名必须出现在**请求**里：角色提示词的输出格式举例写的是 ``zimage`` 子键，
+    而关键帧现在可以按 ``config/image.yaml`` 的 ``frame:`` 换成 Qwen/MOSS——不说，
+    模型会照例交 ``zimage``，产物里就出现「按 Qwen 的纪律写的词、挂 Z-Image 的牌子」。
+    """
+    from ..generation import IMAGE_FAMILY_LABELS
+
+    return (f"本次关键帧按 {IMAGE_FAMILY_LABELS[model]}（{model}）出图："
+            f"JSON 里的模型子键用 `{model}`，不要用别的家族名。")
+
+
+def _frame_discipline_block(model: str) -> str:
+    """本档的生图写词纪律（``prompts/image_prompt_disciplines/<模型>.md`` 现取）。
+
+    为什么放在**请求**里而不是角色系统提示词：``tests/test_base_prompt_bytes.py`` 钉着
+    ``frame_prompt_engineer`` 的系统提示词逐字节不变（spec #84 D11），而模型选档是
+    **本次请求的数据**（用户在 image.yaml 里改），本来就该随请求下发——与【画布】
+    【场景词】同一形态。纪律文件缺失时 ``discipline_text`` 会大声报，不静默少一块。
+    """
+    from ..generation import IMAGE_FAMILY_LABELS
+    from ..tools.image_prompt_discipline import discipline_text
+
+    return (f"以下为 {IMAGE_FAMILY_LABELS[model]} 的写词纪律；"
+            f"与角色提示词里「正文中文／默认不写负向」等通用条款冲突时，以本节为准。\n\n"
+            f"{discipline_text(model)}")
+
+
+def _frame_canvas_line(model: str, canvases) -> str:
+    """帧请求的【画布】块：只渲染**本次出图模型**那一行。
+
+    与 ``_canvas_block`` 分开：后者列出资产表里的每个家族（模型要给多档写词时才有用），
+    而关键帧只按一档出词——列出别的家族会让模型按错画幅安排构图。
+    """
+    from ..generation import (
+        IMAGE_FAMILY_LABELS, canvas_display, composition_hint, frame_canvas_size,
+    )
+
+    width, height = frame_canvas_size(model, canvases)
+    return (f"- {IMAGE_FAMILY_LABELS[model]}（{model}）："
+            f"{canvas_display(width, height)}；{composition_hint(width, height)}")
+
+
 def _scene_terms_block(brief: Brief) -> str:
     """渲染【场景词】块：主题要求的地点词组 ＋ 它们该落在哪儿。**恒为非空**。
 
@@ -639,7 +683,7 @@ def _scene_terms_block(brief: Brief) -> str:
 
 def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
     """把完整镜头上下文转换为对应变体的关键帧生图提示词（FL2VA 双帧 / I2VA 仅首帧 / L2VA 仅尾帧）。"""
-    def parse_bundle(raw: str, brief: Brief) -> dict:
+    def parse_bundle(raw: str, brief: Brief, frame_model: str) -> dict:
         # 有效变体从路线能力判据取（issue #103）：导演台的 brief.variant 是 T2VA 占位，
         # 照读它会按 T2VA 拼「必须保留哪些帧」，i2v/fl2v 的首帧词就被静默丢掉。
         variant = director_frame_variant(brief)
@@ -658,7 +702,8 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
                 agents["frame_prompt_engineer"],
                 f"把以下内容转换为严格 JSON，不要 markdown，必须保留 {required}、scene_anchor、"
                 f"continuity_constraints，以及 composition 与 lighting 字段：\n"
-                f"{_ctx(画布=_canvas_block(brief.canvases), 场景词=_scene_terms_block(brief))}\n原始内容：\n{raw}",
+                f"{_ctx(画布=_frame_canvas_line(frame_model, brief.canvases), 出图模型=_frame_model_line(frame_model), 场景词=_scene_terms_block(brief))}\n"
+                f"原始内容：\n{raw}",
             )
             try:
                 parsed = json.loads(repair)
@@ -676,6 +721,24 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
             print(f"[警告] {variant} 变体不含 {'、'.join(dropped)} 帧，"
                   f"模型多返回的它已剥离，不会进入产物。")
         bundle = fl2va_bundle_from_dict(parsed, brief)
+        # 模型子键与配置不符要看得见（2026-10-30）：角色提示词的 JSON 举例写的是
+        # `zimage`，模型可能照例交它——那样产物挂着 Z-Image 的牌子、正文却是按 Qwen
+        # 的英文口径写的，用户生成时两边都不对。
+        families = {row.model_family for row in (*bundle.first, *bundle.last)}
+        if families and frame_model not in families:
+            print(f"[警告] 关键帧产物的模型键是 {'/'.join(sorted(families))}，"
+                  f"与配置的 {frame_model} 不一致：请检查模型是否照抄了提示词里的例子。")
+        # 自包含检查（2026-10-30 实跑）：生图模型没有记忆，提示词里的「同一列／同样」
+        # 到它手上是空话。警告打在**真实运行都经过**的这个节点，产物照常放行
+        # （与 ADR 0018 同口径：警告级，不阻断出词）。
+        for frame_name in variant_frame_names(variant):
+            for row in getattr(bundle, frame_name):
+                # 该档的生图纪律（质量套话等；Z-Image 档另有四类）走同一个打印口。
+                print_image_prompt_warnings(
+                    row.positive_prompt, frame_model,
+                    f"[警告] {variant} {frame_name} 帧：")
+                for warning in check_self_contained(row.positive_prompt):
+                    print(f"[警告] {variant} {frame_name} 帧：{warning.message}")
         return bundle.to_dict()
 
     def node(state: PipelineState) -> dict:
@@ -686,8 +749,13 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
             return {}
         variant = director_frame_variant(brief)
         requirement = {
+            # 连续性要求只用于**自检**：这句话曾经被模型当成可写进画面的措辞，
+            # 于是首帧词以「同一列经典干线蒸汽机车」开头（2026-10-30 实跑）——
+            # 生图模型没有记忆，「同一列」在它眼里是空话。措辞改了，要求本身不变。
             "FL2VA": "请为这一段 FL2VA 视频生成融合的首帧（first）和尾帧（last）静态生图提示词；"
-                     "两帧必须是同一空间、同一组人物、同一套服装和同一组关键道具的连续状态。",
+                     "两帧的画面事实要连续（空间、人物、服装、关键道具、光线方向一致）。"
+                     "这只是自检要求：不要把「同一……」「同样……」这类指代写进正文——"
+                     "每张图的正文必须独立可读。",
             "I2VA": "请只生成首帧（first）静态生图提示词：视频 0.00s 的开场完整静态画面；"
                     "人物、道具和场景必须融合在同一画面中。",
             "L2VA": "请只生成尾帧（last）静态生图提示词：视频结束时的完整静态画面；"
@@ -697,6 +765,9 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
                        "I2VA": "使其通过主题地点校验",
                        "L2VA": "使其通过主题地点校验"}[variant]
         scene_terms = _scene_terms_block(brief)
+        # 关键帧用哪一档出图（2026-10-30：用户本地有 Z-Image / Qwen-Image 2.1 / MOSS
+        # 三档，关键帧默认 Qwen）。写词纪律、画布、JSON 子键名三样都随它走。
+        frame_model = image_config.load_frame_image_model()
         message = (
             requirement
             + "人物、道具和场景必须同时出现在每张关键帧中（不要拆成资产卡片）；"
@@ -721,7 +792,10 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
                 语言=brief.language,
                 # 画布是**本次请求的数据**（不住在系统提示词里），所以主请求与下面的
                 # 改写重试都要带：少了它，模型只能按自己的直觉重新安排构图。
-                画布=_canvas_block(brief.canvases),
+                # 帧链只按一档出词，故只给该档那一行（见 `_frame_canvas_line`）。
+                画布=_frame_canvas_line(frame_model, brief.canvases),
+                出图模型=_frame_model_line(frame_model),
+                生图纪律=_frame_discipline_block(frame_model),
                 # 累积的用户修订：人机修改循环每轮重出都把它带进上下文（issue #23）。
                 # 自动质检循环不设该键 → 空值被 _ctx 跳过，它的替换语义逐字不变。
                 用户修订=render_revision_block(pending_revisions(state)),
@@ -745,7 +819,7 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
         )
         raw = run_agent(agents["frame_prompt_engineer"], message)
         try:
-            bundle = parse_bundle(raw, brief)
+            bundle = parse_bundle(raw, brief, frame_model)
         except ValueError as first_error:
             # 这条改写请求**重写整份 JSON**，所以它必须带上主请求的全部要求：少了修订、
             # 基线或本轮撤销，这一轮就退回纯重掷（用户没提过的细节漂走）、把用户说过的
@@ -757,7 +831,10 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
                 # 画布是数据、不是系统提示词里的常量，所以这条重写请求必须自带一份。
                 # 相对地，composition / lighting 的字段要求住在角色系统提示词里（每次调用
                 # 都在场），不必在这里重复——同「起步澄清」与「内容规则」的分工。
-                画布=_canvas_block(brief.canvases),
+                # 出图模型与纪律同理：少了它，重写会退回「按角色提示词的 zimage 举例写」。
+                画布=_frame_canvas_line(frame_model, brief.canvases),
+                出图模型=_frame_model_line(frame_model),
+                生图纪律=_frame_discipline_block(frame_model),
                 # 场景词同画布：数据、不在系统提示词里。少了它这条重写在信息上不可赢。
                 场景词=scene_terms,
                 起步澄清=brief.clarifications,
@@ -772,7 +849,7 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
                 f"错误：{first_error}\n原始结果：{raw}",
             )
             try:
-                bundle = parse_bundle(repair, brief)
+                bundle = parse_bundle(repair, brief, frame_model)
             except ValueError as exc:
                 raise ValueError(f"{variant} 关键帧提示词生成失败：{exc}") from exc
         return {"fl2va_prompt_bundle": bundle}

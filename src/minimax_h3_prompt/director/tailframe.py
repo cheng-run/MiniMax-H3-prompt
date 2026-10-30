@@ -35,7 +35,7 @@ from pathlib import Path
 # - ``check_image_prompt`` / ``discipline_text`` 是生图纪律的唯一读取口与检查器
 #   （ADR 0018）；尾帧变换提示词与资产图写的是同一件事的两种产物，纪律不能各有一套。
 from ..asset_proofread import _locked_hit
-from ..image_config import DEFAULT_IMAGE_MODEL
+from ..image_config import load_frame_image_model
 from ..segment_prompts import MAX_SEGMENT_ATTEMPTS, _direct_write
 from ..tools.h3_validator import ValidationIssue
 from ..tools.image_prompt_discipline import check_image_prompt, discipline_text
@@ -145,10 +145,21 @@ def last_frame_png_path(session_dir: str | Path, segment: int) -> Path:
 # 请求 → 归一 → 校验（纯函数）
 # ---------------------------------------------------------------------------
 
+def _resolve_model(model: str | None) -> str:
+    """本档生图模型：调用方没指定就**现读**配置（``config/image.yaml`` 的 ``frame:``）。
+
+    为什么不在签名里写默认值：默认参数在 import 时求值，用户改了配置也不会生效
+    （``image_config`` 的读取口就是为这个才坚持调用时取盘）。尾帧变换提示词与关键帧
+    出自同一台本地生图模型，口径必须同一档——关键帧换成 Qwen 后，尾帧词还按
+    Z-Image 的中文短句写就是「两份产物两个口径」。
+    """
+    return model or load_frame_image_model()
+
+
 def build_tailframe_request(segment: DirectorSegment, *, mode: str,
                             start_image: str | Path,
                             start_frame_description: str,
-                            model: str = DEFAULT_IMAGE_MODEL) -> str:
+                            model: str | None = None) -> str:
     """组装一次图生图写作请求（入参全部显式，不依赖 state——issue #26 的教训）。
 
     起点画面的内容由**视觉模型读图**给出（``describe_image`` 是读图唯一口），写词模型
@@ -158,6 +169,7 @@ def build_tailframe_request(segment: DirectorSegment, *, mode: str,
     ``mode`` 是**触发判据的一部分**（i2v 下运镜/收尾段不要终点画面，2026-10-30 用户裁定），
     所以它必填：默认值会让「忘了传」在 i2v 会话上静默按别的模式产词。
     """
+    model = _resolve_model(model)
     if not needs_tailframe(segment.type, mode):
         raise ValueError(
             f"第 {segment.index} 段类型 {segment.type!r}（{segment_type_label(segment.type)}）"
@@ -223,7 +235,7 @@ def _locked_entries(section: str) -> tuple[str, ...]:
 
 
 def validate_tailframe_prompt(text: str, *,
-                              model: str = DEFAULT_IMAGE_MODEL) -> list[ValidationIssue]:
+                              model: str | None = None) -> list[ValidationIssue]:
     """三段式尾帧提示词的确定性检查（票面 AC1/AC3）。
 
     两类结论分开定级：
@@ -238,6 +250,7 @@ def validate_tailframe_prompt(text: str, *,
     命中（同一谓词，不写第二套）；正文取变换指令与保留项声明两节，**不含清单自己**——
     拿整篇去比，条目当然在自己里，判据恒真。
     """
+    model = _resolve_model(model)
     body = str(text or "").strip()
     if not body:
         return [ValidationIssue(
@@ -310,7 +323,7 @@ class WrittenTailframe:
 def write_tailframe_prompt(segment: DirectorSegment, *, mode: str, llm,
                            start_image: str | Path,
                            start_frame_description: str,
-                           model: str = DEFAULT_IMAGE_MODEL) -> str | None:
+                           model: str | None = None) -> str | None:
     """写一段尾帧文档（直调看门狗 + 有界重写）。调用失败返回 ``None``（调用方据此大声报错）。
 
     契约与 ``write_director_segment`` 同形：内容不合格带着问题清单重写到
@@ -345,7 +358,7 @@ def write_tailframe_prompt(segment: DirectorSegment, *, mode: str, llm,
 
 def write_tailframe_prompts(plan: DirectorPlan, *, llm, session_dir: str | Path,
                             start_image: str | Path,
-                            model: str = DEFAULT_IMAGE_MODEL) -> list[WrittenTailframe]:
+                            model: str | None = None) -> list[WrittenTailframe]:
     """逐段产出 ``GENxxx/director/tailframe-NN.md``（只给触发的段写）。
 
     ``start_image`` 是**一张**起点画面（本票口径：演示用固定帧图，不接 #105 的缓存读取口）。
@@ -355,6 +368,7 @@ def write_tailframe_prompts(plan: DirectorPlan, *, llm, session_dir: str | Path,
     出错就**停下并点名段号**：读图失败、调用失败都不写半份文档（半份尾帧比没有更糟——
     用户会拿它去生成终点画面）。
     """
+    model = _resolve_model(model)
     image = Path(start_image)
     if not image.is_file():
         raise ValueError(

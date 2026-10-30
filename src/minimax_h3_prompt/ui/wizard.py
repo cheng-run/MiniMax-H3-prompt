@@ -644,12 +644,35 @@ def _ask_required_media_path(label: str) -> str:
               "（i2v 每段都要源图，gen_timeline.py:304-310）。")
 
 
-def _store_director_still(source: Path, generation_dir: Path, stem: str) -> Path:
-    """把用户交回的图复制到导演包认的落点 ``director/assets/01/<stem><ext>``。
+def _ask_optional_director_still(label: str, consequence: str) -> str:
+    """导演台的**可选**图路径：空输入先讲清后果，再二次确认（参照 ``_ask_optional_path``）。
+
+    为什么参照首尾帧路线：那条线的收帧一直是「空 = 跳过，但要确认一次」，用户已经
+    熟悉这个手感；而导演台 fl2v 的尾帧本来就是可选的（``frames.optional_images_for``），
+    向导却把它做成了硬必填（文案 ``_show_director_frame_prompts`` 还写着「可选项」
+    —— 2026-10-30 实跑现场，文案与行为相反）。
+    """
+    while True:
+        raw = _clean_path_input(_prompt(
+            f"{label}图片路径（资源管理器里复制，粘贴后回车；直接回车=跳过）："))
+        if raw:
+            return raw
+        print(f"[警告] 不交{label}：{consequence}")
+        if _confirm(f"确认跳过{label}？", default=False):
+            return ""
+
+
+def _store_director_still(source: Path, generation_dir: Path, stem: str, *,
+                          segment: int | None = 1) -> Path:
+    """把用户交回的图复制到导演包认的落点 ``director/assets/NN/<stem><ext>``。
 
     为什么由程序复制、而不是让用户自己放到那个目录（2026-10-30 用户现场）：用户的
     习惯是「生成完把路径粘给程序」，让他去翻 ``output/sessions/<主题>/GENxxx/director/
     assets/01/`` 这种内部路径，等于把系统约定转嫁给他。
+
+    ``segment=None`` 落 **assets 根**（全片尾帧 ``film-end``）：它不属于任何一段的
+    段目录——写进 ``assets/01/`` 就会被打包成第 1 段的终点画面（2026-10-30 实跑：
+    4 段各 5 秒的片子，第 1 段被要求从雾中远景直接跑到 20 秒处的隧道深处）。
 
     同一 stem 的**其他扩展名要清掉**：``pack._find_still`` 按扩展名偏好取第一张，
     留着上次的 ``start.png`` 会让这次交的 ``start.jpg`` 静默失效（用户以为换了图）。
@@ -658,7 +681,8 @@ def _store_director_still(source: Path, generation_dir: Path, stem: str) -> Path
 
     from ..director.pack import ASSETS_DIRNAME, DIRECTOR_DIRNAME
 
-    folder = Path(generation_dir) / DIRECTOR_DIRNAME / ASSETS_DIRNAME / "01"
+    assets_root = Path(generation_dir) / DIRECTOR_DIRNAME / ASSETS_DIRNAME
+    folder = assets_root if segment is None else assets_root / f"{segment:02d}"
     folder.mkdir(parents=True, exist_ok=True)
     suffix = Path(source).suffix.lower() or ".png"
     target = folder / f"{stem}{suffix}"
@@ -700,7 +724,11 @@ def _collect_director_opening_still(session: SessionState, config: Config) -> bo
     variant = director_frame_variant(brief)
     while True:
         first_raw = _ask_required_media_path("首帧")
-        last_raw = _ask_required_media_path("尾帧") if variant == "FL2VA" else ""
+        # 尾帧**可选**（``frames.optional_images_for``：fl2v 开场尾帧可选）：它代表全片
+        # 终点画面，属于最后一段；开场段只靠首帧就能跑（段间引导接管后续段）。
+        last_raw = (_ask_optional_director_still(
+            "尾帧", "最后一段就没有终点锚，只能靠上一段的段间引导自由收敛。")
+            if variant == "FL2VA" else "")
         try:
             first_path = _resolve_frame_file(first_raw, "首帧")
             last_path = _resolve_frame_file(last_raw, "尾帧")
@@ -711,14 +739,43 @@ def _collect_director_opening_still(session: SessionState, config: Config) -> bo
             continue
         break
 
-    from ..director.pack import END_STEM, START_STEM
+    from ..director.pack import FILM_END_STEM, START_STEM
 
     target = _store_director_still(first_path, directory, START_STEM)
     print(f"[已就位] 首帧：{target}")
     if last_path is not None:
-        print(f"[已就位] 尾帧：{_store_director_still(last_path, directory, END_STEM)}")
+        # 全片尾帧落 assets 根（``film-end``），不落 ``assets/01/end``：后者是**第 1 段**
+        # 的终点画面。多段时这张图由你在导演台的**最后一段**尾帧槽里挂；单段时打包器
+        # 会把它当作这一段的终点（``pack._plan_media``）。
+        film_end = _store_director_still(last_path, directory, FILM_END_STEM, segment=None)
+        print(f"[已就位] 全片尾帧（最后一段的终点画面）：{film_end}")
     save_session(directory, brief, session.stage_state, status=session.status)
     return True
+
+
+def _announce_film_end_still(directory: Path, plan) -> None:
+    """点名全片尾帧该挂到**哪一段**（多段 fl2v 的唯一用途）。
+
+    它在打包时**不进包**（设计 §3.4.1 第 3 条：非开场段的终点画面由用户逐段挂），
+    所以用户必须在这里被告知落点——否则这张图在盘上，却没人知道该挂哪一段。
+    单段 fl2v 例外：打包器会把它挂成那一段的终点画面（``pack._plan_media``）。
+    """
+    from ..director.frames import segment_type_label
+    from ..director.pack import film_end_still
+
+    if plan.mode != "fl2v":
+        return
+    path = film_end_still(directory)
+    if path is None:
+        return
+    ending = next((seg for seg in plan.segments if seg.type == "ending"), plan.segments[-1])
+    print(f"\n[尾帧] 全片终点画面：{path}")
+    if len(plan.segments) == 1:
+        print(f"       单段片子：打包时已挂成第 {ending.index} 段的终点画面。")
+    else:
+        print(f"       多段片子：请在导演台把它挂到第 {ending.index} 段"
+              f"（{segment_type_label(ending.type)}）的尾帧槽——中间段的终点画面"
+              "由尾帧变换提示词逐段产出。")
 
 
 def _run_director_flow(session: SessionState) -> int:
@@ -806,6 +863,7 @@ def _run_director_flow(session: SessionState) -> int:
     print()
     print(render_plan_listing(plan))
     print(f"\n段表已写入：{plan_file}")
+    _announce_film_end_still(session.directory, plan)
 
     try:
         with step_scope("正在逐段写导演台提示词"):
@@ -1669,7 +1727,9 @@ def _show_director_frame_prompts(state: dict, brief: Brief, generation_dir: Path
         return
     _show_frame_prompts(state, generation_dir)
     if brief.director_mode == "fl2v":
-        print("fl2v 的开场尾帧（end.png）是可选项：需要时一并生成，交路径时会给机会。")
+        # 文案必须与 `_collect_director_opening_still` 的行为一致（2026-10-30 实跑：
+        # 这里写「可选」，那里却硬必填）。全片尾帧属于**最后一段**，不是第 1 段。
+        print("fl2v 的尾帧是**全片终点画面**（可跳过）：它给最后一段用，不会挂到第 1 段。")
     print("生成好图片后不用自己找目录：下一步把图片路径粘贴给我，由我放进导演包。")
 
 
@@ -2073,7 +2133,13 @@ def render_fl2va_frame_markdown_from_bundle(bundle, frame: str) -> str:
         return ""
     title = "首帧" if frame == "first" else "尾帧"
     variant = "FL2VA" if (bundle.first and bundle.last) else "I2VA" if bundle.first else "L2VA"
-    parts = [f"# {variant} {title}生图提示词（Z-Image）", ""]
+    # 标题按**行里的家族**渲染：2026-10-30 起关键帧默认 Qwen-Image 2.1，写死
+    # 「（Z-Image）」会让用户拿到一份挂着 Z-Image 牌子的英文长文提示词。
+    from ..generation import IMAGE_FAMILY_LABELS
+
+    families = "、".join(
+        IMAGE_FAMILY_LABELS.get(item.model_family, item.model_family) for item in rows)
+    parts = [f"# {variant} {title}生图提示词（{families}）", ""]
     for item in rows:
         parts.extend([
             # 画布行与请求【画布】块同取 `canvas_display`（issue #42 AC3）——本渲染器
