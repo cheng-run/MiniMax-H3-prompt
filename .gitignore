@@ -24,3 +24,43 @@ wheels/
 # 并行票据工作树（git worktree add worktree/ticket-NN），只登记在 .git/worktrees，
 # 目录本身不入库——同 output/ 的教训，锚定仓库根防止误吞源码包
 /worktree/
+
+# 环境变量变体（2026-10-30）：原先只挡 .env / .env.local，.env.production 这类会漏
+# 进来。「API key 绝不入库」只能靠规则兜底，不能靠记得改。.env.example 仍入库。
+.env.*
+!.env.example
+
+# 编辑器 / 系统残留
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+
+# 缓存与覆盖率（.pytest_cache 自带 .gitignore 只保护它自己，别依赖）
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+htmlcov/
+
+# 临时与备份
+*.log
+*.tmp
+*.bak
+*.orig
+*.rej
+
+# Claude Code 本机运行时。settings.local.json 目前靠 ~/.config/git/ignore 挡着，
+# 那是本机配置、换机器就不生效，所以仓库里再写一份。
+.claude/settings.local.json
+.claude/worktrees/
+.claude/checkpoints/
+.claude/scheduled_tasks.*
+
+# 技能工作区残留（/grill、/to-questionnaire、/improve-codebase-architecture 会往
+# 当前目录写这些）——它们是过程产物，不是项目文档
+.scratch/
+to-questionnaire-*.md
+architecture-review-*.html
+
