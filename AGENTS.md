@@ -24,12 +24,18 @@ Issues 活在 GitHub Issues（github.com/cheng-run/MiniMax-H3-prompt），用 `g
 |---|---|
 | 术语、架构说明 | `CONTEXT.md`（根） |
 | 架构决策 | `docs/adr/NNNN-slug.md`（扫最大号 +1） |
-| 调研笔记 | `docs/research/YYYY-MM-DD-主题.md` |
+| 调研笔记 | `docs/research/YYYY-MM-DD-主题.md`（目录索引：`docs/research/README.md`，新笔记补一行） |
 | 设计、根因分析 | `docs/design/YYYY-MM-DD-主题.md` |
 | spec、票、关票证据 | GitHub Issues（**不落仓**） |
 | handoff | `docs/handoffs/YYYY-MM-DD-主题.md` |
 
 spec 与票住 issue 是因为 `/to-spec`、`/to-tickets` 按 `docs/agents/issue-tracker.md` 发布；**handoff 覆盖该 skill 默认的系统临时目录**，改落 `docs/handoffs/`——本项目不是临时项目，文档一律留在仓里。本仓自 2026-10-17 起（#39）不再往仓里落 spec 与计划文件。
+
+## 检查与守卫（2026-10-30 起）
+
+- `scripts/check.sh fast`（秒级结构守卫）提交前跑；`scripts/check.sh full`（全量）推送前跑。钩子只是入口，判据只住脚本里。
+- 本机装钩子（不随仓库分发）：`.git/hooks/pre-commit` 一行 `exec "$(git rev-parse --show-toplevel)/scripts/check.sh" fast`。
+- 测试默认**禁止真实出网**（`tests/conftest.py` 的 `no_real_network`）：漏打桩的用例当场变红；确需联网标 `@pytest.mark.allow_network`。
 
 ## 票据工作流（2026-10-30 修订）
 

@@ -34,3 +34,8 @@ dev = [
 # 与导入错（2026-10-18 合并期实测 184 errors）。限定只收 tests/，让本仓既有的
 # 「主树裸跑 pytest -q」口径在开工作树时继续成立。
 testpaths = ["tests"]
+# tests/conftest.py 的 no_real_network 是 autouse 的出网守卫；标了 allow_network 的
+# 用例才会被放行。注册在这里是为了让「用了什么标记」可查——未注册的标记默认静默通过。
+markers = [
+    "allow_network: 允许该用例建立真实网络连接（默认全部禁止，见 conftest.no_real_network）",
+]

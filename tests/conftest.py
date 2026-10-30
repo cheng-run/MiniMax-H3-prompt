@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import socket
 from pathlib import Path
 
 import cv2
@@ -131,3 +132,35 @@ def h3_tier_video(tmp_path: Path):
     def make(seconds: float, name: str = "clip.avi") -> Path:
         return write_h3_tier_video(tmp_path / name, seconds)
     return make
+
+
+def _refuse_network(*args, **kwargs):
+    """把真实的 socket 建连变成一条指名道姓的失败。
+
+    默认拒绝而不是默认放行，是因为这类用例的危险恰恰在于**它照样能过**：本机 `.env`
+    里躺真 key、真网关可达时它就是绿的，换到干净检出或别人机器上才炸（#33/#56 都撞过
+    「只在本机能过」）。默认拒绝让漏打桩的那条在**写下的当天**就变红，并直接点名目标。
+    """
+    target = next((a for a in args if isinstance(a, tuple)), kwargs.get("address"))
+    raise RuntimeError(
+        "测试禁止真实网络连接（retro 2026-10-30）："
+        f"目标 {target!r}。请桩掉客户端，确需联网的用例加 @pytest.mark.allow_network。"
+    )
+
+
+@pytest.fixture(autouse=True)
+def no_real_network(request, monkeypatch):
+    """所有用例默认断开真实网络（retro 候选 2 落到守卫）。
+
+    这条规矩原本只写在 ``CODING_STANDARDS.md``（「会真建 LLM 客户端的用例一律打桩」），
+    靠人记：漏打桩的用例不会报错，只会在换机器时挂掉，因此是判断题里代价最高的一类。
+    做成 autouse 守卫后它变成确定性失败。
+
+    只挡**建连**、不挡建客户端对象：``create_agent`` / ``ChatOpenAI(...)`` 本身不连网，
+    真正出网在第一次请求，挡在那里误报最少（同款判断见 #33 复审）。
+    """
+    if request.node.get_closest_marker("allow_network") is not None:
+        return
+    monkeypatch.setattr(socket.socket, "connect", _refuse_network)
+    monkeypatch.setattr(socket.socket, "connect_ex", _refuse_network)
+    monkeypatch.setattr(socket, "create_connection", _refuse_network)
