@@ -10,7 +10,13 @@ from langgraph.graph.state import CompiledStateGraph
 
 from .. import image_config, image_routing
 from ..agents import image_prompt_agent_key, run_agent
-from ..brief_parser import FRAME_VARIANTS, Brief, brief_uses_refs
+from ..brief_parser import (
+    Brief,
+    brief_uses_refs,
+    director_frame_variant,
+    route_emits_asset_prompts,
+    route_emits_frame_prompts,
+)
 from ..config import Config
 from ..generation import (
     IMAGE_FAMILY_LABELS,
@@ -61,6 +67,9 @@ def _brief_block(brief: Brief) -> str:
         语言=brief.language,
         剧情=brief.plot,
         起步澄清=brief.clarifications,
+        # 导演台路线的生成模式（issue #103）：方言分派与段规划都按它走，请求里不给就等于
+        # 所有模式拿到同一份口径。base/ref 的 director_mode 恒为空，_ctx 跳过、请求逐字不变。
+        导演台模式=brief.director_mode if brief.is_director else "",
         参考资产=refs if brief_uses_refs(brief) else "",
         草稿=brief.draft or "",
     )
@@ -73,11 +82,14 @@ def _ref_assets_block(state: PipelineState, brief: Brief) -> str:
     而那是链上 ``parallel_image_prompts`` 的产物，构造节点时还不存在；这正是三个消费者
     （reference_consistency／身份圆桌／提示词工程师）都从这里取、不再各自抄一份的原因。
 
-    多参纪律只对 ``mode="ref"`` 说：帧变体的 refs 是首/尾帧登记，套「素材语义名指称」
-    会把两套指称体系搅在一起。多参纪律与角色提示词（prompt_engineer.md）互为表里：
-    这里钉**数据侧**（哪些编号、哪些名字、描述取自哪），角色提示词钉写法。
+    多参纪律只对**产资产图的路线**说（``route_emits_asset_prompts``：ref 与导演台
+    r2v/rv2v/mixed，复审 H6）：帧变体的 refs 是首/尾帧登记，套「素材语义名指称」
+    会把两套指称体系搅在一起。判据原先读 ``brief.mode == "ref"``：导演台 r2v 的资产图
+    提示词照常产出、素材登记却恒为空串，reference_consistency 与写段拿到的参考资产
+    是「（无）」——指称与挂图对不上。多参纪律与角色提示词（prompt_engineer.md）互为
+    表里：这里钉**数据侧**（哪些编号、哪些名字、描述取自哪），角色提示词钉写法。
     """
-    if brief.mode == "ref":
+    if route_emits_asset_prompts(brief):
         refs = ref_asset_registry(state, brief)
         if not refs:
             return ""
@@ -87,6 +99,8 @@ def _ref_assets_block(state: PipelineState, brief: Brief) -> str:
             "素材指称以**语义名为主**，<Picture N> 官方标签在格式要求处兜底。\n"
             + format_ref_meta(refs)
         )
+    # 帧路线的 refs 是首/尾帧登记（base 的 FL2VA/I2VA 等）：判据与改动前逐字相同，
+    # ``route_emits_asset_prompts`` 对 base 恒为假、对导演台 i2v/fl2v 也为假。
     if brief_uses_refs(brief) and brief.refs:
         return format_ref_meta(brief.refs)
     return ""
@@ -308,11 +322,12 @@ def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_f
 
     def node(state: PipelineState) -> dict:
         brief: Brief = state["brief"]
-        # 路线守卫（issue #78 / 父 spec #77）：资产图提示词只属于多参路线。首尾帧把人物、
-        # 道具、场景**融合**进一张关键帧，没有「每件资产单独出图」这一步；无条件跑就是每次
-        # 白付 3 次调用，锁死清单不合规还会让整条阶段 1 失败。只早退、不改管线拓扑——
-        # 截断重跑与续跑链都不用跟着改（已知副作用：并行组合节点不产生更新、进度行不出现）。
-        if not brief.is_ref:
+        # 路线守卫（issue #78 / 父 spec #77，issue #103 换判据）：资产图提示词只属于
+        # 「会用参考素材」的路线——ref，以及导演台的 r2v/rv2v/mixed。首尾帧把人物、
+        # 道具、场景**融合**进一张关键帧，没有「每件资产单独出图」这一步；导演台的
+        # t2v/i2v/fl2v/v2v 同样没有参考素材。无条件跑就是白付 3 次调用，
+        # 锁死清单不合规还会让整条阶段 1 失败。只早退、不改管线拓扑。
+        if not route_emits_asset_prompts(brief):
             return {}
         # 模型在**调用时**取：配置是环境事实（换机器换模型只改 yaml），每次出词都现读。
         model_key = image_config.image_model_for(kind_key)
@@ -625,7 +640,9 @@ def _scene_terms_block(brief: Brief) -> str:
 def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
     """把完整镜头上下文转换为对应变体的关键帧生图提示词（FL2VA 双帧 / I2VA 仅首帧 / L2VA 仅尾帧）。"""
     def parse_bundle(raw: str, brief: Brief) -> dict:
-        variant = str(brief.variant).upper()
+        # 有效变体从路线能力判据取（issue #103）：导演台的 brief.variant 是 T2VA 占位，
+        # 照读它会按 T2VA 拼「必须保留哪些帧」，i2v/fl2v 的首帧词就被静默丢掉。
+        variant = director_frame_variant(brief)
         # 「必须保留哪些帧」现拼（复审指出）：变体→帧那份知识住在 `variant_frame_names`，
         # 这里再抄一张表就是同一件事的两处真相——本仓「规则在、接线不在」的温床。
         required = "、".join(variant_frame_names(variant))
@@ -663,9 +680,11 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
 
     def node(state: PipelineState) -> dict:
         brief: Brief = state["brief"]
-        variant = str(brief.variant).upper()
-        if variant not in FRAME_VARIANTS:
+        # 路线能力判据（issue #103）：base 按变体、导演台按生成模式（i2v/fl2v），
+        # ref 恒不产帧图。判据住 brief_parser 一处，这里不写 mode/variant 的裸比较。
+        if not route_emits_frame_prompts(brief):
             return {}
+        variant = director_frame_variant(brief)
         requirement = {
             "FL2VA": "请为这一段 FL2VA 视频生成融合的首帧（first）和尾帧（last）静态生图提示词；"
                      "两帧必须是同一空间、同一组人物、同一套服装和同一组关键道具的连续状态。",
@@ -893,8 +912,11 @@ def _make_cinematographer_node(agents: dict) -> Callable:
 def _make_reference_consistency_node(agents: dict) -> Callable:
     def node(state: PipelineState) -> dict:
         brief: Brief = state["brief"]
-        if brief.mode != "ref":
-            return {"subject_defs": ""}  # base 模式不需要 subject 定义，跳过
+        # 路线能力判据（issue #103）：subject_definitions/retention_analysis 是参考素材的
+        # 定义块，住在「会用参考素材」的路线（ref、导演台 r2v/rv2v/mixed）。base 与导演台的
+        # t2v/i2v/fl2v 没有它，跳过而不是产一份没人用的定义。
+        if not route_emits_asset_prompts(brief):
+            return {"subject_defs": ""}
         # 登记现算（issue #41）：本节点跑在 parallel_image_prompts 之后，拿得到 N 资产；
         # brief.refs 为空的向导多参路线正是靠它才有 <Picture N> 映射可锁。
         refs = _ref_assets_block(state, brief) or "（无）"
@@ -1116,8 +1138,9 @@ def make_shot_rt_node(rt, model, brief) -> Callable:
 
 
 def make_identity_rt_node(rt, model, brief) -> Callable:
-    if brief.mode != "ref":
-        return lambda s: {"identity_lock": ""}  # base 模式不需要身份锁定
+    # 身份圆桌锁的是角色/场景与 `<Picture N>` 的映射，只在有参考素材的路线成立（#103 判据）。
+    if not route_emits_asset_prompts(brief):
+        return lambda s: {"identity_lock": ""}
     return _make_roundtable_node(
         rt, "identity_lock", "锁定角色/场景身份定义与 <Picture N> 映射",
         # 参考资产从 state 现算（issue #41）：<Picture N> 映射正是本圆桌的锁定对象，

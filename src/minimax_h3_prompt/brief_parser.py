@@ -66,8 +66,20 @@ class RefItem:
 
 @dataclass
 class Brief:
-    mode: str = "base"  # ref | base
+    mode: str = "base"  # base | ref | director
     variant: str = "T2VA"  # base: T2VA/I2VA/FL2VA/L2VA
+    # 导演台路线的生成模式（issue #101）：七个值见 ``DIRECTOR_MODES``，空串＝不是这条路线。
+    # 它与 ``variant`` 是两套口径，**不许混用**：variant 是首尾帧链的帧形态
+    # （T2VA/I2VA/FL2VA/L2VA），导演台模式是导演包的任务类型（t2v/…/mixed）。混用会让
+    # 帧链判据（``FRAME_VARIANTS``）把一条导演台会话读成首尾帧（ADR 0024）。
+    director_mode: str = ""
+    # 导演台打包与会话参数（issue #104，设计 §4）：节点 id 与缓存名决定段缓存目录名
+    # （插件口径是 ``<缓存名>_<节点id>``，#105 按它找段缓存），引导模式是包内
+    # ``continuityMode``。三个值**只住 Brief**——复制进 state 就是第二份会变旧的真相
+    # （ADR 0005 接线纪律），而 state 里的副本没人记得同步。
+    director_node_id: str = ""
+    director_cache_name: str = ""
+    director_continuity_mode: str = ""
     duration: float = 5.0
     style: str = "Cinematic"
     language: str = "Chinese"
@@ -95,6 +107,11 @@ class Brief:
         """多参路线（委托 ``is_ref_mode``）：路线判据不许在这个属性里再写一遍。"""
         return is_ref_mode(self.mode)
 
+    @property
+    def is_director(self) -> bool:
+        """导演台路线（委托 ``is_director_mode``）：同上一句，判据只许在模块级写一次。"""
+        return is_director_mode(self.mode)
+
 
 # 帧锚点变体：参考图是"首帧/尾帧"，不是角色/场景
 FRAME_VARIANTS = ("I2VA", "FL2VA", "L2VA")
@@ -113,6 +130,113 @@ def is_ref_mode(mode: str) -> bool:
     只兜住会话文件与外部调用方）。
     """
     return mode == "ref"
+
+
+# 路线的三个合法值（父 spec #100）。顺序即「老路线优先」：base 是默认值。
+ROUTE_MODES = ("base", "ref", "director")
+
+
+def validate_route_mode(mode: str) -> str:
+    """路线值只认三个精确小写值；未知值/大小写变体**当场报错**（issue #101 AC3）。
+
+    判据函数（``is_ref_mode``/``is_director_mode``）只回答「是不是这一条路线」，对
+    ``Director`` 这类拼错值一律返回 False——单看判据，一条写错的路线会被静默当成
+    ``base``（本仓「静默失败」最坏的形态：用户以为在跑导演台，实际在跑首尾帧链）。
+    所以会话读回口（``session_store._brief_from_dict``）必须先过这一道，让「不是任何
+    已知路线」与「不是这条路线」分开。
+    """
+    if mode not in ROUTE_MODES:
+        raise ValueError(
+            f"路线无效：{mode!r}（应为 {'/'.join(ROUTE_MODES)} 之一，精确小写）")
+    return mode
+
+
+# 导演台路线的七个生成模式（父 spec #100 / ADR 0024）。**唯一声明**：向导菜单、
+# 会话读回的校验、后续按模式分派的段规划与提示词出口都从这里取。顺序即菜单顺序。
+DIRECTOR_MODES = ("t2v", "i2v", "fl2v", "r2v", "v2v", "rv2v", "mixed")
+
+
+def is_director_mode(mode: str) -> bool:
+    """路线判据的**唯一真源**（父 spec #100）：导演台路线＝``mode == "director"``。
+
+    与 ``is_ref_mode`` 并列、不合并成一个「是不是新路线」的模糊判断：两条新路线的
+    产物出口不同（导演包 vs 多参六段式），任何一处把二者混读都会让产物形状错位。
+
+    只认精确小写 ``director``：``DIRECTOR`` / ``Director`` 是拼错的路线值，静默放宽
+    等于把一条本该报错的路读成导演台。``parse_brief_text`` 的「模式」键虽按小写归一，
+    但 brief 文件入口本票**不开**（见该函数末尾的显式拒绝），所以这里的严格只兜住
+    会话文件与外部调用方。
+    """
+    return mode == "director"
+
+
+def validate_director_mode(value: str) -> str:
+    """校验导演台模式值并原样返回；**坏值大声报错**（父 spec #100「七种之一」）。
+
+    七个值是精确数据不是自由文本：``T2V``/``Mixed`` 这类大小写变体如果在入口被
+    ``lower()`` 悄悄扶正，后续按模式分派（#103）就会拿一个用户没选过的值去写提示词——
+    本仓「绝不静默失败」要消灭的正是这种形态。
+
+    调用者只有**会话读回**（``session_store._director_mode_from_dict``）：向导菜单的
+    编号→值直接取 ``DIRECTOR_MODES`` 本身（来源已经是合法值，不必再校验一遍），
+    brief 文件入口本票不开（``parse_brief_text`` 读到 director 直接报错）。
+    """
+    if value not in DIRECTOR_MODES:
+        raise ValueError(
+            f"导演台模式无效：{value!r}（应为 {'/'.join(DIRECTOR_MODES)} 之一，精确小写）")
+    return value
+
+
+# 导演台里**产资产图提示词**的生成模式（设计 §4；父 spec #100「阶段 1 的产出随模式变化」）。
+# r2v 用 `<Picture N>` 指称参考素材，rv2v/mixed 也含参考素材段；t2v/i2v/fl2v 没有参考素材，
+# v2v 只吃源视频——给它们出资产图就是白付三次调用，还会让素材登记凭空多出条目。
+DIRECTOR_ASSET_MODES = ("r2v", "rv2v", "mixed")
+
+# 导演台生成模式 → 首尾帧链的帧变体（``director_frame_variant`` 的唯一映射）。
+# 导演台的 ``Brief.variant`` 恒为 T2VA 占位（ADR 0024：模式与变体是两套口径），照读它
+# 会让 i2v/fl2v 都按 T2VA 出词——首帧词静默不产，用户要等到导入导演包才发现段里没图。
+_DIRECTOR_FRAME_VARIANTS = {"i2v": "I2VA", "fl2v": "FL2VA"}
+
+
+def route_emits_asset_prompts(brief: Brief) -> bool:
+    """该 brief 是否产**资产图提示词**（人物/道具/场景的生图词）。
+
+    路线能力判据的**唯一真源**（设计 §4）：替换 ``graph/nodes.py`` 里三处 ``brief.is_ref``
+    早退与 ``session_store._route_filtered_state`` 的过滤判据。为什么必须按模式分派而不是
+    「``is_ref`` 或 ``is_director``」：导演台的 t2v/i2v/fl2v 根本没有参考素材，
+    一句 ``or`` 会让每个导演台模式都白跑三个资产图节点，并把三键写进会话。
+
+    ref 恒为真、base 恒为假——两条老路线的判定与改动前逐位相同。
+    """
+    if is_director_mode(brief.mode):
+        return brief.director_mode in DIRECTOR_ASSET_MODES
+    return is_ref_mode(brief.mode)
+
+
+def director_frame_variant(brief: Brief) -> str:
+    """该 brief 的**有效帧变体**：导演台按生成模式映射，其余路线用它自己的 ``variant``。
+
+    为什么要有这一层：导演台的 ``variant`` 是 T2VA 占位（ADR 0024），而 ``i2v``/``fl2v``
+    实际需要首帧/首尾帧生图词。``_make_fl2va_frame_prompt_node`` 若照 ``brief.variant``
+    取句式，两条模式都会落进「T2VA 不需要帧」的早退（或按 T2VA 出词）——静默少图。
+    非导演台路线的返回值与 ``str(brief.variant).upper()`` 逐字相同（零变化）。
+    """
+    if is_director_mode(brief.mode):
+        return _DIRECTOR_FRAME_VARIANTS.get(brief.director_mode, "")
+    return str(brief.variant).upper()
+
+
+def route_emits_frame_prompts(brief: Brief) -> bool:
+    """该 brief 是否产**关键帧生图提示词**（首帧/尾帧）。
+
+    导演台只有 ``i2v``（首帧）与 ``fl2v``（首尾帧）要帧图；base 按变体判；ref 恒为假
+    （多参没有帧槽，锚定由参考素材承担，ADR 0011）。判据同样只住这一处。
+    """
+    if is_director_mode(brief.mode):
+        return director_frame_variant(brief) in FRAME_VARIANTS
+    # 非导演台路线的判据与改动前逐字相同（``variant not in FRAME_VARIANTS`` 的补集）：
+    # 老会话里 ref+T2VA 恒为假、base+I2VA/FL2VA/L2VA 恒为真，一处行为都不动。
+    return str(brief.variant).upper() in FRAME_VARIANTS
 
 
 def brief_uses_refs(brief: Brief) -> bool:
@@ -382,5 +506,12 @@ def parse_brief_text(text: str) -> Brief:
     # 帧链照跑（fl2va_frame_prompts 只判 variant）、产物按 FL2VA 形状走。
     if brief.mode == "ref":
         brief.variant = "T2VA"
+
+    # 导演台路线（issue #101）本票只开**向导入口**：brief 文件里没有「选模式」的问答位，
+    # `--brief` 快路径也没有打包/陪跑接线（#104–#108）。读到就当场报错——静默按 base 跑
+    # 会拿首尾帧链的步骤跑一条导演台 brief，而且要到阶段 2 才露馅。
+    if is_director_mode(brief.mode):
+        raise ValueError(
+            "brief 文件暂不支持导演台路线（模式: director）：请用交互向导起步。")
 
     return brief

@@ -38,6 +38,7 @@ from ..resume_point import remember as remember_answer
 from ..session_store import (
     STATUS_AWAITING_FRAMES,
     STATUS_COMPLETED,
+    STATUS_DIRECTOR_SEGMENTS_RUNNING,
     STATUS_REF_SEGMENTS_RUNNING,
     STATUS_SEGMENTED_RUNNING,
     STATUS_STAGE1_RUNNING,
@@ -254,11 +255,15 @@ def _confirm(text: str, default: bool = True) -> bool:
 
 
 def _choose_generation_mode() -> str:
-    """阶段 1 视频生成方式四选一：首帧(I2VA)/尾帧(L2VA)/首尾帧(FL2VA，默认)/多参(REF2VA)。
+    """阶段 1 视频生成方式五选一：首帧(I2VA)/尾帧(L2VA)/首尾帧(FL2VA，默认)/多参(REF2VA)/导演台(DIRECTOR)。
 
     多参（issue #41）：与首尾帧**并存**的另一条路线，参考素材＋文本驱动、无桥接帧。
     返回 "REF2VA" 不是帧变体——由 ``_phase1_new`` 转成 ``Brief(mode="ref")``，
     帧逻辑一律按 ``FRAME_VARIANTS`` 判，不看它。
+
+    导演台（issue #101，父 spec #100）：第三条路线，返回 "DIRECTOR"，由 ``_phase1_new``
+    转为 ``Brief(mode="director")`` **并接着问七种模式之一**（``_choose_director_mode``）。
+    前四项与回车默认值一字未变——两条老路线的行为不变是本票的硬要求。
     """
     from ..workflow_config import workflow_settings
 
@@ -269,13 +274,46 @@ def _choose_generation_mode() -> str:
     print("  2. 尾帧生成视频（L2VA，从合理开场逐步收敛到尾帧图）")
     print("  3. 首尾帧生成视频（FL2VA，首尾帧锚定，默认）")
     print(f"  4. 多参生成视频（ref2va，参考素材＋文本驱动；登记工作流：{name}）")
+    print("  5. 导演台生成视频（director，导演包＋段间引导，由 ComfyUI 导演台执行）")
     while True:
-        raw = _prompt("输入 1/2/3/4（回车=3 首尾帧）：").strip()
+        raw = _prompt("输入 1/2/3/4/5（回车=3 首尾帧）：").strip()
         if not raw:
             return "FL2VA"
-        if raw in ("1", "2", "3", "4"):
-            return {1: "I2VA", 2: "L2VA", 3: "FL2VA", 4: "REF2VA"}[int(raw)]
-        print("无效输入，请输入 1/2/3/4。")
+        if raw in ("1", "2", "3", "4", "5"):
+            return {1: "I2VA", 2: "L2VA", 3: "FL2VA", 4: "REF2VA", 5: "DIRECTOR"}[int(raw)]
+        print("无效输入，请输入 1/2/3/4/5。")
+
+
+# 导演台七种模式的中文说明（issue #101）：序号即 ``DIRECTOR_MODES`` 的顺序。
+# 二期三项在菜单上如实标注——本轮只接线选路与记录，按模式分派的产物在 #103 起。
+_DIRECTOR_MODE_LABELS = {
+    "t2v": "文生视频",
+    "i2v": "图生视频（给首帧）",
+    "fl2v": "首尾帧生视频",
+    "r2v": "参考主体生视频",
+    "v2v": "视频转视频（二期）",
+    "rv2v": "参考素材改视频（二期）",
+    "mixed": "混合模式（二期）",
+}
+
+
+def _choose_director_mode() -> str:
+    """导演台路线的七种生成模式之一（父 spec #100「选完路线再选模式」）。
+
+    **没有回车默认**：模式决定后续提示词方言与给图清单（#103/#104），静默替用户选一档
+    等于拿没选过的口径出词。空输入与坏输入都重问，合法值只来自 ``DIRECTOR_MODES``
+    （菜单编号→值这一处映射，返回值不经 ``validate_director_mode`` 再转一遍）。
+    """
+    from ..brief_parser import DIRECTOR_MODES
+
+    print("请选择导演台生成模式：")
+    for index, mode in enumerate(DIRECTOR_MODES, 1):
+        print(f"  {index}. {mode} — {_DIRECTOR_MODE_LABELS[mode]}")
+    while True:
+        raw = _prompt(f"输入 1–{len(DIRECTOR_MODES)}（必选）：").strip()
+        if raw.isdigit() and 1 <= int(raw) <= len(DIRECTOR_MODES):
+            return DIRECTOR_MODES[int(raw) - 1]
+        print(f"无效输入，请输入 1–{len(DIRECTOR_MODES)}。")
 
 
 def _choose_canvases() -> dict[str, tuple[int, int]]:
@@ -419,6 +457,16 @@ def _progress_scope(title: str):
         print(f"[完成] 本段用时 {m} 分 {s:02d} 秒。\n", flush=True)
 
 
+def _skips_base_frame_loop(brief: Brief) -> bool:
+    """这条路线是否**不走** base 的人机修改循环（锚在 fl2va 首尾帧提示词上的那一份）。
+
+    新跑收尾与两条续接入口共用这一个判据（issue #41 多参、issue #101 导演台）。四处
+    各写一份「是不是 ref/是不是 director」的代价是：加第三条路线时总有一个入口漏改，
+    表现成那条路线上「重启后忽然要你交帧图」——本仓「改一处漏一处」的老形态。
+    """
+    return brief.is_ref or brief.is_director
+
+
 def run_wizard(config: Config) -> int:
     """无参数主入口：两阶段向导。返回进程退出码。"""
     if not sys.stdin.isatty():
@@ -454,6 +502,11 @@ def run_wizard(config: Config) -> int:
     # ——两种陪跑的段文件、进度账与有无桥接帧全都不同（见 ``session_store`` 的状态注释）。
     if session.status == STATUS_REF_SEGMENTS_RUNNING:
         return _resume_ref_handoff(config, session)
+    # 导演台逐段陪跑中途退出（issue #105）：回到同一个 GEN 继续数帧验收。这条分派
+    # **必须早于**下面的 `brief.is_director`——否则续跑会重新规划、重新写段、重新打包
+    # （重付 LLM），而且新生成的段表与账本里已通过的段号对不上。
+    if session.status == STATUS_DIRECTOR_SEGMENTS_RUNNING:
+        return _resume_director_handoff(config, session)
     # 续接到「阶段 1 已完成、等帧图」的会话：补上同一个修改循环（issue #27）。它原本直接
     # 掉进阶段 2 的收图提问——累积清单看不到、意见提不了，而这条路径正是「重启后清单仍然
     # 非空」的真实现场（用户在首帧循环里提过意见、还没提交帧图就退出）。
@@ -464,11 +517,581 @@ def run_wizard(config: Config) -> int:
         # 帧路线在修改循环首步展示过；多参路线不再在这里展示（issue #50：素材循环
         # 逐张出词，出站节奏由 `_asset_loop` 管），这个标志只管帧路线的补展示。
         frames_shown = True
+    # 导演台路线（issue #101/#102）：**必须**早于下面 base 的分支——否则第三条路线会
+    # 被静默塞进首尾帧链的阶段 2（收帧图、写 fl2va 正文），比直接报错更难发现。
+    # #102 起这里做最小接线：段规划 → 写 ``GENxxx/director/plan.json`` → 出站段表；
+    # 打包与逐段陪跑仍等 #104–#108。
+    if session.brief.is_director:
+        return _run_director_flow(session)
     # 阶段 1 完成后直接进入阶段 2（生图很快，无需暂停等人工确认）。
     # 多参路线（issue #41）走直出：不收帧图、不进桥接链，≤15 秒一份 ref 六段式。
     if session.brief.mode == "ref":
         return _phase2_ref_finish(config, session)
     return _phase2_collect_and_finish(config, session, show_frame_prompts=not frames_shown)
+
+
+def _ask_director_pack_settings(session: SessionState) -> None:
+    """进导演台流程前问一次打包参数并落 Brief（issue #104，设计 §4）。
+
+    三问答都只问**一次**：节点 id 与缓存名决定段缓存目录名（插件口径是
+    ``<缓存名>_<节点id>``，#105 靠它找 ``seg_XXXX.frames.mkv``），引导模式是包内
+    ``continuityMode``。Brief 里已有节点 id 就整组沿用——续跑反复追问同一件事既是
+    噪音，也容易被误答覆盖。
+
+    节点 id **没有默认值**：缺了 #105 会在用户的 ComfyUI 输出目录里找不到任何缓存，
+    而那时的报错只能是一句「目录不存在」。空输入重问，不是静默留空。
+    """
+    brief = session.brief
+    if brief.director_node_id:
+        return
+    from ..director import cache as director_cache
+
+    node_id = ""
+    while not node_id:
+        raw = _prompt("导演台节点的 unique_id（ComfyUI 里选中导演台节点后显示的 id，必填）：")
+        # 合法性判据只住 ``director/cache.py``（复审 H3）：向导原先自写
+        # ``isalnum() or "_.-"``，恰好放过 ``..``——用户答完三问、进陪跑才在
+        # ``cache_dir`` 炸。这里提前问，报错就在同一道题上。
+        try:
+            node_id = director_cache.validate_node_id(raw)
+        except ValueError as exc:
+            print(f"[提示] {exc}。")
+            continue
+    cache_name = _prompt(
+        "段缓存名（导演台性能组的 cache_name；回车=空，缓存目录只用节点 id）：").strip()
+    from ..director.pack import CONTINUITY_DEFAULT, CONTINUITY_MODES
+
+    continuity = ""
+    while continuity not in CONTINUITY_MODES:
+        raw = _prompt(
+            f"段间引导模式（{' / '.join(CONTINUITY_MODES)}；回车={CONTINUITY_DEFAULT}）："
+        ).strip().lower()
+        continuity = raw or CONTINUITY_DEFAULT
+        if continuity not in CONTINUITY_MODES:
+            print(f"[提示] 只能是 {' / '.join(CONTINUITY_MODES)}。")
+    brief.director_node_id = node_id
+    brief.director_cache_name = cache_name
+    brief.director_continuity_mode = continuity
+    # 立刻落盘：这三个答案决定了后面找缓存与写包的参数，重跑向导不该再问一遍。
+    save_session(session.directory, brief, session.stage_state, status=session.status)
+
+
+def _run_director_flow(session: SessionState) -> int:
+    """导演台路线接线（#102 段规划 + #103 逐段方言 + #104 导演包）：规划 → 段表
+    → 逐段写 ``director/segment-NN.md`` → 打包 ``director/initial.mmxpack.zip`` → 出站清单。
+
+    出站必须**逐段**给段类型、给图清单与包内路径，并同时给两个总帧数（时间线 Σ 声明
+    vs 成片预计 Σ 导出）——段类型误判会让该段静默丢弃首帧（spec 的风险清单），而两个
+    总帧数差「12×有引导段数」，只写一个用户会以为导演台里显示的长度是错的。
+    逐段陪跑、级联与成片归档在 #105–#108。
+
+    规划、写段、打包都是长阻塞或可能失败的动作，每段结束后 ``_drain_stdin()`` 清行
+    缓冲，否则用户误敲的键会被下一个 ``input()`` 吞掉（本仓既有纪律）。放包失败
+    **大声报错并返回非零**：残缺包被导入后插件只会「成功但少图」。
+    """
+    from ..director.pack import prepare_director_pack
+    from ..director.planning import (
+        plan_director_segments,
+        plan_path,
+        render_plan_listing,
+        write_plan_json,
+    )
+    from ..director.prompts import render_written_listing, write_director_segments
+    from ..model_factory import build_chat_model
+    from ..segment_prompts import frame_anchor_context, render_revision_context
+
+    brief = session.brief
+    state = dict(session.stage_state)
+    shot_table = str(state.get("shot_table", ""))
+    if not shot_table.strip():
+        # 没有分镜表就没有可规划的叙事单元：宁可停在这里，也不拿空表让模型自由发挥。
+        # 先判这一条再问打包参数：跑不下去的会话不该先让用户答三道题。
+        print("[错误] 导演台路线：会话里没有分镜表（阶段 1 产物缺失），无法做段规划。")
+        return 1
+    _ask_director_pack_settings(session)
+    # 产资产图的导演台模式（当前＝r2v）先跑**素材循环**再规划（2026-10-29 用户裁定；
+    # 复审 S2）：打包时 `pack._picture_sources` 只认素材台账里已登记的正本，而段词里的
+    # `<Picture N>` 编号又来自同一份登记——不先跑循环，r2v 端到端不可用（打包必然报
+    # 「台账是空的」）。循环复用多参那一段（`_asset_loop`），不复制实现。
+    # t2v/i2v/fl2v/v2v 不产资产图，一步都不多走。
+    from ..brief_parser import route_emits_asset_prompts
+
+    if route_emits_asset_prompts(brief):
+        # False ＝ 用户「先到这里」：进度已逐张落盘、状态仍是 awaiting_frames，
+        # 重跑向导会路由回本函数、重新进入同一张待办（不重付已出过的词）。
+        if not _asset_loop(state, brief, session.directory):
+            return 0
+    # 规划与写段共用同一个模型实例：两段长阻塞之间再建一次客户端只是多一次握手。
+    llm = build_chat_model()
+    try:
+        with step_scope("正在按导演台帧网格规划分段"):
+            plan = plan_director_segments(
+                shot_table, brief.duration, llm,
+                mode=brief.director_mode,
+                # 与 base 的规划调用同源：真实关键帧画面压过分镜表、修订按优先序注入。
+                frame_context=frame_anchor_context(state),
+                revision_context=render_revision_context(state),
+            )
+    except (RuntimeError, ValueError) as exc:
+        # 两种病分开表达（ADR 0019）：调用失败（卡住/断流）与回复不合格都说明白；
+        # 这条路线没有机械回退，不能静默降级成别的分段口径。
+        print(f"[错误] 导演台段规划失败：{exc}")
+        return 1
+    finally:
+        _drain_stdin()
+
+    plan_file = write_plan_json(plan_path(session.directory), plan)
+    print()
+    print(render_plan_listing(plan))
+    print(f"\n段表已写入：{plan_file}")
+
+    try:
+        with step_scope("正在逐段写导演台提示词"):
+            written = write_director_segments(
+                plan, llm=llm, session_dir=session.directory,
+                shot_table=shot_table,
+                # r2v 的六节外壳第 1、3 节取阶段 1 的素材定义（同一条参考素材纪律）；
+                # 其余模式没有参考素材，不传也不会用到。
+                subject_defs=str(state.get("subject_defs", "")),
+            )
+    except (RuntimeError, ValueError) as exc:
+        # 写段失败不写半段假内容（半份段表比没写更糟：用户会拿它去打包）。
+        print(f"[错误] 导演台写段失败：{exc}")
+        return 1
+    finally:
+        _drain_stdin()
+
+    print()
+    print(render_written_listing(plan, written))
+
+    # 打包：段表 + 段提示词 + 素材 → ``director/pack/`` 与 ``director/initial.mmxpack.zip``。
+    # 参数从配置读（画布/参考图尺寸），不在这里写死（设计 §4）。
+    from ..config import config as app_config
+
+    try:
+        _, report = prepare_director_pack(
+            session.directory, plan,
+            settings=app_config.director_settings(),
+            continuity_mode=brief.director_continuity_mode,
+        )
+    except (ValueError, OSError) as exc:
+        # 失败就是失败：不许只打一行警告继续。残缺包导入导演台后，插件只会
+        # 「导入成功、缺失清单非空」，用户到点运行才发现少图。
+        print(f"\n[错误] 导演包构建失败：{exc}")
+        return 1
+    print()
+    print(report)
+    # 打包之后直接进入逐段陪跑（#105）：报告的末行「导入后逐段执行由 #105 跟进」
+    # 由这里接上——用户导入包之后下一步就是跑第 1 段。轮转放在这里：这是**新一次交付**
+    # 的开头（复用 GEN 时追加账不会自动清空，#58 实测）。
+    return _run_director_segment_handoff(
+        plan, session, config=app_config, rotate=True, llm=llm)
+
+
+def _resume_director_handoff(config: Config, session: SessionState, *,
+                             llm=None) -> int:
+    """导演台逐段陪跑续接（issue #105）：回到同一个 GEN，只补没通过的段。
+
+    与 ``_resume_ref_handoff`` 是**两条路线的续接**，不共用：多参靠段产出账的语义层
+    记录与 ``segment-NN.md``，导演台靠**段缓存的帧数**。段表、段提示词、导演包都不重做
+    ——重做会重付 LLM，而且新段表与账上已通过的段号对不上（续跑拿错表）。
+
+    读不回来就**响错停住**：没有段表就不知道「第 N 段已通过」指的是哪一段。这里不走
+    「从零开始」——那等于把已通过的段当没做过。
+    """
+    from ..director import ledger
+    from ..director.planning import plan_path, read_plan_json
+
+    directory = session.directory
+    try:
+        plan = read_plan_json(plan_path(directory))
+    except (OSError, ValueError) as exc:
+        print(f"[错误] 导演台段表读不回来：{exc}")
+        print(f"  出路：把 {plan_path(directory)} 从备份恢复后重跑；"
+              "或删掉会话文件另开一次生成（阶段 1/2 会重做）。")
+        return 1
+    try:
+        passed = ledger.read_director_progress(
+            directory, total_segments=len(plan.segments))
+    except (OSError, ValueError) as exc:
+        print(f"[错误] 段产出账读不回来：{exc}")
+        print("  这一段**不能从零开始**：账上的通过行是「哪些段已经跑过」的唯一凭据，"
+              "丢了它就得重新跑已经跑完的段。")
+        return 1
+    print(f"\n[续接] 上一次导演台逐段陪跑没有跑完，回到 {directory.name} 继续"
+          f"（段规划 / 写段 / 打包都不重跑）：已通过 {len(passed)}/{len(plan.segments)} 段。")
+    return _run_director_segment_handoff(
+        plan, session, config=config, passed=passed, llm=llm)
+
+
+def _render_director_segment_briefing(plan, segment, session_dir: Path,
+                                      cache_directory: Path) -> str:
+    """一段的执行说明：段号、两种计划帧、给图清单、段文件、缓存目录与**勾段方式**。
+
+    「用 runSelection 只勾第 N 段」这句是**硬要求**（设计 §3.7 最后一条）：插件对
+    选中段一律重采样，全片模式下点运行会把整条时间线重跑一遍——用户会以为「只补跑
+    一段」，实际是几十分钟的整片重烧。
+    """
+    from ..director.planning import render_give_images
+    from ..director.prompts import segment_path
+
+    return "\n".join([
+        "",
+        "=" * 60,
+        f"第 {segment.index}/{len(plan.segments)} 段（{segment.label}）  "
+        f"计划：声明 {segment.declared_frames} 帧 / 导出 {segment.export_frames} 帧  "
+        f"给图：{render_give_images(segment, plan.mode)}",
+        f"段提示词：{segment_path(session_dir, segment.index)}",
+        f"段缓存目录：{cache_directory}",
+        f"→ 在导演台里用 runSelection **只勾第 {segment.index} 段**，然后点运行。",
+        "  （全片模式下点运行会把整条时间线重跑一遍：插件对选中段一律重采样，",
+        "    缓存命中也不会跳。）",
+        "=" * 60,
+    ])
+
+
+def _build_director_llm():
+    """陪跑里按需建模型（只有要写尾帧变换提示词时才用得上）。失败不静默。"""
+    from ..model_factory import build_chat_model
+
+    try:
+        return build_chat_model()
+    except Exception as exc:  # noqa: BLE001 - 病因原样交回，别让建客户端失败伪装成别的问题
+        # 不写具体段号：这里拿不到「轮到哪一段」，写死「第 N 段」会变成一句永远
+        # 不替换的模板（复审 H4）。
+        print(f"[错误] 模型构造失败（{exc}）：接下来这一段的终点画面提示词写不出来。")
+        return None
+
+
+def _write_director_tailframe(plan, segment, session: SessionState,
+                              cache_directory: Path, *, llm) -> bool:
+    """轮到该段时产出它的终点画面提示词（#107 的三段式，本票负责接线）。
+
+    起点画面取**上一段缓存的末帧**（设计 §3.3）：这一段自己还没跑，拿不到自己的帧；
+    而「本段第一帧」就是上一段的终点，这才是尾帧变换的输入。
+
+    只传**这一段**给 ``write_tailframe_prompts``（用 ``replace`` 造单段 plan）：
+    它会对 plan 里所有要终点画面的段产出，而陪跑此刻只该为轮到的那一段写——
+    其它段的起点画面还没产生，用这一张图写出来的会是假词。
+    """
+    from dataclasses import replace
+
+    from ..director import cache
+    from ..director import tailframe as tailframe_module
+    from ..director.tailframe import (
+        tailframe_path, validate_tailframe_prompt, write_tailframe_prompts,
+    )
+
+    existing = tailframe_path(session.directory, segment.index)
+    if existing.is_file():
+        # 续跑不重付、也不许覆盖（#58 的同一条教训）：这一段的词可能已经拿去生成过
+        # 终点画面了，重写一份新词会让「挂上去的那张图」与文件里的词不再对应。
+        text = existing.read_text(encoding="utf-8")
+        print(f"[尾帧] 第 {segment.index} 段终点画面提示词已在盘上，沿用（不重付）：{existing}")
+        for issue in validate_tailframe_prompt(text):
+            print(f"   [{issue.severity.upper()}] {issue.code}: {issue.message}")
+        return True
+
+    previous = segment.index - 1
+    if previous < 1:
+        print(f"[错误] 第 {segment.index} 段（{segment.label}）不该要终点画面："
+              "首段没有起点画面可用（opening 不产尾帧变换）。")
+        return False
+    frames_file = cache.frames_path(cache_directory, previous)
+    try:
+        # 落点由 tailframe.last_frame_png_path 给：级联重跑按同一个名字删（#106），
+        # 在这里再拼一份字面就是两处会各自漂的口径。
+        image = cache.export_last_frame(
+            frames_file, tailframe_module.last_frame_png_path(session.directory, previous))
+    except ValueError as exc:
+        print(f"[错误] 第 {segment.index} 段要终点画面，但取不到上一段的末帧：{exc}")
+        return False
+    single = replace(plan, segments=(segment,))
+    try:
+        written = write_tailframe_prompts(
+            single, llm=llm, session_dir=session.directory, start_image=image)
+    except (RuntimeError, ValueError) as exc:
+        print(f"[错误] 第 {segment.index} 段的终点画面提示词写不出来：{exc}")
+        return False
+    for item in written:
+        print(f"[尾帧] 第 {item.index} 段终点画面提示词 → {item.path}")
+        for issue in item.issues:
+            print(f"   [{issue.severity.upper()}] {issue.code}: {issue.message}")
+        print("   用它生成终点画面，然后挂到导演台这一段的尾帧槽上再点运行。")
+    return True
+
+
+def _ask_segment_number(question: str, *, total: int) -> tuple[str, int | None]:
+    """问一个段号（#106 的陪跑首尾两问共用）：返回 ``(动作, 段号)``。
+
+    动作三种：``ok``（合法段号）／``none``（回车＝不用）／``quit``（q＝停下）。
+
+    非法输入**重问**而不是当「不用」：用户打了「3段」或越界段号时，若静默按「不用」
+    处理，他会以为重跑已经排上——而实际上什么都不会发生。这正是 #106 要治的
+    「重跑像什么都没发生」，只是换了个位置发生。
+    """
+    while True:
+        raw = _prompt(question)
+        text = raw.strip().lower()
+        if text in ("q", "quit"):
+            return "quit", None
+        if not text:
+            return "none", None
+        if text.isdigit() and 1 <= int(text) <= total:
+            return "ok", int(text)
+        print(f"  [提示] 无效段号：{raw!r}"
+              f"（请填 1..{total} 之间的段号；回车＝不用，q＝停下）。")
+
+
+def _apply_director_cascade(*, directory: Path, cache_directory: Path,
+                            from_segment: int, total: int) -> dict[int, dict] | None:
+    """执行一次级联、念出结果，返回**刷新后**的通过表；失败返回 ``None``（调用方停住）。
+
+    为什么连通过表一起返回：级联作废的就是这张表（第 N 段起全部失效）。让调用方自己
+    从返回值里删键等于在第二处重复账本判据（「同一契约不许两处口径」）；重读账本才
+    只有一个真源。
+    """
+    from ..director import cascade, ledger
+
+    try:
+        result = cascade.cascade_rerun(
+            directory, from_segment=from_segment, total_segments=total,
+            cache_directory=cache_directory)
+        print(cascade.render_cascade_notice(result))
+        return ledger.read_director_progress(directory, total_segments=total)
+    except (OSError, ValueError) as exc:
+        print(f"[错误] 级联重跑失败：{exc}")
+        return None
+
+
+def _run_director_segment_handoff(plan, session: SessionState, *, config: Config,
+                                  passed: dict[int, dict] | None = None,
+                                  rotate: bool = False, llm=None) -> int:
+    """导演台逐段陪跑（issue #105）：出站「只勾第 N 段」→ 等回车 → 数缓存帧数 → 判定。
+
+    与多参陪跑（``_run_ref_segment_handoff``）**同形不同路**：多参是用户交回视频路径、
+    项目侧剥帧读图做语义验收；导演台是用户在导演台里跑、项目侧读**段缓存**数帧做可证层
+    验收，语义验收留在导演台 UI 里完成。
+
+    判定通过就写一行 ``event=output``（缓存路径 + 实际帧数 + SHA256）——它同时是续跑
+    的进度（不新开进度账）。不通过的段**不落账**：账上有行就是「这段过了」的证据。
+
+    ``rotate``：新一次交付的开头要轮转账本（复用 GEN 时追加账不会自动清空，#58 实测）。
+    续跑不走轮转。
+
+    **首尾各问一次重跑**（#106，2026-10-29 用户裁定，不新增独立菜单、不加每段一问）：
+    开跑前问「有要重跑的段吗」，全部通过后再问「有要改哪一段重来吗」——两处都回到
+    第 N 段重跑；中间那段循环里**不问**，免得每段都要多按一次回车。
+    """
+    from ..director import cache, ledger
+    from ..director.companion import judge_segment
+    from ..director.tailframe import needs_tailframe
+
+    directory = Path(session.directory)
+    brief = session.brief
+    try:
+        cache_directory = cache.cache_dir(
+            config.director_comfy_output_root(),
+            brief.director_cache_name, brief.director_node_id)
+        tolerance = config.director_frame_tolerance()
+    except ValueError as exc:
+        print(f"[错误] 段缓存参数不对：{exc}")
+        return 1
+
+    if rotate:
+        moved = ledger.rotate_director_ledger(directory)
+        if moved is not None:
+            print(f"[轮转] 上一次陪跑的段产出账已挪到 {moved}（新交付从干净进度开始）。")
+
+    if passed is None:
+        try:
+            passed = ledger.read_director_progress(
+                directory, total_segments=len(plan.segments))
+        except (OSError, ValueError) as exc:
+            print(f"[错误] 段产出账读不回来：{exc}")
+            return 1
+
+    # 状态先落盘：中断后向导才会把这条会话列进续接清单，走到导演台的续接路径。
+    save_session(directory, brief, session.stage_state,
+                 status=STATUS_DIRECTOR_SEGMENTS_RUNNING)
+
+    total = len(plan.segments)
+    print(f"\n导演台逐段陪跑：共 {total} 段；段缓存目录 {cache_directory}"
+          f"（帧容差 {tolerance} 帧）")
+
+    # 首问（#106）：先把「答了这一问要付什么代价」念在问题前面，用户才知道自己在决定
+    # 删哪些产物。放在轮转与读账之后：作废要基于这一轮的真实通过表。
+    print("\n[重跑] 若某段要重做，现在告诉我段号：我会作废该段及其后所有段的通过记录，"
+          "并删掉它们的段缓存（**前面的段不动**）。")
+    action, target = _ask_segment_number(
+        "有要重跑的段吗？（段号，回车=不用，q=停下）：", total=total)
+    if action == "quit":
+        print("停在陪跑开始前：没有改动任何段的通过行与缓存。")
+        return 0
+    start_at = 1
+    if action == "ok":
+        refreshed = _apply_director_cascade(
+            directory=directory, cache_directory=cache_directory,
+            from_segment=target, total=total)
+        if refreshed is None:
+            return 1
+        passed, start_at = refreshed, target
+
+    while True:
+        for segment in plan.segments:
+            if segment.index < start_at:
+                # 级联只从第 N 段起动手：第 1..N-1 段一个都不碰，连「跳过」都不必念。
+                continue
+            if segment.index in passed:
+                row = passed[segment.index]
+                print(f"[续接] 第 {segment.index}/{total} 段已通过验收，跳过"
+                      f"（不重跑：{row.get('cache', '')}）")
+                continue
+            # 轮到该段才写它的终点画面提示词：起点画面是**上一段**的末帧，此刻才存在。
+            if needs_tailframe(segment.type):
+                if llm is None:
+                    llm = _build_director_llm()
+                    if llm is None:
+                        return 1
+                if not _write_director_tailframe(
+                        plan, segment, session, cache_directory, llm=llm):
+                    return 1
+            announced = False
+            while True:
+                if not announced:
+                    print(_render_director_segment_briefing(
+                        plan, segment, directory, cache_directory))
+                    announced = True
+                raw = _prompt(
+                    f"第 {segment.index}/{total} 段在导演台里跑完后按回车，我来数该段缓存的帧数"
+                    "（输入 q 停下）：")
+                if raw.strip().lower() in ("q", "quit"):
+                    # 停下不是失败：已通过的段留在账上，重跑向导会从这一段接着走。
+                    print(f"\n⚠ 停在轮到第 {segment.index}/{total} 段：这一段不落账。"
+                          "已通过的段留在段产出账里，重跑向导会从这一段接着走。")
+                    return 0
+                cached = cache.cached_segments(cache_directory)
+                actual = None
+                # 判定前先探 raw 编码（`seg_XXXX.pt`）：`cached_segments` 只认终稿
+                # `.frames.mkv`，插件默认的 `cache_frames_codec="raw"` 写出的 `.pt`
+                # 永远不在里面。只看 `segment.index in cached` 决定要不要读缓存的话，
+                # 用户会一直看到「这一段还没跑」（SEGMENT_NOT_RUN），而真正该看到的处置提示
+                # （把 cache_frames_codec 切成 ffv1 后重跑）永远出不来——#105 硬口径
+                # 在产线不可达（复审 S1 实测）。`.pt` 不许被静默当成「没跑」。
+                raw_cached = cache.raw_frames_path(cache_directory, segment.index).is_file()
+                if segment.index in cached or raw_cached:
+                    try:
+                        actual = cache.actual_frames_for_segment(
+                            cache_directory, segment.index)
+                    except ValueError as exc:
+                        # 编码不对（raw/.pt）或文件读不出：这是环境问题，不是「0 帧」。
+                        # 停在原地重问，让用户处置完再回车。
+                        print(f"[错误] {exc}")
+                        continue
+                verdict = judge_segment(segment, actual_frames=actual,
+                                        cached_segments=cached, tolerance=tolerance)
+                print(f"\n→ {verdict.message}")
+                if not verdict.passed:
+                    print(f"   （判定 {verdict.status.upper()} / {verdict.code}）"
+                          "回导演台重跑**本段**后再回车；输入 q 停下。")
+                    continue
+                ledger.log_director_output(
+                    directory,
+                    segment=segment.index,
+                    start_frame=segment.start_frame,
+                    end_frame=segment.end_frame,
+                    declared_frames=segment.declared_frames,
+                    export_frames=segment.export_frames,
+                    actual_frames=actual,
+                    cache_path=cache.frames_path(cache_directory, segment.index),
+                )
+                print(f"[完成] 第 {segment.index}/{total} 段已记入段产出账"
+                      "（含缓存路径与实际帧数）。")
+                break
+
+        print(f"\n✓ 全部 {total} 段已通过可证层并记入段产出账。")
+        # 尾问（#106）：看完成片才发现某段要改是常态（老师在整片语境里才看得出问题），
+        # 所以全部通过之后再给一次入口，答了就回到那一段重跑。
+        action, target = _ask_segment_number(
+            "有要改哪一段重来吗？（段号，回车=不用，q=停下）：", total=total)
+        if action == "quit":
+            # 尾问里按 q 与「停在交付前」是同一件事：段全过了，交付没做，重跑向导回到这里。
+            print("停在交付之前：全部段已通过，重跑向导会回到交付。")
+            return 0
+        if action == "none":
+            break
+        refreshed = _apply_director_cascade(
+            directory=directory, cache_directory=cache_directory,
+            from_segment=target, total=total)
+        if refreshed is None:
+            return 1
+        passed, start_at = refreshed, target
+
+    # 交付（#108）接在陪跑末尾：问成片与最终包路径、归档、补改写账。
+    # 尾问（#106）排在它**之前**：用户改完段应该回到陪跑，不该带着一段没跑的词直接
+    # 交付（#108 的用例与注释也按这个次序写）。
+    return _finish_director_delivery(plan, session)
+
+
+def _prompt_existing_file(question: str, *, what: str) -> Path | None:
+    """问一个**必须已存在**的文件路径；不存在就报错重问（2026-10-29 用户裁定）。
+
+    返回 ``None`` ＝ 用户输入 q 停下——这不是失败：已通过的段留在账上，重跑向导回到
+    这里。**不扫目录自动挑**：导出目录里往往躺着上一次的同名文件，自动挑中的那一个用户
+    没看过，拿错成片/拿错包都不会有人发现。
+    """
+    while True:
+        # 用户多半是从资源管理器「复制文件地址」粘过来的，会带一对引号。
+        raw = _prompt(question).strip().strip('"').strip("'")
+        if raw.lower() in ("q", "quit"):
+            return None
+        if not raw:
+            print(f"[错误] {what}路径不能为空。")
+            continue
+        path = Path(raw)
+        if not path.is_file():
+            print(f"[错误] {what}不存在：{path}")
+            print("  请确认路径后重输（项目不会自动搜目录：猜错的文件发现不了）。")
+            continue
+        return path
+
+
+def _finish_director_delivery(plan, session: SessionState) -> int:
+    """全段通过后的交付（issue #108，设计 §3.9）：成片记录 ＋ 最终包归档 ＋ 补改写行。
+
+    成功才把会话置 ``STATUS_COMPLETED``：不置就永远出现在续接清单里（每次启动都问一次
+    「是否继续」）；失败时**必须不置**——交付坏掉的会话要能重进，而重进靠的就是这个状态。
+    """
+    from ..director import delivery
+
+    print("\n全部段已通过。接下来在导演台里合并成片、导出最终包，再把两者交给项目。")
+    film = _prompt_existing_file(
+        "成片 mp4 路径（导演台合并导出的文件；输入 q 停下）：", what="成片 mp4")
+    if film is None:
+        print("\n⚠ 停在交付前（成片路径）：段产出账仍写着全部通过，"
+              "重跑向导会回到这里。")
+        return 0
+    pack_zip = _prompt_existing_file(
+        "导演台导出的最终包 zip 路径（输入 q 停下）：", what="最终包")
+    if pack_zip is None:
+        print("\n⚠ 停在交付前（最终包路径）：重跑向导会回到这里。")
+        return 0
+
+    try:
+        report = delivery.deliver(session.directory, plan=plan,
+                                  film_path=film, pack_zip=pack_zip)
+    except (OSError, ValueError) as exc:
+        # 交付失败不静默、不置完成：包坏了/段数不对这类问题用户能自己修，重跑即可重试。
+        print(f"\n[错误] 交付失败：{exc}")
+        print("  会话仍停在导演台逐段陪跑：修好上面的问题后重跑向导可重试交付"
+              "（已通过的段不会重跑）。")
+        return 1
+    print(report.render())
+    # 交付成功才落完成态（设计 §4「交付之后才置 completed」）。
+    save_session(Path(session.directory), session.brief, session.stage_state,
+                 status=STATUS_COMPLETED)
+    print("\n本次导演台生成已完成。")
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -538,10 +1161,10 @@ def _resume_stage1(config: Config, session: SessionState) -> SessionState | None
         state.pop("_progress")
     save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
     print("\n阶段 1 已恢复完成。")
-    if brief.mode == "ref":
-        # 多参路线（issue #41）：直进阶段 2 直出，人机修改循环（画面级锚在帧提示词上）
-        # 对它无意义。资产图提示词**不在这里批量展**（issue #50 AC1 一次只出一张）——
-        # 素材循环逐张出词，画布行走 brief.canvases（AC5）。
+    if _skips_base_frame_loop(brief):
+        # 多参（issue #41）与导演台（issue #101）都没有 base 修改循环的锚（首尾帧提示词）：
+        # 多参下一步走素材循环，导演台的后续步骤在后续票据。两条共用同一判据，
+        # 不再各写一份「跳过」——本仓「改一处漏一处」的老形态就从这里长出来。
         return load_session(generation_dir)
     # 新跑路径（_phase1_new）在进阶段 2 前会展示生图提示词；续接路径漏了这一步，
     # 用户没有提示词就无法生成关键帧图，阶段 2 的「首帧图片路径」无从提交（2026-09-24 实测）。
@@ -562,11 +1185,13 @@ def _resume_awaiting_frames(config: Config, session: SessionState) -> SessionSta
     model/agents 留给循环**按需就地构建**：这条路径手上没有 ``run_stage1`` 的返回值，
     而它原本是零 LLM 成本的一步，不该为「看一眼提示词」先建一个客户端。
     """
-    if session.brief.mode == "ref":
+    if _skips_base_frame_loop(session.brief):
         # 多参路线（issue #41）：没有帧图可等、没有帧提示词可改，直接交回主流程
         # 进 _phase2_ref_finish——素材循环逐张出词（issue #50），再直出视频提示词。
         # 不再在这里补展全量提示词：一次只出一张（AC1），出站由素材循环按队列驱动；
         # 落盘也随出站逐张累积（`_sync_released_asset_files`），断点续接不丢。
+        # 导演台路线（issue #101）：同样没有帧提示词可改——后续步骤由 `run_wizard`
+        # 的导演台出口统一说明（#102–#108 接线前没有可续的产物）。
         return load_session(session.directory)
     state = dict(session.stage_state)
     if _user_revision_loop(state, session.directory, session.brief, config) == RESTART_FLOW:
@@ -644,12 +1269,18 @@ def _phase1_new(config: Config) -> SessionState | None:
     # 多参路线（issue #41）：mode=ref，与首尾帧并存。variant 对多参无意义，取 T2VA 占位
     # ——帧逻辑一律按 FRAME_VARIANTS 判，不读它。
     is_ref = route == "REF2VA"
+    # 导演台路线（issue #101）：选完路线再选七种模式之一。variant 同样取 T2VA 占位，
+    # 理由更强——导演台模式（t2v/…/mixed）与帧变体是两套口径，带着 FL2VA 进管道会让
+    # 帧链判据把这条会话读成首尾帧（ADR 0024）。
+    is_director_route = route == "DIRECTOR"
+    director_mode = _choose_director_mode() if is_director_route else ""
     # 画布选择器（issue #42）：选定值进 brief，请求【画布】块与产物画布行同取。
     canvases = _choose_canvases()
 
     brief = Brief(
-        mode="ref" if is_ref else "base",
-        variant="T2VA" if is_ref else route,
+        mode="director" if is_director_route else ("ref" if is_ref else "base"),
+        variant="T2VA" if (is_ref or is_director_route) else route,
+        director_mode=director_mode,
         duration=duration,
         style=style or "",
         language=config.default_language,
@@ -663,11 +1294,14 @@ def _phase1_new(config: Config) -> SessionState | None:
     # 阶段 1 标题按路线说对话（issue #66）：多参路线的实际产出是**资产图**生图提示词，
     # 沿用「首尾帧」措辞会让用户误以为自己在跑首尾帧链（票面用户现场）。首尾帧链措辞
     # 原样保留——≤9 张的既有流程与老产物描述不受影响。
-    stage1_title = (
-        "[阶段 1] 正在生成剧本、设计与资产图生图提示词……（预计几分钟，期间无需输入）"
-        if brief.mode == "ref" else
-        "[阶段 1] 正在生成剧本、设计与首尾帧生图提示词……（预计几分钟，期间无需输入）"
-    )
+    # 导演台（issue #101）在按模式分派（#103）接线前，阶段 1 产出与 base 同形；标题只
+    # 说「剧本与设计」，既不说首尾帧也不说资产图——两边都不是它这一提的产物。
+    if brief.is_ref:
+        stage1_title = "[阶段 1] 正在生成剧本、设计与资产图生图提示词……（预计几分钟，期间无需输入）"
+    elif brief.is_director:
+        stage1_title = "[阶段 1] 正在生成剧本与设计产物……（导演台专属出词随后续步骤接线，期间无需输入）"
+    else:
+        stage1_title = "[阶段 1] 正在生成剧本、设计与首尾帧生图提示词……（预计几分钟，期间无需输入）"
     with _progress_scope(stage1_title):
         state, model, agents = run_stage1(
             brief, config, on_node=_report_node,
@@ -679,12 +1313,16 @@ def _phase1_new(config: Config) -> SessionState | None:
     state.setdefault("frame_images", [])
     save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
 
-    if brief.mode == "ref":
+    if _skips_base_frame_loop(brief):
         # 多参路线（issue #41）：无关键帧提示词可改、无帧图可交——人机修改循环的
         # 画面级重出锚在 fl2va_frame_prompts 上，对多参是空转。
         # 资产图提示词由**素材循环逐张出站**（issue #50 AC1，一次只出一张、画布同源 AC5），
         # 这里不再一次性全量给出——「8 条一口气全出、全生完才发现问题」正是要杀的节奏。
-        print("\n阶段 1 完成。下一步进入素材循环：逐张出词→生成→审查→交回→校对→裁决。")
+        if brief.is_ref:
+            print("\n阶段 1 完成。下一步进入素材循环：逐张出词→生成→审查→交回→校对→裁决。")
+        # 导演台路线（issue #101）：阶段 1 产物已落会话，**不**进 base 的人机修改循环。
+        # 该循环的画面级重出锚在 fl2va 首尾帧提示词上，对导演台路线是另一套产物；
+        # 段规划/导演包/陪跑由 #102–#108 接线，`run_wizard` 在那里统一退出。
         return load_session(generation_dir)
 
     # 修改循环是与两条续接路径**共用**的那一份（issue #27）：三处各写一遍的代价本仓见过
@@ -2133,10 +2771,18 @@ def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item: QueueIte
 def _asset_loop(state: dict, brief: Brief, generation_dir: Path) -> bool:
     """素材循环（issue #50）：队列驱动的逐张闭环，一次只维持一张「当前待办」。
 
+    **两条路线共用这一个循环**（复审 S2）：多参直出，以及导演台里产资产图提示词的
+    模式（当前＝r2v）。资产图的词与素材台账本来就是同一份（``image_prompt_variants``
+    / 台账文件），各复制一份循环就会长出第二套「什么时候算一张落账」的判据；导演台的
+    r2v 打包又依赖台账里已登记的正本（``pack._picture_sources``），不接这一处 r2v
+    端到端不可用。**不要再包一层同名转发**——那只是把调用点与实现隔开一层（复审
+    Standards 轴 Middle Man）。
+
     队列顺序＝纯 ``<Picture N>`` 升序（issue #66 起；＝剧本出场序＝接线序），支持
     跳号/指定下一个出谁（AC4）；每张要么裁决落账、要么显式放弃才轮到下一张（AC1）。
     返回 True ＝ 队列清空，继续注入卡与阶段 2；
-    False ＝ 用户「先到这里」，会话保持可续接（进度已逐张落盘）。
+    False ＝ 用户「先到这里」，会话保持可续接（进度已逐张落盘）。调用方必须原样停下：
+    重跑向导会回到同一张待办，不重付已出过的词。
     """
     from ..asset_ledger import KIND_PICTURE, IntakeReport, load_asset_ledger, render_report, verify_asset_ledger
     from ..asset_loop import asset_queue, loop_state, set_current

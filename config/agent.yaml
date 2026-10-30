@@ -39,6 +39,25 @@ models:
 # 旧字段：仅在新模型配置和兼容环境变量都未提供模型名时作为 fallback。
 # model: ""
 
+# 导演台路线（issue #104）：导演包的画布与参考图参数。
+# 宽高必须是 32 的倍数（MiniMax H3 画布按 32 对齐，后端会拒绝非对齐尺寸），
+# 打包与配置读取时各校验一次；ref_image_size 只认 match / max（官方节点口径），
+# ref_max_size 是导演台节点的 ref_max_size 默认值。
+director:
+  width: 736
+  height: 1280
+  ref_max_size: 864
+  # match = 参考图按生成尺寸缩放（插件与官方节点的默认值，2026-10-29 用户裁定）；
+  # max = 按 ref_max_size 上限送图，参考图更清晰但更费显存。改这一行即可切换。
+  ref_image_size: "match"
+  # ComfyUI 输出目录（issue #105）：段缓存落在 <这里>/minimax_seg_cache/<缓存名>_<节点id>/。
+  # 换机器不用改这份文件：环境变量 H3_COMFY_OUTPUT_ROOT 优先级更高。
+  comfy_output_root: "D:/Comfyui/ComfyUI/output"
+  # 有引导段允许的「实际比计划少」的帧数（issue #105，设计 §3.7）。默认值住在
+  # director/companion.py 的 DIRECTOR_FRAME_TOLERANCE（判据真源）；写在这里是给用户的
+  # 旋钮，删掉这一行就回落到那个常量。
+  frame_tolerance: 5
+
 defaults:
   style: "Cinematic"
   language: "Chinese"

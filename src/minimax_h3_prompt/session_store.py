@@ -11,7 +11,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .brief_parser import Brief, RefItem
+from .brief_parser import (
+    Brief,
+    RefItem,
+    is_director_mode,
+    route_emits_asset_prompts,
+    validate_director_mode,
+    validate_route_mode,
+)
 from .graph.state import ASSET_PROMPT_KEYS
 from .observability import COST_TABLE_KEY, token_meter
 
@@ -36,6 +43,12 @@ STATUS_COMPLETED = "completed"
 STATUS_STAGE1_RUNNING = "stage1_running"
 STATUS_SEGMENTED_RUNNING = "segmented_running"
 STATUS_REF_SEGMENTS_RUNNING = "ref_segments_running"
+# director_segments_running = 导演台逐段陪跑进行中（issue #105）。与上面两个陪跑态是
+# **同一条教训的第三次**，但**不能复用任何既有值**：导演台的续接路径既不走 base 的
+# ``_run_long_form``（写 shot-NN.md、剥桥接帧），也不走多参的段产出账语义层（读首末帧、
+# 五档出路），它读的是**段缓存的帧数**。同一个值会让导演台会话被别的路线续接，等于拿
+# 另一条路线的步骤去走它（2026-10-20 #55 复核已标记该风险）。
+STATUS_DIRECTOR_SEGMENTS_RUNNING = "director_segments_running"
 
 # state 中允许持久化的键；brief 对象单独序列化。`_progress` 是阶段 1 断点的元数据（哪个节点跑完了）。
 # `fl2va_frame_descriptions` 是用户提交帧图的读图结果——阶段 2 分段流程的唯一画面事实源，
@@ -78,6 +91,10 @@ _STATE_KEYS = (
     "sound_design", "music", "final_prompt", "final_report", "_progress",
     "user_revisions", "frame_round", "asset_proofreads", "asset_loop",
     "resume_answers", "asset_proofread_progress",
+    # **故意不在**这里的：`director_mode`（导演台选定的生成模式，issue #101）。它是
+    # ``mode``/``variant`` 的同族——路线级选择只住 brief 一份，`run_stage1` 每次从 brief
+    # 现取进图 state。落一份进白名单就等于同一契约两处口径：brief 与 stage_state 一旦
+    # 不一致（外人改写、旧代码写脏），节点读 state、向导读 brief，两边各说各话且不报错。
 )
 
 # 资产图提示词三键（父 spec #77 / issue #80）：只属于多参路线。键名从 `graph/state.py`
@@ -97,9 +114,11 @@ def _route_filtered_state(raw_state: Any, brief: Brief) -> dict[str, Any]:
     `_video_output_from_dict`、以及本函数 `dict(...)` 的形状要求都不动），两者不许混为
     一谈：坏数据要响，错路线的数据要静默但确定地丢掉。
 
-    判据只认 `Brief.mode`（多参＝ref，经 `Brief.is_ref` → `brief_parser.is_ref_mode`，
-    与产物出口同一真源）。**禁止**改用「变体是不是 FL2VA」或「有没有首尾帧 bundle」——多参
-    的变体是 T2VA、没有 bundle，这两条正是父 spec 逐字点名的错判据。
+    判据只认路线能力判据（``brief_parser.route_emits_asset_prompts``，issue #103 换成它）：
+    多参恒真，导演台按生成模式（r2v/rv2v/mixed 真、t2v/i2v/fl2v 假），base 恒假。
+    **禁止**改用「变体是不是 FL2VA」或「有没有首尾帧 bundle」——多参的变体是 T2VA、
+    没有 bundle，这两条正是父 spec 逐字点名的错判据。也别写成「``is_ref`` 或
+    ``is_director``」：导演台 t2v 没有资产图，留下三键就是给续跑喂错产物。
 
     多参会话**原样保留**（含读图校对记录 `asset_proofreads`）：三键是素材台账与素材
     循环的输入，读回丢键等于中断续跑后素材全丢。
@@ -109,7 +128,7 @@ def _route_filtered_state(raw_state: Any, brief: Brief) -> dict[str, Any]:
     ``save``——过滤后的 state 落盘，三键自然不在了。
     """
     stage_state = dict(raw_state)
-    if brief.is_ref:
+    if route_emits_asset_prompts(brief):
         return stage_state
     for key in _ASSET_PROMPT_KEYS:
         stage_state.pop(key, None)
@@ -124,6 +143,14 @@ def _brief_to_dict(brief: Brief) -> dict[str, Any]:
     return {
         "mode": brief.mode,
         "variant": brief.variant,
+        # 导演台路线选定的生成模式（issue #101）。brief 的字段逐个显式列出，漏登记就是
+        # 静默丢——重启后按模式分派（#102 段规划、#103 提示词方言）会拿不到用户选过的值。
+        "director_mode": brief.director_mode,
+        # 导演台打包参数（issue #104）：节点 id / 缓存名 / 引导模式。同上一句——漏登记
+        # 就是静默丢，重启续接后 #105 找不到段缓存目录、包里也没有引导模式。
+        "director_node_id": brief.director_node_id,
+        "director_cache_name": brief.director_cache_name,
+        "director_continuity_mode": brief.director_continuity_mode,
         "duration": brief.duration,
         "style": brief.style,
         "language": brief.language,
@@ -200,10 +227,71 @@ def _video_output_from_dict(raw: Any):
     )
 
 
+def _director_mode_from_dict(raw: dict[str, Any], mode: str) -> str:
+    """读回导演台模式；缺值/脏值**大声报错**（issue #101）。
+
+    后续步骤按模式分派（#102 段规划、#103 提示词方言）：空模式等于没有方言可选，
+    静默回落任何一档都是拿用户没选过的口径出词。
+
+    与 ``_route_filtered_state`` 的「静默丢跨路线数据」不冲突：那边丢的是**产物级**
+    键（旧会话里合法残留的资产图提示词），丢掉不会让谁读错路线；这里是一个**单值
+    字段**，值不对只可能是文件损坏或外人改写——吞掉它等于让分派拿错口径。
+    """
+    value = raw.get("director_mode", "")
+    if not isinstance(value, str):
+        raise ValueError(f"director_mode 必须是字符串：{value!r}")
+    if is_director_mode(mode):
+        return validate_director_mode(value)
+    if value:
+        raise ValueError(f"路线 {mode!r} 不该带 director_mode：{value!r}")
+    return ""
+
+
+def _director_pack_settings_from_dict(raw: dict[str, Any], mode: str) -> tuple[str, str, str]:
+    """读回导演台打包参数（节点 id / 缓存名 / 引导模式），返回三元组。
+
+    严格口径与 ``_director_mode_from_dict`` 同一套（issue #104，设计 §4）：
+
+    - 非导演台路线带任一非空值 → 报错（否则一条 base 会话会带着「节点 42」被续接，
+      而它根本不会打包，这个值只会在下一次误读时冒出来）；
+    - 导演台路线的引导模式非空时必须合法——它是插件的 ``continuityMode``，写错等于
+      让插件按默认猜；空串保留给 #102/#103 期间的旧会话（进打包前会再问一次）。
+    """
+    values = {
+        "director_node_id": raw.get("director_node_id", ""),
+        "director_cache_name": raw.get("director_cache_name", ""),
+        "director_continuity_mode": raw.get("director_continuity_mode", ""),
+    }
+    for key, value in values.items():
+        if not isinstance(value, str):
+            raise ValueError(f"{key} 必须是字符串：{value!r}")
+    if not is_director_mode(mode):
+        for key, value in values.items():
+            if value:
+                raise ValueError(f"路线 {mode!r} 不该带 {key}：{value!r}")
+        return "", "", ""
+    continuity = values["director_continuity_mode"]
+    if continuity:
+        # 延迟导入：``director.pack`` 会拉起素材台账与帧数学，会话读回不该为它付入口成本。
+        from .director.pack import validate_continuity_mode
+
+        validate_continuity_mode(continuity)
+    return values["director_node_id"], values["director_cache_name"], continuity
+
+
 def _brief_from_dict(raw: dict[str, Any]) -> Brief:
+    # 路线值先过校验（issue #101 AC3）：判据对拼错值一律返回 False，单看判据会把
+    # ``Director`` 静默当成 base——用户以为在跑导演台、实际在跑首尾帧链。
+    mode = validate_route_mode(str(raw.get("mode", "base")))
+    director_node_id, director_cache_name, director_continuity = \
+        _director_pack_settings_from_dict(raw, mode)
     brief = Brief(
-        mode=str(raw.get("mode", "base")),
+        mode=mode,
         variant=str(raw.get("variant", "T2VA")),
+        director_mode=_director_mode_from_dict(raw, mode),
+        director_node_id=director_node_id,
+        director_cache_name=director_cache_name,
+        director_continuity_mode=director_continuity,
         duration=float(raw.get("duration", 5.0)),
         style=str(raw.get("style", "")),
         language=str(raw.get("language", "Chinese")),
@@ -307,18 +395,19 @@ def load_session(directory: str | Path) -> SessionState | None:
 
 
 def find_awaiting_sessions(root_dir: str | Path) -> list[SessionState]:
-    """扫描会话根目录下所有可续接的会话（阶段 1 中断的 + 等帧图的 + 分段陪跑中的）。
+    """扫描会话根目录下所有可续接的会话（阶段 1 中断的 + 等帧图的 + 三种陪跑中的）。
 
-    只读，不猜测内容归属。两个陪跑中的态都必须在列表里：分段陪跑的中断（硬阻断、
+    只读，不猜测内容归属。三个陪跑中的态都必须在列表里：分段陪跑的中断（硬阻断、
     Ctrl-C、机器重启）代价原本是阶段 2 重做 + 已完成的所有段重来（issue #17）；多参
-    逐段陪跑（issue #58）是同一条教训，漏了这个值，向导就不会把中断的多参会话端出来。
+    逐段陪跑（issue #58）与导演台逐段陪跑（issue #105）是同一条教训的后两次，漏了
+    对应值，向导就不会把中断的会话端出来——用户只能重开 GEN，也就是重做阶段 1/2。
     """
     root = Path(root_dir)
     results: list[SessionState] = []
     if not root.is_dir():
         return results
     resumable = (STATUS_AWAITING_FRAMES, STATUS_STAGE1_RUNNING, STATUS_SEGMENTED_RUNNING,
-                 STATUS_REF_SEGMENTS_RUNNING)
+                 STATUS_REF_SEGMENTS_RUNNING, STATUS_DIRECTOR_SEGMENTS_RUNNING)
     for session_file in sorted(root.glob("**/" + SESSION_FILENAME)):
         try:
             session = load_session(session_file.parent)
@@ -335,5 +424,6 @@ def find_awaiting_sessions(root_dir: str | Path) -> list[SessionState]:
 __all__ = [
     "SessionState", "SESSION_FILENAME", "STATUS_AWAITING_FRAMES", "STATUS_COMPLETED",
     "STATUS_STAGE1_RUNNING", "STATUS_SEGMENTED_RUNNING", "STATUS_REF_SEGMENTS_RUNNING",
+    "STATUS_DIRECTOR_SEGMENTS_RUNNING",
     "save_session", "load_session", "find_awaiting_sessions",
 ]

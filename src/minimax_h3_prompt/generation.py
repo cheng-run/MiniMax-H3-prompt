@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
 from .asset_proofread import proofread_descriptions
-from .brief_parser import Brief, CanvasMap, RefItem, is_ref_mode
+from .brief_parser import Brief, CanvasMap, RefItem, is_ref_mode, route_emits_asset_prompts
 from .graph.state import ASSET_KIND_FIELDS
 from .tools.theme_guard import (
     _CONFLICTING_OUTDOOR_TERMS,
@@ -995,15 +995,16 @@ def image_prompt_variants(
 
 
 def asset_prompts_for(brief: Brief, state: dict[str, Any]) -> tuple[ImagePromptVariant, ...]:
-    """路线感知的资产图提示词取数口（issue #78）：非多参路线恒为空元组。
+    """路线感知的资产图提示词取数口（issue #78）：不产资产图的路线恒为空元组。
 
-    四处共享同一路线判据（``brief_parser.is_ref_mode``，父 spec #77），但只有三处走本
+    四处共享同一路线判据（``brief_parser.route_emits_asset_prompts``，issue #103 从
+    ``is_ref_mode`` 换成它：导演台的 r2v/rv2v/mixed 也产资产图），但只有三处走本
     取数口：**产物结果构造、素材登记、描述合并**；`render_generation` 拿不到 Brief，
     只拿 ``result.mode`` 用同一判据决定产物集。新增出口不接这条线就会重演 #40
     「首尾帧路线凭空多出多参产物」。``canvases`` 必须透传——多参产物行的尺寸只有这一个
     来源（未传就静默回落 profile 默认表，与用户选定自相矛盾）。
     """
-    if not is_ref_mode(brief.mode):
+    if not route_emits_asset_prompts(brief):
         return ()
     return image_prompt_variants(state, brief.canvases)
 
@@ -1022,7 +1023,8 @@ def ref_asset_registry(state: dict[str, Any], brief: Brief) -> list[RefItem]:
     **mode 守卫**（issue #41 复审 F1）：base／帧变体不派生资产登记——base 的 Picture 1/2
     是首尾帧，把资产图提示词派生成 `<Picture N>` 清单会给帧路线的 agent 挂错
     ``list_reference_assets``（实测复审：帧路线 qa/prompt_engineer 多出该工具、报资产级编号，
-    AC1「首尾帧路线不受影响」软性回归）。派生只对 ``mode="ref"`` 发生。
+    AC1「首尾帧路线不受影响」软性回归）。派生只对**产资产图的路线**发生
+    （issue #103：``route_emits_asset_prompts`` 为真的 ref 与导演台 r2v/rv2v/mixed）。
 
     ``brief`` **必填**（issue #77 复审 C）：可选的 ``brief=None`` 等于留了一条绕过路线
     守卫的后门——不传就既不过滤也不合并描述，调用方漏传不会有任何症状。所有生产调用点
@@ -1037,7 +1039,7 @@ def ref_asset_registry(state: dict[str, Any], brief: Brief) -> list[RefItem]:
         # 不传路线的话，旧 base 会话里残留的同名资产提示词会顶替用户登记的帧描述。
         return _with_merged_descriptions(
             sorted(brief.refs, key=lambda r: r.picture), state, brief)
-    if not is_ref_mode(brief.mode):
+    if not route_emits_asset_prompts(brief):
         return []
     script = str(state.get("script", ""))
 
@@ -1070,7 +1072,7 @@ def _with_merged_descriptions(refs: list[RefItem], state: dict[str, Any],
     拿多参残留的资产提示词或读图校对记录改写它，就是把两条路线的指称体系搅在一起。
     ``brief`` **必填**（issue #77 复审 C）：与 ``ref_asset_registry`` 同一条后门。
     """
-    if not is_ref_mode(brief.mode):
+    if not route_emits_asset_prompts(brief):
         return list(refs)
     merged = proofread_descriptions(state)
     variants = asset_prompts_for(brief, state)
