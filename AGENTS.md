@@ -31,11 +31,11 @@ Issues 活在 GitHub Issues（github.com/cheng-run/MiniMax-H3-prompt），用 `g
 
 spec 与票住 issue 是因为 `/to-spec`、`/to-tickets` 按 `docs/agents/issue-tracker.md` 发布；**handoff 覆盖该 skill 默认的系统临时目录**，改落 `docs/handoffs/`——本项目不是临时项目，文档一律留在仓里。本仓自 2026-10-17 起（#39）不再往仓里落 spec 与计划文件。
 
-## 票据工作流（2026-10-21 修订）
+## 票据工作流（2026-10-30 修订）
 
-- **默认不开工作树**：只有用户明确要求并行执行任务时才 `git worktree add worktree/ticket-NN`（`/worktree/` 已 gitignore）；单票照常在主树做。
+- **默认不开工作树**：只有用户明确要求并行执行任务时才 `git worktree add worktree/ticket-NN`（`/worktree/` 已 gitignore）；单票在主树上切分支做，不在主分支直改。
 - **工作树的提交不进历史**：工作树里可以提交到它自己的临时分支，但那些提交**永不 push**；合并回原分支走 `git merge --squash`，**最终提交只落在主分支上、一票一次**。
-- **推送放最后，全量绿才推**：改动碰到 `src/` 或 `tests/` 时必须重跑全量；**纯文档/占位改动沿用最近一次绿的结果**，并在推送时说明依据哪一次。绿了即自动 `git push`，不再逐次询问。
+- **推送放最后，验收后推**：改动碰到 `src/` 或 `tests/` 时必须重跑全量；全量绿只到「交给用户验收」这一步，代码改动要**用户真实验收通过后**才合并并 push（口径见全局 CLAUDE.md「🌿 代码改动走分支」）。**纯文档/占位改动**沿用最近一次绿的结果，并在推送时说明依据哪一次，可直接 push。
 - 工作树内跑测试先设 `PYTHONPATH=<工作树>\src` 再用主仓 `.venv`，否则测的是主树（判据：`CONFIG_PATH` 打印应指向该工作树）。
 - 每合一张票后主树跑全量：票各自绿 ≠ 合起来绿；语义冲突的典型形态＝测试仍按旧流程喂输入。
 - **提交只圈定路径**：`git add <票涉及的路径>`，不用 `git add -A`——主树常带着未提交的模型/网关切换改动（`config/agent.yaml`、`model_factory.py` 等），`-A` 会把它们一起裹进票的提交。
@@ -46,7 +46,7 @@ spec 与票住 issue 是因为 `/to-spec`、`/to-tickets` 按 `docs/agents/issue
 
 用它即视为**用户要求并行**——它会为每张票自己开工作树 + 实现子代理，不必再手动 `git worktree add`。它与本仓规则有三处接缝：
 
-- **它收尾停在集成分支上，不落 main、不 push**（第 8 步只「resolve each ticket」并报告分支）。本仓接手：集成分支按**票**拆回主分支提交（一票一次），全量绿后再 push。
+- **它收尾停在集成分支上，不落 main、不 push**（第 8 步只「resolve each ticket」并报告分支）。本仓接手：集成分支按**票**拆回主分支提交（一票一次），全量绿后交用户真实验收，通过再 push。
 - **它第 2 步的探索笔记默认存到仓库外**（原文 "a directory outside the repo"）。本仓文档一律落仓——这一步要指定写进 `docs/research/`。
 - **它第 8 步按 issue tracker 的方式关票**。本仓口径是先发证据评论再 `close`（见 `CODING_STANDARDS.md` 第七节）；它关完若缺证据评论，由协调会话补上。
 
