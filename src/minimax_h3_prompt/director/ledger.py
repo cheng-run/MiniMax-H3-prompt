@@ -193,9 +193,16 @@ def read_director_missing_video(directory: str | Path, *,
                                 total_segments: int) -> tuple[int, ...]:
     """续跑时账里有通过行、但缺 ``video`` 的段号（#112：要重新贴视频）。
 
-    单列一个读口而不是让调用方自己翻 ``passed_director_rows``：两者的「通过」判据
-    必须永远来自 ``_split_director_progress``（有视频才算过），否则出站点名的段
-    与实际要重跑的段会各走各的。
+    **两条「通过」视图不是同一个口径，不许互相替代**（2026-10-31 复审更正）：
+
+    - 本函数与 ``read_director_progress`` 走 ``_split_director_progress``：口径是
+      「**有视频证据**的已通过段」。缺 ``video`` 的旧账行不算通过，落到本函数的返回里。
+    - ``passed_director_rows`` 是另一条口径：「最后一条 output/invalidate 行是 output」
+      的历史视图，**不要求 video**。级联（#106）与尾帧起点（#114）有意用它——它们要
+      的是「账上曾有通过行」这条事实；换成有视频口径会把旧账上的段当成没跑过。
+
+    单列这个读口而不是让调用方自己翻 ``passed_director_rows``：续跑出站点名的段
+    与实际要重跑的段必须来自同一处判据，否则两者会各走各的。
     """
     _, missing = _split_director_progress(directory, total_segments=total_segments)
     return missing
