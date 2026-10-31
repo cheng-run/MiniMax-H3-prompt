@@ -996,12 +996,16 @@ def _build_director_llm():
         return None
 
 
-def _write_director_tailframe(plan, segment, session: SessionState,
-                              cache_directory: Path, *, llm) -> bool:
+def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> bool:
     """轮到该段时产出它的终点画面提示词（#107 的三段式，本票负责接线）。
 
-    起点画面取**上一段缓存的末帧**（设计 §3.3）：这一段自己还没跑，拿不到自己的帧；
-    而「本段第一帧」就是上一段的终点，这才是尾帧变换的输入。
+    起点画面取**账内上一段成片视频的末帧**（#114）：这一段自己还没跑，拿不到自己的帧；
+    而「本段第一帧」就是上一段的终点，这才是尾帧变换的输入。为什么不取段缓存：
+    #111 的现场里插件默认写 ``raw`` 编码的 ``.pt``，本项目读不了，旧实现因此整轮
+    陪跑中止；而且用户实际跑出来的是哪一版视频，提示词就该描述哪一版。
+
+    账是**现读**的，不用进入循环时的 ``passed`` 快照：轮到第 N 段时，第 N-1 段正是
+    本轮刚在这个循环里通过的——快照是在循环之前读的，看不到它。
 
     只传**这一段**给 ``write_tailframe_prompts``（用 ``replace`` 造单段 plan）：
     它会对 plan 里所有要终点画面的段产出，而陪跑此刻只该为轮到的那一段写——
@@ -1009,7 +1013,7 @@ def _write_director_tailframe(plan, segment, session: SessionState,
     """
     from dataclasses import replace
 
-    from ..director import cache
+    from ..director import cache, ledger
     from ..director import tailframe as tailframe_module
     from ..director.tailframe import (
         tailframe_path, validate_tailframe_prompt, write_tailframe_prompts,
@@ -1030,14 +1034,30 @@ def _write_director_tailframe(plan, segment, session: SessionState,
         print(f"[错误] 第 {segment.index} 段（{segment.label}）不该要终点画面："
               "首段没有起点画面可用（opening 不产尾帧变换）。")
         return False
-    frames_file = cache.frames_path(cache_directory, previous)
+    # #114：起点画面只认账内上一段**成片视频**。段缓存一律不参与——它是另一份来源，
+    # 拿它顶替会让词描述的画面与下一段真正接上的帧不同（「同一契约不许两处口径」）。
+    try:
+        rows = ledger.passed_director_rows(session.directory)
+    except (OSError, ValueError) as exc:
+        print(f"[错误] 段产出账读不回来，第 {segment.index} 段的终点画面提示词写不了：{exc}")
+        print("  修好后重跑向导会从这一段接着走（已通过的段留在段产出账里）。")
+        return False
+    row = rows.get(previous)
+    video = row.get("video") if row else None
+    if not video:
+        # 上一段没有视频记录（旧账）或根本没通过：不猜、不拿缓存顶替。
+        print(f"[错误] 第 {segment.index} 段要终点画面，但账里没有上一段"
+              f"（第 {previous} 段）的成片视频记录：起点画面取不出来。")
+        print("  修好后重跑向导会从这一段接着走（已通过的段留在段产出账里）。")
+        return False
     try:
         # 落点由 tailframe.last_frame_png_path 给：级联重跑按同一个名字删（#106），
         # 在这里再拼一份字面就是两处会各自漂的口径。
         image = cache.export_last_frame(
-            frames_file, tailframe_module.last_frame_png_path(session.directory, previous))
+            video, tailframe_module.last_frame_png_path(session.directory, previous))
     except ValueError as exc:
-        print(f"[错误] 第 {segment.index} 段要终点画面，但取不到上一段的末帧：{exc}")
+        print(f"[错误] 第 {segment.index} 段要终点画面，但取不到上一段视频的末帧：{exc}")
+        print("  修好后重跑向导会从这一段接着走（已通过的段留在段产出账里）。")
         return False
     single = replace(plan, segments=(segment,))
     try:
@@ -1257,7 +1277,7 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
                     if llm is None:
                         return 1
                 if not _write_director_tailframe(
-                        plan, segment, session, cache_directory, llm=llm):
+                        plan, segment, session, llm=llm):
                     return 1
             print(_render_director_segment_briefing(
                 plan, segment, directory, single_shot=single_shot))
