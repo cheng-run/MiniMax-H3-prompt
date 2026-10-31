@@ -90,13 +90,36 @@ def is_retired_image_family(name: object) -> bool:
     三处各写一份「or zimage」就是漂的开始。
     """
     return str(name or "zimage") in RETIRED_IMAGE_FAMILIES
-# 本仓支持的帧生图模型家族。**从上面那张表派生**：家族清单另写一份的话，将来加第三个
-# 家族时【画布】块会静默少一行（issue #33 复审）。
-_FRAME_MODELS = tuple(IMAGE_PROFILE_DEFAULTS)
+# 关键帧（首帧/尾帧）可用的生图家族。**与资产图那张表分开**（2026-10-30）：
+# ``IMAGE_PROFILE_DEFAULTS`` 同时喂着资产的【画布】块与向导的逐家族画布选择器，
+# 往里面加 Qwen 会让每个用户每次运行都被多问一次画布，而资产图的 profile 行本来就
+# 恒取 zimage（``image_prompt_variants`` 的显式口径）。关键帧是另一件事：
+# 它由 ``config/image.yaml`` 的 ``frame:`` 决定用哪一档，只影响首帧/尾帧提示词。
+FRAME_PROFILE_DEFAULTS: dict[str, ImageProfile] = {
+    # Z-Image：数值与原表逐字一致（旧会话/旧产物读回来行为不变）。
+    "zimage": ImageProfile("zimage_t2i_v1", "10", 640, 1280, "candidate"),
+    # Qwen-Image 2.1：本仓**没有**为它登记 ComfyUI 工作流，profile 名与节点号留空——
+    # 出站渲染会跳过空行，不编造一个不存在的节点号。画布默认取 H3 视频原生竖幅
+    # （736×1280，见 ``config/agent.yaml`` 的 director 节）；用户在 brief 里给了
+    # ``canvases["qwen"]`` 时以选定值为准。
+    "qwen": ImageProfile("", "", 736, 1280, "candidate"),
+    # MOSS-Image：同 Qwen，本仓没登记它的 ComfyUI 工作流。``config/image.yaml`` 的
+    # ``frame:`` 允许三档任选，故这里三档都在——少一档时用户改成 moss 会在出词时
+    # 才炸「未知关键帧生图模型」。
+    "moss": ImageProfile("", "", 736, 1280, "candidate"),
+}
 
-# 生图模型键 → 给人看的显示名。渲染层与帧节点的【画布】块都用它，免得同一张对照表
+# 本仓支持的帧生图模型家族。**从上面那张表派生**：家族清单另写一份的话，将来加第三个
+# 家族时请求里的模型块会静默少一行（issue #33 复审）。
+_FRAME_MODELS = tuple(FRAME_PROFILE_DEFAULTS)
+
+# 生图模型键 → 给人看的显示名。渲染层与帧节点的模型块都用它，免得同一张对照表
 # 在三个地方各写一遍（issue #33 复审）。
-IMAGE_FAMILY_LABELS = {"zimage": "Z-Image"}
+IMAGE_FAMILY_LABELS = {
+    "zimage": "Z-Image",
+    "qwen": "Qwen-Image 2.1",
+    "moss": "MOSS-Image",
+}
 # 表外家族的兜底档。**它产不出对象**——真正拦下这种输入的是 ``FL2VAFramePrompt.__post_init__``
 # 的「生图模型类型无效」（实测 `from_dict({"model_family": "sdxl"})` 直接 ValueError）。
 # 之所以还留着这一档：抛错要来自字段校验那一处，而不是 from_dict 里的 AttributeError。
@@ -123,6 +146,30 @@ def image_canvas_size(
     if canvases and model_family in canvases:
         width, height = canvases[model_family]
         return int(width), int(height)
+    return profile.width, profile.height
+
+
+def frame_canvas_size(
+    model_family: str,
+    canvases: CanvasMap | None = None,
+) -> tuple[int, int]:
+    """关键帧该出多大（宽, 高）：用户选定优先，未选回落 ``FRAME_PROFILE_DEFAULTS``。
+
+    与 ``image_canvas_size`` 分成两个读取口，是因为两张表的用途不同（见
+    ``FRAME_PROFILE_DEFAULTS`` 的注释）；判据与报错口径逐字同形，不另发明一套。
+
+    **没给本档选定值时沿用 Z-Image 那张**：向导的画布选择器只问资产表里的家族
+    （见 ``ui.wizard._choose_canvases``），关键帧模型换成 Qwen 后没有自己的选择项。
+    而关键帧必须与成片**同画幅**——用户为这支片子选的 1920×1080 不能因为换了出图
+    模型就变成 736×1280（2026-10-30：用户这一轮选的是 1920×1080 横幅 PV）。
+    """
+    profile = FRAME_PROFILE_DEFAULTS.get(model_family)
+    if profile is None:
+        raise ValueError(f"未知关键帧生图模型：{model_family}")
+    for family in (model_family, "zimage"):
+        if canvases and family in canvases:
+            width, height = canvases[family]
+            return int(width), int(height)
     return profile.width, profile.height
 
 
@@ -441,12 +488,12 @@ class FL2VAFramePrompt:
         # 表外家族走空档——它只在下面构造时被 ``__post_init__`` 拦下（见常量处的说明），
         # 这一档取空值是为了让报错来自字段校验、而不是这里的 AttributeError。
         family = str(raw.get("model_family", "zimage"))
-        profile = IMAGE_PROFILE_DEFAULTS.get(family, _EMPTY_IMAGE_PROFILE)
+        profile = FRAME_PROFILE_DEFAULTS.get(family, _EMPTY_IMAGE_PROFILE)
         if canvases is None:
             width = int(raw.get("width", profile.width) or profile.width)
             height = int(raw.get("height", profile.height) or profile.height)
         else:
-            width, height = image_canvas_size(family, canvases)
+            width, height = frame_canvas_size(family, canvases)
         return cls(
             frame=str(raw.get("frame", "")),
             model_family=str(raw.get("model_family", "")),
@@ -1277,8 +1324,9 @@ __all__ = [
     _REF_WORKFLOW_ALIAS,
     "GenerationResult", "PromptArtifact", "PromptKind", "ImagePromptVariant",
     "FL2VAFramePrompt", "FL2VAPromptBundle", "brief_snapshot",
-    "ImageProfile", "IMAGE_PROFILE_DEFAULTS", "IMAGE_FAMILY_LABELS", "RETIRED_IMAGE_FAMILIES",
-    "is_retired_image_family", "image_canvas_size",
+    "ImageProfile", "IMAGE_PROFILE_DEFAULTS", "FRAME_PROFILE_DEFAULTS", "IMAGE_FAMILY_LABELS",
+    "RETIRED_IMAGE_FAMILIES",
+    "is_retired_image_family", "image_canvas_size", "frame_canvas_size",
     "composition_set", "composition_hint", "canvas_family", "canvas_display",
     "RatioPreset", "CANVAS_RATIO_PRESETS",
     "asset_prompts_for", "fl2va_bundle_from_dict", "generation_directory",

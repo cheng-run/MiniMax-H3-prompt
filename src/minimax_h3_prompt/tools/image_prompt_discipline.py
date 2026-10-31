@@ -156,6 +156,47 @@ _EN_OBJECT = re.compile(
 )
 
 
+# 指代（关键帧提示词的自包含检查，2026-10-30 实跑现场）。生图模型**没有记忆**：
+# 「同一列经典干线蒸汽机车」「同样四节客车」「在同一处山谷」这类措辞对它是一句空话，
+# 它只能凭空编一台「同一列」出来。期望是每张图的词都独立可读——主体、数量、地点、
+# 光向全部复述一遍。
+#
+# 为什么中文按「同一 + 量词」而不是裸「同一」：``同一画面`` 这类说法在本仓提示词里
+# 也确实出现过；量词/名词那几档才是真正的指代。英文同理收窄到「same + 可见名词」，
+# 避免「两人站在同一间屋里」这种**合法共处**描述被误报——警告没有信息量就等于没有。
+_ANAPHORA_CN = re.compile(
+    r"同一(?:列|个|处|张|组|双|节|座|名|位|辆|段|套|间|只|条|排|台|片|幕|种)"
+    r"|同上|上述|前述|前文|上一帧|前一帧|与首帧|与尾帧"
+    r"|该(?:列|组|张|处|人物|场景|地点|列车|机车|车厢|动作|姿态)"
+)
+_ANAPHORA_EN = re.compile(
+    r"\b(?:the\s+)?same\b[^.;:]{0,40}?\b(?:train|locomotive|character|person|man|woman|"
+    r"group|scene|location|place|frame|shot|vehicle|costume|outfit|lighting)\b"
+    r"|\baforementioned\b|\bmentioned above\b|\bas (?:described|shown) above\b"
+    r"|\b(?:the\s+)?previous (?:frame|shot)\b",
+    re.IGNORECASE,
+)
+
+
+def check_self_contained(text: str) -> list[DisciplineWarning]:
+    """一条生图提示词里有没有**指代**（另一帧／上文）；有就报一条警告。
+
+    与 ``check_image_prompt`` 分开：那五类判据绑的是**某个模型的写词事实**（ADR 0018），
+    而「提示词必须自包含」对所有模型都成立——它是产物契约，不是某一档的脾气。
+    只警告、不改产物、不阻断（同 ADR 0018 的处置口径）。
+    """
+    for regex in (_ANAPHORA_CN, _ANAPHORA_EN):
+        found = regex.search(str(text or ""))
+        if found:
+            hit = found.group(0).strip()
+            return [DisciplineWarning(
+                "NOT_SELF_CONTAINED",
+                f"提示词不自包含：出现指代「{hit}」——生图模型没有记忆，看不到另一帧或上文；"
+                "请把这处指代换成完整描述（主体外观、数量、地点亲自复述一遍）。",
+            )]
+    return []
+
+
 def _first(regex: re.Pattern[str], text: str) -> str | None:
     found = regex.search(text)
     return found.group(0).strip() if found else None

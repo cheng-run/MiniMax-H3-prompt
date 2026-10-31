@@ -1,4 +1,12 @@
-"""生图（资产图）模型三档分配：读项目根 ``config/image.yaml``（issue #87 / 父 spec #84 D8）。
+"""生图模型分配：读项目根 ``config/image.yaml``（issue #87 / 父 spec #84 D8）。
+
+同一份文件管两件事、两个读取口：
+- **三档资产图**（人物／道具／场景）→ ``load_image_settings``，决定每类参考图用哪个模型；
+- **关键帧**（首帧／尾帧）→ ``load_frame_image_model``，决定关键帧提示词按哪一档的
+  写词纪律与画布出（2026-10-30 用户裁定：默认 Qwen-Image 2.1）。
+
+下面这段是原三档分配的说明。
+
 
 三档 = 人物／道具／场景，各选一个生图模型（``z_image`` / ``qwen`` / ``moss``）。选中值同时
 决定该档出词请求要追加哪一份纪律块（``prompts/image_prompt_disciplines/<模型>.md``）。
@@ -30,6 +38,17 @@ IMAGE_CONFIG_PATH = PROJECT_ROOT / "config" / "image.yaml"
 # 三档资产的键。与 ``generation.KIND_LABELS`` 的键**同一组**（值是那边的中文标签，
 # 由 ``nodes`` 逆映射取键），不另立第二套命名。
 IMAGE_KINDS = ("character", "prop", "scene")
+
+# 关键帧（首帧/尾帧）的生图模型键。**它不是第四档资产**：出的是整片的关键帧，不进
+# 素材循环、没有逐张改模型的菜单，所以不能并进 ``IMAGE_KINDS``（并进去会让素材循环
+# 凭空多出一档、``KIND_LABELS`` 的逆映射也找不到它）。但它与三档住在同一个 image.yaml：
+# 换模型只改一处，且同一个值域 ``IMAGE_MODEL_KEYS``。
+FRAME_IMAGE_KEY = "frame"
+
+# 关键帧的默认档。2026-10-30 用户裁定：本地部署三个生图模型，关键帧用 Qwen-Image 2.1
+# ——资产图那条线当时只有 Z-Image 一档，关键帧词因此一直是中文长文（实跑 707/771 字），
+# 与 Qwen 的英文长文口径相反，且不报错。要改就是这一行或配置文件里的 ``frame:``。
+DEFAULT_FRAME_IMAGE_MODEL = "qwen"
 
 # 可选模型。值同时是纪律文件名（``prompts/image_prompt_disciplines/<值>.md``）——
 # 清单只有这一处定义，纪律读取口与本模块共用，避免「配置认它、纪律文件没有」。
@@ -106,11 +125,13 @@ def load_image_settings(path: str | Path | None = None) -> ImageSettings:
         raise ValueError(f"生图模型配置必须是映射：{config_path}")
 
     # 拼错的档名（如 characters）若静默略过，用户会以为改了、实际还是默认——所以要报。
-    unknown = set(raw) - set(IMAGE_KINDS)
+    # ``frame`` 是同一份文件里的第四个键（关键帧模型），但它不属于三档资产：允许出现、
+    # 不参与这里的分配。把它当未知字段拦下，等于用户一写关键帧模型就连资产配置都读不了。
+    unknown = set(raw) - set(IMAGE_KINDS) - {FRAME_IMAGE_KEY}
     if unknown:
         raise ValueError(
             f"生图模型配置里有未知字段：{', '.join(sorted(unknown))}"
-            f"（只认 {', '.join(IMAGE_KINDS)}）：{config_path}")
+            f"（只认 {', '.join((*IMAGE_KINDS, FRAME_IMAGE_KEY))}）：{config_path}")
 
     models: dict[str, str] = {}
     for kind in IMAGE_KINDS:
@@ -118,18 +139,45 @@ def load_image_settings(path: str | Path | None = None) -> ImageSettings:
         if value is None:
             models[kind] = DEFAULT_IMAGE_MODELS[kind]
             continue
-        if not isinstance(value, str) or not value.strip():
-            # 写了就必须是非空字符串：`character:` 留空是「本想改却漏了值」，
-            # 静默回默认会把笔误藏起来（同 workflow.yaml 的纪律）。
-            raise ValueError(
-                f"生图模型配置 {kind} 必须是非空字符串：{value!r}（{config_path}）")
-        model = value.strip()
-        if model not in IMAGE_MODEL_KEYS:
-            raise ValueError(
-                f"生图模型配置 {kind} 的值无效：{model!r}"
-                f"（只认 {', '.join(IMAGE_MODEL_KEYS)}）：{config_path}")
-        models[kind] = model
+        models[kind] = _parse_model_value(kind, value, config_path)
     return ImageSettings(models)
+
+
+def _parse_model_value(key: str, value: Any, config_path: Path) -> str:
+    """一个模型键的取值校验。三档与关键帧**共用这一处**：两处各写一份时，值域或
+    报错口径迟早只改到一边（本仓「同一契约两处口径」）。
+    """
+    if not isinstance(value, str) or not value.strip():
+        # 写了就必须是非空字符串：`character:` 留空是「本想改却漏了值」，
+        # 静默回默认会把笔误藏起来（同 workflow.yaml 的纪律）。
+        raise ValueError(
+            f"生图模型配置 {key} 必须是非空字符串：{value!r}（{config_path}）")
+    model = value.strip()
+    if model not in IMAGE_MODEL_KEYS:
+        raise ValueError(
+            f"生图模型配置 {key} 的值无效：{model!r}"
+            f"（只认 {', '.join(IMAGE_MODEL_KEYS)}）：{config_path}")
+    return model
+
+
+def load_frame_image_model(path: str | Path | None = None) -> str:
+    """关键帧（首帧/尾帧）用哪个生图模型键；缺文件/缺键回落 ``DEFAULT_FRAME_IMAGE_MODEL``。
+
+    与 ``load_image_settings`` 同一套读取口径（现读、缺省回落、写错大声报）：帧提示词的
+    写词纪律与画布都随这个值走，静默回默认会让用户以为换成 Qwen 了、实际还按 Z-Image
+    的中文口径出词——产物照常生成，只是英文长文那条质量丢了。
+    """
+    config_path = Path(path) if path is not None else IMAGE_CONFIG_PATH
+    raw: Any = {}
+    if config_path.exists():
+        with open(config_path, "r", encoding="utf-8") as fh:
+            raw = yaml.safe_load(fh) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"生图模型配置必须是映射：{config_path}")
+    value = raw.get(FRAME_IMAGE_KEY)
+    if value is None:
+        return DEFAULT_FRAME_IMAGE_MODEL
+    return _parse_model_value(FRAME_IMAGE_KEY, value, config_path)
 
 
 def image_model_for(kind: str) -> str:
@@ -138,7 +186,8 @@ def image_model_for(kind: str) -> str:
 
 
 __all__ = [
-    "DEFAULT_IMAGE_MODEL", "DEFAULT_IMAGE_MODELS", "IMAGE_CONFIG_PATH", "IMAGE_KINDS",
-    "IMAGE_MODEL_KEYS", "IMAGE_MODEL_LABELS", "ImageSettings", "LICENSE_NOTES",
-    "QWEN_LICENSE_NOTE", "image_model_for", "image_model_label", "load_image_settings",
+    "DEFAULT_FRAME_IMAGE_MODEL", "DEFAULT_IMAGE_MODEL", "DEFAULT_IMAGE_MODELS",
+    "FRAME_IMAGE_KEY", "IMAGE_CONFIG_PATH", "IMAGE_KINDS", "IMAGE_MODEL_KEYS",
+    "IMAGE_MODEL_LABELS", "ImageSettings", "LICENSE_NOTES", "QWEN_LICENSE_NOTE",
+    "image_model_for", "image_model_label", "load_frame_image_model", "load_image_settings",
 ]
