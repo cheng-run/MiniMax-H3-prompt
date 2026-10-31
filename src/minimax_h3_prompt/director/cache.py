@@ -279,7 +279,7 @@ def actual_frames(frames_file: str | Path) -> int:
     path = Path(frames_file)
     if not path.is_file():
         # #112 起这一口也服务用户贴回来的成片视频，文案不能写死「段缓存」。
-        raise ValueError(f"帧文件不存在：{path}（这一段还没跑完，或路径贴错了）")
+        raise ValueError(f"视频或帧文件不存在：{path}（这一段还没跑完，或路径贴错了）")
     meta = video_meta(path)
     frames = int(meta.get("frames", 0) or 0)
     if frames <= 0:
