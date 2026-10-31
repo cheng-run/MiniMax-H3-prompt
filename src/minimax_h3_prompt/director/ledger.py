@@ -72,6 +72,7 @@ def log_director_output(
     actual_frames: int,
     video_path: str | Path,
     cache_path: str | Path | None = None,
+    end_image_path: str | Path | None = None,
 ) -> Path:
     """追加一行通过行：#112 起证据是**成片视频**，缓存路径只是现场线索。
 
@@ -83,7 +84,12 @@ def log_director_output(
     用户手里那条视频与缓存是否存在无关（#112 的现场）。此时 ``cache``/``sha256``
     写 ``null``，键仍在——读账的人不必分辨「没有缓存」与「旧账缺字段」。
 
-    两条路径都存**绝对路径**：账本会被拿到别的工作目录去读（续跑、#108 归档）。
+    ``end_image_path`` 是用户生成并挂到导演台尾帧槽的**本段终点图**（可选）。
+    下一段写尾帧词时优先拿它当参考图：它比「本段成片视频末帧」干净——视频末帧是
+    生成结果，每段都会漂一点，拿它当参考会把漂移逐段放大（2026-10-31 实跑：
+    第 3 段起戴墨镜、第 4 段长胡子）。旧账没有这个键 → 读的人回退到视频末帧。
+
+    三条路径都存**绝对路径**：账本会被拿到别的工作目录去读（续跑、#108 归档）。
     """
     path = segment_ledger_path(directory)
     video = Path(video_path)
@@ -100,6 +106,9 @@ def log_director_output(
         "source": "video",
         "cache": str(Path(cache_path).resolve()) if cache_path is not None else None,
         "sha256": sha256_file(Path(cache_path)) if cache_path is not None else None,
+        "end_image": (
+            str(Path(end_image_path).resolve())
+            if end_image_path is not None else None),
         "at": utc_now_iso(),
     }
     _append_row(path, record)

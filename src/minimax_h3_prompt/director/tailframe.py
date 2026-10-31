@@ -75,10 +75,11 @@ TRANSFORM_HEAD = f"{SECTION_PREFIX}变换指令"
 PRESERVE_HEAD = f"{SECTION_PREFIX}保留项声明"
 LOCKED_HEAD = f"{SECTION_PREFIX}锁死清单"
 
-# 请求里的三块注记（只给模型看，不进产物）。读者不同，故与产物段头分开。
+# 请求里的四块注记（只给模型看，不进产物）。读者不同，故与产物段头分开。
 _START_READING_HEAD = "【起点画面读图结果】"
 _SECTION_REQUIREMENT_HEAD = "【三段式段头】"
 _SEGMENT_PROMPT_HEAD = "【本段视频提示词（运镜与终点构图）】"
+_IDENTITY_HEAD = "【人物设计基线（身份以此为准）】"
 
 # 读图指令：编辑模型要区分「会随镜头移动出画的近景」与「不随镜头移动的固定背景」——
 # 前者不能进保留项，否则「人物走到街角」与「车还停在身后」会互相打架（2026-10-31
@@ -171,6 +172,7 @@ def build_tailframe_request(segment: DirectorSegment, *, mode: str,
                             start_image: str | Path,
                             start_frame_description: str,
                             segment_prompt: str | None = None,
+                            identity_baseline: str | None = None,
                             model: str | None = None) -> str:
     """组装一次图生图写作请求（入参全部显式，不依赖 state——issue #26 的教训）。
 
@@ -182,6 +184,12 @@ def build_tailframe_request(segment: DirectorSegment, *, mode: str,
     终点构图长什么样，只住在那份文本里。只给 ``end_hook``（一句中文终点状态）时，
     写词模型算不出「运镜之后」的取景，只能把起点画面铺开再贴一句终点——2026-10-31
     实跑事故就是这么来的。传 None 只用于还没写段文件的批量演示路径。
+
+    ``identity_baseline`` 是**人物设计基线**（``stage_state.character_design``）：
+    读图结果给的是「参考图里现在长什么样」，而上游视频每段都会漂一点；身份（脸、发型、
+    胡须、墨镜/帽子、制服配饰）必须回到设计文件，否则读图会把已漂移的墨镜、胡子当成
+    事实写进保留项，逐段放大（2026-10-31 实跑：第 3 段起戴墨镜、第 4 段长胡子，
+    而设计写明「干净无胡须」「不戴帽子、墨镜或口罩」）。
 
     ``mode`` 是**触发判据的一部分**（i2v 下运镜/收尾段不要终点画面，2026-10-30 用户裁定），
     所以它必填：默认值会让「忘了传」在 i2v 会话上静默按别的模式产词。
@@ -203,6 +211,15 @@ def build_tailframe_request(segment: DirectorSegment, *, mode: str,
             "时间码、连续运动过程，也不要照抄视频语言。）\n"
             f"{str(segment_prompt).strip()}\n"
         )
+    identity_block = ""
+    if identity_baseline is not None and str(identity_baseline).strip():
+        identity_block = (
+            f"\n{_IDENTITY_HEAD}\n"
+            "（身份以此为准：读图结果里的脸、发色发型、胡须、眼镜/帽子、制服与配饰与"
+            "这里冲突时，以这里为准，并在变换指令或保留句里写纠正（如「面部无遮挡、"
+            "干净无胡须、不戴墨镜/帽子」）。读图只取姿态、背景与光线。）\n"
+            f"{str(identity_baseline).strip()}\n"
+        )
     return (
         f"{load_instruction()}\n\n"
         "---\n"
@@ -212,6 +229,7 @@ def build_tailframe_request(segment: DirectorSegment, *, mode: str,
         f"本段落定的画面（终点画面必须落到这个状态）：{segment.end_hook}\n"
         f"起点画面（参考图，本段第一帧；终点画面由它变换而来）：{start_image}\n"
         f"\n{_START_READING_HEAD}\n{str(start_frame_description).strip()}\n"
+        f"{identity_block}"
         f"{video_block}"
         f"\n{_SECTION_REQUIREMENT_HEAD}（逐字照抄、顺序不变）：\n{heads}\n"
         f"\n{edit_discipline_text(model)}\n"
@@ -387,6 +405,7 @@ def write_tailframe_prompt(segment: DirectorSegment, *, mode: str, llm,
                            start_image: str | Path,
                            start_frame_description: str,
                            segment_prompt: str | None = None,
+                           identity_baseline: str | None = None,
                            model: str | None = None) -> str | None:
     """写一段尾帧文档（直调看门狗 + 有界重写）。调用失败返回 ``None``（调用方据此大声报错）。
 
@@ -397,7 +416,8 @@ def write_tailframe_prompt(segment: DirectorSegment, *, mode: str, llm,
     base_request = build_tailframe_request(
         segment, mode=mode, start_image=start_image,
         start_frame_description=start_frame_description,
-        segment_prompt=segment_prompt, model=model)
+        segment_prompt=segment_prompt, identity_baseline=identity_baseline,
+        model=model)
     request = base_request
     text: str | None = None
     for attempt in range(MAX_SEGMENT_ATTEMPTS):
@@ -440,6 +460,7 @@ def _read_segment_prompt(session_dir: str | Path,
 
 def write_tailframe_prompts(plan: DirectorPlan, *, llm, session_dir: str | Path,
                             start_image: str | Path,
+                            identity_baseline: str | None = None,
                             model: str | None = None) -> list[WrittenTailframe]:
     """逐段产出 ``GENxxx/director/tailframe-NN.md``（只给触发的段写）。
 
@@ -473,7 +494,7 @@ def write_tailframe_prompts(plan: DirectorPlan, *, llm, session_dir: str | Path,
             segment, mode=plan.mode, llm=llm, start_image=image,
             start_frame_description=descriptions[image],
             segment_prompt=_read_segment_prompt(session_dir, segment),
-            model=model)
+            identity_baseline=identity_baseline, model=model)
         if text is None:
             raise RuntimeError(
                 f"第 {segment.index} 段尾帧变换提示词调用失败（已落盘 {len(written)} 段）："

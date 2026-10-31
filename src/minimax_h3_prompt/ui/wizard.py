@@ -962,6 +962,7 @@ def _render_director_segment_briefing(plan, segment, session_dir: Path,
     """
     from ..director.planning import render_give_images
     from ..director.prompts import segment_path
+    from ..director.tailframe import needs_tailframe
 
     lines = [
         "",
@@ -971,6 +972,10 @@ def _render_director_segment_briefing(plan, segment, session_dir: Path,
         f"给图：{render_give_images(segment, plan.mode)}",
         f"段提示词：{segment_path(session_dir, segment.index)}",
     ]
+    if needs_tailframe(segment.type, plan.mode):
+        lines.append(
+            "本段有终点画面：生成后把图片留着，跑完贴视频时会问它的路径"
+            "（下一段拿它当参考图）。")
     if single_shot:
         lines.append(
             "→ 在导演台里直接点运行（时间线只有这一段），跑完回来贴路径。")
@@ -1049,6 +1054,7 @@ def _print_tailframe_document(text: str, *, index: int, path: Path,
               "请看下方校验问题。）")
     print("-" * 60)
     print("锁死清单已留在文件里，生成后核对用（不粘给模型）。")
+    print("生成后把这张终点图的路径留着：跑完这一段会问，下一段拿它当参考图。")
 
 
 def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> bool:
@@ -1071,7 +1077,8 @@ def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> b
     from ..director import cache, ledger
     from ..director import tailframe as tailframe_module
     from ..director.tailframe import (
-        tailframe_path, validate_tailframe_prompt, write_tailframe_prompts,
+        needs_tailframe, tailframe_path, validate_tailframe_prompt,
+        write_tailframe_prompts,
     )
 
     existing = tailframe_path(session.directory, segment.index)
@@ -1090,12 +1097,14 @@ def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> b
         print(f"[错误] 第 {segment.index} 段（{segment.label}）不该要终点画面："
               "首段没有起点画面可用（opening 不产尾帧变换）。")
         return False
-    # 跳过已通过的段之后，这里要读上一段视频末帧再调用模型，可能等几秒到几十秒；
+    # 跳过已通过的段之后，这里要取上一段的起点画面再调用模型，可能等几秒到几十秒；
     # 没有这行时用户只看到「跳过」就静默了（2026-10-31 验收反馈）。
     print(f"\n[进度] 轮到第 {segment.index}/{len(plan.segments)} 段（{segment.label}）："
-          "正在取上一段视频末帧并写终点画面提示词（需要调用模型，稍等）…")
-    # #114：起点画面只认账内上一段**成片视频**。段缓存一律不参与——它是另一份来源，
-    # 拿它顶替会让词描述的画面与下一段真正接上的帧不同（「同一契约不许两处口径」）。
+          "正在取上一段起点画面并写终点画面提示词（需要调用模型，稍等）…")
+    # 起点画面**优先用上一段的终点图**（用户生成并挂在导演台尾帧槽的那张）。
+    # #114 原先只认账内上一段成片视频的末帧；2026-10-31 实跑证明视频末帧每段都会漂
+    # （第 3 段起墨镜、第 4 段胡子），拿它当参考会把漂移逐段放大。终点图是干净的
+    # 目标准图；旧账没有这个字段、或用户没存，才回退到视频末帧。
     try:
         rows = ledger.passed_director_rows(session.directory)
     except (OSError, ValueError) as exc:
@@ -1103,26 +1112,47 @@ def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> b
         print("  修好后重跑向导会从这一段接着走（已通过的段留在段产出账里）。")
         return False
     row = rows.get(previous)
+    end_image = row.get("end_image") if row else None
+    # 旧账（本功能上线前通过的段）没有 ``end_image``：这里补问一次，免得用户为了
+    # 拿到干净参考图而重跑上一段。上一段本身不产终点画面（opening/continue）时不问。
+    previous_segment = next(
+        (item for item in plan.segments if item.index == previous), None)
+    if (not end_image and row is not None and previous_segment is not None
+            and needs_tailframe(previous_segment.type, plan.mode)):
+        end_image = _prompt_optional_image(
+            f"第 {previous} 段的终点图路径（账里没记；回车=没有，改用上一段视频末帧）：")
+    image = None
+    if end_image:
+        candidate = Path(end_image)
+        if candidate.is_file():
+            image = candidate
+            print(f"  起点画面：上一段终点图 {image}")
+        else:
+            print(f"  [警告] 账里记的上一段终点图不存在：{candidate}"
+                  "——改用上一段视频末帧")
     video = row.get("video") if row else None
-    if not video:
-        # 上一段没有视频记录（旧账）或根本没通过：不猜、不拿缓存顶替。
-        print(f"[错误] 第 {segment.index} 段要终点画面，但账里没有上一段"
-              f"（第 {previous} 段）的成片视频记录：起点画面取不出来。")
-        print("  修好后重跑向导会从这一段接着走（已通过的段留在段产出账里）。")
-        return False
-    try:
-        # 落点由 tailframe.last_frame_png_path 给：级联重跑按同一个名字删（#106），
-        # 在这里再拼一份字面就是两处会各自漂的口径。
-        image = cache.export_last_frame(
-            video, tailframe_module.last_frame_png_path(session.directory, previous))
-    except ValueError as exc:
-        print(f"[错误] 第 {segment.index} 段要终点画面，但取不到上一段视频的末帧：{exc}")
-        print("  修好后重跑向导会从这一段接着走（已通过的段留在段产出账里）。")
-        return False
+    if image is None:
+        if not video:
+            # 终点图与成片视频都没有（旧账或根本没通过）：不猜、不拿缓存顶替。
+            print(f"[错误] 第 {segment.index} 段要终点画面，但账里没有上一段"
+                  f"（第 {previous} 段）可用的起点画面（终点图与成片视频都没有）。")
+            print("  修好后重跑向导会从这一段接着走（已通过的段留在段产出账里）。")
+            return False
+        try:
+            # 落点由 tailframe.last_frame_png_path 给：级联重跑按同一个名字删（#106），
+            # 在这里再拼一份字面就是两处会各自漂的口径。
+            image = cache.export_last_frame(
+                video, tailframe_module.last_frame_png_path(session.directory, previous))
+        except ValueError as exc:
+            print(f"[错误] 第 {segment.index} 段要终点画面，但取不到上一段视频的末帧：{exc}")
+            print("  修好后重跑向导会从这一段接着走（已通过的段留在段产出账里）。")
+            return False
+        print(f"  起点画面：上一段视频末帧 {image}")
     single = replace(plan, segments=(segment,))
     try:
         written = write_tailframe_prompts(
-            single, llm=llm, session_dir=session.directory, start_image=image)
+            single, llm=llm, session_dir=session.directory, start_image=image,
+            identity_baseline=session.stage_state.get("character_design"))
     except (RuntimeError, ValueError) as exc:
         print(f"[错误] 第 {segment.index} 段的终点画面提示词写不出来：{exc}")
         return False
@@ -1501,6 +1531,20 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
                           "回导演台重跑**本段**后再贴视频路径，或输入 e 改本段提示词；"
                           "输入 q 停下。")
                     continue
+                # 终点图优先作下一段的参考（2026-10-31）：只有「本段有终点图」且
+                # 「下一段也要终点画面」时才问一次。回车＝没有，下一段回退视频末帧；
+                # 记进账本后，下一段写尾帧词时先找它（干净，不带视频漂移）。
+                end_image = None
+                next_segment = next(
+                    (item for item in plan.segments
+                     if item.index == segment.index + 1), None)
+                if (needs_tailframe(segment.type, plan.mode)
+                        and next_segment is not None
+                        and needs_tailframe(next_segment.type, plan.mode)
+                        and next_segment.index not in passed):
+                    end_image = _prompt_optional_image(
+                        f"第 {segment.index} 段的终点图路径（下一段拿它当参考；"
+                        "回车=没有，改用本段视频末帧）：")
                 # 缓存有没有都不影响判定；有就照记（现场线索），没有就写 null。
                 cache_file = _segment_cache_path(
                     cache_directory, segment.index)
@@ -1514,10 +1558,12 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
                     actual_frames=actual,
                     video_path=video,
                     cache_path=cache_file,
+                    end_image_path=end_image,
                 )
                 cache_note = f"段缓存：{cache_file}" if cache_file else "段缓存：无"
+                end_note = f"；终点图：{end_image}" if end_image else ""
                 print(f"[完成] 第 {segment.index}/{total} 段已记入段产出账"
-                      f"（成片视频：{video}，实际 {actual} 帧；{cache_note}）。")
+                      f"（成片视频：{video}，实际 {actual} 帧；{cache_note}{end_note}）。")
                 break
 
         print(f"\n✓ 全部 {total} 段已通过可证层并记入段产出账。")
@@ -1563,6 +1609,25 @@ def _prompt_existing_file(question: str, *, what: str) -> Path | None:
         if not path.is_file():
             print(f"[错误] {what}不存在：{path}")
             print("  请确认路径后重输（项目不会自动搜目录：猜错的文件发现不了）。")
+            continue
+        return path
+
+
+def _prompt_optional_image(question: str) -> Path | None:
+    """问一张**可选**图片路径：回车＝没有；路径不存在当场报错重问（不猜目录）。
+
+    与 ``_prompt_existing_file`` 的差别只在「空串」的语义：这里是「没有这张图」，
+    不是失败——下一段会回退到视频末帧。用户多半从资源管理器「复制文件地址」粘过来，
+    会带一对引号，所以先剥引号再判。
+    """
+    while True:
+        raw = _prompt(question).strip().strip('"').strip("'")
+        if not raw:
+            return None
+        path = Path(raw)
+        if not path.is_file():
+            print(f"[错误] 文件不存在：{path}")
+            print("  请确认路径后重输（回车＝没有，下一段改用本段视频末帧兜底）。")
             continue
         return path
 
