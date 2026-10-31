@@ -46,6 +46,13 @@ DISCIPLINE_HEADING_PREFIX = "## 生图提示词纪律"
 # （排版的换行不该把提示词判成超长）。超了只警告——见模块头「只警告不阻断」。
 MAX_PROMPT_CHARS = 600
 
+# 图生图编辑版：**同一模型、不同任务**，纪律必须分开（2026-10-31 尾帧实跑事故）。
+# 文生图那份要求「写完整画面、约 20 句」，塞进编辑请求会让模型把参考图当草稿重画；
+# 编辑那份要求「绑定输入图、写终点机位、只写变化与保留句」。文件名 `<模型>_edit.md`，
+# 标题前缀与文生图那份不同——读取口要能分辨「拿错了哪一份」。
+EDIT_DISCIPLINE_SUFFIX = "_edit"
+EDIT_DISCIPLINE_HEADING_PREFIX = "## 图生图编辑提示词纪律"
+
 
 @dataclass(frozen=True)
 class DisciplineWarning:
@@ -77,6 +84,37 @@ def discipline_text(model: str = DEFAULT_IMAGE_MODEL) -> str:
     if not text.startswith(DISCIPLINE_HEADING_PREFIX):
         raise RuntimeError(
             f"{path} 不是一节生图提示词纪律（应以「{DISCIPLINE_HEADING_PREFIX}」起头）")
+    return text
+
+
+def edit_discipline_path(model: str = DEFAULT_IMAGE_MODEL) -> Path:
+    """某一档的**图生图编辑**纪律文件路径；未知模型报错（同 ``discipline_path``）。
+
+    为什么与文生图那份分开：同一个模型在「从零画」和「改参考图」两个任务上要的写法
+    相反——前者要求写完整画面，后者要求只写变化并绑定输入图。混用不会报错，只会让
+    编辑模型把参考图重画一遍（2026-10-31 尾帧实跑：人物、服装、远近关系全漂）。
+    """
+    if model not in DISCIPLINE_MODELS:
+        raise ValueError(
+            f"生图模型无效：{model!r}（只认 {', '.join(DISCIPLINE_MODELS)}）")
+    return DISCIPLINES_DIR / f"{model}{EDIT_DISCIPLINE_SUFFIX}.md"
+
+
+def edit_discipline_text(model: str = DEFAULT_IMAGE_MODEL) -> str:
+    """返回某一档的图生图编辑纪律全文（含标题）。
+
+    缺文件／文件被覆写成别的东西都**大声报错**：静默退回文生图那份就是这次事故的
+    形态——产物照出，只是每一条都写反了。
+    """
+    path = edit_discipline_path(model)
+    if not path.exists():
+        raise RuntimeError(
+            f"缺少图生图编辑提示词纪律文件：{path}（{image_model_label(model)} 档）")
+    text = path.read_text(encoding="utf-8").strip()
+    if not text.startswith(EDIT_DISCIPLINE_HEADING_PREFIX):
+        raise RuntimeError(
+            f"{path} 不是一节图生图编辑纪律"
+            f"（应以「{EDIT_DISCIPLINE_HEADING_PREFIX}」起头）")
     return text
 
 

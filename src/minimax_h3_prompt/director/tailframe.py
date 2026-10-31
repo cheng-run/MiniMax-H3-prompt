@@ -32,13 +32,15 @@ from pathlib import Path
 #   重写一份判据，两处就会对「转述算不算命中」各执一词（本仓「同一契约不许两处口径」）。
 # - ``_direct_write`` 是直调的唯一出口（看门狗 + 失败当场打印，ADR 0019 / issue #70）；
 #   另写一遍就是第二套等待体验。
-# - ``check_image_prompt`` / ``discipline_text`` 是生图纪律的唯一读取口与检查器
-#   （ADR 0018）；尾帧变换提示词与资产图写的是同一件事的两种产物，纪律不能各有一套。
+# - ``check_image_prompt`` 是生图纪律的唯一检查器（ADR 0018）；``edit_discipline_text``
+#   是**图生图编辑**那一份纪律的读取口。它与文生图纪律同模型、不同任务：2026-10-31
+#   实跑事故证明两份不能混用（文生图那份要求写完整画面、20 句，进了编辑请求就会让
+#   模型把参考图当草稿重画），所以不能像旧注释说的那样「纪律只许一套」。
 from ..asset_proofread import _locked_hit
 from ..image_config import load_frame_image_model
 from ..segment_prompts import MAX_SEGMENT_ATTEMPTS, _direct_write
 from ..tools.h3_validator import ValidationIssue
-from ..tools.image_prompt_discipline import check_image_prompt, discipline_text
+from ..tools.image_prompt_discipline import check_image_prompt, edit_discipline_text
 from ..tools.reference_auditor import describe_image
 from .frames import (
     IMAGE_END,
@@ -49,6 +51,10 @@ from .frames import (
     is_guided,
     segment_type_label,
 )
+# 段文件路径的唯一来源（`director/prompts.py`）：运镜与终点构图只住在那儿，
+# 在这里再拼一次 `"segment-%02d.md"` 就会在改名时静默读不到（本仓「同一契约
+# 不许两处口径」）。`prompts.py` 不 import 本模块，循环依赖不成立。
+from .prompts import segment_path
 # 产物目录名只取常量（复审 H1）：尾帧文档与末帧图必须和段表/段文件落在同一个
 # ``GENxxx/director/``，硬写一份字面量会在常量改动时静默写到别处。
 from .planning import DIRECTOR_DIRNAME
@@ -69,16 +75,25 @@ TRANSFORM_HEAD = f"{SECTION_PREFIX}变换指令"
 PRESERVE_HEAD = f"{SECTION_PREFIX}保留项声明"
 LOCKED_HEAD = f"{SECTION_PREFIX}锁死清单"
 
-# 请求里的两块注记（只给模型看，不进产物）。读者不同，故与产物段头分开。
+# 请求里的四块注记（只给模型看，不进产物）。读者不同，故与产物段头分开。
 _START_READING_HEAD = "【起点画面读图结果】"
 _SECTION_REQUIREMENT_HEAD = "【三段式段头】"
+_SEGMENT_PROMPT_HEAD = "【本段视频提示词（运镜与终点构图）】"
+_IDENTITY_HEAD = "【人物设计基线（身份以此为准）】"
 
-# 读图指令：保留项声明要逐项写「背景 / 光照方向 / 其余人物 / 服装 / 道具」，读图就必须
-# 按这几类给事实；默认读图指令面向角色一致性，问不到光线方向与陈设。
+# 读图指令：编辑模型要区分「会随镜头移动出画的近景」与「不随镜头移动的固定背景」——
+# 前者不能进保留项，否则「人物走到街角」与「车还停在身后」会互相打架（2026-10-31
+# 实跑事故）。默认读图指令面向角色一致性，问不到机位会改变哪些可见性。
 _START_READING_INSTRUCTION = (
-    "这张图是一段 AI 视频某一段的第一帧，之后要由视觉模型改写成该段的终点画面。\n"
-    "请只描述图里真实可见的内容，逐项列出：主体（人数、朝向、姿态、服装颜色与款式、标志物）、\n"
-    "背景陈设与它们的相对位置、光源方向与色温、地面积水/反射等可复述的细节。\n"
+    "这张图是一段 AI 视频某一段的第一帧（也就是它的起点画面），之后要由视觉模型"
+    "改写成该段的终点画面。终点画面必须有「走了多远」的距离感，所以读图要把"
+    "可用来判断位移的锚点读出来。\n"
+    "请只描述图里真实可见的内容，并分成四类：\n"
+    "1) 主体：人数、朝向、姿态、服装颜色与款式、标志物；\n"
+    "2) 起点地标：画面里可用来判断「走了多远」的东西（车辆、店面、路牌、柱子），"
+    "以及它们与人物的相对位置；\n"
+    "3) 脚下地面：人物脚下的地面线、路缘、斑马线或停止线；\n"
+    "4) 固定背景：远处建筑、招牌、光源方向与色温、地面材质等不随镜头移动改变的事实。\n"
     "用中文输出 4-6 句，不写心理活动与剧情。"
 )
 
@@ -159,12 +174,25 @@ def _resolve_model(model: str | None) -> str:
 def build_tailframe_request(segment: DirectorSegment, *, mode: str,
                             start_image: str | Path,
                             start_frame_description: str,
+                            segment_prompt: str | None = None,
+                            identity_baseline: str | None = None,
                             model: str | None = None) -> str:
     """组装一次图生图写作请求（入参全部显式，不依赖 state——issue #26 的教训）。
 
     起点画面的内容由**视觉模型读图**给出（``describe_image`` 是读图唯一口），写词模型
     拿到的是一段可复述的事实文本：让它凭空想「上一段结束时画面里有什么」，保留项声明
     就会写成设计稿而不是这张图上真有的东西。
+
+    ``segment_prompt`` 是**本段视频提示词**（``director/segment-NN.md``）：运镜怎么走、
+    终点构图长什么样，只住在那份文本里。只给 ``end_hook``（一句中文终点状态）时，
+    写词模型算不出「运镜之后」的取景，只能把起点画面铺开再贴一句终点——2026-10-31
+    实跑事故就是这么来的。传 None 只用于还没写段文件的批量演示路径。
+
+    ``identity_baseline`` 是**人物设计基线**（``stage_state.character_design``）：
+    读图结果给的是「参考图里现在长什么样」，而上游视频每段都会漂一点；身份（脸、发型、
+    胡须、墨镜/帽子、制服配饰）必须回到设计文件，否则读图会把已漂移的墨镜、胡子当成
+    事实写进保留项，逐段放大（2026-10-31 实跑：第 3 段起戴墨镜、第 4 段长胡子，
+    而设计写明「干净无胡须」「不戴帽子、墨镜或口罩」）。
 
     ``mode`` 是**触发判据的一部分**（i2v 下运镜/收尾段不要终点画面，2026-10-30 用户裁定），
     所以它必填：默认值会让「忘了传」在 i2v 会话上静默按别的模式产词。
@@ -176,6 +204,25 @@ def build_tailframe_request(segment: DirectorSegment, *, mode: str,
             f"在 {mode} 下不需要终点画面：尾帧变换只对运镜段与收尾定格段产出"
             f"（触发集合：{'/'.join(tailframe_segment_types(mode)) or '空'}）")
     heads = "\n".join(tailframe_sections())
+    # 视频词只取运镜与终点构图：不写明用途，模型会把声音、时间码、连续运动过程
+    # 一起抄进静态图提示词（角色提示词也禁，但请求里点名更不容易被忽略）。
+    video_block = ""
+    if segment_prompt is not None and str(segment_prompt).strip():
+        video_block = (
+            f"\n{_SEGMENT_PROMPT_HEAD}\n"
+            "（这是本段**视频**提示词：只取运镜方向与终点构图；不写声音、脚步声、"
+            "时间码、连续运动过程，也不要照抄视频语言。）\n"
+            f"{str(segment_prompt).strip()}\n"
+        )
+    identity_block = ""
+    if identity_baseline is not None and str(identity_baseline).strip():
+        identity_block = (
+            f"\n{_IDENTITY_HEAD}\n"
+            "（身份以此为准：读图结果里的脸、发色发型、胡须、眼镜/帽子、制服与配饰与"
+            "这里冲突时，以这里为准，并在变换指令或保留句里写纠正（如「面部无遮挡、"
+            "干净无胡须、不戴墨镜/帽子」）。读图只取姿态、背景与光线。）\n"
+            f"{str(identity_baseline).strip()}\n"
+        )
     return (
         f"{load_instruction()}\n\n"
         "---\n"
@@ -185,8 +232,10 @@ def build_tailframe_request(segment: DirectorSegment, *, mode: str,
         f"本段落定的画面（终点画面必须落到这个状态）：{segment.end_hook}\n"
         f"起点画面（参考图，本段第一帧；终点画面由它变换而来）：{start_image}\n"
         f"\n{_START_READING_HEAD}\n{str(start_frame_description).strip()}\n"
+        f"{identity_block}"
+        f"{video_block}"
         f"\n{_SECTION_REQUIREMENT_HEAD}（逐字照抄、顺序不变）：\n{heads}\n"
-        f"\n{discipline_text(model)}\n"
+        f"\n{edit_discipline_text(model)}\n"
     )
 
 
@@ -222,6 +271,41 @@ def normalize_tailframe_output(text: str) -> str:
     blocks = [f"{head}\n{sections[head]}".rstrip()
               for head in tailframe_sections() if head in sections]
     return "\n\n".join(blocks).strip()
+
+
+# 参考图绑定：结果必须写明「来自输入图」。不绑定的话，编辑模型会把参考图当草稿
+# 重画一遍——2026-10-31 实跑的产出整篇没有一处指向参考图，人物与陈设全漂了。
+# 正则收中英两套常见写法，宁可漏报也不把合法措辞判死（漏报由角色提示词兜底）。
+_REFERENCE_HINT = re.compile(
+    r"input image|input sketch|reference image|reference photo|source image|"
+    r"from the input|as in the input|"
+    r"输入图|参考图|原图|以这张图|这张图为参考",
+    re.IGNORECASE,
+)
+
+# 终点机位：运镜段的终点画面必须写镜头停在哪。只警告不拦产出——模型可能用
+# "The final composition shows ..." 这类措辞，启发式判死会误伤合法写法。
+_CAMERA_HINT = re.compile(
+    r"\bcamera\b|\bframing\b|\bview\b|\bshot\b|机位|镜头|取景|构图",
+    re.IGNORECASE,
+)
+
+# A→B 位移：起点地标现在在哪（A 锚点）＋ 前景/终点的距离参照（B 纵深）。
+# 只有终点机位、没有位移时，人物会看起来原地踏步（2026-10-31 实跑：第 3 段起
+# 「camera now at ...」写得对，但画面像没走动）。两类各命中一处才算写了位移；
+# 正则收中英两套常见写法，宁可放宽也不把合法措辞判死。
+_DISPLACEMENT_FROM = re.compile(
+    r"behind|out of frame|no longer|left behind|gone|vanished|past\b|"
+    r"身后|出画|已经过去|离开画面|消失",
+    re.IGNORECASE,
+)
+_DISPLACEMENT_TO = re.compile(
+    r"ahead|steps?\b|paces?\b|strides?\b|meters?\b|metres?\b|yards?\b|"
+    r"foreground|near distance|"
+    r"under (?:his|her|their|the)|at (?:his|her|their) feet|beneath|below|"
+    r"directly in front|前方|几步|几米|不远|米处|脚下|前景|正前方",
+    re.IGNORECASE,
+)
 
 
 def _locked_entries(section: str) -> tuple[str, ...]:
@@ -274,6 +358,32 @@ def validate_tailframe_prompt(text: str, *,
             "error", "TAILFRAME_SECTION_EMPTY",
             f"三段式小节为空：{'、'.join(empty)}——段头在、内容没写"))
 
+    transform = sections.get(TRANSFORM_HEAD, "").strip()
+    if transform:
+        # 绑定参考图是**结构性**缺陷：不绑定，这份词就是文生图提示词，产物换了个
+        # 任务（2026-10-31 事故）。必须触发有界重写，不能只告警。
+        if not _REFERENCE_HINT.search(transform):
+            issues.append(ValidationIssue(
+                "error", "TAILFRAME_NO_REFERENCE",
+                "变换指令没有绑定参考图：要写明结果来自输入图（如 "
+                "「from the input image」/「以这张输入图为参考」）——不绑定，"
+                "模型会把参考图当草稿重画，人物与陈设全部漂移"))
+        # 终点机位只警告：合法写法可能不含这几个词，启发式不能拦产出（ADR 0018）。
+        if not _CAMERA_HINT.search(transform):
+            issues.append(ValidationIssue(
+                "warning", "TAILFRAME_NO_CAMERA_ENDPOINT",
+                "变换指令没写终点机位/取景（camera / 机位 / 镜头 / 取景）：运镜段"
+                "需要写明镜头停在哪，否则模型不知道终点取景"))
+        # 位移是**结构性**要求：运镜段的终点画面如果只有 B、没有 A→B，用户拿到的
+        # 就是一张「原地踏步」的图（2026-10-31 实跑）。触发有界重写，不是告警。
+        if not (_DISPLACEMENT_FROM.search(transform)
+                and _DISPLACEMENT_TO.search(transform)):
+            issues.append(ValidationIssue(
+                "error", "TAILFRAME_NO_DISPLACEMENT",
+                "变换指令没有写出 A→B 的位移：要写起点地标现在在哪（身后 / 出画）"
+                "与一处距离参照（脚下 / 前方几步 / 几米）。只写「camera now at B」"
+                "会让画面看起来原地踏步"))
+
     locked = _locked_entries(sections.get(LOCKED_HEAD, ""))
     if LOCKED_HEAD in sections and not locked:
         issues.append(ValidationIssue(
@@ -323,6 +433,8 @@ class WrittenTailframe:
 def write_tailframe_prompt(segment: DirectorSegment, *, mode: str, llm,
                            start_image: str | Path,
                            start_frame_description: str,
+                           segment_prompt: str | None = None,
+                           identity_baseline: str | None = None,
                            model: str | None = None) -> str | None:
     """写一段尾帧文档（直调看门狗 + 有界重写）。调用失败返回 ``None``（调用方据此大声报错）。
 
@@ -332,7 +444,9 @@ def write_tailframe_prompt(segment: DirectorSegment, *, mode: str, llm,
     """
     base_request = build_tailframe_request(
         segment, mode=mode, start_image=start_image,
-        start_frame_description=start_frame_description, model=model)
+        start_frame_description=start_frame_description,
+        segment_prompt=segment_prompt, identity_baseline=identity_baseline,
+        model=model)
     request = base_request
     text: str | None = None
     for attempt in range(MAX_SEGMENT_ATTEMPTS):
@@ -356,8 +470,26 @@ def write_tailframe_prompt(segment: DirectorSegment, *, mode: str, llm,
     return text
 
 
+def _read_segment_prompt(session_dir: str | Path,
+                         segment: DirectorSegment) -> str | None:
+    """本段视频提示词：运镜与终点构图只住在这里（``director/segment-NN.md``）。
+
+    读不到就**在终端点名**并返回 ``None``：批量演示路径（#107）可能还没写段文件，
+    硬报错会让那条路径跑不起来；但静默跳过会让尾帧词又只剩 ``end_hook`` 可依——
+    那正是 2026-10-31 事故的成因，所以至少要让用户看见这一行。
+    """
+    path = segment_path(session_dir, segment.index)
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        print(f"[警告] 第 {segment.index} 段视频提示词不在盘上：{path}"
+              "——尾帧词只能按落定画面写，运镜终点可能不准", flush=True)
+        return None
+
+
 def write_tailframe_prompts(plan: DirectorPlan, *, llm, session_dir: str | Path,
                             start_image: str | Path,
+                            identity_baseline: str | None = None,
                             model: str | None = None) -> list[WrittenTailframe]:
     """逐段产出 ``GENxxx/director/tailframe-NN.md``（只给触发的段写）。
 
@@ -389,7 +521,9 @@ def write_tailframe_prompts(plan: DirectorPlan, *, llm, session_dir: str | Path,
                     f"第 {segment.index} 段起点画面读图失败：{exc}") from exc
         text = write_tailframe_prompt(
             segment, mode=plan.mode, llm=llm, start_image=image,
-            start_frame_description=descriptions[image], model=model)
+            start_frame_description=descriptions[image],
+            segment_prompt=_read_segment_prompt(session_dir, segment),
+            identity_baseline=identity_baseline, model=model)
         if text is None:
             raise RuntimeError(
                 f"第 {segment.index} 段尾帧变换提示词调用失败（已落盘 {len(written)} 段）："

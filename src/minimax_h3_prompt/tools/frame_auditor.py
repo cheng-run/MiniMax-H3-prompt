@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..brief_parser import Brief, RefItem
+from ..brief_parser import RefItem
 from ..task_package import resolve_input_path
 
 # 变体 → 所需 (Picture 编号, 帧位)；T2VA 无关键帧
@@ -236,14 +236,17 @@ def _open_capture(video_path: str | Path):
 
 
 def _write_png(frame, target: Path, source: Path) -> Path:
-    """把一帧写成 PNG（Windows 非 ASCII 路径走 imencode + tofile，绕开 cv2.imwrite 的编码坑）。"""
-    import cv2  # noqa: PLC0415
+    """把一帧写成 PNG；Windows 中文路径交给 ``frame_match.imwrite_unicode`` 唯一写口。
+
+    为什么不再在这里自己 ``imencode + tofile``：导演台的末帧导出（#114）也要写
+    中文会话目录，两处各写一遍就是两份会各自漂的「Unicode 绕法」；写口收在
+    ``frame_match``，这里只负责把失败翻成带来源的 ``ValueError``。
+    """
+    from .frame_match import imwrite_unicode  # noqa: PLC0415
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    ok, buffer = cv2.imencode(".png", frame)
-    if not ok:
+    if not imwrite_unicode(target, frame, ".png"):
         raise ValueError(f"帧编码为 PNG 失败：{source}")
-    buffer.tofile(str(target))
     return target
 
 

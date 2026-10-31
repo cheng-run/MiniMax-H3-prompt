@@ -160,9 +160,9 @@ def render_cascade_notice(result: CascadeResult) -> str:
         lines.append(f"  {earlier}的通过行与缓存没动（它们仍是这次重跑的输入）。")
     lines.extend([
         f"  · 不改词重跑：回到导演台，用 runSelection 只勾第 {first} 段点运行，"
-        "跑完在陪跑里按回车继续。",
+        "跑完在陪跑里贴本段成片视频路径。",
         f"  · 改词重跑：在**导演台 UI 里**改第 {first} 段的提示词"
-        f"（项目侧的 seg-{first:02d}.md 不会自动同步进导演台），"
-        f"改完同样回到第 {first} 段重跑，并按回车继续。",
+        f"（项目侧的 seg-{first:02d}.md 不会自动同步进导演台），或在陪跑里输入 e；"
+        f"改完回到第 {first} 段重跑，跑完把本段成片视频路径贴回来。",
     ])
     return "\n".join(lines)

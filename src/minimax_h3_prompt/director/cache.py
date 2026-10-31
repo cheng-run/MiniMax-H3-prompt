@@ -24,7 +24,7 @@ from pathlib import Path
 
 import cv2
 
-from ..tools.frame_match import read_frames_gray, video_meta
+from ..tools.frame_match import imwrite_unicode, read_frames_gray, video_meta
 
 # 插件常量（``segment_cache.py:141-143``）：目录名与截断长度是同一条契约，抄字面
 # 就等于两份会各自漂的口径，注释标明来源版本（HEAD ``4c6245e``）。
@@ -278,60 +278,39 @@ def actual_frames(frames_file: str | Path) -> int:
     """
     path = Path(frames_file)
     if not path.is_file():
-        raise ValueError(f"段缓存帧文件不存在：{path}（这一段还没在导演台里跑完）")
+        # #112 起这一口也服务用户贴回来的成片视频，文案不能写死「段缓存」。
+        raise ValueError(f"视频或帧文件不存在：{path}（这一段还没跑完，或路径贴错了）")
     meta = video_meta(path)
     frames = int(meta.get("frames", 0) or 0)
     if frames <= 0:
         frames = len(read_frames_gray(path))
     if frames <= 0:
         raise ValueError(
-            f"读不出段缓存的帧数：{path}（容器头为 0、逐帧解码也拿到 0 帧；"
-            "文件可能被截断，或不是 FFV1 无损 mkv）")
+            f"读不出帧数：{path}（容器头为 0、逐帧解码也拿到 0 帧；"
+            "文件可能被截断，或不是能解码的视频）")
     return frames
 
 
-def actual_frames_for_segment(cache_directory: str | Path, segment: int) -> int:
-    """第 ``segment`` 段（1 起）的实际帧数；``.pt`` 缓存**报错并给处置**。
-
-    遇到 ``.pt`` 不许降级：默认 ``cache_frames_codec="raw"`` 时磁盘上就是它，而本项目
-    环境没有 torch（`.venv` 只有 cv2 / imageio_ffmpeg），任何「尽力而为」的读法都是
-    在编数据。处置只有一条：改插件的缓存编码后重跑该段。
-    """
-    directory = Path(cache_directory)
-    path = frames_path(directory, segment)
-    if not path.is_file():
-        raw = raw_frames_path(directory, segment)
-        if raw.is_file():
-            raise ValueError(
-                f"第 {segment} 段的缓存是 raw 编码（{raw.name}，torch 张量），"
-                "本项目没有 torch，读不出帧数。\n"
-                "处置：把导演台节点的 cache_frames_codec 切成 ffv1，"
-                "然后重跑该段（ffv1 会写出 "
-                f"{path.name}）。")
-        raise ValueError(
-            f"第 {segment} 段的缓存帧文件不存在：{path}"
-            "（这一段还没在导演台里跑完，或段号勾错了）")
-    return actual_frames(path)
-
-
 def export_last_frame(frames_file: str | Path, out_path: str | Path) -> Path:
-    """把一段缓存的**最后一帧**导出成 png（#107 尾帧变换提示词的起点画面）。
+    """把一段视频/帧文件的**最后一帧**导出成 png（#107 尾帧变换提示词的起点画面）。
 
-    为什么这一段在 cache.py：起点画面是「上一段缓存的末帧」，取哪一帧属于段缓存的
-    读取口径（设计 §3.3「输入是上一段缓存末帧」）；#107 只负责拿这张图去写词，
-    不该自己再开一条视频解码路径（那会长出第二份「怎么读缓存」）。
+    为什么这一段在 cache.py：起点画面沿用「上一段的末帧」这份读取口径（设计 §3.3）；
+    #114 起来源是账内上一段的成片视频，但这个函数不关心来源是谁——它只做「打开、
+    取末帧、写 png」，判据留在调用方，避免这里长出第二份「起点画面该取哪条片」的口径。
 
     容器头不可信时（``CAP_PROP_FRAME_COUNT`` 报 0）整段遍历取最后一帧——与
     ``actual_frames`` 同一套怀疑：matroska 里 FFV1 常没有 ``nb_frames``。
+
+    #114：异常文案不再叫「缓存」——同一口也服务成片视频，指错东西会让用户去查错文件。
     """
     path = Path(frames_file)
     if not path.is_file():
         raise ValueError(
-            f"取不到上一段缓存的末帧：{path} 不存在（尾帧变换以它为本段起点画面）")
+            f"取不到末帧：{path} 不存在（尾帧变换以它为本段起点画面）")
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         cap.release()
-        raise ValueError(f"取不到上一段缓存的末帧：{path} 打不开（文件可能被截断）")
+        raise ValueError(f"取不到末帧：{path} 打不开（文件可能被截断）")
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     frame = None
     if total > 0:
@@ -340,6 +319,10 @@ def export_last_frame(frames_file: str | Path, out_path: str | Path) -> Path:
         if ok:
             frame = candidate
     if frame is None:  # 头部不可信：老实解一遍
+        # seek 失败后读取位置**不可信**（有的解码器会把位置留在文件尾或维持原值），
+        # 必须显式回到第 0 帧再逐帧读——否则续读可能一帧都取不到（2026-10-31 复审
+        # 实测：头报了正数、seek 后 read 失败，回退循环直接读空，末帧永远拿不到）。
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         while True:
             ok, candidate = cap.read()
             if not ok:
@@ -347,9 +330,12 @@ def export_last_frame(frames_file: str | Path, out_path: str | Path) -> Path:
             frame = candidate
     cap.release()
     if frame is None:
-        raise ValueError(f"取不到上一段缓存的末帧：{path} 一帧都解不出来")
+        raise ValueError(f"取不到末帧：{path} 一帧都解不出来")
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    if not cv2.imwrite(str(out), frame):
-        raise ValueError(f"末帧写不出来：{out}（目录不可写或扩展名不支持）")
+    # 不能直接用 cv2.imwrite：Windows 上它对非 ASCII 路径返回 False 而不抛错，
+    # 会话目录名含中文时会被误报成「目录不可写」（2026-10-31 验收现场）。
+    # 统一走 frame_match 的 Unicode 写口（与 imread_unicode 同一处纪律）。
+    if not imwrite_unicode(out, frame, ".png"):
+        raise ValueError(f"末帧 PNG 写不出来：{out}（路径或磁盘不可写）")
     return out

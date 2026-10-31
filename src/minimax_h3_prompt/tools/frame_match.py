@@ -37,6 +37,30 @@ def imread_unicode(path: Path, flags: int = cv2.IMREAD_COLOR) -> np.ndarray | No
     return cv2.imdecode(buf, flags)
 
 
+def imwrite_unicode(path: Path, image: np.ndarray, ext: str = ".png") -> bool:
+    """写图，支持中文路径；成功 True，编码/落盘失败 False（与 ``imread_unicode`` 对称）。
+
+    为什么不能直接 ``cv2.imwrite``：Windows 上它对非 ASCII 路径**返回 False 而不是
+    抛错**，调用方会把「路径有中文」误报成「目录不可写或扩展名不支持」（2026-10-31
+    真实会话现场：会话目录名是中文，末帧图写不出来）。``imencode`` + ``tofile`` 走
+    Python 的字节写入，绕开 OpenCV 的 ANSI 路径限制。
+
+    不抛异常：与读口同一纪律——调用方拿 False 决定「报错/跳过」，这里只负责把两张
+    失败（编码失败、磁盘不可写）都收成一个布尔，不替调用方选文案。
+    """
+    try:
+        ok, buffer = cv2.imencode(ext, image)
+    except cv2.error:
+        return False
+    if not ok:
+        return False
+    try:
+        buffer.tofile(str(path))
+    except OSError:
+        return False
+    return True
+
+
 def to_gray(bgr: np.ndarray) -> np.ndarray:
     """BGR 图 → 降采样灰度（分析用）。已经是单通道时只做缩放。"""
     small = cv2.resize(bgr, (ANALYZE_W, ANALYZE_H), interpolation=cv2.INTER_AREA)
