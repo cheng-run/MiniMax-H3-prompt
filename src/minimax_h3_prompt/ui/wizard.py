@@ -1184,15 +1184,22 @@ def _prompt_segment_video(question: str) -> tuple[str, Path | None, int | None]:
 
 def _rewrite_director_segment_round(plan, segment, session: SessionState, *,
                                     config: Config, llm) -> str:
-    """「e」的一轮改词（issue #113）：改词 → 写回段文件 → 记改写账 → 只重打导演包。
+    """「e」的一轮改词（issue #113）：改词 → 写回段文件 → 重打导演包 → 记改写账。
 
     返回 ``"retry"``（留在等待，让用户重贴视频或再按 e）或 ``"fatal"``（打包失败，
-    整轮陪跑必须停）。两类失败都**不覆盖原段提示词、不落账**：票面要求「改词失败时
-    明确报错」而不是把半份坏词写进产物——写坏词比不改更糟，用户会拿它去重跑。
+    整轮陪跑必须停）。**任何失败都不留下「新词 + 旧包」的半成品**：调用失败/校验不过
+    原词不动；打包失败把段文件**回滚成改前版本**（见下）。票面要的是「改词失败时
+    明确报错」，而不是写坏词、也不是留一份与包对不上的词——用户会拿它去重跑。
 
-    顺序是契约：**先落盘段文件、再重打导演包**。反过来（先打包后写文件）包里会留着
-    旧词，而用户按提示「重新导入、只跑本段」跑出来的仍是改前那一版——这类错不会
-    报错，只会让人以为改词没生效。
+    顺序是契约，两条都不能换：
+
+    1. **先落盘段文件、再重打导演包**。反过来（先打包后写文件）包里会留着旧词，
+       而用户按提示「重新导入、只跑本段」跑出来的仍是改前那一版——这类错不会报错，
+       只会让人以为改词没生效。
+    2. **改写账在打包成功之后才记**。打包失败时整轮改词不成立；若先记账，账上会留
+       一轮实际没生效的改写，而 ``initial.mmxpack.zip`` 还是旧词——续跑不会自动重打包，
+       「账说改过、包说没改」就是同一件事的两处口径。打包失败时把 ``before`` 原样
+       写回，盘上三处（段文件 / 导演包 / 改写账）一起停在改前状态。
 
     改写账与交付时「最终包 vs 初始包」补记的那本账同形、同一写口
     （``ref_segments.log_segment_rewrite_round``）；``feedback`` 点名发生在陪跑里，
@@ -1244,12 +1251,6 @@ def _rewrite_director_segment_round(plan, segment, session: SessionState, *,
 
     after = outcome.text.rstrip() + "\n"
     path.write_text(after, encoding="utf-8")
-    # 账上的修前/修后取**提示词文本**（不带文件尾换行）：多参改写轮与交付补记
-    # 记的都是这个形态，尾巴多一个空行只会让逐行 diff 多出一条噪声。
-    log_segment_rewrite_round(
-        session.directory, segment=segment.index,
-        feedback="导演台陪跑改词（e）",
-        prompt_before=before.strip(), prompt_after=after.strip())
 
     try:
         job, _report = prepare_director_pack(
@@ -1257,12 +1258,21 @@ def _rewrite_director_segment_round(plan, segment, session: SessionState, *,
             settings=config.director_settings(),
             continuity_mode=session.brief.director_continuity_mode)
     except (OSError, ValueError) as exc:
-        # 打包失败不许「带着坏包继续」：用户下一步就是导入。段文件已经是新词，
-        # 所以要说清「词改了、包没打成」，并给一条能重试的路（再按 e 会重新打包）。
+        # 打包失败 = 这一轮改词整体不成立，必须**回滚段文件**：留下「段文件是新词、
+        # 包是旧词」的话，续跑不会自动重打包，用户会拿着旧包以为改词没生效。
+        # 改写账此时还没记（它排在打包成功之后），所以盘上三处一起停在改前状态。
+        path.write_text(before, encoding="utf-8")
         print(f"\n[错误] 改完段提示词后导演包重打失败：{exc}")
-        print("  段提示词已经是新词，但导演包没打成；修好上面的问题后重跑向导会从这一段"
-              "接着走，或再按 e 重新改一次（会重新打包）。")
+        print("  段提示词已恢复为改前版本，导演包保持旧词；修好后重跑向导会从这一段"
+              "接着走。")
         return "fatal"
+
+    # 账上的修前/修后取**提示词文本**（不带文件尾换行）：多参改写轮与交付补记
+    # 记的都是这个形态，尾巴多一个空行只会让逐行 diff 多出一条噪声。
+    log_segment_rewrite_round(
+        session.directory, segment=segment.index,
+        feedback="导演台陪跑改词（e）",
+        prompt_before=before.strip(), prompt_after=after.strip())
 
     print(f"\n[改词] 第 {segment.index}/{len(plan.segments)} 段提示词已改写并写回 {path}"
           "（本轮修前/修后原文已记入段产出账）。")
