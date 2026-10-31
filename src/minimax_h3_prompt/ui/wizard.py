@@ -19,12 +19,11 @@ if TYPE_CHECKING:  # 返回注解用；运行时经函数级导入取（防环�
     from collections.abc import Sequence
 
     from ..asset_loop import QueueItem
-    from ..injection_card import VideoOutputParams
-    from ..ref_segments import RefSegmentJob, RefSegmentResult
+    from ..ref_segments import RefSegmentResult
 
 from ..brief_parser import Brief, RefItem
 from ..config import Config
-from ..generation import canvas_display, render_fl2va_frame_markdown
+from ..generation import canvas_display
 from ..graph.pipeline import (
     rerun_silent_nodes,
     run_stage1,
@@ -1009,6 +1008,22 @@ def _build_director_llm(purpose: str = "写终点画面提示词"):
         return None
 
 
+def _print_tailframe_document(text: str, *, index: int, path: Path,
+                              note: str = "") -> None:
+    """把三段式全文摊在终端上（2026-10-31 验收反馈）。
+
+    用户下一步就是拿这份词去生成终点画面；只给路径等于逼他开资源管理器。
+    正文用分隔线包住，方便整段复制；路径留在标题里，事后仍可定位文件。
+    """
+    header = f"[尾帧] 第 {index} 段终点画面提示词"
+    if note:
+        header += f"（{note}）"
+    print(f"{header}（{path}）：")
+    print("-" * 60)
+    print(str(text).strip())
+    print("-" * 60)
+
+
 def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> bool:
     """轮到该段时产出它的终点画面提示词（#107 的三段式，本票负责接线）。
 
@@ -1037,7 +1052,8 @@ def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> b
         # 续跑不重付、也不许覆盖（#58 的同一条教训）：这一段的词可能已经拿去生成过
         # 终点画面了，重写一份新词会让「挂上去的那张图」与文件里的词不再对应。
         text = existing.read_text(encoding="utf-8")
-        print(f"[尾帧] 第 {segment.index} 段终点画面提示词已在盘上，沿用（不重付）：{existing}")
+        _print_tailframe_document(text, index=segment.index, path=existing,
+                                  note="已在盘上，沿用，不重付")
         for issue in validate_tailframe_prompt(text):
             print(f"   [{issue.severity.upper()}] {issue.code}: {issue.message}")
         return True
@@ -1047,6 +1063,10 @@ def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> b
         print(f"[错误] 第 {segment.index} 段（{segment.label}）不该要终点画面："
               "首段没有起点画面可用（opening 不产尾帧变换）。")
         return False
+    # 跳过已通过的段之后，这里要读上一段视频末帧再调用模型，可能等几秒到几十秒；
+    # 没有这行时用户只看到「跳过」就静默了（2026-10-31 验收反馈）。
+    print(f"\n[进度] 轮到第 {segment.index}/{len(plan.segments)} 段（{segment.label}）："
+          "正在取上一段视频末帧并写终点画面提示词（需要调用模型，稍等）…")
     # #114：起点画面只认账内上一段**成片视频**。段缓存一律不参与——它是另一份来源，
     # 拿它顶替会让词描述的画面与下一段真正接上的帧不同（「同一契约不许两处口径」）。
     try:
@@ -1080,7 +1100,7 @@ def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> b
         print(f"[错误] 第 {segment.index} 段的终点画面提示词写不出来：{exc}")
         return False
     for item in written:
-        print(f"[尾帧] 第 {item.index} 段终点画面提示词 → {item.path}")
+        _print_tailframe_document(item.text, index=item.index, path=item.path)
         for issue in item.issues:
             print(f"   [{issue.severity.upper()}] {issue.code}: {issue.message}")
         print("   用它生成终点画面，然后挂到导演台这一段的尾帧槽上再点运行。")
@@ -1775,7 +1795,6 @@ def _phase1_new(config: Config) -> SessionState | None:
             on_step_done=_progress_saver(generation_dir, brief),
         )
     _drain_stdin()
-    bundle = state.get("fl2va_prompt_bundle") or {}
     state.setdefault("fl2va_frame_descriptions", [])
     state.setdefault("frame_images", [])
     save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
@@ -4928,9 +4947,9 @@ def _verify_last_frame(state: dict, position: int, generation_dir: Path, *,
     """
     promised = _promised_last_frame_description(state)
     if promised is None:
-        print(f"\n[末段产出] 本会话没有承诺尾帧：末段无画面可核，但**末段输出视频**仍要"
-              f"交回——它是成片 final.mp4 的最后一段，没有它拼不出成片。"
-              f"本次只做可证层（时长/尺寸）校验。")
+        print("\n[末段产出] 本会话没有承诺尾帧：末段无画面可核，但**末段输出视频**仍要"
+              "交回——它是成片 final.mp4 的最后一段，没有它拼不出成片。"
+              "本次只做可证层（时长/尺寸）校验。")
         return _acquire_last_video(
             segment_number=segment_number, total=total,
             expected_seconds=expected_seconds, on_pass=on_pass)
@@ -5546,7 +5565,6 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
         render_revision_context,
         rewrite_segment_prompt,
         split_shots_from_prompt,
-        write_segment_v2,
     )
 
     # ① 先走新流程：segment_planner 规划整秒分段边界 → 每段独立细写（官方英文格式，spec 2026-09-22）
