@@ -983,8 +983,12 @@ def _render_director_segment_briefing(plan, segment, session_dir: Path,
     return "\n".join(lines)
 
 
-def _build_director_llm():
-    """陪跑里按需建模型（只有要写尾帧变换提示词时才用得上）。失败不静默。"""
+def _build_director_llm(purpose: str = "写终点画面提示词"):
+    """陪跑里按需建模型（写尾帧词或改词时才用得上）。失败不静默。
+
+    ``purpose`` 由调用方给：同一份构造在「尾帧词」与「改词」两处失败时要说清各自
+    卡住了什么，否则用户只看到一句与当前动作无关的病因。
+    """
     from ..model_factory import build_chat_model
 
     try:
@@ -992,7 +996,7 @@ def _build_director_llm():
     except Exception as exc:  # noqa: BLE001 - 病因原样交回，别让建客户端失败伪装成别的问题
         # 不写具体段号：这里拿不到「轮到哪一段」，写死「第 N 段」会变成一句永远
         # 不替换的模板（复审 H4）。
-        print(f"[错误] 模型构造失败（{exc}）：接下来这一段的终点画面提示词写不出来。")
+        print(f"[错误] 模型构造失败（{exc}）：接下来这一段要{purpose}，客户端没建起来。")
         return None
 
 
@@ -1135,23 +1139,33 @@ def _segment_cache_evidence(cache_directory: Path, segment: int) -> Path | None:
     return None
 
 
-def _prompt_segment_video(question: str) -> tuple[Path, int] | None:
-    """问本段**成片视频路径**并当场数帧；不可用就报错重问（#112）。
+def _prompt_segment_video(question: str) -> tuple[str, Path | None, int | None]:
+    """问本段**成片视频路径**；同时接受 ``e``（改词）与 ``q``（停下）（#112/#113）。
 
-    三件检查在同一问里完成：文件存在、能打开、数得出帧数。分开问会让用户在
-    「路径存在」之后先看到一步进展，而真正决定证据成立的是帧数。
+    返回 ``(动作, 路径, 帧数)``，动作三态：
 
-    返回 ``None`` ＝ 用户输入 q 停下（不落账，已通过的段留在账上）。
+    - ``video``：路径可用（文件存在、能打开、数得出帧数——三件检查在同一问里完成，
+      分开问会让用户在「路径存在」之后先看到一步进展，而真正决定证据成立的是帧数）；
+    - ``rewrite``：用户按了 ``e``，进一轮改词（#113：看完成片不满意时不必先跑去导演台
+      UI 手改）；
+    - ``quit``：用户按了 ``q``，不落账，已通过的段留在账上。
+
+    动作与 §``_ask_segment_number`` 同一种三态返回（字符串动作 + 载荷），不另造一个
+    需要调用方解包的类型。``e`` 只认**整串**（大小写不敏感）：Windows 盘符 ``E:\…``
+    与文件名里的 e 都不会被误当成改词。
     """
     from ..director import cache
 
     while True:
         # 用户多半是从资源管理器「复制文件地址」粘过来的，会带一对引号。
         raw = _prompt(question).strip().strip('"').strip("'")
-        if raw.lower() in ("q", "quit"):
-            return None
+        lowered = raw.lower()
+        if lowered in ("q", "quit"):
+            return "quit", None, None
+        if lowered == "e":
+            return "rewrite", None, None
         if not raw:
-            print("[错误] 成片视频路径不能为空。")
+            print("[错误] 成片视频路径不能为空（或输入 e 改本段提示词、q 停下）。")
             continue
         path = Path(raw)
         if not path.is_file():
@@ -1163,9 +1177,99 @@ def _prompt_segment_video(question: str) -> tuple[Path, int] | None:
         except ValueError as exc:
             # 读不出帧数＝证据不成立（不是视频 / 截断 / 解码器不认），不是 0 帧。
             print(f"[错误] 不是能数帧的成片视频：{exc}")
-            print("  请贴本段在导演台里跑出来的那条视频；输入 q 停下。")
+            print("  请贴本段在导演台里跑出来的那条视频；输入 e 改本段提示词、q 停下。")
             continue
-        return path, actual
+        return "video", path, actual
+
+
+def _rewrite_director_segment_round(plan, segment, session: SessionState, *,
+                                    config: Config, llm) -> str:
+    """「e」的一轮改词（issue #113）：改词 → 写回段文件 → 记改写账 → 只重打导演包。
+
+    返回 ``"retry"``（留在等待，让用户重贴视频或再按 e）或 ``"fatal"``（打包失败，
+    整轮陪跑必须停）。两类失败都**不覆盖原段提示词、不落账**：票面要求「改词失败时
+    明确报错」而不是把半份坏词写进产物——写坏词比不改更糟，用户会拿它去重跑。
+
+    顺序是契约：**先落盘段文件、再重打导演包**。反过来（先打包后写文件）包里会留着
+    旧词，而用户按提示「重新导入、只跑本段」跑出来的仍是改前那一版——这类错不会
+    报错，只会让人以为改词没生效。
+
+    改写账与交付时「最终包 vs 初始包」补记的那本账同形、同一写口
+    （``ref_segments.log_segment_rewrite_round``）；``feedback`` 点名发生在陪跑里，
+    与 ``director/delivery.py`` 的「导演台 UI 内修改」区分开（两种来源混在一处，
+    事后分不清哪笔改动是项目侧做的，哪笔是用户在导演台里做的）。
+    """
+    from ..director.pack import prepare_director_pack
+    from ..director.prompts import rewrite_director_segment, segment_path
+    from ..ref_segments import log_segment_rewrite_round
+    from ..segment_prompts import MAX_SEGMENT_ATTEMPTS
+
+    path = segment_path(session.directory, segment.index)
+    try:
+        before = path.read_text(encoding="utf-8")
+    except (OSError, ValueError) as exc:
+        # 段文件读不回来就不可能有「修前」可对照：原词都不在，改词无从谈起。
+        print(f"[错误] 本段提示词读不回来：{exc}")
+        print("  修好后重跑向导会从这一段接着走（或输入 q 停下）。")
+        return "retry"
+    # 写段上下文只在 stage_state 里（持久化白名单）：`_run_director_segment_handoff`
+    # 本身从不读它们（只有 `_run_director_flow` 读过），#113 的改词必须在这里补上，
+    # 否则改出来的词没有分镜表、r2v 还缺六节定义块。
+    state = dict(session.stage_state)
+    try:
+        with step_scope(f"正在改写第 {segment.index}/{len(plan.segments)} 段提示词"):
+            outcome = rewrite_director_segment(
+                plan, segment, llm=llm, current_text=before,
+                shot_table=str(state.get("shot_table", "")),
+                subject_defs=str(state.get("subject_defs", "")),
+            )
+    except (OSError, ValueError) as exc:
+        # 上下文不完整（如 r2v 缺 subject_defs）：大声报，原词不动、不落账。
+        print(f"[错误] 改词上下文不完整：{exc}")
+        print("  本段提示词保持原样，可重选出路（贴视频 / 再按 e / q 停下）。")
+        return "retry"
+    finally:
+        _drain_stdin()
+
+    if outcome.text is None:
+        print("[错误] 改词调用失败（病因见上一行警告）；"
+              "本段提示词保持原样，可重选出路（贴视频 / 再按 e / q 停下）。")
+        return "retry"
+    if outcome.errors:
+        print(f"[错误] 改词产出未通过校验（重写预算 {MAX_SEGMENT_ATTEMPTS} 次已用尽）："
+              "本段提示词保持原样，可重选出路（贴视频 / 再按 e / q 停下）。")
+        for issue in outcome.errors:
+            print(f"   [{issue.severity.upper()}] {issue.code}: {issue.message}")
+        return "retry"
+
+    after = outcome.text.rstrip() + "\n"
+    path.write_text(after, encoding="utf-8")
+    # 账上的修前/修后取**提示词文本**（不带文件尾换行）：多参改写轮与交付补记
+    # 记的都是这个形态，尾巴多一个空行只会让逐行 diff 多出一条噪声。
+    log_segment_rewrite_round(
+        session.directory, segment=segment.index,
+        feedback="导演台陪跑改词（e）",
+        prompt_before=before.strip(), prompt_after=after.strip())
+
+    try:
+        job, _report = prepare_director_pack(
+            session.directory, plan,
+            settings=config.director_settings(),
+            continuity_mode=session.brief.director_continuity_mode)
+    except (OSError, ValueError) as exc:
+        # 打包失败不许「带着坏包继续」：用户下一步就是导入。段文件已经是新词，
+        # 所以要说清「词改了、包没打成」，并给一条能重试的路（再按 e 会重新打包）。
+        print(f"\n[错误] 改完段提示词后导演包重打失败：{exc}")
+        print("  段提示词已经是新词，但导演包没打成；修好上面的问题后重跑向导会从这一段"
+              "接着走，或再按 e 重新改一次（会重新打包）。")
+        return "fatal"
+
+    print(f"\n[改词] 第 {segment.index}/{len(plan.segments)} 段提示词已改写并写回 {path}"
+          "（本轮修前/修后原文已记入段产出账）。")
+    print(f"  导演包已按新词重打：{job.zip_path}")
+    print(f"  → 重新导入导演包，并用 runSelection 只勾第 {segment.index} 段，"
+          "跑完回来贴本段成片视频路径。")
+    return "retry"
 
 
 def _run_director_segment_handoff(plan, session: SessionState, *, config: Config,
@@ -1179,6 +1283,9 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
 
     判定通过就写一行 ``event=output``（视频路径 + 实际帧数 + 视频 SHA256）——它同时是
     续跑的进度（不新开进度账）。不通过的段**不落账**：账上有行就是「这段过了」的证据。
+
+    等视频路径时另有两个出口（#113）：``e`` 走一轮改词（只动画面正文、只重打导演包，
+    然后回到同一问）、``q`` 停下。判定不合格时同样给这三档，用户不必被卡在「只能重跑」。
 
     ``rotate``：新一次交付的开头要轮转账本（复用 GEN 时追加账不会自动清空，#58 实测）。
     续跑不走轮转。
@@ -1284,21 +1391,35 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
             while True:
                 # #112：判定证据只有用户贴回来的这条视频。路径不存在 / 不是视频 /
                 # 读不出帧数都在这一问里当场报错重问，**不落账**。
-                answer = _prompt_segment_video(
+                action, video, actual = _prompt_segment_video(
                     f"第 {segment.index}/{total} 段跑完后贴本段成片视频路径"
-                    "（我按这条视频数帧判定；输入 q 停下）：")
-                if answer is None:
+                    "（我按这条视频数帧判定；输入 e 改本段提示词，q 停下）：")
+                if action == "quit":
                     # 停下不是失败：已通过的段留在账上，重跑向导会从这一段接着走。
                     print(f"\n⚠ 停在轮到第 {segment.index}/{total} 段：这一段不落账。"
                           "已通过的段留在段产出账里，重跑向导会从这一段接着走。")
                     return 0
-                video, actual = answer
+                if action == "rewrite":
+                    # #113：看完成片不满意时，先改这一段再重跑，不必回导演台 UI 手改。
+                    if llm is None:
+                        llm = _build_director_llm("改写提示词")
+                        if llm is None:
+                            # 建不出客户端不是内容问题：原词不动、不落账，留在等待里。
+                            continue
+                    if _rewrite_director_segment_round(
+                            plan, segment, session, config=config, llm=llm) == "fatal":
+                        # 打包失败必须停：不许带着坏包回等待让人继续导入。
+                        return 1
+                    continue
+                assert video is not None and actual is not None
                 verdict = judge_single_shot(
                     segment, actual_frames=actual, tolerance=tolerance)
                 print(f"\n→ {verdict.message}")
                 if not verdict.passed:
+                    # #113：出口三档——重跑本段 / 改词 / 停下。
                     print(f"   （判定 {verdict.status.upper()} / {verdict.code}）"
-                          "回导演台重跑**本段**后再贴视频路径；输入 q 停下。")
+                          "回导演台重跑**本段**后再贴视频路径，或输入 e 改本段提示词；"
+                          "输入 q 停下。")
                     continue
                 # 缓存有没有都不影响判定；有就照记（现场线索），没有就写 null。
                 cache_file = _segment_cache_evidence(
