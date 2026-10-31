@@ -1032,9 +1032,14 @@ def _print_tailframe_document(text: str, *, index: int, path: Path,
         body = sections.get(head, "").strip()
         if body:
             blocks.append(f"{head}\n{body}")
-    # 极端情况下两节都没解析出来（模型产出了坏文档）：原样交回，让校验问题照常暴露，
-    # 不在这里静默打印一个空块。
-    print("\n\n".join(blocks) if blocks else str(text).strip())
+    if blocks:
+        print("\n\n".join(blocks))
+    else:
+        # 极端情况下两节都没解析出来（模型产出了坏文档）：**不要**原样打印全文——
+        # 全文可能带着锁死清单，而用户要求终端不展示它。完整内容在文件里，
+        # 下方的校验问题会点名缺了哪一节。
+        print("（没有解析出「变换指令 / 保留项声明」两节；完整内容在文件里，"
+              "请看下方校验问题。）")
     print("-" * 60)
     print("锁死清单已留在文件里，生成后核对用（不粘给模型）。")
 
