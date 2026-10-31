@@ -1010,18 +1010,33 @@ def _build_director_llm(purpose: str = "写终点画面提示词"):
 
 def _print_tailframe_document(text: str, *, index: int, path: Path,
                               note: str = "") -> None:
-    """把三段式全文摊在终端上（2026-10-31 验收反馈）。
+    """打印**可直接复制给生图模型**的前两节（2026-10-31 用户裁定）。
 
-    用户下一步就是拿这份词去生成终点画面；只给路径等于逼他开资源管理器。
+    锁死清单是生成之后的核对表，不是生成指令：它逐字摘自前两节，粘给模型是冗余，
+    还可能让模型把清单当成额外约束逐条照做。用户明确要求终端只展示前两节；
+    完整三段式仍写盘（``tailframe-NN.md``），核对时打开文件即可。
     正文用分隔线包住，方便整段复制；路径留在标题里，事后仍可定位文件。
     """
-    header = f"[尾帧] 第 {index} 段终点画面提示词"
+    from ..director.tailframe import (
+        PRESERVE_HEAD, TRANSFORM_HEAD, split_tailframe_sections,
+    )
+
+    header = f"[尾帧] 第 {index} 段可直接复制给生图模型"
     if note:
         header += f"（{note}）"
     print(f"{header}（{path}）：")
     print("-" * 60)
-    print(str(text).strip())
+    sections = split_tailframe_sections(text)
+    blocks = []
+    for head in (TRANSFORM_HEAD, PRESERVE_HEAD):
+        body = sections.get(head, "").strip()
+        if body:
+            blocks.append(f"{head}\n{body}")
+    # 极端情况下两节都没解析出来（模型产出了坏文档）：原样交回，让校验问题照常暴露，
+    # 不在这里静默打印一个空块。
+    print("\n\n".join(blocks) if blocks else str(text).strip())
     print("-" * 60)
+    print("锁死清单已留在文件里，生成后核对用（不粘给模型）。")
 
 
 def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> bool:
