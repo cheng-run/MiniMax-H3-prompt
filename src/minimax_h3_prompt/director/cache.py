@@ -291,30 +291,6 @@ def actual_frames(frames_file: str | Path) -> int:
     return frames
 
 
-def actual_frames_for_segment(cache_directory: str | Path, segment: int) -> int:
-    """第 ``segment`` 段（1 起）的实际帧数；``.pt`` 缓存**报错并给处置**。
-
-    遇到 ``.pt`` 不许降级：默认 ``cache_frames_codec="raw"`` 时磁盘上就是它，而本项目
-    环境没有 torch（`.venv` 只有 cv2 / imageio_ffmpeg），任何「尽力而为」的读法都是
-    在编数据。处置只有一条：改插件的缓存编码后重跑该段。
-    """
-    directory = Path(cache_directory)
-    path = frames_path(directory, segment)
-    if not path.is_file():
-        raw = raw_frames_path(directory, segment)
-        if raw.is_file():
-            raise ValueError(
-                f"第 {segment} 段的缓存是 raw 编码（{raw.name}，torch 张量），"
-                "本项目没有 torch，读不出帧数。\n"
-                "处置：把导演台节点的 cache_frames_codec 切成 ffv1，"
-                "然后重跑该段（ffv1 会写出 "
-                f"{path.name}）。")
-        raise ValueError(
-            f"第 {segment} 段的缓存帧文件不存在：{path}"
-            "（这一段还没在导演台里跑完，或段号勾错了）")
-    return actual_frames(path)
-
-
 def export_last_frame(frames_file: str | Path, out_path: str | Path) -> Path:
     """把一段视频/帧文件的**最后一帧**导出成 png（#107 尾帧变换提示词的起点画面）。
 
@@ -343,6 +319,10 @@ def export_last_frame(frames_file: str | Path, out_path: str | Path) -> Path:
         if ok:
             frame = candidate
     if frame is None:  # 头部不可信：老实解一遍
+        # seek 失败后读取位置**不可信**（有的解码器会把位置留在文件尾或维持原值），
+        # 必须显式回到第 0 帧再逐帧读——否则续读可能一帧都取不到（2026-10-31 复审
+        # 实测：头报了正数、seek 后 read 失败，回退循环直接读空，末帧永远拿不到）。
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         while True:
             ok, candidate = cap.read()
             if not ok:

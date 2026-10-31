@@ -1,8 +1,14 @@
 """逐段陪跑的可证层判定（issue #105，设计 §3.7）。
 
-**纯函数、不碰磁盘**：调用方拿 ``cache.cached_segments`` 与 ``cache.actual_frames``
-的读数进来，这里只回答「这一段过没过」。盘上怎么数帧住在 ``cache.py``，账怎么写住在
-``ledger.py``——一个契约只住一处（设计 §1 第 3 条）。
+**纯函数、不碰磁盘**：调用方把量好的帧数传进来，这里只回答「这一段过没过」。盘上怎么
+数帧住在 ``cache.py``，账怎么写住在 ``ledger.py``——一个契约只住一处（设计 §1 第 3 条）。
+
+两条判定入口，帧数判据同一份（``_judge_frames``）：
+
+- ``judge_video_evidence``：**产线路径**（#112 起）。证据是用户在陪跑里贴回的**本段
+  成片视频**，``cache.actual_frames`` 数它；单段与多段共用（2026-10-31 复审更名）。
+- ``judge_segment``：缓存侧的纯函数，保留它可以被直接调用（级联与旧测试按段缓存
+  清单判「这段在不在」）；产线不再走这条，因为插件默认 raw 编码、缓存常常不存在。
 
 判据**按路线帧形态**，**不复用** ``tools/preflight.H3_TIER_FRAMES``（ADR 0024 明令）：
 那张表是 17k+5 档位，有引导段的导出帧恒为 17 的倍数，与它永不相交。抄过来只会让两条
@@ -92,6 +98,21 @@ def judge_segment(segment: DirectorSegment, *,
             f"请回导演台**只勾第 {segment.index} 段**重跑，别拿别的段的帧顶替。",
             None, _expected(segment))
 
+    return _judge_frames(segment, actual_frames, tolerance)
+
+
+def _judge_frames(segment: DirectorSegment, actual_frames: int,
+                  tolerance: int) -> DirectorVerdict:
+    """**帧数**判定（``judge_segment`` 与 ``judge_video_evidence`` 共用的纯函数）。
+
+    2026-10-31 复审采纳：证据来源换了（段缓存 → 用户贴回的成片视频），但「多少帧算
+    过」必须只有一份判据。两条路径此前各自调 ``judge_segment`` 绕一圈，等于把
+    「缓存清单里有没有这一段」这种证据层判断混进帧数判定；抽出来后谁调它都不再关心
+    盘上有没有缓存。
+
+    有引导段：多于导出帧＝不是本段产物；少 1..tolerance 帧＝告警放行；再少＝报红。
+    无引导段：必须**等于**声明帧（没有裁尾理由，也没有容差）。
+    """
     expected = _expected(segment)
     if segment.guided:
         if actual_frames > segment.export_frames:
@@ -136,28 +157,34 @@ def judge_segment(segment: DirectorSegment, *,
         actual_frames, expected)
 
 
-def judge_single_shot(segment: DirectorSegment, *,
-                      actual_frames: int | None,
-                      tolerance: int | None = None) -> DirectorVerdict:
-    """单段计划（插件**不会**为它写段缓存）的判定：证据是成片视频，不是段缓存。
+def judge_video_evidence(segment: DirectorSegment, *,
+                         actual_frames: int | None,
+                         tolerance: int | None = None) -> DirectorVerdict:
+    """成片视频证据的判定：**单段与多段共用**；证据是用户贴回的成片视频（#112）。
 
-    为什么必须单列一条：插件的磁盘缓存是给「分段重跑 / refine / 段间引导」用的
-    （``executor_core.py:106-125`` 的 ``_segment_disk_cache_needed``）。单段计划三样
-    都不成立——``segment_continuity.py:192-207`` 在 ``segment_count < 2`` 时直接关掉
-    段间引导，于是插件**一份缓存都不写**。2026-10-30 真实跑现场：单段 i2v 跑完 243 帧
-    （`MiniMax-H3视频_00001_.mp4`，243 帧 ＠24fps，与声明帧一致），
-    ``output/minimax_seg_cache`` 目录根本不存在，陪跑却报 `SEGMENT_NOT_RUN`
-    「这一段还没跑」——错的是**证据来源**，不是用户没跑。
+    为什么不能再叫 ``judge_single_shot``：2026-10-31 起多段陪跑的判定证据也统一换成
+    用户贴回的成片视频，缓存帧只作定位/现场线索（不再参与判定）。旧名字会让人以为这
+    只服务单段，从而在多段路径上另写一份帧数判据——「同一语义只许一处口径」。
 
-    帧数口径**复用** ``judge_segment``（无引导段：实际必须等于声明帧），这里只替掉
-    「段在不在缓存清单里」这一层：视频已经交到手里，那层判断既不可达，也只会误报。
+    单段计划仍是最典型的入口：插件**不会**为它写段缓存（``executor_core.py:106-125``
+    的 ``_segment_disk_cache_needed``，且 ``segment_continuity.py:192-207`` 在
+    ``segment_count < 2`` 时关掉段间引导）。2026-10-30 真实跑现场：单段 i2v 跑完
+    243 帧，``output/minimax_seg_cache`` 目录不存在，旧陪跑却对着一条已经跑完的片子
+    报 `SEGMENT_NOT_RUN`——错的是**证据来源**，不是用户没跑。
+
+    帧数口径**复用** ``_judge_frames``（与 ``judge_segment`` 同一份），不再绕
+    ``judge_segment`` 的「段在不在缓存清单里」那一层：视频已经交到手里，那层判断
+    既不可达，也只会误报。
     """
     if actual_frames is None:
         raise ValueError(
             "单段判定的实际帧数不能为 None：这一情形的证据是用户交回来的视频文件，"
             "读不出帧数应当由调用方先报错，不能走到判定这一步")
-    return judge_segment(segment, actual_frames=actual_frames,
-                         cached_segments=(segment.index,), tolerance=tolerance)
+    if tolerance is None:
+        tolerance = DIRECTOR_FRAME_TOLERANCE
+    if isinstance(tolerance, bool) or not isinstance(tolerance, int) or tolerance < 0:
+        raise ValueError(f"帧容差必须是非负整数，实际 {tolerance!r}")
+    return _judge_frames(segment, actual_frames, tolerance)
 
 
 def _expected(segment: DirectorSegment) -> int:

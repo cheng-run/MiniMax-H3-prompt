@@ -946,17 +946,20 @@ def _resume_director_handoff(config: Config, session: SessionState, *,
 
 
 def _render_director_segment_briefing(plan, segment, session_dir: Path,
-                                      *, single_shot: bool = False) -> str:
+                                      *, single_shot: bool = False,
+                                      cache_directory: Path | None = None) -> str:
     """一段的执行说明：段号、两种计划帧、给图清单、段文件、**勾段方式与证据入口**。
 
     「用 runSelection 只勾第 N 段」这句是**硬要求**（设计 §3.7 最后一条）：插件对
     选中段一律重采样，全片模式下点运行会把整条时间线重跑一遍——用户会以为「只补跑
     一段」，实际是几十分钟的整片重烧。
 
-    #112 起证据统一为**成片视频**：简报不再出现「段缓存目录 / 数缓存帧数」——
-    那会让用户以为缓存仍是判定依据（`raw` 编码现场就是这样被卡在第 1 段的）。
-    单段计划（i2v）只换掉勾段那一句：插件不为单段写段缓存，时间线也只有一段，
-    runSelection 对它没有意义。
+    #112 起证据统一为**成片视频**：简报不能说「数缓存帧数」，那会让用户以为缓存仍是
+    判定依据（`raw` 编码现场就是这样被卡在第 1 段的）。但#112 复审（2026-10-31）
+    要求多段仍印一行**段缓存目录**并当场标注它**只供定位、不是判定依据**——用户去
+    找插件现场产物时需要这个路径，删掉只会让他自己翻 `output/`。
+    单段计划（i2v）不印这一行：插件根本不为单段写缓存（2026-10-30 现场目录都不存在），
+    印一个永远不存在的路径只会误导。
     """
     from ..director.planning import render_give_images
     from ..director.prompts import segment_path
@@ -978,6 +981,12 @@ def _render_director_segment_briefing(plan, segment, session_dir: Path,
             "  （全片模式下点运行会把整条时间线重跑一遍：插件对选中段一律重采样，",
             "    缓存命中也不会跳。）",
         ]
+        if cache_directory is not None:
+            # 只印路径、不印「数帧」：判定证据是用户贴回的成片视频（#112），缓存帧只
+            # 用来定位插件现场产物。标注写在同一行，免得用户只看到路径就以为要核对它。
+            lines.append(
+                f"段缓存目录：{cache_directory}（只供定位，不是判定依据："
+                "判定按你贴回的成片视频）")
     lines.append("跑完把本段成片视频路径贴回来（我按这条视频数帧判定）。")
     lines.append("=" * 60)
     return "\n".join(lines)
@@ -1121,11 +1130,12 @@ def _apply_director_cascade(*, directory: Path, cache_directory: Path,
         return None
 
 
-def _segment_cache_evidence(cache_directory: Path, segment: int) -> Path | None:
+def _segment_cache_path(cache_directory: Path, segment: int) -> Path | None:
     """这一段在插件缓存里有没有产物：有就返回路径，没有返回 ``None``。
 
-    #112 起它**只用于照记账行**（「当时盘上有没有缓存」是现场线索），不再决定证据
-    来源——判定统一走用户贴回来的成片视频。终稿 ``.frames.mkv`` 与 raw ``.pt``
+    名字是 **cache_path** 而不是 ``evidence``（2026-10-31 复审采纳）：它只决定账行里
+    照记的缓存路径，**不是证据**。叫 evidence 会让下一个读代码的人以为判定还看它。
+    #112 起判定统一走用户贴回来的成片视频；终稿 ``.frames.mkv`` 与 raw ``.pt``
     都算「有产物」：账本要回答的是「有没有」，不是「我们能不能读它」。
     """
     from ..director import cache
@@ -1277,8 +1287,14 @@ def _rewrite_director_segment_round(plan, segment, session: SessionState, *,
     print(f"\n[改词] 第 {segment.index}/{len(plan.segments)} 段提示词已改写并写回 {path}"
           "（本轮修前/修后原文已记入段产出账）。")
     print(f"  导演包已按新词重打：{job.zip_path}")
-    print(f"  → 重新导入导演包，并用 runSelection 只勾第 {segment.index} 段，"
-          "跑完回来贴本段成片视频路径。")
+    if len(plan.segments) == 1:
+        # 单段计划（i2v）时间线只有一段：没有「只勾第 N 段」可勾，runSelection 那句
+        # 会让用户去找一个不存在的入口（与简报同一判据，2026-10-31 复审采纳）。
+        print("  → 重新导入导演包后直接点运行（时间线只有这一段），"
+              "跑完回来贴本段成片视频路径。")
+    else:
+        print(f"  → 重新导入导演包，并用 runSelection 只勾第 {segment.index} 段，"
+              "跑完回来贴本段成片视频路径。")
     return "retry"
 
 
@@ -1300,12 +1316,13 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
     ``rotate``：新一次交付的开头要轮转账本（复用 GEN 时追加账不会自动清空，#58 实测）。
     续跑不走轮转。
 
-    **首问只在续跑时出现**（#112）：账里已有**有效通过行**才问「有要重跑的段吗」，
-    全新开跑直接进第 1 段——旧版在全新开跑也先问一遍，读起来像「必须先把全部段跑完」。
+    **首问只在续跑时出现**（#112）：账里已有有效通过行**或**无证据旧账行时问
+    「有要重跑的段吗」——后者不算通过、不会跳段，但用户仍需要从第 N 段重来的入口
+    （2026-10-31 复审采纳）。全新开跑直接进第 1 段。
     尾问（#106）不变：全部通过后再问「有要改哪一段重来吗」。
     """
     from ..director import cache, ledger
-    from ..director.companion import judge_single_shot
+    from ..director.companion import judge_video_evidence
     from ..director.tailframe import needs_tailframe
 
     directory = Path(session.directory)
@@ -1357,10 +1374,13 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
         print(f"[续接] {named}的旧账没有视频记录，需要重新贴成片视频"
               "（旧缓存帧数不再作为判定依据）。")
 
-    # 首问（#106）：只在账里**已有有效通过行**时出现。全新开跑直接进第 1 段。
+    # 首问（#106）：账里**已有通过行**时出现。全新开跑直接进第 1 段。
+    # 「已有」包括#112 的无证据旧账行（``missing_video``）：它们不算通过、不会跳段，
+    # 但用户仍需要在开头指定从第 N 段重来（2026-10-31 复审采纳——旧版只看 ``passed``，
+    # 纯旧账的会话连重跑入口都没有）。``passed`` 的跳段判据不变：只收有视频的行。
     # 问题前面先念清代价：用户才知道自己在决定删哪些产物。
     start_at = 1
-    if passed:
+    if passed or missing_video:
         print("\n[重跑] 若某段要重做，现在告诉我段号：我会作废该段及其后所有段的"
               "通过记录，并删掉它们的段缓存（**前面的段不动**）。")
         action, target = _ask_segment_number(
@@ -1397,7 +1417,8 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
                         plan, segment, session, llm=llm):
                     return 1
             print(_render_director_segment_briefing(
-                plan, segment, directory, single_shot=single_shot))
+                plan, segment, directory, single_shot=single_shot,
+                cache_directory=cache_directory))
             while True:
                 # #112：判定证据只有用户贴回来的这条视频。路径不存在 / 不是视频 /
                 # 读不出帧数都在这一问里当场报错重问，**不落账**。
@@ -1422,7 +1443,7 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
                         return 1
                     continue
                 assert video is not None and actual is not None
-                verdict = judge_single_shot(
+                verdict = judge_video_evidence(
                     segment, actual_frames=actual, tolerance=tolerance)
                 print(f"\n→ {verdict.message}")
                 if not verdict.passed:
@@ -1432,7 +1453,7 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
                           "输入 q 停下。")
                     continue
                 # 缓存有没有都不影响判定；有就照记（现场线索），没有就写 null。
-                cache_file = _segment_cache_evidence(
+                cache_file = _segment_cache_path(
                     cache_directory, segment.index)
                 ledger.log_director_output(
                     directory,
