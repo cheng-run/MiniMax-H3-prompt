@@ -98,8 +98,8 @@ def judge_segment(segment: DirectorSegment, *,
             return DirectorVerdict(
                 STATUS_FAIL, CODE_FRAME_OVERFLOW,
                 f"第 {segment.index} 段实测 {actual_frames} 帧，多于计划导出 "
-                f"{segment.export_frames} 帧：导出帧是定案值，多出来的帧说明这份缓存"
-                "不是这一段的产物，请确认勾的是本段。",
+                f"{segment.export_frames} 帧：导出帧是定案值，多出来的帧说明这条视频"
+                "不是这一段的产物，请确认贴的是本段成片。",
                 actual_frames, expected)
         gap = segment.export_frames - actual_frames
         if gap == 0:

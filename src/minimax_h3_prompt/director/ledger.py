@@ -37,23 +37,17 @@ DIRECTOR_EVENT_INVALIDATE = "invalidate"
 # 导演台**允许写**的事件集合（#105 复审口径：本清单就是白名单，加行先改这里）。
 DIRECTOR_EVENTS = (SEGMENT_EVENT_OUTPUT, DIRECTOR_EVENT_INVALIDATE)
 
-# 通过行里必须有的字段：账本自己说清「这段的产物是什么、几个帧」。#58 复审实测过
-# 「行在但字段被剥掉、续跑照跳」的形态——判据建立在行写全了之上。
-#
-# #112 起**判定证据只有成片视频**（``video`` + ``video_sha256`` + ``source``）；
-# ``cache`` / ``sha256`` 仍写，但缓存不存在时允许是 ``null``——它们是现场线索，
-# 不是「这段过没过」的来源。同一件事不许有两个口径。
+# 通过行的**旧必填集**：#58 复审实测过「行在但字段被剥掉、续跑照跳」的形态，
+# 判据建立在行写全了之上。这份集合#112 起保持不变——缺这些仍是账坏了。
 _REQUIRED_OUTPUT_FIELDS = (
-    "segment", "start_frame", "end_frame", "declared_frames", "export_frames",
-    "actual_frames", "video", "video_sha256", "source", "cache", "sha256", "at",
-)
-
-# #112 之前写的通过行只有这些字段。缺 ``video`` 只代表「无证据、要重新贴视频」，
-# **不**代表账坏了——把它当坏行会让用户在升级后连陪跑都进不去（票面明令）。
-_LEGACY_OUTPUT_FIELDS = (
     "segment", "start_frame", "end_frame", "declared_frames", "export_frames",
     "actual_frames", "cache", "sha256", "at",
 )
+
+# #112 起**判定证据只有成片视频**。它们不进上面的旧必填集：旧账（升级前写的行）
+# 没有这些字段是**无证据**，要重新贴视频，不是「账坏了」——直接加进必填集会让人
+# 升级后连陪跑都进不去（票面明令）。新行则必须写全。
+_VIDEO_EVIDENCE_FIELDS = ("video", "video_sha256", "source")
 
 
 def utc_now_iso() -> str:
@@ -169,7 +163,9 @@ def _split_director_progress(
                 f"段产出账里的段号 {segment} 超出段表范围 1..{total_segments}："
                 f"{segment_ledger_path(directory)} 与当前 plan.json 不是同一份")
         has_video = bool(row.get("video"))
-        required = _REQUIRED_OUTPUT_FIELDS if has_video else _LEGACY_OUTPUT_FIELDS
+        # 旧必填集对两类行都查；视频三字段只对有视频的新行查（旧账缺它们＝无证据）。
+        required = _REQUIRED_OUTPUT_FIELDS + (
+            _VIDEO_EVIDENCE_FIELDS if has_video else ())
         missing = [name for name in required if name not in row]
         if missing:
             raise ValueError(
