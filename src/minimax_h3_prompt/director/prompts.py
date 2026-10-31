@@ -68,6 +68,11 @@ DIRECTOR_SEGMENT_WRITER_ROLE = "role_director_segment_writer"
 # 写段的「改写轮」没有独立角色名：改写与首写走同一个 writer 出口（同一份看门狗、
 # 同一套失败措辞）。此前这里备了一个 ``..._REWRITER_ROLE`` 的常量，全仓无人引用
 # ——死常量会让人以为存在一条独立的改写记账口径（复审 H2，已删）。
+#
+# #113 的「陪跑里改词」是**用户按键才发生**的另一类调用（与首写分开记账）：
+# 成本表上要能一眼看出哪笔钱花在「看过成片之后的重写」上（同
+# ``ref_segments.REF_SEGMENT_REVISER_ROLE`` 的理由，ADR 0019）。
+DIRECTOR_SEGMENT_REVISER_ROLE = "role_director_segment_reviser"
 
 # 绝对时间轴注记的唯一模板。占位符全部由**帧**现算（成片坐标，ADR 0025 的两套坐标
 # 之「成片坐标」）：秒不是第二份真源，`plan.json` 里的 start_s/end_s 只是派生显示值。
@@ -479,6 +484,113 @@ def write_director_segment(plan: DirectorPlan, segment: DirectorSegment, *, llm,
             + "\n".join(f"- {issue.code}: {issue.message}" for issue in errors)
         )
     return text
+
+
+# 改词请求的块标题：请求文本、假模型与断言三处共用这一份（各写一遍就是又一个会
+# 各自漂的字面量，同 ``ref_segments.REF_SEGMENT_BODY_HEAD`` 的纪律）。
+_REWRITE_REQUIREMENT_HEAD = "【用户看过成片后不满意：只改画面正文】"
+_REWRITE_CURRENT_HEAD = "【当前段提示词（只改其中的画面正文）】"
+
+
+@dataclass(frozen=True)
+class RewriteOutcome:
+    """一轮改词的结果（#113）。
+
+    ``text is None`` ＝ **调用失败**（网关/卡住/空回复）；``errors`` 非空 ＝ **产出不合格**
+    （重写预算已用尽）。两类都必须让调用方「原词不动、不落账、留在等待里」，所以不能像
+    首写那样把两种失败压成同一个 ``str | None``——首写的失败由出站清单逐段展示，
+    改词的失败则要当场说清是哪一类，用户才知道该重按 e 还是先查网关。
+    """
+
+    text: str | None
+    issues: tuple[ValidationIssue, ...] = ()
+
+    @property
+    def errors(self) -> tuple[ValidationIssue, ...]:
+        return tuple(issue for issue in self.issues if issue.severity == "error")
+
+
+def build_rewrite_request(plan: DirectorPlan, segment: DirectorSegment, *,
+                          current_text: str, shot_table: str = "",
+                          sections: dict[str, str] | None = None) -> str:
+    """一轮改词的请求（#113）：**同一份写段上下文** ＋ 当前段提示词 ＋ 只改正文的要求。
+
+    为什么直接复用 ``build_segment_request`` 而不是另写一份精简请求：改词的落笔纪律与
+    首写必须逐条相同（时间窗外禁区、分镜窗口、词表切片、r2v 定义块），少一处就会
+    改出「首写合格、改词走样」的两套方言（「同一语义只许一处口径」）。
+
+    时间基那句是本请求最要紧的提示：``current_text`` 是盘上的段文件，里面的 ``At``
+    时间戳已是**成片坐标**（组装器加过本段起点）；模型照抄它会被组装器再加一次、
+    落出本段窗口。所以必须明确要求「按相对本段起点重写」，并给出本段起点秒。
+    """
+    base = build_segment_request(plan, segment, shot_table=shot_table,
+                                 sections=sections)
+    start_s = segment.start_frame / FPS
+    return (
+        f"{base}\n\n"
+        "---\n"
+        f"{_REWRITE_REQUIREMENT_HEAD}\n"
+        "用户已经在导演台里看过这一段的成片，画面不满意。请按同样的写作纪律重写本段，"
+        "让画面更贴合本段剧情概述、落定画面与分镜表。\n\n"
+        "纪律：\n"
+        "1. **只改画面正文**：不写时间轴注记、不写起止状态句、不写图片对齐指令行"
+        "（上文禁止清单照旧生效）——注记由组装器按帧注入。\n"
+        "2. 没被点名的问题不要顺手改：提示词是逐轮小步改的，全篇重写会把没提到的细节"
+        "一并漂走。\n"
+        f"3. 正文时间基**相对本段起点**（00:00.000 = 本段第一帧）；组装器会再加上本段在"
+        f"成片里的起点 {start_s:.3f}s——**不要照抄**下面当前段提示词里的绝对时间戳。\n"
+        "4. 只输出提示词纯正文：不要解释、不要 markdown 围栏、不要前言或结语。\n\n"
+        f"{_REWRITE_CURRENT_HEAD}\n{str(current_text).strip()}\n"
+    )
+
+
+def rewrite_director_segment(plan: DirectorPlan, segment: DirectorSegment, *, llm,
+                             current_text: str, shot_table: str = "",
+                             subject_defs: str = "") -> RewriteOutcome:
+    """按「看过成片、不满意」重写一段（#113）：与 ``write_director_segment`` 同形。
+
+    同形之处就是票面要的「同一份写段指令与同一个校验器」：请求从
+    ``build_segment_request`` 的同一份上下文长出来，产出走
+    ``normalize_segment_output``（注记代码注入、时间戳合成片坐标）＋
+    ``validate_director_segment``（禁起止状态句、禁对齐行、时间戳落本段窗口），
+    不合格按 ``MAX_SEGMENT_ATTEMPTS`` 有界重写。
+
+    与首写的差别只有一个返回值形态：首写把「调用失败」与「内容坏」都交给出站清单逐段
+    展示；改词发生在等待循环里，必须当场分开报（见 ``RewriteOutcome``），且**任何一类
+    都不许覆盖原段提示词**（写坏词比不改更糟：用户会拿它去重跑）。
+
+    ``subject_defs`` 只在 r2v 用到：六节外壳的第 1、3 节逐字取它（``_require_r2v_sections``）。
+    调用方从 ``session.stage_state`` 取——这两个键在持久化白名单里，续跑读得回来。
+    """
+    sections = (_require_r2v_sections(split_ref_sections(subject_defs))
+                if plan.mode == "r2v" else None)
+    base_request = build_rewrite_request(
+        plan, segment, current_text=current_text, shot_table=shot_table,
+        sections=sections)
+    request = base_request
+    text: str | None = None
+    for attempt in range(MAX_SEGMENT_ATTEMPTS):
+        raw = _direct_write(
+            llm, request, role=DIRECTOR_SEGMENT_REVISER_ROLE,
+            label=f"第 {segment.index} 段导演台改词")
+        if raw is None:
+            return RewriteOutcome(text=None)
+        text = normalize_segment_output(raw, plan=plan, segment=segment,
+                                        sections=sections)
+        issues = tuple(validate_director_segment(
+            text, plan.mode, plan=plan, segment=segment))
+        if not any(issue.severity == "error" for issue in issues):
+            return RewriteOutcome(text=text, issues=issues)
+        if attempt + 1 == MAX_SEGMENT_ATTEMPTS:
+            # 预算用尽：交回最后一版与问题清单，由调用方**不落盘**地打给用户。
+            return RewriteOutcome(text=text, issues=issues)
+        request = (
+            f"{base_request}\n\n"
+            "【上一次产出被校验器判为不合格，请按下列问题修正后重写】\n"
+            + "\n".join(f"- {issue.code}: {issue.message}" for issue in issues
+                        if issue.severity == "error")
+        )
+    return RewriteOutcome(text=text)
 
 
 def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
