@@ -39,3 +39,13 @@ testpaths = ["tests"]
 markers = [
     "allow_network: 允许该用例建立真实网络连接（默认全部禁止，见 conftest.no_real_network）",
 ]
+
+[tool.ruff]
+# retro 2026-10-31：把机械风格/导入错误交给确定性工具，不再只靠复审子代理。
+# 只查 src/；tests/ 不入库且先跑通再扩。规则先取 pyflakes（F）——它抓未定义名、
+# 未使用导入这类真错误，不会像 E501 那样一次刷满全仓历史文件。
+src = ["src"]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["F"]
