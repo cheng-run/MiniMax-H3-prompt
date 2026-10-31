@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..brief_parser import Brief, RefItem
+from ..brief_parser import RefItem
 from ..task_package import resolve_input_path
 
 # 变体 → 所需 (Picture 编号, 帧位)；T2VA 无关键帧
