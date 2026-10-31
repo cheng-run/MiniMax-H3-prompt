@@ -979,6 +979,11 @@ def _render_director_segment_briefing(plan, segment, session_dir: Path,
             f"→ 在导演台里用 runSelection **只勾第 {segment.index} 段**，然后点运行。",
             "  （全片模式下点运行会把整条时间线重跑一遍：插件对选中段一律重采样，",
             "    缓存命中也不会跳。）",
+            # 2026-10-31 现场：导演包固定 exportMode="all"，跑完导出的是「前几段的
+            # 合并视频」，用户贴回来的是 226 帧而不是本段的 187 帧。先说清，免得
+            # 他以为自己跑错、或者去手动裁视频。
+            "  导出是「全部导出」：跑完的视频含前面已有帧的段（未勾的段从缓存填），",
+            "  把那条路径贴回来即可，不用自己裁。",
         ]
         if cache_directory is not None:
             # 只印路径、不印「数帧」：判定证据是用户贴回的成片视频（#112），缓存帧只
@@ -1483,8 +1488,10 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
                         return 1
                     continue
                 assert video is not None and actual is not None
+                # plan 一起交进去：导演台是「全部导出」，贴回的常是前 N 段合并视频，
+                # 判定要按累计形态认，而不是拿总帧数比本段导出帧（2026-10-31 现场）。
                 verdict = judge_video_evidence(
-                    segment, actual_frames=actual, tolerance=tolerance)
+                    segment, actual_frames=actual, plan=plan, tolerance=tolerance)
                 print(f"\n→ {verdict.message}")
                 if not verdict.passed:
                     # #113：出口三档——重跑本段 / 改词 / 停下。
