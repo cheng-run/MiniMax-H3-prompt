@@ -1015,11 +1015,15 @@ def _build_director_llm(purpose: str = "写终点画面提示词"):
 
 def _print_tailframe_document(text: str, *, index: int, path: Path,
                               note: str = "") -> None:
-    """打印**可直接复制给生图模型**的前两节（2026-10-31 用户裁定）。
+    """打印**可直接复制给生图模型**的正文（2026-10-31 用户裁定，同日修订）。
 
-    锁死清单是生成之后的核对表，不是生成指令：它逐字摘自前两节，粘给模型是冗余，
-    还可能让模型把清单当成额外约束逐条照做。用户明确要求终端只展示前两节；
+    锁死清单是生成之后的核对表，不是生成指令：它逐字摘自正文，粘给模型是冗余，
+    还可能让模型把清单当成额外约束逐条照做。用户明确要求终端只展示正文；
     完整三段式仍写盘（``tailframe-NN.md``），核对时打开文件即可。
+
+    **拼成一段而不是两节**：Qwen-Image-2.1 的单图编辑口径就是一段 prompt
+    （官方示例 ``Create a photorealistic photograph ... from the input sketch ...``），
+    带两个 ``###`` 段头粘过去等于把指令拆成文档。段头只留在文件里给校验器用。
     正文用分隔线包住，方便整段复制；路径留在标题里，事后仍可定位文件。
     """
     from ..director.tailframe import (
@@ -1032,11 +1036,9 @@ def _print_tailframe_document(text: str, *, index: int, path: Path,
     print(f"{header}（{path}）：")
     print("-" * 60)
     sections = split_tailframe_sections(text)
-    blocks = []
-    for head in (TRANSFORM_HEAD, PRESERVE_HEAD):
-        body = sections.get(head, "").strip()
-        if body:
-            blocks.append(f"{head}\n{body}")
+    blocks = [sections.get(head, "").strip()
+              for head in (TRANSFORM_HEAD, PRESERVE_HEAD)
+              if sections.get(head, "").strip()]
     if blocks:
         print("\n\n".join(blocks))
     else:
