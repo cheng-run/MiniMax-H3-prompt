@@ -278,15 +278,16 @@ def actual_frames(frames_file: str | Path) -> int:
     """
     path = Path(frames_file)
     if not path.is_file():
-        raise ValueError(f"段缓存帧文件不存在：{path}（这一段还没在导演台里跑完）")
+        # #112 起这一口也服务用户贴回来的成片视频，文案不能写死「段缓存」。
+        raise ValueError(f"帧文件不存在：{path}（这一段还没跑完，或路径贴错了）")
     meta = video_meta(path)
     frames = int(meta.get("frames", 0) or 0)
     if frames <= 0:
         frames = len(read_frames_gray(path))
     if frames <= 0:
         raise ValueError(
-            f"读不出段缓存的帧数：{path}（容器头为 0、逐帧解码也拿到 0 帧；"
-            "文件可能被截断，或不是 FFV1 无损 mkv）")
+            f"读不出帧数：{path}（容器头为 0、逐帧解码也拿到 0 帧；"
+            "文件可能被截断，或不是能解码的视频）")
     return frames
 
 
