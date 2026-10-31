@@ -1054,7 +1054,8 @@ def _print_tailframe_document(text: str, *, index: int, path: Path,
               "请看下方校验问题。）")
     print("-" * 60)
     print("锁死清单已留在文件里，生成后核对用（不粘给模型）。")
-    print("生成后把这张终点图的路径留着：跑完这一段会问，下一段拿它当参考图。")
+    print("生成后把这张终点图的路径留着：跑完这一段会问，下一段拿它当参考图"
+          "（带起点地标，才有距离感）。")
 
 
 def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> bool:
@@ -1120,7 +1121,8 @@ def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> b
     if (not end_image and row is not None and previous_segment is not None
             and needs_tailframe(previous_segment.type, plan.mode)):
         end_image = _prompt_optional_image(
-            f"第 {previous} 段的终点图路径（账里没记；回车=没有，改用上一段视频末帧）：")
+            f"第 {previous} 段的终点图路径（账里没记；它带起点地标，是距离感的"
+            "锚点；回车=没有，改用上一段视频末帧）：")
     image = None
     if end_image:
         candidate = Path(end_image)
@@ -1544,7 +1546,7 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
                         and next_segment.index not in passed):
                     end_image = _prompt_optional_image(
                         f"第 {segment.index} 段的终点图路径（下一段拿它当参考；"
-                        "回车=没有，改用本段视频末帧）：")
+                        "它带起点地标，是距离感的锚点；回车=没有，改用本段视频末帧）：")
                 # 缓存有没有都不影响判定；有就照记（现场线索），没有就写 null。
                 cache_file = _segment_cache_path(
                     cache_directory, segment.index)

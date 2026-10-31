@@ -86,11 +86,14 @@ _IDENTITY_HEAD = "【人物设计基线（身份以此为准）】"
 # 实跑事故）。默认读图指令面向角色一致性，问不到机位会改变哪些可见性。
 _START_READING_INSTRUCTION = (
     "这张图是一段 AI 视频某一段的第一帧（也就是它的起点画面），之后要由视觉模型"
-    "改写成该段的终点画面。\n"
-    "请只描述图里真实可见的内容，并分成三类：\n"
+    "改写成该段的终点画面。终点画面必须有「走了多远」的距离感，所以读图要把"
+    "可用来判断位移的锚点读出来。\n"
+    "请只描述图里真实可见的内容，并分成四类：\n"
     "1) 主体：人数、朝向、姿态、服装颜色与款式、标志物；\n"
-    "2) 近景物体：会随镜头移动被带出画面的东西，以及它们与人物的相对位置；\n"
-    "3) 固定背景：远处建筑、招牌、光源方向与色温、地面材质等不随镜头移动改变的事实。\n"
+    "2) 起点地标：画面里可用来判断「走了多远」的东西（车辆、店面、路牌、柱子），"
+    "以及它们与人物的相对位置；\n"
+    "3) 脚下地面：人物脚下的地面线、路缘、斑马线或停止线；\n"
+    "4) 固定背景：远处建筑、招牌、光源方向与色温、地面材质等不随镜头移动改变的事实。\n"
     "用中文输出 4-6 句，不写心理活动与剧情。"
 )
 
@@ -287,6 +290,23 @@ _CAMERA_HINT = re.compile(
     re.IGNORECASE,
 )
 
+# A→B 位移：起点地标现在在哪（A 锚点）＋ 前景/终点的距离参照（B 纵深）。
+# 只有终点机位、没有位移时，人物会看起来原地踏步（2026-10-31 实跑：第 3 段起
+# 「camera now at ...」写得对，但画面像没走动）。两类各命中一处才算写了位移；
+# 正则收中英两套常见写法，宁可放宽也不把合法措辞判死。
+_DISPLACEMENT_FROM = re.compile(
+    r"behind|out of frame|no longer|left behind|gone|vanished|past\b|"
+    r"身后|出画|已经过去|离开画面|消失",
+    re.IGNORECASE,
+)
+_DISPLACEMENT_TO = re.compile(
+    r"ahead|steps?\b|paces?\b|strides?\b|meters?\b|metres?\b|yards?\b|"
+    r"foreground|near distance|"
+    r"under (?:his|her|their|the)|at (?:his|her|their) feet|beneath|below|"
+    r"directly in front|前方|几步|几米|不远|米处|脚下|前景|正前方",
+    re.IGNORECASE,
+)
+
 
 def _locked_entries(section: str) -> tuple[str, ...]:
     """锁死清单小节 → 条目元组。只认列表行（``- x`` / ``* x`` / ``• x``）。"""
@@ -354,6 +374,15 @@ def validate_tailframe_prompt(text: str, *,
                 "warning", "TAILFRAME_NO_CAMERA_ENDPOINT",
                 "变换指令没写终点机位/取景（camera / 机位 / 镜头 / 取景）：运镜段"
                 "需要写明镜头停在哪，否则模型不知道终点取景"))
+        # 位移是**结构性**要求：运镜段的终点画面如果只有 B、没有 A→B，用户拿到的
+        # 就是一张「原地踏步」的图（2026-10-31 实跑）。触发有界重写，不是告警。
+        if not (_DISPLACEMENT_FROM.search(transform)
+                and _DISPLACEMENT_TO.search(transform)):
+            issues.append(ValidationIssue(
+                "error", "TAILFRAME_NO_DISPLACEMENT",
+                "变换指令没有写出 A→B 的位移：要写起点地标现在在哪（身后 / 出画）"
+                "与一处距离参照（脚下 / 前方几步 / 几米）。只写「camera now at B」"
+                "会让画面看起来原地踏步"))
 
     locked = _locked_entries(sections.get(LOCKED_HEAD, ""))
     if LOCKED_HEAD in sections and not locked:

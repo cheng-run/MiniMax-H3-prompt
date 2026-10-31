@@ -10,3 +10,4 @@
 6. **不写视频语言与质量套话**。
 7. **背景连续**：buildings, storefronts, signs, street fixtures and visible vehicles keep their relative positions from the input image; do not invent a new street.
 8. **用编辑动词**：`Move the camera ...` / `Keep ...`, never `Create a photograph of ...` (it triggers a full repaint).
+9. **位移与纵深**：state where the starting landmark now is (behind/out of frame), the ground line under the feet, and the endpoint landmark's distance; `camera now at B` alone reads as marching in place.
