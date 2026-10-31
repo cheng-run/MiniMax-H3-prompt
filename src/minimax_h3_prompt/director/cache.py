@@ -24,7 +24,7 @@ from pathlib import Path
 
 import cv2
 
-from ..tools.frame_match import read_frames_gray, video_meta
+from ..tools.frame_match import imwrite_unicode, read_frames_gray, video_meta
 
 # 插件常量（``segment_cache.py:141-143``）：目录名与截断长度是同一条契约，抄字面
 # 就等于两份会各自漂的口径，注释标明来源版本（HEAD ``4c6245e``）。
@@ -333,6 +333,9 @@ def export_last_frame(frames_file: str | Path, out_path: str | Path) -> Path:
         raise ValueError(f"取不到末帧：{path} 一帧都解不出来")
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    if not cv2.imwrite(str(out), frame):
-        raise ValueError(f"末帧写不出来：{out}（目录不可写或扩展名不支持）")
+    # 不能直接用 cv2.imwrite：Windows 上它对非 ASCII 路径返回 False 而不抛错，
+    # 会话目录名含中文时会被误报成「目录不可写」（2026-10-31 验收现场）。
+    # 统一走 frame_match 的 Unicode 写口（与 imread_unicode 同一处纪律）。
+    if not imwrite_unicode(out, frame, ".png"):
+        raise ValueError(f"末帧 PNG 写不出来：{out}（路径或磁盘不可写）")
     return out
