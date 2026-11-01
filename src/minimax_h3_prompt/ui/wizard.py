@@ -3316,8 +3316,14 @@ def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item: QueueIte
             ledger = load_asset_ledger(generation_dir)
             existing = ledger.get(item.name, KIND_PICTURE)
             mark = f"（已入库 {existing.tag}，换版将替换）" if existing else ""
+            # 人审项（L6-15 / 2026-11-01 裁定）：回灌只管出词前，图交回来之后没人再看
+            # 跨母版一致性。**只加问句、不加自动判据**；非人物不问——场景与道具没有
+            # 「同一张脸」这回事，问了只是噪声。
+            same_face = ("  人审：同角色的其他母版是不是同一张脸？\n"
+                         if item.kind == "character" else "")
             choice = _prompt(
                 f"[审查·{item.name}] 这张图满意吗？{mark}\n"
+                f"{same_face}"
                 "  1=满意，交回这张（下一步填路径）  2=打回：外部重掷（不登记被拒图）\n"
                 "  3=打回：改写提示词（留痕一轮修订）  4=显式放弃这张资产\n"
                 "  5=登记外部生成成本（耗时/次数）  6=改这张的生图模型（换档重出词）\n"

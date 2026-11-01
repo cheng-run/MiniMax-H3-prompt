@@ -59,6 +59,11 @@ TEXT_CAPABILITY_KEYWORDS = tuple(word for word, _zh, _latin in _TEXT_KEYWORD_PAT
 # 命中后切到哪一个模型。是**规则的结果**而不是「默认档」：默认档住在 image_config。
 TEXT_CAPABILITY_MODEL = "moss"
 
+# 不参与「按文字类关键词自动切档」的资产类别（L6-12 / 2026-11-01 裁定）：人物身份板上
+# 的校名、臂章上的字会把整张板切到 MOSS，而 ``moss.md:11`` 明写四格身份板不是本档强项。
+# 只管自动规则——手动指定仍可给人物选 MOSS（人看图选档是人的判断）。
+AUTO_ROUTING_EXEMPT_KINDS = frozenset({"character"})
+
 _LATIN_PATTERNS: dict[str, re.Pattern[str]] = {
     # 边界用「前后不是字母数字下划线」而不是 ``\b``：``sign`` 与 ``signage`` 这类长短词
     # 要在同一个正则里分开处理，``\b`` 只认「词与非词之间」，管不住「sign 是 signage 的
@@ -107,15 +112,19 @@ def assignment(kind: str, *, texts: Sequence[str], manual: str | None = None) ->
 
     ``manual`` 是人在素材循环里选过的模型；写错值要响（``sd3`` 这类拼错静默回落，
     等于「人以为改了、实际一直按旧模型出词」，且产物不报错）。
+
+    人物类**跳过自动关键词规则**：身份板上的校名与臂章文字会命中「文字」，把整张板
+    切到不擅长四格身份板的 MOSS。跳过规则后仍走配置默认档，手动指定照旧优先。
     """
     if manual is not None:
         if manual not in IMAGE_MODEL_KEYS:
             raise ValueError(
                 f"生图模型无效：{manual!r}（只认 {', '.join(IMAGE_MODEL_KEYS)}）")
         return {"model": manual, "source": SOURCE_MANUAL, "keyword": ""}
-    hit = text_capability_hit(*texts)
-    if hit is not None:
-        return {"model": TEXT_CAPABILITY_MODEL, "source": SOURCE_AUTO, "keyword": hit}
+    if kind not in AUTO_ROUTING_EXEMPT_KINDS:
+        hit = text_capability_hit(*texts)
+        if hit is not None:
+            return {"model": TEXT_CAPABILITY_MODEL, "source": SOURCE_AUTO, "keyword": hit}
     return {"model": image_model_for(kind), "source": SOURCE_CONFIG, "keyword": ""}
 
 
@@ -186,6 +195,7 @@ def described(value: Mapping[str, str]) -> str:
 
 
 __all__ = [
+    "AUTO_ROUTING_EXEMPT_KINDS",
     "ENTRY_KEY", "SOURCES", "SOURCE_AUTO", "SOURCE_CONFIG", "SOURCE_MANUAL",
     "TEXT_CAPABILITY_KEYWORDS", "TEXT_CAPABILITY_MODEL",
     "assignment", "assignment_of", "described", "manual_model_of", "model_of",
