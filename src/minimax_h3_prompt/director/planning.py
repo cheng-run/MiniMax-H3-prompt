@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 from .frames import (
     FPS,
@@ -422,7 +421,9 @@ def read_plan_json(path: Path) -> DirectorPlan:
 _IMAGE_LABELS = {
     IMAGE_FIRST: "首帧",
     IMAGE_END: "尾帧（终点画面）",
-    IMAGE_ASSETS: "参考素材",
+    # r2v 每段挂的是**本段素材子集**（≤ MAX_PICTURES=9，插件单请求上限）：标签里带上
+    # 这张上限，用户看到「参考素材」时就知道这不是「全片素材一口气挂上去」。
+    IMAGE_ASSETS: "参考素材（本段 ≤9 张）",
 }
 
 
@@ -434,7 +435,8 @@ def render_give_images(segment: DirectorSegment, mode: str) -> str:
     if not required and not optional:
         # 引导段靠上一段末帧接续，不是「纯文字」：后者会让用户以为这一段没有任何
         # 画面来源（2026-10-30 的 i2v 给图改动暴露了这句）。i2v 单段制下不会走到
-        # 这里（唯一段是 opening，必给首帧），但 t2v/fl2v/r2v 的引导段仍靠它。
+        # 这里（唯一段是 opening，必给首帧），t2v/fl2v 的引导段仍靠它；r2v 每段都有
+        # 参考素材（必填），走不到这一支。
         if segment.guided:
             return "无（只靠段间引导）"
         return "无（纯文字）"

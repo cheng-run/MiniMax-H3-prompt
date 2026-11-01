@@ -841,6 +841,36 @@ def _run_director_flow(session: SessionState) -> int:
             return 0
     # 规划与写段共用同一个模型实例：两段长阻塞之间再建一次客户端只是多一次握手。
     llm = build_chat_model()
+    # r2v 的六节外壳第 1、3 节要先有**英文**定义块（2026-11-01 真实现场）：阶段 1 的
+    # `subject_defs` 是中文 markdown 素材，既解析不出段头、也不是全英文，直接复制进段
+    # 就是半份空定义。放在规划之前：这一步要花一次调用，失败就该在花钱做规划之前停。
+    sections = None
+    registry: tuple[tuple[int, str], ...] = ()
+    if brief.director_mode == "r2v":
+        from ..director import refdefs
+        from ..generation import ref_asset_registry
+
+        registry = tuple(
+            (item.picture, item.name)
+            for item in ref_asset_registry(state, brief))
+        cached = refdefs.load_ref_sections(session.directory)
+        if refdefs.has_sections(cached) and cached.registry == registry:
+            # 续跑不重付：定义块只跟素材登记有关，跟分段无关（段规划改了也照用）。
+            sections = cached
+            print(f"[定义块] 复用已生成的全片定义：{refdefs.sections_path(session.directory)}")
+        else:
+            try:
+                with step_scope("正在生成 r2v 英文定义块"):
+                    sections = refdefs.build_ref_sections(
+                        material=str(state.get("subject_defs", "")),
+                        registry=registry, llm=llm)
+            except (RuntimeError, ValueError) as exc:
+                print(f"[错误] 导演台 r2v 定义块生成失败：{exc}")
+                return 1
+            finally:
+                _drain_stdin()
+            refdefs.save_ref_sections(session.directory, sections)
+            print(f"[定义块] 已生成并落盘：{refdefs.sections_path(session.directory)}")
     try:
         with step_scope("正在按导演台帧网格规划分段"):
             plan = plan_director_segments(
@@ -869,9 +899,11 @@ def _run_director_flow(session: SessionState) -> int:
             written = write_director_segments(
                 plan, llm=llm, session_dir=session.directory,
                 shot_table=shot_table,
-                # r2v 的六节外壳第 1、3 节取阶段 1 的素材定义（同一条参考素材纪律）；
+                # r2v 的六节外壳第 1、3 节取上面那份英文定义块；逐段再按本段正文裁成
+                # ≤9 张的子集并落 `assets-in-segment.json`（打包照它挂图）。
                 # 其余模式没有参考素材，不传也不会用到。
-                subject_defs=str(state.get("subject_defs", "")),
+                sections=(sections.as_mapping() if sections is not None else None),
+                registry=registry,
             )
     except (RuntimeError, ValueError) as exc:
         # 写段失败不写半段假内容（半份段表比没写更糟：用户会拿它去打包）。
@@ -1311,13 +1343,20 @@ def _rewrite_director_segment_round(plan, segment, session: SessionState, *,
     # 写段上下文只在 stage_state 里（持久化白名单）：`_run_director_segment_handoff`
     # 本身从不读它们（只有 `_run_director_flow` 读过），#113 的改词必须在这里补上，
     # 否则改出来的词没有分镜表、r2v 还缺六节定义块。
+    #
+    # r2v 的定义块取**盘上这段自己的**（`split_ref_sections(before)`），不取阶段 1 的
+    # 中文素材：那份素材已经过 `refdefs` 变英文、又按本段裁成 ≤9 张子集，改词若退回
+    # 全局中文块，改出来的段会和同目录其它段用两套编号与两套语言（2026-11-01 现场）。
+    from ..tools.h3_validator import split_ref_sections
+
     state = dict(session.stage_state)
+    sections = split_ref_sections(before) if plan.mode == "r2v" else None
     try:
         with step_scope(f"正在改写第 {segment.index}/{len(plan.segments)} 段提示词"):
             outcome = rewrite_director_segment(
                 plan, segment, llm=llm, current_text=before,
                 shot_table=str(state.get("shot_table", "")),
-                subject_defs=str(state.get("subject_defs", "")),
+                sections=sections,
             )
     except (OSError, ValueError) as exc:
         # 上下文不完整（如 r2v 缺 subject_defs）：大声报，原词不动、不落账。

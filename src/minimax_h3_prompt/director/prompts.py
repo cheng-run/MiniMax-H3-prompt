@@ -23,11 +23,20 @@
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable, Sequence
 
 from .. import film_language
+from ..ref_capacity import MAX_PICTURES
+from ..segment_refs import (
+    SegmentAssetOverflowError,
+    compute_segment_scope,
+    rewrite_picture_labels,
+    scope_ref_sections,
+)
 # 跨模块取那两个下划线常量与直调出口，是**刻意的复用**而不是抄近路：
 # - ``_REF_START/END_STATE_PREFIX`` 是「起止状态句」的唯一可写来源。导演台**禁止**这两句，
 #   但「怎么认出来」必须跟着那边走——重抄一份字面，ref 的措辞一改，这里的禁令就再也咬不住
@@ -415,6 +424,15 @@ def build_segment_request(plan: DirectorPlan, segment: DirectorSegment, *,
     )
     definitions = (
         _definitions_block(_require_r2v_sections(sections)) if plan.mode == "r2v" else "")
+    # 参考图预算是**事前的**，不是事后截断：插件按「每次请求」限 9 张（
+    # ``lib/ref_images.py`` 的 MAX_REFERENCE_IMAGES），而本段最终只会挂正文真正点名
+    # 的那几张。先写清上限，模型才在第一版就按剧情取舍，而不是写满 13 张再被退回。
+    budget = (
+        f"\n【本段参考图预算】最多引用 {MAX_PICTURES} 张不同的 <Picture N>："
+        "插件每次生成（＝每段）只接受这么多个参考图槽位。请按本段剧情挑选**真正出场**"
+        f"的素材，超过 {MAX_PICTURES} 张会被退回重写（不会替你删图——删掉的图在正文里"
+        "没有接线可落）。\n"
+        if plan.mode == "r2v" else "")
     return (
         f"{load_instruction(plan.mode)}\n\n"
         "---\n"
@@ -430,6 +448,7 @@ def build_segment_request(plan: DirectorPlan, segment: DirectorSegment, *,
         f"{_future_events_block(plan, segment)}"
         f"\n{shots_block}\n"
         f"{definitions}"
+        f"{budget}"
         "\n## 词表切片（ADR 0007 落笔侧同一份）\n"
         "下面词表**前言**里「edge-stability 句」「分段首行的锚定行」两处指针是首尾帧链的"
         "义务，导演台分段**一概不用**（见上方禁止清单）。词表正文的选词与写法照用。\n\n"
@@ -475,8 +494,9 @@ def normalize_segment_output(text: str, *, plan: DirectorPlan,
 
 def _write_validated(plan: DirectorPlan, segment: DirectorSegment, *, llm,
                      base_request: str, sections: dict[str, str] | None,
-                     role: str, label: str
-                     ) -> tuple[str, tuple[ValidationIssue, ...]] | None:
+                     role: str, label: str,
+                     registry: Sequence[Sequence] = ()
+                     ) -> tuple[str, tuple[ValidationIssue, ...], list[dict] | None] | None:
     """首写与改词共用的循环：请求 → 直调 → 归一 → 校验 → 有界重写。
 
     为什么抽成一处：两条路径的落笔纪律必须逐条相同（同一份请求上下文、同一套
@@ -485,12 +505,18 @@ def _write_validated(plan: DirectorPlan, segment: DirectorSegment, *, llm,
     改一处（比如重试探针或问题清单标题）另一处会静默漂——「同一语义只许一处口径」。
 
     返回 ``None`` ＝ **调用失败**（网关/卡住/空回复）；否则返回 ``(最后一版文本,
-    问题清单)``。预算用尽后仍不合格时也照常返回文本与清单：首写把它交给出行清单
-    逐段展示，改词由调用方「不落盘」地报给用户——两种处置不同，判定内容却同源。
+    问题清单, 段内素材子集记录)``。预算用尽后仍不合格时也照常返回文本与清单：首写把
+    它交给出行清单逐段展示，改词由调用方「不落盘」地报给用户——两种处置不同，判定
+    内容却同源。
+
+    ``registry`` 非空时（r2v）每轮合格后还要**裁段内素材子集**；超过每段上限会作为
+    一条校验错误回灌给模型重写（2026-11-01 真实现场：第 2 段引用了 10 张、上限 9）。
+    「超了就地截断」不是选项——截掉的图在正文里没有接线可落，写出来的段会指着空气。
     """
     request = base_request
     text: str | None = None
     issues: tuple[ValidationIssue, ...] = ()
+    record: list[dict] | None = None
     for attempt in range(MAX_SEGMENT_ATTEMPTS):
         raw = _direct_write(llm, request, role=role, label=label)
         if raw is None:
@@ -499,22 +525,44 @@ def _write_validated(plan: DirectorPlan, segment: DirectorSegment, *, llm,
         issues = tuple(validate_director_segment(
             text, plan.mode, plan=plan, segment=segment))
         errors = [issue for issue in issues if issue.severity == "error"]
-        if not errors:
-            return text, issues
+        if not errors and registry and sections is not None:
+            try:
+                text, record = _scope_segment_text(
+                    text, plan=plan, segment=segment,
+                    sections=sections, registry=registry)
+            except SegmentAssetOverflowError as exc:
+                # 只接「本段素材太多」这一类（``compute_segment_scope`` 的设计边界）：
+                # 它是**可以被模型自己修好的**——少引用一张、把两张合并成一句描述。
+                # 同时并进 ``issues``：预算用尽时调用方要能在出站清单上看到这条，
+                # 而不是只有「六节齐全」的一串绿。
+                overflow = ValidationIssue(
+                    "error", "DIRECTOR_PICTURE_OVERFLOW", str(exc))
+                issues = (*issues, overflow)
+                errors = [overflow]
+            else:
+                # 裁完的正文换了图号，再走一遍同一条校验器（标号改了，悬空与否重算）。
+                issues = tuple(validate_director_segment(
+                    text, plan.mode, plan=plan, segment=segment))
+                errors = [issue for issue in issues if issue.severity == "error"]
+                if not errors:
+                    return text, issues, record
+        elif not errors:
+            return text, issues, record
         if attempt + 1 == MAX_SEGMENT_ATTEMPTS:
             # 重试预算用尽：交回最后一版与问题清单，由调用方决定怎么展示/是否落盘。
-            return text, issues
+            return text, issues, record
         request = (
             f"{base_request}\n\n"
             "【上一次产出被校验器判为不合格，请按下列问题修正后重写】\n"
             + "\n".join(f"- {issue.code}: {issue.message}" for issue in errors)
         )
-    return text, issues
+    return text, issues, record
 
 
 def write_director_segment(plan: DirectorPlan, segment: DirectorSegment, *, llm,
                            shot_table: str = "",
-                           sections: dict[str, str] | None = None) -> str | None:
+                           sections: dict[str, str] | None = None,
+                           registry: Sequence[Sequence] = ()) -> str | None:
     """写一段（直调看门狗 + 有界重写）。调用失败返回 None（调用方据此大声报错）。
 
     契约与 ``write_ref_segment_v2`` 同形：**调用失败**返回 None；**内容不合格**带着
@@ -526,7 +574,7 @@ def write_director_segment(plan: DirectorPlan, segment: DirectorSegment, *, llm,
     result = _write_validated(
         plan, segment, llm=llm, base_request=base_request, sections=sections,
         role=DIRECTOR_SEGMENT_WRITER_ROLE,
-        label=f"第 {segment.index} 段导演台写段")
+        label=f"第 {segment.index} 段导演台写段", registry=registry)
     return None if result is None else result[0]
 
 
@@ -594,7 +642,7 @@ def build_rewrite_request(plan: DirectorPlan, segment: DirectorSegment, *,
 
 def rewrite_director_segment(plan: DirectorPlan, segment: DirectorSegment, *, llm,
                              current_text: str, shot_table: str = "",
-                             subject_defs: str = "") -> RewriteOutcome:
+                             sections=None) -> RewriteOutcome:
     """按「看过成片、不满意」重写一段（#113）：与 ``write_director_segment`` 同形。
 
     同形之处就是票面要的「同一份写段指令与同一个校验器」：请求从
@@ -607,11 +655,13 @@ def rewrite_director_segment(plan: DirectorPlan, segment: DirectorSegment, *, ll
     展示；改词发生在等待循环里，必须当场分开报（见 ``RewriteOutcome``），且**任何一类
     都不许覆盖原段提示词**（写坏词比不改更糟：用户会拿它去重跑）。
 
-    ``subject_defs`` 只在 r2v 用到：六节外壳的第 1、3 节逐字取它（``_require_r2v_sections``）。
-    调用方从 ``session.stage_state`` 取——这两个键在持久化白名单里，续跑读得回来。
+    ``sections`` 只在 r2v 用到：六节外壳的第 1、3 节逐字取它（``_require_r2v_sections``）。
+    调用方从**盘上的段文件**取（``split_ref_sections(current_text)``），不从阶段 1 的
+    中文素材取——那份素材已经过 ``refdefs`` 变成英文、又按段裁成了子集；改词若退回
+    全局中文块，改出来的段会和同目录其它段用两套定义（2026-11-01 真实现场）。
     """
-    sections = (_require_r2v_sections(split_ref_sections(subject_defs))
-                if plan.mode == "r2v" else None)
+    parts = _sections_mapping(sections)
+    sections = _require_r2v_sections(parts) if plan.mode == "r2v" else None
     base_request = build_rewrite_request(
         plan, segment, current_text=current_text, shot_table=shot_table,
         sections=sections)
@@ -621,30 +671,145 @@ def rewrite_director_segment(plan: DirectorPlan, segment: DirectorSegment, *, ll
         label=f"第 {segment.index} 段导演台改词")
     if result is None:
         return RewriteOutcome(text=None)
-    text, issues = result
+    text, issues, _record = result
     return RewriteOutcome(text=text, issues=issues)
+
+
+# 段内素材表（r2v）：``director/assets-in-segment.json``，段号 → 该段挂的图
+# （``new`` 是段内槽号，``original`` 是全局登记号，``name`` 是台账语义名）。
+# 打包**照它挂图**、不自己再推一遍子集：写段与打包各推一次就是同一契约两处口径，
+# 哪边先改都会让「段词里的 <Picture 3>」和「包里的第 3 张」变成两张不同的图。
+SEGMENT_ASSETS_FILENAME = "assets-in-segment.json"
+
+
+def segment_assets_path(session_dir: str | Path) -> Path:
+    return Path(session_dir) / DIRECTOR_DIRNAME / SEGMENT_ASSETS_FILENAME
+
+
+def _sections_mapping(sections) -> dict[str, str] | None:
+    """``RefSections`` / 字典 / None → 两节字典（None 原样返回，非 r2v 不用定义块）。"""
+    if sections is None:
+        return None
+    if hasattr(sections, "as_mapping"):
+        return sections.as_mapping()
+    return dict(sections)
+
+
+def _scope_segment_text(text: str, *, plan: DirectorPlan, segment: DirectorSegment,
+                        sections: dict[str, str], registry: Sequence[Sequence]
+                        ) -> tuple[str, dict | None]:
+    """段正文 → (按本段素材子集重写后的正文, 子集记录)。
+
+    子集按**已写出的正文**算，不按规划期的梗概猜：正文才是这一段真正点名了谁的证据
+    （``compute_segment_scope`` 认 ``<Picture N>`` 标签与语义名两条口）。三段之后的重编号
+    全部交给 ``scope_ref_sections`` / ``rewrite_picture_labels``——那是多参路线已经用
+    过的同一套改写，导演台不另写一份。
+
+    ``registry`` 为空时**不裁**（返回原文与 None）：只有测试与旧调用会走这一支，
+    真实流程必须给登记表，否则超过 9 张会在打包期点名报错（不静默丢图）。
+    """
+    if not registry:
+        return text, None
+    parts = split_ref_sections(text)
+    if not parts:
+        return text, None
+    shot_text = "\n".join(filter(None, (
+        parts.get("summary", ""), parts.get("detailed_description", ""))))
+    scope = compute_segment_scope(
+        shot_text=shot_text,
+        subject_definitions=str(sections.get("subject_definitions", "")),
+        registry=[(int(item[0]), str(item[1]), "") for item in registry],
+        refs_per_segment=MAX_PICTURES,
+        segment_label=f"段 {segment.index}")
+    record = [{"new": item.new_picture, "original": item.original_picture,
+               "name": item.name} for item in scope.pictures]
+    full = {int(item[0]): int(item[0]) for item in registry}
+    if len(scope.pictures) == len(registry) and scope.picture_map == full:
+        return text, record  # 全量即为子集：段词一字不改（与改动前行为逐字一致）
+
+    scoped = scope_ref_sections(parts, scope)
+    note = render_timeline_note(plan, segment)
+    detailed = rewrite_picture_labels(
+        parts.get("detailed_description", ""), scope.picture_map)
+    if detailed.startswith(note):
+        # 组装器已注入的注记：重建时由 assemble_ref_segment 再加一次，先摘掉。
+        detailed = detailed[len(note):].lstrip("\n")
+    task_type, summary_body = split_task_type(parts.get("summary", ""))
+    rebuilt = assemble_ref_segment(
+        subject_definitions=scoped.get("subject_definitions", ""),
+        retention_analysis=scoped.get("retention_analysis", ""),
+        task_type=task_type or _REF_TASK_TYPE,
+        summary_body=summary_body,
+        detailed_body=detailed,
+        overall_soundscape=parts.get("overall_soundscape", ""),
+        non_diegetic_music=parts.get("non_diegetic_music", ""),
+        annotations=note,
+    )
+    return rebuilt, record
+
+
+def write_segment_assets(session_dir: str | Path,
+                         scopes: dict[int, list[dict]]) -> Path | None:
+    """段内素材表落盘；没有 r2v 段（空表）时**不写文件**（别的模式没有素材子集）。"""
+    if not scopes:
+        return None
+    path = segment_assets_path(session_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {str(index): entries for index, entries in sorted(scopes.items())}
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def load_segment_assets(session_dir: str | Path) -> dict[int, list[dict]]:
+    """读段内素材表；文件不在＝**旧会话**（全量挂图口径），返回空表。
+
+    空表不是错误：改动前的包就是「每段挂全量」，旧会话续跑必须照旧打得出来。
+    """
+    path = segment_assets_path(session_dir)
+    if not path.is_file():
+        return {}
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    return {int(index): list(entries) for index, entries in raw.items()}
 
 
 def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
                             shot_table: str = "",
-                            subject_defs: str = "") -> list[WrittenSegment]:
+                            sections=None,
+                            registry: Iterable[Sequence] = ()) -> list[WrittenSegment]:
     """逐段写并落盘 ``GENxxx/director/segment-NN.md``（1 起）。
 
     出错就**停下并点名段号**：调用失败（``RuntimeError``）与模式不可写（``ValueError``）
     都不许写成半段假内容——半份段表比没写更糟，用户会拿它去打包（#104）。
     已落盘的前几段保留：它们是真实产物，重跑会覆盖同名文件。
+
+    ``sections`` 是**全片**定义块（r2v 必填；来自 ``refdefs.build_ref_sections`` 的英文
+    两节）。每段写完后按本段正文裁一份子集（≤9 张，插件单请求上限），裁完的子集落
+    ``assets-in-segment.json`` 给打包期照挂——段词与挂图同源，不许各推一遍。
     """
     _require_write_mode(plan.mode)
-    sections = (_require_r2v_sections(split_ref_sections(subject_defs))
-                if plan.mode == "r2v" else None)
+    global_sections = _sections_mapping(sections)
+    if plan.mode == "r2v":
+        global_sections = _require_r2v_sections(global_sections)
+    registry_rows = tuple(registry)
+    scopes: dict[int, list[dict]] = {}
     written: list[WrittenSegment] = []
     for segment in plan.segments:
-        text = write_director_segment(plan, segment, llm=llm, shot_table=shot_table,
-                                      sections=sections)
-        if text is None:
+        # 子集裁剪在**有界重写循环里**（``_write_validated``）：超过每段 9 张时把
+        # 「本段素材太多」当一条校验错误回灌，让模型自己取舍后再写一遍；三次仍超才停。
+        # 裁完再校验、再落盘——盘上的段文件与段内素材表永远同一版。
+        base_request = build_segment_request(
+            plan, segment, shot_table=shot_table, sections=global_sections)
+        result = _write_validated(
+            plan, segment, llm=llm, base_request=base_request,
+            sections=global_sections, role=DIRECTOR_SEGMENT_WRITER_ROLE,
+            label=f"第 {segment.index} 段导演台写段", registry=registry_rows)
+        if result is None:
             raise RuntimeError(
                 f"第 {segment.index} 段导演台写段调用失败（已落盘 {len(written)} 段）："
                 "失败原因见上一行警告；已落盘的段可续跑复用")
+        text, _issues, record = result
+        if record is not None:
+            scopes[segment.index] = record
         path = segment_path(session_dir, segment.index)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text.rstrip() + "\n", encoding="utf-8")
@@ -656,6 +821,7 @@ def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
             issues=tuple(validate_director_segment(
                 text, plan.mode, plan=plan, segment=segment)),
         ))
+    write_segment_assets(session_dir, scopes)
     return written
 
 

@@ -40,11 +40,12 @@ from .frames import (
     PLAN_MODES,
     SEGMENT_TYPE_LABELS,
     DirectorPlan,
+    DirectorSegment,
     duration_sec_for_declared,
     validate_segment_types,
 )
 from .planning import DIRECTOR_DIRNAME, render_give_images
-from .prompts import segment_path
+from .prompts import load_segment_assets, segment_path
 
 # ---------------------------------------------------------------------------
 # 插件契约常量（ComfyUI_MiniMaxH3_Director/director/pack.py，HEAD 4c6245e）
@@ -500,12 +501,17 @@ def _read_segment_prompts(session_dir: Path, plan: DirectorPlan) -> dict[int, st
     return texts
 
 
-def _picture_sources(session_dir: Path) -> tuple[tuple[Path, str], ...]:
-    """r2v 的参考图正本：台账已登记的图片，按台账顺序（= 官方编号顺序）。
+def _picture_sources(session_dir: Path) -> tuple[tuple[str, Path, str], ...]:
+    """r2v 的参考图正本：``(语义名, 路径, 扩展名)``，按台账顺序。
 
     只走**一个解析口** ``resolve_asset_path``（issue #85 复审：库根/旧布局的分支只住
-    那里）。缺正本、类型不认、超过槽位上限全部**点名报错**——静默截断会留下悬空的
-    ``<Picture N>``，自动丢图则是替用户删了素材（spec #84）。
+    那里）。缺正本、类型不认全部**点名报错**——静默截断会留下悬空的 ``<Picture N>``，
+    自动丢图则是替用户删了素材（spec #84）。
+
+    **这里不再判「台账超过 9 张」**：9 张是插件**单次请求**（＝每段）的上限，不是全片
+    素材库的上限（2026-11-01 用户裁定：每段最多 9 图 + 3 视频 + 3 音频，可以按段上传
+    素材）。每段的张数由段内素材表（``prompts.load_segment_assets``）决定，超限在
+    那一段上点名报错。
     """
     ledger = load_asset_ledger(session_dir)
     pictures = [entry for entry in ledger.entries if entry.kind == KIND_PICTURE]
@@ -513,13 +519,8 @@ def _picture_sources(session_dir: Path) -> tuple[tuple[Path, str], ...]:
         raise ValueError(
             "r2v 需要素材台账里已登记的图片：台账是空的，段词里的 <Picture N> 会全部"
             "悬空（插件不会报错，只会按槽位顺序补前缀）。先把素材入库再打包")
-    if len(pictures) > PICTURE_SLOT_LIMIT:
-        raise ValueError(
-            f"素材台账登记了 {len(pictures)} 张图片，超过插件槽位上限 "
-            f"{PICTURE_SLOT_LIMIT}（Picture1–{PICTURE_SLOT_LIMIT}）："
-            "本期不做「超 9 张自动改段内子集」的静默降级（设计 §3.4.1），"
-            "请先精简素材或拆段")
-    sources: list[tuple[Path, str]] = []
+    sources: list[tuple[str, Path, str]] = []
+    seen: dict[str, str] = {}
     for entry in pictures:
         path = Path(resolve_asset_path(ledger, entry, session_dir=session_dir))
         if not path.is_file():
@@ -531,7 +532,13 @@ def _picture_sources(session_dir: Path) -> tuple[tuple[Path, str], ...]:
             raise ValueError(
                 f"素材 {entry.tag}（{entry.name}）的扩展名 {ext or '（无）'} 不是图片格式"
                 f"（{'/'.join(sorted(IMAGE_EXTS))}）：插件按图片解码，认不出的会被清空")
-        sources.append((path, ext))
+        if entry.name in seen:
+            # 段内素材表按**语义名**找正本：同名两条会静默取到后一条，段词指称就此错位。
+            raise ValueError(
+                f"素材台账里有两张同名图片 {entry.name!r}（{seen[entry.name]} 与 "
+                f"{entry.tag}）：段内素材表按语义名找正本，同名会让挂图与段词对不上")
+        seen[entry.name] = entry.tag
+        sources.append((entry.name, path, ext))
     return tuple(sources)
 
 
@@ -593,6 +600,49 @@ def _require_start_still(session_dir: Path, position: int) -> Path:
     return found
 
 
+def _segment_slots(segment: DirectorSegment, scopes: dict[int, list[dict]],
+                   pictures: tuple[tuple[str, Path, str], ...],
+                   by_name: dict[str, tuple[Path, str]]) -> list[tuple[int, tuple[Path, str]]]:
+    """本段挂哪几张图：``(段内槽号, (正本, 扩展名))``，顺序就是插件里的 Picture 1…k。
+
+    有段内素材表（写段期落的 ``assets-in-segment.json``）就**照表**：表里 ``new`` 是
+    段内槽号、``name`` 是台账语义名——写段与打包同源，段词里的 ``<Picture N>`` 才不会
+    指到另一张图。没有表＝**旧会话**（改动前每段挂全量），按台账顺序全量挂；那种会话
+    一旦超过 {limit} 张仍然点名报错，因为「悄悄少挂几张」会让段词悬空。
+
+    为什么不在打包期重算子集：写段用的正文与打包用的段文件是同一份，重算等于让同一件
+    事有两处实现；两边哪天对「语义名怎么算」理解不同，段词与挂图就静默错位。
+    """
+    entries = scopes.get(segment.index)
+    if entries is None:
+        if len(pictures) > PICTURE_SLOT_LIMIT:
+            raise ValueError(
+                f"素材台账登记了 {len(pictures)} 张图片，超过插件单段上限 "
+                f"{PICTURE_SLOT_LIMIT}（Picture1–{PICTURE_SLOT_LIMIT}），而这份会话没有"
+                "段内素材表（旧会话全量挂图口径）。请重跑向导写段以生成按段素材子集")
+        return [(slot, (path, ext))
+                for slot, (_name, path, ext) in enumerate(pictures, 1)]
+
+    slots: list[tuple[int, tuple[Path, str]]] = []
+    for entry in entries:
+        name = str(entry.get("name", ""))
+        slot = int(entry.get("new", 0))
+        if name not in by_name:
+            raise ValueError(
+                f"第 {segment.index} 段的素材 {name!r} 不在素材台账里："
+                "段内素材表与台账对不上（多半是台账换过版），请重跑向导写段")
+        slots.append((slot, by_name[name]))
+    if [slot for slot, _ in slots] != list(range(1, len(slots) + 1)):
+        raise ValueError(
+            f"第 {segment.index} 段的槽号不是从 1 连续："
+            f"{[slot for slot, _ in slots]}——插件按槽位顺序读图，断号会让指称错位")
+    if len(slots) > PICTURE_SLOT_LIMIT:
+        raise ValueError(
+            f"第 {segment.index} 段挂了 {len(slots)} 张参考图，超过插件单段上限 "
+            f"{PICTURE_SLOT_LIMIT}（Picture1–{PICTURE_SLOT_LIMIT}）")
+    return slots
+
+
 def _plan_media(session_dir: Path, plan: DirectorPlan) -> dict[int, SegmentMedia]:
     """按模式决定每段进包的媒体（设计 §3.4.1，2026-10-29 用户裁定）。
 
@@ -605,12 +655,15 @@ def _plan_media(session_dir: Path, plan: DirectorPlan) -> dict[int, SegmentMedia
     empty = {segment.index: SegmentMedia() for segment in plan.segments}
     if plan.mode == "r2v":
         pictures = _picture_sources(session_dir)
+        by_name = {name: (path, ext) for name, path, ext in pictures}
+        scopes = load_segment_assets(session_dir)
         planned: dict[int, SegmentMedia] = {}
         for segment in plan.segments:
             folder = f"asset_groups/{segment.index:02d}"
+            slots = _segment_slots(segment, scopes, pictures, by_name)
             planned[segment.index] = SegmentMedia(refs=tuple(
                 PackedMedia(source=path, pack_rel=f"{folder}/Picture{slot}{ext}")
-                for slot, (path, ext) in enumerate(pictures, 1)))
+                for slot, (path, ext) in slots))
         return planned
     if plan.mode in ("i2v", "fl2v"):
         opening = plan.segments[0]  # 首段必是开场（frames.validate_segment_types 保证）

@@ -394,6 +394,14 @@ _Avoid_: 以为「没导出 mp4 就等于没有段视频」（缓存里有，导
 `.mmxpack.zip`，导演台的原生工程交换格式，含 `pack.json`（格式版本/任务类型/采样参数/输出配置）、`timeline.json`（完整时间线）、`shared_params`、`asset_groups`、以及媒体文件。**包内路径必须是 ASCII**（非 ASCII 会让导入直接报错），所以中文素材名在包内改写成 ASCII，中文语义名只留在提示词与账本里。导入时插件把媒体复制进 `input/minimax_director_packs/<包id>/`，因此素材落位由导入完成、不需要单独拷进 `input`。
 _Avoid_: 把裸 `timeline_data` JSON 当交付物（那是节点的隐藏字段，粘不进去）、手工把素材拷进 `input` 再写相对路径（导入会自己做，且包内路径有 ASCII 约束）
 
+**r2v 定义块（r2v definition block）**:
+导演台 `r2v` 每段提示词是 ref 六节外壳，第 1、3 节（`subject_definitions` / `retention_analysis`）由组装器**逐字**取用。它的源不是阶段 1 的 `subject_defs`（那份是**中文 markdown 素材**，解析器只认行首裸标签、语言闸也要求英文），而是 `director/ref-sections.json` 里那份由 `director/refdefs.py` 生成的**英文两节**：一次生成（不是每段一次）、过 `validate_ref` 的四类判据（图号定义、登记图覆盖、英文），续跑与改词都从它读。
+_Avoid_: 拿 `subject_defs` 原样当第 1、3 节（2026-11-01 真实现场：`## subject_definitions` 解析为空字典，写段当场报「定义块缺失」）、每段重生成一次定义块（同一批素材会逐段漂出版本）
+
+**段内素材表（director segment assets）**:
+`director/assets-in-segment.json`：`r2v` 每段实际挂哪几张参考图（`new` 段内槽号 / `original` 全局登记号 / `name` 台账语义名）。插件上限是**每次请求**（＝每段）9 张图 + 3 视频 + 3 音频（`lib/ref_images.py` 的 `MAX_REFERENCE_IMAGES = 9`），全片素材可以多于 9 张，所以段词里的 `<Picture N>` 是**段内局部号**。写段时按本段正文现算子集并落这张表，打包照表挂图——两边同源，不各推一遍。
+_Avoid_: 把 9 张当全片素材上限（那是单段上限）、在打包期重算子集（写段与打包各算一次，段词与挂图会静默错位）、拿全局登记号当段内槽号（只有每段挂全量时才恰好相等）
+
 **初始包（initial pack）**:
 项目在开始执行**之前**生成的那份导演包：段规划、段提示词、段1 的首帧、参考素材一次装齐。它只打一次——之后的终点画面依赖上一段产出，打包时还不存在，所以在导演台 UI 里逐段挂。它与最终包的关系是**计划 vs 结论**。
 _Avoid_: 每段重打一次（会重置 UI 里挂的尾帧与改动）、把它当权威记录（它不含执行期的任何改动）

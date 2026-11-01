@@ -199,6 +199,12 @@ def give_images_for(segment_type: str, mode: str) -> tuple[str, ...]:
             f"导演台模式 {mode!r} 本票不做叙事规划（一期只支持 "
             f"{'/'.join(PLAN_MODES)}；v2v/rv2v 见 #109、mixed 见 #110）")
     is_guided(segment_type)  # 类型合法性
+    # r2v **每一段**都挂自己那几张参考图（2026-11-01 用户裁定 + 插件上限核实）：
+    # 参考图是这一模式的唯一画面来源，运镜段与收尾段也不例外——它们没有首尾帧可挂
+    # （首/尾帧是 fl2v 的槽位）。每段挂的**张数**由段内素材表决定（≤ MAX_PICTURES），
+    # 给图清单只说「有参考素材」，不在这里猜张数。
+    if mode == "r2v":
+        return (IMAGE_ASSETS,)
     if segment_type == "continue":
         return ()
     # i2v 单段（ADR 0026 修订版）：唯一那段就是开场，给首帧；其余段类型在本模式下
@@ -222,14 +228,17 @@ def give_images_for(segment_type: str, mode: str) -> tuple[str, ...]:
 
 
 def optional_images_for(segment_type: str, mode: str) -> tuple[str, ...]:
-    """该段**可选**给图（设计 §3.1 表：``fl2v`` 开场尾帧可选、``r2v`` 开场首帧可选）。"""
+    """该段**可选**给图（设计 §3.1 表：只有 ``fl2v`` 的开场尾帧可选）。
+
+    ``r2v`` **没有可选首帧**（2026-11-01 真实现场）：首/尾帧是 fl2v 的帧槽，r2v 的
+    画面来源只有参考素材；以前这里写着「首帧（可选）」，出站清单于是对每条 r2v 片子
+    说一句没有槽位可挂的话，用户照着找槽位只会找到 fl2v 的字段。
+    """
     give_images_for(segment_type, mode)  # 复用模式/类型合法性校验
     if segment_type != "opening":
         return ()
     if mode == "fl2v":
         return (IMAGE_END,)
-    if mode == "r2v":
-        return (IMAGE_FIRST,)
     return ()
 
 
