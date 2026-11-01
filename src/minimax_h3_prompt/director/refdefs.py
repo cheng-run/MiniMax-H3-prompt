@@ -11,8 +11,9 @@
    语言闸），中文定义原样复制进去就是「英文正文 + 中文定义块」。
 
 所以导演台 r2v 在写段之前**必须**把中文素材再走一次官方口径，产出可解析、全英文、
-每张登记图都有定义的 1、3 节。这一步只做一次（不是每段一次）：定义块逐段重复，逐段
-重写就是让同一批素材每段漂一个版本。
+每张登记图都被引用的 1、3 节（引用 = 作为某个 Subject 的来源图，或独立的 Picture 行；
+官方 ref-en.txt §2.2 只给帧／构图锚单开行）。这一步只做一次（不是每段一次）：定义块
+逐段重复，逐段重写就是让同一批素材每段漂一个版本。
 
 产物落 ``GENxxx/director/ref-sections.json``：续跑、改词、打包都从它读，不重付、也不
 让第二处再推一遍「哪张图叫什么」。
@@ -38,6 +39,11 @@ _GUARDED_CODES = frozenset({
     "PICTURE_UNDEFINED",       # 引用了登记表里没有的号
     "BODY_NOT_ENGLISH",        # 中文散文（issue #75）
 })
+
+# 合并不了是**写法偏好**不是缺陷（L6-09 / 票 #134）：逐图各建一个 Subject 照样能给
+# 模型用，只是同一个人被拆成几份。所以这条只出站、不进 ``_GUARDED_CODES``、不占重写
+# 预算——把能跑的产物打回重写，就等于让一条建议挡住交付。
+SUBJECT_MERGE_CANDIDATE = "SUBJECT_MERGE_CANDIDATE"
 
 
 @dataclass(frozen=True)
@@ -110,12 +116,18 @@ def _build_request(material: str, registry: Sequence[Sequence]) -> str:
         "2. 两节全部英文：中文语义名要**翻成英文**再写（人物姓名等专名可保留原文，"
         "但描述词必须是英文）——校验器按「中文占比 + 绝对字数」判语言，"
         "十三个中文素材名原样堆在定义里就会被判成中文散文。\n"
-        f"3. 下面 {len(rows)} 张登记图**每一张**都要在 subject_definitions 里有定义，"
-        "编号逐字沿用、不得改号、不得漏。\n"
+        f"3. 下面 {len(rows)} 张登记图**每一张**都必须被**引用**——不是各占一个定义行："
+        "要么作为某个 `<Subject N>` 的来源图写进它的定义，要么作为独立的 `<Picture N>` "
+        "行；编号逐字沿用、不得改号、不得漏。\n"
         "4. retention_analysis 里每张图一行，关系标记只许用官方取值：\n"
         "   fully_preserved / partially_preserved / attribute_transfer / weak_reference。\n"
         "5. 定义句照官方写法：`<Subject N> is the …` 描述可复用的可见内容，"
-        "`<Picture N> is …` 指向具体的那张图（可作为某个 Subject 的来源）。\n\n"
+        "`<Picture N> is …` 指向具体的那张图。\n"
+        "   同一角色的多张母版（身份／表情／服装……）**合成一个 Subject**，逐图说明各提供"
+        "什么，例如：`<Subject N> is … whose appearance comes from <Picture 1>, whose "
+        "expressions come from <Picture 2>, and whose outfit comes from <Picture 3>.`\n"
+        "   图只作为某个 Subject 的来源时，**不单开** `<Picture N>` 行；只有图本身就是某一"
+        "镜的首帧／关键帧／尾帧／构图锚时，才单开 `<Picture N>` 行。\n\n"
         "【参考登记（编号 = 语义名，不得改号）】\n"
         f"{listed}\n\n"
         "【中文定义素材】\n"
@@ -123,8 +135,99 @@ def _build_request(material: str, registry: Sequence[Sequence]) -> str:
     )
 
 
-def _guard_issues(text: str, registry: Sequence[Sequence]) -> list[str]:
-    """定义块的四类硬判据；返回可读的问题清单（空＝通过）。"""
+@dataclass(frozen=True)
+class DefinitionCheck:
+    """定义块的检查结论。两类结论**分开承载**，因为处置方式相反：
+
+    - ``problems``（硬错）：进重写预算——不合格就退回重写，预算用尽即抛。
+    - ``warnings``（建议）：只出站不判死。合并主体是写法偏好，现行逐图各建 Subject
+      的定义块仍然可用；混进 problems 会把一份能跑的产物打回重写。
+    """
+
+    problems: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+
+# 定义条目的行首标签与正文里的任意标签。分开两个正则：行首那个决定「一条定义从哪开始」，
+# 正文那个用来找它引用了谁（官方合并句式正是一条 Subject 行里点名多张 Picture）。
+_DEF_LABEL_RE = re.compile(r"^<(Subject|Picture|Video|Audio)\s+(\d+)>")
+_ANY_LABEL_RE = re.compile(r"<(Subject|Picture|Video|Audio)\s+(\d+)>")
+
+
+def _definition_entries(text: str) -> list[tuple[str, int, str]]:
+    """把 ``subject_definitions`` 切成一条条定义：行首带标签的行开新条，续行归上一条。
+
+    续行必须跟着走：合并句式是一条长句，折行之后图片引用会掉到下一行去，只看行首
+    就会把「同一个主体的三张来源图」读成三张没人认领的图。
+    """
+    entries: list[list] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        head = _DEF_LABEL_RE.match(stripped)
+        if head:
+            entries.append([head.group(1), int(head.group(2)), stripped])
+        elif entries:
+            entries[-1][2] = f"{entries[-1][2]} {stripped}"
+    return [(kind, number, body) for kind, number, body in entries]
+
+
+def _semantic_prefix(name: str) -> str:
+    """语义名里「同一个角色」的那一段：**去掉最后一段主责**后的前缀。
+
+    母版清单（#133）把同一个人的多张母版写成 ``CHAR_01_身份母版`` / ``CHAR_01_表情母版``
+    / ``CHAR_01_服装母版``——变化只在最后那一段（主责），前面是角色自己。所以前缀是
+    「除最后一段以外的全部」，而不是第一段：``CHAR_01`` 与 ``CHAR_02`` 的第一段同为
+    ``CHAR``，按第一段分组会把两个不同角色判成同一个（假建议）。
+    不带 ``_`` 的语义名（道具、场景、只有一张母版的角色）不分组：没有主责段就分不清
+    「同一个角色的另一张」与「另一件东西」，凭名字猜只会造一批假建议。
+    """
+    head, sep, _tail = str(name or "").rpartition("_")
+    return head if sep and head.strip() else ""
+
+
+def _merge_warnings(text: str, registry: Sequence[Sequence]) -> tuple[str, ...]:
+    """同一语义名前缀下出现多个 ``<Subject N>`` → 提示可合并（L6-09，票 #134）。
+
+    关联方向两条都认，因为官方两种写法都合法：
+
+    - ``<Picture N>`` 行认领来源主体（存量实跑的形状：``… image for <Subject 1>``）；
+    - ``<Subject N>`` 行内联来源图（官方合并句式：``whose appearance comes from
+      <Picture 1>``）。
+
+    只认显式点名：一条 Picture 行既没指名主体、也没被任何主体指名时，宁可漏报——这是
+    建议，不是判据，猜错只会让用户去合并不该合的东西。
+    """
+    from ..tools.h3_validator import split_ref_sections
+
+    names = {int(item[0]): str(item[1]) for item in registry}
+    pictures = split_ref_sections(text).get("subject_definitions", "")
+    prefix_of = {number: _semantic_prefix(names.get(number, "")) for number in names}
+
+    grouped: dict[str, set[int]] = {}
+    for kind, number, body in _definition_entries(str(pictures)):
+        labels = _ANY_LABEL_RE.findall(body)
+        links: list[tuple[int, int]] = []   # (登记图号, 主体号)
+        if kind == "Subject":
+            links = [(int(pic), number) for label, pic in labels if label == "Picture"]
+        elif kind == "Picture":
+            links = [(number, int(subject)) for label, subject in labels
+                     if label == "Subject"]
+        for picture, subject in links:
+            prefix = prefix_of.get(picture, "")
+            if prefix:
+                grouped.setdefault(prefix, set()).add(subject)
+
+    return tuple(
+        f"{SUBJECT_MERGE_CANDIDATE}: {'、'.join(f'<Subject {n}>' for n in sorted(subjects))}"
+        f" 的来源图共享语义名前缀「{prefix}」——看起来是同一角色的多张母版，"
+        "可合并为一个 Subject，逐图说明各提供什么（身份／表情／服装）"
+        for prefix, subjects in sorted(grouped.items()) if len(subjects) >= 2)
+
+
+def _guard_issues(text: str, registry: Sequence[Sequence]) -> DefinitionCheck:
+    """定义块的判据：四类硬错（进重写预算）＋ 一条合并建议（只出站）。"""
     from ..tools.h3_validator import split_ref_sections, validate_ref
 
     sections = split_ref_sections(text)
@@ -137,7 +240,10 @@ def _guard_issues(text: str, registry: Sequence[Sequence]) -> list[str]:
     for issue in validate_ref(text, ref_meta=ref_meta):
         if issue.severity == "error" and issue.code in _GUARDED_CODES:
             problems.append(f"{issue.code}: {issue.message}")
-    return problems
+    return DefinitionCheck(
+        problems=tuple(problems),
+        warnings=_merge_warnings(text, registry),
+    )
 
 
 def build_ref_sections(*, material: str, registry: Sequence[Sequence], llm,
@@ -152,7 +258,7 @@ def build_ref_sections(*, material: str, registry: Sequence[Sequence], llm,
     budget = attempts or MAX_SEGMENT_ATTEMPTS
     base = _build_request(material, registry)
     request = base
-    problems: list[str] = []
+    problems: tuple[str, ...] = ()
     for attempt in range(budget):
         raw = _direct_write(llm, request, role=DIRECTOR_REF_SECTIONS_ROLE,
                             label="导演台 r2v 定义块")
@@ -161,10 +267,14 @@ def build_ref_sections(*, material: str, registry: Sequence[Sequence], llm,
                 "导演台 r2v 定义块调用失败（网关/卡住/空回复，见上一行警告）："
                 "定义块是六节外壳的第 1、3 节，没有它写出来的段就是无参照描述")
         text = str(raw)
-        problems = _guard_issues(text, registry)
+        check = _guard_issues(text, registry)
+        problems = check.problems
         if not problems:
             from ..tools.h3_validator import split_ref_sections
 
+            # 建议只在**定稿**这一版出站：退回重写时也念一遍，用户会以为模型漏改了。
+            for warning in check.warnings:
+                print(f"[警告] 定义块：{warning}")
             sections = split_ref_sections(text)
             return RefSections(
                 subject_definitions=str(sections["subject_definitions"]).strip(),
