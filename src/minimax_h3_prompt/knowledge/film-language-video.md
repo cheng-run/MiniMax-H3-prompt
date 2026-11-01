@@ -4,14 +4,15 @@
 它由本仓 `docs/film-language-playbook.md`（第一~九节）按本仓硬约束过滤而来，把那份的结论收成**唯一真源**
 （各角色提示词不再各抄一份）。
 
-**与官方参考文献的区别**：与本份同级的 `references/base-en.txt` / `ref-en.txt` 是官方**格式规范**
-（字段、结构、句法，逐字符照抄用）；本份是**选词与写法**（哪个词能选、句子怎么落），
+**与官方参考文献的区别**：与本份同级的 `references/base-en.txt` / `ref-en.txt` 是**格式规范**
+（字段、结构、句法，逐字符照抄用；注意 `base-en.txt` 里有 3 处本仓增补，账本见
+`references/README.md`，别当成上游原文）；本份是**选词与写法**（哪个词能选、句子怎么落），
 不定义格式、不替代官方规范。格式问题一律以官方规范为唯一依据。
 
-**要逐字符照抄的官方原文，本份不复述、只留指针**：镜头块收尾的 edge-stability 句取
+**要逐字符照抄的原文，本份不复述、只留指针**：镜头块收尾的 edge-stability 句取
 `h3_validator.EDGE_STABILITY_SENTENCE`，分段首行的锚定行取
 `h3_validator.ALIGN_TEMPLATES[segment_prompts.SEGMENT_ANCHOR_VARIANT]`。这两处已有唯一来源、且有测试守着；
-在这里再抄一份就是又一份硬拷贝（本仓吃过「同一句官方原文 3 份硬拷贝」的亏）。
+在这里再抄一份就是又一份硬拷贝（本仓吃过「同一句原文 3 份硬拷贝」的亏）。
 
 **生图侧（静态画面）是另一套语言**，不在本份内：运镜、剪辑、时间码、H3 三段式一律不进静态图提示词。
 
@@ -165,6 +166,8 @@ The push-in reveals the tension in his face.
    ✅ `The camera pushes in with small amplitude at slow speed toward the folded letter in her hands.`
    ❌ `Push In, small amplitude, slow speed.`
 2. **切点必须是整秒**：时间戳毫秒位写 `.000`（如 `At 00:04.000`），且严格递增。
-   官方文本给的理由是 ComfyUI 的 H3 时长档只给整数秒（原文写 4-10；节点契约实测
-   min=4/max=15，见 ADR 0012——校验档 4–15，首尾帧链规划保守档仍 4-10、多参执行段 4-15）
-   ——分镜阶段按情节节拍给镜头时长（本仓允许长短不一），换算到执行段时由分段拆分吸收进整数档。
+   理由是本仓执行约束（不是上游官方格式）：ComfyUI 的 H3 时长档只给整数秒
+   （仓内副本写 4-10；节点契约实测 min=4/max=15，见 ADR 0012——校验档 4–15，
+   首尾帧链规划保守档仍 4-10、多参执行段 4-15），且上游官方示例本身就是半秒
+   （`At 00:03.500`）——分镜阶段按情节节拍给镜头时长（本仓允许长短不一），
+   换算到执行段时由分段拆分吸收进整数档。

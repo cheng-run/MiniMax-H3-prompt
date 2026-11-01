@@ -1,14 +1,17 @@
 """H3 提示词规则校验器。
 
-规则全部取自官方规范（``references/base-en.txt``、``ref-en.txt``）。那两份是**给人读的官方
-原文**、不是运行时输入（本模块不打开它们）：要逐字符照抄的部分在这里落成常量，由
-``tests/test_official_references.py`` 逐字钉回官方文件——**改常量不同步官方原文、或重新
-vendor 官方文件不同步常量，都会报红**。裁定与取舍见 ``docs/adr/0008``。
+规则取自 ``references/base-en.txt``、``ref-en.txt`` 两份 vendor 文本。那两份是**给人读的
+对照物**、不是运行时输入（本模块不打开它们）：要逐字符照抄的部分在这里落成常量，由
+``tests/test_official_references.py`` 逐字钉回**仓内副本**——**改常量不同步副本、或重新
+vendor 副本不同步常量，都会报红**。裁定与取舍见 ``docs/adr/0008``。
+
+注意副本里混着 3 处**本仓增补**（整秒切点、`:89` 示例、edge-stability 段），
+逐条定性见 ``references/README.md`` 的账本；它们不是上游原文，注释里不许写「官方要求」。
 供质检节点 / 提示词工程师 / agent 工具调用。
 
 严重级别：
 - error   阻塞性问题，必须修（格式/标签/时间戳/段落顺序）
-- warning 建议性问题（词数、句子数、编号跳跃、缺官方 edge-stability 句等）
+- warning 建议性问题（词数、句子数、编号跳跃、缺 edge-stability 句等）
 """
 from __future__ import annotations
 
@@ -37,17 +40,19 @@ _DURATION_SENTENCE_RE = re.compile(r"^This is a \d+(?:\.\d+)?-second continuous 
 # 关键节拍距段尾最小余量（spec 决策 Q1：出场动作需要展开空间）
 _END_MARGIN_S = 1.0
 
-# 官方 edge-stability 句，逐字符照抄 base-en.txt:92-96。官方给的理由正是本项目的桥接帧链：
-# 「end every shot block with this exact edge-stability sentence, so the extracted tail frame
-# keeps a crisp character outline for the next segment's first-frame reference」。
+# edge-stability 句，逐字符取自 ``references/base-en.txt`` 第 92-96 行。
+# **这一段是仓内增补，不是上游官方原文**（2026-11-01 核定，账本见 ``references/README.md``）：
+# 上游 HF / GitHub 两份同源文本里都搜不到它，注释、票面、文档里都不许写成「官方要求」。
+# 保留它的理由是本项目自己的桥接帧链——抽出的尾帧要保持轮廓锐利，留给下一段当首帧参考，
+# 与上游 §4.2 那段理由句无关（那句同属仓内增补）。
 #
-# **代码里唯一一处写死官方原文的地方**（2026-09-27，issue #35）：写段模板（segment_prompts）
+# **代码里唯一一处写死照抄原文的地方**（2026-09-27，issue #35）：写段模板（segment_prompts）
 # 从这里插值，角色提示词由加载处（``agents.OFFICIAL_VERBATIM_ROLES``）注入，测试用例取常量
 # 而不另抄——原先那三处手抄已删。
 # 「唯一」的口径是**出站文本的来源**，不含文档引文与样本：CONTEXT.md / ADR / playbook 里的
 # 同句是引文，正样本 fixture 与各条用例里内联的同句是**样本**（样本本来就得长得像真实产出），
 # 它们与这里分叉时由下面的守卫报红，但改产出文本不需要动它们。
-# 唯一性由两侧守卫：常量与官方原文的逐字一致见 tests/test_official_references.py，
+# 唯一性由两侧守卫：常量与 references 副本的逐字一致见 tests/test_official_references.py，
 # 角色 .md 里不得再出现原文、且白名单角色必须留指针见 tests/test_role_prompts.py。
 # 宿主选这里不是随意的——segment_prompts 已经从本模块导入（ALIGN_TEMPLATES 同理），
 # 常量若住 segment_prompts 而本模块要用，就成循环导入。校验器是裁判，判据随裁判走。
@@ -82,7 +87,7 @@ RETENTION_MARKERS = (
 )
 
 # 帧变体首行对齐指令：官方模板逐字符固定（base-en.txt 2.1）。
-# 与 EDGE_STABILITY_SENTENCE 同属「全仓唯一一处写死官方原文的地方」，见那上面的注释。
+# 与 EDGE_STABILITY_SENTENCE 同属「全仓唯一一处写死照抄原文的地方」，见那上面的注释。
 ALIGN_TEMPLATES = {
     "I2VA": "For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.",
     "FL2VA": "How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the 0.00-second mark of the target video; Picture 2 (from Shot N) aligns with the S.SS-second mark of the target video.",
@@ -218,16 +223,16 @@ def _check_banned_structures(text: str, issues: list[ValidationIssue]) -> None:
     结构标记按行首匹配（字段式自创结构）。
 
     **曾经的 RIPPLE_SPELL_BANNED 已移除**（issue #8）：那条规则把 Shot 块尾的中文
-    「全程保持…无波纹、扭曲或边缘抖动」判为自创结构，而它正是官方 edge-stability
-    句的译文（base-en.txt:92-96 要求的是同一句的英文原文）。要求与禁令指向同一句话，
-    自相矛盾；现由 `_check_edge_stability` 单向判「块尾是否为官方原句」。
+    「全程保持…无波纹、扭曲或边缘抖动」判为自创结构，而它正是 edge-stability 句的
+    译文（英文原文见 ``EDGE_STABILITY_SENTENCE``）。要求与禁令指向同一句话，
+    自相矛盾；现由 `_check_edge_stability` 单向判「块尾是否为该句原文」。
     """
     for marker in _BANNED_SECTION_MARKERS:
         if re.search(rf"^{marker}\s*[:：]", text, re.MULTILINE):
             issues.append(ValidationIssue(
                 "error", f"{marker}_BANNED",
                 f"自创结构 {marker}: 不存在于官方 base-en.txt 规范，必须删除"
-                "（实体外观写进首次出场的 Shot；段首靠 Picture 1 锚定句；段尾收于官方 "
+                "（实体外观写进首次出场的 Shot；段首靠 Picture 1 锚定句；段尾收于 "
                 "edge-stability 句）"))
     first_nonempty = next((l for l in text.splitlines() if l.strip()), "")
     if _DURATION_SENTENCE_RE.match(first_nonempty.strip()):
@@ -260,12 +265,12 @@ def _check_beat_and_shot_count(text: str, duration: float | None,
 
 
 def _check_edge_stability(body: str, issues: list[ValidationIssue]) -> None:
-    """每个镜头块必须以官方 edge-stability 原句收尾（base-en.txt:92-96）。
+    """每个镜头块必须以 edge-stability 句收尾（常量见 ``EDGE_STABILITY_SENTENCE``）。
 
     缺失报 **warning**——2026-09-23 裁定：本条规则刚落地、合规真实样本为零，
     不足以立 error 闸门（同 #11 的教训：n 不够就别急着让规则有牙齿）。
 
-    按块尾判，不按「全文出现过」判：官方措辞是 *end every shot block with*，
+    按块尾判，不按「全文出现过」判：措辞是 *end every shot block with*，
     句中出现而块尾是别的话，尾帧照样拿不到那句约束。
     没有 ``[Shot N]`` 标记时直接返回——那是 NO_SHOT（error）的辖区，不重复报。
     """
@@ -275,9 +280,9 @@ def _check_edge_stability(body: str, issues: list[ValidationIssue]) -> None:
         if not body[mark.start():block_end].strip().endswith(EDGE_STABILITY_SENTENCE):
             issues.append(ValidationIssue(
                 "warning", "EDGE_STABILITY_MISSING",
-                f"[Shot {mark.group(1)}] 块尾缺官方 edge-stability 原句——官方要求每个镜头块"
-                "以此句收尾，理由是抽出的尾帧要保持轮廓锐利、留给下一段当首帧参考"
-                f"（base-en.txt 2.1）。逐字符应为：{EDGE_STABILITY_SENTENCE}"))
+                f"[Shot {mark.group(1)}] 块尾缺 edge-stability 原句——本仓要求每个镜头块"
+                "以此句收尾，理由是抽出的尾帧要保持轮廓锐利、留给下一段当首帧参考。"
+                f"逐字符应为：{EDGE_STABILITY_SENTENCE}"))
 
 
 def _check_shots(text: str, duration: float | None, issues: list[ValidationIssue]) -> None:
