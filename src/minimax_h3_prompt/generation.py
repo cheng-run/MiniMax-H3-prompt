@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -1010,9 +1009,12 @@ def image_prompt_variants(
     variants: list[ImagePromptVariant] = []
     # 类别 → (产物键, 设计键) 取 ``graph.state.ASSET_KIND_FIELDS`` 的唯一声明（issue #88）：
     # 这里再抄一份，加第四类资产时就是「节点写了、出口读不到」的静默漏。
-    for kind, (field, design_field) in ASSET_KIND_FIELDS.items():
+    # 循环变量叫 ``field_key`` 而不是 ``field``：本模块顶部从 dataclasses 导入了
+    # ``field``，同名循环变量会在循环体里遮蔽它（ruff F402），将来在体内建 dataclass
+    # 字段时就会拿到字符串下标而不是工厂函数。
+    for kind, (field_key, design_field) in ASSET_KIND_FIELDS.items():
         label = KIND_LABELS[kind]
-        raw = state.get(field)
+        raw = state.get(field_key)
         if isinstance(raw, list):
             entries = raw
         elif isinstance(raw, dict):

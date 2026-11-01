@@ -51,7 +51,10 @@ from .final_film import (
     ConcatStrategy,
     FinalFilm,
     assemble_film,
-    format_final_film,
+    # 再导出：``ui/wizard.py`` 与 ``tests/test_ref_segments.py`` 都写
+    # ``from .ref_segments import format_final_film``。看起来是「未使用导入」，其实是
+    # 这条产线对外的门面（2026-11-01：删掉它当场打断两处调用，ruff F401 也照报）。
+    format_final_film,  # noqa: F401
 )
 from .ref_capacity import (
     ReferenceItem,
@@ -612,7 +615,7 @@ def render_ref_order_card(plans: list[SegmentPlan], segment_paths: list[Path],
             f"| {position} | Segment {position} | {plan.start_s}s-{plan.end_s}s "
             f"| {plan.duration_s}s | {path.name} |")
     lines.append("")
-    lines.append(f"分段规划明细见 plan.json（同目录）。登记工作流见注入卡。")
+    lines.append("分段规划明细见 plan.json（同目录）。登记工作流见注入卡。")
     return "\n".join(lines) + "\n"
 
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -150,7 +151,6 @@ def _print_generation_result(result, directory) -> None:
 
 def _run_create_video(args) -> int:
     from .config import config
-    from .topic_generation import create_video_from_topic
 
     result, directory = _create_video_with_progress(
         args.topic, config, duration=args.duration,
@@ -320,8 +320,6 @@ def _run_audit(args: argparse.Namespace) -> int:
 
 def _resolve_videos(ledger, output_dirs) -> list:
     """把 ledger 里的镜头名解析回真实文件路径。"""
-    from pathlib import Path
-
     index: dict[str, Path] = {}
     for directory in output_dirs:
         if directory.is_dir():
