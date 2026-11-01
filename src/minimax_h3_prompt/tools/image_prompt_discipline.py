@@ -42,7 +42,8 @@ DISCIPLINES_DIR = (
 )
 DISCIPLINE_HEADING_PREFIX = "## 生图提示词纪律"
 
-# 「长度约 600 字内」的上限。按**非空白字符**计数：中文一字算一字，空格与换行不计
+# 长度的**本仓经验值**（不是模型上限）：ComfyUI 不截断（ADR 0018 第 3 条），600 字是
+# 「长文稀释注意力」的经验。按**非空白字符**计数：中文一字算一字，空格与换行不计
 # （排版的换行不该把提示词判成超长）。超了只警告——见模块头「只警告不阻断」。
 MAX_PROMPT_CHARS = 600
 
@@ -352,7 +353,7 @@ def check_image_prompt(prompt: str, *, model: str = DEFAULT_IMAGE_MODEL
     if visible > MAX_PROMPT_CHARS:
         warnings.append(DisciplineWarning(
             "PROMPT_TOO_LONG",
-            f"正文共 {visible} 字，超过约 {MAX_PROMPT_CHARS} 字上限——ComfyUI 不截断，"
+            f"正文共 {visible} 字，超过本仓经验值约 {MAX_PROMPT_CHARS} 字——ComfyUI 不截断，"
             "但长文会稀释注意力；请删掉次要细节。",
         ))
 
