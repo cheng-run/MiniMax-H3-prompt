@@ -6,8 +6,10 @@
 `<Audio N>`，`plan.py:554-624`）。所以方言只能由项目侧保证，且**每种模式一份**：
 - `r2v` 保留官方 ref 六节外壳（唯一含音频段的模式），`detailed_description` 改时序写法、
   去掉 `start_state`（导演台没有桥接帧概念）、主体用 `<Picture N>`；
-- `t2v` / `i2v` / `fl2v` 是单段正文（**无 section 头**），音频描述并入正文——插件里
-  这三种模式看到的就是一段自由文本；
+- `t2v` / `i2v` / `fl2v` 是官方**三字段外壳**（`integrated_multimodal_description` →
+  `overall_soundscape` → `non_diegetic_music`，字段名逐字、顺序固定）。#130 之前这里是
+  「单段自由文本、音频并入正文」——那是按插件视图推出来的口径，与官方 base 格式相反；
+  插件对这三种模式读的是一整段文本，三字段本来就在那段文本里（#118 只证到原样透传）；
 - `v2v` / `rv2v` / `mixed` 是二期（#109 / #110），一期**明确报错**，不许被当成四种之一
   静默跑一遍。
 
@@ -55,6 +57,11 @@ from ..tools.h3_validator import (
     BASE_SECTIONS,
     REF_SECTIONS,
     ValidationIssue,
+    # ``_find_sections`` 是「三字段／六节怎么定位」的唯一实现（#130）。形状闸只借它
+    # 与本模块的 ``BASE_SECTIONS`` 判「缺节／乱序」，**不整体调 ``validate_base``**：
+    # 后者顺带查切点、说话人、edge-stability，全是导演台不用的东西，整调会造一批假错。
+    # 在这里另写一份定位正则，节常量或标题写法一改，两处就会各自漂。
+    _find_sections,
     has_align_instruction,
     split_ref_sections,
 )
@@ -62,7 +69,9 @@ from .frames import FPS, PLAN_MODES, DirectorPlan, DirectorSegment
 # 产物目录名只有 ``planning.DIRECTOR_DIRNAME`` 一处声明（复审 H1）：段文件、段表、
 # 尾帧与导演包必须落在**同一个** ``GENxxx/director/`` 下，各写一份字面量就是几条
 # 会各自漂的路径口径（某一条改了，另一条只会表现为「读不到/缺文件」）。
-from .planning import DIRECTOR_DIRNAME
+# ``render_give_images`` 同理（#130）：写段请求里的「本段给图」与段表清单、出站清单
+# **同一份**渲染，不在这里另写一份 token 翻译。
+from .planning import DIRECTOR_DIRNAME, render_give_images
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 _INSTRUCTION_NAME = "segment_writer_director.md"
@@ -268,7 +277,8 @@ def validate_director_segment(text: str, mode: str, *, plan: DirectorPlan,
     的五条契约：
 
     1. ``DIRECTOR_EMPTY``：空段；
-    2. ``DIRECTOR_SECTION_*``：r2v 六节齐全且有序；其余模式**不许**有段头；
+    2. ``DIRECTOR_SECTION_*``：r2v 六节齐全且有序；t2v/i2v/fl2v 三字段齐全且有序
+       （#130 起闸是**正向**的：段头必需，缺节／乱序才报错）；
     3. ``DIRECTOR_STATE_ANNOTATION``：出现起止状态句（导演台没有桥接帧，这两句是
        base/ref 的产物，写进来就是错口径）；
     4. ``DIRECTOR_ALIGN_LINE``：出现 base 的图片对齐指令行（帧槽属于首尾帧链）；
@@ -300,14 +310,25 @@ def validate_director_segment(text: str, mode: str, *, plan: DirectorPlan,
                 "r2v 段正文没有 <Picture N>：参考主体必须按槽号指称，"
                 "否则插件会按槽位顺序自行补前缀，指称与挂图对不上"))
     else:
-        headers = list(REF_SECTIONS) + list(BASE_SECTIONS)
-        found = [header for header in headers
-                 if re.search(rf"^{re.escape(header)}\s*[:：]", body, re.MULTILINE)]
-        if found:
+        # #130：t2v/i2v/fl2v 恢复官方三字段外壳（`integrated_multimodal_description` →
+        # `overall_soundscape` → `non_diegetic_music`）。闸的判据**翻了正向**：从前
+        # 「出现段头即报错」，现在段头是必需的格式，缺节／乱序才报错。
+        # 判据只用节常量与节查找（都不是本模块的私有实现），不整体调 `validate_base`。
+        sections = _find_sections(body, BASE_SECTIONS)
+        missing = [header for header in BASE_SECTIONS if header not in sections]
+        if missing:
             issues.append(ValidationIssue(
-                "error", "DIRECTOR_SECTION_PRESENT",
-                f"{mode} 是单段正文（音频并入正文），不该出现段头：{', '.join(found)}"
-                "（插件对这几种模式只读一段自由文本，段头会被当成正文照读）"))
+                "error", "DIRECTOR_SECTION_MISSING",
+                f"{mode} 段缺三字段段头：{', '.join(missing)}"
+                "（官方 base 的三字段外壳：画面描述 → 环境声 → 配乐，缺一节就是错格式）"))
+        else:
+            order = [header for header, _ in sorted(sections.items(),
+                                                    key=lambda item: item[1][1])]
+            if order != list(BASE_SECTIONS):
+                issues.append(ValidationIssue(
+                    "error", "DIRECTOR_SECTION_ORDER",
+                    f"三字段顺序错误：应为 {' → '.join(BASE_SECTIONS)}，"
+                    f"实际 {' → '.join(order)}"))
 
     state_hits = [prefix for prefix in (_REF_START_STATE_PREFIX, _REF_END_STATE_PREFIX)
                   if prefix in body]
@@ -433,6 +454,19 @@ def build_segment_request(plan: DirectorPlan, segment: DirectorSegment, *,
         f"的素材，超过 {MAX_PICTURES} 张会被退回重写（不会替你删图——删掉的图在正文里"
         "没有接线可落）。\n"
         if plan.mode == "r2v" else "")
+    # 本段输出外壳（#130）：r2v 的六节外壳已在指令里写死，这里只服务三条单段模式。
+    # 为什么要在**请求里**再写一遍：指令是通用纪律，请求是这一次的执行前提；三字段是
+    # 逐字要照抄的格式，写在离产出最近的地方，模型才不会按自己习惯改字段名。
+    shell = (
+        "\n【本段输出外壳】\n"
+        "本段正文必须是三个字段，字段名逐字、顺序固定、节间空一行：\n"
+        "`integrated_multimodal_description:` → `overall_soundscape:` → `non_diegetic_music:`。\n"
+        "全英文；`<d>` 对白、歌词与画面可见文字保留原语言。不要输出这三节之外的任何段落。\n"
+        if plan.mode != "r2v" else "")
+    # 本段给图（#130）：改动前请求里**没有任何**「本段有没有首尾帧图」的信息，而
+    # 「有尾帧才写终点构图句」等规则全依赖它。这条事实段表里现成、也有中文渲染，
+    # 直接调 ``render_give_images``——与段表清单、出站清单同一份，不另写 token 翻译。
+    give = f"【本段给图】{render_give_images(segment, plan.mode)}\n"
     return (
         f"{load_instruction(plan.mode)}\n\n"
         "---\n"
@@ -443,8 +477,10 @@ def build_segment_request(plan: DirectorPlan, segment: DirectorSegment, *,
         f"本段在成片中的起点（成片坐标，供你理解；**不要写进正文**）：{start_s:.3f}s\n"
         "时间轴注记（组装器注入，你不要写；正文叙事须与它一致）：\n"
         f"{note}\n"
+        f"{give}"
         f"本段剧情概述（中文，仅供你理解剧情，不得写进提示词）：{segment.summary}\n"
         f"本段落定的画面（end_hook，正文必须落到这个状态）：{segment.end_hook}\n"
+        f"{shell}"
         f"{_future_events_block(plan, segment)}"
         f"\n{shots_block}\n"
         f"{definitions}"
