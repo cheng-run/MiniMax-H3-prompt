@@ -4,10 +4,13 @@
 而到达模型的应该是**按角色裁剪过的片段**——分镜师定的是景别与构图，摄影指导才写光线与机位角度。
 整份灌给所有角色既浪费上下文，也会让不写光线的角色去挑光线词。
 
-**两份真源，两个读取口**：视频半（H3 正文）与生图半（静态画面）是**两套语言**，
+**三份真源，三个读取口**：视频半（H3 正文）与生图半（静态画面）是**两套语言**，
 各自一份文件、各自一张白名单（``VIDEO_SLICES`` / ``IMAGE_SLICES``）。两张白名单**不许相交**——
 ``agents.load_role_prompt`` 按「先视频后生图」取第一份非空的，同一个键同时出现在两边时
-视频侧会静默赢。运镜词表进了静态图就是直接违规，所以这条由测试钉住。
+视频侧会静默赢。运镜词表进了静态图就是直接违规，所以这条由测试钉住。**尾帧编辑半**
+（#119）是第三份真源：它写的是图 A → 图 B 的编辑指令，不是视频语言、也不是从零生成，
+只有导演台尾帧写词一个消费者（``TAILFRAME_SLICES``），读取口是 ``tailframe_slice``；
+三张白名单两两不相交，由同一条测试钉住。
 
 **为什么不做 skill 运行时**：流水线角色是一次纯 API 调用，没有工具、没有按需加载、没有
 「先看目录再决定读哪个」的机会。全仓只有三处会把**文件内容读进模型请求**（角色提示词目录、
@@ -29,6 +32,12 @@ from pathlib import Path
 KNOWLEDGE_DIR = Path(__file__).resolve().parent / "knowledge"
 VIDEO_SOURCE_PATH = KNOWLEDGE_DIR / "film-language-video.md"
 IMAGE_SOURCE_PATH = KNOWLEDGE_DIR / "film-language-image.md"
+TAILFRAME_SOURCE_PATH = KNOWLEDGE_DIR / "film-language-tailframe.md"
+
+# 单 consumer 切片超过这个体量就告警。阈值是**判断**不是实测结论：本仓没量过
+# 「多少字符开始稀释遵从度」，所以只告警、不硬拦（项目既定：质量未达标前不做自动化）。
+# 现测最大切片 6367 字符（生图半），留了余量；真源再长下去至少让人先看见。
+SLICE_CHAR_WARNING = 8000
 
 # 小节以二级标题起行；key 与小节标题**全等**才算命中。
 # 为什么不用「标题含 key」的模糊匹配：模糊匹配下两个 key 可能落到同一节、一个 key 可能落到
@@ -139,6 +148,34 @@ IMAGE_SLICES: dict[str, tuple[str, ...]] = {
     "image_prompt_engineer": _IMAGE_SLICES,
 }
 
+# 尾帧编辑半（#119 / #131）：**第三份真源**，只服务导演台的尾帧写词。
+#
+# 为什么单开一份、不并进生图半：尾帧写的是编辑指令（图 A → 图 B），生图半写的是
+# 从零生成的静态画面。两套相反写法挤进同一个文件，最后一定是「后出现的压过前面的」
+# ——那正是 load_role_prompt 的 docstring 里记过的掩盖方式。结构决定见 #119。
+#
+# 消费者键 ``tailframe_writer`` 不是角色键：导演台的尾帧写词是直调（不经
+# ``load_role_prompt``），请求由 ``director/tailframe.build_tailframe_request`` 拼装。
+# 取全部六节：写词时六条纪律都要看到（编辑定性、终点状态、机位分叉、保留区、
+# 指称方式、自查），按节裁剪没有意义。声明仍显式，并有「声明 == 真源小节」的
+# 集合相等断言守着——真源新增一节不会自己送到模型手里。
+_TAILFRAME_SLICES: tuple[str, ...] = (
+    "这是编辑，不是重新生成",
+    "终点状态怎么写",
+    "机位动不动要分叉",
+    "保留区与不变项",
+    "图里已有主体怎么指称",
+    "落笔前自查",
+)
+
+# 尾帧真源唯一的消费者键。写成常量供 ``director/tailframe.py`` 取用：键名只留一处，
+# 声明与读取不会各自漂。
+TAILFRAME_CONSUMER = "tailframe_writer"
+
+TAILFRAME_SLICES: dict[str, tuple[str, ...]] = {
+    TAILFRAME_CONSUMER: _TAILFRAME_SLICES,
+}
+
 
 def video_source_text() -> str:
     """整份视频半真源（纯文本，逐字）。"""
@@ -163,6 +200,17 @@ def video_source_headline() -> str:
 def image_source_headline() -> str:
     """生图半真源第一行（标题）。标记串的取法同 ``video_source_headline``。"""
     lines = image_source_text().lstrip().splitlines()
+    return lines[0] if lines else ""
+
+
+def tailframe_source_text() -> str:
+    """整份尾帧编辑半真源（纯文本，逐字）。"""
+    return TAILFRAME_SOURCE_PATH.read_text(encoding="utf-8")
+
+
+def tailframe_source_headline() -> str:
+    """尾帧真源第一行（标题）。标记串的取法同 ``video_source_headline``。"""
+    lines = tailframe_source_text().lstrip().splitlines()
     return lines[0] if lines else ""
 
 
@@ -193,6 +241,9 @@ def _slice(source_path: Path, declarations: dict[str, tuple[str, ...]], consumer
     找不到声明的小节（标题被改过）、或真源里出现重名小节（取哪一节不唯一）都**报错**，
     而不是静默少给一节：「词表悄悄没送到」正是本仓「规则在、接线不在」那一类缺陷，
     不能靠人发现。
+
+    体量超 ``SLICE_CHAR_WARNING`` 只**打印告警**、不阻断：阈值是判断不是实测结论，
+    但切片变长会稀释模型对规则的遵从度，至少要让用户先看见（#119 §五）。
     """
     keys = declarations.get(consumer)
     if not keys:
@@ -209,7 +260,15 @@ def _slice(source_path: Path, declarations: dict[str, tuple[str, ...]], consumer
             f"{source_path.name} 里找不到小节 {missing}（消费者 {consumer}）——"
             "真源的小节标题改了，切片声明要跟着改"
         )
-    return preamble + "".join(body for head, body in sections if head in keys)
+    text = preamble + "".join(body for head, body in sections if head in keys)
+    if len(text) > SLICE_CHAR_WARNING:
+        print(
+            f"[警告] 电影语言切片 {len(text)} 字符，超过 {SLICE_CHAR_WARNING} 字符"
+            f"（消费者 {consumer}，来源 {source_path.name}）：切片越长越稀释模型对"
+            "规则的遵从度，考虑收窄声明或拆节。",
+            flush=True,
+        )
+    return text
 
 
 def video_slice(consumer: str) -> str:
@@ -224,3 +283,12 @@ def image_slice(consumer: str) -> str:
     语言不同，谁都不该误用另一个的口子（``agents.load_role_prompt`` 也只按角色各取一次）。
     """
     return _slice(IMAGE_SOURCE_PATH, IMAGE_SLICES, consumer)
+
+
+def tailframe_slice(consumer: str) -> str:
+    """取尾帧编辑半真源里给该消费者的切片；消费者不在白名单里返回空串。
+
+    第三个读取口不是「给六层各开一个口」：六层里只有尾帧缺口，其余四层复用现有两个口
+    （#119 §四）。尾帧写的是编辑指令，让它去取生成侧的词表就是把相反写法送进请求。
+    """
+    return _slice(TAILFRAME_SOURCE_PATH, TAILFRAME_SLICES, consumer)

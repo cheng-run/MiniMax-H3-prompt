@@ -37,6 +37,7 @@ from pathlib import Path
 #   实跑事故证明两份不能混用（文生图那份要求写完整画面、20 句，进了编辑请求就会让
 #   模型把参考图当草稿重画），所以不能像旧注释说的那样「纪律只许一套」。
 from ..asset_proofread import _locked_hit
+from ..film_language import TAILFRAME_CONSUMER, tailframe_slice
 from ..image_config import load_frame_image_model
 from ..segment_prompts import MAX_SEGMENT_ATTEMPTS, _direct_write
 from ..tools.h3_validator import ValidationIssue
@@ -91,7 +92,7 @@ _START_READING_INSTRUCTION = (
     "请只描述图里真实可见的内容，并分成四类：\n"
     "1) 主体：人数、朝向、姿态、服装颜色与款式、标志物；\n"
     "2) 起点地标：画面里可用来判断「走了多远」的东西（车辆、店面、路牌、柱子），"
-    "以及它们与人物的相对位置；\n"
+    "说出它与人物或画面边缘的**可见关系**（在身后、在左前方、被谁挡住），不要给距离数字；\n"
     "3) 脚下地面：人物脚下的地面线、路缘、斑马线或停止线；\n"
     "4) 固定背景：远处建筑、招牌、光源方向与色温、地面材质等不随镜头移动改变的事实。\n"
     "用中文输出 4-6 句，不写心理活动与剧情。"
@@ -235,6 +236,10 @@ def build_tailframe_request(segment: DirectorSegment, *, mode: str,
         f"{identity_block}"
         f"{video_block}"
         f"\n{_SECTION_REQUIREMENT_HEAD}（逐字照抄、顺序不变）：\n{heads}\n"
+        # 真源切片必须排在模型纪律**之前**：纪律块里那句「与另一档的差别以本节为准」
+        # 只有后出现时才是真话（agents.load_role_prompt 的拼接纪律，#119）。
+        # 顺序：角色指令 → 真源切片 → 模型纪律 → 段头契约。
+        f"\n{tailframe_slice(TAILFRAME_CONSUMER)}\n"
         f"\n{edit_discipline_text(model)}\n"
     )
 
@@ -290,20 +295,67 @@ _CAMERA_HINT = re.compile(
     re.IGNORECASE,
 )
 
-# A→B 位移：起点地标现在在哪（A 锚点）＋ 前景/终点的距离参照（B 纵深）。
+# A→B 位移：起点地标现在在哪（A 锚点）＋ 终点与一个具名地标的**可见关系**（B）。
 # 只有终点机位、没有位移时，人物会看起来原地踏步（2026-10-31 实跑：第 3 段起
-# 「camera now at ...」写得对，但画面像没走动）。两类各命中一处才算写了位移；
-# 正则收中英两套常见写法，宁可放宽也不把合法措辞判死。
+# 「camera now at ...」写得对，但画面像没走动）。两类各命中一处才算写了位移。
 _DISPLACEMENT_FROM = re.compile(
     r"behind|out of frame|no longer|left behind|gone|vanished|past\b|"
     r"身后|出画|已经过去|离开画面|消失",
     re.IGNORECASE,
 )
+
+# 2026-11-01 换判据（#123 Q5 / L4-07）：`steps?` / `paces?` / `strides?` / `meters?` /
+# `yards?` 与中文「几步 / 几米 / 不远 / 米处」从 TO 里**删掉**。它们是步态词与长度单位，
+# 量的不是「起点地标现在在哪」——实测四份存量尾帧里 `tailframe-03` 正是靠 `mid-stride`
+# 过闸的，而全文没有一处看得见的位移关系。新口径只收「具名地标 + 一个可见关系」：
+# 脚下 / 停止线 / 正前方 / 前景 / 与人物或画面边缘的左右关系。
+# 仍然宁可漏报也不把合法措辞判死（漏报由角色提示词兜底，见 ADR 0018 的同一口径）。
 _DISPLACEMENT_TO = re.compile(
-    r"ahead|steps?\b|paces?\b|strides?\b|meters?\b|metres?\b|yards?\b|"
-    r"foreground|near distance|"
+    # 关系词本身（自带宾语，或锚在人物脚下／前景上）
+    r"ahead|foreground|near distance|directly in front|in front of|"
+    r"beside|next to|alongside|against the|beyond the|past the|at the edge of|"
     r"under (?:his|her|their|the)|at (?:his|her|their) feet|beneath|below|"
-    r"directly in front|前方|几步|几米|不远|米处|脚下|前景|正前方",
+    # 具名地标 + 一个关系（只出现地标名不算：那正是旧判据量错的地方）
+    r"(?:at|on|before|past|beyond|beside|near|by)\s+the\s+"
+    r"(?:stop(?:ping)? line|crosswalk|traffic (?:light|signal)|street sign|"
+    r"street corner|intersection|curb)"
+    r"|(?:停止线|斑马线|红绿灯|信号灯|路牌|街角|路口|路缘|店门|招牌)"
+    r"(?:前|后|旁|边|处|上|下|内侧|外侧|左侧|右侧)"
+    # 中文方位关系
+    r"|前方|正前方|面前|身前|旁边|左侧|右侧|边缘|脚下|前景",
+    re.IGNORECASE,
+)
+
+# 角色声明是**必写句**（L4-01），但它本身就是负向表述（NOT / 不是）。生图纪律的负向
+# 检查是为产品正文写的（不写「不要动」这类指令），把这句必写的话判成违规，只会让
+# 每一份 Z-Image 尾帧词都带一条假警告。检查前先剥掉这句，其余照判——不改共享检查器
+# （它还要判资产图与关键帧，那里没有这句）。
+_ROLE_DECLARATION = re.compile(
+    r"This is an IMAGE EDIT, NOT A REGENERATION\.?|"
+    r"这是对输入图的编辑，不是重新生成。?",
+    re.IGNORECASE,
+)
+
+# 「机位动不动」按 L4-04 由**写词模型自己读运镜句判**；下面两个正则只是校验器拿
+# 请求里的段词做一次**回退复核**，不是第二套判定口径。误判不该拦产出，所以只告警。
+#
+# 为什么需要复核：机位在动时保留项要求「背景相对位置保持原样」，等于给模型两个互斥
+# 目标——机位一动，背景相对位置必然变（2026-10-31 实跑：段词是 the camera tracks
+# backward，保留项却写 unchanged in their established spatial relationships）。
+_CAMERA_MOVE_HINT = re.compile(
+    r"\b(?:track(?:s|ing)?|pan(?:s|ning)?|doll(?:y|ies|ying)|crane(?:s|ing)?|"
+    r"zoom(?:s|ing)?|orbit(?:s|ing)?|truck(?:s|ing)?|push(?:es|ing)? in|"
+    r"pull(?:s|ing)? (?:back|out)|camera (?:moves?|travels?|follows?|rises?|"
+    r"falls?|circles?|sweeps?|rotates?))\b|"
+    r"推镜|拉镜|摇镜|移镜|跟拍|升降|运镜|镜头(?:推进|拉远|横移|上摇|下摇|环绕|跟随)",
+    re.IGNORECASE,
+)
+# 只认「背景相对位置不变」这一类句式，不认毯式句「保持输入图原样」——后者正是
+# L4-09 要求的写法，机位在动时也合法（约束的是「描述得越具体越容易漂」）。
+_BACKGROUND_FROZEN = re.compile(
+    r"unchanged in (?:their|its) (?:established |original )?spatial relationships?"
+    r"|(?:相对位置|空间关系)[^。\n]{0,30}?(?:保持|不变|原样|一致)"
+    r"|(?:保持|保留)[^。\n]{0,30}?(?:相对位置|空间关系)[^。\n]{0,20}?(?:不变|原样)",
     re.IGNORECASE,
 )
 
@@ -319,7 +371,9 @@ def _locked_entries(section: str) -> tuple[str, ...]:
 
 
 def validate_tailframe_prompt(text: str, *,
-                              model: str | None = None) -> list[ValidationIssue]:
+                              model: str | None = None,
+                              segment_prompt: str | None = None
+                              ) -> list[ValidationIssue]:
     """三段式尾帧提示词的确定性检查（票面 AC1/AC3）。
 
     两类结论分开定级：
@@ -327,8 +381,12 @@ def validate_tailframe_prompt(text: str, *,
     1. **结构性**（error）：缺段 / 空段 / 清单为空 / 清单条目不是正文原文片段。
        最后一条是 ADR 0016 的不变式——条目是**判据**，转述了就读图校对永远不命中，
        报告照写「干净」（静默失效），所以它必须能触发重写。
-    2. **生图纪律**（warning，ADR 0018）：只写看得见的事实、一律正向陈述等，由
+    2. **内容质量**（warning，ADR 0018）：只写看得见的事实、一律正向陈述等，由
        ``check_image_prompt`` 按档现判；违规不阻断产出，用户看得到即可。
+
+    ``segment_prompt`` 是本段**视频**提示词（可选）：给了才做「机位在动却要求背景
+    相对位置不变」的回退复核。机位动没动按 L4-04 由写词模型自己判，这里只用运镜词
+    做一次启发式复核；误判不该拦产出，所以那条是 warning。
 
     判据方向与 ``asset_proofread._locked_hit`` 同一口径：条目与正文**字面互为子串**即算
     命中（同一谓词，不写第二套）；正文取变换指令与保留项声明两节，**不含清单自己**——
@@ -380,9 +438,19 @@ def validate_tailframe_prompt(text: str, *,
                 and _DISPLACEMENT_TO.search(transform)):
             issues.append(ValidationIssue(
                 "error", "TAILFRAME_NO_DISPLACEMENT",
-                "变换指令没有写出 A→B 的位移：要写起点地标现在在哪（身后 / 出画）"
-                "与一处距离参照（脚下 / 前方几步 / 几米）。只写「camera now at B」"
-                "会让画面看起来原地踏步"))
+                "变换指令没有写出 A→B 的位移：要写起点地标现在在哪（身后 / 出画），"
+                "以及终点与一个具名地标的可见关系（脚下踩在停止线前 / 正前方是"
+                "路口那根红绿灯杆）。不写「前方几步」「几米」这类量不出来的程度词。"
+                "只写「camera now at B」会让画面看起来原地踏步"))
+
+    preserved = sections.get(PRESERVE_HEAD, "").strip()
+    if (segment_prompt and _CAMERA_MOVE_HINT.search(segment_prompt)
+            and _BACKGROUND_FROZEN.search(preserved)):
+        issues.append(ValidationIssue(
+            "warning", "TAILFRAME_BACKGROUND_FROZEN",
+            "机位在动（本段运镜句有运镜词），保留项却要求背景相对位置保持原样："
+            "机位一动背景相对位置必然变，两条要求互斥。机位在动时只保留身份、"
+            "光源方向与材质，背景不列；机位不动时才允许把背景逐项列全（L4-05）"))
 
     locked = _locked_entries(sections.get(LOCKED_HEAD, ""))
     if LOCKED_HEAD in sections and not locked:
@@ -403,7 +471,8 @@ def validate_tailframe_prompt(text: str, *,
                 "——条目要逐字摘自变换指令或保留项声明，转述会让判据永远不命中"
                 "（ADR 0016）"))
 
-    for warning in check_image_prompt(body, model=model):
+    for warning in check_image_prompt(
+            _ROLE_DECLARATION.sub("", body), model=model):
         issues.append(ValidationIssue("warning", warning.code, warning.message))
     return issues
 
@@ -456,7 +525,8 @@ def write_tailframe_prompt(segment: DirectorSegment, *, mode: str, llm,
         if raw is None:
             return None
         text = normalize_tailframe_output(raw)
-        errors = [issue for issue in validate_tailframe_prompt(text, model=model)
+        errors = [issue for issue in validate_tailframe_prompt(
+                      text, model=model, segment_prompt=segment_prompt)
                   if issue.severity == "error"]
         if not errors:
             return text
@@ -519,10 +589,11 @@ def write_tailframe_prompts(plan: DirectorPlan, *, llm, session_dir: str | Path,
             except Exception as exc:  # noqa: BLE001 - 病因原样交回，段号在这里补
                 raise RuntimeError(
                     f"第 {segment.index} 段起点画面读图失败：{exc}") from exc
+        segment_prompt = _read_segment_prompt(session_dir, segment)
         text = write_tailframe_prompt(
             segment, mode=plan.mode, llm=llm, start_image=image,
             start_frame_description=descriptions[image],
-            segment_prompt=_read_segment_prompt(session_dir, segment),
+            segment_prompt=segment_prompt,
             identity_baseline=identity_baseline, model=model)
         if text is None:
             raise RuntimeError(
@@ -533,7 +604,8 @@ def write_tailframe_prompts(plan: DirectorPlan, *, llm, session_dir: str | Path,
         path.write_text(text.rstrip() + "\n", encoding="utf-8")
 
         sections = split_tailframe_sections(text)
-        issues = tuple(validate_tailframe_prompt(text, model=model))
+        issues = tuple(validate_tailframe_prompt(
+            text, model=model, segment_prompt=segment_prompt))
         for issue in issues:
             # 告警要在**产出那一刻**打在终端上：这份产物不进后续自动流程，
             # 只在 #105 的陪跑出站里被列出——那时用户已经在忙着生成图了。
