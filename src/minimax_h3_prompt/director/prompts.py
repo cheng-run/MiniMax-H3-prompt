@@ -252,14 +252,13 @@ def relativize_timestamps(text: str, start_frame: int) -> str:
 
 
 def _section_headers_in_order(text: str) -> list[str]:
-    """正文里出现的 ref 段头，按出现位置排序（只认行首 ``header:``）。"""
-    positions: list[tuple[int, str]] = []
-    for header in REF_SECTIONS:
-        match = re.search(rf"^{re.escape(header)}\s*[:：]", text, re.MULTILINE)
-        if match:
-            positions.append((match.start(), header))
-    positions.sort()
-    return [header for _, header in positions]
+    """正文里出现的 ref 段头，按出现位置排序（只认行首 ``header:``）。
+
+    复用 ``_find_sections``：段头怎么认只有那一处实现（#130）。在这里另跑一份正则，
+    节常量或标题写法一改，两处就会各自漂。
+    """
+    found = _find_sections(text, list(REF_SECTIONS))
+    return [header for header, _ in sorted(found.items(), key=lambda item: item[1][1])]
 
 
 def _at_timestamps(text: str) -> list[float]:
@@ -552,8 +551,11 @@ def _write_validated(plan: DirectorPlan, segment: DirectorSegment, *, llm,
     request = base_request
     text: str | None = None
     issues: tuple[ValidationIssue, ...] = ()
-    record: list[dict] | None = None
     for attempt in range(MAX_SEGMENT_ATTEMPTS):
+        # 每一轮都从「没有子集记录」开始：``record`` 只由本轮的裁剪产生。放在循环外
+        # 初始化时，上一轮裁好子集、这一轮直接写坏的情况会把旧 record 配着新 text
+        # 一起返回——调用方照它落 ``assets-in-segment.json``，段词与挂图就不同源了。
+        record: list[dict] | None = None
         raw = _direct_write(llm, request, role=role, label=label)
         if raw is None:
             return None

@@ -279,8 +279,9 @@ def video_slice(consumer: str) -> str:
 def image_slice(consumer: str) -> str:
     """取生图半真源里给该消费者的切片；消费者不在白名单里返回空串。
 
-    与 ``video_slice`` 是**两个读取口**，不是同一个函数换参数：两份真源的消费者不同、
-    语言不同，谁都不该误用另一个的口子（``agents.load_role_prompt`` 也只按角色各取一次）。
+    它是**三个读取口之一**（另有 ``video_slice`` / ``tailframe_slice``），不是同一个函数
+    换参数：三份真源的消费者不同、语言不同，谁都不该误用另一个的口子
+    （``agents.load_role_prompt`` 也只按角色各取一次）。
     """
     return _slice(IMAGE_SOURCE_PATH, IMAGE_SLICES, consumer)
 

@@ -60,7 +60,8 @@ TEXT_CAPABILITY_KEYWORDS = tuple(word for word, _zh, _latin in _TEXT_KEYWORD_PAT
 TEXT_CAPABILITY_MODEL = "moss"
 
 # 不参与「按文字类关键词自动切档」的资产类别（L6-12 / 2026-11-01 裁定）：人物身份板上
-# 的校名、臂章上的字会把整张板切到 MOSS，而 ``moss.md:11`` 明写四格身份板不是本档强项。
+# 的校名、臂章上的字会把整张板切到 MOSS，而 ``prompts/image_prompt_disciplines/moss.md``
+# 的「人物身份板不是本档强项」一条明写四格身份板不是本档强项（指针不带行号：本仓行号会漂）。
 # 只管自动规则——手动指定仍可给人物选 MOSS（人看图选档是人的判断）。
 AUTO_ROUTING_EXEMPT_KINDS = frozenset({"character"})
 

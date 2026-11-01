@@ -608,7 +608,10 @@ def _segment_slots(segment: DirectorSegment, scopes: dict[int, list[dict]],
     有段内素材表（写段期落的 ``assets-in-segment.json``）就**照表**：表里 ``new`` 是
     段内槽号、``name`` 是台账语义名——写段与打包同源，段词里的 ``<Picture N>`` 才不会
     指到另一张图。没有表＝**旧会话**（改动前每段挂全量），按台账顺序全量挂；那种会话
-    一旦超过 {limit} 张仍然点名报错，因为「悄悄少挂几张」会让段词悬空。
+    一旦超过槽位上限（``PICTURE_SLOT_LIMIT``，即 ``ref_capacity.MAX_PICTURES``，本仓为 9）
+    张仍然点名报错，因为「悄悄少挂几张」会让段词悬空。
+    这里只写常量名不插值：docstring 若改成 f-string，Python 就不再把它当 docstring
+    （``__doc__`` 变 ``None``），而这条说明正是给维护者看的。
 
     为什么不在打包期重算子集：写段用的正文与打包用的段文件是同一份，重算等于让同一件
     事有两处实现；两边哪天对「语义名怎么算」理解不同，段词与挂图就静默错位。

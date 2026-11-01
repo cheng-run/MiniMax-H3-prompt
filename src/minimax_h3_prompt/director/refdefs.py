@@ -15,8 +15,9 @@
 官方 ref-en.txt §2.2 只给帧／构图锚单开行）。这一步只做一次（不是每段一次）：定义块
 逐段重复，逐段重写就是让同一批素材每段漂一个版本。
 
-产物落 ``GENxxx/director/ref-sections.json``：续跑、改词、打包都从它读，不重付、也不
-让第二处再推一遍「哪张图叫什么」。
+产物落 ``GENxxx/director/ref-sections.json``：续跑时由向导读回它复用（``ui/wizard.py``
+一处，登记表对得上才复用），不重付、也不让第二处再推一遍「哪张图叫什么」。改词从段
+文件取（段内已裁成子集），打包从 ``assets-in-segment.json`` 取，都不读这份文件。
 """
 from __future__ import annotations
 
@@ -31,8 +32,9 @@ from typing import Iterable, Sequence
 REF_SECTIONS_FILENAME = "ref-sections.json"
 DIRECTOR_REF_SECTIONS_ROLE = "role_director_ref_sections"
 
-# 只有这四个判据能拦住「写进去也白写」的定义块，其余（六节齐全、镜头、时间戳）由写段
-# 那一侧管：这里只有两节，拿整套 ref 校验去判会报一堆与定义块无关的假错。
+# 下面的码，加上 ``_guard_issues`` 自己会产出的 ``MISSING_SECTION``（段头解析不出），
+# 一共能拦住「写进去也白写」的定义块；其余（六节齐全、镜头、时间戳）由写段那一侧管：
+# 这里只有两节，拿整套 ref 校验去判会报一堆与定义块无关的假错。
 _GUARDED_CODES = frozenset({
     "PICTURE_NO_DEFINITION",   # 引用了没定义的图
     "PICTURE_UNUSED",          # 登记了却没被定义——段词里那句 <Picture N> 会悬空
@@ -325,11 +327,3 @@ def has_sections(sections: RefSections | None) -> bool:
     return all(
         str(getattr(sections, key, "")).strip()
         for key in ("subject_definitions", "retention_analysis"))
-
-
-_CJK_RE = re.compile(r"[一-鿿]")
-
-
-def cjk_chars(text: str) -> int:
-    """中文汉字个数：测试与报错措辞共用，不各写一份正则。"""
-    return len(_CJK_RE.findall(str(text or "")))

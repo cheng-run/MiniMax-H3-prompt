@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ..ref_capacity import MAX_PICTURES
 from .frames import (
     FPS,
     GRID_OFFSET,
@@ -421,9 +422,10 @@ def read_plan_json(path: Path) -> DirectorPlan:
 _IMAGE_LABELS = {
     IMAGE_FIRST: "首帧",
     IMAGE_END: "尾帧（终点画面）",
-    # r2v 每段挂的是**本段素材子集**（≤ MAX_PICTURES=9，插件单请求上限）：标签里带上
+    # r2v 每段挂的是**本段素材子集**（≤ MAX_PICTURES，插件单请求上限）：标签里带上
     # 这张上限，用户看到「参考素材」时就知道这不是「全片素材一口气挂上去」。
-    IMAGE_ASSETS: "参考素材（本段 ≤9 张）",
+    # 数字从常量来：官方上限一改，这句用户可见的措辞不会留在旧值上。
+    IMAGE_ASSETS: f"参考素材（本段 ≤{MAX_PICTURES} 张）",
 }
 
 

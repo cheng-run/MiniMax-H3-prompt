@@ -1121,7 +1121,12 @@ def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> b
         text = existing.read_text(encoding="utf-8")
         _print_tailframe_document(text, index=segment.index, path=existing,
                                   note="已在盘上，沿用，不重付")
-        for issue in validate_tailframe_prompt(text):
+        # 与本段视频词一起复核：背景冻结 vs 机位在动的判据只接在写词路径上时，
+        # 续跑沿用的旧词可以带着一对互斥要求而终端一声不响（半接线）。
+        for issue in validate_tailframe_prompt(
+                text,
+                segment_prompt=tailframe_module._read_segment_prompt(
+                    session.directory, segment)):
             print(f"   [{issue.severity.upper()}] {issue.code}: {issue.message}")
         return True
 

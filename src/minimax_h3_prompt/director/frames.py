@@ -191,8 +191,10 @@ def give_images_for(segment_type: str, mode: str) -> tuple[str, ...]:
     """该段**必填**给图清单（出站清单，不是打包清单；设计 §3.1 表）。
 
     尾帧（终点画面）打包时还不存在：它由 #107 的尾帧变换提示词产出、用户在导演台
-    UI 里逐段挂。``opening`` 段按模式分派；``fl2v`` 的尾帧与 ``r2v`` 的首帧是**可选**
-    的，见 ``optional_images_for``。``i2v`` 段内不要终点画面（见下方分支）。
+    UI 里逐段挂。``opening`` 段按模式分派；``fl2v`` 的尾帧是**可选**的，见
+    ``optional_images_for``。``r2v`` 没有帧槽（首/尾帧是 fl2v 的槽位），它的画面来源
+    只有参考素材，所以每段都**必填**参考素材、没有可选图。``i2v`` 段内不要终点画面
+    （见下方分支）。
     """
     if mode not in PLAN_MODES:
         raise ValueError(
@@ -218,12 +220,12 @@ def give_images_for(segment_type: str, mode: str) -> tuple[str, ...]:
         return (IMAGE_FIRST, IMAGE_END)
     if segment_type == "ending":
         return (IMAGE_END,)
-    # opening：按模式分派（t2v 无图；i2v/fl2v 给首帧；r2v 给参考素材）
+    # opening：按模式分派（t2v 无图；i2v/fl2v 给首帧）。r2v 在上方已提前返回，
+    # 这里不再列它——写了也是死分支，而它会让 i2v 上面的「不发明不可达规则」变成空话。
     return {
         "t2v": (),
         "i2v": (IMAGE_FIRST,),
         "fl2v": (IMAGE_FIRST,),
-        "r2v": (IMAGE_ASSETS,),
     }[mode]
 
 
