@@ -6,15 +6,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import mimetypes
 import re
-import shutil
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-
-from PIL import Image
 
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -31,18 +27,6 @@ _TASK_FIELDS = {
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _canonical(data: Any) -> str:
-    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 @dataclass(frozen=True)
@@ -232,23 +216,6 @@ class TaskPackage:
         return replace(self, status=status)
 
 
-@dataclass(frozen=True)
-class ImportedAsset:
-    asset_id: str
-    generation_id: str
-    source_path: str
-    target_path: str
-    sha256: str
-    size: int
-    mime_type: str
-    status: str = "inbox"
-    width: int | None = None
-    height: int | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return self.__dict__.copy()
-
-
 def resolve_input_path(raw_path: str | Path, *, base_dir: str | Path | None = None) -> Path:
     """在 Windows 上优先解析本机路径，同时兼容 brief 中的 /mnt/<drive>/ 写法。"""
     text = str(raw_path).strip().strip('"\'')
@@ -258,79 +225,3 @@ def resolve_input_path(raw_path: str | Path, *, base_dir: str | Path | None = No
     if not candidate.is_absolute() and base_dir:
         candidate = Path(base_dir) / candidate
     return candidate.resolve()
-
-
-def inspect_asset(path: str | Path) -> dict[str, Any]:
-    source = Path(path)
-    if not source.is_file():
-        raise FileNotFoundError(source)
-    result: dict[str, Any] = {
-        "path": str(source),
-        "size": source.stat().st_size,
-        "sha256": _sha256(source),
-        "mime_type": mimetypes.guess_type(source.name)[0] or "application/octet-stream",
-    }
-    try:
-        with Image.open(source) as image:
-            result["width"], result["height"] = image.size
-            result["mime_type"] = Image.MIME.get(image.format, result["mime_type"])
-    except (OSError, Image.UnidentifiedImageError):
-        pass
-    return result
-
-
-def import_output(
-    source_path: str | Path,
-    task: TaskPackage,
-    destination_dir: str | Path,
-    *,
-    asset_id: str | None = None,
-    allow_non_output_source: bool = False,
-) -> ImportedAsset:
-    """复制一个已由任务明确关联的输出到 inbox，并校验副本哈希。"""
-    source = Path(source_path).resolve()
-    if not source.is_file():
-        raise FileNotFoundError(source)
-    if not task.generation_id:
-        raise ValueError("缺少 generation_id，禁止导入无关联结果")
-    if not task.profile_id or not task.workflow_sha256:
-        raise ValueError("任务包缺少 Profile 或 workflow SHA-256")
-    if not allow_non_output_source and "output" not in {part.lower() for part in source.parts}:
-        raise ValueError("源文件不在 ComfyUI output 路径下")
-
-    info = inspect_asset(source)
-    digest = str(info["sha256"])
-    asset_id = asset_id or f"{task.generation_id}-{digest[:12]}"
-    destination = Path(destination_dir)
-    destination.mkdir(parents=True, exist_ok=True)
-    target = destination / source.name
-    if target.exists():
-        if _sha256(target) != digest:
-            raise FileExistsError(f"目标已存在且内容不同：{target}")
-    else:
-        shutil.copy2(source, target)
-    if _sha256(target) != digest:
-        raise IOError("复制后的资产 SHA-256 与源文件不一致")
-
-    imported = ImportedAsset(
-        asset_id=asset_id,
-        generation_id=task.generation_id,
-        source_path=str(source),
-        target_path=str(target),
-        sha256=digest,
-        size=int(info["size"]),
-        mime_type=str(info["mime_type"]),
-        width=info.get("width"),
-        height=info.get("height"),
-    )
-    (destination / "source.json").write_text(
-        json.dumps({
-            "asset": imported.to_dict(),
-            "generation_id": task.generation_id,
-            "profile_id": task.profile_id,
-            "profile_version": task.profile_version,
-            "workflow_sha256": task.workflow_sha256,
-            "copied_at": _now(),
-        }, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    return imported

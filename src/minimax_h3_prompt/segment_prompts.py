@@ -1222,7 +1222,7 @@ def _ref_defs_request_block(sections: dict[str, str]) -> str:
 
 def build_ref_segment_v2_request(plan, all_plans: list, *,
                                  sections: dict[str, str],
-                                 shot_texts: list[str], task_type: str,
+                                 shot_texts: list[str],
                                  total_s: float) -> str:
     """组装多参 v2 写段请求（issue #46）。
 
@@ -1372,7 +1372,7 @@ def write_ref_segment_v2(plan, all_plans: list, *, sections: dict[str, str],
     """
     base_request = build_ref_segment_v2_request(
         plan, all_plans, sections=sections,
-        shot_texts=shot_texts, task_type=task_type, total_s=total_s)
+        shot_texts=shot_texts, total_s=total_s)
     request = base_request
     text: str | None = None
     for attempt in range(MAX_SEGMENT_ATTEMPTS):

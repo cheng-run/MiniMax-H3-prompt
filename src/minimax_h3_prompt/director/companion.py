@@ -190,7 +190,7 @@ def _match_cumulative_export(plan: DirectorPlan, segment: DirectorSegment,
 
 
 def _cumulative_verdict(segment: DirectorSegment, actual_frames: int,
-                        k: int, total: int, *, tolerance: int,
+                        k: int, *, tolerance: int,
                         plan: DirectorPlan) -> DirectorVerdict:
     """合并导出形态的判定：本段在片子里，帧数按导出帧算，直接放行。
 
@@ -265,9 +265,9 @@ def judge_video_evidence(segment: DirectorSegment, *,
 
     form = _match_cumulative_export(plan, segment, actual_frames, tolerance)
     if form is not None:
-        k, total = form
+        k, _total = form
         return _cumulative_verdict(
-            segment, actual_frames, k, total, tolerance=tolerance, plan=plan)
+            segment, actual_frames, k, tolerance=tolerance, plan=plan)
     # 比本段导出帧还短，或在单段导出的容差内：仍是「单段视频」的帧数判据
     # （短多少、是否在容差内由 ``_judge_frames`` 说准，不在这里另造一套文案）。
     expected = _expected(segment)

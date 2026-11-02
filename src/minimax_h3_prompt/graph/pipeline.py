@@ -245,17 +245,6 @@ def stage1_rerun_plan(layer: str, *, mode: str = "base") -> Stage1RerunPlan:
     return Stage1RerunPlan(spec=spec, start=spec.resume_from, nodes=nodes, artifacts=artifacts)
 
 
-def _build_stage_graph(model, brief: Brief, config: Config, chain: list[str]):
-    """按显式链构建编译图；chain 必须是 _STAGE1_CHAIN/_STAGE2_CHAIN/_LINEAR_CHAIN 之一。"""
-    if chain is _STAGE1_CHAIN:
-        stage = 1
-    elif chain is _STAGE2_CHAIN:
-        stage = 2
-    else:
-        stage = 0
-    return build_pipeline_graph(model, brief, config, stage=stage)[0]
-
-
 def run_stage1(brief: Brief, config: Config, *, on_node=None,
                resume_from_node: str | None = None,
                initial_state: dict | None = None,
@@ -409,7 +398,7 @@ def run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_node
                         on_node(node_name)
 
         prompt = merged.get("final_prompt", "")
-        prompt, _ = assemble_and_repair(prompt, brief.mode, brief.variant)
+        prompt, _ = assemble_and_repair(prompt, brief.mode)
         if checkpoint_dir:
             save_checkpoint(checkpoint_dir, prompt_draft=prompt,
                             cost_table=token_meter.snapshot())
@@ -449,13 +438,13 @@ def run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_node
             f"【质检建议】\n{review}\n"
             f"【问题清单】\n{format_issues(issues)}",
         )
-        prompt, _ = assemble_and_repair(prompt, brief.mode, brief.variant)
+        prompt, _ = assemble_and_repair(prompt, brief.mode)
         stage_saver.save(f"qa_refine_{i}", {"质检建议": review, "重出提示词": prompt, "主题忠实度校验": format_issues(theme_issues)})
         if checkpoint_dir:
             save_checkpoint(checkpoint_dir, prompt_draft=prompt, status=f"qa_round_{i + 1}",
                             cost_table=token_meter.snapshot())
 
-    prompt, _ = assemble_and_repair(prompt, brief.mode, brief.variant)
+    prompt, _ = assemble_and_repair(prompt, brief.mode)
     merged["final_prompt"] = prompt
     if checkpoint_dir:
         clear_checkpoint(checkpoint_dir)

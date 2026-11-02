@@ -17,7 +17,7 @@ def extract_fenced_block(text: str) -> str:
     return m.group(1).strip() if m else text
 
 
-def assemble_and_repair(prompt: str, mode: str, variant: str = "T2VA") -> tuple[str, str]:
+def assemble_and_repair(prompt: str, mode: str) -> tuple[str, str]:
     """确定性格式保障：抽围栏 → 段头齐全 → 声音段规范为 N/A。返回 (修复后提示词, 说明)。
 
     ``director`` 必须走显式分支（issue #103）：改动前这里是 ``mode == "ref"`` 的二元分叉，

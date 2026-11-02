@@ -69,7 +69,7 @@ def shot_excerpt_for_window(shot_table: str, start_s: float, end_s: float) -> st
     return "\n\n".join(selected) if selected else shot_table.strip()
 
 
-def build_firstframe_request(segment: DirectorSegment, *, mode: str,
+def build_firstframe_request(segment: DirectorSegment,
                              shot_table: str, brief, model: str) -> str:
     """只问**一帧**的请求：本段起点那一格，不要 last、不要中间节点。"""
     # 画布／出图模型／场景词三块与关键帧节点同一份真源（节点侧是私有函数，但两边
@@ -140,7 +140,7 @@ def extract_first_prompt(raw: str, model: str) -> str | None:
     return None
 
 
-def write_firstframe_prompt(segment: DirectorSegment, *, mode: str, llm,
+def write_firstframe_prompt(segment: DirectorSegment, *, llm,
                             shot_table: str, brief, session_dir: str | Path,
                             model: str | None = None) -> str | None:
     """为切镜段产出段首帧词并落盘；调用失败返回 ``None``（不写半份）。"""
@@ -148,7 +148,7 @@ def write_firstframe_prompt(segment: DirectorSegment, *, mode: str, llm,
 
     model = model or load_frame_image_model()
     request = build_firstframe_request(
-        segment, mode=mode, shot_table=shot_table, brief=brief, model=model)
+        segment, shot_table=shot_table, brief=brief, model=model)
     agents = build_role_agents(
         llm, brief.refs, brief.mode, brief.duration, brief.variant)
     raw = run_agent(agents["frame_prompt_engineer"], request)

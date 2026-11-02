@@ -228,44 +228,10 @@ def test_missing_registry_picture_triggers_repair_round(tmp_path, monkeypatch):
 # 3. 登记名统一（AC6）：一个名字、「工作流 63」旧称清零
 # ---------------------------------------------------------------------------
 
-def test_menu_ref_label_uses_registered_name(monkeypatch):
-    """菜单多参项的文案用登记名（旧称「工作流 63」已废弃）。"""
-    from minimax_h3_prompt.ui import menu
-
-    captured: dict = {}
-
-    def fake_select(prompt, choices):
-        captured["choices"] = list(choices)
-        return SimpleNamespace(ask=lambda: captured["choices"][3])
-
-    monkeypatch.setattr(menu.questionary, "select", fake_select)
-    assert menu.choose_model() == "ref2va"
-    assert any(REF_WORKFLOW_NAME in choice for choice in captured["choices"])
-
-
-def test_menu_label_reads_the_registered_name_at_call_time(tmp_path, monkeypatch):
-    """菜单文案在**调用时**取登记名（复审 S4）：换配置后菜单必须当场跟着变。
-
-    原先 import 时就求值，换一份 ``config/workflow.yaml`` 后菜单仍指旧工作流，
-    用户按菜单进 ComfyUI 找不到那张——而且不报错。
-    """
-    from minimax_h3_prompt import workflow_config
-    from minimax_h3_prompt.ui import menu
-
-    path = tmp_path / "workflow.yaml"
-    path.write_text('ref_workflow_name: "临时工作流 V9"\n', encoding="utf-8")
-    monkeypatch.setattr(workflow_config, "WORKFLOW_CONFIG_PATH", path)
-
-    captured: dict = {}
-
-    def fake_select(prompt, choices):
-        captured["choices"] = list(choices)
-        return SimpleNamespace(ask=lambda: captured["choices"][3])
-
-    monkeypatch.setattr(menu.questionary, "select", fake_select)
-    assert menu.choose_model() == "ref2va"
-    assert any("临时工作流 V9" in choice for choice in captured["choices"]), (
-        f"菜单仍用旧登记名：{captured['choices']}")
+# 原先这里还有两条 ``ui/menu.py`` 的用例（菜单文案取登记名）。该模块在产线上不可达
+# （``main()`` 只走向导或 ``_run_cli``，见记忆 ui-menu-unreachable-in-production），
+# 2026-11-02 随死代码清理整文件删除；它守的「调用时取登记名」仍由
+# ``workflow_config`` 的用例覆盖。
 
 
 def test_legacy_workflow_63_name_is_gone_from_user_facing_files():
@@ -275,7 +241,6 @@ def test_legacy_workflow_63_name_is_gone_from_user_facing_files():
         "README.md",
         "examples/brief_template.md",
         "examples/brief_ref.md",
-        "src/minimax_h3_prompt/ui/menu.py",
         "src/minimax_h3_prompt/ui/wizard.py",
     )
     for rel in user_facing:

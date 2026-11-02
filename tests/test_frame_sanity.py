@@ -158,7 +158,7 @@ def test_stage2_qa_includes_common_sense(monkeypatch):
 
     monkeypatch.setattr(frame_sanity, "prompt_common_sense_issues", fake_cs)
     monkeypatch.setattr(pipeline, "run_agent", lambda agent, msg: "fixed prompt")
-    monkeypatch.setattr(pipeline, "assemble_and_repair", lambda p, m, v: ("fixed prompt", "report"))
+    monkeypatch.setattr(pipeline, "assemble_and_repair", lambda p, m: ("fixed prompt", "report"))
     monkeypatch.setattr(pipeline, "format_issues", lambda issues: "issues")
     monkeypatch.setattr(pipeline, "_theme_repair_injection", lambda s, b: "rewire")
     monkeypatch.setattr(pipeline, "stage_saver", SimpleNamespace(save=lambda *a, **k: None))
@@ -228,7 +228,7 @@ def test_stage2_refine_loop_and_assembly_print_step_banners(monkeypatch, capsys)
     monkeypatch.setattr(pipeline, "theme_fidelity_issues", lambda *a, **k: [])
     monkeypatch.setattr(pipeline, "run_agent", lambda agent, msg: "fixed prompt")
     monkeypatch.setattr(pipeline, "assemble_and_repair",
-                        lambda p, m, v: ("fixed prompt", "report"))
+                        lambda p, m: ("fixed prompt", "report"))
     monkeypatch.setattr(pipeline, "format_issues", lambda issues: "issues")
     monkeypatch.setattr(pipeline, "_theme_repair_injection", lambda s, b: "rewire")
     monkeypatch.setattr(pipeline, "stage_saver", SimpleNamespace(save=lambda *a, **k: None))

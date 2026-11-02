@@ -65,7 +65,7 @@ def test_request_carries_the_window_the_excerpt_and_the_model():
     from minimax_h3_prompt.director.firstframe import build_firstframe_request
 
     request = build_firstframe_request(
-        _segment(), mode="fl2v", shot_table=_SHOT_TABLE, brief=_brief(), model="qwen")
+        _segment(), shot_table=_SHOT_TABLE, brief=_brief(), model="qwen")
     assert "第 2 段" in request
     assert "3.750s" in request and "8.000s" in request
     assert "[Shot 1]" in request and "[Shot 2]" in request
@@ -108,7 +108,7 @@ def test_write_firstframe_prompt_lands_the_positive_prompt(tmp_path, monkeypatch
         lambda agent, request: '{"first": {"qwen": {"positive_prompt": "A rider in the rain."}}}')
 
     text = firstframe.write_firstframe_prompt(
-        _segment(), mode="fl2v", llm=object(), shot_table=_SHOT_TABLE,
+        _segment(), llm=object(), shot_table=_SHOT_TABLE,
         brief=_brief(), session_dir=tmp_path, model="qwen")
 
     assert text == "A rider in the rain."
@@ -126,6 +126,6 @@ def test_write_firstframe_prompt_writes_nothing_on_unparsable_reply(tmp_path, mo
     monkeypatch.setattr(agents, "run_agent", lambda agent, request: "没有 JSON")
 
     assert firstframe.write_firstframe_prompt(
-        _segment(), mode="fl2v", llm=object(), shot_table=_SHOT_TABLE,
+        _segment(), llm=object(), shot_table=_SHOT_TABLE,
         brief=_brief(), session_dir=tmp_path, model="qwen") is None
     assert not firstframe.firstframe_path(tmp_path, 2).exists()

@@ -255,7 +255,7 @@ def _generate_asset_entries(agent, kind: str, design_field: str, state: dict, br
             raise ValueError(f"{kind} 生图提示词不是有效 JSON") from exc
     # 清单层违约先修一次（issue #64）：条目是转述时下游的偏差判定会静默失效，
     # 但一次违约就停住整条阶段 1 的代价与这个模型的失败模式不匹配。
-    violations = _locked_violations(parsed, kind)
+    violations = _locked_violations(parsed)
     if violations:
         patch = run_agent(
             agent,
@@ -493,7 +493,7 @@ def _normalize_locked_features(raw: object, name: str, positive: str, kind: str)
     return [str(x).strip() for x in raw if str(x).strip()]
 
 
-def _locked_violations(parsed: object, kind: str) -> list[dict]:
+def _locked_violations(parsed: object) -> list[dict]:
     """收集**清单层**违约，供节点做一次补丁式修复（issue #64）。
 
     为什么需要修复而不是一次违约就停：条目转述时下游会**静默**把整条偏差降级成
@@ -891,7 +891,7 @@ class ShotScale:
                 f"超过的部分会由生产管线自动拆成连续执行段，无需在分镜中缩短镜头）。")
 
 
-def derive_shot_scale(duration: float, plot_richness_hint: str = "") -> ShotScale:
+def derive_shot_scale(duration: float) -> ShotScale:
     """根据时长和粗略内容复杂度推导镜头数与镜头时长区间。
 
     设定依据（H3 官方 base-en 案例 + ComfyUI H3 时长选项 4-10s 整数档）：
@@ -1139,13 +1139,13 @@ def _make_prompt_engineer_node(agents: dict) -> Callable:
     return node
 
 
-def _make_finalize_node(config: Config) -> Callable:
+def _make_finalize_node() -> Callable:
     def node(state: PipelineState) -> dict:
         from ..output.assembler import assemble_and_repair
         from ..tools.theme_guard import theme_fidelity_issues
 
         brief: Brief = state["brief"]
-        repaired, report = assemble_and_repair(state.get("final_prompt", ""), brief.mode, brief.variant)
+        repaired, report = assemble_and_repair(state.get("final_prompt", ""), brief.mode)
         issues = validate_prompt(
             repaired, brief.mode, duration=brief.duration, variant=brief.variant, ref_meta=state.get("ref_meta")
         )
@@ -1197,7 +1197,7 @@ def make_nodes(agents: dict, model, brief: Brief, config: Config) -> dict[str, C
         "composer": _make_composer_node(agents),
         "prompt_engineer": _make_prompt_engineer_node(agents),
         # qa 不在图里跑：质检精修在 pipeline.run_pipeline 的 Python 循环里用 qa agent
-        "finalize": _make_finalize_node(config),
+        "finalize": _make_finalize_node(),
     }
     return nodes
 

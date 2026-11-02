@@ -1368,7 +1368,6 @@ def _ref_request_kwargs():
     return dict(
         sections=sections,
         shot_texts=["[Shot 2] A close-up as she hands 青铜钥匙 to the boy."],
-        task_type="reference generation",
         total_s=22,
     )
 
@@ -1465,7 +1464,8 @@ def test_write_ref_segment_v2_returns_self_contained_document():
     llm = _ref_v2_llm()
     text = write_ref_segment_v2(
         plan, all_plans, llm=llm,
-        ref_meta=[(1, "红裙女孩", "…"), (2, "青铜钥匙", "…")], **_ref_request_kwargs())
+        ref_meta=[(1, "红裙女孩", "…"), (2, "青铜钥匙", "…")],
+        task_type="reference generation", **_ref_request_kwargs())
     assert text is not None
     sections = split_ref_sections(text)
     whole = split_ref_sections(_REF_WHOLE_PROMPT)
@@ -1497,7 +1497,8 @@ def test_write_ref_segment_v2_retries_on_errors_bounded():
     llm = _LLM()
     plan, all_plans = _ref_plans()[1], _ref_plans()
     text = write_ref_segment_v2(
-        plan, all_plans, llm=llm, **_ref_request_kwargs())
+        plan, all_plans, llm=llm,
+        task_type="reference generation", **_ref_request_kwargs())
     assert len(llm.requests) == MAX_SEGMENT_ATTEMPTS  # 有界
     assert "SEGMENT_ANAPHORA" in llm.requests[1]  # issue 回插重写请求
     assert text is not None  # 仍不合格交回原文（当面给用户看），不返回 None 装死

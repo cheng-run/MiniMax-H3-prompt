@@ -539,11 +539,11 @@ def run_wizard(config: Config) -> int:
     # 分段陪跑中途退出：整条提示词与帧锚都已落盘，直接回到陪跑续接。
     # 绝不能再走阶段 2——那正是 #17 的代价（重做阶段 2 + 已完成的所有段重来）。
     if session.status == STATUS_SEGMENTED_RUNNING:
-        return _resume_segmented(config, session)
+        return _resume_segmented(session)
     # 多参逐段陪跑中途退出（issue #58）：落到**多参自己的**续接路径，绝不共用上面那条
     # ——两种陪跑的段文件、进度账与有无桥接帧全都不同（见 ``session_store`` 的状态注释）。
     if session.status == STATUS_REF_SEGMENTS_RUNNING:
-        return _resume_ref_handoff(config, session)
+        return _resume_ref_handoff(session)
     # 导演台逐段陪跑中途退出（issue #105）：回到同一个 GEN 继续数帧验收。这条分派
     # **必须早于**下面的 `brief.is_director`——否则续跑会重新规划、重新写段、重新打包
     # （重付 LLM），而且新生成的段表与账本里已通过的段号对不上。
@@ -1152,7 +1152,7 @@ def _cut_first_frame_prompt(plan, segment, session: SessionState, *, llm) -> str
     shot_table = str(session.stage_state.get("shot_table", ""))
     try:
         text = write_firstframe_prompt(
-            segment, mode=plan.mode, llm=llm, shot_table=shot_table,
+            segment, llm=llm, shot_table=shot_table,
             brief=session.brief, session_dir=session.directory)
     except Exception as exc:  # noqa: BLE001 - 病因原样交回，别伪装成别的问题
         print(f"[错误] 第 {segment.index} 段的段首帧提示词写不出来：{exc}")
@@ -5490,7 +5490,7 @@ def _assemble_film_and_complete(directory: Path, brief: Brief,
     return passed
 
 
-def _resume_segmented(config: Config, session: SessionState) -> int:
+def _resume_segmented(session: SessionState) -> int:
     """分段陪跑续接：不碰阶段 1/2，用已落盘的整条提示词与帧锚直接回到陪跑。
 
     阶段 2 的产物（``video-prompt.md``、``summary-zh.json``、带帧图读图结果的
@@ -5530,7 +5530,7 @@ def _ref_delivery_started(directory: Path) -> bool:
             or any(segments.glob("segment-*.md")))
 
 
-def _resume_ref_handoff(config: Config, session: SessionState) -> int:
+def _resume_ref_handoff(session: SessionState) -> int:
     """多参逐段陪跑续接（issue #58）：回到同一个 GEN，已通过的段不重出、不重跑、不重付。
 
     与 ``_resume_segmented`` 是**两条路线的续接**，不共用：base 那边靠

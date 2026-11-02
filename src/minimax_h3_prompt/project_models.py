@@ -560,37 +560,6 @@ class ShotPlan:
         return ShotPlan(self.shot_plan_id, self.project_id, self.variant, self.duration_seconds, shots, self.status, self.review_records, self.schema_version)
 
 
-def verify_chain(segments: tuple[Segment, ...]) -> list[str]:
-    """跨段连续性检查。
-
-    校验规则：
-    - 首段不得声明 prev_segment_id；
-    - 后续段必须声明 prev_segment_id 且指向前一段；
-    - 前一段的 next_segment_id 必须指向后一段（双向一致）；
-    - 后续段的 start_frame_asset_id（若非空）必须等于上一段的 end_frame_asset_id。
-    """
-    errors: list[str] = []
-    for index, segment in enumerate(segments):
-        if index == 0:
-            if segment.prev_segment_id:
-                errors.append(f"{segment.segment_id}: FIRST_SEGMENT_HAS_PREDECESSOR 首段不能声明上一段")
-            continue
-        previous = segments[index - 1]
-        if not segment.prev_segment_id:
-            errors.append(f"{segment.segment_id}: MISSING_PREV_SEGMENT 未声明上一段")
-        elif segment.prev_segment_id != previous.segment_id:
-            errors.append(f"{segment.segment_id}: PREV_SEGMENT_MISMATCH 指向前一段为 {segment.prev_segment_id}，实际应为 {previous.segment_id}")
-        if previous.next_segment_id != segment.segment_id:
-            errors.append(f"{previous.segment_id}: NEXT_SEGMENT_MISMATCH next_segment_id 应为 {segment.segment_id}")
-        # 桥接帧哈希/资产 ID 衔接：若下一段声明首帧，必须等于上一段尾帧
-        if segment.start_frame_asset_id and previous.end_frame_asset_id:
-            if segment.start_frame_asset_id != previous.end_frame_asset_id:
-                errors.append(
-                    f"{segment.segment_id}: BRIDGE_FRAME_MISMATCH 首帧资产 {segment.start_frame_asset_id} 与上一段尾帧 {previous.end_frame_asset_id} 不一致"
-                )
-    return errors
-
-
 def prompt_sha256(prompt: str) -> str:
     """统一生成任务包/资产记录使用的 Prompt SHA-256。"""
     return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
