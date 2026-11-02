@@ -97,6 +97,46 @@ _STATE_KEYS = (
     # 不一致（外人改写、旧代码写脏），节点读 state、向导读 brief，两边各说各话且不报错。
 )
 
+# 状态契约的第二半（体检 §4.2 / P3）：`PipelineState` 里**故意不持久化**的键，
+# 以及**持久化但不在** `PipelineState` 里的键。两张表都带理由——理由不是注释而是
+# 数据，因为 ``tests/test_state_contract.py`` 用它做双向核对：
+#
+# - schema 里有、两张表都没有 → 红（新键没说清要不要持久化）；
+# - 表里列了、schema 里没有（或反之） → 红（表过期了，删除时忘了同步）；
+# - 白名单里的键既不在 schema、也不在 ``OUTSIDE_GRAPH`` → 红（漏声明）。
+#
+# 这就是「光看 schema 或 grep 都拼不出完整状态契约」的机读版本。
+PERSISTENCE_EXCLUSIONS: dict[str, str] = {
+    # brief 对象单独序列化（``SessionState.brief``），路线级选择只住 brief 一份。
+    "brief": "单独序列化为 SessionState.brief",
+    "mode": "由 brief 承载（同上）",
+    "variant": "由 brief 承载（同上）",
+    "duration": "由 brief 承载（同上）",
+    "ref_meta": "阶段 2 由 brief.refs / ref_asset_registry 现算（pipeline.run_stage2）",
+    "director_mode": (
+        "由 brief 承载；落一份进 stage_state 就是同一契约两处口径（issue #101）"),
+    "shot_duration_warning": (
+        "只进阶段产物 output/stages/*.txt（pipeline.py:297），无代码读者"),
+    "qa_issues": "单轮质检的入参（pipeline.py:284 起手清零），不是产物",
+    "setting_revision": (
+        "本轮那条设定级修订（user_revisions.py:89），只在这一次截断重跑里有效，"
+        "留下来会让续接后的每次重跑都回灌同一条要求"),
+    "iterations": "单次运行的质检轮计数，续跑重新计",
+}
+
+# 持久化、但**不进 LangGraph 图**的键：它们由向导侧读写（续跑书签、循环进度），
+# 不参与 ``StateGraph`` 搬运，故不需要在 ``PipelineState`` 里声明。
+PERSISTED_OUTSIDE_GRAPH: dict[str, str] = {
+    "_progress": "阶段 1 断点书签：wizard.py:477 写、:1846 读",
+    "frame_round": "画面级修订轮次：user_revisions.py:142 写、:131 读",
+    "asset_loop": "素材循环进度：asset_loop.py:29 的 ASSET_LOOP_KEY",
+    "resume_answers": "续跑问答答案账：resume_point.py:15 的 ANSWERS_KEY",
+    "asset_proofread_progress": "读图校对中途进度：asset_proofread.py:466 的 PROGRESS_KEY",
+    "bridge_frame_descriptions": (
+        "各段桥接帧读图结果：wizard.py:4755 写、segment_prompts.py:647 读"
+        "（分段陪跑走向导侧，不进图）"),
+}
+
 # 资产图提示词三键（父 spec #77 / issue #80）：只属于多参路线。键名从 `graph/state.py`
 # 的 `ASSET_PROMPT_KEYS` **派生、不重抄**；上面 `_STATE_KEYS` 白名单由同一个常量展开。
 # 三键仍留在白名单里——旧的首尾帧会话文件里还有这三个键，得先读得回来、再按路线丢掉；
