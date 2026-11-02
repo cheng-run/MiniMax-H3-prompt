@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
@@ -406,7 +407,10 @@ def _run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_nod
 
     checkpoint = load_checkpoint(checkpoint_dir) if checkpoint_dir else None
     if checkpoint is not None:
-        merged = {k: v for k, v in state.items() if k not in ("final_prompt", "final_report")}
+        # 值是动态 state 产物（str/dict/list），用 Any 如实表达；用 object 会让
+        # 后续 ``merged.get(...)`` 全部变成 object，反而要到处 cast。
+        merged: dict[str, Any] = {
+            k: v for k, v in state.items() if k not in ("final_prompt", "final_report")}
         merged["ref_meta"] = ref_meta
         prompt = str(checkpoint["prompt_draft"])
         # 断点里带着组装那一刻的成本表（issue #52）：组装的钱花在上一个进程里，而它
@@ -430,7 +434,7 @@ def _run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_nod
             **{k: v for k, v in state.items()
                if k not in ("final_prompt", "final_report", "brief", "ref_meta")},
         }
-        merged: dict = dict(initial)
+        merged = dict(initial)
         for chunk in graph.stream(initial, stream_mode="updates"):
             for node_name, update in chunk.items():
                 if update:
@@ -493,7 +497,7 @@ def _run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_nod
     return merged, prompt
 
 
-def _execute_pipeline(brief: Brief, config: Config, *, frame_descriptions: list[dict] | None = None) -> tuple[dict, object]:
+def _execute_pipeline(brief: Brief, config: Config, *, frame_descriptions: list[dict] | None = None) -> tuple[dict, Brief]:
     """执行完整管线（阶段 1+2 连续拼接）并返回最终 state 与 brief。"""
     state, model, _agents = run_stage1(brief, config)
     if frame_descriptions:

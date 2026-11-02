@@ -92,11 +92,11 @@ def render_summary_zh(summary: PromptSummary, shot_number: int | None = None) ->
         for item in summary.shots:
             lines.append(_render_shot(item))
     else:
-        item = summary.shot_view(shot_number)
-        if item is None:
+        shot = summary.shot_view(shot_number)
+        if shot is None:
             lines.append(f"（摘要中未找到 Shot {shot_number}）")
         else:
-            lines.append(_render_shot(item))
+            lines.append(_render_shot(shot))
     return "\n".join(lines)
 
 

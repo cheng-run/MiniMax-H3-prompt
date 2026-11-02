@@ -25,7 +25,8 @@ def save_checkpoint(directory: str | Path, *, prompt_draft: str, status: str = "
     正是「跑完的成本蒸发」里最大的一块。故断点与成本快照同写一处。
     """
     path = checkpoint_path(directory)
-    payload = {
+    # 显式 object 值类型：成本表是嵌套 dict，不是 str（mypy 会从字面量推成 dict[str, str]）
+    payload: dict[str, object] = {
         "schema_version": _SCHEMA_VERSION,
         "status": status,
         "prompt_draft": prompt_draft,

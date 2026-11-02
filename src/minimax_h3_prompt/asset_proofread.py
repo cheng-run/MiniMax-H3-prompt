@@ -380,12 +380,13 @@ def render_proofread_report(report: ProofreadReport) -> str:
     lines: list[str] = []
     if report.deviations:
         lines.append(f"[偏差] {len(report.deviations)} 处（描述与图不符）：")
-        for item in report.deviations:
-            lines.append(f"  - {item.aspect}：描述「{item.prompt_quote}」→ 图中「{item.observed}」")
+        for deviation in report.deviations:
+            lines.append(f"  - {deviation.aspect}：描述「{deviation.prompt_quote}」"
+                         f"→ 图中「{deviation.observed}」")
     if report.omissions:
         lines.append(f"[补漏] {len(report.omissions)} 条（图里有而描述没有）：")
-        for item in report.omissions:
-            lines.append(f"  - {item.aspect}：{item.fact}")
+        for omission in report.omissions:
+            lines.append(f"  - {omission.aspect}：{omission.fact}")
     if report.exempted:
         # 只列条目标签、不逐条铺开：收窄的成果要看得见，但不该把屏面重新淹一遍
         # （逐条细节在 ``exempted`` 里，要查查它）。

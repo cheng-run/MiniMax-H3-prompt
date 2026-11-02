@@ -53,6 +53,19 @@ files = [
     "src/minimax_h3_prompt/kinds.py",
     "src/minimax_h3_prompt/text_patterns.py",
     "src/minimax_h3_prompt/observability.py",
+    # 第二批（2026-11-02）：纯逻辑叶子 + 已修到绿的边界模块。
+    "src/minimax_h3_prompt/ref_capacity.py",
+    "src/minimax_h3_prompt/image_routing.py",
+    "src/minimax_h3_prompt/segment_planner.py",
+    "src/minimax_h3_prompt/director/frames.py",
+    "src/minimax_h3_prompt/tools/ref_metadata.py",
+    "src/minimax_h3_prompt/tools/frame_auditor.py",
+    "src/minimax_h3_prompt/stage2_checkpoint.py",
+    "src/minimax_h3_prompt/summary.py",
+    "src/minimax_h3_prompt/asset_proofread.py",
+    "src/minimax_h3_prompt/graph/pipeline.py",
+    "src/minimax_h3_prompt/model_factory.py",
+    "src/minimax_h3_prompt/main.py",
 ]
 ignore_missing_imports = true
 warn_unused_ignores = true

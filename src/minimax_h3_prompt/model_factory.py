@@ -4,6 +4,7 @@ from __future__ import annotations
 import httpx
 from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI
+from pydantic import SecretStr
 
 from .config import ModelSettings, config
 from .errors import ConfigError
@@ -39,7 +40,7 @@ _LLM_CALL_BUDGET_SECONDS = 1200.0
 _LLM_MAX_ATTEMPTS = 3
 
 try:  # deepagents 依赖 langchain-anthropic，单独 import 避免硬依赖
-    from langchain_anthropic import ChatAnthropic  # type: ignore
+    from langchain_anthropic import ChatAnthropic
 except ImportError:  # pragma: no cover
     ChatAnthropic = None  # type: ignore
 
@@ -67,9 +68,12 @@ def _anthropic(key: str, settings: ModelSettings) -> BaseChatModel:
     # stream_usage 在 ChatAnthropic 里默认 True，仍显式写：守卫测试钉的是「构造时
     # 明确要求了 usage 上报」，依赖库默认值会在升级时静默变化；一旦漏掉，
     # usage_metadata 返回 None，成本表会记成 0 token 而不报错（「规则在、接线不在」第 9 次）。
-    return ChatAnthropic(
+    # mypy 对 pydantic 生成的 __init__ 签名认不全（报了 model 意外、又追要一个
+    # ``stop``），运行期 ``model=`` 是字段名、有实测（tests/test_external_contracts.py
+    # 真构造了这个类）。只对 call-arg 收声，别的类型错误照报。
+    return ChatAnthropic(  # type: ignore[call-arg]
         model=settings.model,
-        api_key=key,
+        api_key=SecretStr(key),
         base_url=settings.base_url,
         timeout=_LLM_READ_TIMEOUT_SECONDS,
         max_retries=_LLM_MAX_RETRIES,
@@ -104,7 +108,7 @@ def build_chat_model() -> BaseChatModel:
     # read 同时承担首字节线与块间线，理由见上方常量注释。
     return ChatOpenAI(
         model=settings.model,
-        api_key=key,
+        api_key=SecretStr(key),
         base_url=base_url,
         timeout=httpx.Timeout(
             connect=_LLM_CONNECT_TIMEOUT_SECONDS,

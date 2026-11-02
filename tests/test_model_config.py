@@ -6,6 +6,13 @@ from minimax_h3_prompt import model_factory
 from minimax_h3_prompt.config import ModelSettings
 
 
+def _secret(value):
+    """取构造参数里的 key：主模型/视觉档传 ``SecretStr``（便于隐藏 repr），
+    视觉回退那一处仍是 str——两种形态都要能读。
+    """
+    return value.get_secret_value() if hasattr(value, "get_secret_value") else value
+
+
 def _stub_openai_constructor(monkeypatch, settings: ModelSettings) -> Mock:
     """把工厂里的 ChatOpenAI 换成 Mock，只观察它被要求了什么配置。
 
@@ -42,7 +49,7 @@ def test_build_deepseek_from_config(monkeypatch):
     constructor.assert_called_once()
     kwargs = constructor.call_args.kwargs
     assert kwargs["model"] == "deepseek-v4-flash"
-    assert kwargs["api_key"] == "secret"
+    assert _secret(kwargs["api_key"]) == "secret"
     assert kwargs["base_url"] == "https://api.deepseek.com/v1"
     # 开流式让「服务端在不在动」变成可观测；usage 上报必须同时开，否则
     # usage_metadata 返回 None、成本表静默记 0 token 而不报错。
@@ -83,7 +90,7 @@ def test_build_custom_openai_compatible_provider(monkeypatch):
     constructor.assert_called_once()
     kwargs = constructor.call_args.kwargs
     assert kwargs["model"] == "deepseek-v4.1-flash"
-    assert kwargs["api_key"] == "secret"
+    assert _secret(kwargs["api_key"]) == "secret"
     assert kwargs["base_url"] == "https://opencode.ai/zen/go"
     assert kwargs["streaming"] is True
     assert kwargs["stream_usage"] is True
@@ -118,7 +125,7 @@ def test_build_anthropic_streams_and_reports_usage(monkeypatch):
     constructor.assert_called_once()
     kwargs = constructor.call_args.kwargs
     assert kwargs["model"] == "claude-sonnet-5"
-    assert kwargs["api_key"] == "secret"
+    assert _secret(kwargs["api_key"]) == "secret"
     assert kwargs["base_url"] == "https://api.anthropic.com"
     assert kwargs["streaming"] is True
     assert kwargs["stream_usage"] is True
@@ -153,7 +160,7 @@ def test_build_vision_uses_config_and_streams(monkeypatch):
 
     kwargs = constructor.call_args.kwargs
     assert kwargs["model"] == "qwen3.7-plus"
-    assert kwargs["api_key"] == "secret"
+    assert _secret(kwargs["api_key"]) == "secret"
     assert kwargs["base_url"] == "https://vision.example/v1"
     assert kwargs["streaming"] is True
     # 与主档同一条「开流式必须开 usage 上报」的纪律：漏了它成本表记 0 且不报错

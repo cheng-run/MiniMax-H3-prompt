@@ -237,10 +237,11 @@ def _run_ledger(args: argparse.Namespace) -> int:
         return 0
 
     print(f"镜头 {len(ledger.shots)} 个：" + " → ".join(s.video for s in ledger.shots))
-    for item in ledger.discarded:
-        print(f"[废片] {item.video}（{item.confidence}）— {item.reason}")
-    for item in ledger.interruptions:
-        print(f"[中断] 第 {item.at_shot} 段未产出（{item.confidence}）— {item.hint}")
+    for discarded in ledger.discarded:
+        print(f"[废片] {discarded.video}（{discarded.confidence}）— {discarded.reason}")
+    for interruption in ledger.interruptions:
+        print(f"[中断] 第 {interruption.at_shot} 段未产出（{interruption.confidence}）"
+              f"— {interruption.hint}")
     for note in ledger.review_needed:
         print(f"[待确认] {note}")
     for note in ledger.warnings:
