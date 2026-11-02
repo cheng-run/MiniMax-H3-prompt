@@ -16,7 +16,9 @@ vendor 副本不同步常量，都会报红**。裁定与取舍见 ``docs/adr/00
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Protocol
 
 from ..text_patterns import (
     AT_TIMESTAMP as _TIME_RE,
@@ -628,7 +630,16 @@ def split_ref_sections(text: str) -> dict[str, str]:
     return {h: body for h, (body, _ln) in _find_sections(text, REF_SECTIONS).items()}
 
 
-def format_issues(issues: list[ValidationIssue]) -> str:
+class IssueLike(Protocol):
+    """渲染只需要这三个字段：``preflight.Issue`` 与 ``ValidationIssue`` 同形，
+    让渲染口接受形状而不是逼调用方换类型（换类型就得派生出第四份问题类）。"""
+
+    severity: str
+    code: str
+    message: str
+
+
+def format_issues(issues: Sequence[IssueLike]) -> str:
     if not issues:
         return "通过：未发现格式问题。"
     lines = [f"[{i.severity.upper()}] {i.code}: {i.message}" for i in issues]

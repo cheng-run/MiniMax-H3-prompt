@@ -12,8 +12,9 @@ import math
 import sys
 import time
 from contextlib import contextmanager
+from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, NamedTuple
+from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 
 if TYPE_CHECKING:  # 返回注解用；运行时经函数级导入取（防环，brief_parser 同款）
     from collections.abc import Sequence
@@ -35,6 +36,8 @@ from ..resume_point import forget as forget_answer
 from ..resume_point import recall as recall_answer
 from ..resume_point import remember as remember_answer
 from .wizard_display import (
+    clean_path_input as _clean_path_input,
+    semantic_reference as _semantic_reference,
     asset_assignment as _asset_assignment,
     current_prompt_text as _current_prompt_text,
     find_prompt_entry as _find_prompt_entry,
@@ -130,7 +133,9 @@ def _drain_stdin() -> None:
         try:
             import termios
 
-            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+            # termios 只有 POSIX 有这两个属性；Windows 上连 import 都会失败，
+            # 这一支走不到（下面的 except 兜底）。类型谱按当前平台生成，故单点收声。
+            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)  # type: ignore[attr-defined]
         except Exception:
             pass  # 宁可不排也不崩
 
@@ -235,19 +240,6 @@ def _register_asset_external_cost(state: dict, brief: Brief, generation_dir: Pat
     remember_answer(state, attempts_key, str(attempts))
     save_session(generation_dir, brief, state, status=STATUS_AWAITING_FRAMES)
     print(f"[外部成本·{item.name}] 已记下，交回入库时挂到这一版上。")
-
-
-def _clean_path_input(raw: str) -> str:
-    """清洗交互输入的文件路径：剥空白与首尾成对引号。
-
-    Windows 资源管理器"复制为路径"自带双引号，直接 Path(raw) 会得到
-    不存在的路径。只剥"首尾成对"的引号，路径中间内容原样保留——
-    无引号输入的行为与清洗前完全一致。
-    """
-    text = raw.strip()
-    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
-        text = text[1:-1].strip()
-    return text
 
 
 def _confirm(text: str, default: bool = True) -> bool:
@@ -750,6 +742,9 @@ def _collect_director_opening_still(session: SessionState, config: Config) -> bo
 
     from ..director.pack import FILM_END_STEM, START_STEM
 
+    if first_path is None:  # 首帧必填；空输入在这里拦下，不把 None 传进落点
+        print("[错误] 首帧路径为空。")
+        return False
     target = _store_director_still(first_path, directory, START_STEM)
     print(f"[已就位] 首帧：{target}")
     if last_path is not None:
@@ -864,7 +859,7 @@ def _run_director_flow(session: SessionState) -> int:
             (item.picture, item.name)
             for item in ref_asset_registry(state, brief))
         cached = refdefs.load_ref_sections(session.directory)
-        if refdefs.has_sections(cached) and cached.registry == registry:
+        if cached is not None and refdefs.has_sections(cached) and cached.registry == registry:
             # 续跑不重付：定义块只跟素材登记有关，跟分段无关（段规划改了也照用）。
             sections = cached
             print(f"[定义块] 复用已生成的全片定义：{refdefs.sections_path(session.directory)}")
@@ -1079,18 +1074,18 @@ def _cut_first_frame_prompt(plan, segment, session: SessionState, *, llm) -> str
           "切镜段要一张自己的首帧，正在写段首帧提示词（需要调用模型，稍等）…")
     shot_table = str(session.stage_state.get("shot_table", ""))
     try:
-        text = write_firstframe_prompt(
+        written = write_firstframe_prompt(
             segment, llm=llm, shot_table=shot_table,
             brief=session.brief, session_dir=session.directory)
     except Exception as exc:  # noqa: BLE001 - 病因原样交回，别伪装成别的问题
         print(f"[错误] 第 {segment.index} 段的段首帧提示词写不出来：{exc}")
         return None
-    if text is None:
+    if written is None:
         print(f"[错误] 第 {segment.index} 段的段首帧提示词写不出来"
               "（调用失败或回复里没有 first 帧正文）。")
         return None
-    _print_firstframe_prompt(text, index=segment.index, path=path)
-    return text
+    _print_firstframe_prompt(written, index=segment.index, path=path)
+    return written
 
 
 def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> bool:
@@ -1529,7 +1524,7 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
         if action == "quit":
             print("停在陪跑开始前：没有改动任何段的通过行与缓存。")
             return 0
-        if action == "ok":
+        if action == "ok" and target is not None:
             refreshed = _apply_director_cascade(
                 directory=directory, cache_directory=cache_directory,
                 from_segment=target, total=total)
@@ -1651,7 +1646,7 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
             # 尾问里按 q 与「停在交付前」是同一件事：段全过了，交付没做，重跑向导回到这里。
             print("停在交付之前：全部段已通过，重跑向导会回到交付。")
             return 0
-        if action == "none":
+        if action == "none" or target is None:
             break
         refreshed = _apply_director_cascade(
             directory=directory, cache_directory=cache_directory,
@@ -3071,7 +3066,7 @@ def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: 
             with step_scope("正在读图校对"):
                 # 正本位置走统一解析口（issue #85）：素材在素材库里，不在生成目录
                 raw = describe_image(
-                    resolve_asset_path(ledger, entry, session_dir=generation_dir),
+                    Path(resolve_asset_path(ledger, entry, session_dir=generation_dir)),
                     build_proofread_request(base, locked))
             reading = parse_reading(raw)
         except Exception as exc:  # noqa: BLE001 — 读图失败要响且不放行
@@ -4302,18 +4297,18 @@ def _phase2_collect_and_finish(
         print("[警告] 首帧与尾帧是同一张图，视频将几乎静止。")
 
     # 帧图入库 + 读图
-    descriptions = []
+    descriptions: list[dict] | None = []
     frame_records = []
     if have_first or have_last:
         from ..tools.frame_auditor import audit_frame_images
 
         refs = []
         frame_slots = {role: picture for picture, role in _required_frames(effective)}
-        if have_first:
+        if first_path is not None:
             record = _store_frame(first_path, generation_dir, "first")
             frame_records.append(record)
             refs.append(RefItem(picture=frame_slots.get("first", 1), name="首帧", description="", path=str(first_path)))
-        if have_last:
+        if last_path is not None:
             record = _store_frame(last_path, generation_dir, "last")
             frame_records.append(record)
             refs.append(RefItem(picture=frame_slots.get("last", 2), name="尾帧", description="", path=str(last_path)))
@@ -4420,9 +4415,11 @@ def _load_or_make_summary(prompt: str, llm, directory: Path):
         try:
             payload = json.loads(json_path.read_text(encoding="utf-8"))
             if isinstance(payload, dict) and payload.get("overall"):
+                raw_shots = payload.get("shots")
                 return PromptSummary(
                     overall=str(payload["overall"]),
-                    shots=payload.get("shots") if isinstance(payload.get("shots"), list) else [],
+                    shots=[shot for shot in raw_shots if isinstance(shot, dict)]
+                    if isinstance(raw_shots, list) else [],
                 )
         except (OSError, ValueError):
             pass  # 损坏则重新生成
@@ -4570,19 +4567,6 @@ def _log_gate(directory: Path, record: dict) -> None:
     seg_dir.mkdir(parents=True, exist_ok=True)
     with open(seg_dir / "gate-log.jsonl", "a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-
-def _semantic_reference(previous_text: str | None) -> str | None:
-    """从一段提示词正文取「该达到的末态」参照：收尾句。
-
-    v2 规划路径用 ``plan.end_hook``（规划层显式声明的末态）；机械拆分不产出它，
-    所以回退路径退而取上一段正文的最后一行——官方格式下它就是该段最后一个动作节拍。
-    展示时会标明是降级参照，不假装它是 end_hook。
-    """
-    if not previous_text:
-        return None
-    lines = [line.strip() for line in previous_text.strip().splitlines() if line.strip()]
-    return lines[-1] if lines else None
 
 
 def _previous_segment_tail(seg_dir: Path, position: int) -> str | None:
@@ -5812,8 +5796,7 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
                 reference=_previous_segment_tail(seg_dir, position),
                 reference_label="（上一段提示词收尾句；本路径无 plan 末态声明）",
                 # 落账点在闸门放行那一刻：被拦下/判重跑/停下的轮次走不到这里
-                on_pass=lambda video, number=position, shot=judged:
-                    record_pass(number, shot, video),
+                on_pass=partial(record_pass, position, judged),
             ):
                 return False  # 硬阻断（issue #13）：交接物不合格，不能算「已跑完」
             # 闸门放行＝上一段过了、本段的锚已写进 state：立刻落盘（issue #94 复审）。
@@ -5894,8 +5877,7 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
                                   end_hook=_previous_segment_tail(seg_dir, total),
                                   segment_number=total, total=total,
                                   expected_seconds=segments[-1].duration_seconds,
-                                  on_pass=lambda video, shot=segments[-1]:
-                                      record_pass(total, shot, video)):
+                                  on_pass=partial(record_pass, total, segments[-1])):
             return False
     # 段序真源（#96）：机械回退路径没有 plan 层，全部段通过之后补写段表，收尾处的成片
     # 拼接照它排段。只在**全部段通过**时写（中途写的后果见函数 docstring）；旧会话不写
@@ -6180,8 +6162,7 @@ def _run_segmented_flow_v2(session: SessionState, plans: list, state: dict, llm,
                     reference_label="（本段 plan.end_hook）",
                     # 落账点＝闸门放行那一刻（issue #94）：被拦下/判重跑/停下的轮次
                     # 走不到这里，账上就不会有这一段的通过行。
-                    on_pass=lambda video, number=position + 1, current=plan:
-                        record_pass(number, current, video),
+                    on_pass=partial(record_pass, position + 1, plan),
                 ):
                     # 硬阻断（issue #13）：错误的交接物不得被当成下一段的事实喂下去。
                     # 账（旧会话是进度）也**不得**落盘——否则被拦下的这一段会被续跑跳过。
@@ -6214,8 +6195,7 @@ def _run_segmented_flow_v2(session: SessionState, plans: list, state: dict, llm,
                                   end_hook=last_plan.end_hook,
                                   segment_number=total, total=total,
                                   expected_seconds=float(last_plan.duration_s),
-                                  on_pass=lambda video, current=last_plan:
-                                      record_pass(total, current, video)):
+                                  on_pass=partial(record_pass, total, last_plan)):
             return False
     print(f"\n✓ 全部 {total} 段已人工确认完成。")
     return True
@@ -6236,7 +6216,7 @@ def _store_frame(source: Path, generation_dir: Path, role: str) -> dict:
         shutil.copy2(source, target)
     record = {"role": role, "source": str(source), "target": str(target), "sha256": digest}
     manifest = frames_dir / "source.json"
-    existing = {"schema_version": "frame-import.v1", "frames": []}
+    existing: dict[str, Any] = {"schema_version": "frame-import.v1", "frames": []}
     if manifest.exists():
         try:
             raw = json.loads(manifest.read_text(encoding="utf-8"))
@@ -6244,7 +6224,9 @@ def _store_frame(source: Path, generation_dir: Path, role: str) -> dict:
                 existing = raw
         except (OSError, json.JSONDecodeError):
             pass
-    frames = {item.get("role"): item for item in existing.get("frames", [])}
+    frames: dict[Any, Any] = {
+        item.get("role"): item for item in existing.get("frames", [])
+        if isinstance(item, dict)}
     frames[role] = record
     existing["frames"] = list(frames.values())
     manifest.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")

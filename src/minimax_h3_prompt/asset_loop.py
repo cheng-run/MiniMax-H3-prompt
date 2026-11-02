@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, NamedTuple, Sequence
 
 # 模型展示名与纪律读取口（issue #87 起按模型各一份）。放在模块顶层而不是函数内：
@@ -124,7 +125,12 @@ class QueueItem(NamedTuple):
     name: str
 
 
-def asset_queue(entries: Sequence[dict[str, Any]], *, pictures: dict[str, int] | None = None) -> tuple[QueueItem, ...]:
+def asset_queue(
+    entries: Mapping[str, Sequence[dict[str, Any]]]
+    | Sequence[tuple[str, dict[str, Any]]],
+    *,
+    pictures: dict[str, int] | None = None,
+) -> tuple[QueueItem, ...]:
     """把资产条目排成素材循环的待办队列（issue #66 起纯 ``<Picture N>`` 升序）。
 
     编号来自 ``pictures``（语义名 → 剧本出场序，经 ``ref_asset_registry`` 派生），

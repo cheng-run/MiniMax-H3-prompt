@@ -79,6 +79,8 @@ files = [
     "src/minimax_h3_prompt/generation.py",
     # 第五批（2026-11-02）：管线节点。
     "src/minimax_h3_prompt/graph/nodes.py",
+    # 第六批（2026-11-02）：向导（6000+ 行，最后一块）。
+    "src/minimax_h3_prompt/ui/wizard.py",
 ]
 ignore_missing_imports = true
 warn_unused_ignores = true

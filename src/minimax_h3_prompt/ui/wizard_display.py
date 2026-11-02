@@ -168,3 +168,29 @@ def locked_features(state: dict, brief: Brief, name: str) -> Sequence[str]:
 
     return next((v.locked_features for v in image_prompt_variants(state, brief.canvases)
                  if v.name == name), ())
+
+
+def clean_path_input(raw: str) -> str:
+    """清洗交互输入的文件路径：剥空白与首尾成对引号。
+
+    Windows 资源管理器"复制为路径"自带双引号，直接 Path(raw) 会得到
+    不存在的路径。只剥"首尾成对"的引号，路径中间内容原样保留——
+    无引号输入的行为与清洗前完全一致。
+    """
+    text = raw.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        text = text[1:-1].strip()
+    return text
+
+
+def semantic_reference(previous_text: str | None) -> str | None:
+    """从一段提示词正文取「该达到的末态」参照：收尾句。
+
+    v2 规划路径用 ``plan.end_hook``（规划层显式声明的末态）；机械拆分不产出它，
+    所以回退路径退而取上一段正文的最后一行——官方格式下它就是该段最后一个动作节拍。
+    展示时会标明是降级参照，不假装它是 end_hook。
+    """
+    if not previous_text:
+        return None
+    lines = [line.strip() for line in previous_text.strip().splitlines() if line.strip()]
+    return lines[-1] if lines else None
