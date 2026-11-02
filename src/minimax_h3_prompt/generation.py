@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, NamedTuple
+from typing import Any, Literal, NamedTuple, cast
 
 from .asset_proofread import proofread_descriptions
 from .brief_parser import (
@@ -348,7 +348,9 @@ class PromptArtifact:
     def from_dict(cls, raw: dict[str, Any]) -> PromptArtifact:
         return cls(
             artifact_id=str(raw.get("artifact_id", "")),
-            kind=str(raw.get("kind", "")),
+            # 外部 JSON 读回：值先按 str 取，合法性由 ``__post_init__`` 判
+            # （坏 kind 在那里报错），cast 只告诉类型检查「这一步之后是那几值之一」。
+            kind=cast(PromptKind, str(raw.get("kind", ""))),
             content=str(raw.get("content", "")),
             source_stage=str(raw.get("source_stage", "")),
             sha256=str(raw.get("sha256", "")),
@@ -412,7 +414,8 @@ class ImagePromptVariant:
     def from_dict(cls, raw: dict[str, Any]) -> ImagePromptVariant:
         return cls(
             name=str(raw.get("name", "")),
-            kind=str(raw.get("kind", "")),
+            # 同上：``__post_init__`` 已按 {"character","prop","scene"} 校验过。
+            kind=cast(Literal["character", "prop", "scene"], str(raw.get("kind", ""))),
             positive_prompt=str(raw.get("positive_prompt", "")),
             negative_prompt=str(raw.get("negative_prompt", "")),
             profile_id=str(raw.get("profile_id", "")),
@@ -494,7 +497,8 @@ class FL2VAFramePrompt:
         else:
             width, height = frame_canvas_size(family, canvases)
         return cls(
-            frame=str(raw.get("frame", "")),
+            # 同上：帧名由 ``__post_init__`` 按变体帧表校验。
+            frame=cast(Literal["first", "last"], str(raw.get("frame", ""))),
             model_family=str(raw.get("model_family", "")),
             positive_prompt=str(raw.get("positive_prompt") or raw.get("prompt", "")),
             negative_prompt=str(raw.get("negative_prompt", "")),
@@ -925,8 +929,8 @@ def result_from_state(
         raw_bundle = state.get("fl2va_prompt_bundle")
         if not isinstance(raw_bundle, dict):
             raise ValueError("管线缺少 FL2VA 首尾帧提示词")
-        image_bundle = fl2va_bundle_from_dict(raw_bundle, brief)
-        artifacts = (
+        image_bundle: FL2VAPromptBundle | None = fl2va_bundle_from_dict(raw_bundle, brief)
+        artifacts: tuple[PromptArtifact, ...] = (
             PromptArtifact(
                 artifact_id=f"{generation_id}-video",
                 kind="video",
@@ -1043,7 +1047,8 @@ def image_prompt_variants(
             canvas_width, canvas_height = image_canvas_size("zimage", canvases)
             variants.append(ImagePromptVariant(
                 name=str(item.get("name", "") or label),
-                kind=kind,
+                # 来源是 ``ASSET_KIND_FIELDS`` 的键（纯数据表），运行时范围有限。
+                kind=cast(Literal["character", "prop", "scene"], kind),
                 positive_prompt=positive,
                 negative_prompt=str(item.get("negative_prompt", "")),
                 profile_id=str(item.get("profile_id", default.profile_id)),

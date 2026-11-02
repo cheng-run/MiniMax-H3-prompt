@@ -74,6 +74,9 @@ files = [
     "src/minimax_h3_prompt/shot_ledger.py",
     "src/minimax_h3_prompt/segment_prompts.py",
     "src/minimax_h3_prompt/project_models.py",
+    # 第四批（2026-11-02）：角色装配与产物模型。
+    "src/minimax_h3_prompt/agents/__init__.py",
+    "src/minimax_h3_prompt/generation.py",
 ]
 ignore_missing_imports = true
 warn_unused_ignores = true

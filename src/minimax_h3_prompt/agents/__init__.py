@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 from langchain.agents import create_agent
@@ -337,7 +338,11 @@ class FirstByteHandler(BaseCallbackHandler):
             return 0.0
         return time.monotonic() - self.first_byte_at
 
-    def on_llm_new_token(self, token: str, **kwargs) -> None:
+    # 签名对齐 langchain 的 ``LLMManagerMixin.on_llm_new_token``：至少要有
+    # keyword-only 的 ``chunk``，否则父类调用约定一变就静默不触发（首字节信号消失）。
+    def on_llm_new_token(self, token: object, *, chunk: object = None,
+                         run_id: object = None, parent_run_id: object = None,
+                         tags: object = None, **kwargs: object) -> None:
         now = time.monotonic()
         if self.first_byte_at is None:
             self.first_byte_at = now
@@ -347,8 +352,10 @@ class FirstByteHandler(BaseCallbackHandler):
             })
         self.chunks += 1
         # UTF-8 字节数，不是 ``len(token)``（那数码点：中文一字 1、字节却是 3）。
-        # 空 token 也要能过，所以先 ``or ""`` 再编码。
-        self.bytes += len((token or "").encode("utf-8"))
+        # 父类签名允许 list 形态的 token；这里只把 str 计入（list 是「一批片段」，
+        # 计数本来就是启发式），也避免对 list 调 .encode 直接崩。
+        piece = token if isinstance(token, str) else ""
+        self.bytes += len(piece.encode("utf-8"))
         if now - self._last_progress_at >= self._interval:
             self._last_progress_at = now
             reporter.emit({
@@ -372,8 +379,10 @@ def _is_timeout_error(exc: BaseException) -> bool:
     try:
         from openai import APITimeoutError
     except ImportError:  # pragma: no cover - openai 是硬依赖，留作防御
-        APITimeoutError = None  # type: ignore[assignment]
-    if APITimeoutError is not None and isinstance(exc, APITimeoutError):
+        _api_timeout_error = None
+    else:
+        _api_timeout_error = APITimeoutError
+    if _api_timeout_error is not None and isinstance(exc, _api_timeout_error):
         return True
     return any(cls.__name__ == "TimeoutException" for cls in type(exc).__mro__)
 
@@ -658,7 +667,7 @@ def run_direct_call(llm, request: object, *, role: str) -> DirectCallResult:
             ok=True, response=response, attempts=attempt_no, duration=duration)
 
 
-def run_agent(agent: object, message: str, retry_empty: bool = True) -> str:
+def run_agent(agent: Any, message: str, retry_empty: bool = True) -> str:
     """invoke 一个角色 agent，返回最终回答的纯文本。
 
     判据分派（issue #61，三种病走三条路）：
@@ -744,7 +753,7 @@ def run_agent(agent: object, message: str, retry_empty: bool = True) -> str:
 
 
 def _run_agent_inner(
-    agent: object,
+    agent: Any,
     message: str,
     retry_empty: bool = True,
     *,
