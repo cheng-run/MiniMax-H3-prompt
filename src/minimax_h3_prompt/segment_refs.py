@@ -28,12 +28,15 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
 from .ref_capacity import MAX_PICTURES
+from .text_patterns import (
+    PICTURE_TAG as _PICTURE_RE,
+    SHOT_TAG as _SHOT_TAG_RE,
+    SUBJECT_TAG as _SUBJECT_RE,
+)
 from .workflow_config import DEFAULT_REFS_PER_SEGMENT, workflow_settings
 
 # 官方标签（ref-en.txt §2）：<Subject N> / <Picture N>。与校验器同一套形态，
 # 但这里只做「收集与改写」，判据（未定义/未使用/跳号）仍住在 ``tools.h3_validator``。
-_PICTURE_RE = re.compile(r"<Picture\s+(\d+)>")
-_SUBJECT_RE = re.compile(r"<Subject\s+(\d+)>")
 
 # 定义条目行首标签：官方要求「Give each item its own line」，所以一行起头是标签的
 # 就是一个新条目；续行归上一个条目（历史产物里偶有折行，不能把续行当新条目丢掉）。
@@ -349,9 +352,8 @@ def scope_ref_sections(sections: Mapping[str, str],
 #   <Subject 1> (appears in [Shot 1], [Shot 3]): fully_preserved - ...
 #   Shot 2, 00:04-00:10: <Subject 1> partially_preserved, ...
 # 前者一行跨多个镜头，后者一行只讲一个镜头——两种都要按本段镜头裁。
-_SHOT_TAG_RE = re.compile(r"\[Shot\s+(\d+)\]")
-_APPEARS_RE = re.compile(r"\(\s*appears in\s+([^)]*)\)", re.IGNORECASE)
 _EDGE_SHOT_RE = re.compile(r"^\s*Shot\s+(\d+)\s*[,:]\s*", re.IGNORECASE)
+_APPEARS_RE = re.compile(r"\(\s*appears in\s+([^)]*)\)", re.IGNORECASE)
 
 
 def scope_retention_to_shots(text: str, shots: Iterable[int], *,

@@ -16,13 +16,13 @@ import re
 from pathlib import Path
 
 from ..image_config import load_frame_image_model
+from ..text_patterns import AT_TIMESTAMP as _SHOT_TIME
 from .frames import DirectorSegment
 from .planning import DIRECTOR_DIRNAME
 
 FIRSTFRAME_FILENAME = "firstframe-{position:02d}.md"
 
 _SHOT_HEAD = re.compile(r"\*\*\[Shot\s+(\d+)\]\*\*")
-_SHOT_TIME = re.compile(r"At\s+(\d{2}):(\d{2})\.(\d{3})")
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
 
 

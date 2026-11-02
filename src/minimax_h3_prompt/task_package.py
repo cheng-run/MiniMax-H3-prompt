@@ -12,8 +12,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .text_patterns import SHA256_HEX as _SHA256_RE
 
-_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
 _GENERATION_ID_RE = re.compile(r"^(?:G\d{3}|[A-Z][A-Z0-9]*-G\d{3})$")
 _TASK_SCHEMA_VERSION = "1"
 _TASK_FIELDS = {

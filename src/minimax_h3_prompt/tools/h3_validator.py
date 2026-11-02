@@ -18,16 +18,17 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-_SHOT_RE = re.compile(r"\[Shot\s+(\d+)\]")
-_TIME_RE = re.compile(r"At\s+(\d{2}):(\d{2})\.(\d{3})")
-# 行首裸时间戳镜头：At MM:SS.mmm 开头且本行无 [Shot N]——长视频拆分器会漏掉
-_BARE_TIMESTAMP_LINE = re.compile(r"^\s*At\s+\d{2}:\d{2}\.\d{3}")
+from ..text_patterns import (
+    AT_TIMESTAMP as _TIME_RE,
+    PICTURE_TAG as _PICTURE_RE,
+    SHOT_TAG as _SHOT_RE,
+    TIMESTAMP_ONLY_LINE as _BARE_TIMESTAMP_LINE,
+)
+
 _DIALOG_OPEN_RE = re.compile(r"<d>")
 _DIALOG_CLOSE_RE = re.compile(r"</d>")
 _LANG_TAG_RE = re.compile(r"<d>\s*\[([A-Za-z\-]{2,})\]")
 _SPEAKER_RE = re.compile(r"\(S(\d+)\)")
-_PICTURE_RE = re.compile(r"<Picture\s+(\d+)>")
-_SUBJECT_RE = re.compile(r"<Subject\s+(\d+)>")
 _AUDIO_RE = re.compile(r"<Audio\s+(\d+)>")
 _VIDEO_RE = re.compile(r"<Video\s+(\d+)>")
 _WORD_RE = re.compile(r"[A-Za-z]+")

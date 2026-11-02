@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
 
+from .text_patterns import SHA256_HEX as _SHA256
+
 AssetStatus = Literal["planned", "candidate", "approved", "rejected"]
 ReviewSeverity = Literal["info", "warning", "error"]
 ReviewKind = Literal["static", "manual", "visual", "audio"]
@@ -21,7 +23,6 @@ _ASSET_ID = re.compile(r"^[CSP E]\d{2}$".replace(" ", ""))
 _SHOT_ID = re.compile(r"^SH\d{3}$")
 _VERSION_ID = re.compile(r"^(?:[A-Z]+\d{2}|SH\d{3})-v\d{3}$")
 _GENERATION_ID = re.compile(r"^(?:[A-Z]+\d{2}|SH\d{3})-G\d{3}$")
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SEGMENT_ID = re.compile(r"^SEG\d{2}-SH\d{3}[a-z]$")
 
 

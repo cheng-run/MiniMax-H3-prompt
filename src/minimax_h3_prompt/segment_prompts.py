@@ -18,6 +18,11 @@ import re
 from dataclasses import dataclass
 
 from . import film_language
+from .text_patterns import (
+    AT_TIMESTAMP as _AT_TIME_RE,
+    LEADING_TIMESTAMP as _BARE_TIMESTAMP_LINE,
+    SHOT_TAG as _SHOT_BLOCK,
+)
 from .tools.h3_validator import (
     ALIGN_TEMPLATES,
     EDGE_STABILITY_SENTENCE,
@@ -31,8 +36,7 @@ from .tools.h3_validator import (
 )
 from .user_revisions import pending_revisions, render_revision_block
 
-# 镜头块标记：[Shot N]（允许中括号与数字间任意空白）
-_SHOT_BLOCK = re.compile(r"\[Shot\s+(\d+)\]")
+# 镜头块标记：[Shot N]（允许中括号与数字间任意空白）；判据单一来源见 text_patterns。
 # 镜头块首的绝对时间戳：[Shot 2] At 00:03.500, the camera ...
 _TIMESTAMP_AFTER_TAG = re.compile(r"(\[Shot\s+\d+\])\s*At\s+(\d{2}):(\d{2})\.(\d{3}),?\s*", re.IGNORECASE)
 # 镜头区之后属于全局声音/配乐段落的标记（用于界定镜头区结尾）
@@ -79,7 +83,6 @@ def _direct_write(llm, request: str, *, role: str, label: str) -> str | None:
 
 
 # 行首裸时间戳（无 [Shot N] 标记的镜头边界），用于"模型漏标镜头号"的兼容降级
-_BARE_TIMESTAMP_LINE = re.compile(r"^At\s+(\d{2}):(\d{2})\.(\d{3}),?\s*", re.IGNORECASE)
 
 
 def _mark_bare_timestamp_shots(prompt: str) -> str:
@@ -1405,7 +1408,6 @@ def write_ref_segment_v2(plan, all_plans: list, *, sections: dict[str, str],
 # 行内节拍时间戳（At MM:SS.mmm）与块首切点时间戳：机械切片整体重基用。
 # 块首只认 `\A` 锚定的切点时间——不锚定会把首块**句中**的第一个节拍当切点删掉
 # （对抗验证 B1 实证：合法句 "Wide view. At 00:02.500, gulls scatter" 被静默吞节拍）。
-_AT_TIME_RE = re.compile(r"At\s+(\d{2}):(\d{2})\.(\d{3})")
 _LEADING_AT_RE = re.compile(r"\AAt\s+\d{2}:\d{2}\.\d{3},?\s*")
 
 

@@ -33,6 +33,7 @@ from typing import Iterable, Sequence
 
 from .. import film_language
 from ..ref_capacity import MAX_PICTURES
+from ..text_patterns import AT_TIMESTAMP as _AT_TIME_RE
 from ..segment_refs import (
     SegmentAssetOverflowError,
     compute_segment_scope,
@@ -106,7 +107,7 @@ _REF_TASK_TYPE = "reference generation"
 # 行内时间戳（`At MM:SS.mmm`）：导演台正文里最终是**成片坐标**，由组装器从模型写的
 # 相对本段起点的时间戳加上 `start_frame / 24` 得到。格式只认两位分、两位秒、三位毫秒
 # ——与官方 base/ref 的时间戳形态同一份，模型不会为导演台另造一种写法。
-_AT_TIME_RE = re.compile(r"At\s+(\d{2}):(\d{2})\.(\d{3})")
+# 判据本体在 ``text_patterns.AT_TIMESTAMP``（2026-11-02 体检 P0-4 单一来源）。
 
 # 段文件落点：``GENxxx/director/segment-NN.md``（1 起）。与 ``plan.json`` 同目录——
 # ``segments/`` 是 base/ref 的地盘，两套产物混在一处会让按目录扫段的续跑读错路线。

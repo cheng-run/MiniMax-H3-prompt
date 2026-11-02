@@ -35,6 +35,7 @@ from typing import Any, Iterable, Sequence
 
 from ..asset_ledger import KIND_PICTURE, load_asset_ledger, resolve_asset_path
 from ..ref_capacity import MAX_PICTURES
+from ..text_patterns import PICTURE_TAG as _SLOT_TOKEN_RE
 from .frames import (
     FPS,
     PLAN_MODES,
@@ -157,8 +158,6 @@ _ASSET_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 # fl2v 段的默认负面词（``fl2v_timeline.py:32`` ``DEFAULT_FL2V_NEGATIVE``）：UI 在
 # 段缺负面词时也用它，包里写同一个值可以避免「包里空、UI 里又变回来」的假差异。
 FL2V_DEFAULT_NEGATIVE = "bad video"
-
-_SLOT_TOKEN_RE = re.compile(r"<Picture\s+(\d+)>")
 
 
 # ---------------------------------------------------------------------------

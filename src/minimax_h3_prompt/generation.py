@@ -18,6 +18,7 @@ from .brief_parser import (
     route_emits_asset_prompts,
 )
 from .graph.state import ASSET_KIND_FIELDS
+from .text_patterns import SHA256_HEX as _SHA256
 from .tools.theme_guard import (
     _CONFLICTING_OUTDOOR_TERMS,
     contains_unqualified_conflict as _contains_unqualified_conflict,
@@ -28,7 +29,6 @@ from .workflow_config import workflow_settings
 PromptKind = Literal["script", "video", "character", "prop", "scene"]
 _PROMPT_KINDS = ("script", "video", "character", "prop", "scene")
 _GENERATION_ID = re.compile(r"^GEN\d{3}$")
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 # 多参（ref2va）路线的登记工作流名。**唯一可写来源是 config/workflow.yaml**
 # （issue #41 AC6 → issue #65 改为配置派生）：产物/菜单/注入卡的指称都要对得上
