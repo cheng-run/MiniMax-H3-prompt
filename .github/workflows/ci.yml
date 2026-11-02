@@ -1,0 +1,52 @@
+name: CI
+
+# 为什么有这个工作流（体检 P0-2，2026-11-02）：此前 docs/tests/scripts 不入库，
+# 唯一的守卫是 scripts/check.sh，而它只活在本机 `.git/hooks` 里。换机器、换会话、
+# 干净检出都没有约束，「本机全绿」于是成了唯一证据——而它不能当反证。
+# 这里把同一套命令搬到每次 push / PR 上，让「绿」变成任何机器都能复现的事实。
+#
+# 不做的事：不跑真实 ComfyUI/网关/ffmpeg 联调（需要用户机器与密钥），
+# 真实外部契约测试在后续阶段单独设计（见 docs/research/2026-11-02-项目体检.md §5）。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 只读权限：CI 只验证，不写回仓库。
+permissions:
+  contents: read
+
+# 同一分支的新提交取消旧的运行，避免排队烧时长。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # Windows 是当前唯一支持平台：配置默认值带 D:\ 路径、向导要求 TTY。
+    # 跨平台解耦是后续工作项（体检 P2-4）；先别让一个从没绿过的 job 常红。
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      # uv 负责解释器与锁文件：requires-python >= 3.14，由 setup-uv 现装。
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: "3.14"
+          enable-cache: true
+
+      - name: 安装依赖（严格按 uv.lock）
+        run: uv sync --frozen
+
+      # 与 scripts/check.sh 同源：结构守卫 → lint → 全量测试。
+      # ruff 的 F 规则抓未定义名/未使用导入，是复审子代理漏掉的那类机械错误。
+      - name: 结构守卫：docstring 不许写成 f-string
+        run: uv run python scripts/check_docstring_shape.py src
+
+      - name: lint（ruff）
+        run: uv run python -m ruff check src
+
+      - name: 全量测试
+        run: uv run python -m pytest -q

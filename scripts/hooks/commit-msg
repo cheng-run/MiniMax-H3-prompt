@@ -1,0 +1,4 @@
+#!/bin/sh
+# 提交信息格式守卫（retro 2026-10-31）。逻辑在 scripts/check_commit_msg.sh，
+# 钩子只是入口，方便 bootstrap-dev.sh 重新安装。
+exec "$(git rev-parse --show-toplevel)/scripts/check_commit_msg.sh" "$1"

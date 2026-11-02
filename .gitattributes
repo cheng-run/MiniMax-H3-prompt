@@ -1,0 +1,17 @@
+# 换行统一（2026-11-02 入库 P0-1 配套）：Windows 默认 core.autocrlf=true，若不做
+# 声明，干净检出会把 shell 脚本签成 CRLF，Git Bash 报 "bad interpreter"——
+# scripts/check.sh 与 .git/hooks 会因此整条失效，而且不报错只提示，很容易当绿。
+* text=auto
+
+# 脚本与钩子必须 LF：它们是 bash 入口，CRLF 会让 shebang 解析失败。
+*.sh text eol=lf
+scripts/hooks/* text eol=lf
+
+# 其余文本文件统一 LF，避免同一份文档在不同机器上来回改行尾。
+*.py text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+*.jsonl text eol=lf

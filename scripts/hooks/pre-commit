@@ -1,0 +1,4 @@
+#!/bin/sh
+# 提交前跑秒级结构守卫（retro 2026-10-30）。真正的逻辑在 scripts/check.sh，
+# 钩子只是入口——这样改判据只改一处，不用碰 .git/hooks。
+exec "$(git rev-parse --show-toplevel)/scripts/check.sh" fast
