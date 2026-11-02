@@ -454,7 +454,7 @@ def render_segment_injection_card(scope: SegmentAssetScope, *, position: int,
     槽位名从 ``injection_card.slot_name`` 取（端口命名唯一来源），不在这里手写前缀。
     """
     from .injection_card import slot_name  # 延迟导入：本模块被写段层 import，别拖配置栈
-    from .asset_ledger import KIND_PICTURE
+    from .kinds import KIND_PICTURE
 
     # 端口数与名字都从生效配置取一次（读盘一次，两处共用）。**端口数**是「工作流有几个
     # 图槽」，未用槽要点到真实端口——用官方上限 9 去截会把它算成假的（配置 24 槽时

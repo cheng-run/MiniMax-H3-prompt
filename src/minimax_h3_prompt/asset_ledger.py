@@ -38,6 +38,14 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Sequence
 
 from .brief_parser import RefItem
+from .kinds import (
+    KIND_AUDIO,
+    KIND_LABELS,
+    KIND_PICTURE,
+    KIND_VIDEO,
+    KINDS,
+    OFFICIAL_LABEL as _OFFICIAL_LABEL,
+)
 from .library_config import library_settings, require_library_root
 from .task_package import resolve_input_path
 from .text_patterns import SHA256_HEX as _SHA256_RE
@@ -48,13 +56,8 @@ LEDGER_FILENAME = "asset-ledger.json"
 # 两个可选字段把旧产物的可复测性砸掉，正好违背台账存在的理由。
 _SCHEMA_VERSION = "asset-ledger.v1"
 
-# 参考素材三型：对齐官方标签（Picture / Video / Audio），值是机器口径，渲染再转中文。
-KIND_PICTURE = "picture"
-KIND_VIDEO = "video"
-KIND_AUDIO = "audio"
-KINDS = (KIND_PICTURE, KIND_VIDEO, KIND_AUDIO)
-KIND_LABELS = {KIND_PICTURE: "图", KIND_VIDEO: "视频", KIND_AUDIO: "音频"}
-_OFFICIAL_LABEL = {KIND_PICTURE: "Picture", KIND_VIDEO: "Video", KIND_AUDIO: "Audio"}
+# 参考素材三型（KIND_*）与中文标签住 ``kinds.py``，这里按原名字再导出：调用点与
+# ``__all__`` 不用改，配置/会话层则可以只依赖 ``kinds``，不再拉起本模块（P0-5）。
 
 # 素材库文件名里的语义名：去掉路径分隔符与 glob 元字符（``[]`` 也是通配符，留着会让
 # 「盘上已有同号文件」的扫描看漏），截断到 40 字防超长路径。非法字符换成 ``_``，

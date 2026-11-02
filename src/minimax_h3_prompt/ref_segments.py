@@ -42,11 +42,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .asset_ledger import (
-    KIND_PICTURE,
     load_asset_ledger,
     resolve_asset_path,
     sha256_file,
 )
+from .kinds import KIND_PICTURE
 from .final_film import (
     ConcatStrategy,
     FinalFilm,

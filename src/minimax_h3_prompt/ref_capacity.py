@@ -20,15 +20,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
-from .asset_ledger import (
-    KIND_AUDIO,
-    KIND_LABELS,
-    KIND_PICTURE,
-    KIND_VIDEO,
-    KINDS,
-    AssetLedger,
-    format_tag,
-)
+from .asset_ledger import AssetLedger, format_tag
+from .kinds import KIND_AUDIO, KIND_LABELS, KIND_PICTURE, KIND_VIDEO, KINDS
 
 # 官方单次请求上限（spec #84「事实底账」→ minimax.io v2-create 文档）。改这里的任何
 # 一个数都要同时改票面与 ADR：这组数字是外部契约，不是本仓的调参。

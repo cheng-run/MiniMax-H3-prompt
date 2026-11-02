@@ -37,10 +37,6 @@ from pathlib import Path
 from typing import NamedTuple
 
 from .asset_ledger import (
-    KIND_AUDIO,
-    KIND_LABELS,
-    KIND_PICTURE,
-    KIND_VIDEO,
     AssetLedger,
     AssetRecord,
     format_tag,
@@ -48,6 +44,7 @@ from .asset_ledger import (
     resolve_asset_path,
 )
 from .generation import image_canvas_size
+from .kinds import KIND_AUDIO, KIND_LABELS, KIND_PICTURE, KIND_VIDEO
 from .ref_capacity import MAX_AUDIOS, MAX_FILES, MAX_PICTURES, MAX_VIDEOS
 from .workflow_config import WorkflowSettings, workflow_settings
 

@@ -568,7 +568,7 @@ def _check_brief_ref_capacity(brief) -> bool:
     这条快路径没有生成目录、没有台账（见 ``_run_cli`` 的能力声明），所以判据取
     ``brief.refs``——它是本路径唯一的素材声明来源。
     """
-    from .asset_ledger import KIND_PICTURE
+    from .kinds import KIND_PICTURE
     from .ref_capacity import (
         ReferenceCapacityError,
         ReferenceItem,

@@ -17,7 +17,7 @@ from .brief_parser import (
     is_ref_mode,
     route_emits_asset_prompts,
 )
-from .graph.state import ASSET_KIND_FIELDS
+from .kinds import ASSET_KIND_FIELDS
 from .text_patterns import SHA256_HEX as _SHA256
 from .tools.theme_guard import (
     _CONFLICTING_OUTDOOR_TERMS,

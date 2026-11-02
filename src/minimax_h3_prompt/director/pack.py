@@ -33,7 +33,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from ..asset_ledger import KIND_PICTURE, load_asset_ledger, resolve_asset_path
+from ..asset_ledger import load_asset_ledger, resolve_asset_path
+from ..kinds import KIND_PICTURE
 from ..ref_capacity import MAX_PICTURES
 from ..text_patterns import PICTURE_TAG as _SLOT_TOKEN_RE
 from .frames import (

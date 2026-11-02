@@ -209,7 +209,8 @@ def _register_asset_external_cost(state: dict, brief: Brief, generation_dir: Pat
     的班）。再登记一次就是覆盖这次登记的成本，不问人「要不要清空」——那是把一句话
     拆成两问。
     """
-    from ..asset_ledger import KIND_PICTURE, load_asset_ledger, record_external_cost
+    from ..asset_ledger import load_asset_ledger, record_external_cost
+    from ..kinds import KIND_PICTURE
 
     seconds, attempts = _ask_asset_external_cost(item.name)
     if not (seconds or attempts):
@@ -3058,7 +3059,8 @@ def _abandon_asset(state: dict, brief: Brief, generation_dir: Path, item: QueueI
     **不写轮次账**：轮次账记的是「改写」修订轮，放弃不是修订；放弃事实落在
     ``asset_loop.abandoned`` 与屏幕交代上，续接据此跳过。
     """
-    from ..asset_ledger import KIND_PICTURE, load_asset_ledger, remove_asset
+    from ..asset_ledger import load_asset_ledger, remove_asset
+    from ..kinds import KIND_PICTURE
     from ..asset_loop import note_abandoned, set_current
 
     entry = load_asset_ledger(generation_dir).get(item.name, KIND_PICTURE)
@@ -3135,7 +3137,8 @@ def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: 
     对照底本恒取生图提示词最新版：换版重交/改词再掷的
     新图是按**当前词**画的，不是按上一轮合并结果画的。
     """
-    from ..asset_ledger import KIND_PICTURE, load_asset_ledger, resolve_asset_path
+    from ..asset_ledger import load_asset_ledger, resolve_asset_path
+    from ..kinds import KIND_PICTURE
     from ..asset_loop import count_regen_rounds, render_regen_hint
     from ..asset_proofread import (
         DECISION_LABELS,
@@ -3562,7 +3565,8 @@ def _asset_loop(state: dict, brief: Brief, generation_dir: Path) -> bool:
     False ＝ 用户「先到这里」，会话保持可续接（进度已逐张落盘）。调用方必须原样停下：
     重跑向导会回到同一张待办，不重付已出过的词。
     """
-    from ..asset_ledger import KIND_PICTURE, IntakeReport, load_asset_ledger, render_report, verify_asset_ledger
+    from ..asset_ledger import IntakeReport, load_asset_ledger, render_report, verify_asset_ledger
+    from ..kinds import KIND_PICTURE
     from ..asset_loop import asset_queue, loop_state, set_current
     from ..asset_proofread import STATUS_DONE, ProofreadRecord, proofread_rows
     from ..generation import image_prompt_variants, ref_asset_registry

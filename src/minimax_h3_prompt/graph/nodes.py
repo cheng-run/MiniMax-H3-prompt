@@ -44,7 +44,8 @@ from ..user_revisions import (
     render_revision_block,
     setting_revision_block,
 )
-from .state import ASSET_KIND_FIELDS, PipelineState
+from ..kinds import ASSET_KIND_FIELDS
+from .state import PipelineState
 
 
 # 各节点的上下文标签一律写字面量（与既有的「原始剧情」「分镜表」同形，读起来就是请求本身）。
@@ -1232,6 +1233,14 @@ def make_identity_rt_node(rt, model, brief) -> Callable:
                        参考资产=_ref_assets_block(s, brief) or "（无）"))
 
 
+def _same_value(left, right) -> bool:
+    """比较两个 state 值：numpy 数组这类 ``==`` 返回数组的对象退回身份比较。"""
+    try:
+        return bool(left == right)
+    except (TypeError, ValueError):
+        return left is right
+
+
 def make_parallel(*nodes: Callable[[PipelineState], dict]) -> Callable[[PipelineState], dict]:
     """把多个独立节点并行执行，合并输出。
 
@@ -1243,8 +1252,20 @@ def make_parallel(*nodes: Callable[[PipelineState], dict]) -> Callable[[Pipeline
         with ThreadPoolExecutor(max_workers=max(2, len(nodes))) as ex:
             futs = [ex.submit(fn, state) for fn in nodes]
             merged: dict = {}
-            for f in futs:
-                merged.update(f.result())
+            sources: dict[str, int] = {}
+            for position, f in enumerate(futs):
+                patch = f.result()
+                for key, value in patch.items():
+                    # 共享键后写者赢，前写者**静默消失**（2026-10-25 探针实测）。各节点
+                    # 本该只写自己的键；一旦有人加了共享表，这里要当场炸，而不是等某类
+                    # 资产图提示词凭空少一半才发现。同值重复写（同一份 ref_meta）放行。
+                    if key in merged and not _same_value(merged[key], value):
+                        raise ValueError(
+                            f"并行组第 {sources[key] + 1} 与第 {position + 1} 个节点"
+                            f"都写了 {key!r} 且值不同：并行节点只能写各自的产物键，"
+                            "共享键会被后一个静默覆盖（ADR 0005 接线纪律）")
+                    merged[key] = value
+                    sources.setdefault(key, position)
         return merged
 
     return node

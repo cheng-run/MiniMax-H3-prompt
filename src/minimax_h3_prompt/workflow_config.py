@@ -21,7 +21,7 @@ from typing import Any, Mapping
 
 import yaml
 
-from .asset_ledger import KIND_AUDIO, KIND_PICTURE, KIND_VIDEO, KINDS
+from .kinds import KIND_AUDIO, KIND_PICTURE, KIND_VIDEO, KINDS
 
 # 项目根目录：src/minimax_h3_prompt/workflow_config.py -> parents[0]=包, [1]=src, [2]=根。
 # 不 import config.PROJECT_ROOT：那会连带实例化模型配置（读 agent.yaml + .env），
