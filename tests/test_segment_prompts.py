@@ -700,7 +700,7 @@ def test_v2_request_anchor_line_is_variant_independent(variant):
     from minimax_h3_prompt.brief_parser import Brief
     from minimax_h3_prompt.segment_prompts import I2VA_ANCHOR_LINE, build_segment_v2_request
 
-    brief = Brief(mode="base", variant=variant, duration=12.0, style="写实", plot="便利店橘猫")
+    Brief(mode="base", variant=variant, duration=12.0, style="写实", plot="便利店橘猫")
     request = build_segment_v2_request(_v2_plans()[0], _v2_plans(), _frame_state(shot_table=SHOT_TABLE))
     assert I2VA_ANCHOR_LINE in request
     # 判据取**锚定行原文**（ALIGN_TEMPLATES 派生），不再用「请求里出现 Picture 2」当代理：

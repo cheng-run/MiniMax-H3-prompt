@@ -340,16 +340,19 @@ def test_segment_prompt_is_wrapped_by_copy_boundary_markers(
     assert out.count(COPY_START_MARKER) == 2
     assert out.count(COPY_END_MARKER) == 2
 
+    # 用游标而不是「上一轮在循环尾赋的变量」：后者要在条件里引用循环体末尾才赋值的
+    # 名字（ruff 的 F821/F841 成对报出来），读代码的人也得先想清楚轮次才敢改。
+    cursor = 0
     for position in (1, 2):
         path = _generation_dir(tmp_path) / "segments" / f"segment-{position:02d}.md"
-        start = out.index(COPY_START_MARKER, 0 if position == 1 else first_end)
+        start = out.index(COPY_START_MARKER, cursor)
         end = out.index(COPY_END_MARKER, start)
+        cursor = end
         block = out[start + len(COPY_START_MARKER):end].strip("\n")
         # 文件末尾带一个换行、终端切片被 strip 掉了：比较正文本身，不比排版换行。
         assert block == path.read_text(encoding="utf-8").rstrip("\n"), (
             f"第 {position} 段标记之间与段文件不一致")
         assert out.index(f"第 {position}/2 段 · 起止") < start
-        first_end = end
 
 
 # ---------------------------------------------------------------------------

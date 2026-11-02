@@ -8,7 +8,6 @@ import pytest
 from minimax_h3_prompt.tools.frame_match import (
     ANALYZE_H,
     ANALYZE_W,
-    MAD_MAYBE,
     MAD_SAME,
     classify_match,
     imread_unicode,
@@ -16,7 +15,6 @@ from minimax_h3_prompt.tools.frame_match import (
     match_video,
     read_frames_gray,
     read_window,
-    to_gray,
     video_meta,
 )
 

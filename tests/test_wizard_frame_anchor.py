@@ -7,7 +7,6 @@ bug（2026-09-22）：``_phase2_collect_and_finish`` 把读图结果写进
 """
 from types import SimpleNamespace
 
-import pytest
 
 from minimax_h3_prompt import model_factory, segment_planner, segment_prompts, session_store
 from minimax_h3_prompt.brief_parser import Brief

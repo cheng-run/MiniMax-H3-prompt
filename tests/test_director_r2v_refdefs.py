@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import re
 
-import pytest
 
 # 真实会话里 ``subject_defs`` 的形态：中文、markdown 标题、正文带反引号标签。
 _REAL_SHAPE_MATERIAL = """## subject_definitions
@@ -84,7 +83,6 @@ class _RefDefsLLM:
         self.requests.append(request)
         if "subject_definitions 与 retention_analysis" in request:
             return _english_definitions()
-        from minimax_h3_prompt.director.prompts import render_timeline_note
 
         # 写段请求：三个段头都齐，只引用前 3 张图（本段真正用到的素材）。
         note = re.search(r"Segment \d+ of \d+, covering [^\n]+", request).group(0)
@@ -174,7 +172,6 @@ class _OverflowThenFixLLM(_RefDefsLLM):
         if "subject_definitions 与 retention_analysis" in request:
             return super().invoke(request, config)
         self.requests.append(request)
-        from minimax_h3_prompt.director.prompts import render_timeline_note
 
         note = re.search(r"Segment \d+ of \d+, covering [^\n]+", request).group(0)
         fixed = "上一次产出被校验器判为不合格" in request
@@ -239,7 +236,6 @@ class _ScopeThenBreakLLM:
         self.requests: list[str] = []
 
     def invoke(self, request, config=None):
-        from minimax_h3_prompt.director.prompts import render_timeline_note
 
         self.requests.append(request)
         if "上一次产出被校验器判为不合格" in request:

@@ -1,11 +1,9 @@
 """seam_audit 接缝审计测试。"""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 from minimax_h3_prompt.tools.seam_audit import (
     STATIC_THR,

@@ -510,7 +510,7 @@ def test_remove_asset_drops_entry_but_keeps_history_and_library_file(tmp_path, m
     refs = [RefItem(picture=1, name="红裙女孩", description="红裙", path=str(girl))]
     create_video_from_topic("测试主题", _cfg(tmp_path), mode="ref", refs=refs)
     directory = _gen_dir(tmp_path)
-    entry = load_asset_ledger(directory).entries[0]
+    load_asset_ledger(directory).entries[0]
 
     girl.write_bytes(b"content-v2-different")
     create_video_from_topic("测试主题", _cfg(tmp_path), mode="ref", refs=refs)

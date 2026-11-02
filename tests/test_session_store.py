@@ -4,7 +4,6 @@ bug（2026-09-22）：``fl2va_frame_descriptions``（首帧实际画面的读图
 ``_STATE_KEYS`` 白名单里，save 时被静默丢弃 → 续跑后的分段流程不再锚定首帧图片。
 """
 import json
-from pathlib import Path
 
 import pytest
 

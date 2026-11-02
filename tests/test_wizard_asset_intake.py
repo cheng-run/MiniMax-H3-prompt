@@ -166,7 +166,7 @@ def test_ref_flow_collects_pictures_and_writes_ledger(tmp_path, monkeypatch, cap
             loop.append("")
         loop += ["1", str(paths[name])]
     asked = _fake_inputs(monkeypatch, [TOPIC, "", "", "4"] + loop)
-    confirms = _fake_confirms(monkeypatch, [("视频/音频", False)])
+    _fake_confirms(monkeypatch, [("视频/音频", False)])
 
     code = wizard.run_wizard(_cfg(tmp_path))
     assert code == 0

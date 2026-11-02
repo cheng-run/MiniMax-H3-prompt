@@ -1,7 +1,6 @@
 """theme_guard 主题忠实度守卫测试。"""
 from __future__ import annotations
 
-import pytest
 
 from minimax_h3_prompt.tools.h3_validator import ValidationIssue
 from minimax_h3_prompt.tools.theme_guard import (

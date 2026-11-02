@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
-import pytest
 
 from minimax_h3_prompt.tools.frame_match import read_window
 from minimax_h3_prompt.tools.ledger import Discarded, Ledger, SCHEMA

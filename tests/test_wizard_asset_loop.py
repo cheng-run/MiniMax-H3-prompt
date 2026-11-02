@@ -534,7 +534,7 @@ def test_regen_reword_exit_rewrites_and_logs(tmp_path, monkeypatch, capsys):
     """「改词再掷」：留痕 regen_reword、新词出站（词图皆错时连词一起换）。"""
     girl = _write_source(tmp_path, "girl.png", b"girl")
     vision = {"红裙女孩":_claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])}
-    rewrite_calls = _stub_rewrite(monkeypatch, "人物·红裙女孩专属生图提示词：宝蓝裙")
+    _stub_rewrite(monkeypatch, "人物·红裙女孩专属生图提示词：宝蓝裙")
     tail = [
         "", "1", str(girl),
         "2",                    # 三选：重生成
@@ -757,7 +757,7 @@ def test_abandon_after_intake_can_keep_the_registration(tmp_path, monkeypatch, c
 
 def test_externally_replaced_asset_returns_to_queue(tmp_path, monkeypatch, capsys):
     """循环外换版（正本 sha 变而裁决没重做）→ 旧裁决不冒充新版：退回待办重新校对。"""
-    from minimax_h3_prompt.asset_ledger import AssetSubmission, intake_assets, load_asset_ledger
+    from minimax_h3_prompt.asset_ledger import AssetSubmission, intake_assets
 
     girl = _write_source(tmp_path, "girl.png", b"girl")
     tail = ["", "1", str(girl), "", "4", "", "4", "4", "8", "1"]

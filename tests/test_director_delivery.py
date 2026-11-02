@@ -104,7 +104,6 @@ def _write_pack_zip(path: Path, timeline: dict) -> Path:
 
 def _ready_session(tmp_path: Path, *, initial=None, mode: str = "t2v"):
     """造一个「初始包已落盘」的会话目录，返回 (段目录, 段表, 成片路径, 最终包路径)。"""
-    from minimax_h3_prompt.director import delivery
 
     session_dir = _session_dir(tmp_path)
     plan = _plan(mode=mode)

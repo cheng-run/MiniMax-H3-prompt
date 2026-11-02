@@ -283,7 +283,6 @@ def test_segmented_flow_prints_step_banner_then_watchdog_lines(capsys, monkeypat
     这条用例走**真实**的 ``plan_segments``（只把模型换成假对象）：接线若只接了
     横幅、没订阅事件，卡住行就没人打印；若只订阅事件、没打横幅，第一句断言即红。
     """
-    from types import SimpleNamespace
 
     from minimax_h3_prompt import model_factory, session_store
     from minimax_h3_prompt.brief_parser import Brief
@@ -336,7 +335,6 @@ def test_segmented_flow_prints_failure_cause_and_attempts_before_fallback(
     """看门狗用尽重试 → 明说「原因＋已试 N 次」再回退机械拆分（不再静默）。"""
     from minimax_h3_prompt import model_factory, session_store
     from minimax_h3_prompt.brief_parser import Brief
-    from minimax_h3_prompt import segment_planner
     from minimax_h3_prompt.ui import wizard
 
     monkeypatch.setattr(

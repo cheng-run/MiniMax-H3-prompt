@@ -23,7 +23,7 @@ from minimax_h3_prompt import model_factory, observability
 from minimax_h3_prompt.brief_parser import Brief
 from minimax_h3_prompt.config import Config
 from minimax_h3_prompt.errors import ConfigError
-from minimax_h3_prompt.graph import nodes, pipeline, roundtable
+from minimax_h3_prompt.graph import pipeline
 
 _SECRET = "用户剧情里的独有句子不会进日志"
 

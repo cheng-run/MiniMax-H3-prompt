@@ -12,7 +12,6 @@ ImportError／红——它们钉的是「有生产者」这件事本身。
 """
 from __future__ import annotations
 
-from pathlib import Path
 
 from minimax_h3_prompt.director.frames import DirectorSegment
 

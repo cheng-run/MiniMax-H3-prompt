@@ -459,7 +459,6 @@ def test_resolve_chain_falls_back_to_mtime_when_nothing_continues(tmp_path, tmp_
 
 # --- 桥接帧未匹配任何视频尾帧：报路径 + 按尺寸判 kind + 进 review ---------------
 
-import numpy as np
 
 from minimax_h3_prompt.tools.ledger import _shot_input_frame
 

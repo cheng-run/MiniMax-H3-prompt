@@ -12,7 +12,6 @@
 """
 from __future__ import annotations
 
-import json
 import re
 
 import pytest
@@ -537,7 +536,7 @@ def test_normalize_r2v_replaces_model_written_definitions_and_note():
 
 def test_normalize_single_body_prepends_absolute_note_and_rebases():
     """t2v/i2v/fl2v 单段正文：注记置顶、时间戳重算、不补任何段头。"""
-    from minimax_h3_prompt.director.prompts import normalize_segment_output, split_ref_sections
+    from minimax_h3_prompt.director.prompts import normalize_segment_output
 
     plan = _plan("i2v")
     segment = plan.segments[1]

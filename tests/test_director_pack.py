@@ -249,7 +249,7 @@ def test_r2v_mounts_every_registered_picture_on_every_segment(tmp_path):
     })
     records = []
     for number, name in enumerate(("人物 阿岚", "道具 旧灯", "场景 雨街"), 1):
-        source = _write_asset(session_dir / "assets" / f"{name}.png")
+        _write_asset(session_dir / "assets" / f"{name}.png")
         records.append(_picture_record(name, number, f"assets/{name}.png"))
     _write_ledger(session_dir, records)
 

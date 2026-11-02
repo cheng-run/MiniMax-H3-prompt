@@ -186,7 +186,7 @@ def test_wizard_entry_resumes_same_gen_without_rerunning_stage2(tmp_path, monkey
 def test_resume_uses_the_prompt_already_on_disk(tmp_path, monkeypatch, capsys):
     """续接要用已落盘的整条提示词，不能要求重跑阶段 2 才有 prompt 可拆。"""
     slug_dir = tmp_path / "某主题"
-    gen = _interrupted_gen(slug_dir)
+    _interrupted_gen(slug_dir)
     _silence(monkeypatch)
     seen: list[str] = []
     monkeypatch.setattr(wizard, "_run_segmented_flow",

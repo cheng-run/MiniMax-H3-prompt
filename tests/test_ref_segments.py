@@ -196,7 +196,7 @@ def test_report_says_concat_belongs_to_system(tmp_path):
 
 
 def test_segment_files_and_plan_are_written(tmp_path):
-    result = _run(tmp_path, llm=None)
+    _run(tmp_path, llm=None)
     for position in (1, 2, 3):
         assert (tmp_path / "segments" / f"segment-{position:02d}.md").is_file()
     plan_data = json.loads((tmp_path / "segments" / "plan.json").read_text(encoding="utf-8"))
