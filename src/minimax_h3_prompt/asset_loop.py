@@ -159,7 +159,9 @@ def asset_queue(
         items.append((number, seq, QueueItem(number, kind, name)))
         seq += 1
 
-    if isinstance(entries, dict):
+    # 按 Mapping 判而不是 dict：注解里就是 Mapping，用 dict 收窄后 else 分支
+    # 仍可能是 Mapping，迭代它拿到的是键（str），会被当成 (kind, 条目) 拆开。
+    if isinstance(entries, Mapping):
         for kind, rows in entries.items():
             for raw in rows or []:
                 _add(str(kind), raw)

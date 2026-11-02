@@ -128,7 +128,9 @@ def build_roundtable(model: BaseChatModel, participants: list[str], max_rounds: 
         return {"lock": reply, "round": current_round + 1}
 
     g = StateGraph(RoundTableState)
-    first = participants[0]
+    first = participants[0]  # 空清单在调用方就被拦了；这里再兜一次，别让 add_edge(None)
+    if not participants:
+        raise ValueError("圆桌至少需要一个参与者")
     prev: str | None = None
     for role in participants:
         g.add_node(f"speak_{role}", make_speaker(role))
@@ -139,7 +141,9 @@ def build_roundtable(model: BaseChatModel, participants: list[str], max_rounds: 
         prev = f"speak_{role}"
 
     g.add_node("moderator", moderate)
-    g.add_edge(prev, "moderator")
+    # 用 participants[-1] 而不是循环里攒的 prev：后者的类型是 str | None，
+    # 而空清单在上面已经拦过，这里就是最后一位发言者。
+    g.add_edge(f"speak_{participants[-1]}", "moderator")
 
     def route(state: RoundTableState) -> str:
         if not state.get("lock") and state.get("round", 1) <= max_rounds:

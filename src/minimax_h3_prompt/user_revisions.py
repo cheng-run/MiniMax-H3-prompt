@@ -186,7 +186,7 @@ def remove_user_revision(state: dict[str, Any], screen_number: Any) -> dict[str,
     return victim
 
 
-def active_revisions(state: dict[str, Any]) -> list[dict[str, Any]]:
+def active_revisions(state: Mapping[str, Any]) -> list[dict[str, Any]]:
     """当前清单的**全量快照**（副本；台账取它，不递内部对象出去）。
 
     **注入通道不要直接用它**——用 ``pending_revisions``：已落地的条目在这份全量里，
