@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+import traceback
 from pathlib import Path
 
 
@@ -484,6 +486,23 @@ def _run_preflight(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """进程入口：顶层异常边界（体检 P2-6，2026-11-02）。
+
+    为什么要有：此前只有向导周围接 ``KeyboardInterrupt/EOFError``，CLI 子命令
+    （ledger/audit/preflight）出意外就是一屏裸 traceback，没有一句「这是什么」。
+    这里**不吞堆栈**——报障需要原文——只在堆栈前加一行上下文，并保证返回 1，
+    不让异常穿到解释器。``KeyboardInterrupt`` 继承 ``BaseException``，不会被这里
+    接住：向导那条有自己的续跑提示，CLI 侧按 Ctrl-C 仍由 Python 原样处理。
+    """
+    try:
+        return _dispatch(argv)
+    except Exception as exc:  # noqa: BLE001 - 顶层边界：打印上下文后仍交回 traceback
+        print(f"[错误] 未处理的失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+        traceback.print_exc()
+        return 1
+
+
+def _dispatch(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.command == "create-video":
