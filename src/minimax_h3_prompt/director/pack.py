@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from ..asset_ledger import load_asset_ledger, resolve_asset_path
+from ..errors import ConfigError
 from ..kinds import KIND_PICTURE
 from ..ref_capacity import MAX_PICTURES
 from ..text_patterns import PICTURE_TAG as _SLOT_TOKEN_RE
@@ -312,9 +313,9 @@ def validate_canvas(width: int, height: int) -> None:
     """
     for name, value in (("宽", width), ("高", height)):
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-            raise ValueError(f"画布{name}必须是正整数，实际 {value!r}")
+            raise ConfigError(f"画布{name}必须是正整数，实际 {value!r}")
         if value % CANVAS_ALIGN:
-            raise ValueError(
+            raise ConfigError(
                 f"画布{name} {value} 不是 {CANVAS_ALIGN} 的倍数：插件后端会拒绝执行"
                 f"（MiniMax H3 画布按 {CANVAS_ALIGN} 对齐）")
 
@@ -326,7 +327,7 @@ def validate_ref_image_size(value: str) -> None:
     用户以为压到了 1024，实际按原图送——属于「参数写了没生效」。
     """
     if value not in REF_IMAGE_SIZES:
-        raise ValueError(
+        raise ConfigError(
             f"refImageSize 只允许 {' / '.join(REF_IMAGE_SIZES)}，实际 {value!r}："
             "其它档位在官方 MiniMaxH3ReferenceToVideo 上会被静默归一成 match")
 

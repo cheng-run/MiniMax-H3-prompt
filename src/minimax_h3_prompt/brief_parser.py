@@ -25,6 +25,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
+from .errors import UserInputError
 
 if TYPE_CHECKING:  # 防环：injection_card 顶层引 generation→本模块，只能单向
     from .injection_card import VideoOutputParams
@@ -146,7 +147,7 @@ def validate_route_mode(mode: str) -> str:
     已知路线」与「不是这条路线」分开。
     """
     if mode not in ROUTE_MODES:
-        raise ValueError(
+        raise UserInputError(
             f"路线无效：{mode!r}（应为 {'/'.join(ROUTE_MODES)} 之一，精确小写）")
     return mode
 
@@ -182,7 +183,7 @@ def validate_director_mode(value: str) -> str:
     brief 文件入口本票不开（``parse_brief_text`` 读到 director 直接报错）。
     """
     if value not in DIRECTOR_MODES:
-        raise ValueError(
+        raise UserInputError(
             f"导演台模式无效：{value!r}（应为 {'/'.join(DIRECTOR_MODES)} 之一，精确小写）")
     return value
 
@@ -264,10 +265,10 @@ def parse_canvas_size(value: str) -> tuple[int, int]:
     """
     m = _CANVAS_SIZE_RE.match(value.strip())
     if not m:
-        raise ValueError(f"画布尺寸无效：{value!r}（应为 宽x高，如 640x1280）")
+        raise UserInputError(f"画布尺寸无效：{value!r}（应为 宽x高，如 640x1280）")
     width, height = int(m.group(1)), int(m.group(2))
     if width <= 0 or height <= 0:
-        raise ValueError(f"画布尺寸必须为正：{value!r}")
+        raise UserInputError(f"画布尺寸必须为正：{value!r}")
     return width, height
 
 
@@ -311,7 +312,7 @@ def _apply_canvas_line(key: str, value: str, brief: Brief) -> None:
             brief.canvases[name] = size
         return
     if family not in IMAGE_PROFILE_DEFAULTS:
-        raise ValueError(f"未知生图模型：{family}（画布键只认 {', '.join(IMAGE_PROFILE_DEFAULTS)}）")
+        raise UserInputError(f"未知生图模型：{family}（画布键只认 {', '.join(IMAGE_PROFILE_DEFAULTS)}）")
     brief.canvases[family] = size
 
 
@@ -333,9 +334,9 @@ def _video_output_field(key: str) -> str:
     return _VIDEO_OUTPUT_KEYS.get(normalized, "")
 
 
-def _video_output_line_error(stripped: str) -> ValueError:
+def _video_output_line_error(stripped: str) -> UserInputError:
     """视频输出行解析失败的**唯一**报错构造（两处探针同文案——各拼一遍就会漂）。"""
-    return ValueError(f"视频输出行无法解析：{stripped!r}"
+    return UserInputError(f"视频输出行无法解析：{stripped!r}"
                       "（应为「视频比例/视频像素预算/视频对齐倍数: 值」）")
 
 
@@ -360,13 +361,13 @@ def _apply_video_output_line(key: str, value: str, brief: Brief) -> None:
         try:
             megapixels = float(text)
         except ValueError as exc:
-            raise ValueError(f"视频像素预算无效：{value!r}（应为数字，如 0.4）") from exc
+            raise UserInputError(f"视频像素预算无效：{value!r}（应为数字，如 0.4）") from exc
         updated = replace(current, megapixels=megapixels)
     else:
         try:
             multiple = int(text)
         except ValueError as exc:
-            raise ValueError(f"视频对齐倍数无效：{value!r}（应为整数，如 32）") from exc
+            raise UserInputError(f"视频对齐倍数无效：{value!r}（应为整数，如 32）") from exc
         updated = replace(current, multiple=multiple)
     brief.video_output = updated
 
@@ -402,7 +403,7 @@ def parse_brief_text(text: str) -> Brief:
             # 画布行/视频输出行**长得像该键却解析不了**（缺冒号、`=` 分隔、空格分隔）
             # 要当场报：沉默跳过就是「用户以为选了、实际回落默认」（issue #42 复审）。
             if probe.startswith(("画布", "canvas")):
-                raise ValueError(f"画布行无法解析：{stripped!r}（应为「画布 <家族>: 宽x高」）")
+                raise UserInputError(f"画布行无法解析：{stripped!r}（应为「画布 <家族>: 宽x高」）")
             if any(probe.startswith(name) for name in _VIDEO_OUTPUT_KEYS):
                 raise _video_output_line_error(stripped)
             continue
@@ -511,7 +512,7 @@ def parse_brief_text(text: str) -> Brief:
     # `--brief` 快路径也没有打包/陪跑接线（#104–#108）。读到就当场报错——静默按 base 跑
     # 会拿首尾帧链的步骤跑一条导演台 brief，而且要到阶段 2 才露馅。
     if is_director_mode(brief.mode):
-        raise ValueError(
+        raise UserInputError(
             "brief 文件暂不支持导演台路线（模式: director）：请用交互向导起步。")
 
     return brief

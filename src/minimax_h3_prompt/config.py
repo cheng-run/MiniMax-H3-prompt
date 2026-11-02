@@ -9,6 +9,8 @@ from typing import Any
 import yaml
 from dotenv import load_dotenv
 
+from .errors import ConfigError
+
 # 项目根目录：src/minimax_h3_prompt/config.py -> parents[0]=包, [1]=src, [2]=项目根
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = PROJECT_ROOT / "config" / "agent.yaml"
@@ -175,13 +177,13 @@ class Config:
 
         raw = self.raw.get("director", {}) or {}
         if not isinstance(raw, dict):
-            raise ValueError(f"config/agent.yaml 的 director 节必须是对象：{raw!r}")
+            raise ConfigError(f"config/agent.yaml 的 director 节必须是对象：{raw!r}")
 
         def _read_int(key: str, fallback: int) -> int:
             value = raw.get(key, fallback)
             # bool 是 int 的子类：`width: true` 不该被当成 1 静默放行。
             if isinstance(value, bool) or not isinstance(value, int):
-                raise ValueError(
+                raise ConfigError(
                     f"config/agent.yaml 的 director.{key} 必须是整数，实际 {value!r}")
             return value
 
@@ -207,11 +209,11 @@ class Config:
         """
         raw = self.raw.get("director", {}) or {}
         if not isinstance(raw, dict):
-            raise ValueError(f"config/agent.yaml 的 director 节必须是对象：{raw!r}")
+            raise ConfigError(f"config/agent.yaml 的 director 节必须是对象：{raw!r}")
         value = _env(_COMFY_OUTPUT_ROOT_ENV) or raw.get(
             "comfy_output_root", _DEFAULT_COMFY_OUTPUT_ROOT)
         if not isinstance(value, str) or not value.strip():
-            raise ValueError(
+            raise ConfigError(
                 f"config/agent.yaml 的 director.comfy_output_root 必须是非空字符串，"
                 f"实际 {value!r}")
         return Path(value.strip())
@@ -228,11 +230,11 @@ class Config:
 
         raw = self.raw.get("director", {}) or {}
         if not isinstance(raw, dict):
-            raise ValueError(f"config/agent.yaml 的 director 节必须是对象：{raw!r}")
+            raise ConfigError(f"config/agent.yaml 的 director 节必须是对象：{raw!r}")
         value = raw.get("frame_tolerance", DIRECTOR_FRAME_TOLERANCE)
         # bool 是 int 的子类：`frame_tolerance: true` 会被当成 1 静默放行。
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise ValueError(
+            raise ConfigError(
                 f"config/agent.yaml 的 director.frame_tolerance 必须是非负整数，"
                 f"实际 {value!r}")
         return value
@@ -243,7 +245,7 @@ class Config:
         if settings.provider == "anthropic" and not key and settings.api_key_env == "ANTHROPIC_API_KEY":
             key = _env("ANTHROPIC_AUTH_TOKEN")
         if not key:
-            raise ValueError(
+            raise ConfigError(
                 f"缺失 {settings.api_key_env}：请在项目根 .env 中配置（{settings.purpose}）"
             )
         return key

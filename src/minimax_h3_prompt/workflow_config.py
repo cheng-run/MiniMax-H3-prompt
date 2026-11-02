@@ -22,6 +22,7 @@ from typing import Any, Mapping
 import yaml
 
 from .kinds import KIND_AUDIO, KIND_PICTURE, KIND_VIDEO, KINDS
+from .errors import ConfigError
 
 # 项目根目录：src/minimax_h3_prompt/workflow_config.py -> parents[0]=包, [1]=src, [2]=根。
 # 不 import config.PROJECT_ROOT：那会连带实例化模型配置（读 agent.yaml + .env），
@@ -65,14 +66,14 @@ class WorkflowSettings:
         try:
             return self.slot_counts[kind]
         except KeyError:
-            raise ValueError(
+            raise ConfigError(
                 f"参考素材类型无效：{kind!r}（只认 {', '.join(KINDS)}）") from None
 
 
 def _positive_int(value: Any, key: str) -> int:
     """槽位数只收正整数；bool 是 int 的子类（YAML 的 ``yes/no``），必须单独挡掉。"""
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ValueError(
+        raise ConfigError(
             f"slots.{key} 必须是正整数：{value!r}（槽位数＝工作流端口个数）")
     return value
 
@@ -89,13 +90,13 @@ def load_workflow_settings(path: str | Path | None = None) -> WorkflowSettings:
         with open(config_path, "r", encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
     if not isinstance(raw, dict):
-        raise ValueError(f"工作流配置必须是映射：{config_path}")
+        raise ConfigError(f"工作流配置必须是映射：{config_path}")
 
     name = raw.get("ref_workflow_name")
     if name is None or (isinstance(name, str) and not name.strip()):
         name = DEFAULT_REF_WORKFLOW_NAME
     elif not isinstance(name, str):
-        raise ValueError(f"ref_workflow_name 必须是字符串：{name!r}")
+        raise ConfigError(f"ref_workflow_name 必须是字符串：{name!r}")
     else:
         name = name.strip()
 
@@ -104,11 +105,11 @@ def load_workflow_settings(path: str | Path | None = None) -> WorkflowSettings:
         slots_raw = {}
     if not isinstance(slots_raw, dict):
         # 注意 `slots: []` 是「写了但写错」，不是「没写」——前者要报，后者才回落默认
-        raise ValueError(f"slots 必须是映射：{slots_raw!r}")
+        raise ConfigError(f"slots 必须是映射：{slots_raw!r}")
     unknown = set(slots_raw) - set(KINDS)
     if unknown:
         # 拼错的键（如 pictures）若静默略过，用户会以为自己改了边界、实际用的默认值
-        raise ValueError(
+        raise ConfigError(
             f"slots 里有未知类型：{', '.join(sorted(unknown))}"
             f"（只认 {', '.join(KINDS)}）")
     counts = {

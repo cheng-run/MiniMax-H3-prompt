@@ -13,6 +13,8 @@ import sys
 import traceback
 from pathlib import Path
 
+from .errors import error_code
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -497,7 +499,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return _dispatch(argv)
     except Exception as exc:  # noqa: BLE001 - 顶层边界：打印上下文后仍交回 traceback
-        print(f"[错误] 未处理的失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+        print(f"[错误] 未处理的失败（{error_code(exc)}）：{type(exc).__name__}: {exc}",
+              file=sys.stderr)
         traceback.print_exc()
         return 1
 

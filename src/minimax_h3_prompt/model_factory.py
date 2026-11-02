@@ -6,6 +6,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 
 from .config import ModelSettings, config
+from .errors import ConfigError
 
 # 关掉 openai 客户端自动重试——它重试会重发完整上下文，token 计费翻倍；
 # 重试由 run_agent 层面接管，次数由调用预算决定（issue #59、#61）。
@@ -47,7 +48,7 @@ def _require(settings: ModelSettings) -> str:
     try:
         return config.resolve_api_key(settings)
     except ValueError as exc:
-        raise ValueError(
+        raise ConfigError(
             f"缺失 {settings.api_key_env}：请在项目根 .env 中配置（LLM_PROVIDER={settings.provider}）"
         ) from exc
 

@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import yaml
+from .errors import ConfigError
 
 # 项目根目录：src/minimax_h3_prompt/image_config.py -> [0]=包, [1]=src, [2]=项目根。
 # 不 import config.PROJECT_ROOT：那会连带实例化模型配置（读 agent.yaml + .env），
@@ -96,7 +97,7 @@ class ImageSettings:
     def model_for(self, kind: str) -> str:
         """取某一档的模型；未知档报错（与 ``IMAGE_KINDS`` 同一口径）。"""
         if kind not in IMAGE_KINDS:
-            raise ValueError(
+            raise ConfigError(
                 f"资产类型无效：{kind!r}（只认 {', '.join(IMAGE_KINDS)}）")
         return self.models[kind]
 
@@ -106,7 +107,7 @@ def image_model_label(model: str) -> str:
     try:
         return IMAGE_MODEL_LABELS[model]
     except KeyError:
-        raise ValueError(
+        raise ConfigError(
             f"生图模型无效：{model!r}（只认 {', '.join(IMAGE_MODEL_KEYS)}）") from None
 
 
@@ -122,14 +123,14 @@ def load_image_settings(path: str | Path | None = None) -> ImageSettings:
         with open(config_path, "r", encoding="utf-8") as fh:
             raw = yaml.safe_load(fh) or {}
     if not isinstance(raw, dict):
-        raise ValueError(f"生图模型配置必须是映射：{config_path}")
+        raise ConfigError(f"生图模型配置必须是映射：{config_path}")
 
     # 拼错的档名（如 characters）若静默略过，用户会以为改了、实际还是默认——所以要报。
     # ``frame`` 是同一份文件里的第四个键（关键帧模型），但它不属于三档资产：允许出现、
     # 不参与这里的分配。把它当未知字段拦下，等于用户一写关键帧模型就连资产配置都读不了。
     unknown = set(raw) - set(IMAGE_KINDS) - {FRAME_IMAGE_KEY}
     if unknown:
-        raise ValueError(
+        raise ConfigError(
             f"生图模型配置里有未知字段：{', '.join(sorted(unknown))}"
             f"（只认 {', '.join((*IMAGE_KINDS, FRAME_IMAGE_KEY))}）：{config_path}")
 
@@ -150,11 +151,11 @@ def _parse_model_value(key: str, value: Any, config_path: Path) -> str:
     if not isinstance(value, str) or not value.strip():
         # 写了就必须是非空字符串：`character:` 留空是「本想改却漏了值」，
         # 静默回默认会把笔误藏起来（同 workflow.yaml 的纪律）。
-        raise ValueError(
+        raise ConfigError(
             f"生图模型配置 {key} 必须是非空字符串：{value!r}（{config_path}）")
     model = value.strip()
     if model not in IMAGE_MODEL_KEYS:
-        raise ValueError(
+        raise ConfigError(
             f"生图模型配置 {key} 的值无效：{model!r}"
             f"（只认 {', '.join(IMAGE_MODEL_KEYS)}）：{config_path}")
     return model
@@ -173,7 +174,7 @@ def load_frame_image_model(path: str | Path | None = None) -> str:
         with open(config_path, "r", encoding="utf-8") as fh:
             raw = yaml.safe_load(fh) or {}
     if not isinstance(raw, dict):
-        raise ValueError(f"生图模型配置必须是映射：{config_path}")
+        raise ConfigError(f"生图模型配置必须是映射：{config_path}")
     value = raw.get(FRAME_IMAGE_KEY)
     if value is None:
         return DEFAULT_FRAME_IMAGE_MODEL

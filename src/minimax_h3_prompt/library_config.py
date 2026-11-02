@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from .errors import ConfigError
 
 # 项目根目录：src/minimax_h3_prompt/library_config.py -> [0]=包, [1]=src, [2]=项目根。
 # 不 import config.PROJECT_ROOT：那会连带实例化模型配置（读 agent.yaml + .env），
@@ -52,11 +53,11 @@ def require_library_root(value: Any, *, label: str = "素材库根") -> Path:
     elif isinstance(value, str):
         root = Path(value.strip())
     else:
-        raise ValueError(f"{label} 必须是字符串或路径：{value!r}")
+        raise ConfigError(f"{label} 必须是字符串或路径：{value!r}")
     if not root.is_absolute():
-        raise ValueError(f"{label} 必须是绝对路径：{value!r}")
+        raise ConfigError(f"{label} 必须是绝对路径：{value!r}")
     if ".." in root.parts:
-        raise ValueError(f"{label} 不许含 ..：{value!r}")
+        raise ConfigError(f"{label} 不许含 ..：{value!r}")
     return root
 
 
@@ -72,12 +73,12 @@ def load_library_settings(path: str | Path | None = None) -> LibrarySettings:
         with open(config_path, "r", encoding="utf-8") as fh:
             raw = yaml.safe_load(fh) or {}
     if not isinstance(raw, dict):
-        raise ValueError(f"素材库配置必须是映射：{config_path}")
+        raise ConfigError(f"素材库配置必须是映射：{config_path}")
 
     # 拼错的键（如 rooot）若静默略过，用户会以为换了库、实际还写在旧目录——所以要报
     unknown = set(raw) - {"root"}
     if unknown:
-        raise ValueError(
+        raise ConfigError(
             f"素材库配置里有未知字段：{', '.join(sorted(unknown))}（只认 root）")
 
     root_raw = raw.get("root")
