@@ -27,9 +27,9 @@ uv add --dev mypy      # 先只查叶子模块，配置见 pyproject [tool.mypy]
 uv add --dev coverage  # 只度量、不设 fail_under，见 pyproject [tool.coverage.*]
 ```
 
-- **mypy**：`files` 刻意只列 `errors.py` / `kinds.py` / `text_patterns.py` /
-  `observability.py`——它们没有项目内循环依赖，注解能真表达出来。一次放开全仓会
-  刷出上千条历史错误，把新错误一起淹掉。加文件是**一步一步**的事，每加一个就修到绿。
+- **mypy**：2026-11-02 分六批从 4 个叶子模块推到**全仓 72 个文件零错误**，`files`
+  现在就是整个包（白名单会漏掉新增文件）。推进纪律保留：一次一批、修到绿再加下一批；
+  新错误不会淹在历史债里，因为历史债已经清零。
 - **coverage**：本仓没有历史基线，设 `fail_under` 只会逼人写凑数用例。改动了哪几行、
   哪几行没测到，才是评审要看的东西（`coverage report` 的 `Missing` 列）。
 - **变异检验**：`scripts/mutation_check.py` 把关键实现改坏、跑指定守卫用例、再还原。
