@@ -1,5 +1,7 @@
 # 帧级地点校验改为覆盖式：#37 不再要求每张关键帧都含全部地点词
 
+> **状态（2026-11-02 复核）**：仍生效。证据：`graph/nodes.py:659`（`_scene_terms_block`）、`graph/nodes.py:678`（`target=` 参数）。
+
 ## 背景
 
 2026-09-27，issue #37。主题地点守卫（`tools/theme_guard.py` 的词表 ＋ `generation.validate_fl2va_bundle` 的判决）此前按**词表命中组数**分流：命中 1 组时「逐帧严格」——每一张关键帧的正向提示词**与** `scene_anchor` 都必须含该组的地点词；命中 ≥2 组才切「覆盖式」（锚点或任一帧覆盖即可）。

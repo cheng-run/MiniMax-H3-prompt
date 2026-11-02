@@ -1,5 +1,7 @@
 # 官方原文只有一处可写来源：references 是给人读的对照物，原文由加载处注入
 
+> **状态（2026-11-02 复核）**：仍生效。证据：`agents/__init__.py:50`（`OFFICIAL_VERBATIM_ROLES`）与 `:55`（`OFFICIAL_VERBATIM_MARKER`）。
+
 2026-09-27（issue #35）。
 
 ## 背景

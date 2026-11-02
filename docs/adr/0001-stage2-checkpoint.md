@@ -1,5 +1,7 @@
 # 阶段 2 组装后落盘断点（stage2-checkpoint.json）
 
+> **状态（2026-11-02 复核）**：仍生效。证据：`stage2_checkpoint.py:11`（`FILENAME`）、`graph/pipeline.py:396`（阶段 2 真接 load/save/clear）。
+
 阶段 2（最终提示词组装+质检）中，组装是最贵的一步（LLM 大上下文一次调用，实测可超 10 分钟）。崩溃后重跑要全部重来成本太高。决定在 `run_stage2` 组装完成后立刻把 `prompt_draft` 落盘为 `stage2-checkpoint.json`，质检循环每轮也更新；完整跑完即删除。崩溃后的重跑检测到该断点，直接跳过组装进入质检精修。
 
 **考虑过并放弃**：

@@ -1,5 +1,7 @@
 # 导演台 i2v 是单段：一张首帧 → 一段视频
 
+> **状态（2026-11-02 复核）**：仍生效。证据：`director/frames.py:54`（`_MODE_MAX_SEGMENTS`）、`:61`（`SINGLE_SEGMENT_MAX_S`）。
+
 日期：2026-10-30（**修订**当天的第一版）。关系：收窄
 `docs/adr/0024-director-route-native-semantics.md` 与
 `docs/design/2026-10-29-导演台路线实现设计.md` §3.1「给图清单」表；**取代本文件

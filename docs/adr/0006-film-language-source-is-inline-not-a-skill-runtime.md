@@ -1,5 +1,7 @@
 # 电影语言知识内联进提示词、不做 skill 运行时
 
+> **状态（2026-11-02 复核）**：仍生效。证据：`film_language.py:15`；真源 `knowledge/film-language-video.md` 存在。
+
 2026-09-27（issue #31/#30）。
 
 ## 背景

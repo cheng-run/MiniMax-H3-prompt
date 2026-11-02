@@ -1,5 +1,7 @@
 # 多参分段的留存分析只带本段镜头——整片重复会把别的段演一遍
 
+> **状态（2026-11-02 复核）**：仍生效。证据：`ref_segments.py:295`（写段前裁留存分析）。
+
 多参（ref2va）每段的 `retention_analysis` 从「逐段原样重复整片定义」改为「只带本段镜头涉及的条目」（`segment_refs.scope_retention_to_shots`，写段前在 `RefSegmentJob._generate` 里裁）。`subject_definitions` 不变，仍逐段重复整片定义——ADR 0011 的理据（标签语义一致）只适用于它。
 
 ## 为什么

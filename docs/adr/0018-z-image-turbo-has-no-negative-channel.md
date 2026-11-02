@@ -1,5 +1,7 @@
 # Z-Image Turbo 没有负向通路：生图提示词按正向纪律写
 
+> **状态（2026-11-02 复核）**：仍生效。证据：`prompts/image_prompt_disciplines/z_image.md`、`tools/image_prompt_discipline.py:303`（`check_image_prompt` 只报 warning）。
+
 2026-10-22 的实测里，一条生图提示词的四处细节没被画出来（靠墙的数级低台阶、屏幕朝下的手机、咬了一口的三角形三明治、正在收拢的灯架），读图校对判出 4 处偏差。把现象归到模型侧后，查证到三条事实：
 
 1. **Turbo 是蒸馏模型，CFG=1，负面提示词完全无效**。官方讨论区原话「this model does not use negative prompts at all」；diffusers 的 `do_classifier_free_guidance` 在 guidance=0 时返回 False，ComfyUI `samplers.py` 在 `cond_scale≈1` 时把无条件分支置空。写「不要 X」「没有 X」不但是空动作，还会被当正向词读。
