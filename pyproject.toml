@@ -77,6 +77,8 @@ files = [
     # 第四批（2026-11-02）：角色装配与产物模型。
     "src/minimax_h3_prompt/agents/__init__.py",
     "src/minimax_h3_prompt/generation.py",
+    # 第五批（2026-11-02）：管线节点。
+    "src/minimax_h3_prompt/graph/nodes.py",
 ]
 ignore_missing_imports = true
 warn_unused_ignores = true

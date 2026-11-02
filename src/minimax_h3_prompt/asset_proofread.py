@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Sequence
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -597,7 +598,7 @@ def pop_decision(pool: list[Adjudication], deviation: Deviation) -> Adjudication
     return None
 
 
-def proofread_rows(state: dict) -> dict:
+def proofread_rows(state: Mapping[str, Any]) -> dict:
     """state 里的校对记录原始行（写账侧与取材口共用的形状口）：键缺失／null → 空表。
 
     坏形状**响**（ValueError），口径同 session_store 画布字段（issue #42 复审）：
@@ -613,7 +614,7 @@ def proofread_rows(state: dict) -> dict:
     return dict(raw)
 
 
-def proofread_descriptions(state: dict) -> dict[str, str]:
+def proofread_descriptions(state: Mapping[str, Any]) -> dict[str, str]:
     """state 里的校对记录 → ``{语义名: 素材画面事实}``（下游唯一取材口）。
 
     每条记录都收，**不按 status 过滤**：``pending_regen`` 的 description 是未改动的

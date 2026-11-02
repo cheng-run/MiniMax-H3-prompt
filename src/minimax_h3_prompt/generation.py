@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, Literal, NamedTuple, cast
 
 from .asset_proofread import proofread_descriptions
@@ -995,7 +996,7 @@ KIND_LABELS: dict[str, str] = {"character": "人物", "prop": "道具", "scene":
 
 
 def image_prompt_variants(
-    state: dict[str, Any],
+    state: Mapping[str, Any],
     canvases: CanvasMap | None = None,
 ) -> tuple[ImagePromptVariant, ...]:
     """从结构化适配器结果构造 N 份可复制提示词（每资产一版）；旧 state 缺少时保留兼容降级。
@@ -1065,7 +1066,7 @@ def image_prompt_variants(
     return tuple(variants)
 
 
-def asset_prompts_for(brief: Brief, state: dict[str, Any]) -> tuple[ImagePromptVariant, ...]:
+def asset_prompts_for(brief: Brief, state: Mapping[str, Any]) -> tuple[ImagePromptVariant, ...]:
     """路线感知的资产图提示词取数口（issue #78）：不产资产图的路线恒为空元组。
 
     四处共享同一路线判据（``brief_parser.route_emits_asset_prompts``，issue #103 从
@@ -1080,7 +1081,7 @@ def asset_prompts_for(brief: Brief, state: dict[str, Any]) -> tuple[ImagePromptV
     return image_prompt_variants(state, brief.canvases)
 
 
-def ref_asset_registry(state: dict[str, Any], brief: Brief) -> list[RefItem]:
+def ref_asset_registry(state: Mapping[str, Any], brief: Brief) -> list[RefItem]:
     """多参路线的参考素材登记：语义名 + `<Picture N>` 编号 + 描述（生图提示词）。
 
     编号按**剧本出场顺序**分配（编号即叙事顺序，2026-10-16 裁定，CONTEXT.md「参考素材」）：
@@ -1131,7 +1132,7 @@ def ref_asset_registry(state: dict[str, Any], brief: Brief) -> list[RefItem]:
     ], state, brief)
 
 
-def _with_merged_descriptions(refs: list[RefItem], state: dict[str, Any],
+def _with_merged_descriptions(refs: list[RefItem], state: Mapping[str, Any],
                               brief: Brief) -> list[RefItem]:
     """素材画面事实覆盖（issue #44 AC3）：描述取校对记录的合并结果。
 

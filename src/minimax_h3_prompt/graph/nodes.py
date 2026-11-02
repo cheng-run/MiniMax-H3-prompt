@@ -4,7 +4,8 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Callable
+from collections.abc import Mapping
+from typing import Any, Callable, cast
 
 from langgraph.graph.state import CompiledStateGraph
 
@@ -201,7 +202,7 @@ _IMAGE_PROMPTS_FIELD_BY_KIND: dict[str, str] = {
 }
 
 
-def _asset_prompt_request(kind: str, design_field: str, state: dict, brief: Brief,
+def _asset_prompt_request(kind: str, design_field: str, state: Mapping[str, Any], brief: Brief,
                           *, only: str = "") -> str:
     """资产图出词请求正文；``only`` 非空时只出**那一张**（issue #88 的单条重出）。
 
@@ -234,7 +235,7 @@ def _asset_prompt_request(kind: str, design_field: str, state: dict, brief: Brie
     )
 
 
-def _generate_asset_entries(agent, kind: str, design_field: str, state: dict, brief: Brief,
+def _generate_asset_entries(agent, kind: str, design_field: str, state: Mapping[str, Any], brief: Brief,
                             *, only: str = "") -> list[dict]:
     """跑一次资产图出词并归一成条目（多资产与单条重出共用这一条路）。
 
@@ -279,7 +280,7 @@ def _generate_asset_entries(agent, kind: str, design_field: str, state: dict, br
     return entries
 
 
-def regenerate_asset_prompt(agents: dict, kind_key: str, name: str, state: dict, brief: Brief,
+def regenerate_asset_prompt(agents: dict, kind_key: str, name: str, state: Mapping[str, Any], brief: Brief,
                             *, model: str) -> dict:
     """按**指定模型**只重出一条资产图提示词（issue #88）。
 
@@ -343,7 +344,7 @@ def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_f
     return node
 
 
-def _route_asset_entries(agents: dict, kind_key: str, entries: list[dict], state: dict,
+def _route_asset_entries(agents: dict, kind_key: str, entries: list[dict], state: Mapping[str, Any],
                          brief: Brief, *, default_model: str) -> list[dict]:
     """给每条资产定模型并按需重出（issue #88 / 父 spec #84 D8）。
 
@@ -491,6 +492,8 @@ def _normalize_locked_features(raw: object, name: str, positive: str, kind: str)
     problem = _locked_problem(raw, positive)
     if problem is not None:
         raise ValueError(f"{kind} 资产「{name}」：{problem}")
+    if not isinstance(raw, list):  # 类型收窄：上面那句已经拦过一次，这里是给人看的兜底
+        raise ValueError(f"{kind} 资产「{name}」：locked_features 不是数组")
     return [str(x).strip() for x in raw if str(x).strip()]
 
 
@@ -802,10 +805,10 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
                 用户修订=render_revision_block(pending_revisions(state)),
                 # 修订基线（issue #25）：上一轮**完整产物**渲染成的块，由人机修改循环经独立
                 # 入参键传入——没有它，用户没提过的细节每轮都会跟着重掷一起漂走。
-                修订基线=state.get(FRAME_BASELINE_KEY),
+                修订基线=str(state.get(FRAME_BASELINE_KEY) or ""),
                 # 本轮撤销（issue #24）：被撤的修订不再生效，其造成的画面改动要跟着撤回。
                 # 不说给模型听的话，基线那句「未提到的部分原样保留」会把它们原样保住。
-                本轮撤销=state.get(FRAME_REVOKED_KEY),
+                本轮撤销=str(state.get(FRAME_REVOKED_KEY) or ""),
                 分场剧本=state.get("script", ""),
                 人物设计=state.get("character_design", ""),
                 道具设计=state.get("prop_design", ""),
@@ -815,7 +818,11 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
                 镜头评审锁定=state.get("shot_review_lock", ""),
                 画面细化=state.get("visual_design", ""),
                 身份一致性锁定=state.get("identity_lock", ""),
-                质检问题="\n".join(state.get("frame_prompt_issues") or []),
+                # state 里的值是动态的：先当 list 看（cast 只影响类型），
+                # 再只收字符串条目——别让一处坏形状把 join 炸掉。
+                质检问题="\n".join(
+                    item for item in cast(list, state.get("frame_prompt_issues") or [])
+                    if isinstance(item, str)),
             )
         )
         raw = run_agent(agents["frame_prompt_engineer"], message)
@@ -840,8 +847,8 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
                 场景词=scene_terms,
                 起步澄清=brief.clarifications,
                 用户修订=render_revision_block(pending_revisions(state)),
-                修订基线=state.get(FRAME_BASELINE_KEY),
-                本轮撤销=state.get(FRAME_REVOKED_KEY),
+                修订基线=str(state.get(FRAME_BASELINE_KEY) or ""),
+                本轮撤销=str(state.get(FRAME_REVOKED_KEY) or ""),
             )
             repair = run_agent(
                 agents["frame_prompt_engineer"],
@@ -1151,7 +1158,7 @@ def _make_finalize_node() -> Callable:
             repaired, brief.mode, duration=brief.duration, variant=brief.variant, ref_meta=state.get("ref_meta")
         )
         extra = state.get("fl2va_prompt_bundle")
-        groups = ()
+        groups: tuple[tuple[str, ...], ...] = ()
         if isinstance(extra, dict):
             groups = tuple(
                 tuple(str(term) for term in group)

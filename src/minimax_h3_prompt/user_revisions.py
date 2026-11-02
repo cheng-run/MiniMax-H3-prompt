@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, Iterable
 
 from .generation import is_retired_image_family
@@ -194,7 +195,7 @@ def active_revisions(state: dict[str, Any]) -> list[dict[str, Any]]:
     return [dict(_checked(item)) for item in state.get("user_revisions") or []]
 
 
-def pending_revisions(state: dict[str, Any]) -> list[dict[str, Any]]:
+def pending_revisions(state: Mapping[str, Any]) -> list[dict[str, Any]]:
     """**还没落地**的修订：所有注入通道的真源（首帧节点、分段写段、分段规划）。
 
     已落地的条目（设定级重跑成功那条）不再进去：它的要求已经写进设定产物本身，而那些
@@ -250,7 +251,7 @@ def render_applied_list(revisions: Iterable[dict[str, Any]] | None) -> str:
     )
 
 
-def setting_revision_block(state: dict[str, Any], layer: str) -> str:
+def setting_revision_block(state: Mapping[str, Any], layer: str) -> str:
     """本轮那条设定级修订的注入块；**层次不匹配就是一个字都不进**（返回空串）。
 
     按层次过滤的理由见 ``SETTING_REVISION_KEY``：重跑起点是节点组，三个设计师一次全跑，
