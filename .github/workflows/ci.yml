@@ -50,3 +50,8 @@ jobs:
 
       - name: 全量测试
         run: uv run python -m pytest -q
+
+      # 守卫变异检验（体检 P6）：把关键实现改坏，指定的守卫用例必须变红。
+      # 「永不为红＝没有」——不做这一步，没人知道新守卫是不是摆设。
+      - name: 守卫变异检验
+        run: uv run python scripts/mutation_check.py

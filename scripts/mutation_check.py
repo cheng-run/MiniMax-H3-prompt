@@ -1,0 +1,168 @@
+"""变异检验：守卫测试真的会咬人吗（体检 §9 未验证项 / P6）。
+
+「永不为红＝没有」。一条守卫用例在**没有实现**时照样绿，说明它守的不是它声称
+的那件事；本仓已经吃过一次（``check.sh`` 的输出接 ``| tail``，红的检查显示成绿）。
+
+做法很小：登记一组「把关键实现改坏」的变异，逐个应用 → 跑指定用例 → 还原。
+用例必须红（=变异被杀死）；用例仍绿＝这条守卫是摆设。
+
+```bash
+uv run python scripts/mutation_check.py            # 全部
+uv run python scripts/mutation_check.py --only ffmpeg_shell
+```
+
+约束：
+
+- 只改**工作区里干净**的文件（``git status --porcelain`` 有改动就拒绝），
+  免得把用户没提交的东西卷进去；
+- 每条变异都声明 ``old`` 在文件里**恰好出现一次**（多处出现说明锚点选错了，
+  会用错地方）；
+- 无论用例结果如何都还原（``finally``），还原后再核对文件与原文逐字相同。
+"""
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@dataclass(frozen=True)
+class Mutation:
+    name: str
+    path: str
+    old: str
+    new: str
+    tests: tuple[str, ...]
+    why: str
+
+
+MUTATIONS: tuple[Mutation, ...] = (
+    Mutation(
+        "usage_off",
+        "src/minimax_h3_prompt/model_factory.py",
+        "        ),\n        max_retries=_LLM_MAX_RETRIES,\n        streaming=True,\n"
+        "        stream_usage=True,\n    )",
+        "        ),\n        max_retries=_LLM_MAX_RETRIES,\n        streaming=True,\n"
+        "        stream_usage=False,\n    )",
+        ("tests/test_external_contracts.py::test_gateway_client_asks_for_streaming_and_usage_together",),
+        "关掉 usage 上报会让成本表记 0 且不报错（2026-10-21 实测）",
+    ),
+    Mutation(
+        "continuity_cut_true",
+        "src/minimax_h3_prompt/director/pack.py",
+        '        "refVideos": [],\n        "continuityFromPrev": segment.guided,\n'
+        '        "refImageSize": settings.ref_image_size,',
+        '        "refVideos": [],\n        "continuityFromPrev": True,\n'
+        '        "refImageSize": settings.ref_image_size,',
+        ("tests/test_director_pack.py::test_camera_cut_segment_ships_continuity_from_prev_false",),
+        "切镜段被写成续接＝插件导入后静默续上上一段（#142 的真身）",
+    ),
+    Mutation(
+        "asset_modes_drop_r2v",
+        "src/minimax_h3_prompt/brief_parser.py",
+        'DIRECTOR_ASSET_MODES = ("r2v", "rv2v", "mixed")',
+        'DIRECTOR_ASSET_MODES = ("rv2v", "mixed")',
+        ("tests/test_route_matrix.py",),
+        "r2v 不再产出资产图提示词＝导演台 r2v 段没有参考素材",
+    ),
+    Mutation(
+        "schema_key_removed",
+        "src/minimax_h3_prompt/graph/state.py",
+        "    asset_proofreads: dict\n",
+        "",
+        ("tests/test_state_contract.py",),
+        "state 键漏声明＝节点读不到它（LangGraph 只搬声明过的键）",
+    ),
+    Mutation(
+        "user_error_not_value_error",
+        "src/minimax_h3_prompt/errors.py",
+        "class UserInputError(ValueError, H3Error):",
+        "class UserInputError(H3Error):",
+        ("tests/test_errors.py::test_classified_errors_stay_catchable_as_builtin_types",),
+        "新异常不继承 ValueError＝存量 except ValueError 静默漏掉它",
+    ),
+    Mutation(
+        "parallel_overwrite_allowed",
+        "src/minimax_h3_prompt/graph/nodes.py",
+        '        if key in merged and not _same_value(merged[key], value):',
+        '        if False and key in merged and not _same_value(merged[key], value):',
+        ("tests/test_parallel_merge.py::test_parallel_nodes_may_not_silently_overwrite_a_shared_key",),
+        "撤掉并行组共享键守卫＝后写者静默覆盖（2026-10-25 探针形态）",
+    ),
+)
+
+
+def _git_clean(path: Path) -> bool:
+    """内容层面干净才许变异（``git status`` 会把「只有 mtime 变了」也算脏）。
+
+    上一次变异把文件写回原样后 mtime 变了、内容没变，用 ``status`` 判就会误报脏；
+    ``git diff --quiet`` 比的是内容，正好是我们要的判据（工作区 vs 索引、索引 vs HEAD）。
+    """
+    rel = str(path.relative_to(ROOT))
+    for extra in ([], ["--cached"]):
+        result = subprocess.run(
+            ["git", "diff", "--quiet", *extra, "--", rel],
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if result.returncode != 0:
+            return False
+    return True
+
+
+def _run_tests(nodes: tuple[str, ...]) -> int:
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *nodes],
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace").returncode
+
+
+def check(mutation: Mutation) -> tuple[bool, str]:
+    """应用变异、跑到红、还原。返回 (是否被杀死, 说明)。"""
+    path = ROOT / mutation.path
+    original = path.read_text(encoding="utf-8")
+    occurrences = original.count(mutation.old)
+    if occurrences != 1:
+        return False, f"锚点在 {mutation.path} 出现 {occurrences} 次（要求恰好 1 次）"
+    if not _git_clean(path):
+        return False, f"{mutation.path} 工作区不干净，拒绝变异"
+
+    mutated = original.replace(mutation.old, mutation.new, 1)
+    try:
+        path.write_text(mutated, encoding="utf-8")
+        code = _run_tests(mutation.tests)
+    finally:
+        path.write_text(original, encoding="utf-8")
+    restored = path.read_text(encoding="utf-8")
+    if restored != original:
+        return False, f"还原失败：{mutation.path} 与原文不一致，请手动 git checkout"
+    return code != 0, "用例变红（杀死）" if code != 0 else "用例仍然全绿（守卫是摆设）"
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="守卫测试的变异检验")
+    parser.add_argument("--only", default=None, help="只跑指定的一条（按 name）")
+    args = parser.parse_args(argv)
+
+    selected = [m for m in MUTATIONS if args.only in (None, m.name)]
+    if not selected:
+        print(f"没有名为 {args.only!r} 的变异；可用：{', '.join(m.name for m in MUTATIONS)}")
+        return 2
+
+    survivors = []
+    for mutation in selected:
+        killed, note = check(mutation)
+        print(f"[{'杀死' if killed else '存活'}] {mutation.name}: {note}")
+        if not killed:
+            survivors.append(mutation.name)
+
+    if survivors:
+        print(f"\n{len(survivors)} 条变异没被杀死：{', '.join(survivors)}")
+        return 1
+    print(f"\n{len(selected)} 条变异全部被杀死。")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

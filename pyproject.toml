@@ -41,6 +41,37 @@ markers = [
     "allow_network: 允许该用例建立真实网络连接（默认全部禁止，见 conftest.no_real_network）",
 ]
 
+[tool.mypy]
+# 体检 P6（2026-11-02）：先只查**叶子模块**——它们没有项目内循环依赖，注解能真
+# 表达出来；一次性放开全仓会刷出上千条历史错误，把新错误一起淹掉。
+# 安装由用户本人执行：uv add --dev mypy（scripts/check.sh types 会先看有没有装）。
+python_version = "3.14"
+files = [
+    "src/minimax_h3_prompt/errors.py",
+    "src/minimax_h3_prompt/kinds.py",
+    "src/minimax_h3_prompt/text_patterns.py",
+    "src/minimax_h3_prompt/observability.py",
+]
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+
+[tool.coverage.run]
+# 体检 P6：覆盖率先只做**度量**，不设门槛——本仓的历史基线没有，设 fail_under
+# 只会逼人写凑数用例。改了哪几行、哪几行没测到，才是评审要看的东西。
+# 安装由用户本人执行：uv add --dev coverage
+source = ["src/minimax_h3_prompt"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise SystemExit",
+]
+
 [tool.ruff]
 # retro 2026-10-31：把机械风格/导入错误交给确定性工具，不再只靠复审子代理。
 # 只查 src/；tests/ 的规则先跑通再扩（tests/ 已于 2026-11-02 入库）。规则先取 pyflakes（F）——它抓未定义名、

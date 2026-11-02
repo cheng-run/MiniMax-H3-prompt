@@ -53,6 +53,10 @@ spec 与票住 issue 是因为 `/to-spec`、`/to-tickets` 按 `docs/agents/issue
 - `scripts/worktree.sh add|harvest|remove NN`：建树自动复制 `tests/`、`scripts/`、`docs/` 并留一份 tests 基线快照；`harvest` 把工作树里的测试改动回灌主树（主树已分叉就报冲突、不覆盖）；删树先自动 harvest。
 - `scripts/bootstrap-dev.sh`：新本机装回 `pre-commit` / `commit-msg` 钩子并检查 `tests/`、`scripts/` 是否就位。
 - lint：`ruff` 在 `[dependency-groups].dev` 里、装在 `.venv`；`scripts/check.sh` 用 `"$PY" -m ruff`（不走 PATH）。缺装时 fast 会跳过并提示，安装由用户执行：`uv add --dev ruff`。
+- `scripts/check.sh mutate`：守卫变异检验（`scripts/mutation_check.py`），把关键实现改坏、跑指定用例、还原；用例必须红。**新加守卫就往 `MUTATIONS` 补一条**——没有变异检验的守卫不算守卫。
+- `scripts/check.sh types|coverage`：mypy（先只查叶子模块）与分支覆盖度量，两个都**装了才跑**，安装由用户执行（`uv add --dev mypy` / `uv add --dev coverage`）。
+- `scripts/ac_trace.py`：按注释/docstring 里的 `#NNN` 汇总 issue → 代码 → 测试；用来发现「只有代码、没有测试」的票。不是门禁。
+- 工程化常态（检查档位、发布管理、追溯口径）见 `docs/agents/engineering-cadence.md`；变更记录见根 `CHANGELOG.md`。
 
 ## `/implement-spec`（2026-10-21 起）
 

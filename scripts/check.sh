@@ -14,6 +14,9 @@
 #   scripts/check.sh fast
 #   scripts/check.sh full     # 全量测试 + 改动文件的 lint
 #   scripts/check.sh lint     # 全量 src 的 ruff（装了才跑）
+#   scripts/check.sh mutate   # 守卫变异检验（不需要额外依赖）
+#   scripts/check.sh types    # mypy（装了才跑；先只查叶子模块）
+#   scripts/check.sh coverage # 分支覆盖度量（装了才跑；不设门槛）
 set -euo pipefail
 
 cd "$(dirname "$0")/.." || exit 1
@@ -97,8 +100,31 @@ case "${1:-fast}" in
     echo "[check] lint: ruff check src"
     "$PY" -m ruff check src
     ;;
+  mutate)
+    # 变异检验（体检 P6）：守卫测试必须真的会咬人。不需要额外依赖。
+    echo "[check] mutate: 守卫变异检验"
+    "$PY" scripts/mutation_check.py
+    ;;
+  types)
+    # mypy 未装时提示并放行——安装由用户本人执行（全局规则：下载一律由用户做）。
+    if ! "$PY" -m mypy --version >/dev/null 2>&1; then
+      echo "[check] types: mypy 未安装，跳过（安装由用户执行：uv add --dev mypy）"
+      exit 0
+    fi
+    echo "[check] types: mypy（叶子模块，见 pyproject [tool.mypy].files）"
+    "$PY" -m mypy
+    ;;
+  coverage)
+    if ! "$PY" -m coverage --version >/dev/null 2>&1; then
+      echo "[check] coverage: coverage 未安装，跳过（安装由用户执行：uv add --dev coverage）"
+      exit 0
+    fi
+    echo "[check] coverage: 全量测试 + 分支覆盖（只度量，不设门槛）"
+    "$PY" -m coverage run -m pytest -q
+    "$PY" -m coverage report
+    ;;
   *)
-    echo "用法: $0 [fast|full|lint]" >&2
+    echo "用法: $0 [fast|full|lint|mutate|types|coverage]" >&2
     exit 2
     ;;
 esac
