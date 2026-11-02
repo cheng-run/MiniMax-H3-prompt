@@ -12,6 +12,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TextIO
 
 from .config import config
 
@@ -68,7 +69,7 @@ class RunLog:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._path: Path | None = None
-        self._handle = None
+        self._handle: TextIO | None = None
         self._warned = False
         self._started_at = time.monotonic()
 
