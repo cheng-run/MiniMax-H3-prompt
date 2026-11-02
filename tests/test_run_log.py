@@ -57,6 +57,9 @@ def test_stage1_writes_events_and_no_prompt_text(logging_on, monkeypatch):
             })
             yield {"storyboard": {"shot_table": "分镜正文"}}
 
+    # 模型构造必须打桩：_run_stage1 第一行就建客户端，本机有 .env 能过、
+    # 干净检出会抛「缺失 MINIMAX_API_KEY」——2026-11-02 CI 第一次跑就是这么红的。
+    monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
     monkeypatch.setattr(
         pipeline, "build_pipeline_graph", lambda *a, **k: (_Graph(), {}))
     monkeypatch.setattr(pipeline, "_stage1_frame_qa_loop", lambda state, *a: state)
