@@ -32,7 +32,9 @@ jobs:
       - uses: actions/checkout@v7
 
       # uv 负责解释器与锁文件：requires-python >= 3.14，由 setup-uv 现装。
-      - uses: astral-sh/setup-uv@v10
+      # 钉精确版本：该仓库只发语义化版本标签，没有 v10 这种移动主版本标签
+      # （2026-11-02 第一次远端跑就是这么红的：unable to find version v10）。
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: "3.14"
           enable-cache: true
