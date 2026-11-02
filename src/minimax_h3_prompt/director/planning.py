@@ -43,6 +43,9 @@ from .frames import (
 # 导演台只是第三条路线，不是另一套模型输出约定。``_extract_json`` 是私有名但语义
 # 稳定、无副作用，重抄一份会让两条路对模型输出的宽容度各自漂。
 from ..segment_planner import FRAME_CONTEXT_HEADER, _extract_json
+# 执行段 4–15 秒档：与 preflight 共用一份常量，别在规划层再抄一遍数字
+# （issue #46 AC6 定档；导演台路线此前没有校验，P7）。
+from ..tools.preflight import SEGMENT_MAX_S, SEGMENT_MIN_S
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 _INSTRUCTION_NAME = "segment_planner_director.md"
@@ -179,6 +182,18 @@ def parse_director_plan(text: str, total_s: float, *, mode: str) -> DirectorPlan
         end = _require_number(item.get("end_s"), f"第 {position} 段 end_s")
         if end - start <= 0:
             raise ValueError(f"第 {position} 段窗口 {start}–{end} 非正时长")
+        # 4–15 秒是规划师自己的契约（``segment_planner_director.md`` 硬约束），但
+        # 之前只写在提示词里、代码不校验（L1 §四「本轮不实现」）。#137 首轮因此拿到
+        # 39 帧＝1.625s 的段，打包与陪跑全盘接受。这里在**装成段表之前**拦：不合格
+        # 的窗口就是一次作废的规划，不能往下游传。
+        seconds = end - start
+        if (seconds < SEGMENT_MIN_S - _BOUNDARY_TOLERANCE
+                or seconds > SEGMENT_MAX_S + _BOUNDARY_TOLERANCE):
+            raise ValueError(
+                f"第 {position} 段窗口 {start}–{end} 秒＝{seconds:.3f}s，"
+                f"超出 {SEGMENT_MIN_S:g}–{SEGMENT_MAX_S:g} 秒契约：每段至少 "
+                f"{SEGMENT_MIN_S:g} 秒、至多 {SEGMENT_MAX_S:g} 秒，且不短于本段内"
+                "最长的镜头。改段边界后重试")
         types.append(segment_type)
         windows.append((start, end))
         summaries.append(str(item.get("summary", "")))
@@ -223,8 +238,20 @@ def parse_director_plan(text: str, total_s: float, *, mode: str) -> DirectorPlan
         # 有人改落位函数时两处口径悄悄分家。
         raise ValueError(
             f"段表累计导出帧 {segments[-1].end_frame} 与落位总量 {landed_frames} 不一致")
+    notes = [note] if note else []
+    # 窗口合格≠落位合格：声明帧吸附 17k+5 网格后，合规的 4s 可能被压到 3.75s
+    # （2026-11-02 #138 段1 实测）。这是网格的既定行为，**不能报错**——报错会让
+    # 「4s 档」永远规划不出来；但必须让用户看见，故写进出站说明。
+    for segment in segments:
+        landed = segment.export_frames / FPS
+        if (landed < SEGMENT_MIN_S - _BOUNDARY_TOLERANCE
+                or landed > SEGMENT_MAX_S + _BOUNDARY_TOLERANCE):
+            notes.append(
+                f"第 {segment.index} 段落位 {landed:.3f}s 超出 "
+                f"{SEGMENT_MIN_S:g}–{SEGMENT_MAX_S:g} 秒（规划窗口合格，"
+                "是 17k+5 网格吸附造成）")
     return DirectorPlan(mode=mode, total_frames=landed_frames, segments=segments,
-                        notes=(note,) if note else ())
+                        notes=tuple(notes))
 
 
 def plan_director_segments(shot_table: str, total_s: float, llm, *, mode: str,

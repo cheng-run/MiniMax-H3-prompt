@@ -978,7 +978,8 @@ def _resume_director_handoff(config: Config, session: SessionState, *,
 
 def _render_director_segment_briefing(plan, segment, session_dir: Path,
                                       *, single_shot: bool = False,
-                                      cache_directory: Path | None = None) -> str:
+                                      cache_directory: Path | None = None,
+                                      cache_name: str = "") -> str:
     """一段的执行说明：段号、两种计划帧、给图清单、段文件、**勾段方式与证据入口**。
 
     「用 runSelection 只勾第 N 段」这句是**硬要求**（设计 §3.7 最后一条）：插件对
@@ -1004,6 +1005,24 @@ def _render_director_segment_briefing(plan, segment, session_dir: Path,
         f"给图：{render_give_images(segment, plan.mode)}",
         f"段提示词：{segment_path(session_dir, segment.index)}",
     ]
+    # 提示词正文**直接打在终端**（P6，2026-11-02 验收）：只给路径时用户要一边终端
+    # 一边资源管理器翻文件，既打断节奏也容易复制错版本。
+    prompt_path = segment_path(session_dir, segment.index)
+    if prompt_path.is_file():
+        lines += [
+            "",
+            "本段提示词（整段复制到导演台的提示词框）：",
+            "-" * 60,
+            prompt_path.read_text(encoding="utf-8").strip(),
+            "-" * 60,
+        ]
+    if not segment.guided and segment.index > 1:
+        # P4（2026-11-02 验收）：切镜段关引导。包内 continuityFromPrev=false，
+        # 但 ComfyUI 里若被勾成「引用上段」，这一段会多出 12 帧「保完整」尾，
+        # 帧数判定必挂（#137 段2 实测 136 帧 vs 应出 124）。
+        lines.append(
+            "本段是切镜段：挂**首帧**（本段起点画面），并把「引用上段」**关掉**——"
+            "包内 continuityFromPrev=false；被勾上会当成续接，多出 12 帧「保完整」尾。")
     if needs_tailframe(segment.type, plan.mode):
         lines.append(
             "本段有终点画面：生成后把图片留着，跑完贴视频时会问它的路径"
@@ -1028,6 +1047,12 @@ def _render_director_segment_briefing(plan, segment, session_dir: Path,
             lines.append(
                 f"段缓存目录：{cache_directory}（只供定位，不是判定依据："
                 "判定按你贴回的成片视频）")
+        if cache_name:
+            # P5（2026-11-02 验收）：包内的缓存名与节点性能组的字段是两处输入；
+            # 节点留空时缓存落到以 node id 命名的目录，账行路径与现场对不上。
+            lines.append(
+                f"节点性能组的 cache_name 也填：{cache_name}"
+                "（留空会让段缓存目录名与账行对不上）")
     lines.append("跑完把本段成片视频路径贴回来（我按这条视频数帧判定）。")
     lines.append("=" * 60)
     return "\n".join(lines)
@@ -1090,6 +1115,56 @@ def _print_tailframe_document(text: str, *, index: int, path: Path,
           "（带起点地标，才有距离感）。")
 
 
+def _print_firstframe_prompt(text: str, *, index: int, path: Path,
+                             note: str = "") -> None:
+    """打印切镜段**段首帧**的可复制正文（用户要粘给生图模型）。
+
+    与尾帧文档分开：首帧词是文生图的一段正文（没有三段式），粘过去就是一整段；
+    加分隔线只是方便整段选中。
+    """
+    header = f"[首帧] 第 {index} 段可直接复制给生图模型"
+    if note:
+        header += f"（{note}）"
+    print(f"{header}（{path}）：")
+    print("-" * 60)
+    print(text.strip())
+    print("-" * 60)
+    print("用它先生成这一段的**首帧**，挂到导演台该段的「首帧」槽；"
+          "接着写的尾帧词会以这张图为参考。")
+
+
+def _cut_first_frame_prompt(plan, segment, session: SessionState, *, llm) -> str | None:
+    """切镜段的段首帧词：轮到该段时先给词，再写尾帧词（尾帧要拿这张图当参考）。
+
+    不重付：文件已在盘上就沿用（与尾帧词同一条纪律——用户可能已经拿它生成过图，
+    重写一份会让「挂上去的那张图」与文件里的词不再对应）。
+    """
+    from ..director.firstframe import firstframe_path, write_firstframe_prompt
+
+    path = firstframe_path(session.directory, segment.index)
+    if path.is_file():
+        text = path.read_text(encoding="utf-8").strip()
+        _print_firstframe_prompt(text, index=segment.index, path=path,
+                                 note="已在盘上，沿用，不重付")
+        return text
+    print(f"\n[进度] 轮到第 {segment.index}/{len(plan.segments)} 段（{segment.label}）："
+          "切镜段要一张自己的首帧，正在写段首帧提示词（需要调用模型，稍等）…")
+    shot_table = str(session.stage_state.get("shot_table", ""))
+    try:
+        text = write_firstframe_prompt(
+            segment, mode=plan.mode, llm=llm, shot_table=shot_table,
+            brief=session.brief, session_dir=session.directory)
+    except Exception as exc:  # noqa: BLE001 - 病因原样交回，别伪装成别的问题
+        print(f"[错误] 第 {segment.index} 段的段首帧提示词写不出来：{exc}")
+        return None
+    if text is None:
+        print(f"[错误] 第 {segment.index} 段的段首帧提示词写不出来"
+              "（调用失败或回复里没有 first 帧正文）。")
+        return None
+    _print_firstframe_prompt(text, index=segment.index, path=path)
+    return text
+
+
 def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> bool:
     """轮到该段时产出它的终点画面提示词（#107 的三段式，本票负责接线）。
 
@@ -1109,6 +1184,7 @@ def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> b
 
     from ..director import cache, ledger
     from ..director import tailframe as tailframe_module
+    from ..director.frames import IMAGE_FIRST, give_images_for
     from ..director.tailframe import (
         needs_tailframe, tailframe_path, validate_tailframe_prompt,
         write_tailframe_prompts,
@@ -1139,54 +1215,68 @@ def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> b
     # 没有这行时用户只看到「跳过」就静默了（2026-10-31 验收反馈）。
     print(f"\n[进度] 轮到第 {segment.index}/{len(plan.segments)} 段（{segment.label}）："
           "正在取上一段起点画面并写终点画面提示词（需要调用模型，稍等）…")
-    # 起点画面**优先用上一段的终点图**（用户生成并挂在导演台尾帧槽的那张）。
-    # #114 原先只认账内上一段成片视频的末帧；2026-10-31 实跑证明视频末帧每段都会漂
-    # （第 3 段起墨镜、第 4 段胡子），拿它当参考会把漂移逐段放大。终点图是干净的
-    # 目标准图；旧账没有这个字段、或用户没存，才回退到视频末帧。
-    try:
-        rows = ledger.passed_director_rows(session.directory)
-    except (OSError, ValueError) as exc:
-        print(f"[错误] 段产出账读不回来，第 {segment.index} 段的终点画面提示词写不了：{exc}")
-        print("  修好后重跑向导会从这一段接着走（已通过的段留在段产出账里）。")
-        return False
-    row = rows.get(previous)
-    end_image = row.get("end_image") if row else None
-    # 旧账（本功能上线前通过的段）没有 ``end_image``：这里补问一次，免得用户为了
-    # 拿到干净参考图而重跑上一段。上一段本身不产终点画面（opening/continue）时不问。
-    previous_segment = next(
-        (item for item in plan.segments if item.index == previous), None)
-    if (not end_image and row is not None and previous_segment is not None
-            and needs_tailframe(previous_segment.type, plan.mode)):
-        end_image = _prompt_optional_image(
-            f"第 {previous} 段的终点图路径（账里没记；它带起点地标，是距离感的"
-            "锚点；回车=没有，改用上一段视频末帧）：")
+    # 起点画面＝**本段起点**（``tailframe_writer_director.md:8``）。两种段分开取：
+    # 切镜段起点在别处，参考图只能是用户挂在该段首帧槽的那张；引导段的起点＝上一段
+    # 终点，下面那段「上一段终点图／视频末帧」才是本段起点。2026-11-02 验收
+    # （#137 段2）之前这里对两类一视同仁，切镜段的尾帧词因此从错误起点写起。
     image = None
-    if end_image:
-        candidate = Path(end_image)
-        if candidate.is_file():
-            image = candidate
-            print(f"  起点画面：上一段终点图 {image}")
+    if IMAGE_FIRST in give_images_for(segment.type, plan.mode):
+        image = _prompt_optional_image(
+            f"第 {segment.index} 段（{segment.label}）的首帧路径"
+            "（本段起点画面；尾帧词以它为参考图。回车＝没有，改用上一段终点图兜底）：")
+        if image is not None:
+            print(f"  起点画面：本段首帧 {image}")
         else:
-            print(f"  [警告] 账里记的上一段终点图不存在：{candidate}"
-                  "——改用上一段视频末帧")
-    video = row.get("video") if row else None
+            print("  [警告] 本段是切镜段，没有给首帧：尾帧词将沿用上一段终点图／末帧——"
+                  "只有本段起点与上一段终点同地时才成立。")
     if image is None:
-        if not video:
-            # 终点图与成片视频都没有（旧账或根本没通过）：不猜、不拿缓存顶替。
-            print(f"[错误] 第 {segment.index} 段要终点画面，但账里没有上一段"
-                  f"（第 {previous} 段）可用的起点画面（终点图与成片视频都没有）。")
-            print("  修好后重跑向导会从这一段接着走（已通过的段留在段产出账里）。")
-            return False
+        # 起点画面**优先用上一段的终点图**（用户生成并挂在导演台尾帧槽的那张）。
+        # #114 原先只认账内上一段成片视频的末帧；2026-10-31 实跑证明视频末帧每段都会漂
+        # （第 3 段起墨镜、第 4 段胡子），拿它当参考会把漂移逐段放大。终点图是干净的
+        # 目标准图；旧账没有这个字段、或用户没存，才回退到视频末帧。
         try:
-            # 落点由 tailframe.last_frame_png_path 给：级联重跑按同一个名字删（#106），
-            # 在这里再拼一份字面就是两处会各自漂的口径。
-            image = cache.export_last_frame(
-                video, tailframe_module.last_frame_png_path(session.directory, previous))
-        except ValueError as exc:
-            print(f"[错误] 第 {segment.index} 段要终点画面，但取不到上一段视频的末帧：{exc}")
+            rows = ledger.passed_director_rows(session.directory)
+        except (OSError, ValueError) as exc:
+            print(f"[错误] 段产出账读不回来，第 {segment.index} 段的终点画面提示词写不了：{exc}")
             print("  修好后重跑向导会从这一段接着走（已通过的段留在段产出账里）。")
             return False
-        print(f"  起点画面：上一段视频末帧 {image}")
+        row = rows.get(previous)
+        end_image = row.get("end_image") if row else None
+        # 旧账（本功能上线前通过的段）没有 ``end_image``：这里补问一次，免得用户为了
+        # 拿到干净参考图而重跑上一段。上一段本身不产终点画面（opening/continue）时不问。
+        previous_segment = next(
+            (item for item in plan.segments if item.index == previous), None)
+        if (not end_image and row is not None and previous_segment is not None
+                and needs_tailframe(previous_segment.type, plan.mode)):
+            end_image = _prompt_optional_image(
+                f"第 {previous} 段的终点图路径（账里没记；它带起点地标，是距离感的"
+                "锚点；回车=没有，改用上一段视频末帧）：")
+        if end_image:
+            candidate = Path(end_image)
+            if candidate.is_file():
+                image = candidate
+                print(f"  起点画面：上一段终点图 {image}")
+            else:
+                print(f"  [警告] 账里记的上一段终点图不存在：{candidate}"
+                      "——改用上一段视频末帧")
+        video = row.get("video") if row else None
+        if image is None:
+            if not video:
+                # 终点图与成片视频都没有（旧账或根本没通过）：不猜、不拿缓存顶替。
+                print(f"[错误] 第 {segment.index} 段要终点画面，但账里没有上一段"
+                      f"（第 {previous} 段）可用的起点画面（终点图与成片视频都没有）。")
+                print("  修好后重跑向导会从这一段接着走（已通过的段留在段产出账里）。")
+                return False
+            try:
+                # 落点由 tailframe.last_frame_png_path 给：级联重跑按同一个名字删（#106），
+                # 在这里再拼一份字面就是两处会各自漂的口径。
+                image = cache.export_last_frame(
+                    video, tailframe_module.last_frame_png_path(session.directory, previous))
+            except ValueError as exc:
+                print(f"[错误] 第 {segment.index} 段要终点画面，但取不到上一段视频的末帧：{exc}")
+                print("  修好后重跑向导会从这一段接着走（已通过的段留在段产出账里）。")
+                return False
+            print(f"  起点画面：上一段视频末帧 {image}")
     single = replace(plan, segments=(segment,))
     try:
         written = write_tailframe_prompts(
@@ -1529,6 +1619,17 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
                 print(f"[续接] 第 {segment.index}/{total} 段已通过验收，跳过"
                       f"（不重跑：{row.get('video', '')}）")
                 continue
+            # 切镜段的段首帧既不在导演包里、也没有出词口（P2，2026-11-02 验收）：
+            # 轮到这一段时先把首帧词交给用户，紧接着的尾帧词要拿这张图当参考。
+            # 只认 camera_cut：opening 的首帧是阶段 1 的全片首帧（已经出过词并收过图），
+            # 其余类型没有首帧槽。
+            if segment.type == "camera_cut":
+                if llm is None:
+                    llm = _build_director_llm("写段首帧提示词")
+                    if llm is None:
+                        return 1
+                if _cut_first_frame_prompt(plan, segment, session, llm=llm) is None:
+                    return 1
             # 轮到该段才写它的终点画面提示词：起点画面是**上一段**的末帧，此刻才存在。
             # 判据带模式：i2v 下不给终点画面，也就没有尾帧词可写（2026-10-30 用户裁定）。
             if needs_tailframe(segment.type, plan.mode):
@@ -1541,7 +1642,8 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
                     return 1
             print(_render_director_segment_briefing(
                 plan, segment, directory, single_shot=single_shot,
-                cache_directory=cache_directory))
+                cache_directory=cache_directory,
+                cache_name=brief.director_cache_name))
             while True:
                 # #112：判定证据只有用户贴回来的这条视频。路径不存在 / 不是视频 /
                 # 读不出帧数都在这一问里当场报错重问，**不落账**。
