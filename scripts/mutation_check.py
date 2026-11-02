@@ -157,6 +157,10 @@ def check(mutation: Mutation) -> tuple[bool, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windows 的 CI runner 控制台是 cp1252：中文一 print 就 UnicodeEncodeError，
+    # 整个变异检验会以「脚本崩溃」而不是「守卫存活」结束（2026-11-02 实测）。
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="守卫测试的变异检验")
     parser.add_argument("--only", default=None, help="只跑指定的一条（按 name）")
     args = parser.parse_args(argv)

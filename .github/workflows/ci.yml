@@ -28,6 +28,9 @@ jobs:
     # 跨平台解耦是后续工作项（体检 P2-4）；先别让一个从没绿过的 job 常红。
     runs-on: windows-latest
     timeout-minutes: 30
+    env:
+      # Windows runner 默认 cp1252：脚本里的中文输出会直接崩
+      PYTHONIOENCODING: utf-8
     steps:
       - uses: actions/checkout@v7
 
