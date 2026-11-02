@@ -129,6 +129,37 @@ def no_real_network(request, monkeypatch):
     monkeypatch.setattr(socket.socket, "connect_ex", _blocked)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def clean_env_when_requested():
+    """``H3_TEST_NO_ENV=1``：把本机 ``.env`` 从测试里摘掉，模拟 CI 的干净检出。
+
+    背景（2026-11-02 CI 首跑）：一条用例真建了 LLM 客户端——本机 ``.env`` 有 key
+    能过，干净检出抛「缺失 MINIMAX_API_KEY」。这类失败**本地永远看不见**，只能
+    在推送前主动模拟。入口是 ``scripts/check.sh clean``。
+
+    做法：停掉 ``load_dotenv`` 并把环境里已加载的模型相关变量摘掉（保存后还原）。
+    不碰用户的 ``.env`` 文件本身——只影响本进程。
+    """
+    if os.getenv("H3_TEST_NO_ENV", "").strip().lower() not in {"1", "true", "yes"}:
+        yield
+        return
+    from minimax_h3_prompt import config as config_module
+
+    original = config_module.load_dotenv
+    config_module.load_dotenv = lambda *args, **kwargs: None
+    saved = {
+        name: os.environ.pop(name)
+        for name in list(os.environ)
+        if name.endswith(("_API_KEY", "_AUTH_TOKEN", "_BASE_URL", "_MODEL", "_MODEL_NAME"))
+        or name == "LLM_PROVIDER"
+    }
+    try:
+        yield
+    finally:
+        config_module.load_dotenv = original
+        os.environ.update(saved)
+
+
 @pytest.fixture(autouse=True)
 def no_run_log(monkeypatch):
     """默认关掉结构化运行日志（体检 P4）。

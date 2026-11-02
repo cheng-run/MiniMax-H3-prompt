@@ -149,7 +149,12 @@ def check(mutation: Mutation) -> tuple[bool, str]:
         path.write_text(mutated, encoding="utf-8")
         code = _run_tests(mutation.tests)
     finally:
-        path.write_text(original, encoding="utf-8")
+        # 用 git 还原，不用文本写回：CRLF 文件写回后与索引不一致，`git status` 会
+        # 变脏、`git switch` 被拦（2026-11-02 合并 governance 分支时实测，
+        # 只能先 git checkout 五个文件才切得动）。git checkout 是字节级还原。
+        subprocess.run(
+            ["git", "checkout", "--", str(path.relative_to(ROOT))],
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace")
     restored = path.read_text(encoding="utf-8")
     if restored != original:
         return False, f"还原失败：{mutation.path} 与原文不一致，请手动 git checkout"

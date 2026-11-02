@@ -51,7 +51,13 @@ jobs:
         run: uv run python scripts/check_docstring_shape.py src
 
       - name: lint（ruff）
-        run: uv run python -m ruff check src
+        # tests/ 一起查：测试里也有未定义名、未使用导入这类机械错误。
+        run: uv run python -m ruff check src tests
+
+      # 类型检查：2026-11-02 起全仓零错误。不进 CI 的守卫等于没有——
+      # 之前 mypy 只在 check.sh 里，推送后没人再检查它。
+      - name: 类型检查（mypy）
+        run: uv run python -m mypy
 
       - name: 全量测试
         run: uv run python -m pytest -q

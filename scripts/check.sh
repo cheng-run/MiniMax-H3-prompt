@@ -17,6 +17,7 @@
 #   scripts/check.sh mutate   # 守卫变异检验（不需要额外依赖）
 #   scripts/check.sh types    # mypy（装了才跑；先只查叶子模块）
 #   scripts/check.sh coverage # 分支覆盖度量（装了才跑；不设门槛）
+#   scripts/check.sh clean    # 干净环境（无 .env）跑全量，模拟 CI
 set -euo pipefail
 
 cd "$(dirname "$0")/.." || exit 1
@@ -60,9 +61,11 @@ lint_changed() {
     return 0
   fi
   local files
-  files=$(git diff --name-only --diff-filter=ACMR HEAD -- 'src' | grep -E '\.py$' || true)
+  # tests/ 也查：2026-11-02 扩到全仓时，tests 里还躺着 34 条（含一条 F821
+  # 「赋值前引用」）。只查 src 等于把一半代码排除在机械检查之外。
+  files=$(git diff --name-only --diff-filter=ACMR HEAD -- 'src' 'tests' | grep -E '\.py$' || true)
   if [ -z "$files" ]; then
-    echo "[check] lint: 没有改动的 src/*.py，跳过"
+    echo "[check] lint: 没有改动的 src/tests 下的 .py，跳过"
     return 0
   fi
   echo "[check] lint: ruff check（改动文件）"
@@ -75,6 +78,18 @@ lint_changed() {
 run_docstring_guard() {
   echo "[check] 结构守卫：文档字符串不许写成 f-string"
   "$PY" scripts/check_docstring_shape.py src
+}
+
+# mypy：2026-11-02 起覆盖全仓（72 个文件零错误）。未安装时提示并放行——安装由
+# 用户本人执行（全局规则：下载一律由用户做）。**full 档必须跑它**：类型守卫不进
+# full 就等于没有（CI 也一样，见 .github/workflows/ci.yml）。
+run_types() {
+  if ! "$PY" -m mypy --version >/dev/null 2>&1; then
+    echo "[check] types: mypy 未安装，跳过（安装由用户执行：uv add --dev mypy）"
+    return 0
+  fi
+  echo "[check] types: mypy（全仓）"
+  "$PY" -m mypy
 }
 
 run_fast() {
@@ -93,14 +108,22 @@ case "${1:-fast}" in
     "$PY" -m pytest -q
     run_docstring_guard
     lint_changed
+    run_types
     ;;
   lint)
     if ! ruff_available; then
       echo "[check] lint: ruff 未安装，跳过（安装由用户执行：uv add --dev ruff）"
       exit 0
     fi
-    echo "[check] lint: ruff check src"
-    "$PY" -m ruff check src
+    echo "[check] lint: ruff check src tests"
+    "$PY" -m ruff check src tests
+    ;;
+  clean)
+    # 干净环境（retro 2026-11-02）：把本机 .env 从测试里摘掉，模拟 CI 的干净检出。
+    # 推送前跑一次，就能看见「远端会看见而本地看不见」的那类红（首跑 CI 红了三条）。
+    echo "[check] clean: 干净环境（无 .env / 无模型环境变量）下跑全量"
+    H3_TEST_NO_ENV=1 "$PY" -m pytest -q
+    run_docstring_guard
     ;;
   mutate)
     # 变异检验（体检 P6）：守卫测试必须真的会咬人。不需要额外依赖。
@@ -108,13 +131,7 @@ case "${1:-fast}" in
     "$PY" scripts/mutation_check.py
     ;;
   types)
-    # mypy 未装时提示并放行——安装由用户本人执行（全局规则：下载一律由用户做）。
-    if ! "$PY" -m mypy --version >/dev/null 2>&1; then
-      echo "[check] types: mypy 未安装，跳过（安装由用户执行：uv add --dev mypy）"
-      exit 0
-    fi
-    echo "[check] types: mypy（叶子模块，见 pyproject [tool.mypy].files）"
-    "$PY" -m mypy
+    run_types
     ;;
   coverage)
     if ! "$PY" -m coverage --version >/dev/null 2>&1; then
@@ -126,7 +143,7 @@ case "${1:-fast}" in
     "$PY" -m coverage report
     ;;
   *)
-    echo "用法: $0 [fast|full|lint|mutate|types|coverage]" >&2
+    echo "用法: $0 [fast|full|lint|mutate|types|coverage|clean]" >&2
     exit 2
     ;;
 esac

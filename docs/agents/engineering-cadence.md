@@ -11,12 +11,29 @@ scripts/check.sh fast       # 提交前：结构守卫 + 改动文件 lint + 秒
 scripts/check.sh full       # 推送前：全量测试 + docstring 守卫 + lint
 scripts/check.sh lint       # 全量 src 的 ruff（装了才跑）
 scripts/check.sh mutate     # 守卫变异检验（无额外依赖，约 5 秒）
-scripts/check.sh types      # mypy（装了才跑）
+scripts/check.sh types      # mypy 全仓（装了才跑）
 scripts/check.sh coverage   # 分支覆盖度量（装了才跑，不设门槛）
+scripts/check.sh clean      # 干净环境（无 .env）跑全量，模拟 CI 的干净检出
 ```
 
-CI（`.github/workflows/ci.yml`）跑的是同一套：docstring 守卫 → ruff → 全量测试 →
-变异检验。**CI 与本机同源**，否则「本机绿」又会变回唯一证据。
+CI（`.github/workflows/ci.yml`）跑的是同一套：docstring 守卫 → ruff（`src tests`）→
+mypy → 全量测试 → 变异检验。**CI 与本机同源**，否则「本机绿」又会变回唯一证据。
+
+### 改工作流时的两条约定
+
+1. **actions 一律钉精确版本**，不写 `@v7`/`@v10` 这类移动主版本标签——有些仓库
+   不发主版本标签（`astral-sh/setup-uv` 只有 `v10.3.3` 这种），`@v10` 会当场
+   "unable to find version"（2026-11-02 首跑 6 秒失败）。推送前验一次：
+
+   ```bash
+   gh api repos/<owner>/<repo>/git/matching-refs/tags/<tag> --jq '.[].ref'
+   ```
+
+   本地无法复现任何工作流错误，这一验是唯一能提前发现的手段；`actionlint` 只查
+   语法与表达式，查不了标签存在。
+2. **Windows runner 的控制台是 cp1252**：脚本里 `print` 中文会 `UnicodeEncodeError`，
+   整个步骤以崩溃收场。工作流已设 `PYTHONIOENCODING: utf-8`，新脚本入口也自己
+   `sys.stdout.reconfigure(encoding="utf-8")` 兜一道。
 
 ## 三条「装了才有」的工具
 

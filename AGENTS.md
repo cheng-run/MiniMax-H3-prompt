@@ -47,7 +47,9 @@ spec 与票住 issue 是因为 `/to-spec`、`/to-tickets` 按 `docs/agents/issue
 ## 守卫（2026-11-02 起入库）
 
 `tests/`、`scripts/`、`docs/` 与 `AGENTS.md` 自 2026-11-02 起恢复入库（体检 P0-1）：干净检出即可跑测试与结构守卫，CI 与本机跑同一套命令。`.git/hooks/` 仍是每台机器自己的目录、不随 clone 走——新机器跑一次 `scripts/bootstrap-dev.sh` 装回；钩子本体在 `scripts/hooks/`，已被跟踪。
-- `scripts/check.sh fast|full`：快档结构守卫（出网守卫、f-string docstring）＋改动文件的 lint ＋测试；`.git/hooks/pre-commit` 调快档。**别把它的输出接 `| tail`**：管道会吞掉退出码，红的检查会显示成绿（2026-11-01 实测，一次 collection error 因此被漏看）。要看结尾就 `set -o pipefail` 或 `; echo EXIT=$?`。
+- `scripts/check.sh fast|full`：快档结构守卫（出网守卫、f-string docstring）＋改动文件的 lint ＋测试；`.git/hooks/pre-commit` 调快档。`full` 另跑 mypy 与全量测试；`clean` 把本机 `.env` 从测试里摘掉、模拟 CI 的干净检出（推送前跑它，2026-11-02 CI 首跑红了三条本地看不见的）。**看结尾而退出码不被吞**，直接用这条：
+  `bash scripts/check.sh full 2>&1 | tail -5; echo "EXIT=${PIPESTATUS[0]}"`
+  （裸 `| tail` 会让红的检查显示成绿——2026-11-01 漏看过一次 collection error。）
 - `scripts/check_docstring_shape.py`：AST 守卫，docstring 写成 f-string 即报红（ruff 的 F 规则不抓，全量测试也不报）。
 - `scripts/check_commit_msg.sh`：提交信息格式 `type(scope): 摘要（#N）`（无 issue 的 retro 用 `（retro YYYY-MM-DD）`）；`.git/hooks/commit-msg` 调用它。
 - `scripts/worktree.sh add|harvest|remove NN`：建树自动复制 `tests/`、`scripts/`、`docs/` 并留一份 tests 基线快照；`harvest` 把工作树里的测试改动回灌主树（主树已分叉就报冲突、不覆盖）；删树先自动 harvest。
