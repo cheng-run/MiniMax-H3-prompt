@@ -560,6 +560,31 @@ def test_repacking_replaces_the_pack_dir_so_stale_media_does_not_survive(tmp_pat
     assert all("Picture3" not in name for name in _zip_names(job))
 
 
+def test_camera_cut_segment_ships_continuity_from_prev_false(tmp_path):
+    """#142：包内切镜段必须写 ``continuityFromPrev=false``，续接段才是 true。
+
+    插件在字段**缺失**时才默认 true（``segment_continuity.py:210-231``）。本仓的包
+    一旦漏写或写反，硬切会被当续接执行：多出 12 帧「保完整」尾、帧数判定必挂
+    （#137 A/B 段2 实测 136 帧／累计 311）。这条钉住**包侧**契约；插件导入后是否丢
+    字段（#142 的另一半）需要 ComfyUI 现场，本用例不声称覆盖。
+    """
+    from minimax_h3_prompt.director.pack import prepare_director_pack
+
+    text = json.dumps({"segments": [
+        {"start_s": 0, "end_s": 6, "type": "opening", "summary": "a", "end_hook": "h1"},
+        {"start_s": 6, "end_s": 12, "type": "continue", "summary": "b", "end_hook": "h2"},
+        {"start_s": 12, "end_s": 18, "type": "camera_cut", "summary": "c", "end_hook": "h3"},
+    ]}, ensure_ascii=False)
+    plan = parse_director_plan(text, 18.0, mode="t2v")
+    session_dir = _session(tmp_path, plan)
+
+    job, _ = prepare_director_pack(session_dir, plan, settings=_settings())
+    timeline = _pack_timeline(job)
+
+    assert [s["continuityFromPrev"] for s in timeline["segments"]] == [False, True, False], \
+        "continuityFromPrev 必须按段类型派生：切镜/开场 false，续接 true"
+
+
 def test_second_phase_modes_are_refused_explicitly(tmp_path):
     """v2v/rv2v/mixed 一期不许静默套用别的模式（票面硬条，二期 #109/#110）。
 
