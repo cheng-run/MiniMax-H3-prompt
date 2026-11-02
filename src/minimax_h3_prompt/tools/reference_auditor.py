@@ -56,7 +56,8 @@ def _build_vision_model(*, streaming: bool = True) -> ChatOpenAI:
         key = config.resolve_api_key(settings)
     except ValueError as exc:
         raise RuntimeError(
-            f"缺失 {settings.api_key_env}：参考图审核需要 {settings.provider} 视觉模型"
+            f"缺失 {settings.api_key_env}：参考图审核需要视觉模型 "
+            f"{settings.model}（{settings.base_url}）"
         ) from exc
     if streaming:
         timeout: object = httpx.Timeout(

@@ -43,7 +43,8 @@ def test_loads_primary_and_vision_from_yaml(config_without_env):
     assert cfg.primary_model.provider == yaml_primary.get("provider", "dashscope")
     assert cfg.primary_model.model == yaml_primary.get("model")
     assert cfg.primary_model.base_url == yaml_primary.get("base_url")
-    assert cfg.vision_model.provider == yaml_vision.get("provider", "dashscope")
+    # 视觉档的 provider 是协议标签、不是配置项（2026-11-02 体检 P3 删掉该键）：
+    assert cfg.vision_model.provider == config_module.VISION_PROTOCOL_LABEL
     assert cfg.vision_model.model == yaml_vision.get("model")
     assert cfg.vision_model.base_url == yaml_vision.get("base_url")
 

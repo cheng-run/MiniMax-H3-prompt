@@ -28,8 +28,9 @@ models:
     base_url: https://api.minimax.cn/v1
     api_key_env: MINIMAX_API_KEY
 
+  # 视觉档不配 provider（2026-11-02 体检 P3 裁定「删掉」）：客户端恒为
+  # OpenAI 兼容协议，换网关改 base_url；写 provider 会当场报错。
   vision:
-    provider: dashscope
     model: MiniMax-M3.1-Flash
     # 网关 OpenAI 兼容口只有 /v1；多打一个 1（/v11）会被 nginx 直接 404，
     # 读图两端（首帧/多参）都会挂（2026-10-24 实测）

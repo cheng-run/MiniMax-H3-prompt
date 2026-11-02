@@ -1,6 +1,7 @@
 """全局配置：读项目根 `config/agent.yaml` + `.env`。"""
 from __future__ import annotations
 
+import difflib
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -90,6 +91,87 @@ _DIRECTOR_DEFAULTS = {
 _COMFY_OUTPUT_ROOT_ENV = "H3_COMFY_OUTPUT_ROOT"
 _DEFAULT_COMFY_OUTPUT_ROOT = "D:/Comfyui/ComfyUI/output"
 
+# ---------------------------------------------------------------------------
+# 配置 schema（体检 §4.4 / P3）：**未知键报错**。
+#
+# 为什么要有：``provider`` 拼成 ``provder`` 时旧实现静默回落到环境探测，用户以为
+# 换了网关、实际没换（2026-10-20 换模型期间反复踩到）。键集合是契约，写错要响。
+# 加新键时同步这里——少加一处，用户写了也不生效，那正是本守卫要消灭的形态。
+# ---------------------------------------------------------------------------
+_KNOWN_TOP = frozenset({"pipeline", "cost", "models", "director", "defaults", "model"})
+_KNOWN_SECTIONS: dict[str, frozenset[str]] = {
+    "pipeline": frozenset({
+        "default_duration", "max_qa_iterations", "max_clarification_rounds",
+        "roundtable_max_rounds", "output_path", "save_stages", "stages_path",
+        "common_sense_qa",
+    }),
+    "cost": frozenset({"price_per_m_input", "price_per_m_output"}),
+    "director": frozenset({
+        "width", "height", "ref_max_size", "ref_image_size",
+        "comfy_output_root", "frame_tolerance",
+    }),
+    "defaults": frozenset({"style", "language", "sessions_root"}),
+    "models": frozenset({"primary", "vision"}),
+}
+_KNOWN_MODEL_FIELDS: dict[str, frozenset[str]] = {
+    "primary": frozenset({"provider", "model", "base_url", "api_key_env"}),
+    # 视觉档**没有** provider：客户端恒为 ChatOpenAI（OpenAI 兼容协议），写别的值
+    # 不会换协议、只会让报错文案说错（2026-11-02 体检 §4.4 裁定「删掉」）。
+    "vision": frozenset({"model", "base_url", "api_key_env"}),
+}
+# 视觉档 ``ModelSettings.provider`` 的取值：它是**协议标签**不是网关名（网关名从
+# base_url 的 host 现取）。写死一个常量，避免任何地方再把它当可配项读。
+VISION_PROTOCOL_LABEL = "openai-compatible"
+
+
+def _reject_unknown(where: str, raw: dict, known: frozenset[str]) -> None:
+    """未知键报错并给最接近的候选（``provder`` → ``provider``）。"""
+    unknown = [key for key in raw if key not in known]
+    if not unknown:
+        return
+    hints = []
+    for key in unknown:
+        close = difflib.get_close_matches(str(key), sorted(known), n=1)
+        hints.append(f"{key!r}" + (f"（是不是 {close[0]!r}？）" if close else ""))
+    raise ConfigError(
+        f"config/agent.yaml 的 {where} 有未识别的键：{'、'.join(hints)}。"
+        f"可用键：{', '.join(sorted(known))}。"
+        "拼错的键不会生效——旧实现会静默忽略它并回落到默认值。")
+
+
+def validate_schema(raw: object) -> None:
+    """校验 ``agent.yaml`` 的键集合与节形状；坏配置在**构造期**就报错。
+
+    纯函数（不碰文件、不碰环境），用例可以直接喂 dict 做变异检验。
+    """
+    if raw is None:
+        return
+    if not isinstance(raw, dict):
+        raise ConfigError(f"config/agent.yaml 顶层必须是映射，实际 {type(raw).__name__}")
+    _reject_unknown("顶层", raw, _KNOWN_TOP)
+    for section, known in _KNOWN_SECTIONS.items():
+        if section not in raw or raw[section] is None:
+            continue
+        value = raw[section]
+        if not isinstance(value, dict):
+            raise ConfigError(
+                f"config/agent.yaml 的 {section} 节必须是映射，实际 {type(value).__name__}")
+        _reject_unknown(section, value, known)
+    models = raw.get("models") or {}
+    for name, known in _KNOWN_MODEL_FIELDS.items():
+        if not isinstance(models, dict) or name not in models or models[name] is None:
+            continue
+        block = models[name]
+        if not isinstance(block, dict):
+            raise ConfigError(
+                f"config/agent.yaml 的 models.{name} 必须是映射，实际 {type(block).__name__}")
+        if name == "vision" and "provider" in block:
+            raise ConfigError(
+                "config/agent.yaml 的 models.vision.provider 已退役（2026-11-02，体检 §4.4）："
+                "视觉档恒走 OpenAI 兼容协议（ChatOpenAI），写 provider 不会换协议、"
+                "只会让报错文案说错。请删掉这一行；要换网关请改 base_url。")
+        _reject_unknown(f"models.{name}", block, known)
+
 
 class Config:
     """应用级配置。字段只读（兼容既有运行时对 save_stages 的测试修改）。"""
@@ -98,6 +180,7 @@ class Config:
         load_dotenv(PROJECT_ROOT / ".env")
 
         self.raw = _load_yaml(CONFIG_PATH)
+        validate_schema(self.raw)
         pipeline = self.raw.get("pipeline", {}) or {}
         defaults = self.raw.get("defaults", {}) or {}
 
@@ -152,12 +235,13 @@ class Config:
 
     @staticmethod
     def _build_vision_settings(raw: dict[str, Any]) -> ModelSettings:
-        provider = str(raw.get("provider") or "dashscope").strip().lower()
+        # provider 不再读配置（2026-11-02 体检 §4.4）：视觉客户端恒为 ChatOpenAI，
+        # 这个字段只做「协议」标签，网关名从 base_url 的 host 现取。
         default_model, default_base_url, default_key_env = _DEFAULTS["dashscope"]
         model = _env("DASHSCOPE_MODEL", "DASHSCOPE_MODEL_NAME") or str(raw.get("model") or "").strip() or "qwen3.7-plus"
         base_url = _env("DASHSCOPE_BASE_URL") or str(raw.get("base_url") or "").strip() or default_base_url
         key_env = str(raw.get("api_key_env") or default_key_env).strip()
-        return ModelSettings(provider, model, base_url or None, key_env, "视觉模型")
+        return ModelSettings(VISION_PROTOCOL_LABEL, model, base_url or None, key_env, "视觉模型")
 
     def director_settings(self):
         """导演包参数（``director:`` 节，issue #104）：画布宽高、参考图尺寸。
