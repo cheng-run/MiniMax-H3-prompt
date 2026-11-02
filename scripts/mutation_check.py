@@ -93,6 +93,22 @@ MUTATIONS: tuple[Mutation, ...] = (
         ("tests/test_parallel_merge.py::test_parallel_nodes_may_not_silently_overwrite_a_shared_key",),
         "撤掉并行组共享键守卫＝后写者静默覆盖（2026-10-25 探针形态）",
     ),
+    Mutation(
+        "adr_ref_dangling",
+        "src/minimax_h3_prompt/asset_loop.py",
+        "# 直调路径的角色名（issue #71 / ADR 0019）",
+        "# 直调路径的角色名（issue #71 / ADR 0099）",
+        ("tests/test_adr_guard.py::test_every_referenced_adr_exists",),
+        "引用不存在的 ADR 号＝悬空指针，没有任何守卫会报（#143 抓到过三处）",
+    ),
+    Mutation(
+        "adr_status_missing",
+        "docs/adr/0001-stage2-checkpoint.md",
+        "> **状态（2026-11-02 复核）**：",
+        "> 状态：",
+        ("tests/test_adr_guard.py::test_every_adr_has_a_well_formed_status_line",),
+        "删掉状态行＝「哪份还被取代」再也机读不出来",
+    ),
 )
 
 

@@ -56,6 +56,7 @@ spec 与票住 issue 是因为 `/to-spec`、`/to-tickets` 按 `docs/agents/issue
 - `scripts/check.sh mutate`：守卫变异检验（`scripts/mutation_check.py`），把关键实现改坏、跑指定用例、还原；用例必须红。**新加守卫就往 `MUTATIONS` 补一条**——没有变异检验的守卫不算守卫。
 - `scripts/check.sh types|coverage`：mypy（先只查叶子模块）与分支覆盖度量，两个都**装了才跑**，安装由用户执行（`uv add --dev mypy` / `uv add --dev coverage`）。
 - `scripts/ac_trace.py`：按注释/docstring 里的 `#NNN` 汇总 issue → 代码 → 测试；用来发现「只有代码、没有测试」的票。不是门禁。
+- `tests/test_adr_guard.py`（fast 档）：① 注释/docstring/文档里的 `ADR NNNN` 必须指向真实文件（外部 ADR 写 `ADR-NNNN`，连字符形式不核对）；② 27 份 ADR 必须有且只有一行合规状态行。ADR 写法与索引口径见 `docs/agents/engineering-cadence.md`；索引用 `scripts/adr_index.py` 现生成，不落静态清单。
 - 工程化常态（检查档位、发布管理、追溯口径）见 `docs/agents/engineering-cadence.md`；变更记录见根 `CHANGELOG.md`。
 
 ## `/implement-spec`（2026-10-21 起）
