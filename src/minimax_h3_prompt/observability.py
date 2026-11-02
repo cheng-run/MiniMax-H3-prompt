@@ -5,7 +5,12 @@
 """
 from __future__ import annotations
 
+import json
+import os
+import sys
 import threading
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import config
@@ -34,6 +39,97 @@ def format_step_banner(action: str, *, round_no: int = 1, total_rounds: int = 1)
     return f"▶ {action}（第 {round_no}/{total_rounds} 轮）……"
 
 
+# 结构化运行日志的开关（体检 §4.5 / P4）：默认开，``H3_RUN_LOG=0`` 关。
+# 为什么用环境变量而不是 YAML 键：它要能在**测试**里被 conftest 一次性关掉，
+# 也要能在排障时临时打开/关闭而不改仓里的配置。
+_RUN_LOG_ENV = "H3_RUN_LOG"
+_OFF_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def run_log_enabled() -> bool:
+    return os.getenv(_RUN_LOG_ENV, "").strip().lower() not in _OFF_VALUES
+
+
+class RunLog:
+    """一次运行一份 JSONL（``logs/<时间>-<阶段>.jsonl``）：事件、耗时、token、错误码。
+
+    为什么要有（体检 §4.5）：617 处 ``print`` 没有一条落盘，出事后无法从盘上复盘
+    一次运行；成本、耗时、失败原因只能靠人看屏幕。
+
+    三条不变式：
+
+    1. **只记元数据，不记正文**——提示词与模型输出只记长度（``out_len``），
+       避免把用户素材与商业内容写成日志资产；
+    2. **写失败不影响主流程**：日志是观测，不是业务（与 ``Reporter.emit`` 同口径），
+       但**第一次**失败要在 stderr 说一句，否则「日志悄悄没写」会变成新的静默；
+    3. **嵌套运行只留第一份**：阶段 2 在阶段 1 之后开，同一次运行不该有两本账。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._path: Path | None = None
+        self._handle = None
+        self._warned = False
+        self._started_at = time.monotonic()
+
+    @property
+    def path(self) -> Path | None:
+        return self._path
+
+    def start(self, path: Path) -> Path | None:
+        """开始一份运行日志；已激活时保持原来那份并返回它的路径。"""
+        with self._lock:
+            if self._handle is not None:
+                return self._path
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                self._handle = open(path, "a", encoding="utf-8")  # noqa: SIM115 - 生命周期由 stop 管
+            except OSError as exc:
+                self._warn_once(f"[日志] 无法写入 {path}：{exc}")
+                return None
+            self._path = path
+            self._started_at = time.monotonic()
+        self.record("run_start")
+        return path
+
+    def stop(self) -> None:
+        with self._lock:
+            if self._handle is None:
+                return
+            handle, self._handle, self._path = self._handle, None, None
+        try:
+            handle.close()
+        except OSError:
+            pass
+
+    def record(self, event: str, **fields) -> None:
+        """追加一条事件。``event`` 用短名（``agent_done`` / ``error`` / ``stage_end``）。"""
+        with self._lock:
+            handle = self._handle
+            if handle is None:
+                return
+            row = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "elapsed": round(time.monotonic() - self._started_at, 3),
+                "event": event,
+                **fields,
+            }
+            try:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+                handle.flush()
+            except (OSError, TypeError, ValueError) as exc:
+                self._warn_once(f"[日志] 写运行日志失败：{exc}")
+
+    def _warn_once(self, message: str) -> None:
+        if self._warned:
+            return
+        self._warned = True
+        print(message, file=sys.stderr)
+
+
+run_log = RunLog()
+
+
 class Reporter:
     """线程安全事件总线。事件为 dict，必须含 type。"""
 
@@ -51,6 +147,10 @@ class Reporter:
                 self._subscribers.remove(callback)
 
     def emit(self, event: dict) -> None:
+        # 先落运行日志（无活动日志时是空操作），再分发给订阅者：观测层自己的
+        # 事件链（cost/进度）与打印共用同一个来源，不另开一条记账路径。
+        run_log.record(str(event.get("type", "event")),
+                       **{key: value for key, value in event.items() if key != "type"})
         with self._lock:
             subs = list(self._subscribers)
         for cb in subs:
@@ -61,6 +161,16 @@ class Reporter:
 
 
 reporter = Reporter()
+
+
+def default_run_log_path(base: Path, stage: str) -> Path:
+    """``<base>/logs/<时间戳>-<阶段>.jsonl``：一次运行一份，文件名带微秒防撞。
+
+    ``base`` 取 ``stage_saver.base.parent``（即 output/），测试里被 monkeypatch 成
+    tmp_path 时日志跟着落进临时目录，不污染仓库。
+    """
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    return base / "logs" / f"{stamp}-{stage}.jsonl"
 
 
 class TokenMeter:

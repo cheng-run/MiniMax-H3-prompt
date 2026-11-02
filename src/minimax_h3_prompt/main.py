@@ -499,10 +499,32 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return _dispatch(argv)
     except Exception as exc:  # noqa: BLE001 - 顶层边界：打印上下文后仍交回 traceback
+        _record_fatal(exc)
         print(f"[错误] 未处理的失败（{error_code(exc)}）：{type(exc).__name__}: {exc}",
               file=sys.stderr)
         traceback.print_exc()
         return 1
+
+
+def _record_fatal(exc: BaseException) -> None:
+    """给盘上留一行「这次运行怎么死的」（体检 §4.5）：分类码 + 类名 + 消息。
+
+    没有活动日志时现开一份 ``logs/<时间>-cli.jsonl``；日志写失败不影响报错输出
+    （``RunLog`` 自己只在 stderr 说一句就放手）。
+    """
+    from .observability import (
+        default_run_log_path, run_log, run_log_enabled, stage_saver,
+    )
+
+    if not run_log_enabled():
+        return
+    started = run_log.path is None
+    if started:
+        run_log.start(default_run_log_path(stage_saver.base.parent, "cli"))
+    run_log.record("error", error_code=error_code(exc),
+                   error=type(exc).__name__, message=str(exc))
+    if started:
+        run_log.stop()
 
 
 def _dispatch(argv: list[str] | None = None) -> int:

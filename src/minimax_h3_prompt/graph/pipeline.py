@@ -6,6 +6,7 @@ v0.1 采用线性执行：并行 fan-in 深度不对齐时 LangGraph 会重复�
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from langgraph.graph import END, START, StateGraph
@@ -14,7 +15,11 @@ from ..agents import build_role_agents, run_agent
 from ..brief_parser import FRAME_VARIANTS, Brief, is_ref_mode
 from ..clarification import as_block
 from ..config import Config
-from ..observability import format_step_banner, stage_saver, token_meter
+from ..errors import error_code
+from ..observability import (
+    default_run_log_path, format_step_banner, run_log, run_log_enabled,
+    stage_saver, token_meter,
+)
 from ..output.assembler import assemble_and_repair
 from ..tools.h3_validator import format_issues, validate_prompt
 from ..tools.ref_metadata import to_tuple
@@ -245,10 +250,10 @@ def stage1_rerun_plan(layer: str, *, mode: str = "base") -> Stage1RerunPlan:
     return Stage1RerunPlan(spec=spec, start=spec.resume_from, nodes=nodes, artifacts=artifacts)
 
 
-def run_stage1(brief: Brief, config: Config, *, on_node=None,
-               resume_from_node: str | None = None,
-               initial_state: dict | None = None,
-               on_step_done=None) -> tuple[dict, object, object]:
+def _run_stage1(brief: Brief, config: Config, *, on_node=None,
+                resume_from_node: str | None = None,
+                initial_state: dict | None = None,
+                on_step_done=None) -> tuple[dict, object, object]:
     """阶段 1：创意/设计/分镜/首尾帧生图提示词/声音。返回 (state, model, agents)。
 
     on_node：可选回调，每个图节点跑完（有产出）时以节点名调用，供 UI 报进度。
@@ -307,6 +312,37 @@ def run_stage1(brief: Brief, config: Config, *, on_node=None,
     return state, model, agents
 
 
+@contextmanager
+def _stage_log(stage: int, brief: Brief):
+    """阶段的结构化日志边界（体检 §4.5 / P4）：开始/结束/失败三种记录。
+
+    失败走 ``except`` 分支记一条 ``stage_end status=error``（带分类码）再原样抛出——
+    日志不是容错层，只是把「这次运行怎么死的」落成盘上的一行。
+    """
+    path = None
+    if run_log_enabled():
+        path = run_log.start(default_run_log_path(stage_saver.base.parent, f"stage{stage}"))
+    run_log.record("stage_start", stage=stage, mode=brief.mode,
+                   variant=brief.variant, duration=brief.duration)
+    try:
+        yield
+    except Exception as exc:  # noqa: BLE001 - 记完原样抛
+        run_log.record("stage_end", stage=stage, status="error",
+                       error_code=error_code(exc), error=type(exc).__name__)
+        raise
+    else:
+        run_log.record("stage_end", stage=stage, status="ok")
+    finally:
+        if path is not None:
+            run_log.stop()
+
+
+def run_stage1(brief: Brief, config: Config, **kwargs) -> tuple[dict, object, object]:
+    """阶段 1 的入口（外层只管运行日志边界，细节见 ``_run_stage1``）。"""
+    with _stage_log(1, brief):
+        return _run_stage1(brief, config, **kwargs)
+
+
 def _stage1_frame_qa_loop(state: dict, brief: Brief, agents, model, config: Config) -> dict:
     """生图提示词有界常识 QA：发现 error 级问题注入 frame_prompt_issues 重生成，最多 max_qa_iterations 轮。"""
     from ..tools.frame_sanity import frame_common_sense_issues
@@ -342,7 +378,13 @@ def _stage1_frame_qa_loop(state: dict, brief: Brief, agents, model, config: Conf
     return state
 
 
-def run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_node=None, checkpoint_dir=None) -> tuple[dict, str]:
+def run_stage2(state: dict, brief: Brief, config: Config, **kwargs) -> tuple[dict, str]:
+    """阶段 2 的入口（外层只管运行日志边界，细节见 ``_run_stage2``）。"""
+    with _stage_log(2, brief):
+        return _run_stage2(state, brief, config, **kwargs)
+
+
+def _run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_node=None, checkpoint_dir=None) -> tuple[dict, str]:
     """阶段 2：注入真实帧描述后组装视频正文 + 有界 QA/theme_guard 精修。返回 (state, 最终提示词)。
 
     on_node：可选回调，每个图节点跑完（有产出）时以节点名调用，供 UI 报进度。

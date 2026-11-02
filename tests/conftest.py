@@ -130,6 +130,17 @@ def no_real_network(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_run_log(monkeypatch):
+    """默认关掉结构化运行日志（体检 P4）。
+
+    它的默认落点是 ``stage_saver.base.parent/logs/``：多数用例没有把 ``stage_saver``
+    指到临时目录，跑一次全量就会在仓里留下几百份 JSONL——那是「测试污染用户目录」
+    的老形态。要验证日志本身的用例（``tests/test_run_log.py``）自己打开。
+    """
+    monkeypatch.setenv("H3_RUN_LOG", "0")
+
+
+@pytest.fixture(autouse=True)
 def isolated_asset_library(tmp_path_factory, monkeypatch):
     """所有用例默认把素材库根指到临时目录（issue #85）。
 
