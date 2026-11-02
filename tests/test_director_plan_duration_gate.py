@@ -46,6 +46,28 @@ def test_rejects_a_window_longer_than_fifteen_seconds():
         parse_director_plan(text, 20.0, mode="fl2v")
 
 
+def test_a_four_second_window_lands_at_least_four_seconds():
+    """#141：窗口合格还不够——落位也必须守住 4s 下限。
+
+    旧实现把这条交给「出站说明」兜底（见上一条测试）；#141 裁定改成落位层直接
+    守住：4s 窗口的段不得低于 96 帧。这里走 ``parse_director_plan`` 的真实路径。
+    """
+    from minimax_h3_prompt.director.planning import parse_director_plan
+
+    text = _reply([
+        _seg(1, 0, 4.0, "opening"),
+        _seg(2, 4.0, 8.0, "continue"),
+        _seg(3, 8.0, 14.0, "camera_same"),
+        _seg(4, 14.0, 20.0, "ending"),
+    ])
+    plan = parse_director_plan(text, 20.0, mode="fl2v")
+
+    first = plan.segments[0]
+    assert first.export_frames >= 96, (
+        f"第 1 段窗口 0–4s，落位却只有 {first.export_frames} 帧"
+        f"＝{first.export_frames / 24:.3f}s")
+
+
 def test_legal_windows_build_a_plan_and_note_grid_snapping():
     """窗口 0–4/4–8/8–14/14–20 全合格；吸附若把某段压出带外，说明里必须点名。"""
     from minimax_h3_prompt.director.planning import parse_director_plan, render_plan_listing

@@ -60,6 +60,10 @@ _MODE_MAX_SEGMENTS: dict[str, int] = {
 # ``test_single_segment_max_matches_preflight`` 交叉校验：改一处不改另一处当场报红。
 SINGLE_SEGMENT_MAX_S = 15.0
 
+# 单段执行下限 4 秒，同一个口径。这里只用它回答一个问题：这一段的**规划窗口**
+# 是否承诺了 4 秒以上（#141 的落位下限）。与 15 秒同法交叉校验，不直接 import。
+SEGMENT_MIN_S = 4.0
+
 
 def segment_types_for_mode(mode: str) -> tuple[str, ...]:
     """该模式允许的段类型清单；规划请求、解析与读回校验**都从这里取**。
@@ -293,6 +297,29 @@ def _nearest_grid(raw_frames: int) -> int:
     return min(candidates, key=lambda v: (abs(v - raw_frames), -v))
 
 
+def _min_export_for(segment_type: str, raw_frames: int) -> int:
+    """落位下限（#141）：规划窗口 ≥4s 的段，落位不得低于 4s。
+
+    raw 是窗口折成的帧数，用它判断这一段当初承诺了多长——窗口本身在
+    ``parse_director_plan`` 已按 4–15 秒校验过，但网格吸附可能把合规窗口压小。
+    网格不一定能正好落在 96 帧上，所以取该类型的**下一个**合法导出值：
+    有引导段导出恒为 17 的倍数（102），无引导段 ≡5 (mod 17)（107）。
+    短于 4s 的窗口不享受这条下限，仍按最小段长处理。
+    """
+    min_frames = round(SEGMENT_MIN_S * FPS)
+    if raw_frames < min_frames:
+        return MIN_SEGMENT_FRAMES
+    if is_guided(segment_type):
+        return ((min_frames + GRID_STEP - 1) // GRID_STEP) * GRID_STEP
+    return align_frames(min_frames)
+
+
+def _min_declared_for(segment_type: str, min_export: int) -> int:
+    """导出下限 → 声明帧下限（声明帧必须落在 ``17k+5`` 网格上）。"""
+    floor = min_export - KEEP_TAIL_FRAMES if is_guided(segment_type) else min_export
+    return align_frames(max(MIN_SEGMENT_FRAMES, floor))
+
+
 def duration_sec_for_declared(declared_frames: int) -> float:
     """声明帧 → 包内要写的 ``durationSec``（1 位小数），两者**严格自洽**（ADR 0025）。
 
@@ -367,21 +394,54 @@ def land_exports(types: Sequence[str], raw_frames: Sequence[int],
     balancer = unguided[-1]
     others = [index for index in range(len(types)) if index != balancer]
 
-    declared = {index: _nearest_grid(raw[index]) for index in others}
+    # 每段的落位下限（#141）：规划窗口 ≥4s 的段不得被余额吸附压到 4s 以下。
+    # 之前只有「余额装不下最小段长（17 帧）」才回退，于是 20s/4 段里 72 帧余额
+    # 全压给段1、选最近网格 73（3.042s）——总长对了，契约错了。
+    min_export = {index: _min_export_for(types[index], raw[index])
+                  for index in range(len(types))}
+    min_declared = {index: _min_declared_for(types[index], min_export[index])
+                    for index in range(len(types))}
 
+    declared: dict[int, int] = {
+        index: max(_nearest_grid(raw[index]), min_declared[index])
+        for index in others
+    }
+
+    def export_of(index: int, declared_frames: int) -> int:
+        return _export_of(types[index], declared_frames)
+
+    def others_total() -> int:
+        return sum(export_of(index, declared[index]) for index in others)
+
+    def deviation(candidate: int) -> int:
+        """整条段表离提议帧的总偏差：同样接近目标时，取改动最小的分配。"""
+        total = sum(abs(export_of(index, declared[index]) - raw[index]) for index in others)
+        return total + abs(export_of(balancer, candidate) - raw[balancer])
+
+    best: tuple[tuple, int, int, dict[int, int]] | None = None
+    shrinks = 0
     while True:
-        others_total = sum(_export_of(types[index], declared[index]) for index in others)
-        ideal = target_frames - others_total
-        if ideal >= MIN_SEGMENT_FRAMES:
-            break
-        # 余额装不下一段：把代价最小的一段往下挪一格（提议边界太挤时才会走到这里）。
-        shrinkable = [
-            index for index in others
-            if declared[index] - GRID_STEP >= MIN_SEGMENT_FRAMES]
+        current_total = others_total()
+        ideal = target_frames - current_total
+        # 候选＝理想余额附近的两个网格值，外加本段下限本身。余额低于下限时，
+        # 下限仍是合法落位（总量会比目标多，但合规窗口不被压穿）。
+        candidates = set(_grid_candidates(ideal))
+        candidates.add(min_declared[balancer])
+        for candidate in candidates:
+            if candidate < min_declared[balancer] or candidate < MIN_SEGMENT_FRAMES:
+                continue
+            total = current_total + export_of(balancer, candidate)
+            # 排序键：先总量最接近目标，再**少动别的段**（719 的固定落位靠这一位），
+            # 再整表偏差最小，最后总量大者优先（同距取上界，ADR 0024）。
+            key = (abs(total - target_frames), shrinks, deviation(candidate), -total)
+            if best is None or key < best[0]:
+                best = (key, candidate, total, dict(declared))
+        # 余额低于下限时只能让别的段各退一格 17 帧；每退一格总量降 17。
+        # 但只在总量确实更接近目标时才采纳（由排序键决定），不为分布好看推远总量。
+        shrinkable = [index for index in others
+                      if declared[index] - GRID_STEP >= min_declared[index]]
         if not shrinkable:
-            raise ValueError(
-                f"目标总帧 {target_frames} 在 {len(types)} 段上无合法落位"
-                f"（每段至少 {MIN_SEGMENT_FRAMES} 帧、声明帧须在 {GRID_STEP}k+{GRID_OFFSET} 网格上）")
+            break
 
         def shrink_cost(index: int) -> int:
             """往下挪一格对「离提议多远」的代价：挪最便宜的段，别动已经偏很多的。"""
@@ -390,20 +450,15 @@ def land_exports(types: Sequence[str], raw_frames: Sequence[int],
 
         cheapest = min(shrinkable, key=lambda index: (shrink_cost(index), index))
         declared[cheapest] -= GRID_STEP
+        shrinks += 1
 
-    # 余额吸附到最近网格：两个候选都比距离，落定「最接近目标的可达总量」。
-    best: tuple[tuple, int, int] | None = None
-    for candidate in _grid_candidates(ideal):
-        total = others_total + _export_of(types[balancer], candidate)
-        key = (abs(total - target_frames), abs(candidate - raw[balancer]), -total)
-        if best is None or key < best[0]:
-            best = (key, candidate, total)
     if best is None:
         raise ValueError(f"目标总帧 {target_frames} 无法落位：余额 {ideal} 附近没有合法网格值")
 
-    _, balancer_declared, total = best
+    _, balancer_declared, total, best_declared = best
+    declared = best_declared
     declared[balancer] = balancer_declared
-    exports = [_export_of(types[index], declared[index]) for index in range(len(types))]
+    exports = [export_of(index, declared[index]) for index in range(len(types))]
 
     if total == target_frames:
         return exports, None

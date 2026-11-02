@@ -239,9 +239,9 @@ def parse_director_plan(text: str, total_s: float, *, mode: str) -> DirectorPlan
         raise ValueError(
             f"段表累计导出帧 {segments[-1].end_frame} 与落位总量 {landed_frames} 不一致")
     notes = [note] if note else []
-    # 窗口合格≠落位合格：声明帧吸附 17k+5 网格后，合规的 4s 可能被压到 3.75s
-    # （2026-11-02 #138 段1 实测）。这是网格的既定行为，**不能报错**——报错会让
-    # 「4s 档」永远规划不出来；但必须让用户看见，故写进出站说明。
+    # 残余兜底（#141 之后落位层已守住 4s 下限，正常不再触发）：将来若有人改落位
+    # 逻辑又把合规窗口压出带外，至少让用户看见，而不是静默接受。不报错——报错会让
+    # 「4s 档」永远规划不出来。
     for segment in segments:
         landed = segment.export_frames / FPS
         if (landed < SEGMENT_MIN_S - _BOUNDARY_TOLERANCE

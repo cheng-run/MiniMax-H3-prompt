@@ -189,12 +189,14 @@ def test_landing_reproduces_the_adr_0025_example_as_719():
 def test_landing_picks_the_nearest_reachable_total_not_a_naive_rounding():
     """29.17 秒（700 帧）/ 5 段：可达总量 ≡ 5 (mod 17)，最近是 702（差 2），不是 700。
 
+    2026-11-02 #141 追加 4s 下限后，段1 不再落到 90 帧（3.75s）：它从有引导段
+    各让一格 17 帧里拿回 17 帧，变成 107 帧（4.458s）；总量仍是 702。
     变异检验：把「余额吸附到最近网格」改成「截断到网格下界」，会落到 685（差 15）。
     """
     types = ["opening", "continue", "continue", "continue", "continue"]
     exports, note = land_exports(types, [140] * 5, 700, mode="t2v")
     assert sum(exports) == 702
-    assert exports[0] == 90 and exports[1:] == [153] * 4
+    assert exports == [107, 136, 153, 153, 153], "4s 下限优先于「余额吸收者就近」"
     assert note is not None and "差 2 帧" in note
 
 
@@ -208,6 +210,23 @@ def test_landing_shrinks_segments_when_the_remainder_does_not_fit():
     assert sum(exports) == 719
     assert note is not None and "差 1 帧" in note
     assert all(export % 17 == 0 for export in exports[1:]), "有引导段导出必须是 17 的倍数"
+
+
+def test_four_second_window_never_lands_below_four_seconds():
+    """#141：20s/4 段、窗口全部 ≥4s，段1 曾被余额吸附压到 73 帧＝3.042s。
+
+    判据不是「总长对」而是「合规窗口不得被落位压出下限」：旧实现先把三个引导段
+    各自吸到 102/153/153，余额 72 帧全给段1、选最近网格 73；正确做法是在引导段
+    之间各让一格 17 帧，把段1 抬到 4s 以上（仍是 17k+5，总量不变）。
+    """
+    types = ["opening", "continue", "camera_same", "ending"]
+    exports, note = land_exports(types, [96, 96, 144, 144], 480, mode="fl2v")
+
+    assert exports[0] >= 96, (
+        f"4s 窗口的段1落到 {exports[0]} 帧＝{exports[0] / 24:.3f}s，"
+        "低于 4s 下限")
+    assert sum(exports) == 481
+    assert note is not None and "差 1 帧" in note
 
 
 def test_landing_without_unguided_segment_is_loud():

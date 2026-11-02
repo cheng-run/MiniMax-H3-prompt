@@ -142,6 +142,18 @@ def test_single_segment_max_matches_preflight():
     assert SINGLE_SEGMENT_MAX_S == SEGMENT_MAX_S
 
 
+def test_single_segment_min_matches_preflight():
+    """#141 的 4s 落位下限与 preflight 同源：改一处不改另一处当场报红。
+
+    与上一条同理，``frames.SEGMENT_MIN_S`` 是纯算术件里的副本，只用来判断
+    「规划窗口是否承诺了 4s」；真正的段视频档位口径在 ``tools/preflight.py``。
+    """
+    from minimax_h3_prompt.director.frames import SEGMENT_MIN_S
+    from minimax_h3_prompt.tools.preflight import SEGMENT_MIN_S as PREFLIGHT_MIN_S
+
+    assert SEGMENT_MIN_S == PREFLIGHT_MIN_S
+
+
 def test_wizard_clamps_the_i2v_duration_before_stage_one(monkeypatch):
     """选完 i2v 后超限时长必须当场收正：回车取上限，合法输入原样采纳。
 
