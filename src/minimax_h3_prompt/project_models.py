@@ -307,7 +307,10 @@ class Segment:
 
     @property
     def shot_number(self) -> int:
-        return int(_SHOT_ID.fullmatch(self.shot_ref).group(0)[2:])
+        match = _SHOT_ID.fullmatch(self.shot_ref)
+        if match is None:
+            raise ValueError(f"镜头引用格式无效：{self.shot_ref!r}")
+        return int(match.group(0)[2:])
 
     @property
     def sequence_letter(self) -> str:

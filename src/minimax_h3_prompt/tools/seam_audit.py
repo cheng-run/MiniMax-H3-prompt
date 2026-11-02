@@ -52,7 +52,7 @@ def find_ffmpeg() -> Path:
     try:
         import imageio_ffmpeg
     except ImportError:
-        imageio_ffmpeg = None  # type: ignore[assignment]
+        imageio_ffmpeg = None
     if imageio_ffmpeg is not None:
         try:
             return Path(imageio_ffmpeg.get_ffmpeg_exe())
@@ -428,10 +428,12 @@ def render_markdown(report: AuditReport, baseline: dict | None) -> str:
         lines.append("")
         lines.append("| 接缝 | 前镜头末尾静止 | 后镜头开头静止 | 接缝总静止 |")
         lines.append("|---|---|---|---|")
-        for s in report.seams:
-            lines.append(f"| {s.prev_shot}→{s.next_shot} | {s.prev_trailing} | "
-                         f"{s.next_leading} | **{s.total_still}**"
-                         f"（{s.total_still / 24:.2f}s） |")
+        # 循环变量改名为 seam：上面「每个镜头」那段已经用过 s（ShotStill），
+        # 同名会让类型检查与读代码的人都以为这是同一种对象。
+        for seam in report.seams:
+            lines.append(f"| {seam.prev_shot}→{seam.next_shot} | {seam.prev_trailing} | "
+                         f"{seam.next_leading} | **{seam.total_still}**"
+                         f"（{seam.total_still / 24:.2f}s） |")
         lines.append("")
 
     if report.warnings:

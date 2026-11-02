@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from .asset_ledger import sha256_file
 
@@ -110,11 +111,14 @@ def passed_shot_rows(directory: str | Path) -> dict[int, dict]:
     rows: dict[int, dict] = {}
     path = shot_ledger_path(directory)
     for index, record in enumerate(read_shot_ledger(directory), 1):
+        # 账是外部文件：值是 Any，坏值（None/"abc"）由下面的 except 接住——
+        # 这是**有意的**运行期校验，不该让 int() 的签名在这里挡住它。
+        raw_segment: Any = record.get("segment")
         try:
-            number = int(record.get("segment"))
+            number = int(raw_segment)
         except (TypeError, ValueError) as exc:
             raise ValueError(
-                f"段产出账的行读不出段号（第 {index} 行，{path}）：{record.get('segment')!r}"
+                f"段产出账的行读不出段号（第 {index} 行，{path}）：{raw_segment!r}"
             ) from exc
         missing = [key for key in ("video", "sha256", "at")
                    if not str(record.get(key) or "").strip()]

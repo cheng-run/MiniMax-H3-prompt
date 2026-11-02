@@ -550,7 +550,9 @@ def _write_validated(plan: DirectorPlan, segment: DirectorSegment, *, llm,
     「超了就地截断」不是选项——截掉的图在正文里没有接线可落，写出来的段会指着空气。
     """
     request = base_request
-    text: str | None = None
+    # 初值给空串而不是 None：循环体保证第一次走到 return 前一定赋过值，
+    # 用 None 只会让每个 return 站点都要多一次无意义的判空。
+    text = ""
     issues: tuple[ValidationIssue, ...] = ()
     for attempt in range(MAX_SEGMENT_ATTEMPTS):
         # 每一轮都从「没有子集记录」开始：``record`` 只由本轮的裁剪产生。放在循环外
@@ -736,7 +738,7 @@ def _sections_mapping(sections) -> dict[str, str] | None:
 
 def _scope_segment_text(text: str, *, plan: DirectorPlan, segment: DirectorSegment,
                         sections: dict[str, str], registry: Sequence[Sequence]
-                        ) -> tuple[str, dict | None]:
+                        ) -> tuple[str, list[dict] | None]:
     """段正文 → (按本段素材子集重写后的正文, 子集记录)。
 
     子集按**已写出的正文**算，不按规划期的梗概猜：正文才是这一段真正点名了谁的证据

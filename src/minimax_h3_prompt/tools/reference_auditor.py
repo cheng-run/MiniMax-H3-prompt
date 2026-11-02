@@ -20,6 +20,7 @@ from pathlib import Path
 import httpx
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
+from pydantic import SecretStr
 from PIL import Image
 
 from .. import model_factory
@@ -70,7 +71,7 @@ def _build_vision_model(*, streaming: bool = True) -> ChatOpenAI:
         timeout = _FALLBACK_TIMEOUT_SECONDS
     return ChatOpenAI(
         model=settings.model,
-        api_key=key,
+        api_key=SecretStr(key),
         base_url=settings.base_url,
         timeout=timeout,
         max_retries=0,    # 重试由看门狗控制（openai 自动重试会翻倍烧 token）
@@ -84,13 +85,15 @@ def _build_vision_model(*, streaming: bool = True) -> ChatOpenAI:
 
 def _downscale_to_jpeg(path: Path, max_side: int = 1024) -> str:
     """压缩图片为 JPEG base64（长边 ≤ max_side），返回 data URI。"""
-    img = Image.open(path)
+    # Image.open 返回 ImageFile（惰性代理），convert/resize 之后才是 Image：
+    # 显式按 Image 标注，别让类型在两次赋值之间换脸。
+    img: Image.Image = Image.open(path)
     if img.mode not in ("RGB", "L"):
         img = img.convert("RGB")
     w, h = img.size
     scale = max_side / max(w, h)
     if scale < 1:
-        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+        img = img.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=85)
     return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
@@ -170,8 +173,9 @@ def describe_image(path: str | Path, instruction: str | None = None) -> str:
         return result.text
     if result.timed_out:
         # 卡住不是「不支持流式」：不许回退（见 docstring）
-        raise RuntimeError(result.error)
-    cause = result.error if not result.ok else "流式响应没有任何内容（网关可能忽略了 stream 参数）"
+        raise RuntimeError(result.error or "读图超时：首字节线内没有任何数据（ADR 0019）")
+    cause = ((result.error or "流式读图失败（无错误详情）") if not result.ok
+             else "流式响应没有任何内容（网关可能忽略了 stream 参数）")
     if result.status_code in _CONFIG_ERROR_STATUS:
         # 配错就直说配错：把它混进「网关可能不支持流式」会让人去查网关方言，
         # 而真正该改的是 base_url / api_key_env（2026-10-24 实测）。

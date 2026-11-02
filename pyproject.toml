@@ -66,6 +66,14 @@ files = [
     "src/minimax_h3_prompt/graph/pipeline.py",
     "src/minimax_h3_prompt/model_factory.py",
     "src/minimax_h3_prompt/main.py",
+    # 第三批（2026-11-02）：外部命令、读图、导演台写段、台账与段账。
+    "src/minimax_h3_prompt/tools/seam_audit.py",
+    "src/minimax_h3_prompt/tools/reference_auditor.py",
+    "src/minimax_h3_prompt/director/prompts.py",
+    "src/minimax_h3_prompt/asset_ledger.py",
+    "src/minimax_h3_prompt/shot_ledger.py",
+    "src/minimax_h3_prompt/segment_prompts.py",
+    "src/minimax_h3_prompt/project_models.py",
 ]
 ignore_missing_imports = true
 warn_unused_ignores = true

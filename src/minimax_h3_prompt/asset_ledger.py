@@ -430,7 +430,9 @@ def remove_asset(directory: str | Path, name: str, kind: str) -> AssetRecord | N
         return None
     kept = tuple(e for e in ledger.entries if (e.name, e.kind) != (name, kind))
     save_asset_ledger(base, replace(ledger, entries=kept))
-    copied = resolve_asset_path(ledger, entry, session_dir=base)
+    # 这里传了 session_dir，解析出的必是绝对 Path；收成 Path 只为让类型说真话
+    # （resolve_asset_path 的联合返回里另一种是渲染层用的 PurePosixPath）。
+    copied = Path(resolve_asset_path(ledger, entry, session_dir=base))
     if not ledger.library_root and copied.is_file():
         copied.unlink()
     return entry
@@ -490,7 +492,7 @@ def verify_asset_ledger(directory: str | Path) -> tuple[Drift, ...]:
     ledger = load_asset_ledger(base)
     drift: list[Drift] = []
     for entry in ledger.entries:
-        target = resolve_asset_path(ledger, entry, session_dir=base)
+        target = Path(resolve_asset_path(ledger, entry, session_dir=base))
         if not target.is_file():
             drift.append(Drift(entry.name, entry.kind, entry.number, entry.path,
                                entry.sha256, None))

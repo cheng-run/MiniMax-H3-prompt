@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Any
 
 from . import film_language
 from .text_patterns import (
@@ -647,8 +648,10 @@ def _bridge_frame_descriptions(state: dict) -> dict[int, str]:
     for item in state.get("bridge_frame_descriptions") or []:
         if not isinstance(item, dict):
             continue
+        # 读图结果来自 state，形状不可信；坏段号跳过（与下面的 except 同一条纪律）。
+        raw_segment: Any = item.get("segment")
         try:
-            segment = int(item.get("segment"))
+            segment = int(raw_segment)
         except (TypeError, ValueError):
             continue
         description = str(item.get("description", "")).strip()
