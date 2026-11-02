@@ -152,10 +152,21 @@ def _image_discipline_block(role: str, image_model: str | None) -> str:
     """
     if role != IMAGE_PROMPT_ROLE:
         return ""
+    model = image_model or DEFAULT_IMAGE_MODEL
+    # 压盖语（#139，2026-11-02）：公共段写着「正文中文／默认不写负向」，那是 Z-Image
+    # 的口径；Qwen／MOSS 的纪律块说的是相反的话。关键帧路径在**请求**里带了这句
+    # （``graph/nodes.py`` 的 ``_frame_discipline_block``），资产图路径走系统提示词，
+    # 之前没有——32 条已落盘资产条目 100% 中文、moss 档 negative 全空，就是它没生效的
+    # 现场。那句「以本节为准」只有排在公共段**之后**才是真话。
+    from ..generation import IMAGE_FAMILY_LABELS  # noqa: PLC0415 - 避免入口期拉起生成栈
+    family = IMAGE_FAMILY_LABELS.get(model, model)
     # 末尾补一个换行：拼进系统提示词后与下一块（词表）之间留一个空行——纪律块原先在
     # 角色 .md 末尾时，靠的是 .md 自带的收尾换行，搬出来后必须显式补上，否则
     # 「…元标签。」与词表标题会粘在一起（改动前的排版因此逐字保留）。
-    return discipline_text(image_model or DEFAULT_IMAGE_MODEL) + "\n"
+    return (
+        f"以下为 {family} 的写词纪律；"
+        "与角色提示词里「正文中文／默认不写负向」等通用条款冲突时，以本节为准。\n\n"
+        f"{discipline_text(model)}\n")
 
 
 def load_role_prompt(role: str, *, image_model: str | None = None) -> str:

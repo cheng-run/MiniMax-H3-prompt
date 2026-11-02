@@ -145,6 +145,23 @@ def test_role_prompt_carries_exactly_its_own_discipline():
                 f"{model} 档的系统提示词里混进了 {other} 档的纪律"
 
 
+def test_asset_discipline_block_declares_precedence_over_common_clauses():
+    """#139：资产图路径的纪律块必须自带「以本节为准」压盖语。
+
+    现场：32 条已落盘资产条目（19 条 moss + 13 条 qwen）正文 100% 中文、moss 档
+    ``negative_prompt`` 全空——公共段「正文中文／默认不写负向」把模型纪律盖掉了。
+    关键帧路径在请求侧已有这句（``graph/nodes.py`` 的 ``_frame_discipline_block``），
+    资产图路径走系统提示词，之前没有。
+
+    变异检验：删掉这句 → 本用例红。
+    """
+    for model in DISCIPLINE_MODELS:
+        prompt = load_role_prompt("image_prompt_engineer", image_model=model)
+        assert "以本节为准" in prompt, f"{model} 档缺压盖语"
+        assert prompt.index("以本节为准") < prompt.index(discipline_text(model)), \
+            f"{model} 档的压盖语没排在纪律正文之前"
+
+
 def test_the_default_discipline_is_still_zimage():
     """不带模型参数的调用（AI 改词等历史路径）沿用 Z-Image——本票之前只有这一档。"""
     assert load_role_prompt("image_prompt_engineer") == \
