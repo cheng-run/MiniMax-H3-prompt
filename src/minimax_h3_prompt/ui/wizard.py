@@ -1065,7 +1065,8 @@ def _cut_first_frame_prompt(plan, segment, session: SessionState, *, llm) -> str
     from ..director.firstframe import firstframe_path, write_firstframe_prompt
 
     path = firstframe_path(session.directory, segment.index)
-    if path.is_file():
+    if path.is_file() and not _frame_meta_rewrite_requested(
+            path, f"第 {segment.index} 段段首帧词"):
         text = path.read_text(encoding="utf-8").strip()
         _print_firstframe_prompt(text, index=segment.index, path=path,
                                  note="已在盘上，沿用，不重付")
@@ -1130,7 +1131,8 @@ def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> b
             if existing.is_file():
                 print(f"       旧尾帧词不采用：{existing}（全片尾帧优先，#149）。")
             return True
-    if existing.is_file():
+    if existing.is_file() and not _frame_meta_rewrite_requested(
+            existing, f"第 {segment.index} 段尾帧词"):
         # 续跑不重付、也不许覆盖（#58 的同一条教训）：这一段的词可能已经拿去生成过
         # 终点画面了，重写一份新词会让「挂上去的那张图」与文件里的词不再对应。
         text = existing.read_text(encoding="utf-8")
@@ -1719,6 +1721,31 @@ class _HandoffStopped(Exception):
     ``None`` 会被下游当成「没有这张图」继续兜底——而这里要的是**停住**，两者在
     类型上分开，调用方就不可能把「用户主动停下」误当成「缺图」（#149）。
     """
+
+
+def _frame_meta_rewrite_requested(prompt_path: Path, label: str) -> bool:
+    """盘上按需词的模型档与当前 ``frame:`` 不一致时告警并问「重写？」；默认 N。
+
+    #153：首帧/尾帧词是**按某一档的写词纪律与画布**产出的。用户换了 ``config/image.yaml``
+    的 ``frame:`` 之后续跑，旧词会被当作「已在盘上，不重付」直接沿用——产物照常生成，
+    只是按旧档的口径写、按新档的工作流出图，两边都不对，而且一声不响。
+    默认 N：这份词可能已经拿去生过图，重写会让「挂上去的那张图」与文件里的词错开。
+    """
+    from .. import image_config
+    from ..director.frame_meta import read_frame_meta
+
+    meta = read_frame_meta(prompt_path)
+    used = str((meta or {}).get("model") or "")
+    if not used:
+        return False  # 旧产物没有 sidecar：不知道按哪档写的，不凭空报警
+    current = image_config.load_frame_image_model()
+    if used == current:
+        return False
+    label_of = image_config.IMAGE_MODEL_LABELS
+    print(f"[警告] {label}是按 {label_of.get(used, used)}（{used}）写的，"
+          f"当前 config/image.yaml 的 frame: 是 {label_of.get(current, current)}"
+          f"（{current}）：沿用旧词会按旧档的纪律与画布出图，可能与当前工作流不匹配。")
+    return _confirm(f"重写{label}？", default=False)
 
 
 def _prompt_required_image(question: str, consequence: str) -> Path:

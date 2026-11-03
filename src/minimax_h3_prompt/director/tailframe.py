@@ -43,6 +43,7 @@ from ..segment_prompts import MAX_SEGMENT_ATTEMPTS, _direct_write
 from ..tools.h3_validator import ValidationIssue
 from ..tools.image_prompt_discipline import check_image_prompt, edit_discipline_text
 from ..tools.reference_auditor import describe_image
+from .frame_meta import frame_meta_path, sha256_file, sha256_text, write_frame_meta
 from .frames import (
     IMAGE_END,
     SEGMENT_TYPES,
@@ -146,6 +147,11 @@ def load_instruction() -> str:
 def tailframe_path(session_dir: str | Path, position: int) -> Path:
     """第 ``position`` 段（1 起）的尾帧文档路径。"""
     return Path(session_dir) / DIRECTOR_DIRNAME / TAILFRAME_FILENAME.format(position=position)
+
+
+def tailframe_meta_path(session_dir: str | Path, position: int) -> Path:
+    """第 ``position`` 段尾帧词的 sidecar（模型 provenance，与正文同名）。"""
+    return frame_meta_path(tailframe_path(session_dir, position))
 
 
 def last_frame_png_path(session_dir: str | Path, segment: int) -> Path:
@@ -602,6 +608,16 @@ def write_tailframe_prompts(plan: DirectorPlan, *, llm, session_dir: str | Path,
         path = tailframe_path(session_dir, segment.index)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text.rstrip() + "\n", encoding="utf-8")
+        # provenance 与正文同批落盘（#153）：换 `frame:` 后，续跑要靠这份记录发现
+        # 「盘上的词是按旧档写的」。段提示词指纹同时记录——改过段词，旧尾帧词的终点
+        # 构图可能已经不对了。
+        write_frame_meta(path, {
+            "kind": "tailframe",
+            "segment": segment.index,
+            "model": model,
+            "segment_prompt_sha256": sha256_text(segment_prompt),
+            "start_image_sha256": sha256_file(image),
+        })
 
         sections = split_tailframe_sections(text)
         issues = tuple(validate_tailframe_prompt(

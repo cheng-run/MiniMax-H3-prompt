@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 
 
 def _segment(index, segment_type, start, end, declared, export, guided, give_images=()):
@@ -201,4 +203,114 @@ def test_ending_without_film_end_still_writes_the_tailframe_word(tmp_path, monke
     assert wizard._write_director_tailframe(
         plan, ending, _session(tmp_path), llm=object()) is True
     assert recorded["start_image"] == prev_end
+
+
+# ---------------------------------------------------------------------------
+# #153：按需词的模型 provenance——换 frame: 后不静默复用旧档
+# ---------------------------------------------------------------------------
+
+def _plant_meta(prompt_path, model: str = "qwen") -> None:
+    from minimax_h3_prompt.director.frame_meta import write_frame_meta
+
+    write_frame_meta(prompt_path, {
+        "kind": "firstframe" if prompt_path.name.startswith("firstframe") else "tailframe",
+        "segment": 2, "model": model,
+    })
+
+
+def test_firstframe_written_by_another_model_warns_and_keeps_by_default(
+        tmp_path, monkeypatch, capsys):
+    from minimax_h3_prompt import image_config
+    from minimax_h3_prompt.director import firstframe
+    from minimax_h3_prompt.ui import wizard
+
+    plan = _plan()
+    segment = plan.segments[1]
+    path = firstframe.firstframe_path(tmp_path, segment.index)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("旧的段首帧词", encoding="utf-8")
+    _plant_meta(path, model="qwen")
+    monkeypatch.setattr(image_config, "load_frame_image_model", lambda: "moss")
+    asked: list[tuple[str, bool]] = []
+
+    def fake_confirm(text: str, default: bool = True) -> bool:
+        asked.append((text, default))
+        return False
+
+    monkeypatch.setattr(wizard, "_confirm", fake_confirm)
+    monkeypatch.setattr(
+        firstframe, "write_firstframe_prompt",
+        lambda *args, **kwargs: pytest.fail("默认 N 时不该重写段首帧词"))
+
+    text = wizard._cut_first_frame_prompt(
+        plan, segment, _session(tmp_path), llm=object())
+
+    assert text.strip() == "旧的段首帧词", "默认 N 必须沿用旧词"
+    out = capsys.readouterr().out
+    assert "qwen" in out and "moss" in out, "警告没有说清旧档与当前档"
+    assert asked and asked[0][1] is False, "「重写？」必须默认 N"
+
+
+def test_confirming_the_rewrite_regenerates_the_firstframe_word(tmp_path, monkeypatch):
+    from minimax_h3_prompt import image_config
+    from minimax_h3_prompt.director import firstframe
+    from minimax_h3_prompt.ui import wizard
+
+    plan = _plan()
+    segment = plan.segments[1]
+    path = firstframe.firstframe_path(tmp_path, segment.index)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("旧的段首帧词", encoding="utf-8")
+    _plant_meta(path, model="qwen")
+    monkeypatch.setattr(image_config, "load_frame_image_model", lambda: "moss")
+    monkeypatch.setattr(wizard, "_confirm", lambda text, default=True: True)
+    calls: list[str] = []
+
+    def fake_write(*args, **kwargs):
+        calls.append("rewritten")
+        return "新的段首帧词"
+
+    monkeypatch.setattr(firstframe, "write_firstframe_prompt", fake_write)
+
+    text = wizard._cut_first_frame_prompt(
+        plan, segment, _session(tmp_path), llm=object())
+
+    assert text == "新的段首帧词"
+    assert calls == ["rewritten"]
+
+
+def test_tailframe_written_by_another_model_warns_and_keeps_by_default(
+        tmp_path, monkeypatch, capsys):
+    from minimax_h3_prompt import image_config
+    from minimax_h3_prompt.director import tailframe
+    from minimax_h3_prompt.ui import wizard
+
+    plan = _plan()
+    ending = plan.segments[2]
+    existing = tailframe.tailframe_path(tmp_path, ending.index)
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_text(
+        "### 变换指令\n推进。\n\n### 保留项声明\n灰色风衣\n\n### 锁死清单\n- 灰色风衣\n",
+        encoding="utf-8")
+    _plant_meta(existing, model="qwen")
+    monkeypatch.setattr(image_config, "load_frame_image_model", lambda: "moss")
+    asked: list[tuple[str, bool]] = []
+
+    def fake_confirm(text: str, default: bool = True) -> bool:
+        asked.append((text, default))
+        return False
+
+    monkeypatch.setattr(wizard, "_confirm", fake_confirm)
+    monkeypatch.setattr(
+        tailframe, "write_tailframe_prompts",
+        lambda *args, **kwargs: pytest.fail("默认 N 时不该重写尾帧词"))
+
+    assert wizard._write_director_tailframe(
+        plan, ending, _session(tmp_path), llm=object()) is True
+
+    out = capsys.readouterr().out
+    assert "qwen" in out and "moss" in out
+    assert asked and asked[0][1] is False, "「重写？」必须默认 N"
+    assert "重写" in asked[0][0]
+
 

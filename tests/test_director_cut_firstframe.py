@@ -245,3 +245,34 @@ def test_firstframe_sidecar_keeps_composition_lighting_and_negative_out_of_the_b
     assert meta["negative_prompt"] == "no text"
     assert meta["model"] == "qwen" and meta["segment"] == 2
 
+
+def test_firstframe_sidecar_records_the_segment_prompt_fingerprint(tmp_path, monkeypatch):
+    """#153：段首帧 sidecar 记下段提示词 sha256；文生图没有起点图，该项为 null。"""
+    import hashlib
+    import json
+
+    from minimax_h3_prompt import agents
+    from minimax_h3_prompt.director import firstframe
+    from minimax_h3_prompt.director.prompts import segment_path
+
+    segment_prompt = "本段视频提示词：硬切到雨棚下。"
+    path = segment_path(tmp_path, 2)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(segment_prompt, encoding="utf-8")
+    monkeypatch.setattr(agents, "build_role_agents", lambda *a, **k: {
+        "frame_prompt_engineer": object()})
+    monkeypatch.setattr(
+        agents, "run_agent",
+        lambda agent, request: '{"first": {"qwen": {"positive_prompt": "A rider."}}}')
+
+    firstframe.write_firstframe_prompt(
+        _segment(), llm=object(), shot_table=_SHOT_TABLE,
+        brief=_brief(), session_dir=tmp_path, model="qwen")
+
+    meta = json.loads(
+        firstframe.firstframe_meta_path(tmp_path, 2).read_text(encoding="utf-8"))
+    assert meta["segment_prompt_sha256"] == hashlib.sha256(
+        segment_prompt.encode("utf-8")).hexdigest()
+    assert meta["start_image_sha256"] is None
+
+
