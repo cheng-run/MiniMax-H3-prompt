@@ -125,6 +125,22 @@ MUTATIONS: tuple[Mutation, ...] = (
         ("tests/test_director_tailframe.py::test_tailframe_sidecar_records_model_segment_and_input_fingerprints",),
         "sidecar 不记模型＝换 frame: 后旧尾帧词被静默复用（#153）",
     ),
+    Mutation(
+        "static_branch_disabled",
+        "src/minimax_h3_prompt/director/tailframe.py",
+        '    return bool(_STATE_CHANGE.search(str(end_hook or "")))',
+        "    return False",
+        ("tests/test_director_tailframe.py::test_static_segment_accepts_state_change_plus_a_named_relation",),
+        "静态分支永不生效＝静态 ending 仍被逼写 A→B 位移（#150）",
+    ),
+    Mutation(
+        "blocked_by_rejected",
+        "src/minimax_h3_prompt/director/tailframe.py",
+        '    r"blocked by|occluded by|obscured by|hidden behind|"',
+        '    r"occluded by|obscured by|hidden behind|"',
+        ("tests/test_director_tailframe.py::test_displacement_accepts_blocked_by_in_both_languages",),
+        "位移锚点不认 blocked by＝合法的遮挡写法被重写（#150）",
+    ),
 )
 
 

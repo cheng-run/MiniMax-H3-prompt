@@ -225,7 +225,7 @@ def announce_film_end_still(directory: Path, plan) -> None:
 
 
 def print_tailframe_document(text: str, *, index: int, path: Path,
-                             note: str = "") -> None:
+                             note: str = "", model: str | None = None) -> None:
     """打印**可直接复制给生图模型**的正文（2026-10-31 用户裁定，同日修订）。
 
     锁死清单是生成之后的核对表，不是生成指令：它逐字摘自正文，粘给模型是冗余，
@@ -236,6 +236,9 @@ def print_tailframe_document(text: str, *, index: int, path: Path,
     （官方示例 ``Create a photorealistic photograph ... from the input sketch ...``），
     带两个 ``###`` 段头粘过去等于把指令拆成文档。段头只留在文件里给校验器用。
     正文用分隔线包住，方便整段复制；路径留在标题里，事后仍可定位文件。
+
+    ``model`` 是这份词**写时**的档（#150 AC2）：用户据此知道该开哪个工作流，也免得
+    把 Qwen 的词拿到 MOSS 工作流里出图。沿用旧词时传 sidecar 里的档，不是当前配置。
     """
     from ..director.tailframe import (
         PRESERVE_HEAD, TRANSFORM_HEAD, split_tailframe_sections,
@@ -245,6 +248,18 @@ def print_tailframe_document(text: str, *, index: int, path: Path,
     if note:
         header += f"（{note}）"
     print(f"{header}（{path}）：")
+    if model is None:
+        # 沿用盘上旧词时没人在调用点知道它按哪档写的：sidecar 才是**写时**的档。
+        # 现读配置会把旧词标成新档（用户中途换过 ``frame:`` 时，#150）。
+        from ..director.frame_meta import read_frame_meta
+
+        model = str((read_frame_meta(path) or {}).get("model") or "") or None
+    if model:
+        # 展示名取配置层的对照表（与 #88 的出词横幅同源），不另写一份中文名。
+        from ..image_config import IMAGE_MODEL_LABELS
+
+        print(f"本次按 {IMAGE_MODEL_LABELS.get(model, model)}（{model}）档出词："
+              "角色声明与保留句按这一档的图生图编辑纪律写。")
     print("-" * 60)
     sections = split_tailframe_sections(text)
     blocks = [sections.get(head, "").strip()
