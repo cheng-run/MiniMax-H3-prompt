@@ -498,3 +498,29 @@ def test_oversized_slice_warns_before_it_dilutes_the_request(tmp_path, monkeypat
     monkeypatch.setitem(film_language.IMAGE_SLICES, "frame_prompt_engineer", ("小节",))
     assert len(film_language.image_slice("frame_prompt_engineer")) <= 8000
     assert capsys.readouterr().out == "", "未超线的切片不该刷告警"
+
+
+def test_image_source_scopes_language_by_model_tier():
+    """共用生图真源的正文语言按档，不再写死中文（issue #148 AC2）。
+
+    这份真源同时喂关键帧与资产图两路，两路都可换 Qwen/MOSS——写死「正文中文」
+    就是把 Z-Image 的口径塞给全档。语言分支的最终权威仍是纪律块（请求里也会带），
+    但共用真源不能再给它写反话。
+    """
+    src = film_language.image_source_text()
+
+    assert "**正文中文**" not in src, "共用生图真源还在无条件要求正文中文"
+    for name in ("Qwen", "MOSS", "Z-Image"):
+        assert name in src, f"共用生图真源的正文语言没按档说明（缺 {name}）"
+    assert "英文" in src
+
+
+def test_image_source_self_check_marks_single_frame_segments():
+    """落笔前自查的「首尾帧共享 scene_anchor」要标明单帧段不适用（issue #148 AC2）。
+
+    导演台的切镜段可能只有首帧或只有尾帧；要求它「首尾共享」等于对着一张图的问题
+    找一个不存在的答案。
+    """
+    src = film_language.image_source_text()
+
+    assert "单帧" in src, "自查没标明单帧段（单首帧/单尾帧）不适用首尾共享"

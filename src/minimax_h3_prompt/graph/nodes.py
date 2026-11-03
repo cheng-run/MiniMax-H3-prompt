@@ -21,7 +21,6 @@ from ..brief_parser import (
 from ..config import Config
 from ..generation import (
     IMAGE_FAMILY_LABELS,
-    IMAGE_PROFILE_DEFAULTS,
     KIND_LABELS,
     canvas_display,
     composition_hint,
@@ -203,14 +202,16 @@ _IMAGE_PROMPTS_FIELD_BY_KIND: dict[str, str] = {
 
 
 def _asset_prompt_request(kind: str, design_field: str, state: Mapping[str, Any], brief: Brief,
-                          *, only: str = "") -> str:
+                          *, model: str, only: str = "") -> str:
     """资产图出词请求正文；``only`` 非空时只出**那一张**（issue #88 的单条重出）。
 
     点名资产用「资产「名字」」这个形式：它是模型手上唯一「只回这一条」的锚（请求里同时
     给了整类的设计正文，不点名就无从知道要回哪一条）。
 
-    请求不点名**生图模型**：模型由 agent 的 system prompt（纪律块）决定，请求里再说一遍
-    就成了两处口径，改配置不改请求时两者会打架（issue #87 的裁定）。
+    请求里的【画布】块**只列本档这一行**（issue #146）：这份出词是按 ``model`` 那一档的
+    纪律写的，摆出别的档的画幅会让模型按错画幅安排构图。不再另外点名生图模型——模型由
+    agent 的 system prompt（纪律块）决定，请求里再说一遍就成了两处口径（issue #87 的裁定），
+    而画布行里的显示名已经说明了这一单是哪一档。
     """
     scope = (
         f"请为{kind}设计中的资产「{only}」生成一条可直接复制的生图提示词。"
@@ -226,30 +227,36 @@ def _asset_prompt_request(kind: str, design_field: str, state: Mapping[str, Any]
         对应设计=state.get(design_field, ""),
         美术统筹=state.get("art_design", ""),
         视觉风格=brief.style,
-        语言=brief.language,
+        # 对白语言**不进图像请求**（issue #148）：它说的是人物说什么话，与画面提示词的
+        # 语言是两件事。旧请求把 `语言=Chinese` 传给生图模型，模型把它读成「正文用中文」，
+        # 把 Qwen／MOSS 的英文纪律整块盖掉（32 条已落盘资产条目 100% 中文的现场）。
+        # 正文语言由纪律块决定（Z-Image 中文、Qwen／MOSS 英文），这里不再另立一份。
         # 画布是**本次请求的数据**（不住在系统提示词里）：构图那套词按画幅族分
         # 两套，而用户选定的画布形状各案不同。词表里写着「画布与尺寸一律以请求里的
         # 【画布】块为准」——不带这块，那条指针就没有落点（issue #33 在帧节点踩过
         # 同一个坑）。
-        画布=_canvas_block(brief.canvases),
+        画布=_canvas_block(model, brief.canvases),
     )
 
 
 def _generate_asset_entries(agent, kind: str, design_field: str, state: Mapping[str, Any], brief: Brief,
-                            *, only: str = "") -> list[dict]:
+                            *, model: str, only: str = "") -> list[dict]:
     """跑一次资产图出词并归一成条目（多资产与单条重出共用这一条路）。
 
     ``only`` 非空时要求回复里**恰好是那一张**：模型回了别的名字就响——写进这张条目的
     词会属于另一张资产，而下游按语义名对号，串了也没人看得见（静默失败）。
+    ``model`` 是这一单按哪一档出词（决定请求里【画布】块的那一行）。
     """
-    raw = run_agent(agent, _asset_prompt_request(kind, design_field, state, brief, only=only))
+    raw = run_agent(
+        agent, _asset_prompt_request(kind, design_field, state, brief, model=model, only=only))
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
         # 纯格式转换，但它同样用这份系统提示词——词表里的【画布】指针照样得在场。
         repair = run_agent(
             agent,
-            f"把以下内容转换为严格 JSON 数组，不要 markdown：\n{_ctx(画布=_canvas_block(brief.canvases))}\n{raw}",
+            f"把以下内容转换为严格 JSON 数组，不要 markdown：\n"
+            f"{_ctx(画布=_canvas_block(model, brief.canvases))}\n{raw}",
         )
         try:
             parsed = json.loads(repair)
@@ -261,7 +268,7 @@ def _generate_asset_entries(agent, kind: str, design_field: str, state: Mapping[
     if violations:
         patch = run_agent(
             agent,
-            _build_locked_repair_request(kind, violations, _canvas_block(brief.canvases)),
+            _build_locked_repair_request(kind, violations, _canvas_block(model, brief.canvases)),
         )
         merged = _apply_locked_repair(parsed, kind, patch, violations)
         try:
@@ -297,7 +304,7 @@ def regenerate_asset_prompt(agents: dict, kind_key: str, name: str, state: Mappi
         raise ValueError(f"未知资产类别：{kind_key!r}（只认 {', '.join(ASSET_KIND_FIELDS)}）")
     entries = _generate_asset_entries(
         _image_prompt_agent(agents, model), KIND_LABELS[kind_key],
-        ASSET_DESIGN_FIELDS[kind_key], state, brief, only=name)
+        ASSET_DESIGN_FIELDS[kind_key], state, brief, model=model, only=name)
     return entries[0]
 
 
@@ -334,7 +341,8 @@ def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_f
         # 模型在**调用时**取：配置是环境事实（换机器换模型只改 yaml），每次出词都现读。
         model_key = image_config.image_model_for(kind_key)
         entries = _generate_asset_entries(
-            _image_prompt_agent(agents, model_key), kind, design_field, state, brief)
+            _image_prompt_agent(agents, model_key), kind, design_field, state, brief,
+            model=model_key)
         entries = _route_asset_entries(
             agents, kind_key, entries, state, brief, default_model=model_key)
         # 纪律检查**排在归一与路由之后**：只有形状合规的条目才谈得上「正文写法」，
@@ -592,8 +600,8 @@ def _apply_locked_repair(parsed: list, kind: str, raw: str, violations: list[dic
     return merged
 
 
-def _canvas_block(canvases: dict[str, tuple[int, int]] | None = None) -> str:
-    """生图侧请求里的【画布】块（issue #33 接线，issue #42 改为用户选定）。
+def _canvas_block(model: str, canvases: dict[str, tuple[int, int]] | None = None) -> str:
+    """生图侧请求里的【画布】块：**只渲染本次出词模型那一行**（issue #146）。
 
     模型不知道自己在给哪个画幅写构图，就会按一种画幅的直觉安排主体位置。每行带三样：
     **用户选定的画布**（显示名+尺寸，与渲染层的画布行同取 ``canvas_display``）、
@@ -601,18 +609,13 @@ def _canvas_block(canvases: dict[str, tuple[int, int]] | None = None) -> str:
     （Q21(c)），族外（横幅、极端比例）的指示明说「不用竖幅/正方任一套」，把
     「横幅画面配竖幅构图词」的说反话堵在请求这一层。
 
-    行的来源就是**生图 profile 默认表本身**（家族清单从 `generation` 取）：本模块里
-    再抄一份家族元组的话，将来加第三个生图家族时【画布】块会**静默少一行**。尺寸经
-    ``image_canvas_size(family, canvases)`` 解析——用户选定优先、未选回落默认表。
+    为什么只列一行（issue #146）：三档的工作流与画布各不相同，一张资产只按它自己的
+    档出图；把别的档的画幅也摆出来，模型会挑错那一行安排构图。关键帧路径一直是这样
+    做的（``_frame_canvas_line``），现在两条路同一口径。
     """
-    lines = []
-    for family in IMAGE_PROFILE_DEFAULTS:
-        width, height = image_canvas_size(family, canvases)
-        lines.append(
-            f"- {IMAGE_FAMILY_LABELS[family]}（{family}）："
-            f"{canvas_display(width, height)}；{composition_hint(width, height)}"
-        )
-    return "\n".join(lines)
+    width, height = image_canvas_size(model, canvases)
+    return (f"- {IMAGE_FAMILY_LABELS[model]}（{model}）："
+            f"{canvas_display(width, height)}；{composition_hint(width, height)}")
 
 
 def _frame_model_line(model: str) -> str:
@@ -640,23 +643,17 @@ def _frame_discipline_block(model: str) -> str:
     from ..tools.image_prompt_discipline import discipline_text
 
     return (f"以下为 {IMAGE_FAMILY_LABELS[model]} 的写词纪律；"
-            f"与角色提示词里「正文中文／默认不写负向」等通用条款冲突时，以本节为准。\n\n"
+            f"与角色提示词里「正文语言／默认不写负向」等通用条款冲突时，以本节为准。\n\n"
             f"{discipline_text(model)}")
 
 
 def _frame_canvas_line(model: str, canvases) -> str:
-    """帧请求的【画布】块：只渲染**本次出图模型**那一行。
+    """帧请求的【画布】块：只渲染**本次出图模型**那一行（与资产图共用 ``_canvas_block``）。
 
-    与 ``_canvas_block`` 分开：后者列出资产表里的每个家族（模型要给多档写词时才有用），
-    而关键帧只按一档出词——列出别的家族会让模型按错画幅安排构图。
+    两张 profile 表在 issue #146 合成了一张，这里就不再各写一份渲染：同一个画布行
+    在两个请求里长得不一样，是「同一契约两处口径」的温床。
     """
-    from ..generation import (
-        IMAGE_FAMILY_LABELS, canvas_display, composition_hint, frame_canvas_size,
-    )
-
-    width, height = frame_canvas_size(model, canvases)
-    return (f"- {IMAGE_FAMILY_LABELS[model]}（{model}）："
-            f"{canvas_display(width, height)}；{composition_hint(width, height)}")
+    return _canvas_block(model, canvases)
 
 
 def _scene_terms_block(brief: Brief) -> str:
@@ -793,7 +790,8 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
                 起步澄清=brief.clarifications,
                 时长=f"{brief.duration}s",
                 视觉风格=brief.style,
-                语言=brief.language,
+                # 对白语言不进图像请求（issue #148）：理由与资产请求那处同一份——
+                # 它说的是人物说什么话，不是画面提示词的语言；正文语言跟【出图模型】。
                 # 画布是**本次请求的数据**（不住在系统提示词里），所以主请求与下面的
                 # 改写重试都要带：少了它，模型只能按自己的直觉重新安排构图。
                 # 帧链只按一档出词，故只给该档那一行（见 `_frame_canvas_line`）。

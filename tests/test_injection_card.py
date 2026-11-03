@@ -125,6 +125,28 @@ def test_derive_megapixels_tier_rounds_half_up_and_clamps_to_node_bounds():
 
 # 三元组的字段就是节点 widget 名（aspect_ratio / megapixels / multiple），
 # 最终 W×H 只由推导得出——「不支持任意宽高直填」在类型面上就没有入口。
+def test_video_output_derives_from_the_main_asset_model_canvas(tmp_path, monkeypatch):
+    """注入卡的视频输出跟**资产模型**的画布走，不再写死 Z-Image（issue #146 AC3）。
+
+    主素材（人物）在这份配置里是 MOSS，用户也给 MOSS 选了 1280×720；推导就要按这张
+    画布出 16:9 · 0.9MP，而不是拿 Z-Image 的 640×1280 推成竖幅——卡上写错画幅，
+    用户进 ComfyUI 会按错尺寸出片。
+    """
+    from minimax_h3_prompt import image_config
+    from minimax_h3_prompt.injection_card import resolve_video_output
+
+    path = tmp_path / "image.yaml"
+    path.write_text("character: moss\n", encoding="utf-8")
+    monkeypatch.setattr(image_config, "IMAGE_CONFIG_PATH", path)
+
+    derivation = resolve_video_output(
+        None, {"moss": (1280, 720), "z_image": (640, 1280)})
+
+    assert derivation.canvas == (1280, 720)
+    assert derivation.params.ratio == "16:9 (Widescreen)"
+    assert derivation.params.megapixels == 0.9
+
+
 def test_video_output_params_carry_the_widget_triple_only():
     """三元组＋推导：W×H 不是输入字段（不支持任意宽高直填）。"""
     params = VideoOutputParams(ratio="9:16 (Portrait Widescreen)", megapixels=0.4)

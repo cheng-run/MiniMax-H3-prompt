@@ -367,3 +367,22 @@ def test_frame_node_warns_about_anaphora_in_generated_prompts(monkeypatch, capsy
 
     out = capsys.readouterr().out
     assert "同一" in out and "自包含" in out, f"帧节点没打印自包含警告：{out!r}"
+
+
+def test_zimage_five_checks_are_pinned_to_the_zimage_tier(monkeypatch):
+    """「Z-Image 五类」认的是 Z-Image 这个键，不是「默认档」这个位置（issue #148 AC4）。
+
+    判据原先写成 ``model != DEFAULT_IMAGE_MODEL``：默认档哪天换成 Qwen，五类检查会
+    静默跟着换给 Qwen 跑（成片假警告），而真正的 Z-Image 反而只剩质量套话一类。
+    """
+    monkeypatch.setattr(discipline, "DEFAULT_IMAGE_MODEL", "qwen")
+    prompt = "不要有阴影。左侧有一把椅子。masterpiece。" + "甲" * (discipline.MAX_PROMPT_CHARS + 1)
+
+    qwen_codes = [w.code for w in check_image_prompt(prompt, model="qwen")]
+    assert qwen_codes == [CLICHE], f"默认档换成 qwen 后五类检查跟着跑到了 Qwen 上：{qwen_codes}"
+
+    zimage_codes = [w.code for w in check_image_prompt(prompt, model="z_image")]
+    for code in (NEGATIVE, TOO_LONG, NO_ANCHOR):
+        assert code in zimage_codes, f"Z-Image 档丢了 {code} 判据"
+    # 旧键位照样按 Z-Image 档判（旧条目/旧调用传的是 zimage）。
+    assert TOO_LONG in [w.code for w in check_image_prompt(prompt, model="zimage")]

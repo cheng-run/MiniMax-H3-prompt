@@ -39,7 +39,7 @@ def test_preset_ratio_then_preset_size_fills_the_only_family(monkeypatch):
     """
     canvases, asked = _run_selector(monkeypatch, ["1", "1"])
 
-    assert canvases == {"zimage": (640, 1280)}
+    assert canvases == {"z_image": (640, 1280)}
     assert any("Z-Image" in q for q in asked), "没按家族提问（Z-Image 缺席）"
     assert not any("Flux.2" in q or "flux2" in q for q in asked), \
         "Flux.2 已全链退役，向导不得再出现 Flux.2 字样提问"
@@ -62,7 +62,7 @@ def test_ratio_menu_shows_the_composition_family(monkeypatch, capsys):
 def test_custom_size_is_free_input(monkeypatch):
     """尺寸档不符时的自定义是自由输入（AC1「自定义为自由输入，保留兜底」）。"""
     canvases, _ = _run_selector(monkeypatch, ["2", "3", "700x1300"])
-    assert canvases["zimage"] == (700, 1300), "自定义尺寸没按自由输入落定"
+    assert canvases["z_image"] == (700, 1300), "自定义尺寸没按自由输入落定"
 
 
 def test_custom_ratio_entry_takes_free_dimensions(monkeypatch):
@@ -72,7 +72,7 @@ def test_custom_ratio_entry_takes_free_dimensions(monkeypatch):
     这里只钉「档外比例进得来」。
     """
     canvases, _ = _run_selector(monkeypatch, ["9", "540x1260"])
-    assert canvases["zimage"] == (540, 1260), "自定义比例入口没吃到自由输入"
+    assert canvases["z_image"] == (540, 1260), "自定义比例入口没吃到自由输入"
 
 
 def test_final_echo_shows_the_actual_family_after_mismatched_custom(monkeypatch, capsys):
@@ -83,7 +83,7 @@ def test_final_echo_shows_the_actual_family_after_mismatched_custom(monkeypatch,
     预告与落点同族——「回显误按预设族而非最终宽高」这一可错形态测不红（复审点名）。
     """
     canvases, _ = _run_selector(monkeypatch, ["8", "3", "700x1300"])
-    assert canvases["zimage"] == (700, 1300)
+    assert canvases["z_image"] == (700, 1300)
     screen = capsys.readouterr().out
     assert "7:13 · 700 × 1300（近竖）" in screen, "回显没有按实际落点展示画布"
     assert "构图用竖幅套" in screen, "回显没说清最终的构图词套（还停在横幅预告上）"
@@ -92,7 +92,7 @@ def test_final_echo_shows_the_actual_family_after_mismatched_custom(monkeypatch,
 def test_times_sign_accepted_in_custom_input(monkeypatch):
     """自定义输入收 `700×1300`（乘号）——用户从产物上抄回来的就是乘号。"""
     canvases, _ = _run_selector(monkeypatch, ["9", "700×1300"])
-    assert canvases["zimage"] == (700, 1300)
+    assert canvases["z_image"] == (700, 1300)
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +102,7 @@ def test_times_sign_accepted_in_custom_input(monkeypatch):
 def test_invalid_entries_reask_instead_of_silently_defaulting(monkeypatch):
     """0/99/乱码都重问，不静默落默认——画布是数据，错值必须当场拦。"""
     canvases, asked = _run_selector(monkeypatch, ["0", "x", "1", "99", "1"])
-    assert canvases["zimage"] == (640, 1280), "坏输入后没回到正轨"
+    assert canvases["z_image"] == (640, 1280), "坏输入后没回到正轨"
     ratio_asks = [q for q in asked if "第 1 步" in q]
     size_asks = [q for q in asked if "第 2 步" in q]
     assert len(ratio_asks) >= 3, "坏比例输入没有重问（静默吞了）"
@@ -112,7 +112,7 @@ def test_invalid_entries_reask_instead_of_silently_defaulting(monkeypatch):
 def test_custom_size_rejects_garbage_and_reasks(monkeypatch):
     """自定义尺寸的自由输入也校验格式：`宽六百` 重问，不静默回落默认表。"""
     canvases, asked = _run_selector(monkeypatch, ["1", "3", "宽六百", "700x1300"])
-    assert canvases["zimage"] == (700, 1300)
+    assert canvases["z_image"] == (700, 1300)
     custom_asks = [q for q in asked if "自定义" in q and "宽" in q]
     assert len(custom_asks) >= 2, "坏自定义尺寸没有重问"
 
@@ -150,7 +150,7 @@ def test_phase1_new_puts_the_selected_canvases_into_the_brief(tmp_path, monkeypa
                           sessions_root=tmp_path / "sessions", max_clarification_rounds=0)
     wizard._phase1_new(cfg)
 
-    assert captured["brief"].canvases == {"zimage": (640, 1280)}, \
+    assert captured["brief"].canvases == {"z_image": (640, 1280)}, \
         "选择器的选定值没进 brief——那一行接线丢了"
 
 

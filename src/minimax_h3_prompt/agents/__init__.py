@@ -154,11 +154,13 @@ def _image_discipline_block(role: str, image_model: str | None) -> str:
     if role != IMAGE_PROMPT_ROLE:
         return ""
     model = image_model or DEFAULT_IMAGE_MODEL
-    # 压盖语（#139，2026-11-02）：公共段写着「正文中文／默认不写负向」，那是 Z-Image
-    # 的口径；Qwen／MOSS 的纪律块说的是相反的话。关键帧路径在**请求**里带了这句
-    # （``graph/nodes.py`` 的 ``_frame_discipline_block``），资产图路径走系统提示词，
-    # 之前没有——32 条已落盘资产条目 100% 中文、moss 档 negative 全空，就是它没生效的
-    # 现场。那句「以本节为准」只有排在公共段**之后**才是真话。
+    # 压盖语（#139，2026-11-02）：公共段写着「正文语言／默认不写负向」，而各档的纪律
+    # 说的是各自的相反面（Qwen／MOSS 英文、MOSS 要负面标签）。issue #148 起公共段不再
+    # 无条件写死中文，压盖语也从「正文中文」改成「正文语言」——它指向的是变量本身，
+    # 不是某一个值。关键帧路径在**请求**里带了这句（``graph/nodes.py`` 的
+    # ``_frame_discipline_block``），资产图路径走系统提示词，之前没有——32 条已落盘
+    # 资产条目 100% 中文、moss 档 negative 全空，就是它没生效的现场。那句「以本节为准」
+    # 只有排在公共段**之后**才是真话。
     from ..generation import IMAGE_FAMILY_LABELS  # noqa: PLC0415 - 避免入口期拉起生成栈
     family = IMAGE_FAMILY_LABELS.get(model, model)
     # 末尾补一个换行：拼进系统提示词后与下一块（词表）之间留一个空行——纪律块原先在
@@ -166,7 +168,7 @@ def _image_discipline_block(role: str, image_model: str | None) -> str:
     # 「…元标签。」与词表标题会粘在一起（改动前的排版因此逐字保留）。
     return (
         f"以下为 {family} 的写词纪律；"
-        "与角色提示词里「正文中文／默认不写负向」等通用条款冲突时，以本节为准。\n\n"
+        "与角色提示词里「正文语言／默认不写负向」等通用条款冲突时，以本节为准。\n\n"
         f"{discipline_text(model)}\n")
 
 
@@ -182,11 +184,11 @@ def load_role_prompt(role: str, *, image_model: str | None = None) -> str:
     哪些角色拿官方原文块由 ``OFFICIAL_VERBATIM_ROLES`` 声明（issue #35）。
 
     纪律块排在**词表之后**、原文块之前（issue #87 复核）：共用生图词表的「四条硬约束」
-    里写着「正文中文／默认不输出负向」，那是 Z-Image 的口径；Qwen／MOSS 的纪律块说的
-    是相反的话。块里那句「与另一档的差别以本节为准」只有在**后出现**时才是真话——
-    排在词表之前等于让通用条款把模型条款盖掉。词表本身**逐字不动**：它还喂着首尾帧的
-    关键帧提示词工程师（``frame_prompt_engineer``），改它就会改 base 路线的系统提示词
-    （spec #84 D11 要求逐字节不变，``tests/test_base_prompt_bytes.py`` 钉着）。
+    写的是通用条款（正文语言按出图档、默认不输出负向），各档纪律说的是自己的那一面；
+    块里那句「与另一档的差别以本节为准」只有在**后出现**时才是真话——排在词表之前等于
+    让通用条款把模型条款盖掉。词表本身只在**有意**变更时改（issue #148 把「正文中文」
+    改成「正文语言按出图档」是一次显式决定，两条路线的系统提示词同时变，基哈希一并更新，
+    见 ``tests/test_base_prompt_bytes.py``）。
     """
     prompt = (PROMPTS_DIR / f"{role}.md").read_text(encoding="utf-8")
     wordlist = _role_wordlist(role)

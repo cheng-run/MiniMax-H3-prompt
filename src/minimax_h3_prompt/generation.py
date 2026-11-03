@@ -18,6 +18,12 @@ from .brief_parser import (
     is_ref_mode,
     route_emits_asset_prompts,
 )
+from .image_config import (
+    DEFAULT_IMAGE_MODEL,
+    LEGACY_IMAGE_MODEL_ALIASES,
+    canonical_image_model,
+)
+from .image_routing import model_of as _entry_image_model
 from .kinds import ASSET_KIND_FIELDS
 from .text_patterns import SHA256_HEX as _SHA256
 from .tools.theme_guard import (
@@ -67,14 +73,20 @@ class ImageProfile(NamedTuple):
     status: str
 
 
-# 生图 profile 默认表：模型 → 该模型在本仓的默认工作流参数。
+# 生图 profile 默认表：模型 → 该模型在本仓的默认工作流参数（issue #146 三档并表）。
 # 它以前只在渲染层被读（给人看「推荐尺寸」）；帧节点的请求现在也从这里取画布
 # （``image_canvas_size``，issue #33）——两处各写一份数就会漂，所以是**公开的单一来源**。
 # Flux.2 行已删（issue #48，ADR 0013 全链退役）：选择器、【画布】块、帧产物都随这张表
 # 自动收缩，家族清单不另抄第二份。旧产物/载荷里的 flux2 键走**弃读**（见
 # ``RETIRED_IMAGE_FAMILIES``），不做静默兼容。
+#
+# 三档的 profile/节点/画布是**用户在 ComfyUI 里实际打开的工作流**（issue #146 票面给的
+# 现货）：Qwen 与 MOSS 是横幅 1920×1088，Z-Image 是竖幅 640×1280。写错节点号会让用户
+# 粘错输入框；写错画布会让构图词按错的画幅落笔——两者都不报错，只是出的图不对。
 IMAGE_PROFILE_DEFAULTS: dict[str, ImageProfile] = {
-    "zimage": ImageProfile("zimage_t2i_v1", "10", 640, 1280, "candidate"),
+    "z_image": ImageProfile("zimage_t2i_v1", "10", 640, 1280, "candidate"),
+    "qwen": ImageProfile("Qwen-image2.1+空间折叠流之万法编辑", "605", 1920, 1088, "candidate"),
+    "moss": ImageProfile("【WorkFisher】全能生图王 _ 适配所有类型", "29", 1920, 1088, "candidate"),
 }
 # 已退役的生图模型家族（issue #48）：**只用于读旧数据时的弃读**——旧产物/载荷里
 # 的 flux2 键/行照常载入但不产出、不渲染（修订基线同款，见 `user_revisions`）；
@@ -85,37 +97,44 @@ RETIRED_IMAGE_FAMILIES = frozenset({"flux2"})
 def is_retired_image_family(name: object) -> bool:
     """该家族名是否点名了已退役家族——三处弃读口共用的**唯一**谓词（issue #48）。
 
-    缺省/空值按现行默认家族 zimage 处理：只有**显式点名**退役家族才算弃读对象，
+    缺省/空值按现行默认家族 z_image 处理：只有**显式点名**退役家族才算弃读对象，
     没写家族的旧数据不是弃读对象（它走各自读法的默认逻辑）。判定默认值只住这里，
-    三处各写一份「or zimage」就是漂的开始。
+    三处各写一份「or z_image」就是漂的开始。
     """
-    return str(name or "zimage") in RETIRED_IMAGE_FAMILIES
-# 关键帧（首帧/尾帧）可用的生图家族。**与资产图那张表分开**（2026-10-30）：
-# ``IMAGE_PROFILE_DEFAULTS`` 同时喂着资产的【画布】块与向导的逐家族画布选择器，
-# 往里面加 Qwen 会让每个用户每次运行都被多问一次画布，而资产图的 profile 行本来就
-# 恒取 zimage（``image_prompt_variants`` 的显式口径）。关键帧是另一件事：
-# 它由 ``config/image.yaml`` 的 ``frame:`` 决定用哪一档，只影响首帧/尾帧提示词。
-FRAME_PROFILE_DEFAULTS: dict[str, ImageProfile] = {
-    # Z-Image：数值与原表逐字一致（旧会话/旧产物读回来行为不变）。
-    "zimage": ImageProfile("zimage_t2i_v1", "10", 640, 1280, "candidate"),
-    # Qwen-Image 2.1：本仓**没有**为它登记 ComfyUI 工作流，profile 名与节点号留空——
-    # 出站渲染会跳过空行，不编造一个不存在的节点号。画布默认取 H3 视频原生竖幅
-    # （736×1280，见 ``config/agent.yaml`` 的 director 节）；用户在 brief 里给了
-    # ``canvases["qwen"]`` 时以选定值为准。
-    "qwen": ImageProfile("", "", 736, 1280, "candidate"),
-    # MOSS-Image：同 Qwen，本仓没登记它的 ComfyUI 工作流。``config/image.yaml`` 的
-    # ``frame:`` 允许三档任选，故这里三档都在——少一档时用户改成 moss 会在出词时
-    # 才炸「未知关键帧生图模型」。
-    "moss": ImageProfile("", "", 736, 1280, "candidate"),
-}
+    return str(name or "z_image") in RETIRED_IMAGE_FAMILIES
+# 关键帧（首帧/尾帧）用的就是同一张表（issue #146）：关键帧可以按 ``config/image.yaml``
+# 的 ``frame:`` 选三档任一份，它的工作流名/节点/画布与资产图**同一档就是同一条**。
+# 曾经分两张表是因为资产表只有 Z-Image、往里面加 Qwen 会让向导多问画布；现在三档都是
+# 真实登记的工作流，再分两张就是同一行数据的两个可写来源（改名时一处改一处漏）。
+FRAME_PROFILE_DEFAULTS: dict[str, ImageProfile] = IMAGE_PROFILE_DEFAULTS
 
 # 本仓支持的帧生图模型家族。**从上面那张表派生**：家族清单另写一份的话，将来加第三个
 # 家族时请求里的模型块会静默少一行（issue #33 复审）。
 _FRAME_MODELS = tuple(FRAME_PROFILE_DEFAULTS)
+# 现行家族键 → 读取时要认的键（现行 ＋ 旧别名）。派生自 ``image_config`` 的别名表：
+# 别名表加一条，所有读口（bundle 子键、时间戳补齐）一起跟上，不会漏一个静默丢掉旧数据。
+_ALIAS_BY_CANONICAL = {
+    canonical: legacy for legacy, canonical in LEGACY_IMAGE_MODEL_ALIASES.items()
+}
+
+
+def _family_keys(model_family: str) -> tuple[str, ...]:
+    """某档在旧载荷里可能出现的键（现行键在前，旧别名在后）。"""
+    legacy = _ALIAS_BY_CANONICAL.get(model_family)
+    return (model_family, legacy) if legacy else (model_family,)
+
+
+# 向导画布问答只问**成片画幅**这一家（issue #146）。用户为这支片子选一次尺寸，
+# Qwen/MOSS 没有自己的选择项时沿用它的选定值（见 ``image_canvas_size``）——同一支片子
+# 的参考图与成片必须同画幅。想给某一档单独定尺寸，用 ``--brief`` 的 `画布 qwen: WxH`。
+CANVAS_CHOICE_FAMILIES = ("z_image",)
 
 # 生图模型键 → 给人看的显示名。渲染层与帧节点的模型块都用它，免得同一张对照表
 # 在三个地方各写一遍（issue #33 复审）。
+# ``zimage`` 是旧键位的读别名（issue #146）：旧 bundle/旧条目里的家族名照样要能渲染，
+# 归一只发生在读取口；这里两条都给，缺一条就是「旧产物打开时 KeyError」。
 IMAGE_FAMILY_LABELS = {
+    "z_image": "Z-Image",
     "zimage": "Z-Image",
     "qwen": "Qwen-Image 2.1",
     "moss": "MOSS-Image",
@@ -137,15 +156,22 @@ def image_canvas_size(
     用户选定（issue #42，选比例→选尺寸→不符可自定义），``canvases`` 是会话里用户的选择
     （家族 → (宽, 高)）；没选的家族（含旧会话、--brief 无画布键）回落默认表——兜底
     让改动前的行为逐字保留。
+
+    **没给本档选定值时沿用 Z-Image 那张**（issue #146）：向导只问一次画布（成片画幅，
+    见 ``ui.wizard._choose_canvases``），换成 Qwen/MOSS 出图的资产或关键帧没有自己的
+    选择项。让它们各自回落 1920×1088，会把同一支片子的参考图做成横幅、成片却是竖幅。
+    旧画布键 ``zimage`` 与旧模型名一样按别名读（``canonical_image_model``）。
     """
+    canonical = canonical_image_model(model_family)
     # 家族合法性先于选定值：表外家族带一个选定值也照旧报错——报错要来自「这个家族
     # 根本不存在」，而不是静默接受一个没有 profile/渲染行的幽灵家族。
-    profile = IMAGE_PROFILE_DEFAULTS.get(model_family)
+    profile = IMAGE_PROFILE_DEFAULTS.get(canonical)
     if profile is None:
         raise ValueError(f"未知生图模型：{model_family}")
-    if canvases and model_family in canvases:
-        width, height = canvases[model_family]
-        return int(width), int(height)
+    for family in (canonical, str(model_family), "z_image", "zimage"):
+        if canvases and family in canvases:
+            width, height = canvases[family]
+            return int(width), int(height)
     return profile.width, profile.height
 
 
@@ -153,24 +179,15 @@ def frame_canvas_size(
     model_family: str,
     canvases: CanvasMap | None = None,
 ) -> tuple[int, int]:
-    """关键帧该出多大（宽, 高）：用户选定优先，未选回落 ``FRAME_PROFILE_DEFAULTS``。
+    """关键帧该出多大（宽, 高）：与 ``image_canvas_size`` 同一口径、同一张表。
 
-    与 ``image_canvas_size`` 分成两个读取口，是因为两张表的用途不同（见
-    ``FRAME_PROFILE_DEFAULTS`` 的注释）；判据与报错口径逐字同形，不另发明一套。
-
-    **没给本档选定值时沿用 Z-Image 那张**：向导的画布选择器只问资产表里的家族
-    （见 ``ui.wizard._choose_canvases``），关键帧模型换成 Qwen 后没有自己的选择项。
-    而关键帧必须与成片**同画幅**——用户为这支片子选的 1920×1080 不能因为换了出图
-    模型就变成 736×1280（2026-10-30：用户这一轮选的是 1920×1080 横幅 PV）。
+    issue #146 起关键帧与资产图共用 profile 表：三档都是真实登记的 ComfyUI 工作流，
+    画布/节点/工作流名是同一行数据，分成两个读取口就会各写一份。
+    报错口径保留「关键帧」字样——用户是在 ``frame:`` 那一行写错的，提示要对得上。
     """
-    profile = FRAME_PROFILE_DEFAULTS.get(model_family)
-    if profile is None:
+    if canonical_image_model(model_family) not in FRAME_PROFILE_DEFAULTS:
         raise ValueError(f"未知关键帧生图模型：{model_family}")
-    for family in (model_family, "zimage"):
-        if canvases and family in canvases:
-            width, height = canvases[family]
-            return int(width), int(height)
-    return profile.width, profile.height
+    return image_canvas_size(model_family, canvases)
 
 
 # 构图词分套的画幅族边界（issue #42，Q21(c) 裁定「族内就近归类，族外降通用」）。
@@ -468,7 +485,9 @@ class FL2VAFramePrompt:
     def __post_init__(self) -> None:
         if self.frame not in {"first", "last"}:
             raise ValueError(f"FL2VA 帧类型无效：{self.frame}")
-        if self.model_family not in _FRAME_MODELS:
+        # 旧 bundle 里的 ``zimage`` 按别名接受（issue #146）：读取要兼容，新写一律
+        # ``z_image``——模型子键由请求里的【出图模型】行指定。
+        if canonical_image_model(self.model_family) not in _FRAME_MODELS:
             raise ValueError(f"FL2VA 生图模型类型无效：{self.model_family}")
         _require_text(self.positive_prompt, "FL2VA positive_prompt")
         if self.time_seconds < 0:
@@ -490,8 +509,10 @@ class FL2VAFramePrompt:
         """
         # 表外家族走空档——它只在下面构造时被 ``__post_init__`` 拦下（见常量处的说明），
         # 这一档取空值是为了让报错来自字段校验、而不是这里的 AttributeError。
-        family = str(raw.get("model_family", "zimage"))
-        profile = FRAME_PROFILE_DEFAULTS.get(family, _EMPTY_IMAGE_PROFILE)
+        # 缺省给现行键位；旧 bundle 里显式写的 ``zimage`` 原样保留（读别名）。
+        family = str(raw.get("model_family", "z_image"))
+        profile = FRAME_PROFILE_DEFAULTS.get(
+            canonical_image_model(family), _EMPTY_IMAGE_PROFILE)
         if canvases is None:
             width = int(raw.get("width", profile.width) or profile.width)
             height = int(raw.get("height", profile.height) or profile.height)
@@ -581,10 +602,14 @@ class FL2VAPromptBundle:
             if isinstance(value, dict):
                 rows = []
                 for model_family in _FRAME_MODELS:
-                    item = value.get(model_family)
-                    if isinstance(item, dict):
+                    # 旧 bundle 用 ``zimage`` 作家族子键（issue #146 AC4）：按别名读出来，
+                    # 行的 model_family 记**现行键位**——产物从此只有一种写法。
+                    flip = {key: model_family for key in _family_keys(model_family)}
+                    for key, item in value.items():
+                        if key not in flip or not isinstance(item, dict):
+                            continue
                         rows.append(FL2VAFramePrompt.from_dict({
-                            **item, "frame": frame_name, "model_family": model_family,
+                            **item, "frame": frame_name, "model_family": flip[key],
                             "scene_anchor": str(item.get("scene_anchor") or raw.get("scene_anchor", "")),
                             "shot_id": str(item.get("shot_id") or value.get("shot_id", "SH001")),
                             "time_seconds": item.get("time_seconds", value.get("time_seconds", 0)),
@@ -595,7 +620,7 @@ class FL2VAPromptBundle:
                 if not rows and (value.get("positive_prompt") or value.get("prompt")) \
                         and not is_retired_image_family(value.get("model_family")):
                     rows.append(FL2VAFramePrompt.from_dict({
-                        **value, "frame": frame_name, "model_family": value.get("model_family", "zimage"),
+                        **value, "frame": frame_name, "model_family": value.get("model_family", "z_image"),
                         "scene_anchor": str(value.get("scene_anchor") or raw.get("scene_anchor", "")),
                     }, canvases))
                 return tuple(rows)
@@ -759,11 +784,12 @@ def fl2va_bundle_from_dict(raw: dict[str, Any], brief: Brief) -> FL2VAPromptBund
         frame_value = dict(value)
         frame_value.setdefault("time_seconds", default_time)
         for model_family in _FRAME_MODELS:
-            item = frame_value.get(model_family)
-            if isinstance(item, dict):
-                item_value = dict(item)
-                item_value.setdefault("time_seconds", default_time)
-                frame_value[model_family] = item_value
+            for key in _family_keys(model_family):
+                item = frame_value.get(key)
+                if isinstance(item, dict):
+                    item_value = dict(item)
+                    item_value.setdefault("time_seconds", default_time)
+                    frame_value[key] = item_value
         enriched[frame_name] = frame_value
     # 尺寸交给 from_dict 按 ``brief.canvases`` 权威解析（issue #42 AC1）：模型幻觉的
     # width/height、帧级回退形状的残留一律不认——画布是请求下发的数据，不是模型的
@@ -1010,6 +1036,11 @@ def image_prompt_variants(
     Flux.2 版已全链取消，旧数据里的 flux2 一并弃读；**整键缺失**（#36 之前的会话）回退
     设计正文——那种现场没有专门的生图提示词，回退到设计正文总比给空串强（那是设计正文
     曾经当生图提示词喂 ComfyUI 的根源，新跑的会话永远走不到那支，``tests/test_asset_image_prompts.py`` 钉住）。
+
+    **每条的 profile/节点/画布取它自己那一档**（issue #146）：条目里的
+    ``image_model`` 是这条路唯一的模型事实源（``image_routing``），产物因此与出词时的
+    纪律同档——同一次运行里人物可能按 Qwen 写、道具按 MOSS 写，产物不能都挂 Z-Image 的
+    牌子。旧条目没有这个字段时按历史的 Z-Image 读（那时只有这一档）。
     """
     variants: list[ImagePromptVariant] = []
     # 类别 → (产物键, 设计键) 取 ``graph.state.ASSET_KIND_FIELDS`` 的唯一声明（issue #88）：
@@ -1040,12 +1071,14 @@ def image_prompt_variants(
                 # 资产键与设计正文都空＝这一类无货可交，跳过而不是构造非法对象——
                 # 向导展示会对任意精简 state 调到这里（issue #40），缺料不是错误。
                 continue
-            # profile 行取生图默认表的 Z-Image 行，画布尺寸走 `image_canvas_size` 读取口
-            # （用户选定优先、未选回落同一张表）——issue #33 把这张表扶正为单一来源，
-            # issue #42 让选定值从同一读取口进来。尺寸**无条件**取读取口：条目里混进的
-            # width/height 一律不认（四键契约外的残留/幻觉不许压过用户选定，复审点名）。
-            default = IMAGE_PROFILE_DEFAULTS["zimage"]
-            canvas_width, canvas_height = image_canvas_size("zimage", canvases)
+            # profile 行与画布都取**这一条自己的模型档**（issue #146）：条目上的
+            # ``image_model`` 是出词时写下的判定，与正文后来改成什么样无关；没有记录的
+            # 旧条目按当时唯一存在的 Z-Image 档读。
+            # 尺寸**无条件**取读取口：条目里混进的 width/height 一律不认（四键契约外的
+            # 残留/幻觉不许压过用户选定，复审点名）。
+            model = canonical_image_model(_entry_image_model(item) or DEFAULT_IMAGE_MODEL)
+            default = IMAGE_PROFILE_DEFAULTS[model]
+            canvas_width, canvas_height = image_canvas_size(model, canvases)
             variants.append(ImagePromptVariant(
                 name=str(item.get("name", "") or label),
                 # 来源是 ``ASSET_KIND_FIELDS`` 的键（纯数据表），运行时范围有限。

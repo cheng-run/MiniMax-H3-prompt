@@ -28,7 +28,13 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..image_config import DEFAULT_IMAGE_MODEL, IMAGE_MODEL_KEYS, image_model_label
+from ..image_config import (
+    DEFAULT_IMAGE_MODEL,
+    IMAGE_MODEL_KEYS,
+    Z_IMAGE_MODEL,
+    canonical_image_model,
+    image_model_label,
+)
 
 # 可加载纪律的模型键。**真源是 ``image_config.IMAGE_MODEL_KEYS``**（值域与配置文件同一处），
 # 这里只做转发：两处各写一份时，新增一个模型会只改到一边（配置认它、纪律文件找不到）。
@@ -64,7 +70,12 @@ class DisciplineWarning:
 
 
 def discipline_path(model: str = DEFAULT_IMAGE_MODEL) -> Path:
-    """某一档的纪律文件路径；未知模型报错（别猜文件、也别回落到默认档）。"""
+    """某一档的纪律文件路径；未知模型报错（别猜文件、也别回落到默认档）。
+
+    旧键位 ``zimage`` 按别名读（issue #146）：旧会话与旧条目里的模型名不该因为改名
+    在读取口炸掉。
+    """
+    model = canonical_image_model(model)
     if model not in DISCIPLINE_MODELS:
         raise ValueError(
             f"生图模型无效：{model!r}（只认 {', '.join(DISCIPLINE_MODELS)}）")
@@ -314,6 +325,8 @@ def check_image_prompt(prompt: str, *, model: str = DEFAULT_IMAGE_MODEL
     """
     # 值域先验：放在空文本早退之前——否则 `check_image_prompt("", model="flux")` 会
     # 静默返回空表，看起来「这个模型没违规」，实际是从没认过这个模型。
+    # 旧键位 ``zimage`` 先归一，后面那一跳才对得上（issue #146 的读别名）。
+    model = canonical_image_model(model)
     if model not in DISCIPLINE_MODELS:
         raise ValueError(
             f"生图模型无效：{model!r}（只认 {', '.join(DISCIPLINE_MODELS)}）")
@@ -324,7 +337,7 @@ def check_image_prompt(prompt: str, *, model: str = DEFAULT_IMAGE_MODEL
 
     warnings: list[DisciplineWarning] = []
 
-    if model != DEFAULT_IMAGE_MODEL:
+    if model != Z_IMAGE_MODEL:
         # 这一档只有「质量套话」一类：文案与下面 Z-Image 档用的是**同一个构造函数**，
         # 两处各写一份时改一处漏一处，两个模型会得到不一样的措辞（本仓「同一契约不许
         # 两处口径」）。
