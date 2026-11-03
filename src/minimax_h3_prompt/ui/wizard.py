@@ -1107,7 +1107,7 @@ def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> b
 
     from ..director import cache, ledger
     from ..director import tailframe as tailframe_module
-    from ..director.frames import IMAGE_FIRST, give_images_for
+    from ..director.frames import needs_first_frame_image
     from ..director.tailframe import (
         needs_tailframe, tailframe_path, validate_tailframe_prompt,
         write_tailframe_prompts,
@@ -1143,7 +1143,7 @@ def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> b
     # 终点，下面那段「上一段终点图／视频末帧」才是本段起点。2026-11-02 验收
     # （#137 段2）之前这里对两类一视同仁，切镜段的尾帧词因此从错误起点写起。
     image = None
-    if IMAGE_FIRST in give_images_for(segment.type, plan.mode):
+    if needs_first_frame_image(segment.type, plan.mode):
         image = _prompt_optional_image(
             f"第 {segment.index} 段（{segment.label}）的首帧路径"
             "（本段起点画面；尾帧词以它为参考图。回车＝没有，改用上一段终点图兜底）：")
@@ -1459,6 +1459,7 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
     """
     from ..director import cache, ledger
     from ..director.companion import judge_video_evidence
+    from ..director.frames import needs_first_frame_image
     from ..director.tailframe import needs_tailframe
 
     directory = Path(session.directory)
@@ -1544,9 +1545,9 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
                 continue
             # 切镜段的段首帧既不在导演包里、也没有出词口（P2，2026-11-02 验收）：
             # 轮到这一段时先把首帧词交给用户，紧接着的尾帧词要拿这张图当参考。
-            # 只认 camera_cut：opening 的首帧是阶段 1 的全片首帧（已经出过词并收过图），
-            # 其余类型没有首帧槽。
-            if segment.type == "camera_cut":
+            # 判据问给图契约（#145）：fl2v 的 camera_cut 有首帧槽，r2v 的同一类型
+            # 没有——照类型名判会给 r2v 产出一份挂不上的词。
+            if needs_first_frame_image(segment.type, plan.mode):
                 if llm is None:
                     llm = _build_director_llm("写段首帧提示词")
                     if llm is None:

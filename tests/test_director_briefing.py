@@ -66,3 +66,25 @@ def test_guided_segment_gets_no_disable_reference_line(tmp_path):
     text = _render_director_segment_briefing(plan, plan.segments[2], tmp_path)
 
     assert "引用上段" not in text, "引导段不该提示「关引用上段」"
+
+
+def test_r2v_cut_segment_briefing_does_not_ask_for_a_first_frame(tmp_path):
+    """#145：简报的首帧提示也走给图契约——r2v 的 `camera_cut` 没有首帧槽。"""
+    from minimax_h3_prompt.director.frames import DirectorPlan
+    from minimax_h3_prompt.ui.wizard import _render_director_segment_briefing
+
+    fl2v_plan = _plan()
+    r2v_segments = tuple(
+        _segment(segment.index, segment.type, segment.guided, ("assets",))
+        for segment in fl2v_plan.segments)
+    r2v_plan = DirectorPlan(mode="r2v", total_frames=306, segments=r2v_segments)
+    _plant_segment(tmp_path, 2, "integrated_multimodal_description: [Shot 1] 切镜")
+
+    text = _render_director_segment_briefing(r2v_plan, r2v_segments[1], tmp_path)
+
+    assert "本段是切镜段" not in text, "r2v 的切镜段没有首帧槽，不该提示挂首帧"
+    assert "挂**首帧**" not in text
+
+    fl2v_text = _render_director_segment_briefing(
+        fl2v_plan, fl2v_plan.segments[1], tmp_path)
+    assert "挂**首帧**" in fl2v_text, "fl2v 的切镜段必须提示挂首帧"

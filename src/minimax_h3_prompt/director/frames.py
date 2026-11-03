@@ -233,6 +233,17 @@ def give_images_for(segment_type: str, mode: str) -> tuple[str, ...]:
     }[mode]
 
 
+def needs_first_frame_image(segment_type: str, mode: str) -> bool:
+    """该段在本模式下**有没有首帧槽**——判据只有一条：给图清单里有没有 ``first``。
+
+    为什么不在调用点写 ``segment.type == "camera_cut"``：r2v 的 ``camera_cut`` 没有
+    首帧槽（首/尾帧是 fl2v 的槽位，r2v 每段只挂参考素材），照类型名判会让 r2v 会话
+    产出一份没有槽位可挂的首帧词、简报还会让用户去挂一张不存在的图。首帧词生产与
+    切镜简报共用这个函数，模式差异只住 ``give_images_for`` 一处。
+    """
+    return IMAGE_FIRST in give_images_for(segment_type, mode)
+
+
 def optional_images_for(segment_type: str, mode: str) -> tuple[str, ...]:
     """该段**可选**给图（设计 §3.1 表：只有 ``fl2v`` 的开场尾帧可选）。
 
