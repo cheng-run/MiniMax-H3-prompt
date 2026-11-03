@@ -21,11 +21,11 @@
 1. `subject_definitions:` **原样复制**请求给出的定义块，一字不改（参考主体在这里定义，标签语义逐段一致）。
 2. `summary:` 以 `[reference generation]` 开头，一句话概括**本段**的主参照关系。
 3. `retention_analysis:` **原样复制**请求给出的定义块，一字不改。
-4. `detailed_description:` 本段正文——先一两句英文风格开场，然后从 `[Shot 1]` 起按时间顺序写镜头（时序写法：先发生什么、再发生什么，动作的落点写在各自镜头里）。指称以 `<Picture N>` 为准（槽号与请求里的定义块一致）。**不写起止状态句**（见 common）。
+4. `detailed_description:` 本段正文——先一两句英文风格开场，然后从 `[Shot 1]` 起按时间顺序写镜头（时序写法：先发生什么、再发生什么，动作的落点写在各自镜头里）。指称：**可复用的可见内容（人物／场景／道具／风格）用 `<Subject N>`**；只有「这张图本身是某一帧／独立图」时才用 `<Picture N>`（槽号与请求里的定义块一致）。**不写起止状态句**（见 common）。
 5. `overall_soundscape:` 为本段重写的英文摘要（1–4 句连续段落，无时间戳）。
 6. `non_diegetic_music:` 为本段重写的英文摘要（1–3 句；无声写 `N/A`）。
 
-**参考图不是首帧，也不是落点**：`<Picture N>` 只锚定主体外观与保留关系（谁是谁、保留什么）。参考图不得被写成起始画面或落点——`begins in the position and framing established by Picture N` 这类 FL2VA 句式**一律不许出现**。首帧／尾帧是 fl2v 的帧槽，r2v 没有它们。
+**参考图不是首帧，也不是落点**：`<Subject N>` / `<Picture N>` 只锚定主体外观与保留关系（谁是谁、保留什么）。参考图不得被写成起始画面或落点——`begins in the position and framing established by Picture N` 这类 FL2VA 句式**一律不许出现**。首帧／尾帧是 fl2v 的帧槽，r2v 没有它们。
 
 不要输出六节之外的段落，也不要删节。组装器会用请求里的定义块覆盖 1、3 两节——你照抄即可，改写的部分不会被采用。
 

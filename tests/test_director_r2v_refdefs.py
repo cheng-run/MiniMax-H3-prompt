@@ -360,6 +360,25 @@ def test_merged_masters_produce_no_warning_and_no_error():
     assert check.warnings == ()
 
 
+def test_reference_consistency_prompt_no_longer_claims_chinese_goes_in_verbatim():
+    """定义句是**中文素材**，下游转英文后才进最终提示词（#155）。"""
+    from minimax_h3_prompt.agents import load_role_prompt
+
+    text = load_role_prompt("reference_consistency")
+    assert "中文素材" in text, "没写定义句是中文素材"
+    assert "英文" in text and ("下游" in text or "转" in text), "没写下游会转英文"
+    assert "直接进入最终提示词" not in text, "还声称中文会逐字进入最终提示词"
+
+
+def test_request_carries_the_subject_first_naming_rule():
+    """refdefs 示例同步 Subject/Picture 分工（#155）：可复用内容先 Subject。"""
+    from minimax_h3_prompt.director import refdefs
+
+    request = refdefs._build_request(_REAL_SHAPE_MATERIAL, _REGISTRY)
+    assert "<Subject N>" in request and "可复用" in request
+    assert "正文里指称" in request and "只留给" in request
+
+
 def test_request_asks_every_picture_to_be_cited_not_defined_on_its_own_line():
     """规则 3：从「每张都要有定义」改成「每张都必须被**引用**」，两种合法形态都写清。"""
     from minimax_h3_prompt.director import refdefs

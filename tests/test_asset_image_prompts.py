@@ -641,6 +641,26 @@ def test_asset_role_prompt_no_longer_asks_for_operator_notes():
     assert '"instructions"' not in prompt, "image_prompt_engineer.md 还在要求 instructions 字段"
 
 
+def test_master_count_and_dedup_priority_are_not_in_conflict():
+    """张数照清单、板内视图才去冗余；配角设计与出词两端都是 1–2（#155）。
+
+    两句以前互相矛盾：「不得增删母版」与「去冗余删掉」并列时，模型读到哪句都算遵守。
+    优先级必须写成一条：删的是**板内视图**，不是清单里的整张板。
+    """
+    from minimax_h3_prompt.agents import load_role_prompt
+
+    designer = load_role_prompt("character_designer")
+    assert "配角" in designer and ("1–2" in designer or "1-2" in designer), \
+        "设计端配角张数没写成 1–2"
+
+    engine = load_role_prompt("image_prompt_engineer")
+    assert "张数照设计端的母版清单" in engine or "张数照清单" in engine, \
+        "出词端没把母版清单当张数来源"
+    assert "去冗余" in engine, "出词端没写去冗余"
+    assert "板内视图" in engine and "整张板" in engine, \
+        "没写清「去冗余只删板内视图、不删整张板」"
+
+
 # ---------------------------------------------------------------------------
 # 8. 锁死清单：进条目、进产物、进请求（issue #53 AC1）
 # ---------------------------------------------------------------------------

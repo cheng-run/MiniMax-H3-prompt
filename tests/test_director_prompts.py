@@ -608,6 +608,21 @@ def test_r2v_request_does_not_get_the_three_field_shell():
     assert "detailed_description" in request
 
 
+def test_r2v_instruction_uses_subjects_for_reusable_content():
+    """r2v 正文指称：可复用内容用 ``<Subject N>``，只有具体帧／独立图才用 ``<Picture N>``。
+
+    以前正文「以 ``<Picture N>`` 为准」，同一个角色的多张母版在正文里被拆成三个主体；
+    定义块却按官方合并成一个 Subject（#134/#155），指称体系于是两套。
+    """
+    from minimax_h3_prompt.director.prompts import load_instruction
+
+    r2v = load_instruction("r2v")
+    assert "<Subject N>" in r2v, "r2v 指令没给 Subject 指称"
+    assert "可复用" in r2v, "没说哪些内容用 Subject"
+    assert "具体帧" in r2v or "独立图" in r2v, "没说 Picture 只留给具体帧/独立图"
+    assert "指称以 `<Picture N>` 为准" not in r2v, "旧的 Picture 优先措辞还在"
+
+
 def test_mode_instructions_teach_the_official_three_field_shell():
     """三条单段模式的角色提示词里写着三字段外壳（字段名逐字、顺序固定、无「音频并入正文」）。"""
     from minimax_h3_prompt.director.prompts import load_instruction
