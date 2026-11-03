@@ -37,16 +37,25 @@ def render_director_segment_briefing(plan, segment, session_dir: Path,
     单段计划（i2v）不印这一行：插件根本不为单段写缓存（2026-10-30 现场目录都不存在），
     印一个永远不存在的路径只会误导。
     """
+    from ..director.pack import film_end_still
     from ..director.planning import render_give_images
     from ..director.prompts import segment_path
     from ..director.tailframe import needs_tailframe
+
+    # 给图行与段表清单、打包报告同一口径：单段 fl2v 的全片尾帧会被挂成这一段的
+    # 终点画面，多段时它属于最后一段（#147 AC2）。`pack` 在函数级导入——模块级
+    # 会经 `pack -> prompts` 绕回来形成环。
+    film_end = plan.mode == "fl2v" and film_end_still(session_dir) is not None
+    give_images = render_give_images(segment, plan.mode,
+                                     single_segment=len(plan.segments) == 1,
+                                     film_end=film_end)
 
     lines = [
         "",
         "=" * 60,
         f"第 {segment.index}/{len(plan.segments)} 段（{segment.label}）  "
         f"计划：声明 {segment.declared_frames} 帧 / 导出 {segment.export_frames} 帧  "
-        f"给图：{render_give_images(segment, plan.mode)}",
+        f"给图：{give_images}",
         f"段提示词：{segment_path(session_dir, segment.index)}",
     ]
     # 提示词正文**直接打在终端**（P6，2026-11-02 验收）：只给路径时用户要一边终端

@@ -33,8 +33,8 @@ def _segment(index, segment_type, start, declared, export, guided):
     )
 
 
-def _plan(*segments):
-    return DirectorPlan(mode="t2v", total_frames=sum(s.export_frames for s in segments),
+def _plan(*segments, mode="t2v"):
+    return DirectorPlan(mode=mode, total_frames=sum(s.export_frames for s in segments),
                         segments=tuple(segments))
 
 
@@ -91,6 +91,39 @@ def test_single_shot_briefing_omits_cache_lines(tmp_path):
     assert "直接点运行" in text
     assert "段缓存目录" not in text, "单段计划插件不写缓存，印路径只会误导"
     assert "cache_name" not in text
+
+
+def test_fl2v_briefing_matches_the_film_end_tail_image_rule(tmp_path):
+    """单段 fl2v 且有全片尾帧时简报印「首+尾」；多段开场只印「首帧」（#147 AC2）。
+
+    简报是用户逐段执行时唯一看得到的给图说明。它若与段表清单/打包口径不一致，
+    用户会以为单段片子没有终点画面（或以为多段开场挂了尾帧）。
+    """
+    from dataclasses import replace
+
+    from minimax_h3_prompt.director.frames import give_images_for
+    from minimax_h3_prompt.director.pack import ASSETS_DIRNAME, DIRECTOR_DIRNAME
+
+    opening = replace(
+        _segment(1, "opening", 0, 107, 107, False),
+        give_images=give_images_for("opening", "fl2v"))
+
+    def give_line(plan, segment):
+        text = render_director_segment_briefing(plan, segment, tmp_path)
+        return next(line for line in text.splitlines() if "给图：" in line)
+
+    single = _plan(opening, mode="fl2v")
+    assert "尾帧" not in give_line(single, opening), "没有 film-end 时不该印尾帧"
+
+    assets = tmp_path / DIRECTOR_DIRNAME / ASSETS_DIRNAME
+    assets.mkdir(parents=True)
+    (assets / "film-end.png").write_bytes(b"not a real png")
+    line = give_line(single, opening)
+    assert "首帧" in line and "尾帧" in line, line
+
+    multi = _plan(opening, _segment(2, "continue", 107, 141, 153, True), mode="fl2v")
+    multi_line = give_line(multi, multi.segments[0])
+    assert "尾帧" not in multi_line, multi_line
 
 
 def test_asset_model_line_reads_the_recorded_assignment():
