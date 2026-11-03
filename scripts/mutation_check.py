@@ -109,6 +109,22 @@ MUTATIONS: tuple[Mutation, ...] = (
         ("tests/test_adr_guard.py::test_every_adr_has_a_well_formed_status_line",),
         "删掉状态行＝「哪份还被取代」再也机读不出来",
     ),
+    Mutation(
+        "first_frame_slot_ignored",
+        "src/minimax_h3_prompt/director/frames.py",
+        "    return IMAGE_FIRST in give_images_for(segment_type, mode)",
+        "    return False",
+        ("tests/test_director_first_frame_slot.py",),
+        "首帧槽判据恒假＝fl2v 切镜段不再产首帧词，r2v 的误触也被掩盖（#145）",
+    ),
+    Mutation(
+        "frame_meta_model_dropped",
+        "src/minimax_h3_prompt/director/tailframe.py",
+        '            "model": model,\n',
+        '            "model": "",\n',
+        ("tests/test_director_tailframe.py::test_tailframe_sidecar_records_model_segment_and_input_fingerprints",),
+        "sidecar 不记模型＝换 frame: 后旧尾帧词被静默复用（#153）",
+    ),
 )
 
 
