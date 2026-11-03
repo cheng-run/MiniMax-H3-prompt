@@ -20,9 +20,12 @@ from minimax_h3_prompt.user_revisions import LAYER_FRAME, render_baseline_block
 
 
 def frame_payload(prompt: str) -> dict:
-    """一帧的模型载荷（现行形状）：只有 zimage 一份——ADR 0013 全链退役后单模型输出。"""
+    """一帧的模型载荷（现行形状）：只有 ``z_image`` 一份——ADR 0013 全链退役后单模型输出。
+
+    旧键位 ``zimage`` 的读取另有用例（issue #146 AC4），这里用现行键位，钉的是新产物。
+    """
     return {
-        "zimage": {"positive_prompt": prompt},
+        "z_image": {"positive_prompt": prompt},
     }
 
 
@@ -160,7 +163,7 @@ def test_bundle_keeps_the_qwen_family_the_node_asked_for():
 
     旧口径只有一个 ``zimage`` 键；节点说 qwen、解析却只认 zimage，会把整帧丢掉
     （随后报「必须同时包含首帧和尾帧」或静默按 zimage 渲染一个不存在的名称）。
-    画布期望值是**字面量**（Qwen 档的默认 736×1280，H3 视频原生竖幅）。
+    画布期望值是**字面量**（Qwen 档登记的 1920×1088，issue #146 票面现货）。
     """
     payload = {
         "scene_anchor": "medieval tavern interior",
@@ -175,7 +178,7 @@ def test_bundle_keeps_the_qwen_family_the_node_asked_for():
     bundle = fl2va_bundle_from_dict(payload, brief)
 
     assert [row.model_family for row in bundle.first] == ["qwen"]
-    assert (bundle.first[0].width, bundle.first[0].height) == (736, 1280)
+    assert (bundle.first[0].width, bundle.first[0].height) == (1920, 1088)
 
 
 def test_frame_node_warns_when_the_family_key_does_not_match_the_config(
@@ -197,20 +200,88 @@ def test_frame_node_warns_when_the_family_key_does_not_match_the_config(
     node({"brief": brief})
 
     out = capsys.readouterr().out
-    assert "zimage" in out and "qwen" in out, f"模型子键不一致没有告警：{out!r}"
+    assert "z_image" in out and "qwen" in out, f"模型子键不一致没有告警：{out!r}"
 
 
 def test_frame_canvas_follows_the_selected_video_canvas_when_its_family_is_unset():
-    """没给帧模型单独特定画布时，沿用用户为这支片子选的那张（zimage 那张）。
+    """没给帧模型单独特定画布时，沿用用户为这支片子选的那张（成片画幅）。
 
-    向导的画布选择器只问资产表里的家族；关键帧换 Qwen 后没有自己的选择项，但关键帧
-    必须与成片同画幅——不能因为换了出图模型就把 1920×1080 的横幅 PV 变成 736×1280。
+    向导的画布选择器只问成片画幅（issue #146）；关键帧换 Qwen 后没有自己的选择项，
+    但关键帧必须与成片同画幅——不能因为换了出图模型就把 1920×1080 的横幅 PV 变成
+    1920×1088（Qwen 档的默认画布）。
     """
     assert generation.frame_canvas_size(
         "qwen", {"zimage": (1920, 1080)}) == (1920, 1080)
     # 本档有选定值时以它为准（不会被子集覆盖）。
     assert generation.frame_canvas_size(
         "qwen", {"qwen": (960, 1152), "zimage": (1920, 1080)}) == (960, 1152)
+
+
+def test_frame_model_z_image_is_a_valid_config(tmp_path, monkeypatch):
+    """`frame: z_image` 是合法配置（issue #146 AC1）：请求按 Z-Image 档出，不再崩。
+
+    旧实现两张表键位不一致（``image_config`` 是 ``z_image``、``generation`` 是
+    ``zimage``），用户把 ``frame:`` 切回 Z-Image 时直接抛「未知关键帧生图模型」。
+    这里从**配置读取口**一路走到请求文本：请求里有 Z-Image 的画布行与纪律块。
+    """
+    from minimax_h3_prompt import image_config
+
+    path = tmp_path / "image.yaml"
+    path.write_text("frame: z_image\n", encoding="utf-8")
+    monkeypatch.setattr(image_config, "IMAGE_CONFIG_PATH", path)
+    captured: dict = {}
+    payload = json.dumps({
+        "scene_anchor": "深夜便利店的柜台",
+        "first": {"z_image": {"positive_prompt": "A cat sits on the counter."}},
+        "continuity_constraints": ["Keep the same layout."],
+    })
+
+    def fake_run_agent(agent, message):
+        captured["message"] = message
+        return payload
+
+    monkeypatch.setattr(nodes, "run_agent", fake_run_agent)
+    node = nodes._make_fl2va_frame_prompt_node({"frame_prompt_engineer": object()})
+    brief = Brief(variant="I2VA", duration=5, plot="深夜便利店一只橘猫")
+
+    output = node({"brief": brief})
+
+    message = captured["message"]
+    assert "Z-Image（z_image）" in message, "请求没按 Z-Image 档出词"
+    assert "640 × 1280" in message, "请求【画布】块没带 Z-Image 的画布"
+    assert output["fl2va_prompt_bundle"]["first"][0]["model_family"] == "z_image"
+
+
+def test_legacy_zimage_bundle_and_rows_still_read():
+    """旧 ``zimage`` 键位的 bundle 与帧行仍可读（issue #146 AC4）。
+
+    两种旧形状都要认：dict 形家族子键（旧节点产物）与行上的 ``model_family: zimage``
+    （旧 to_dict 落盘）。读出来归一成 ``z_image``，节点号/画布仍是 Z-Image 那一行。
+    """
+    dict_shape = {
+        "scene_anchor": "medieval tavern interior",
+        "first": {"zimage": {"positive_prompt": "Three adventurers sit inside a medieval tavern interior."}},
+        "continuity_constraints": ["Keep the same characters."],
+    }
+    bundle = fl2va_bundle_from_dict(dict_shape, Brief(variant="I2VA", duration=5,
+                                                      plot="中世纪酒馆室内"))
+    assert [row.model_family for row in bundle.first] == ["z_image"]
+    assert bundle.first[0].profile_id == "zimage_t2i_v1"
+    assert bundle.first[0].prompt_node_id == "10"
+
+    list_shape = {
+        "scene_anchor": "medieval tavern interior",
+        "first": [{
+            "frame": "first",
+            "model_family": "zimage",
+            "positive_prompt": "Three adventurers sit inside a medieval tavern interior.",
+            "scene_anchor": "medieval tavern interior",
+        }],
+        "continuity_constraints": ["Keep the same characters."],
+    }
+    restored = FL2VAPromptBundle.from_dict(list_shape)
+    assert restored.first[0].model_family == "zimage"  # 读别名：原样保留，照样合法
+    assert generation.IMAGE_FAMILY_LABELS[restored.first[0].model_family] == "Z-Image"
 
 
 def test_wizard_render_names_the_actual_family():
@@ -696,13 +767,13 @@ def test_frame_bundle_roundtrips_composition_and_lighting():
     不成立的话，「让它们有值」也就没地方落。
     """
     payload = bundle_payload()
-    payload["first"]["zimage"]["composition"] = "竖幅三段式，主体偏下、天空留白在上"
-    payload["first"]["zimage"]["lighting"] = "暖光自右侧门缝低角度溢出，光比温和"
+    payload["first"]["z_image"]["composition"] = "竖幅三段式，主体偏下、天空留白在上"
+    payload["first"]["z_image"]["lighting"] = "暖光自右侧门缝低角度溢出，光比温和"
     brief = Brief(variant="FL2VA", duration=5, plot="中世纪酒馆室内")
     bundle = fl2va_bundle_from_dict(payload, brief)
 
     def zimage_row(b):
-        return next(r for r in b.first if r.model_family == "zimage")
+        return next(r for r in b.first if r.model_family == "z_image")
 
     row = zimage_row(bundle)
     assert row.composition == "竖幅三段式，主体偏下、天空留白在上"
@@ -748,10 +819,10 @@ def test_frame_node_request_carries_the_canvas_without_flux2(monkeypatch):
     这条会红（已实测）。
     """
     message = _frame_node_request(monkeypatch)
-    # 期望串是**字面量**（Qwen 默认画布，2026-10-30 起关键帧默认按 Qwen-Image 2.1 出词）：
+    # 期望串是**字面量**（Qwen 登记的画布 1920×1088，issue #146 票面现货）：
     # 从 `frame_canvas_size` 现算就与实现同构，组装断线也一起绿——「真的从表里取数」
     # 由下面的 profile 表用例钉。
-    assert "736 × 1280" in message, "帧节点请求里没有 Qwen 的画布尺寸"
+    assert "1920 × 1088" in message, "帧节点请求里没有 Qwen 的画布尺寸"
     assert "Qwen-Image 2.1" in message, "帧节点请求没点名本次出图模型"
     assert "Flux.2" not in message and "flux2" not in message, \
         "Flux.2 已退役，请求里不得再出现 Flux.2 行"
@@ -781,7 +852,7 @@ def test_frame_node_request_carries_the_user_selected_canvases(monkeypatch):
     message = _frame_node_request(monkeypatch, canvases={"qwen": (960, 1152)})
     assert "5:6 · 960 × 1152（近方）" in message, "帧节点请求里没有 Qwen 的选定画布"
     assert "构图用正方套" in message, "近方画布没拿到正方套指示"
-    assert "736 × 1280" not in message, "选定了画布却还带着系统钦定的推荐尺寸"
+    assert "1920 × 1088" not in message, "选定了画布却还带着系统钦定的默认尺寸"
 
 
 def test_frame_products_carry_the_user_selected_canvas():
@@ -800,8 +871,8 @@ def test_frame_products_carry_the_user_selected_canvas():
                                topic_id="topic", project_id="project")
 
     rows = {r.model_family: r for r in result.fl2va_prompt_bundle.first}
-    assert set(rows) == {"zimage"}, f"产物该只出 Z-Image 一版，实际行：{sorted(rows)}"
-    assert (rows["zimage"].width, rows["zimage"].height) == (700, 1300)
+    assert set(rows) == {"z_image"}, f"产物该只出 Z-Image 一版，实际行：{sorted(rows)}"
+    assert (rows["z_image"].width, rows["z_image"].height) == (700, 1300)
 
     rendered = render_fl2va_frame_markdown(result, "first")
     assert "画布：`7:13 · 700 × 1300（近竖）`" in rendered, "产物没有 Z-Image 的选定画布行"
@@ -820,7 +891,7 @@ def test_frame_product_no_longer_renders_operator_notes():
     """
     payload = bundle_payload()
     for frame in ("first", "last"):
-        row = payload[frame]["zimage"]
+        row = payload[frame]["z_image"]
         # 复刻实测现场：模型把 positive_prompt 原文填进了 instructions。
         row["instructions"] = [row["positive_prompt"]]
     brief = Brief(variant="FL2VA", duration=5, style="live-action realism",
@@ -840,7 +911,7 @@ def test_frame_product_no_longer_renders_operator_notes():
     rendered = render_fl2va_frame_markdown(result, "first")
 
     assert "操作说明" not in rendered, "渲染层还在输出「操作说明」小节"
-    assert rendered.count(payload["first"]["zimage"]["positive_prompt"]) == 1, \
+    assert rendered.count(payload["first"]["z_image"]["positive_prompt"]) == 1, \
         "正文被 instructions 重复渲染了一次"
 
 
@@ -864,12 +935,12 @@ def test_model_hallucinated_size_cannot_beat_the_selected_canvas():
     【画布】块漂开——画布是请求下发的数据，不是模型的自由发挥。
     """
     payload = bundle_payload()
-    payload["first"]["zimage"]["width"] = 111
-    payload["first"]["zimage"]["height"] = 222
+    payload["first"]["z_image"]["width"] = 111
+    payload["first"]["z_image"]["height"] = 222
     brief = Brief(variant="FL2VA", duration=5, plot="中世纪酒馆室内，冒险者团队庆祝",
                   canvases={"zimage": (700, 1300)})
     bundle = fl2va_bundle_from_dict(payload, brief)
-    zrow = next(r for r in bundle.first if r.model_family == "zimage")
+    zrow = next(r for r in bundle.first if r.model_family == "z_image")
     assert (zrow.width, zrow.height) == (700, 1300), \
         f"模型幻觉尺寸赢了：{(zrow.width, zrow.height)}"
 
@@ -976,8 +1047,8 @@ def test_rewrite_retry_also_carries_the_canvas(monkeypatch):
     node({"brief": brief})
 
     assert len(seen) == 2, "首轮产物没触发改写重试，这条用例没测到重试路径"
-    assert "736 × 1280" in seen[1], "改写请求丢了画布尺寸"
-    assert "Qwen-Image 2.1" in seen[1], "改写请求没点名本次出图模型（会退回按 zimage 举例写）"
+    assert "1920 × 1088" in seen[1], "改写请求丢了画布尺寸"
+    assert "Qwen-Image 2.1" in seen[1], "改写请求没点名本次出图模型（会退回按 z_image 举例写）"
 
 
 def _frame_prompt_spec() -> str:
@@ -1040,7 +1111,7 @@ def test_legacy_flux2_keys_in_payloads_are_read_as_absent():
     brief = Brief(variant="I2VA", duration=5, plot="中世纪酒馆室内")
     bundle = fl2va_bundle_from_dict(payload, brief)
 
-    assert [r.model_family for r in bundle.first] == ["zimage"]
+    assert [r.model_family for r in bundle.first] == ["z_image"]
     assert "旧 Flux.2 版" not in bundle.first[0].positive_prompt
     assert "Flux.2" not in json.dumps(bundle.to_dict(), ensure_ascii=False)
 
@@ -1054,7 +1125,7 @@ def test_legacy_flux2_rows_in_list_shape_are_dropped():
     raw = {
         "scene_anchor": "medieval tavern interior",
         "first": [
-            {"frame": "first", "model_family": "zimage",
+            {"frame": "first", "model_family": "z_image",
              "scene_anchor": "medieval tavern interior",
              "positive_prompt": "Three adventurers inside a medieval tavern interior."},
             {"frame": "first", "model_family": "flux2",
@@ -1066,7 +1137,7 @@ def test_legacy_flux2_rows_in_list_shape_are_dropped():
     brief = Brief(variant="I2VA", duration=5, plot="中世纪酒馆室内")
     bundle = fl2va_bundle_from_dict(raw, brief)
 
-    assert [r.model_family for r in bundle.first] == ["zimage"]
+    assert [r.model_family for r in bundle.first] == ["z_image"]
     assert "旧 Flux.2 版" not in bundle.first[0].positive_prompt
 
 
@@ -1089,7 +1160,7 @@ def test_frame_request_names_exactly_the_configured_model(monkeypatch, tmp_path)
 
     assert "MOSS-Image" in message and "（moss）" in message, "请求没跟上配置里的 frame 档"
     assert "700 × 700" in message, "MOSS 的画布没进请求"
-    assert "736 × 1280" not in message, "配置成 MOSS 了还带着 Qwen 的默认画布"
+    assert "1920 × 1088" not in message, "配置成 MOSS 了还带着 Qwen 的默认画布"
 
 
 def test_json_repair_retry_also_carries_the_canvas_and_the_two_fields(monkeypatch):
@@ -1183,8 +1254,8 @@ def test_frame_markdown_shows_composition_and_lighting(tmp_path):
     看得见这两行时才成立；只落在 session-state JSON 里等于又要人去挖。
     """
     payload = bundle_payload()
-    payload["first"]["zimage"]["composition"] = "竖幅三段式，主体偏下"
-    payload["first"]["zimage"]["lighting"] = "暖光自右侧门缝低角度溢出"
+    payload["first"]["z_image"]["composition"] = "竖幅三段式，主体偏下"
+    payload["first"]["z_image"]["lighting"] = "暖光自右侧门缝低角度溢出"
     brief = Brief(variant="FL2VA", duration=5, plot="中世纪酒馆室内")
     result = result_from_state(
         {

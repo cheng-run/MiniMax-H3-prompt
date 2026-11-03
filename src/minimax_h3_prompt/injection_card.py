@@ -249,13 +249,19 @@ def resolve_video_output(video_output: VideoOutputParams | None,
 
     两条消费路径（向导 ``_deliver_injection_card``、``topic_generation``）共用这一份
     「先声明后推导」的接线——各写一份就是本仓反复出现的「改一处漏一处」形态
-    （进度落盘三处同款教训）。推导源取 **zimage 画布**：资产图生图提示词就用它出图
-    （``image_prompt_variants``），视频跟自己的参考图对齐尺寸才有意义。返回值
-    ``canvas`` 为空 ＝ 声明分支（未经推导）。
+    （进度落盘三处同款教训）。
+
+    推导源取**主资产模型**（人物档）的画布（issue #146）：资产图生图提示词就按那一档
+    出图，视频跟自己的参考图对齐尺寸才有意义。以前写死 ``zimage``——用户把人物切到
+    Qwen/MOSS 后，卡上按 Z-Image 的竖幅推导，进 ComfyUI 出的是另一种画幅。
+    本档没选画布时沿用成片画幅（``image_canvas_size`` 的兜底），所以「用户选定优先」
+    在向导只问一次画布的前提下仍然成立。返回值 ``canvas`` 为空 ＝ 声明分支（未经推导）。
     """
     if video_output is not None:
         return VideoOutputDerivation(video_output, (), None)
-    canvas = image_canvas_size("zimage", canvases)
+    from .image_config import image_model_for
+
+    canvas = image_canvas_size(image_model_for("character"), canvases)
     return derive_video_output(*canvas)
 
 

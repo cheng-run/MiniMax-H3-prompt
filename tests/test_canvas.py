@@ -113,20 +113,21 @@ def test_canvas_display_labels_extreme_ratios_as_extreme():
 def test_image_canvas_size_prefers_the_user_selection(monkeypatch):
     """选定值是数据不是默认值的装饰：传了就用它，不用 profile 默认表。
 
-    「没选的家族不能跟着别的家族跑」用临时加的第二家族验证（Flux.2 退役后只剩一家，
-    原样本是 flux2；家族清单从表派生，测试加行与生产加行同一条路）。
+    issue #146 起，**没选的家族沿用成片画布（Z-Image 那张）**，不再各自回落 profile
+    默认尺寸——一支片子只有一个画幅，参考图与成片不能一横一竖。临时加的第二家族用来
+    验证「没有自己选定值时也走成片画布」，而不是另立一套默认。
     """
     assert image_canvas_size("zimage", {"zimage": (700, 1300)}) == (700, 1300)
     monkeypatch.setitem(IMAGE_PROFILE_DEFAULTS, "zimage_wide",
                         ImageProfile("zimage_wide_v1", "12", 768, 768, "candidate"))
-    assert image_canvas_size("zimage_wide", {"zimage": (700, 1300)}) == (768, 768), \
-        "没选的家族必须回落默认表，不能跟着别的家族跑"
+    assert image_canvas_size("zimage_wide", {"z_image": (700, 1300)}) == (700, 1300), \
+        "没选的家族必须沿用成片画布，不能另立一套画幅"
 
 
 def test_image_canvas_size_falls_back_to_the_profile_table():
     """未选（含旧会话、--brief 无画布键）时行为与改动前逐字一致——兜底不是摆设。"""
-    assert image_canvas_size("zimage") == (
-        IMAGE_PROFILE_DEFAULTS["zimage"].width, IMAGE_PROFILE_DEFAULTS["zimage"].height)
+    assert image_canvas_size("z_image") == (
+        IMAGE_PROFILE_DEFAULTS["z_image"].width, IMAGE_PROFILE_DEFAULTS["z_image"].height)
 
 
 def test_image_canvas_size_rejects_unknown_family():
@@ -143,6 +144,48 @@ def test_image_canvas_size_rejects_unknown_family():
         image_canvas_size("flux2")
     with pytest.raises(ValueError, match="未知生图模型"):
         image_canvas_size("flux2", {"flux2": (512, 512)})
+
+
+# ---------------------------------------------------------------------------
+# 2b. 三档 profile 与统一键位（issue #146）
+# ---------------------------------------------------------------------------
+
+def test_three_image_profiles_carry_the_real_workflows():
+    """三档各带自己的 ComfyUI 工作流名、主提示词节点与画布（issue #146 AC2）。
+
+    期望值是**字面量**（票面给的现货）：从实现现算等于自己和自己比，节点号或工作流名
+    被改错时这条会绿着。画布是用户在 ComfyUI 里实际出图的尺寸——写错会让构图词按
+    错的画幅落笔（qwen/moss 是横幅 1920×1088，z_image 是他们要的竖幅）。
+    """
+    expected = {
+        "z_image": ("zimage_t2i_v1", "10", 640, 1280),
+        "qwen": ("Qwen-image2.1+空间折叠流之万法编辑", "605", 1920, 1088),
+        "moss": ("【WorkFisher】全能生图王 _ 适配所有类型", "29", 1920, 1088),
+    }
+    assert set(IMAGE_PROFILE_DEFAULTS) == set(expected)
+    for family, (profile_id, node_id, width, height) in expected.items():
+        row = IMAGE_PROFILE_DEFAULTS[family]
+        assert (row.profile_id, row.prompt_node_id, row.width, row.height) == \
+            (profile_id, node_id, width, height), f"{family} 的 profile 不是票面那一行"
+
+
+def test_legacy_zimage_canvas_key_still_reads():
+    """旧画布键 ``zimage`` 与旧模型名 ``zimage`` 都读得出同一张 Z-Image 画布。"""
+    assert image_canvas_size("z_image") == (640, 1280)
+    assert image_canvas_size("zimage") == (640, 1280)
+    assert image_canvas_size("z_image", {"zimage": (700, 1300)}) == (700, 1300)
+    assert image_canvas_size("zimage", {"z_image": (700, 1300)}) == (700, 1300)
+
+
+def test_unselected_family_follows_the_film_canvas():
+    """没给本档选定画布时沿用 Z-Image 那张——一支片子一张画幅（issue #146 AC3）。
+
+    向导只问一次画布（成片画幅）；Qwen/MOSS 资产若各自回落到自己 profile 的默认尺寸，
+    同一支片子的参考图会一半横幅、一半竖幅。只有整场都没选画布时才用各档自己的默认。
+    """
+    assert image_canvas_size("qwen", {"z_image": (1920, 1080)}) == (1920, 1080)
+    assert image_canvas_size("moss", {"zimage": (1080, 1920)}) == (1080, 1920)
+    assert image_canvas_size("qwen") == (1920, 1088)
 
 
 def test_ratio_preset_sizes_match_their_ratio_exactly():
@@ -265,5 +308,5 @@ def test_cli_brief_path_forwards_canvases_to_generation(tmp_path, monkeypatch):
                               topic=None, duration=None, style=None, language=None)
     with pytest.raises(RuntimeError):
         _run_generate_prompts(args)
-    assert forwarded.get("canvases") == {"zimage": (700, 1300)}, \
-        "CLI --brief 路径没把画布递到生成入口"
+    assert forwarded.get("canvases") == {"z_image": (700, 1300)}, \
+        "CLI --brief 路径没把画布递到生成入口（旧键位 zimage 应归一成 z_image）"

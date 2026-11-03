@@ -122,6 +122,29 @@ def test_every_discipline_model_is_selectable():
         assert image_config.image_model_label(key)
 
 
+# --- 旧键位 zimage 只作读取别名（issue #146 AC1/AC4）---------------------------
+#
+# 统一键位之前，画布键、image.yaml 与旧 bundle 里都有 ``zimage``。改名的代价不能落给
+# 已经跑过的会话：它们读回来必须仍是 Z-Image，而不是「未知模型」或静默变成别的档。
+
+def test_legacy_zimage_reads_as_the_canonical_key(tmp_path):
+    """配置文件写旧键位仍读得通，读出来的值已归一成 ``z_image``。"""
+    path = _write(tmp_path, "character: zimage\nframe: zimage\n")
+
+    assert image_config.load_image_settings(path).model_for("character") == "z_image"
+    assert image_config.load_frame_image_model(path) == "z_image"
+    assert image_config.canonical_image_model("zimage") == "z_image"
+    assert image_config.canonical_image_model("z_image") == "z_image"
+
+
+def test_legacy_zimage_label_still_reads_as_z_image():
+    """旧产物行里的 ``zimage`` 家族名照旧有展示名（渲染层按它出标题）。"""
+    from minimax_h3_prompt.generation import IMAGE_FAMILY_LABELS
+
+    assert IMAGE_FAMILY_LABELS["zimage"] == "Z-Image"
+    assert IMAGE_FAMILY_LABELS["z_image"] == "Z-Image"
+
+
 # --- 关键帧生图模型（2026-10-30 用户裁定：默认 Qwen-Image 2.1）----------------
 #
 # 为什么关键帧要单独一档、而不是复用三档资产分配：2026-10-30 实跑现场，关键帧词是按

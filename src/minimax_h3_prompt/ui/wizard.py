@@ -361,19 +361,20 @@ def _clamp_single_segment_duration(duration: float) -> float:
 
 
 def _choose_canvases() -> dict[str, tuple[int, int]]:
-    """生图侧画布选择器（issue #42）：选比例→选尺寸→不符可自定义，**逐模型家族**。
+    """生图侧画布选择器（issue #42）：选比例→选尺寸→不符可自定义，**只问成片画幅**。
 
     「取代系统钦定的推荐尺寸」：比例没有回车默认档——必须显式选（坏输入重问），
-    尺寸档不符走自定义自由输入（保留兜底）。每个现存家族各走一遍三步（Flux.2 全链
-    退役后只剩 zimage 一家，issue #48——家族清单从默认表取，随表自动收缩）：
-    构图词分套绑选定画布的**画幅族**（Q21(c)）。返回家族 → (宽, 高)，落进
-    Brief.canvases，随请求【画布】块与产物画布行同源下发。
+    尺寸档不符走自定义自由输入（保留兜底）。issue #146 起只问 Z-Image 这一家
+    （``CANVAS_CHOICE_FAMILIES``，即成片画幅）：Qwen/MOSS 没有自己的选择项时沿用它的
+    选定值，想单独定尺寸走 ``--brief`` 的 `画布 qwen: WxH`。构图词分套绑选定画布的
+    **画幅族**（Q21(c)）。返回家族 → (宽, 高)，落进 Brief.canvases，随请求【画布】块
+    与产物画布行同源下发。
     """
-    from ..generation import IMAGE_FAMILY_LABELS, IMAGE_PROFILE_DEFAULTS
+    from ..generation import CANVAS_CHOICE_FAMILIES, IMAGE_FAMILY_LABELS
 
     return {
         family: _choose_canvas(IMAGE_FAMILY_LABELS[family])
-        for family in IMAGE_PROFILE_DEFAULTS
+        for family in CANVAS_CHOICE_FAMILIES
     }
 
 

@@ -302,15 +302,21 @@ def _apply_canvas_line(key: str, value: str, brief: Brief) -> None:
     家族名对照生图默认表**当场校验**：`画布 zimge:` 这类拼写错误必须在这里报，
     否则它会被静默忽略、画布悄悄回落默认表。表格从 ``generation`` 函数级导入——
     模块级是反向依赖（generation 顶部就 import 本模块的 Brief），加载期会成环。
+    旧键位 ``zimage`` 按别名归一成 ``z_image`` 存下（issue #146）：读得了旧 brief，
+    写进会话的只有一种键位。
     """
     from .generation import IMAGE_PROFILE_DEFAULTS
+    from .image_config import canonical_image_model
 
     family = _canvas_key_core(key)
     size = parse_canvas_size(value)
     if not family:
+        # 裸画布＝给**每一个现存家族**同一个尺寸（用户说的是「这支片子的画布」，
+        # 不是「Z-Image 这一档的画布」）；命名的那一行才是逐档覆盖。
         for name in IMAGE_PROFILE_DEFAULTS:
             brief.canvases[name] = size
         return
+    family = canonical_image_model(family)
     if family not in IMAGE_PROFILE_DEFAULTS:
         raise UserInputError(f"未知生图模型：{family}（画布键只认 {', '.join(IMAGE_PROFILE_DEFAULTS)}）")
     brief.canvases[family] = size

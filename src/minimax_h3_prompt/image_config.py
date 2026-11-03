@@ -55,6 +55,18 @@ DEFAULT_FRAME_IMAGE_MODEL = "qwen"
 # 清单只有这一处定义，纪律读取口与本模块共用，避免「配置认它、纪律文件没有」。
 IMAGE_MODEL_KEYS = ("z_image", "qwen", "moss")
 
+# 旧键位 → 现行键位（issue #146）。``zimage`` 只在**读入**时归一：配置、brief 画布键、
+# 旧 bundle 里都可能写着它；新写一律 ``z_image``。放在词表旁边而不是各读取口各写一份，
+# 否则改名时总有一处静默不认旧值（「未知模型」或更糟：按默认档出词）。
+LEGACY_IMAGE_MODEL_ALIASES: Mapping[str, str] = {"zimage": "z_image"}
+
+
+def canonical_image_model(name: object) -> str:
+    """把模型键归一到现行键位；未知值原样返回，交给各自的值域校验报错。"""
+    key = str(name or "")
+    return LEGACY_IMAGE_MODEL_ALIASES.get(key, key)
+
+
 # 展示名：终端与产物里说人话用（#88 的出词横幅也取它）。
 IMAGE_MODEL_LABELS: Mapping[str, str] = {
     "z_image": "Z-Image Turbo",
@@ -105,7 +117,7 @@ class ImageSettings:
 def image_model_label(model: str) -> str:
     """模型的展示名；未知模型报错——拿不到标签说明值域已经错了，别拿原始键凑合。"""
     try:
-        return IMAGE_MODEL_LABELS[model]
+        return IMAGE_MODEL_LABELS[canonical_image_model(model)]
     except KeyError:
         raise ConfigError(
             f"生图模型无效：{model!r}（只认 {', '.join(IMAGE_MODEL_KEYS)}）") from None
@@ -153,7 +165,7 @@ def _parse_model_value(key: str, value: Any, config_path: Path) -> str:
         # 静默回默认会把笔误藏起来（同 workflow.yaml 的纪律）。
         raise ConfigError(
             f"生图模型配置 {key} 必须是非空字符串：{value!r}（{config_path}）")
-    model = value.strip()
+    model = canonical_image_model(value.strip())
     if model not in IMAGE_MODEL_KEYS:
         raise ConfigError(
             f"生图模型配置 {key} 的值无效：{model!r}"
@@ -189,6 +201,7 @@ def image_model_for(kind: str) -> str:
 __all__ = [
     "DEFAULT_FRAME_IMAGE_MODEL", "DEFAULT_IMAGE_MODEL", "DEFAULT_IMAGE_MODELS",
     "FRAME_IMAGE_KEY", "IMAGE_CONFIG_PATH", "IMAGE_KINDS", "IMAGE_MODEL_KEYS",
-    "IMAGE_MODEL_LABELS", "ImageSettings", "LICENSE_NOTES", "QWEN_LICENSE_NOTE",
-    "image_model_for", "image_model_label", "load_frame_image_model", "load_image_settings",
+    "IMAGE_MODEL_LABELS", "ImageSettings", "LEGACY_IMAGE_MODEL_ALIASES", "LICENSE_NOTES",
+    "QWEN_LICENSE_NOTE", "canonical_image_model", "image_model_for", "image_model_label",
+    "load_frame_image_model", "load_image_settings",
 ]

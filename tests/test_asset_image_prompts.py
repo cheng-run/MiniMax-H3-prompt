@@ -30,7 +30,6 @@ from minimax_h3_prompt.agents import image_prompt_agent_key
 from minimax_h3_prompt.brief_parser import Brief
 from minimax_h3_prompt.generation import (
     IMAGE_PROFILE_DEFAULTS,
-    image_canvas_size,
     image_prompt_variants,
     render_asset_rows,
     render_generation,
@@ -141,6 +140,13 @@ def _run_stage1(tmp_path, monkeypatch, brief: Brief | None = None
         return "上游产物正文"
 
     monkeypatch.setattr(nodes, "run_agent", fake_run_agent)
+    # 生图档位钉死（issue #146）：仓库那份 config/image.yaml 是用户会改的部署事实，
+    # 断言产物 profile 不能跟着它漂。取值与仓库默认一致，行为对既有用例不变。
+    image_path = tmp_path / "image.yaml"
+    image_path.write_text(
+        "character: qwen\nprop: z_image\nscene: z_image\nframe: qwen\n",
+        encoding="utf-8")
+    monkeypatch.setattr(image_config, "IMAGE_CONFIG_PATH", image_path)
     # 圆桌节点不走 nodes.run_agent（它自己调 roundtable._invoke）
     monkeypatch.setattr(roundtable, "_invoke", lambda role, model, msgs: "已锁定")
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
@@ -218,12 +224,16 @@ def test_base_stage1_sends_no_asset_prompt_request(tmp_path, monkeypatch, capsys
 # 2. N×1：每资产一条 Z-Image 提示词、带语义名，不按模型数翻倍
 # ---------------------------------------------------------------------------
 
-def test_each_asset_gets_exactly_one_named_zimage_prompt(tmp_path, monkeypatch):
+def test_each_asset_gets_exactly_one_prompt_in_its_own_profile(tmp_path, monkeypatch):
     """下游取到的是 N 条（每资产一条），不是 N×2——Flux.2 版已全链取消。
 
     语义名必须原样到达：素材台账／注入卡靠它对号（issue #40 的 N 化不止是条数，
     还要认得出「这条是谁的」）。同时钉住归一结构**只有四键**——模型键（zimage/flux2）
     不许再混进 state 形状里。
+
+    **每条的 profile 跟着这一条自己那一档**（issue #146）：夹具钉死人物 Qwen、
+    道具/场景 Z-Image，产物就要给出 Qwen 工作流名与 Z-Image 节点号——全挂 Z-Image
+    的牌子时用户会去 ComfyUI 打开错的工作流。期望值是字面量（票面给的现货）。
     """
     state, _, _ = _run_stage1(tmp_path, monkeypatch)
 
@@ -238,12 +248,17 @@ def test_each_asset_gets_exactly_one_named_zimage_prompt(tmp_path, monkeypatch):
 
     by_key = {(v.kind, v.name): v for v in variants}
     zh_to_kind = {"人物": "character", "道具": "prop", "场景": "scene"}
+    profiles = {
+        "character": ("Qwen-image2.1+空间折叠流之万法编辑", "605"),
+        "prop": ("zimage_t2i_v1", "10"),
+        "scene": ("zimage_t2i_v1", "10"),
+    }
     for _node, zh, _d, _t, _out, assets in _ASSETS:
         for name, prompt in assets:
             item = by_key[(zh_to_kind[zh], name)]
             assert item.positive_prompt == prompt, f"{zh}/{name} 取到的不是本资产的提示词"
-            assert item.profile_id == IMAGE_PROFILE_DEFAULTS["zimage"].profile_id, \
-                f"{zh}/{name} 的 profile 不是 Z-Image 档"
+            assert (item.profile_id, item.prompt_node_id) == profiles[zh_to_kind[zh]], \
+                f"{zh}/{name} 的 profile/节点不是它自己那一档"
     for _node, _k, _d, _t, out_field, _a in _ASSETS:
         for entry in state[out_field]:
             # issue #88 起条目多一键 ``image_model``（系统记的「这条词按哪一档的纪律
@@ -295,46 +310,50 @@ def test_legacy_dict_state_still_reads_one_prompt_per_kind(monkeypatch):
         ("character", "人物"), ("prop", "道具"), ("scene", "场景"),
     ]
     assert [v.positive_prompt for v in variants] == ["旧人物提示词", "旧道具提示词", "旧场景提示词"]
-    assert all(v.profile_id == IMAGE_PROFILE_DEFAULTS["zimage"].profile_id for v in variants)
+    assert all(v.profile_id == IMAGE_PROFILE_DEFAULTS["z_image"].profile_id for v in variants)
 
 
 # ---------------------------------------------------------------------------
 # 4. 请求里带【画布】块（生图词表的指针指着它）
 # ---------------------------------------------------------------------------
 
-def test_asset_prompt_request_carries_the_canvas_block(monkeypatch):
-    """节点级：三个节点发出的请求都带【画布】块，**每个生图家族**的画幅都在里面。
+def test_asset_prompt_request_carries_only_its_own_model_canvas(tmp_path, monkeypatch):
+    """节点级：三个节点发出的请求都带【画布】块，且**只列本档当前模型那一行**。
 
     生图词表里写着「哪个模型是哪种画幅、尺寸是多少，一律以请求里的【画布】块为准」——
     角色提示词被加载到这些调用上，不带这块那条指针就是**悬空**的（#33 在帧节点踩过
-    同一个坑）。资产链只写 Z-Image，但【画布】块是词表指针的落点，行来源是
-    ``IMAGE_PROFILE_DEFAULTS`` 整表（与帧节点共用一块），不按消费者裁剪。
+    同一个坑）。issue #146 起不列整表：一张资产只按**它自己的档**出图，把别的档的
+    画布也摆出来，模型会按错画幅安排构图（同一支片子里三档尺寸各不相同）。
 
-    尺寸与家族清单都从 ``IMAGE_PROFILE_DEFAULTS`` **现取**（经 ``image_canvas_size``）：
-    测试里再抄一份数字就是第二份可写来源，换画布时它会静默失配——而且按家族清单遍历，
-    将来加第三个生图家族时这条会自己跟着断言，不会漏。
+    档位用临时 image.yaml 钉死（不读仓库那份）：仓库配置是用户会改的部署事实，
+    断言它的取值会让「用户合法地改了配置」变成基线红。
     """
-    requests: list[str] = []
-    monkeypatch.setattr(nodes, "run_agent",
-                        lambda agent, message: requests.append(message) or _assets_json((("甲", "甲的提示词"),)))
-    brief = _ref_brief()
-    agents = _image_agents()
+    path = tmp_path / "image.yaml"
+    path.write_text("character: qwen\nprop: moss\nscene: z_image\nframe: qwen\n",
+                    encoding="utf-8")
+    monkeypatch.setattr(image_config, "IMAGE_CONFIG_PATH", path)
+    cases = (
+        ("人物", "character_design", "character_image_prompts",
+         "Qwen-Image 2.1", "1920 × 1088", ("MOSS-Image", "Z-Image")),
+        ("道具", "prop_design", "prop_image_prompts",
+         "MOSS-Image", "1920 × 1088", ("Qwen-Image 2.1", "Z-Image")),
+        ("场景", "background_design", "scene_image_prompts",
+         "Z-Image", "640 × 1280", ("Qwen-Image 2.1", "MOSS-Image")),
+    )
+    for kind, design_field, out_field, label, size, others in cases:
+        request = _canvas_request(monkeypatch, {}, kind=kind,
+                                  design_field=design_field, out_field=out_field)
+        assert "【画布】" in request, f"{kind} 的请求里没有【画布】块"
+        assert label in request, f"{kind} 的【画布】块没写当前模型 {label}"
+        assert size in request, f"{kind} 的【画布】块没写 {label} 的画布 {size}"
+        for other in others:
+            assert other not in request, \
+                f"{kind} 的【画布】块列出了别的档 {other}——模型会按错的画幅构图"
 
-    for _node, kind, design_field, _design, out_field, _assets in _ASSETS:
-        requests.clear()
-        nodes._make_image_prompt_node(agents, kind, design_field, out_field)(
-            {"brief": brief, design_field: "设计正文"})
-        assert len(requests) == 1
-        assert "【画布】" in requests[0], f"{kind} 的请求里没有【画布】块"
 
-    assert IMAGE_PROFILE_DEFAULTS, "生图默认表是空的——【画布】块会退化成空块"
-    for family in IMAGE_PROFILE_DEFAULTS:
-        width, height = image_canvas_size(family)
-        assert f"{width} × {height}" in requests[0], \
-            f"【画布】块里没有 {family} 的画布尺寸"
-
-
-def _canvas_request(monkeypatch, canvases: dict) -> str:
+def _canvas_request(monkeypatch, canvases: dict, *,
+                   kind: str = "人物", design_field: str = "character_design",
+                   out_field: str = "character_image_prompts") -> str:
     """跑一次资产图节点，返回它真正发出去的请求串（请求是生图侧的缝，断言打在串上）。"""
     captured: list[str] = []
 
@@ -347,8 +366,8 @@ def _canvas_request(monkeypatch, canvases: dict) -> str:
     brief = Brief(mode="ref", variant="T2VA", duration=5.0, style="写实", plot=TOPIC,
                   canvases=canvases)
     agents = _image_agents()
-    nodes._make_image_prompt_node(agents, "人物", "character_design", "character_image_prompts")(
-        {"brief": brief, "character_design": "设计正文"})
+    nodes._make_image_prompt_node(agents, kind, design_field, out_field)(
+        {"brief": brief, design_field: "设计正文"})
     assert captured, "节点没有发出请求"
     return captured[0]
 

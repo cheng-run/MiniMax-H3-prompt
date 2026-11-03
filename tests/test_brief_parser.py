@@ -137,9 +137,14 @@ def test_windows_path_normalized():
 # ---------------------------------------------------------------------------
 
 def test_canvas_key_per_family():
-    """`画布 <家族>: WxH` 按家族选定——构图词分套跟着该家族选定画布的画幅族走。"""
-    b = parse_brief_text("画布 zimage: 640x1280\n## 剧情\nx")
-    assert b.canvases == {"zimage": (640, 1280)}
+    """`画布 <家族>: WxH` 按家族选定——构图词分套跟着该家族选定画布的画幅族走。
+
+    issue #146 起键位统一为 ``z_image``；旧键位 ``zimage`` 读得进来、存下来已归一。
+    """
+    b = parse_brief_text("画布 z_image: 640x1280\n## 剧情\nx")
+    assert b.canvases == {"z_image": (640, 1280)}
+    legacy = parse_brief_text("画布 zimage: 640x1280\n## 剧情\nx")
+    assert legacy.canvases == {"z_image": (640, 1280)}
 
 
 def test_canvas_key_flux2_is_loud_after_retirement():
@@ -153,21 +158,25 @@ def test_canvas_key_flux2_is_loud_after_retirement():
 
 
 def test_canvas_key_bare_applies_to_every_family():
-    """裸 `画布: WxH` 是快捷式：一份选定套用到全部现存家族（现只剩 zimage）。"""
+    """裸 `画布: WxH` 是快捷式：一份选定套用到全部现存家族（issue #146 起是三档）。"""
     b = parse_brief_text("画布: 700x1300\n## 剧情\nx")
-    assert b.canvases == {"zimage": (700, 1300)}
+    assert b.canvases == {
+        "z_image": (700, 1300), "qwen": (700, 1300), "moss": (700, 1300),
+    }
 
 
 def test_canvas_per_family_overrides_bare():
     """家族行覆盖快捷式：先给全局、再单独改一个家族，各得其所。"""
-    b = parse_brief_text("画布: 700x1300\n画布 zimage: 640x1280\n## 剧情\nx")
-    assert b.canvases == {"zimage": (640, 1280)}
+    b = parse_brief_text("画布: 700x1300\n画布 z_image: 640x1280\n## 剧情\nx")
+    assert b.canvases == {
+        "z_image": (640, 1280), "qwen": (700, 1300), "moss": (700, 1300),
+    }
 
 
 def test_canvas_value_accepts_times_sign():
     """`640×1280`（乘号）与 `640x1280` 等价——用户从渲染层抄回来的就是乘号。"""
     b = parse_brief_text("画布 zimage: 640×1280\n## 剧情\nx")
-    assert b.canvases["zimage"] == (640, 1280)
+    assert b.canvases["z_image"] == (640, 1280)
 
 
 def test_canvas_malformed_value_is_loud():
@@ -194,7 +203,7 @@ def test_canvas_key_without_space_still_reads():
     键形态拼错曾不进画布分支、无声无息地让选定作废；家族名/值都响亮，键形态也得响亮。
     """
     b = parse_brief_text("画布zimage: 700x1300\n## 剧情\nx")
-    assert b.canvases == {"zimage": (700, 1300)}
+    assert b.canvases == {"z_image": (700, 1300)}
 
 
 def test_canvas_key_forms_all_read():
@@ -207,7 +216,7 @@ def test_canvas_key_forms_all_read():
                  "Canvas_Zimage: 700x1300", "- 画布 zimage: 700x1300",
                  "1. 画布 zimage: 700x1300", "+ 画布 zimage: 700x1300", "> 画布 zimage: 700x1300"):
         b = parse_brief_text(f"{line}\n## 剧情\nx")
-        assert b.canvases == {"zimage": (700, 1300)}, f"键形态没读入：{line!r}"
+        assert b.canvases == {"z_image": (700, 1300)}, f"键形态没读入：{line!r}"
 
 
 def test_canvas_empty_value_is_loud_not_skipped():
