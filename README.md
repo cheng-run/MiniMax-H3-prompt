@@ -1,240 +1,270 @@
-# Windows PowerShell
-# Set-Location D:\项目\MiniMax-H3-prompt
-# uv sync
-# uv run launch.py
+# MiniMax-H3 Prompt
 
-# MiniMax-H3 多智能体提示词生成系统
+为 **MiniMax-H3** 生成高质量视频提示词、并把长视频拆成可逐段执行的工具。用户从一句创意出发，经分镜与关键帧（或参考素材）得到最终**英文** H3 提示词（官方 `base-en.txt` / `ref-en.txt` 格式），再按段交回视频完成验收与拼接。
 
-为 **MiniMax-H3** 生成高质量视频提示词的多智能体系统。用一个模仿**电影制作 + AIGC 双流程**的 15 角色流水线，把一段创意 brief 打磨成符合 MiniMax 官方规范（`h3-prompt-writing`）的提示词，复制粘贴即可出片。
+三条生成路线**并存**，在向导里选路线（导演台再选模式）即可：
 
-- 技术栈：**LangChain（`create_agent`）+ LangGraph（StateGraph 管线 + 有界圆桌子图）**
-- 输出流程：**主题 → 剧本 → FL2VA 融合首帧/尾帧提示词 → 视频提示词**；人物、道具、场景统一融入首尾帧
-- 格式唯一依据：仓库内 `references/` 的规范文档（`base-en.txt` / `ref-en.txt`，**给人读的对照副本**——`ref-en.txt` 与上游逐字节一致，`base-en.txt` 含 3 处本仓增补，账本见 `references/README.md`）
+| 路线 | 一句话 | 跨段连续靠什么 |
+|---|---|---|
+| **首尾帧链（base）** | 关键帧图锚定首/尾，逐段剥尾帧接力 | 尾帧桥接（剥末帧当下一段首帧） |
+| **多参（ref）** | 参考素材 + 文本驱动，参考槽接线 | 每段自带的参考素材 + 起止状态声明 |
+| **导演台（director）** | 项目出导演包，由 ComfyUI 导演台执行 | 段间引导（上一段 AV latent 尾部） |
 
-## ✅ 当前状态（2026-08-14）
+三条路线的逐阶段流程、产物落点、代码入口与「改动影响面清单」**置顶在 [CONTEXT.md](CONTEXT.md)**——开发前先读那一节。
+
+## 当前状态（2026-11-02）
 
 | 项 | 状态 |
 |---|---|
-| 15 角色 agent 装配 | ✅ `create_agent` 构建通过 |
-| LangGraph 管线编译 | ✅ 14 节点线性 DAG + 3 圆桌子图，桩模型验证每节点仅执行 1 次 |
-| H3 校验器单测 | ✅ 18 个用例全绿 |
-| T2VA 端到端 | ✅ 实测通过：耗时 ~342s，产出 3542 字符完整三段式提示词，**终检 0 错误** |
-| Ref2VA 端到端 | ✅ 实测通过：耗时 477s，产出 7954 字符六段式提示词，**终检 0 错误 0 警告**；`<Picture 1/2/3>` 正确映射三个角色/场景 |
-
-> T2VA 实测产物示例见文末附录。
+| 三条路线 | `base` / `ref` / `director` 都已接进两阶段向导；`--brief` 快路径支持 base 与 ref |
+| 首尾帧链 | 阶段 1/2、长片拆段（4–10s）、逐段陪跑（两道闸）、段产出账、系统拼接 `final.mp4` |
+| 多参 | 素材循环、素材库/台账、注入卡、ref 六段式、按需写段、逐段陪跑、拼接与 `ref-concat` |
+| 导演台 | 帧网格段规划、初始导演包、逐段数帧验收、级联重跑、最终包归档（一期 `t2v`/`i2v`/`fl2v`/`r2v`；`v2v`/`rv2v`/`mixed` 二期未做，段规划时会明确报错） |
+| 工程守卫 | `scripts/check.sh fast` / `full` / `clean`、`CONTEXT.md` 结构守卫、ADR 引用守卫、提交信息守卫 |
 
 ## 快速开始
 
 ```powershell
 uv sync
-uv run launch.py                         # 唯一入口：输入主题并生成 FL2VA 产物
+
+uv run launch.py                          # 两阶段向导（三条路线都从这里起步）
 uv run launch.py --brief examples/brief_fl2va.md
 uv run launch.py --brief your.md --dry-run
-uv run python -m pytest tests -q
+uv run launch.py --brief your.md --variant FL2VA
+
+uv run python -m pytest tests -q          # 全量测试
+bash scripts/check.sh fast                # 结构守卫 + 改动文件 lint + 测试
+bash scripts/check.sh full                # 另跑 mypy 与全量测试
+bash scripts/check.sh clean               # 模拟干净检出（摘掉本机 .env）
 ```
 
-项目不再提供 `uv run minimax-h3-prompt`、`python -m minimax_h3_prompt` 或其他独立启动命令；包内 `main()` 仅由 [launch.py](launch.py) 调用。
+项目唯一启动入口是 [launch.py](launch.py)，包内 `main()` 只由它调用；不再提供 `uv run minimax-h3-prompt` 或 `python -m minimax_h3_prompt`。
 
-## 交互与观测（不黑箱）
+## 三条路线怎么走
 
-`uv run launch.py` 是唯一入口：输入视频主题后自动生成剧本、融合首帧提示词、融合尾帧提示词和 FL2VA 视频提示词。运行期间显示每个角色和阶段的实时进度。
+### 首尾帧链（base）
 
-运行期间：
-- **实时进度面板**：每个角色/圆桌一行（状态 ✓/运行中、耗时、产出长度），顶部累计耗时与 token 费用。
-- **中间产物落盘**：每个阶段的产物写 `output/stages/<节点>.txt`，跑完可翻看每一步。
-- **token/费用统计**：按角色累计 input/output token，按 `config/agent.yaml` 的 `cost` 单价估算费用（DeepSeek 估算价，可改）。
-
-### LLM 后端与统一配置
-
-模型的 provider、名称和 base URL 统一配置在 `config/agent.yaml` 的 `models.primary`（主文本模型）与 `models.vision`（参考图视觉模型）中；API key 仍只放项目根 `.env`，不会写入 YAML 或入库。当前默认配置为 DeepSeek 主模型和 DashScope `qwen3.7-plus` 视觉模型：
-
-```yaml
-models:
-  primary:
-    provider: deepseek
-    model: deepseek-v4-flash
-    base_url: https://api.deepseek.com/v1
-    api_key_env: DEEPSEEK_API_KEY
-  vision:
-    provider: dashscope
-    model: qwen3.7-plus
-    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-    api_key_env: DASHSCOPE_API_KEY
+```text
+起步澄清 → 阶段 1（剧本/设计/分镜/关键帧生图词）→ 人机修改循环
+→ 提交关键帧图 → 读图 → 组装 base 三段式 → 质检精修 → video-prompt.md
+   ├─ ≤10 秒：只出整片提示词（不产成片）
+   └─ >10 秒：4–10s 整秒拆段 → 逐段写段 → ComfyUI 出片 → 回传视频
+        → 交接校验（可证层）→ 剥尾帧 → 锚帧语义人判 → 落段账 → 下一段
+        → 全段通过 → final.mp4
 ```
 
-`.env` 示例：
+变体：`I2VA`（仅首帧）/ `L2VA`（仅尾帧）/ `FL2VA`（首尾帧）/ `T2VA`（纯文字）。长片续跑从段产出账的通过行接着走，已通过的段不重跑。
 
-```env
-LLM_PROVIDER=deepseek
-DEEPSEEK_API_KEY=xxx
-DASHSCOPE_API_KEY=xxx
+### 多参（ref）
+
+```text
+起步澄清 → 阶段 1（剧本/设计/资产图提示词/分镜）→ 素材循环
+→ 视频/音频挂账 → 注入卡 → 组装 ref 六段式 → 整片提示词（存档）
+   ├─ ≤15 秒：整片即唯一执行段
+   └─ >15 秒：按镜头切点拆 4–15s 段（段内参考图 ≤9、只重编号 Picture）
+→ 轮到哪段才写哪段 → 照注入卡接线出片 → 回传段视频
+→ 交接校验 → 首/末帧读图语义人判（五档出路）→ 落段账
+→ 全段通过 → 系统拼接 final.mp4
 ```
 
-`LLM_PROVIDER`、各 provider 的 `*_MODEL`/`*_MODEL_NAME`/`*_BASE_URL` 仍作为旧配置兼容覆盖项；未设置时才使用 `agent.yaml` 的值。不要把真实 key 写进仓库。
+素材循环一次只出一张资产图提示词：出词 → 外部生图 → 审查 → 交回 → 读图校对 → 裁决 → 才出下一张。容量按官方单次请求判：**≤9 图 + ≤3 视频 + ≤3 音频、总文件 ≤12**。登记工作流为「59-(多Lora改)MiniMax-H3 ref2va 多参生视频 V2」，段内接线按注入卡照做。
 
-`provider` 不限于内置的四种：任何 OpenAI 兼容网关（自建服务、中转站、`opencode` 等）直接把 `provider` 写成网关名，并在同一节点给出 `base_url` 与 `api_key_env` 即可；只有 `provider: anthropic` 走 Anthropic 官方 SDK。
+### 导演台（director）
+
+```text
+起步澄清 → 阶段 1（剧本/设计/分镜；i2v/fl2v 另出关键帧词；r2v 另出资产图词）
+→ 收集开场首帧/全片尾帧 → 打包参数 → [r2v：素材循环 + 英文定义块]
+→ 按帧网格段规划（声明帧 17k+5）→ 逐段写 director/segment-NN.md
+→ 打初始导演包 → 用户导入导演台 → 逐段跑、贴回本段成片视频 → 数帧判定
+→ 全段通过 → 导演台合并导出成片与最终包 → 项目交付归档
+```
+
+- 菜单有七个模式，**一期只支持 `t2v` / `i2v` / `fl2v` / `r2v`**。`i2v` 是单段模式（一张首帧 → 一段 ≤15 秒）；要长片、运镜与切镜请用 `fl2v`。选 `v2v` / `rv2v` / `mixed` 会在段规划时明确报错（阶段 1 会先跑完）。
+- 有引导段的导出帧 = 声明帧 + 12，所以总长落位会报告「目标 / 实际 / 差几帧」。
+- 逐段验收证据是**用户贴回的成片视频**（数帧）；语义验收留在导演台 UI。
+
+## `--brief` 与 CLI 子命令
+
+`--brief` 是非交互快路径：解析 brief → 跑管线 → 把最终提示词写到 `config/agent.yaml` 的 `output_path`（默认 `output/final_prompt.txt`）。它**不**建完整生成目录、不建素材台账、不陪跑；需要这些请用向导。`--brief` 不支持导演台路线（向导独有）。
+
+```powershell
+uv run launch.py create-video --topic "雨夜行人" --variant FL2VA
+uv run launch.py generate-prompts --brief examples/brief_fl2va.md
+uv run launch.py ledger rebuild <会话目录> --output-dir <ComfyUI 输出目录>
+uv run launch.py audit run <会话目录> --output-dir <ComfyUI 输出目录>
+uv run launch.py preflight --input-frame <桥接帧.png> --prev-video <上一段.mp4> --session <会话目录>
+uv run launch.py ref-concat <生成目录>                          # 多参：按段账重新拼成片
+uv run launch.py ref-concat <生成目录> --replace 3 <新视频.mp4>  # 换掉第 3 段后再拼
+```
+
+`--model` 当前只接受 `fl2va`，`--mode` 只接受 `base`（旧选项保留兼容，不扩展路线）；路线由 brief 的 `输入` 键或向导选择决定。
 
 ## brief 格式
 
-`examples/` 里有示例（模板 `examples/brief_template.md`）。**`输入` 键对应你喂工作流的参考方式**：
+`examples/` 里有示例（模板 `examples/brief_template.md`）。**`输入` 键决定路线/参考方式**：
 
 ```markdown
-输入: 首尾帧     # 首帧（工作流62·1张图）| 尾帧（工作流62·1张图）| 首尾帧（工作流62·2张图）| 多参（59-(多Lora改)MiniMax-H3 ref2va 多参生视频 V2·N 张素材）
-时长: 6          # 秒
+输入: 首尾帧     # 首帧 | 尾帧 | 首尾帧 | 多参（ref2va）
+时长: 6          # 秒（整数执行段）
 风格: Cinematic 武侠电影质感
 语言: Chinese
 
 ## 剧情
 一段话描述创意……（核心输入）
 
-## 参考图          # 张数随输入：首帧/尾帧=1张；首尾帧=2张（Picture1=首帧 Picture2=尾帧）；多参=N 张（参考素材）
-                  # 格式：Picture N: 名称 — 描述  (图片路径)；有路径 → 运行前用 qwen3.7-plus 读图自动出描述，人工确认后进管线
+## 参考图
+# 首帧/尾帧=1 张；首尾帧=2 张（Picture1=首帧、Picture2=尾帧）；多参=N 张参考素材
+# 有路径 → 向导里运行前用视觉模型读图自动出描述，人工确认后进管线（--brief 快路径不读图）
 - Picture 1: 首帧 — 白发仙师在竹林缓抬手  (D:\Comfyui\ComfyUI\output\图片\你的图.png)
 - Picture 2: 尾帧 — 青衫青年落地向仙师行礼
 
 ## 草稿提示词      # 可选；写了即进入 polish（润色）流程
 ```
 
-命令行：`--model fl2va|ref2va|i2va|l2va` 覆盖（或旧写法 `--mode/--variant`）；`--polish` 润色；`--dry-run` 只解析。最终提示词粘到你工作流的 `PrimitiveStringMultiline` 节点（纯净文本）。
-
-> **参考图审核**：在 Windows 下，brief 参考图行末尾填写本机图片路径（例如 `D:\Comfyui\ComfyUI\output\图片\你的图.png`）；在 WSL 下才使用 `/mnt/d/...` 路径。运行前会用阿里云 `qwen3.7-plus`（多模态，读取 `.env` 中的 `DASHSCOPE_API_KEY`）自动读图生成准确描述 → 菜单里你确认/修改后才进管线。图片自动压缩（≤1024px）避免大图超限。
+参考图路径在 Windows 下写本机路径；在 WSL 下用 `/mnt/d/...`。图片会自动压缩（≤1024px）再送视觉模型。画布可写成 `画布 zimage: 736x1280`（画布键只认生图档表里的家族，当前登记为 `zimage`；裸 `画布: WxH` 写全部家族），缺省按配置。
 
 ## 架构
 
-### 15 角色（电影班底 + AIGC 特色）
+### 角色（17 个 `create_agent` 角色 + 直调写手）
 
-| 阶段 | 角色 | 产出物 |
+| 阶段 | 角色 | 产出 |
 |---|---|---|
-| 前期 | 制片 Producer | 制作计划（模式/时长/风格/任务类型） |
-| 前期 | 导演 Director | 导演阐述（情绪基调/视觉风格/节奏） |
-| 编剧 | 编剧 Screenwriter | 分场剧本（对白保留原文） |
-| 美术 | 美术指导 Art Director | 统筹人物/背景/道具设计，裁决冲突并锁定统一美术约束 |
-| 美术 | 人物形象设计师 Character Designer | 与剧情绑定的人物外观锚点、状态与连续性素材 |
-| 美术 | 背景设计师 Background Designer | 与剧情绑定的场景空间、环境状态与连续性素材 |
-| 美术 | 道具设计师 Prop Designer | 与剧情绑定的关键道具外观、用途与连续性素材 |
-| 视觉 | 分镜师 Storyboard | `[Shot N]` 镜头表（景别/机位/切点） |
-| 视觉 | 摄影指导 Cinematographer | 每镜画面细化（英文，供最终提示词正文） |
-| 声音 | 声音设计师 Sound Designer | 对白表 `(Sx)`/`<d>[语言]` + 环境声 |
-| 声音 | 配乐师 Composer | `non_diegetic_music` 素材 |
-| AIGC | 参考资产与一致性经理 Reference & Consistency | `subject_definitions`/`retention_analysis` 素材（ref 模式） |
-| AIGC | 可生成性审查员 Feasibility Reviewer | 每镜可生成性风险评估（参与镜头评审会） |
+| 前期 | 制片 Producer | 制作计划 |
+| 前期 | 导演 Director | 导演阐述 |
+| 编剧 | 编剧 Screenwriter | 分场剧本 |
+| 美术 | 美术指导 Art Director | 统一美术统筹与冲突裁决 |
+| 美术 | 人物/背景/道具设计师 | 三类设计正文（生图设计的文字真源） |
+| AIGC | 资产图提示词工程师 Image Prompt Engineer | 人物/道具/场景的**资产图提示词**（仅多参、导演台 r2v 等产资产图的路线） |
+| 视觉 | 分镜师 Storyboard | `[Shot N]` 镜头表 |
+| 视觉 | 摄影指导 Cinematographer | 每镜画面细化 |
+| AIGC | 关键帧生图提示词工程师 Frame Prompt Engineer | 首帧/尾帧生图提示词（仅要关键帧的路线） |
+| 声音 | 声音设计师 / 配乐师 | 对白、环境声 / `non_diegetic_music` |
+| AIGC | 参考资产与一致性经理 Reference & Consistency | `subject_definitions` 等（仅产资产图的路线） |
+| AIGC | 可生成性审查员 Feasibility Reviewer | 镜头评审会 |
 | AIGC | 提示词工程师 Prompt Engineer | 按官方规范组装最终提示词 |
-| 质检 | 质检员 QA | 质检报告 + 修正建议（Python 精修循环里用） |
+| 质检 | 质检员 QA | 质检建议（有界精修循环） |
 
-### 管线（LangGraph 线性链 + 组合节点内并发 + 3 有界圆桌）
+另有**直调写手**（不是 `create_agent` 角色，由代码拼请求）：起步澄清问句、分段规划师（base / ref / director 三种方言）、写段手（base / ref）、尾帧变换提示词写手。
 
+### 主管线（阶段 1 共用，阶段 2 分叉）
+
+```text
+阶段 1（LangGraph 线性链，每个节点恰好一次；组合节点内并发）
+制片 → 导演 → 创意圆桌 → 编剧
+→ 设计三并行（人物‖背景‖道具）→ 美术统筹
+→ [资产图提示词三并行]                       ← 仅产资产图的路线
+→ 分镜 → [镜头评审会‖身份一致性会]
+→ [摄影指导‖参考一致性]                      ← 后者的早期返回取决于路线
+→ [关键帧生图提示词]                          ← 仅要关键帧的路线
+→ [声音设计‖配乐] → 有界生图常识 QA
+
+阶段 2（按路线分叉）
+base：收帧图 → 读图 → base 三段式 → 质检精修 → 长片拆段与陪跑 → 成片
+ref ：素材循环 → 注入卡 → ref 六段式 → 拆段/按需写段 → 陪跑 → 成片
+director：帧网格段规划 → 导演包 → 逐段数帧验收 → 最终包交付
 ```
-START → [制片] → [导演] → [创意会·圆桌] → [编剧]
-     → [并行生图设计：人物‖背景‖道具] → [美术指导统筹]
-     → [并行资产图提示词：人物‖道具‖场景]
-     → [分镜]
-     → [并行决策：镜头评审会‖一致性对齐会]
-     → [并行视觉：摄影指导‖参考资产与一致性](ref)
-     → [关键帧生图提示词（首/尾帧）]
-     → [并行声音：声音设计‖配乐师]
-     → [提示词工程师] → [组装器/终检] → END
-```
 
-**4 个美术角色**先以原始剧情 + 导演方向 + 分场剧本为共同约束：人物形象设计师、背景设计师、道具设计师并行编写生图设计素材，美术指导负责统筹和冲突裁决。三类素材最终由提示词工程师转化为 H3 官方格式，不改变 base/ref 的输出协议。
-
-**质检精修在 Python 层做有界循环**：确定性校验驱动 → 有 error 级问题则 `qa` 角色给建议、`prompt_engineer` 重出，最多 `max_qa_iterations`（默认 2）轮。`h3_validator` 规则校验是硬门槛，无论 agent 怎么讨论都要过。
-
-### 实现要点（与最初方案的两处偏差，均为实测后修正）
-
-1. **角色 agent 用 `langchain.agents.create_agent`，不是 `deepagents.create_deep_agent`**。原因：deepagents 基础栈**无条件注入文件系统/执行工具**（`ls`/`write_file`/`execute`/`task` 等），单次产出文本的角色会去调 `write_file`/`ls` 而不是直接返回文本，导致空产出（实测确认）。create_agent 是同一 LangChain 栈、无默认工具、轻量。"deep-agent"式多 agent 讨论思想已用 LangGraph 有界圆桌实现。
-2. **管线 = 线性链 + 组合节点内并发**。并行 fan-in 深度不对齐时 LangGraph 会重复触发汇合节点（实测确认），故整图保持线性、每节点恰好执行一次；把互不依赖的子任务（三个人物/背景/道具设计师、三条资产图提示词、镜头评审会‖一致性对齐会、摄影‖参考资产、声音设计‖配乐师）折叠进「并行组合节点」，内部用 `ThreadPoolExecutor` 并发，墙钟省约 30%。
-
-## 输出格式
-
-- **ref（Ref2VA）六段式**：`subject_definitions` → `summary`（`[任务类型]` 前缀）→ `retention_analysis`（fully_preserved 等标记）→ `detailed_description`（350–500 英文词）→ `overall_soundscape` → `non_diegetic_music`
-- **base 三段式**：`integrated_multimodal_description` → `overall_soundscape` → `non_diegetic_music`（I2VA/FL2VA/L2VA 带图片对齐指令）
-- 对白/歌词保留原文放 `<d>[语言]…</d>`；说话人 `(Sx)` 全局连续；切点 `[Shot N] At MM:SS.mmm` 严格递增；声音段无声统一 `N/A`。
+质检精修在 Python 层做**有界循环**：确定性校验 `h3_validator` + 主题守卫驱动，有 error 才让 `qa` 给建议、`prompt_engineer` 重出，最多 `max_qa_iterations` 轮。
 
 ## 配置
 
-`config/agent.yaml`：`max_qa_iterations`（质检精修上限）、`roundtable_max_rounds`（圆桌轮数上限）、`default_duration`、`output_path`（默认 `output/final_prompt.txt`）。
+| 文件 | 管什么 |
+|---|---|
+| `config/agent.yaml` | 模型（`models.primary` / `models.vision`）、成本单价、`max_qa_iterations`、`roundtable_max_rounds`、`max_clarification_rounds`、`sessions_root`、导演台打包参数（画布/参考图尺寸/ComfyUI 输出目录/帧容差） |
+| `config/workflow.yaml` | 多参登记工作流名与槽位数（V2：图 9 / 视频 3 / 音频 3）；`refs_per_segment`（默认 9，且不会超过官方 9 图上限） |
+| `config/library.yaml` | 多参素材库根目录（默认 `D:\素材库`，必须是绝对路径） |
+| `config/image.yaml` | 资产图三档生图模型（人物 `qwen`、道具/场景 `z_image`）＋关键帧档 `frame`（默认 `qwen`） |
 
-`config/workflow.yaml`：多参路线的**登记工作流名**与三型参考槽位数（默认图 24 / 视频 3 / 音频 3）。槽位数是工作流节点的物理端口数，不是模型能力（ADR 0017）——先有对应端口的工作流再改这里的数字；缺失时读取口回落默认值。与 `agent.yaml`（模型侧）分开：换模型不该误改槽位。
-
-`config/library.yaml`：多参路线的**素材库根目录**（默认 `D:\素材库`，必须是绝对路径）。交回的素材复制成 `<库根>/<主题摘要>/<编号>-<语义名>.<ext>`，生成目录不再留图；换版追加 `-r2` 且旧文件保留，同一主题重跑另开 `<主题摘要>-2` 子目录（issue #85）。台账 `asset-ledger.json` 记库根 + 相对路径，读图/对账/撤下/卡片都经同一解析口取文件；没有库根字段的旧台账仍按旧的生成目录布局读，不迁移。
-
-`config/image.yaml`：资产图（人物／道具／场景参考图）各走哪个生图模型——`z_image` / `qwen` / `moss`，默认人物 `qwen`、道具与场景 `z_image`（issue #87）。选中值决定出词请求追加哪一份纪律块（`prompts/image_prompt_disciplines/<模型>.md`）：Z-Image 中文短句全正向、Qwen-Image 英文长文不写负面、MOSS-Image 英文并填负面标签，三档共用同一个 JSON 契约。配置是**每张的起点**：该类的设计正文或该资产提示词命中文字类关键词（标签/招牌/包装/logo/文字/海报）时，那一张自动切 MOSS 并打印命中词（设计正文是整类共用的，故它命中时该类每一张都切）；素材循环审查菜单 `6=改这张的生图模型` 可逐张改，手动选择压过自动规则（issue #88）。⚠ Qwen-Image 2.1 是 Qwen Research License，**仅限非商用**，商用前把 `character` 切到 `z_image` 或 `moss`——选到 Qwen 档时出词横幅会打印这句提示。
+API key 只放项目根 `.env`，不写 YAML、不入库。`provider` 不限于内置值：任何 OpenAI 兼容网关写网关名 + `base_url` + `api_key_env` 即可。⚠ Qwen-Image 2.1 是 Qwen Research License，**仅限非商用**；商用前把相关档切到 `z_image` 或 `moss`。
 
 ## 目录结构
 
-```
+```text
 src/minimax_h3_prompt/
-├── main.py              # CLI（wizard 向导 / brief 快路径 / create-video / generate-prompts）
-├── config.py            # YAML + `.env` 统一配置（API key 仅从 `.env` 读取）
-├── workflow_config.py   # 工作流登记名与参考槽位数（`config/workflow.yaml`）
-├── library_config.py    # 素材库根目录（`config/library.yaml`，默认 `D:\素材库`）
-├── image_config.py      # 资产图三档生图模型分配（`config/image.yaml`）
-├── image_routing.py     # 出图模型按张路由：文字类关键词 → MOSS、手动覆盖（issue #88）
-├── model_factory.py     # LLM 后端工厂（自动探测）
-├── brief_parser.py      # brief 解析
-├── topic_generation.py  # 主题 → 提示词单入口（落盘到 output/sessions）
-├── session_store.py     # 两阶段会话持久化（断点续接）
-├── generation.py        # 生成结果模型与渲染
-├── summary.py           # 视频提示词中文摘要
-├── segment_prompts.py   # 长视频按镜头拆段与逐段重写
-├── references/          # H3 规范文本（给人读；base-en.txt 含 3 处本仓增补，见该目录 README 账本；代码里的唯一可写来源是 h3_validator 常量）
-├── prompts/             # 角色 system prompt
-├── agents/              # create_agent 装配 + run_agent
-├── graph/               # state / roundtable / nodes / pipeline
-├── ui/                  # wizard 两阶段向导 + 进度显示
-├── tools/               # h3_validator / frame_auditor / frame_sanity / theme_guard / ref_metadata
-└── output/              # assembler（确定性格式保障）+ renderer
+├── main.py                  # CLI 入口（向导 / --brief / 子命令）
+├── config.py                # YAML + .env 统一配置
+├── brief_parser.py          # brief 解析、路线与模式判据（唯一真源）
+├── model_factory.py         # LLM 客户端、流式与等待判定
+├── observability.py         # 进度、成本表、结构化日志
+├── session_store.py         # 会话持久化与续跑状态
+├── topic_generation.py      # 主题 → 提示词单入口（CLI 快路径）
+├── generation.py            # 生成结果模型、提示词渲染与校验
+├── summary.py               # 视频提示词中文摘要
+├── agents/                  # 17 角色装配 + run_agent / run_direct_call
+├── graph/                   # state / pipeline（阶段 1 链）/ nodes / roundtable
+├── prompts/                 # 角色 system prompt 与直调写手提示词
+├── references/              # 官方格式文本（给人读的对照副本）
+├── knowledge/               # 电影语言词表（视频/生图/尾帧三份真源）
+├── tools/                   # h3_validator / frame_auditor / preflight / theme_guard 等
+├── ui/                      # 两阶段向导、进度与菜单
+├── output/                  # assembler（确定性格式保障）+ renderer
+├── asset_ledger.py          # 素材台账与素材库解析
+├── asset_loop.py            # 多参素材循环
+├── asset_proofread.py       # 读图校对与偏差裁决
+├── injection_card.py        # 多参注入卡
+├── segment_planner.py       # 整数秒分段规划（base / ref 方言）
+├── segment_prompts.py       # 写段（v2 规划式 + 回退式）与交付校验
+├── segment_refs.py          # 段内参考素材子集与重编号
+├── ref_segments.py          # 多参拆段、按需写段、陪跑账、成片
+├── shot_ledger.py           # 首尾帧链段产出账与旧进度兼容
+├── final_film.py            # 两条路线共用的成片拼接核心
+├── director/                # 导演台路线：planning / prompts / pack / cache /
+│                            #   ledger / companion / cascade / delivery / frames
+├── image_config.py          # 三档资产图模型 + 关键帧档
+├── image_routing.py         # 按张路由（文字类关键词 → MOSS、手动覆盖）
+├── workflow_config.py       # 工作流登记与槽位
+├── library_config.py        # 素材库根目录
+└── task_package.py          # 受控导入
 ```
 
 ## 输出与会话目录
 
-生成产物统一落在项目内的会话目录（不再依赖外部资产库）：
-
 ```text
 output/
-├── final_prompt.txt                   # --brief 快路径的最终提示词
-├── stages/                            # 各角色/阶段产物（save_stages）
-└── sessions\                          # 两阶段向导的会话
-    └── <主题slug>-<hash8>\GEN001\
-        ├── session-state.json         # 断点续接（阶段 1 → 阶段 2）
-        ├── frames\                    # 人工提交的关键帧（first/last + source.json）
-        ├── video-prompt.md            # 最终视频提示词
-        ├── first-frame-prompt.md      # 首帧生图提示词
-        ├── last-frame-prompt.md       # 尾帧生图提示词
-        ├── fl2va-prompt.md / .json    # FL2VA 汇总
-        ├── summary-zh.md / .json      # 中文摘要（核对视频走向）
-        └── segments\                  # 长视频逐段陪跑的每段提示词
+├── final_prompt.txt                 # --brief 快路径的最终提示词
+├── stages/                          # 各角色/阶段产物（save_stages）
+└── sessions/
+    └── <主题slug>-<hash8>/GEN001/
+        ├── session-state.json       # 会话状态与断点续接
+        ├── video-prompt.md          # 整片视频提示词
+        ├── summary-zh.md / .json    # 中文摘要
+        ├── frame-rounds.jsonl       # 首尾帧链的人机修订台账
+        ├── asset-ledger.json        # 多参素材台账（图在素材库根目录）
+        ├── asset-rounds.jsonl       # 多参资产图改写轮次
+        ├── injection-card.md        # 多参接线清单（多段另有 segments/injection-card-NN.md）
+        ├── frames/                  # 首尾帧图与 source.json
+        ├── bridge_frames/           # 首尾帧链的桥接帧
+        ├── segments/                # 段表、段提示词、段产出账、闸门遭遇
+        ├── director/                # 导演台：plan.json、段提示词、导演包、交付
+        └── final.mp4                # 成片（base/ref 由系统拼；导演台只把路径记进 director/final-film.json）
 ```
 
 根目录可用 `config/agent.yaml` 的 `defaults.sessions_root` 修改（默认 `output/sessions`）。
 
-> [!note] 已移除：资产库
-> 早期版本在 `D:\笔记\Assets` 维护过一套「主题 / 项目 / 资产 / Workflow Profile / 分段执行闭环」资产库。该机制当前阶段使用极少、维护成本高于收益，已整体移除（含 `project` 子命令组与 Profile 校验）。历史数据已归档到 `D:\笔记\_archive-assets-<时间戳>\`。
+## 测试与守卫
 
-```powershell
-uv run launch.py --brief examples/brief_fl2va.md              # brief 快路径
-uv run launch.py create-video --topic "雨夜行人" --variant FL2VA  # 主题 → 提示词
-uv run launch.py                                              # 两阶段交互向导
-```
+- `scripts/check.sh fast|full|clean`：结构守卫 + lint + 测试；`full` 另跑 mypy 与全量测试，`clean` 摘掉本机 `.env` 模拟 CI 干净检出。
+- `scripts/check.sh mutate`：守卫变异检验（关键实现改坏后用例必须变红）。
+- `tests/test_context_glossary.py`：`CONTEXT.md` 词条结构守卫。
+- `tests/test_adr_guard.py`：`ADR NNNN` 引用必须指向真实文件，状态行格式守卫。
+- `scripts/ac_trace.py`：按 `#NNN` 汇总 issue → 代码 → 测试（不是门禁）。
 
-## 已知限制与后续优化
+## 文档地图
 
-- **耗时**：T2VA 一次全跑约 6 分钟（~30 次 LLM 调用）；ref 模式更重（约 35+ 次调用，实测超 40 分钟）。想提速：roundtable 限 1 轮、跳过非必要角色、换更快模型、或给独立环节做并行。
-- **成本**：DeepSeek Flash 单次全流程 token 消耗中等；切换 Pro 质量更高但更贵。
-- **Ref2VA 已端到端跑通**：待贴回 ComfyUI 验证 `<Picture N>` 角色绑定是否真的对得上参考图（视觉验收）。
+| 文档 | 内容 |
+|---|---|
+| [CONTEXT.md](CONTEXT.md) | **术语表 + 置顶的三路线流程总览**（开发前必读） |
+| `docs/adr/` | 架构决策（路线边界、成片归系统、帧网格、容量上限等） |
+| `docs/design/` | 设计与根因分析（含导演台路线实现设计） |
+| `docs/research/` | 调研笔记（电影语言、导演台插件原生格式等） |
+| `docs/agents/` | 工程常态、issue tracker、triage 标签等 agent 规约 |
+| `CHANGELOG.md` | 变更记录 |
 
----
+## 已知限制
 
-## 附录：T2VA 实测产物节选
-
-输入（`examples/brief_t2va.md`）：雨夜女子公交站台等车。产出（校验 0 错误）：
-
-```text
-integrated_multimodal_description: Cinematic live-action film look, ... [Shot 1] A medium shot,
-side-rear handheld follow with a slight natural vertical bob. A lone man ... strides quickly
-through heavy rain across wet asphalt. ... [Shot 2] At 00:01.500 Medium close-up, side angle,
-shallow depth of field locked on the chrome door handle ... [Shot 3] At 00:03.500 ...
-
-overall_soundscape: Steady medium rain falls across the wet asphalt, with a fine hiss ...
-non_diegetic_music: N/A
-```
+- **导演台二期未做**：`v2v` / `rv2v` / `mixed` 只在菜单上标注「二期」，段规划时会明确报错（阶段 1 会先跑完）。
+- **`--brief` 能力有限**：不建完整生成目录、不建素材台账、不陪跑、不支持导演台；需要这些用向导。
+- **首尾帧链 ≤10 秒不出成片**：那条视频本来就是一次生成的结果。
+- **成片实测时长只做「只报短」核对**：H3 产出从不是整数秒（4s 档恒 4.458s），严格相等会把真产物判成伪产物。
+- **耗时与成本**：一次全流程是几十次 LLM 调用；ref 路线更重。可减少圆桌轮数、换更快模型；读图与外部生成成本另计。
+- **画布与模型许可**：Qwen-Image 2.1 仅限非商用；换生图模型时要连同 `prompts/image_prompt_disciplines/` 的纪律块一起换。
