@@ -314,3 +314,68 @@ def test_tailframe_written_by_another_model_warns_and_keeps_by_default(
     assert "重写" in asked[0][0]
 
 
+# ---------------------------------------------------------------------------
+# #150：终端打印本次出词的档名（正常路径与沿用旧词路径都要有）
+# ---------------------------------------------------------------------------
+
+def _written_item(tmp_path, *, model: str, index: int = 3):
+    from minimax_h3_prompt.director.tailframe import WrittenTailframe, tailframe_path
+
+    text = ("### 变换指令\n以这张输入图为参考：镜头落在中景。\n\n"
+            "### 保留项声明\n保持输入图中的人物身份不变。\n\n"
+            "### 锁死清单\n- 保持输入图中的人物身份不变\n")
+    path = tailframe_path(tmp_path, index)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return WrittenTailframe(
+        index=index, type="ending", path=path, text=text,
+        transform="以这张输入图为参考：镜头落在中景。",
+        preserved="保持输入图中的人物身份不变。",
+        locked=("保持输入图中的人物身份不变",), issues=(), model=model)
+
+
+def test_fresh_tailframe_document_prints_the_frame_model(
+        tmp_path, monkeypatch, capsys):
+    """#150 AC2：新写出来的尾帧词要在终端标明按哪一档出词。"""
+    from minimax_h3_prompt.director import ledger, tailframe
+    from minimax_h3_prompt.ui import wizard
+
+    plan = _plan()
+    ending = plan.segments[2]
+    prev_end = tmp_path / "prev-end.png"
+    prev_end.write_bytes(b"end")
+    monkeypatch.setattr(ledger, "passed_director_rows",
+                        lambda directory: {2: {"end_image": str(prev_end)}})
+    monkeypatch.setattr(wizard, "_prompt_optional_image", lambda question: "")
+    monkeypatch.setattr(
+        tailframe, "write_tailframe_prompts",
+        lambda *args, **kwargs: [_written_item(tmp_path, model="moss")])
+
+    assert wizard._write_director_tailframe(
+        plan, ending, _session(tmp_path), llm=object()) is True
+
+    out = capsys.readouterr().out
+    assert "MOSS-Image" in out and "moss" in out, "新尾帧词没打印出图档名"
+
+
+def test_existing_tailframe_document_prints_its_recorded_model(
+        tmp_path, monkeypatch, capsys):
+    """#150 AC2：沿用盘上旧词时也要打印它**写时**的档名（sidecar 里有）。"""
+    from minimax_h3_prompt.director import ledger
+    from minimax_h3_prompt.ui import wizard
+
+    plan = _plan()
+    ending = plan.segments[2]
+    existing = _written_item(tmp_path, model="qwen").path
+    _plant_meta(existing, model="qwen")
+    monkeypatch.setattr(ledger, "passed_director_rows",
+                        lambda directory: {2: {"end_image": str(tmp_path / "x.png")}})
+
+    assert wizard._write_director_tailframe(
+        plan, ending, _session(tmp_path), llm=object()) is True
+
+    out = capsys.readouterr().out
+    assert "Qwen-Image 2.1" in out and "qwen" in out, \
+        "沿用旧尾帧词时没打印它写时的档名"
+
+

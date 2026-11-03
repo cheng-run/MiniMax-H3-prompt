@@ -659,3 +659,204 @@ def test_role_declaration_does_not_trip_the_negative_statement_check():
             text, model="z_image")}
         assert "NEGATIVE_STATEMENT" not in codes, \
             f"角色声明被当成负向表述：{declaration!r}"
+
+
+# ---------------------------------------------------------------------------
+# #150：参考图文本、模型/段型行、静态分支、被挡住
+# ---------------------------------------------------------------------------
+
+def test_instruction_names_both_kinds_of_start_image():
+    """#150 AC1：参考图＝**本段起点**——引导段取上一段终点图（缺失回退视频末帧），
+    切镜段取本段首帧。写作指令不能再一刀切说「上一段剥下来的末帧」。
+
+    切镜段的起点在别处（#149 已让代码分流），指令里若仍写上一段末帧，模型会按错误
+    起点写终点画面——文字与代码不一致，代码再对也留不住。
+    """
+    from minimax_h3_prompt.director import tailframe
+
+    instruction = tailframe.load_instruction()
+    assert "剥下来" not in instruction, "写作指令仍在说「上一段剥下来的末帧」"
+    assert "上一段终点图" in instruction, "引导段的参考图来源没写清"
+    assert "视频末帧" in instruction, "上一段终点图缺失时的回退没写清"
+    assert "切镜" in instruction and "本段首帧" in instruction, \
+        "切镜段的参考图来源没写清"
+
+
+def test_request_names_the_model_tier_and_the_segment_kind():
+    """#150 AC2：请求要说明「本次按 X 档出词」与本段是硬切还是引导段。
+
+    角色声明、保留句句式与正文语言都按档走；不说档名，模型会按别的档的写法出词。
+    不说段型，切镜段会被当成承接上一段的软过渡写。
+    """
+    from minimax_h3_prompt.director import tailframe
+    from minimax_h3_prompt.generation import IMAGE_FAMILY_LABELS
+
+    guided = tailframe.build_tailframe_request(
+        _plan().segments[2], mode="t2v", start_image="start.png",
+        start_frame_description="…", model="qwen")
+    assert "本次尾帧按" in guided
+    assert IMAGE_FAMILY_LABELS["qwen"] in guided and "qwen" in guided
+    assert "本段是引导段" in guided, "引导段没有在请求里点明"
+
+    cut = tailframe.build_tailframe_request(
+        _plan().segments[3], mode="t2v", start_image="start.png",
+        start_frame_description="…", model="moss")
+    assert "本段是硬切段" in cut, "切镜段没有在请求里点明硬切"
+    assert "本段是引导段" not in cut, "切镜段被写成了引导段"
+
+
+# 静态分支的段词与落定画面：机位不动，终点只是姿态/状态变化。
+_STATIC_VIDEO = (
+    "[Shot 2] a locked-off eye-level medium shot holds the frame; "
+    "final composition keeps him centered at the door.")
+_STATIC_END_HOOK = "他转过身去，右手抬到肩高，停在柜台正前方。"
+_STATIC_TEXT = """### 变换指令
+以这张输入图为参考：镜头保持原位，人物从正面转为背对镜头站立，右手抬到肩高。他站在柜台正前方，柜台边缘与画面下缘相接。
+
+### 保留项声明
+保持便利店门前的光线方向与地面材质不变。
+
+### 锁死清单
+- 右手抬到肩高
+- 柜台正前方
+"""
+
+
+def _with_end_hook(segment, end_hook):
+    from dataclasses import replace
+
+    return replace(segment, end_hook=end_hook)
+
+
+def test_static_segment_accepts_state_change_plus_a_named_relation():
+    """#150 AC3：静态段改收「可见状态变化 + 一个具名关系」，不再逼 A→B 位移。
+
+    静态 ending / 静态切镜的终点就是那个姿态：强行要求起点地标出画，会让模型把
+    一张静物写成人物走了十米。
+    """
+    from minimax_h3_prompt.director import tailframe
+
+    issues = tailframe.validate_tailframe_prompt(
+        _STATIC_TEXT, segment_prompt=_STATIC_VIDEO, end_hook=_STATIC_END_HOOK)
+    codes = {i.code for i in issues}
+    assert "TAILFRAME_NO_DISPLACEMENT" not in codes, \
+        "静态段仍被要求写 A→B 位移"
+    assert "TAILFRAME_NO_STATE_CHANGE" not in codes, \
+        "合法的「可见状态变化 + 具名关系」被静态分支判死"
+
+
+def test_static_segment_still_requires_a_visible_state_change():
+    """静态分支不是放行一切：没有可见状态变化的静物词仍然要报错（可核对）。"""
+    from minimax_h3_prompt.director import tailframe
+
+    no_change = _STATIC_TEXT.replace(
+        "人物从正面转为背对镜头站立，右手抬到肩高。",
+        "人物与画面里的陈设都保持不变。").replace(
+        "- 右手抬到肩高\n", "- 柜台正前方\n")
+    codes = {i.code for i in tailframe.validate_tailframe_prompt(
+        no_change, segment_prompt=_STATIC_VIDEO, end_hook=_STATIC_END_HOOK)}
+    assert "TAILFRAME_NO_STATE_CHANGE" in codes, \
+        "静态段没有可见状态变化却拿到了通行证"
+
+
+def test_static_branch_needs_both_a_static_video_word_and_a_state_end_hook():
+    """两个条件缺一不可：段词里有运镜，或落定画面不是状态变化 → 仍按运镜段判。"""
+    from minimax_h3_prompt.director import tailframe
+
+    moving = {i.code for i in tailframe.validate_tailframe_prompt(
+        _STATIC_TEXT, segment_prompt=_MOVING_VIDEO, end_hook=_STATIC_END_HOOK)}
+    assert "TAILFRAME_NO_DISPLACEMENT" in moving, \
+        "段词有运镜却走了静态分支——运镜段的终点图会像原地踏步"
+
+    pose_only = {i.code for i in tailframe.validate_tailframe_prompt(
+        _STATIC_TEXT, segment_prompt=_STATIC_VIDEO,
+        end_hook="他站在门口。")}
+    assert "TAILFRAME_NO_DISPLACEMENT" in pose_only, \
+        "落定画面不是姿态/状态变化，却不再要求位移"
+
+
+def test_request_carries_the_static_branch_note():
+    """静态段的请求要标明「不写 A→B 位移」：真源切片默认仍要求位移，不说会写反。"""
+    from minimax_h3_prompt.director import tailframe
+
+    segment = _with_end_hook(_plan().segments[2], _STATIC_END_HOOK)
+    request = tailframe.build_tailframe_request(
+        segment, mode="t2v", start_image="start.png",
+        start_frame_description="…", segment_prompt=_STATIC_VIDEO)
+
+    assert "【静态分支（本段机位不动，终点是姿态/状态变化）】" in request, \
+        "请求没有给静态段挂上静态分支块"
+    assert "不要编 A→B 位移" in request
+    assert "可见状态变化" in request and "具名关系" in request
+
+
+def test_static_segment_reads_the_start_image_for_pose_and_state(tmp_path, monkeypatch):
+    """静态段读图改问姿态/状态/可见关系：问「走了多远」会把静物读成路程。"""
+    from minimax_h3_prompt.director import tailframe
+    from minimax_h3_prompt.director.prompts import segment_path
+
+    session = tmp_path / "GEN001"
+    path = segment_path(session, 3)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_STATIC_VIDEO, encoding="utf-8")
+    instructions: list[str] = []
+
+    def fake_describe(image, instruction=None):
+        instructions.append(instruction or "")
+        return "画面里人物正面站立，右手垂在身侧。"
+
+    monkeypatch.setattr(tailframe, "describe_image", fake_describe)
+    plan = _plan()
+    plan = plan.__class__(
+        mode=plan.mode, total_frames=plan.total_frames,
+        segments=tuple(_with_end_hook(seg, _STATIC_END_HOOK) if seg.index == 3 else seg
+                       for seg in plan.segments))
+
+    tailframe.write_tailframe_prompts(
+        plan, llm=_StubLLM([_STATIC_TEXT]), session_dir=session,
+        start_image=_frame_png(tmp_path / "start.png"))
+
+    static = [text for text in instructions if "姿态" in text and "状态" in text]
+    assert static, "静态段读图仍在问位移锚点，没改问姿态/状态/可见关系"
+    assert "走了多远" not in static[0], "静态段的读图指令还在追问位移距离"
+
+
+def _bare_tailframe(transform: str) -> str:
+    """只含三段骨架的尾帧词：锁死清单逐字摘自保留项，避免掺入别的 error。"""
+    preserve = "保持输入图中的人物身份与光线方向不变。"
+    return f"""### 变换指令
+{transform}
+
+### 保留项声明
+{preserve}
+
+### 锁死清单
+- {preserve}
+"""
+
+
+def test_displacement_accepts_blocked_by_in_both_languages():
+    """#150 AC4：`blocked by` / 「被…挡住」是合法的起点锚点（L4-07 点名允许）。"""
+    from minimax_h3_prompt.director import tailframe
+
+    for transform in (
+        "以这张输入图为参考：镜头落在中景，起点那辆货车现在被街角的人群 blocked by "
+        "the crowd；他停在路口前。",
+        "以这张输入图为参考：镜头落在中景，起点那辆货车现在被街角的人群挡住；"
+        "他停在白色停止线前。",
+    ):
+        codes = {i.code for i in tailframe.validate_tailframe_prompt(
+            _bare_tailframe(transform))}
+        assert "TAILFRAME_NO_DISPLACEMENT" not in codes, \
+            f"合法的「被…挡住」写法被位移闸判死：{transform}"
+
+
+def test_displacement_error_text_lists_blocked_by():
+    """报错文案要同步：告诉模型「被…挡住」也算 A 锚点，别把它排除了。"""
+    from minimax_h3_prompt.director import tailframe
+
+    issues = [i for i in tailframe.validate_tailframe_prompt(
+        _bare_tailframe("以这张输入图为参考：镜头落在中景，人物向前走。"))
+        if i.code == "TAILFRAME_NO_DISPLACEMENT"]
+    assert issues
+    assert "blocked by" in issues[0].message and "被" in issues[0].message

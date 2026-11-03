@@ -2,7 +2,8 @@
 
 **为什么它是第三种提示词产物**（CONTEXT.md「尾帧变换提示词」）：段提示词写的是**视频**
 （壁纸一样从这一帧演到下一帧），首帧提示词是**文生图**，而这一份是**图生图**——输入是
-本段起点画面（上一段剥出的末帧），输出是「怎样把它变成本段终点画面」。终点画面不在
+本段起点画面（引导段＝上一段终点图，缺失时回退上一段视频末帧；切镜段＝本段首帧），
+输出是「怎样把它变成本段终点画面」。终点画面不在
 包里（设计 §3.1）：打包时上一段还没跑，图不存在，所以它只能由用户拿这份词现生成、
 在导演台 UI 里逐段挂。混成文生图提示词，生成出来的图与成片不同源，接缝跳变会被下一段
 的段间引导直接继承下去。
@@ -82,6 +83,7 @@ _START_READING_HEAD = "【起点画面读图结果】"
 _SECTION_REQUIREMENT_HEAD = "【三段式段头】"
 _SEGMENT_PROMPT_HEAD = "【本段视频提示词（运镜与终点构图）】"
 _IDENTITY_HEAD = "【人物设计基线（身份以此为准）】"
+_STATIC_BRANCH_HEAD = "【静态分支（本段机位不动，终点是姿态/状态变化）】"
 
 # 读图指令：编辑模型要区分「会随镜头移动出画的近景」与「不随镜头移动的固定背景」——
 # 前者不能进保留项，否则「人物走到街角」与「车还停在身后」会互相打架（2026-10-31
@@ -98,6 +100,27 @@ _START_READING_INSTRUCTION = (
     "4) 固定背景：远处建筑、招牌、光源方向与色温、地面材质等不随镜头移动改变的事实。\n"
     "用中文输出 4-6 句，不写心理活动与剧情。"
 )
+
+# 静态分支的读图指令（#150）：机位不动、终点只是姿态/状态变化时，问「走了多远」
+# 会让读图把一个静物描述成路程（起了车、走了几步），写词模型照着写就编出位移。
+# 所以静态段改问「现在什么样、能变成什么样」＋一个具名关系。
+_STATIC_READING_INSTRUCTION = (
+    "这张图是一段 AI 视频某一段的第一帧（也就是它的起点画面），之后要由视觉模型"
+    "改写成该段的终点画面。这一段**机位不动**，终点只是主体的姿态/状态发生变化，"
+    "所以读图要把「现在什么样、哪些状态能变」读出来。\n"
+    "请只描述图里真实可见的内容，并分成四类：\n"
+    "1) 主体：人数、朝向、站姿/坐姿、手臂与头部的位置、服装颜色与款式、标志物；\n"
+    "2) 可变化的状态：手在做什么、面向哪里、手里或身上有什么、哪些东西开着或关着；\n"
+    "3) 与主体的可见关系：脚下与地面/停止线/柜台的关系、正前方或旁侧的一个具名地标"
+    "（门、柜台、路牌、柱子），不要给「几步」「几米」这类距离数字；\n"
+    "4) 固定背景：远处建筑、招牌、光源方向与色温、地面材质等这一段不会变的事实。\n"
+    "用中文输出 4-6 句，不写心理活动与剧情。"
+)
+
+
+def _reading_instruction(static: bool) -> str:
+    """按「机位动没动」选读图指令：静态段问姿态/状态，运镜段问位移锚点（#150）。"""
+    return _STATIC_READING_INSTRUCTION if static else _START_READING_INSTRUCTION
 
 # 尾帧文档的落点：``GENxxx/director/tailframe-NN.md``（1 起，与 ``segment-NN.md`` 同目录）。
 # 编号跟**段号**而不是第几个产物：用户是拿「第 3 段的终点画面」去挂导演台的，重编号会挂错槽。
@@ -178,6 +201,28 @@ def _resolve_model(model: str | None) -> str:
     return model or load_frame_image_model()
 
 
+def _model_line(model: str) -> str:
+    """请求里「本次按哪一档出词」的一行（#150 AC2）。
+
+    角色声明、保留句句式与正文语言都按这一档的编辑纪律取。不说，模型会按角色提示词
+    里举过的另一档写法出词——产物挂着 Qwen 的牌子、正文却是 Z-Image 的中文短句。
+    """
+    from ..generation import IMAGE_FAMILY_LABELS
+
+    return (f"本次尾帧按 {IMAGE_FAMILY_LABELS[model]}（{model}）档出词："
+            "角色声明、保留句句式与正文语言都取这一档的**图生图编辑**纪律"
+            "（下面「编辑纪律」一节），不要混入别的档的写法。")
+
+
+def _segment_kind_line(segment: DirectorSegment) -> str:
+    """本段是硬切段还是引导段（#150 AC2）：写词起点不同，不说模型会写反。"""
+    if is_guided(segment.type):
+        return (f"本段是引导段（{segment_type_label(segment.type)}）："
+                "起点就是上一段终点，从请求给的起点画面接上，不另起场景、不换地点。")
+    return ("本段是硬切段（运镜·切镜）：起点在别处，不与上一段画面衔接；"
+            "参考图是本段首帧，按这个新起点写，不承接上一段的构图与人物位置。")
+
+
 def build_tailframe_request(segment: DirectorSegment, *, mode: str,
                             start_image: str | Path,
                             start_frame_description: str,
@@ -230,17 +275,33 @@ def build_tailframe_request(segment: DirectorSegment, *, mode: str,
             "干净无胡须、不戴墨镜/帽子」）。读图只取姿态、背景与光线。）\n"
             f"{str(identity_baseline).strip()}\n"
         )
+    # 静态分支说明必须进请求：真源切片默认要求 A→B 位移，不点明这一段是静的，
+    # 模型会照着切片把一张静物词写成人物走了十米（#150）。
+    static = is_static_segment(
+        segment_prompt=segment_prompt, end_hook=segment.end_hook)
+    static_block = ""
+    if static:
+        static_block = (
+            f"\n{_STATIC_BRANCH_HEAD}\n"
+            "（本段视频词里读不出运镜、落定画面是姿态/状态变化：终点是静态的，"
+            "**不要编 A→B 位移**。只写两样：**可见状态变化**（转身、抬头、"
+            "坐下、伸手、开合）＋**一个具名关系**（终点与一个具名地标的可见关系："
+            "脚下 / 正前方 / 旁侧）。）\n"
+        )
     return (
         f"{load_instruction()}\n\n"
         "---\n"
         f"本段编号：Segment {segment.index}\n"
         f"段类型：{segment_type_label(segment.type)}\n"
+        f"{_model_line(model)}\n"
+        f"{_segment_kind_line(segment)}\n"
         f"本段剧情概述（中文，仅供你理解剧情，不得写进提示词）：{segment.summary}\n"
         f"本段落定的画面（终点画面必须落到这个状态）：{segment.end_hook}\n"
-        f"起点画面（参考图，本段第一帧；终点画面由它变换而来）：{start_image}\n"
+        f"起点画面（参考图，本段起点；终点画面由它变换而来）：{start_image}\n"
         f"\n{_START_READING_HEAD}\n{str(start_frame_description).strip()}\n"
         f"{identity_block}"
         f"{video_block}"
+        f"{static_block}"
         f"\n{_SECTION_REQUIREMENT_HEAD}（逐字照抄、顺序不变）：\n{heads}\n"
         # 真源切片必须排在模型纪律**之前**：纪律块里那句「与另一档的差别以本节为准」
         # 只有后出现时才是真话（agents.load_role_prompt 的拼接纪律，#119）。
@@ -306,7 +367,28 @@ _CAMERA_HINT = re.compile(
 # 「camera now at ...」写得对，但画面像没走动）。两类各命中一处才算写了位移。
 _DISPLACEMENT_FROM = re.compile(
     r"behind|out of frame|no longer|left behind|gone|vanished|past\b|"
-    r"身后|出画|已经过去|离开画面|消失",
+    # #150：L4-07 点名允许「被谁挡住」作为起点锚点。blocked by 与中文「被…挡住」
+    # 都要收——否则合法写法会被重写成「身后」，把遮挡关系改掉。
+    r"blocked by|occluded by|obscured by|hidden behind|"
+    r"身后|出画|已经过去|离开画面|消失|挡住|遮挡|遮住|被[^。\n]{0,12}挡",
+    re.IGNORECASE,
+)
+
+# 姿态/状态变化词（#150）：静态分支的判据与校验都用这一份。
+# 只收**看得见的身体/物体状态**（转身、起身、抬手、开合、放下），不收情绪、动机与
+# 剧情——那些本来就不许进终点画面。判定「本段是不是静态」时它用在 ``end_hook`` 上：
+# 规划者写的落定画面是「他转过身去」这类状态，才是静态收束；「镜头推到门口」不是。
+_STATE_CHANGE = re.compile(
+    r"\bturn(?:s|ed|ing)?\b|\bpivot(?:s|ed|ing)?\b|\bkneel(?:s|ed|ing)?\b|"
+    r"\bsit(?:s|ting)?\b|\bris(?:e|es|ing|n) up\b|\braise(?:s|d|ing)?\b|"
+    r"\blower(?:s|ed|ing)?\b|\blift(?:s|ed|ing)?\b|\blean(?:s|ed|ing)?\b|"
+    r"\breach(?:es|ed|ing)?\b|\bopen(?:s|ed|ing)?\b|\bclos(?:e|es|ed|ing)\b|"
+    r"\bbend(?:s|ing)?\b|\bcrouch(?:es|ed|ing)?\b|\bnod(?:s|ded|ding)?\b|"
+    r"\bwave(?:s|d|ing)?\b|\bset(?:s|ting)? down\b|\bput(?:s|ting)? down\b|"
+    r"\bpick(?:s|ed|ing)? up\b|\bhand(?:s|ed|ing)? over\b|"
+    r"转身|转过身|回头|抬头|低头|转头|起身|站起|站定|坐下|蹲下|跪下|"
+    r"伸手|举起|抬起|放下|合上|打开|关上|握住|松开|递出|摘下|戴上|"
+    r"靠在|倚着|停住|停下|停在|面向|背对|侧身|看向|望向|闭眼|睁眼|交叉双臂",
     re.IGNORECASE,
 )
 
@@ -356,6 +438,22 @@ _CAMERA_MOVE_HINT = re.compile(
     r"推镜|拉镜|摇镜|移镜|跟拍|升降|运镜|镜头(?:推进|拉远|横移|上摇|下摇|环绕|跟随)",
     re.IGNORECASE,
 )
+
+
+def is_static_segment(*, segment_prompt: str | None, end_hook: str | None) -> bool:
+    """本段是否走**静态分支**（#150）：视频词里读不出运镜，且落定画面是姿态/状态变化。
+
+    两个条件缺一不可：少了「无运镜」，运镜段的终点图会被写成静物；少了「状态变化」，
+    把一张真的需要位移的画面（人走到街角）放行成静物词。段词缺失时按**在动**处理
+    ——与角色提示词「判不出来按在动」同一口径，宁可要求位移，不静默降级。
+    """
+    if not segment_prompt or not str(segment_prompt).strip():
+        return False
+    if _CAMERA_MOVE_HINT.search(str(segment_prompt)):
+        return False
+    return bool(_STATE_CHANGE.search(str(end_hook or "")))
+
+
 # 只认「背景相对位置不变」这一类句式，不认毯式句「保持输入图原样」——后者正是
 # L4-09 要求的写法，机位在动时也合法（约束的是「描述得越具体越容易漂」）。
 _BACKGROUND_FROZEN = re.compile(
@@ -378,7 +476,8 @@ def _locked_entries(section: str) -> tuple[str, ...]:
 
 def validate_tailframe_prompt(text: str, *,
                               model: str | None = None,
-                              segment_prompt: str | None = None
+                              segment_prompt: str | None = None,
+                              end_hook: str | None = None
                               ) -> list[ValidationIssue]:
     """三段式尾帧提示词的确定性检查（票面 AC1/AC3）。
 
@@ -394,11 +493,17 @@ def validate_tailframe_prompt(text: str, *,
     相对位置不变」的回退复核。机位动没动按 L4-04 由写词模型自己判，这里只用运镜词
     做一次启发式复核；误判不该拦产出，所以那条是 warning。
 
+    ``end_hook`` 是本段落定画面：与 ``segment_prompt`` 一起判定**静态分支**（#150）。
+    静态段（机位不动 + 落定是姿态/状态变化）改收「可见状态变化 + 一个具名关系」，
+    不再逼 A→B 位移——强行要求起点地标出画，会让一张静物词写成人物走了十米。
+
     判据方向与 ``asset_proofread._locked_hit`` 同一口径：条目与正文**字面互为子串**即算
     命中（同一谓词，不写第二套）；正文取变换指令与保留项声明两节，**不含清单自己**——
     拿整篇去比，条目当然在自己里，判据恒真。
     """
     model = _resolve_model(model)
+    static = is_static_segment(
+        segment_prompt=segment_prompt, end_hook=end_hook)
     body = str(text or "").strip()
     if not body:
         return [ValidationIssue(
@@ -433,18 +538,32 @@ def validate_tailframe_prompt(text: str, *,
                 "「from the input image」/「以这张输入图为参考」）——不绑定，"
                 "模型会把参考图当草稿重画，人物与陈设全部漂移"))
         # 终点机位只警告：合法写法可能不含这几个词，启发式不能拦产出（ADR 0018）。
-        if not _CAMERA_HINT.search(transform):
+        # 静态分支不查：机位本来就不动，要求「镜头停在哪」会把静物词逼成运镜词。
+        if not static and not _CAMERA_HINT.search(transform):
             issues.append(ValidationIssue(
                 "warning", "TAILFRAME_NO_CAMERA_ENDPOINT",
                 "变换指令没写终点机位/取景（camera / 机位 / 镜头 / 取景）：运镜段"
                 "需要写明镜头停在哪，否则模型不知道终点取景"))
         # 位移是**结构性**要求：运镜段的终点画面如果只有 B、没有 A→B，用户拿到的
         # 就是一张「原地踏步」的图（2026-10-31 实跑）。触发有界重写，不是告警。
-        if not (_DISPLACEMENT_FROM.search(transform)
-                and _DISPLACEMENT_TO.search(transform)):
+        # 静态段（#150）不要求 A→B：终点就是那个姿态，改收「可见状态变化 + 一个
+        # 具名关系」——两样缺一仍然 error，否则放行一份没有任何变化的静物词。
+        if static:
+            if not (_STATE_CHANGE.search(transform)
+                    and _DISPLACEMENT_TO.search(transform)):
+                issues.append(ValidationIssue(
+                    "error", "TAILFRAME_NO_STATE_CHANGE",
+                    "静态段的变换指令没有写出「可见状态变化 + 一个具名关系」："
+                    "本段机位不动、落定画面是姿态/状态变化，所以要写相对输入图"
+                    "看得见的变化（转身、抬头、坐下、伸手、开合），再给终点与一个"
+                    "具名地标的可见关系（脚下 / 正前方 / 旁侧）。"
+                    "静态段不要把 A→B 位移当成必填"))
+        elif not (_DISPLACEMENT_FROM.search(transform)
+                  and _DISPLACEMENT_TO.search(transform)):
             issues.append(ValidationIssue(
                 "error", "TAILFRAME_NO_DISPLACEMENT",
-                "变换指令没有写出 A→B 的位移：要写起点地标现在在哪（身后 / 出画），"
+                "变换指令没有写出 A→B 的位移：要写起点地标现在在哪"
+                "（身后 / 出画 / blocked by / 被…挡住），"
                 "以及终点与一个具名地标的可见关系（脚下踩在停止线前 / 正前方是"
                 "路口那根红绿灯杆）。不写「前方几步」「几米」这类量不出来的程度词。"
                 "只写「camera now at B」会让画面看起来原地踏步"))
@@ -499,6 +618,9 @@ class WrittenTailframe:
     preserved: str
     locked: tuple[str, ...]
     issues: tuple[ValidationIssue, ...]
+    # 本份词按哪一档写的（#150 AC2）：终端打印档名要用**写时**的档，不是打印时
+    # 现读的配置——续跑途中用户可能已经改过 ``frame:``，现读会把旧词标成新档。
+    model: str
 
     @property
     def errors(self) -> tuple[ValidationIssue, ...]:
@@ -532,7 +654,8 @@ def write_tailframe_prompt(segment: DirectorSegment, *, mode: str, llm,
             return None
         text = normalize_tailframe_output(raw)
         errors = [issue for issue in validate_tailframe_prompt(
-                      text, model=model, segment_prompt=segment_prompt)
+                      text, model=model, segment_prompt=segment_prompt,
+                      end_hook=segment.end_hook)
                   if issue.severity == "error"]
         if not errors:
             return text
@@ -563,6 +686,22 @@ def _read_segment_prompt(session_dir: str | Path,
         return None
 
 
+def validate_written_tailframe(text: str, segment: DirectorSegment,
+                               session_dir: str | Path, *,
+                               model: str | None = None
+                               ) -> list[ValidationIssue]:
+    """校验盘上**已有**的一段尾帧词：段词现读，``end_hook`` 与段型一起参与（#150）。
+
+    续跑沿用旧词时也要复核——静态分支的判据只接在写词路径上时，盘上的静态词会被
+    按运镜段重判、挂一堆假位移错误。读段词与取 ``end_hook`` 的组合只住这里，调用点
+    不必各写一遍（``ui/wizard.py`` 只用它，向导文件不许再长）。
+    """
+    return validate_tailframe_prompt(
+        text, model=model,
+        segment_prompt=_read_segment_prompt(session_dir, segment),
+        end_hook=segment.end_hook)
+
+
 def write_tailframe_prompts(plan: DirectorPlan, *, llm, session_dir: str | Path,
                             start_image: str | Path,
                             identity_baseline: str | None = None,
@@ -571,7 +710,8 @@ def write_tailframe_prompts(plan: DirectorPlan, *, llm, session_dir: str | Path,
 
     ``start_image`` 是**一张**起点画面（本票口径：演示用固定帧图，不接 #105 的缓存读取口）。
     同一张图只读一次——读图是真实计费调用，逐段重读同一张图只是在烧配额；生产里每段
-    起点画面不同，缓存自然各读一次。
+    起点画面不同，缓存自然各读一次。缓存键带**静态分支**（#150）：同一张图若先给运镜段
+    读、再给静态段读，两次要问的东西不同（位移锚点 vs 姿态/状态），不能复用。
 
     出错就**停下并点名段号**：读图失败、调用失败都不写半份文档（半份尾帧比没有更糟——
     用户会拿它去生成终点画面）。
@@ -583,22 +723,25 @@ def write_tailframe_prompts(plan: DirectorPlan, *, llm, session_dir: str | Path,
             f"起点画面不存在：{image}——尾帧变换要以该段第一帧为参考图，"
             "没有它写出来的就是文生图提示词")
 
-    descriptions: dict[Path, str] = {}
+    descriptions: dict[tuple[Path, bool], str] = {}
     written: list[WrittenTailframe] = []
     for segment in plan.segments:
         if not needs_tailframe(segment.type, plan.mode):
             continue
-        if image not in descriptions:
+        segment_prompt = _read_segment_prompt(session_dir, segment)
+        static = is_static_segment(
+            segment_prompt=segment_prompt, end_hook=segment.end_hook)
+        key = (image, static)
+        if key not in descriptions:
             try:
-                descriptions[image] = describe_image(
-                    image, instruction=_START_READING_INSTRUCTION)
+                descriptions[key] = describe_image(
+                    image, instruction=_reading_instruction(static))
             except Exception as exc:  # noqa: BLE001 - 病因原样交回，段号在这里补
                 raise RuntimeError(
                     f"第 {segment.index} 段起点画面读图失败：{exc}") from exc
-        segment_prompt = _read_segment_prompt(session_dir, segment)
         text = write_tailframe_prompt(
             segment, mode=plan.mode, llm=llm, start_image=image,
-            start_frame_description=descriptions[image],
+            start_frame_description=descriptions[key],
             segment_prompt=segment_prompt,
             identity_baseline=identity_baseline, model=model)
         if text is None:
@@ -621,7 +764,8 @@ def write_tailframe_prompts(plan: DirectorPlan, *, llm, session_dir: str | Path,
 
         sections = split_tailframe_sections(text)
         issues = tuple(validate_tailframe_prompt(
-            text, model=model, segment_prompt=segment_prompt))
+            text, model=model, segment_prompt=segment_prompt,
+            end_hook=segment.end_hook))
         for issue in issues:
             # 告警要在**产出那一刻**打在终端上：这份产物不进后续自动流程，
             # 只在 #105 的陪跑出站里被列出——那时用户已经在忙着生成图了。
@@ -636,5 +780,6 @@ def write_tailframe_prompts(plan: DirectorPlan, *, llm, session_dir: str | Path,
             preserved=sections.get(PRESERVE_HEAD, ""),
             locked=_locked_entries(sections.get(LOCKED_HEAD, "")),
             issues=issues,
+            model=model,
         ))
     return written

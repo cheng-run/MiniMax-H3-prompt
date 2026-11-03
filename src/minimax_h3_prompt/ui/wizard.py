@@ -1041,8 +1041,7 @@ def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> b
     from ..director.frames import needs_first_frame_image
     from ..director.pack import film_end_still
     from ..director.tailframe import (
-        needs_tailframe, tailframe_path, validate_tailframe_prompt,
-        write_tailframe_prompts,
+        needs_tailframe, tailframe_path, write_tailframe_prompts,
     )
 
     existing = tailframe_path(session.directory, segment.index)
@@ -1066,11 +1065,10 @@ def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> b
         _print_tailframe_document(text, index=segment.index, path=existing,
                                   note="已在盘上，沿用，不重付")
         # 与本段视频词一起复核：背景冻结 vs 机位在动的判据只接在写词路径上时，
-        # 续跑沿用的旧词可以带着一对互斥要求而终端一声不响（半接线）。
-        for issue in validate_tailframe_prompt(
-                text,
-                segment_prompt=tailframe_module._read_segment_prompt(
-                    session.directory, segment)):
+        # 续跑沿用的旧词可以带着一对互斥要求而终端一声不响（半接线）。静态分支
+        # 也要按本节段重新判，否则静态旧词会被按运镜段挂假位移错误（#150）。
+        for issue in tailframe_module.validate_written_tailframe(
+                text, segment, session.directory):
             print(f"   [{issue.severity.upper()}] {issue.code}: {issue.message}")
         return True
 
@@ -1154,7 +1152,7 @@ def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> b
         print(f"[错误] 第 {segment.index} 段的终点画面提示词写不出来：{exc}")
         return False
     for item in written:
-        _print_tailframe_document(item.text, index=item.index, path=item.path)
+        _print_tailframe_document(item.text, index=item.index, path=item.path, model=item.model)
         for issue in item.issues:
             print(f"   [{issue.severity.upper()}] {issue.code}: {issue.message}")
         print("   用它生成终点画面，然后挂到导演台这一段的尾帧槽上再点运行。")

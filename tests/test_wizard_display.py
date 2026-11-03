@@ -137,3 +137,18 @@ def test_asset_model_line_reads_the_recorded_assignment():
     line = render_asset_model_line(state, item)
 
     assert line.startswith("[生图模型] 红裙女孩：命中『包装』")
+
+
+def test_tailframe_document_prints_the_frame_model(tmp_path, capsys):
+    """#150 AC2：尾帧终端要打印本次按哪一档出词——用户据此知道该开哪个工作流。"""
+    from minimax_h3_prompt.ui.wizard_display import print_tailframe_document
+
+    text = ("### 变换指令\n以这张输入图为参考：镜头落在中景。\n\n"
+            "### 保留项声明\n保持输入图中的人物身份不变。\n\n"
+            "### 锁死清单\n- 保持输入图中的人物身份不变\n")
+    print_tailframe_document(
+        text, index=3, path=tmp_path / "tailframe-03.md", model="qwen")
+
+    out = capsys.readouterr().out
+    assert "Qwen-Image 2.1" in out and "qwen" in out, "终端没打印出图档名"
+    assert "本次按" in out and "档出词" in out
