@@ -149,6 +149,14 @@ MUTATIONS: tuple[Mutation, ...] = (
         ("tests/test_canvas.py::test_legacy_zimage_canvas_key_still_reads",),
         "别名归一失效＝旧画布键 zimage 读不出，旧会话的画布静默回落默认表（#144 D）",
     ),
+    Mutation(
+        "doc_pointer_line_number",
+        "docs/film-language-playbook.md",
+        "| 不写 video 镜头运动 / 剪辑 / 时间码 / H3 三段式 | `image_prompt_engineer.md` 的「内容要求」、`frame_prompt_engineer.md` 的「内容规则」 |",
+        "| 不写 video 镜头运动 / 剪辑 / 时间码 / H3 三段式 | `image_prompt_engineer.md` 的「内容要求」、`frame_prompt_engineer.md:69` |",
+        ("tests/test_doc_pointer_shape.py",),
+        "活文档指针退回行号＝提示词一插行就静默漂移（retro 2026-11-03）",
+    ),
 )
 
 

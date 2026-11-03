@@ -26,7 +26,7 @@
 
 **判据宿主**：常量 `h3_validator.EDGE_STABILITY_SENTENCE` 是**代码侧唯一来源**，写段模板从它取。宿主必须是 validator 而非 `segment_prompts`——后者已从 validator 导入（`ALIGN_TEMPLATES` 同理），反向放置即成循环导入。校验器是裁判，判据随裁判走。另有**两份无法插值的硬拷贝**：`prompts/prompt_engineer.md`（人工文本）与正样本 fixture，分别由 `tests/test_role_prompts.py` 与 `tests/test_h3_validator.py` 守着——常量注释里不得写成「唯一来源」，那只对代码侧成立。
 
-**范围**：只接进 `validate_base`。`ref-en.txt` 无此要求，ref 模式不受影响（grep 确认）。这是**同一禁令的第四处**：票面只点了 `_SEGMENT_V2_INSTRUCTION` 一处，实际另有回退式模板、`prompt_engineer.md:51`（整片路径）与 validator 的 `RIPPLE_SPELL_BANNED`（error）——只改票面点的那一处，其余三处会继续禁它。
+**范围**：只接进 `validate_base`。`ref-en.txt` 无此要求，ref 模式不受影响（grep 确认）。这是**同一禁令的第四处**：票面只点了 `_SEGMENT_V2_INSTRUCTION` 一处，实际另有回退式模板、`prompt_engineer.md` 的「铁律」（整片路径）与 validator 的 `RIPPLE_SPELL_BANNED`（error）——只改票面点的那一处，其余三处会继续禁它。
 
 **考虑过并放弃**：
 

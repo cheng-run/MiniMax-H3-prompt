@@ -133,9 +133,9 @@ The push-in reveals the tension in his face.
 | 切点必须**整秒**（毫秒位 `.000`），每镜隐含时长必须 **4-10 秒整数** | `[仓内]` `base-en.txt:86`——**本地增补、非上游原文**（#117）；理由＝ComfyUI 时长档只有整数秒，上游示例本身是 `At 00:03.500` |
 | 时间戳相对**本段起点**，绝不许写绝对片时 | `[仓内]` `CONTEXT.md:97`（GEN003 坏片实测根因） |
 | 每镜块必须以 edge-stability 句**逐字符**收尾 | `[仓内]` `base-en.txt:92-96`——**本地增补、来源不明**（#117）；理由是我们要的桥接帧锐利 |
-| 默认**单镜头**；段内切镜是显式例外 | `[仓内]` `prompt_engineer.md:51` |
+| 默认**单镜头**；段内切镜是显式例外 | `[仓内]` `prompt_engineer.md` 的「铁律」 |
 | ~~**快机位 + ≥3 个动作节拍不得同段共存**（error）；默认处置是降机位~~ **2026-10-26 已撤除**：换模型+LoRA 后该纪律把全片压成静态/慢速（实测成片 MAD≈0.3，像慢放）。现行口径：**机位速度按剧情选，静场才用 `Static Shot`** | `[仓内]` ADR 0003 末节（撤除记录） |
-| 最后一个节拍距段尾 **≥1s** | `[仓内]` `prompt_engineer.md:52` |
+| 最后一个节拍距段尾 **≥1s** | `[仓内]` `prompt_engineer.md` 的「铁律」 |
 | 禁止自创结构（`GLOBAL_LOCK:` / `BRIDGE_FROM:` / `END_HOOK:` / 首行时长句） | `[官方]` 无此结构；validator 报 error |
 
 **「节奏/剪辑」的物理天花板**：一个 4-10 秒的执行段装不下第二个 ≥4 秒的镜头（切点整秒 + 每镜 4-10 整数秒），所以**节奏只能靠运镜幅度速度 + 动作节拍做**，不能靠多切快切。
@@ -146,7 +146,7 @@ The push-in reveals the tension in his face.
 
 - **不在官方白名单的运镜名**：`crane`、`handheld`、`orbit`、`crash zoom`、`dolly zoom`、`whip pan`、`Steadicam`、`Gimbal` —— 官方只列了 12 个 motion type（`base-en.txt` §4.3 表里 `Motion type` 的行数；2026-09-27 更正，原写 13 是错数）。（2026-10-26 注：原文此处还有一句「`crash zoom` 会绕过本仓快机位正则」——那条正则已随共存禁令一并删除，不再有闸门可钻；本条现在只剩「官方白名单之外」这一个理由。）
 - **Hailuo 的方括号运镜指令**（`[Truck left]` 等）：那是 Hailuo **API 产品线**的能力；官方模型表只有 `MiniMax-Hailuo-2.3` / `MiniMax-Hailuo-02` / `T2V-01-Director` / `T2V-01`，**H3 不在其中**，方括号结构与 H3 的 ComfyUI 提示词格式是两套东西，照搬即自创结构。
-- **把景别/光线/镜头词写进静态生图提示词**：本仓明令禁止（`prompt_engineer.md:31`），生图侧和视频侧是两套词表。
+- **把景别/光线/镜头词写进静态生图提示词**：本仓明令禁止（`prompt_engineer.md` 的「详细度增强（忠实前提下）」），生图侧和视频侧是两套词表。
 - **「一镜一运镜」当成通则**：Runway 原文明确说 `combining camera terms is encouraged`、`One move per clip is the reliable fallback, not the rule` —— 它论的是运镜**个数**，与本仓「机位速度 × 节拍数」不是同一个维度，**不能互相引证**。
 - 未能核实的源（Sora cookbook 403、Runway Gen-4 403、`ai.google.dev` 超时）的内容：**一律不引用**。
 
@@ -249,10 +249,10 @@ Qwen／MOSS 英文、Z-Image 中文，issue #148），共用生图词表逐字�
 
 | 约束 | 位置 |
 |---|---|
-| 不写 video 镜头运动 / 剪辑 / 时间码 / H3 三段式 | `image_prompt_engineer.md:19`、`frame_prompt_engineer.md:69` |
-| 不堆砌无意义质量标签 | `image_prompt_engineer.md:20` |
-| 正文语言按所选模型（Z-Image 中文／Qwen、MOSS 英文；专有名词可保留原文）；**资产图与关键帧都按出图档**（关键帧见请求【出图模型】与【生图纪律】，issue #148） | `image_prompt_engineer.md:22`、`prompts/image_prompt_disciplines/` |
-| 负向按所选模型（Z-Image／Qwen 不写；MOSS 填负面标签）；**仅资产图，关键帧不写负向** | `image_prompt_engineer.md:21`、`prompts/image_prompt_disciplines/` |
+| 不写 video 镜头运动 / 剪辑 / 时间码 / H3 三段式 | `image_prompt_engineer.md` 的「内容要求」、`frame_prompt_engineer.md` 的「内容规则」 |
+| 不堆砌无意义质量标签 | `image_prompt_engineer.md` 的「内容要求」 |
+| 正文语言按所选模型（Z-Image 中文／Qwen、MOSS 英文；专有名词可保留原文）；**资产图与关键帧都按出图档**（关键帧见请求【出图模型】与【生图纪律】，issue #148） | `image_prompt_engineer.md` 的「内容要求」、`prompts/image_prompt_disciplines/` |
+| 负向按所选模型（Z-Image／Qwen 不写；MOSS 填负面标签）；**仅资产图，关键帧不写负向** | `image_prompt_engineer.md` 的「内容要求」、`prompts/image_prompt_disciplines/` |
 
 （2026-10-16 单版化后更正：「两模型必须各自重写，不能同一句」已从资产图链移除——那条链只剩 Z-Image 一版（issue #40）。2026-10-18 **Flux.2 全链退役**（issue #48 / ADR 0013）后关键帧链也只剩 Z-Image 一版，该纪律随之删除，不再有任何链适用。）
 
@@ -345,9 +345,9 @@ Qwen／MOSS 英文、Z-Image 中文，issue #148），共用生图词表逐字�
 ⚠️ **个人仓库，不是权威源**（95 star）。但它是本次**最丰富的静态画面词库**：`references/` 下 6 个文件、两列表 `| Prompt (EN) | Giải thích (VI) |`——**左列是可进提示词的英文词，右列是越南语解释**（不是中文，得自己转译）。已读 4 份约 510 条，全量在报告 §3A-7（光线 83 / 构图 68 / 镜头·胶片质感 151 / 风格·色彩·情绪 212）。
 
 **三条使用纪律**：
-1. **只当选词池，不当模板**——它全是英文术语，而本仓正文语言**按所选生图模型**（`image_prompt_engineer.md:22`、`prompts/image_prompt_disciplines/`）→ 取词后按那一档的语言写进正文（Z-Image 译成中文，Qwen／MOSS 直接用英文），专有名词（`bokeh`、`anamorphic`、胶片型号如 `Kodak Portra 400`）可保留原文。
+1. **只当选词池，不当模板**——它全是英文术语，而本仓正文语言**按所选生图模型**（`image_prompt_engineer.md` 的「内容要求」、`prompts/image_prompt_disciplines/`）→ 取词后按那一档的语言写进正文（Z-Image 译成中文，Qwen／MOSS 直接用英文），专有名词（`bokeh`、`anamorphic`、胶片型号如 `Kodak Portra 400`）可保留原文。
 2. **`04-lens-technical-film.md` 的「快门与运动」整节剔除**：`motion blur`、`Shutter Speed 1/8000s`、`rack focus`、`time-lapse`、`Camera Shake` 都是动态语言，生图侧禁。
-3. **`8K Resolution` / `4K` / `hyperdetailed` 撞「禁堆质量标签」**（`image_prompt_engineer.md:20`）**不用**；但 `hyperrealistic` / `photorealistic` 是**有内容的风格词**，可用——别一刀切。
+3. **`8K Resolution` / `4K` / `hyperdetailed` 撞「禁堆质量标签」**（`image_prompt_engineer.md` 的「内容要求」）**不用**；但 `hyperrealistic` / `photorealistic` 是**有内容的风格词**，可用——别一刀切。
 
 **另外两个文件 2026-09-26 已补读**（6/6 文件全读，合计约 **700 条**——仓库自称的「700+」成立）：
 - `06-materials-weather-pose.md`（175 行）——**正对本仓「外观或材质」字段**，A 节约 90 条材质：`brushed metal`、`Oxidized Copper / Patina Green Copper`、`crushed velvet / Velvet Texture (Absorbing Light)`、`Frosted Glass / Etched Glass`、`Wet and Slick Surface / Reflective puddles`、`translucent`、`cracked earth`、`worn leather / Oiled Leather`、`carbon fiber`、`Chalky / Powdery`、`Dirty/Grungy Texture` …；B 天气 / C 姿态两节同属静态可用。
@@ -400,8 +400,8 @@ BFL 官方 `Exact Color Control` 原文：`Specify brand colors via hex codes wi
 - **任何运镜词**：`push in`、`tracking`、`dolly`、`whip pan`、`orbit`… 一律不进生图提示词——本仓明令禁止，且静态图无从执行。
 - **没出处就不用的词**：外部清单里的具体术语（`anamorphic widescreen lens`、`teal-and-orange color grade`）经两轮验真——**词族确实存在**（`Teal and Orange Grading`、`Anamorphic Squeeze / Bokeh / Glare`，在 `Rylaispirit/cinematic-video-prompt-skill` 的 `04`/`05` 文件里），但**清单把它们归错了仓库**（说成 `video-prompt-reverse`）→ 清单**可能张冠李戴**，它的描述不能直接采信。四个仓库逐个结论：**Rylaispirit 有货**（见 10.4-C）；`ngaitom928`（1★）**读了，没有术语表**；`Wayhhow`（16★）有 `keyword-library.md` / `camera-and-composition.md` 但**正文仍未读**；`LunarXuan`（48★）文件树里**没有术语表**——「电影感词汇库」这个说法**不成立**（它是反推流程仓库）。`cinematique.ai` SSL 握手失败、`invideo.io` 路径 404，两条**仍未核实**。
   → 「700+ 术语」**成立**（6/6 文件全读，约 700 条）；但**权威性低**——都是个人仓库。
-- 🚨 **一个方法论陷阱（`Wayhhow/ai-video-shot-prompt-skill` 的 `keyword-library.md`）**：它的**词可以用，方法不能学**。该文件「**强制使用**去 AI 味质量词」（`超写实`、`极致逼真`），并整节写「`杜绝动作僵硬`/`杜绝游戏CG感`」这类**负向祈使句**——同时撞本仓两条纪律（禁堆质量标签 `image_prompt_engineer.md:20`），而且与 **Google 官方口径正好相反**（官方原文：`Not recommended: using instructive language or words such as "no" or "don't"`）。→ **取词不取法**。
-- **`professional product photography` 这类质量短语**：⚠️ 注意 BFL 官方示例里就有（说明**模型认**），但**本仓自设纪律不许堆**（`image_prompt_engineer.md:20`）。这是**纪律**不是模型限制——别因为官方这么写就放宽，也别误以为模型不认。
+- 🚨 **一个方法论陷阱（`Wayhhow/ai-video-shot-prompt-skill` 的 `keyword-library.md`）**：它的**词可以用，方法不能学**。该文件「**强制使用**去 AI 味质量词」（`超写实`、`极致逼真`），并整节写「`杜绝动作僵硬`/`杜绝游戏CG感`」这类**负向祈使句**——同时撞本仓两条纪律（禁堆质量标签 `image_prompt_engineer.md` 的「内容要求」），而且与 **Google 官方口径正好相反**（官方原文：`Not recommended: using instructive language or words such as "no" or "don't"`）。→ **取词不取法**。
+- **`professional product photography` 这类质量短语**：⚠️ 注意 BFL 官方示例里就有（说明**模型认**），但**本仓自设纪律不许堆**（`image_prompt_engineer.md` 的「内容要求」）。这是**纪律**不是模型限制——别因为官方这么写就放宽，也别误以为模型不认。
 - **「Z-Image 官方推荐写法」这类说法**：不存在这样的官方内容（见 10.2）。
 
 ## 10.7 生图侧自查
