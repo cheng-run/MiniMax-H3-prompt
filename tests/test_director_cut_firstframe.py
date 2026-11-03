@@ -128,3 +128,151 @@ def test_write_firstframe_prompt_writes_nothing_on_unparsable_reply(tmp_path, mo
         _segment(), llm=object(), shot_table=_SHOT_TABLE,
         brief=_brief(), session_dir=tmp_path, model="qwen") is None
     assert not firstframe.firstframe_path(tmp_path, 2).exists()
+
+
+# ---------------------------------------------------------------------------
+# #152：段首帧词的上下文、角色变体、end_hook 标注与质量检查
+# ---------------------------------------------------------------------------
+
+_DESIGN_STATE = {
+    "script": "分场剧本：雨棚下骑手接电话。",
+    "character_design": "人物设计：林远，短寸，灰色雨衣。",
+    "prop_design": "道具设计：外卖箱，贴着蓝色贴纸。",
+    "background_design": "背景设计：旧街雨棚，红色立柱。",
+    "art_design": "美术统筹：冷蓝雨夜配暖黄灯。",
+    "shot_review_lock": "镜头评审锁定：本镜用中景。",
+    "visual_design": "画面细化：雨丝斜落，地面反光。",
+    "identity_lock": "身份锁定：林远不得换装、不得戴帽。",
+}
+
+
+def _brief_with_language(language: str = "English"):
+    from minimax_h3_prompt.brief_parser import Brief
+
+    return Brief(mode="director", director_mode="fl2v", duration=20.0,
+                 plot="暴雨夜外卖骑手", style="写实", language=language)
+
+
+def test_request_carries_the_eight_design_contexts_and_the_language():
+    """#152 AC：切镜首帧请求补齐分场剧本／三类设计／美术／镜头评审／细化／身份／语言。"""
+    from minimax_h3_prompt.director.firstframe import build_firstframe_request
+
+    request = build_firstframe_request(
+        _segment(), shot_table=_SHOT_TABLE, brief=_brief_with_language(),
+        model="qwen", state=_DESIGN_STATE)
+
+    for value in _DESIGN_STATE.values():
+        assert value in request, f"请求缺设计上下文：{value}"
+    assert "【语言】" in request and "English" in request
+
+
+def test_request_marks_end_hook_as_the_segment_end_not_the_first_frame():
+    """`end_hook` 是本段终点：写进请求时必须标明不要画成起点的首帧。"""
+    from minimax_h3_prompt.director.firstframe import build_firstframe_request
+
+    request = build_firstframe_request(
+        _segment(), shot_table=_SHOT_TABLE, brief=_brief(), model="qwen",
+        state=_DESIGN_STATE)
+
+    assert "本段终点" in request and "不要画成首帧" in request
+
+
+def test_role_prompt_has_a_segment_first_frame_variant():
+    """#152 AC：角色有「段首帧」变体——只出 first、起点不是整片 0.00s。"""
+    from minimax_h3_prompt.agents import load_role_prompt
+
+    text = load_role_prompt("frame_prompt_engineer")
+    assert "段首帧" in text
+    section = text[text.index("段首帧"):text.index("段首帧") + 400]
+    assert "只输出 `first`" in section
+    assert "不是整片 0.00s" in section
+    assert "不与尾帧共享" in section
+
+
+def test_write_firstframe_prompt_prints_quality_and_self_containment_warnings(
+        tmp_path, monkeypatch, capsys):
+    """#152 AC：首帧词跑生图纪律与自包含检查；警告不拦产出。"""
+    from minimax_h3_prompt import agents
+    from minimax_h3_prompt.director import firstframe
+
+    monkeypatch.setattr(agents, "build_role_agents", lambda *a, **k: {
+        "frame_prompt_engineer": object()})
+    monkeypatch.setattr(
+        agents, "run_agent",
+        lambda agent, request: (
+            '{"first": {"qwen": {"positive_prompt": '
+            '"masterpiece, A rider under the awning, the same train waits behind."}}}'))
+
+    text = firstframe.write_firstframe_prompt(
+        _segment(), llm=object(), shot_table=_SHOT_TABLE,
+        brief=_brief(), session_dir=tmp_path, model="qwen")
+
+    out = capsys.readouterr().out
+    assert "QUALITY_CLICHE" in out
+    assert "NOT_SELF_CONTAINED" in out
+    assert text is not None, "警告不该拦产出"
+    assert firstframe.firstframe_path(tmp_path, 2).is_file()
+
+
+def test_firstframe_sidecar_keeps_composition_lighting_and_negative_out_of_the_body(
+        tmp_path, monkeypatch):
+    """#152 AC：composition/lighting/negative 落 sidecar，不污染可复制正文。"""
+    import json
+
+    from minimax_h3_prompt import agents
+    from minimax_h3_prompt.director import firstframe
+
+    monkeypatch.setattr(agents, "build_role_agents", lambda *a, **k: {
+        "frame_prompt_engineer": object()})
+    monkeypatch.setattr(
+        agents, "run_agent",
+        lambda agent, request: (
+            '{"first": {"qwen": {"positive_prompt": "A rider in the rain.",'
+            ' "negative_prompt": "no text", "composition": "中景，主体居中",'
+            ' "lighting": "侧逆光，冷蓝"}}}'))
+
+    firstframe.write_firstframe_prompt(
+        _segment(), llm=object(), shot_table=_SHOT_TABLE,
+        brief=_brief(), session_dir=tmp_path, model="qwen")
+
+    body = firstframe.firstframe_path(tmp_path, 2).read_text(encoding="utf-8")
+    assert body.strip() == "A rider in the rain.", "可复制正文只该有正向提示词"
+
+    meta = json.loads(
+        firstframe.firstframe_meta_path(tmp_path, 2).read_text(encoding="utf-8"))
+    assert meta["composition"] == "中景，主体居中"
+    assert meta["lighting"] == "侧逆光，冷蓝"
+    assert meta["negative_prompt"] == "no text"
+    assert meta["model"] == "qwen" and meta["segment"] == 2
+
+
+def test_firstframe_sidecar_records_the_segment_prompt_fingerprint(tmp_path, monkeypatch):
+    """#153：段首帧 sidecar 记下段提示词 sha256；文生图没有起点图，该项为 null。"""
+    import hashlib
+    import json
+
+    from minimax_h3_prompt import agents
+    from minimax_h3_prompt.director import firstframe
+    from minimax_h3_prompt.director.prompts import segment_path
+
+    segment_prompt = "本段视频提示词：硬切到雨棚下。"
+    path = segment_path(tmp_path, 2)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(segment_prompt, encoding="utf-8")
+    monkeypatch.setattr(agents, "build_role_agents", lambda *a, **k: {
+        "frame_prompt_engineer": object()})
+    monkeypatch.setattr(
+        agents, "run_agent",
+        lambda agent, request: '{"first": {"qwen": {"positive_prompt": "A rider."}}}')
+
+    firstframe.write_firstframe_prompt(
+        _segment(), llm=object(), shot_table=_SHOT_TABLE,
+        brief=_brief(), session_dir=tmp_path, model="qwen")
+
+    meta = json.loads(
+        firstframe.firstframe_meta_path(tmp_path, 2).read_text(encoding="utf-8"))
+    assert meta["segment_prompt_sha256"] == hashlib.sha256(
+        segment_prompt.encode("utf-8")).hexdigest()
+    assert meta["start_image_sha256"] is None
+
+

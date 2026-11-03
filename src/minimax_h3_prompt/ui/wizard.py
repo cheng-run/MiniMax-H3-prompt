@@ -36,7 +36,10 @@ from ..resume_point import forget as forget_answer
 from ..resume_point import recall as recall_answer
 from ..resume_point import remember as remember_answer
 from .wizard_display import (
+    announce_film_end_still as _announce_film_end_still,
     clean_path_input as _clean_path_input,
+    print_firstframe_prompt as _print_firstframe_prompt,
+    print_tailframe_document as _print_tailframe_document,
     semantic_reference as _semantic_reference,
     asset_assignment as _asset_assignment,
     current_prompt_text as _current_prompt_text,
@@ -757,31 +760,6 @@ def _collect_director_opening_still(session: SessionState, config: Config) -> bo
     return True
 
 
-def _announce_film_end_still(directory: Path, plan) -> None:
-    """点名全片尾帧该挂到**哪一段**（多段 fl2v 的唯一用途）。
-
-    它在打包时**不进包**（设计 §3.4.1 第 3 条：非开场段的终点画面由用户逐段挂），
-    所以用户必须在这里被告知落点——否则这张图在盘上，却没人知道该挂哪一段。
-    单段 fl2v 例外：打包器会把它挂成那一段的终点画面（``pack._plan_media``）。
-    """
-    from ..director.frames import segment_type_label
-    from ..director.pack import film_end_still
-
-    if plan.mode != "fl2v":
-        return
-    path = film_end_still(directory)
-    if path is None:
-        return
-    ending = next((seg for seg in plan.segments if seg.type == "ending"), plan.segments[-1])
-    print(f"\n[尾帧] 全片终点画面：{path}")
-    if len(plan.segments) == 1:
-        print(f"       单段片子：打包时已挂成第 {ending.index} 段的终点画面。")
-    else:
-        print(f"       多段片子：请在导演台把它挂到第 {ending.index} 段"
-              f"（{segment_type_label(ending.type)}）的尾帧槽——中间段的终点画面"
-              "由尾帧变换提示词逐段产出。")
-
-
 def _run_director_flow(session: SessionState) -> int:
     """导演台路线接线（#102 段规划 + #103 逐段方言 + #104 导演包）：规划 → 段表
     → 逐段写 ``director/segment-NN.md`` → 打包 ``director/initial.mmxpack.zip`` → 出站清单。
@@ -1004,64 +982,6 @@ def _build_director_llm(purpose: str = "写终点画面提示词"):
         return None
 
 
-def _print_tailframe_document(text: str, *, index: int, path: Path,
-                              note: str = "") -> None:
-    """打印**可直接复制给生图模型**的正文（2026-10-31 用户裁定，同日修订）。
-
-    锁死清单是生成之后的核对表，不是生成指令：它逐字摘自正文，粘给模型是冗余，
-    还可能让模型把清单当成额外约束逐条照做。用户明确要求终端只展示正文；
-    完整三段式仍写盘（``tailframe-NN.md``），核对时打开文件即可。
-
-    **拼成一段而不是两节**：Qwen-Image-2.1 的单图编辑口径就是一段 prompt
-    （官方示例 ``Create a photorealistic photograph ... from the input sketch ...``），
-    带两个 ``###`` 段头粘过去等于把指令拆成文档。段头只留在文件里给校验器用。
-    正文用分隔线包住，方便整段复制；路径留在标题里，事后仍可定位文件。
-    """
-    from ..director.tailframe import (
-        PRESERVE_HEAD, TRANSFORM_HEAD, split_tailframe_sections,
-    )
-
-    header = f"[尾帧] 第 {index} 段可直接复制给生图模型"
-    if note:
-        header += f"（{note}）"
-    print(f"{header}（{path}）：")
-    print("-" * 60)
-    sections = split_tailframe_sections(text)
-    blocks = [sections.get(head, "").strip()
-              for head in (TRANSFORM_HEAD, PRESERVE_HEAD)
-              if sections.get(head, "").strip()]
-    if blocks:
-        print("\n\n".join(blocks))
-    else:
-        # 极端情况下两节都没解析出来（模型产出了坏文档）：**不要**原样打印全文——
-        # 全文可能带着锁死清单，而用户要求终端不展示它。完整内容在文件里，
-        # 下方的校验问题会点名缺了哪一节。
-        print("（没有解析出「变换指令 / 保留项声明」两节；完整内容在文件里，"
-              "请看下方校验问题。）")
-    print("-" * 60)
-    print("锁死清单已留在文件里，生成后核对用（不粘给模型）。")
-    print("生成后把这张终点图的路径留着：跑完这一段会问，下一段拿它当参考图"
-          "（带起点地标，才有距离感）。")
-
-
-def _print_firstframe_prompt(text: str, *, index: int, path: Path,
-                             note: str = "") -> None:
-    """打印切镜段**段首帧**的可复制正文（用户要粘给生图模型）。
-
-    与尾帧文档分开：首帧词是文生图的一段正文（没有三段式），粘过去就是一整段；
-    加分隔线只是方便整段选中。
-    """
-    header = f"[首帧] 第 {index} 段可直接复制给生图模型"
-    if note:
-        header += f"（{note}）"
-    print(f"{header}（{path}）：")
-    print("-" * 60)
-    print(text.strip())
-    print("-" * 60)
-    print("用它先生成这一段的**首帧**，挂到导演台该段的「首帧」槽；"
-          "接着写的尾帧词会以这张图为参考。")
-
-
 def _cut_first_frame_prompt(plan, segment, session: SessionState, *, llm) -> str | None:
     """切镜段的段首帧词：轮到该段时先给词，再写尾帧词（尾帧要拿这张图当参考）。
 
@@ -1071,7 +991,8 @@ def _cut_first_frame_prompt(plan, segment, session: SessionState, *, llm) -> str
     from ..director.firstframe import firstframe_path, write_firstframe_prompt
 
     path = firstframe_path(session.directory, segment.index)
-    if path.is_file():
+    if path.is_file() and not _frame_meta_rewrite_requested(
+            path, f"第 {segment.index} 段段首帧词"):
         text = path.read_text(encoding="utf-8").strip()
         _print_firstframe_prompt(text, index=segment.index, path=path,
                                  note="已在盘上，沿用，不重付")
@@ -1082,7 +1003,10 @@ def _cut_first_frame_prompt(plan, segment, session: SessionState, *, llm) -> str
     try:
         written = write_firstframe_prompt(
             segment, llm=llm, shot_table=shot_table,
-            brief=session.brief, session_dir=session.directory)
+            brief=session.brief, session_dir=session.directory,
+            # 设计上下文只在 stage_state 里（分场剧本/人物/道具/背景/美术/镜头评审/
+            # 画面细化/身份锁定）；不传进来，请求就只剩剧情摘要（#152）。
+            state=session.stage_state)
     except Exception as exc:  # noqa: BLE001 - 病因原样交回，别伪装成别的问题
         print(f"[错误] 第 {segment.index} 段的段首帧提示词写不出来：{exc}")
         return None
@@ -1113,14 +1037,28 @@ def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> b
 
     from ..director import cache, ledger
     from ..director import tailframe as tailframe_module
-    from ..director.frames import IMAGE_FIRST, give_images_for
+    from ..director.frames import needs_first_frame_image
+    from ..director.pack import film_end_still
     from ..director.tailframe import (
         needs_tailframe, tailframe_path, validate_tailframe_prompt,
         write_tailframe_prompts,
     )
 
     existing = tailframe_path(session.directory, segment.index)
-    if existing.is_file():
+    # 全片尾帧优先（#149）：`ending` 的尾帧槽同时被「作者给的全片终点图」和「尾帧词」
+    # 指向，作者指定的终点必须赢。盘上有 film-end 就不写词、不花那次模型调用；旧词
+    # 可能已生成过图，明确说一句「不采用」，别让它在盘上冒充本次的终点。
+    if segment.type == "ending":
+        film_end = film_end_still(session.directory)
+        if film_end is not None:
+            print(f"\n[尾帧] 第 {segment.index} 段（{segment.label}）用**全片尾帧**：{film_end}")
+            print(f"       把它挂到导演台第 {segment.index} 段的尾帧槽；"
+                  "这一段不再产出尾帧词（作者给的终点优先）。")
+            if existing.is_file():
+                print(f"       旧尾帧词不采用：{existing}（全片尾帧优先，#149）。")
+            return True
+    if existing.is_file() and not _frame_meta_rewrite_requested(
+            existing, f"第 {segment.index} 段尾帧词"):
         # 续跑不重付、也不许覆盖（#58 的同一条教训）：这一段的词可能已经拿去生成过
         # 终点画面了，重写一份新词会让「挂上去的那张图」与文件里的词不再对应。
         text = existing.read_text(encoding="utf-8")
@@ -1149,15 +1087,15 @@ def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> b
     # 终点，下面那段「上一段终点图／视频末帧」才是本段起点。2026-11-02 验收
     # （#137 段2）之前这里对两类一视同仁，切镜段的尾帧词因此从错误起点写起。
     image = None
-    if IMAGE_FIRST in give_images_for(segment.type, plan.mode):
-        image = _prompt_optional_image(
+    if needs_first_frame_image(segment.type, plan.mode):
+        # 必填、给了 q 就停：这里没有「回车＝兜底」的出口（#149）。兜底会让尾帧词
+        # 从上一段终点写起，而切镜段的起点恰恰不在这里。
+        image = _prompt_required_image(
             f"第 {segment.index} 段（{segment.label}）的首帧路径"
-            "（本段起点画面；尾帧词以它为参考图。回车＝没有，改用上一段终点图兜底）：")
-        if image is not None:
-            print(f"  起点画面：本段首帧 {image}")
-        else:
-            print("  [警告] 本段是切镜段，没有给首帧：尾帧词将沿用上一段终点图／末帧——"
-                  "只有本段起点与上一段终点同地时才成立。")
+            "（本段起点画面；尾帧词以它为参考图；q＝停下）：",
+            "切镜段的尾帧词必须以本段首帧为参考图，没有它只能从上一段终点写起"
+            "（2026-11-02 验收里尾帧词写错起点的成因）。")
+        print(f"  起点画面：本段首帧 {image}")
     if image is None:
         # 起点画面**优先用上一段的终点图**（用户生成并挂在导演台尾帧槽的那张）。
         # #114 原先只认账内上一段成片视频的末帧；2026-10-31 实跑证明视频末帧每段都会漂
@@ -1468,6 +1406,7 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
     """
     from ..director import cache, ledger
     from ..director.companion import judge_video_evidence
+    from ..director.frames import FIRST_SEGMENT_TYPE, needs_first_frame_image
     from ..director.tailframe import needs_tailframe
 
     directory = Path(session.directory)
@@ -1553,9 +1492,11 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
                 continue
             # 切镜段的段首帧既不在导演包里、也没有出词口（P2，2026-11-02 验收）：
             # 轮到这一段时先把首帧词交给用户，紧接着的尾帧词要拿这张图当参考。
-            # 只认 camera_cut：opening 的首帧是阶段 1 的全片首帧（已经出过词并收过图），
-            # 其余类型没有首帧槽。
-            if segment.type == "camera_cut":
+            # 判据问给图契约（#145）：fl2v 的 camera_cut 有首帧槽，r2v 的同一类型
+            # 没有——照类型名判会给 r2v 产出一份挂不上的词。opening 的首帧由阶段 1
+            # 的全片首帧承担（已出过词并收过图），这里再产一份就是重复收费。
+            if (segment.type != FIRST_SEGMENT_TYPE
+                    and needs_first_frame_image(segment.type, plan.mode)):
                 if llm is None:
                     llm = _build_director_llm("写段首帧提示词")
                     if llm is None:
@@ -1569,8 +1510,17 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
                     llm = _build_director_llm()
                     if llm is None:
                         return 1
-                if not _write_director_tailframe(
-                        plan, segment, session, llm=llm):
+                try:
+                    tailframe_ready = _write_director_tailframe(
+                        plan, segment, session, llm=llm)
+                except _HandoffStopped:
+                    # 用户在「本段首帧路径」按了 q：干净停下，与贴视频时按 q 同一出口
+                    # （退出码 0、不落账、已通过的段留在账上）。这不是写词失败。
+                    print(f"\n⚠ 停在轮到第 {segment.index}/{total} 段："
+                          "没有拿到本段首帧图，尾帧词没有产出，这一段不落账。"
+                          "重跑向导会从这一段接着走。")
+                    return 0
+                if not tailframe_ready:
                     return 1
             print(_render_director_segment_briefing(
                 plan, segment, directory, single_shot=single_shot,
@@ -1689,6 +1639,62 @@ def _prompt_existing_file(question: str, *, what: str) -> Path | None:
         if not path.is_file():
             print(f"[错误] {what}不存在：{path}")
             print("  请确认路径后重输（项目不会自动搜目录：猜错的文件发现不了）。")
+            continue
+        return path
+
+
+class _HandoffStopped(Exception):
+    """用户在按需词环节输入 ``q``：干净停下（退出码 0），不是错误。
+
+    用异常而不是布尔返回值：这一问嵌在「取起点画面 → 写尾帧词」的中间，返回
+    ``None`` 会被下游当成「没有这张图」继续兜底——而这里要的是**停住**，两者在
+    类型上分开，调用方就不可能把「用户主动停下」误当成「缺图」（#149）。
+    """
+
+
+def _frame_meta_rewrite_requested(prompt_path: Path, label: str) -> bool:
+    """盘上按需词的模型档与当前 ``frame:`` 不一致时告警并问「重写？」；默认 N。
+
+    #153：首帧/尾帧词是**按某一档的写词纪律与画布**产出的。用户换了 ``config/image.yaml``
+    的 ``frame:`` 之后续跑，旧词会被当作「已在盘上，不重付」直接沿用——产物照常生成，
+    只是按旧档的口径写、按新档的工作流出图，两边都不对，而且一声不响。
+    默认 N：这份词可能已经拿去生过图，重写会让「挂上去的那张图」与文件里的词错开。
+    """
+    from .. import image_config
+    from ..director.frame_meta import read_frame_meta
+
+    meta = read_frame_meta(prompt_path)
+    used = str((meta or {}).get("model") or "")
+    if not used:
+        return False  # 旧产物没有 sidecar：不知道按哪档写的，不凭空报警
+    current = image_config.load_frame_image_model()
+    if used == current:
+        return False
+    label_of = image_config.IMAGE_MODEL_LABELS
+    print(f"[警告] {label}是按 {label_of.get(used, used)}（{used}）写的，"
+          f"当前 config/image.yaml 的 frame: 是 {label_of.get(current, current)}"
+          f"（{current}）：沿用旧词会按旧档的纪律与画布出图，可能与当前工作流不匹配。")
+    return _confirm(f"重写{label}？", default=False)
+
+
+def _prompt_required_image(question: str, consequence: str) -> Path:
+    """问一张**必填**图片路径：空输入讲清后果后重问；``q`` 干净停下。
+
+    切镜段的尾帧词以**本段首帧**为参考图（``tailframe_writer_director.md:8``）。
+    以前这里回车＝没有、改用上一段终点图兜底，于是「切镜段起点在别处」被静默忽略
+    （#137 段2 实测）。没有兜底出口以后，缺图只能停，不能写出一份从错误起点出发的词。
+    """
+    while True:
+        raw = _prompt(question).strip().strip('"').strip("'")
+        if raw.lower() in ("q", "quit"):
+            raise _HandoffStopped
+        if not raw:
+            print(f"[提示] 这一问是必填：{consequence}")
+            continue
+        path = Path(raw)
+        if not path.is_file():
+            print(f"[错误] 文件不存在：{path}")
+            print("  请确认路径后重输（q＝停下，已通过的段留在账上）。")
             continue
         return path
 

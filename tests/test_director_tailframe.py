@@ -430,6 +430,39 @@ def test_write_reads_the_segment_video_prompt_from_disk(tmp_path, monkeypatch):
     assert "[Shot 1] camera tracks him to the corner." in llm.requests[0]
 
 
+def test_tailframe_sidecar_records_model_segment_and_input_fingerprints(
+        tmp_path, monkeypatch):
+    """#153：尾帧词 sidecar 记 model、段号、段提示词 sha256、起点图 sha256。"""
+    import hashlib
+    import json
+
+    from minimax_h3_prompt.director import tailframe
+    from minimax_h3_prompt.director.prompts import segment_path
+
+    _stub_vision(monkeypatch)
+    session = tmp_path / "GEN001"
+    start = _frame_png(tmp_path / "start.png")
+    segment_prompt = "[Shot 1] camera tracks him to the corner."
+    path = segment_path(session, 3)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(segment_prompt, encoding="utf-8")
+
+    tailframe.write_tailframe_prompts(
+        _plan(), llm=_StubLLM([_TAILFRAME_TEXT]), session_dir=session,
+        start_image=start, model="qwen")
+
+    meta = json.loads(
+        tailframe.tailframe_meta_path(session, 3).read_text(encoding="utf-8"))
+    assert meta["kind"] == "tailframe"
+    assert meta["segment"] == 3
+    assert meta["model"] == "qwen"
+    assert meta["segment_prompt_sha256"] == hashlib.sha256(
+        segment_prompt.encode("utf-8")).hexdigest()
+    assert meta["start_image_sha256"] == hashlib.sha256(
+        start.read_bytes()).hexdigest()
+
+
+
 def test_write_uses_the_unique_direct_write_exit_with_its_own_role(monkeypatch):
     """ADR 0019：写尾帧提示词要有独立角色名，并与写段角色分开；直调只走那个出口。"""
     from minimax_h3_prompt.director import prompts, tailframe

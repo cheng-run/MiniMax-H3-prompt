@@ -1,8 +1,10 @@
 """向导的展示与资产提示词读写（2026-11-02 体检 P5：拆 ``wizard.py`` 第一刀）。
 
 为什么单独成文件：``ui/wizard.py`` 6400 行、149 个顶层定义，是「读代码不全」的
-最大一处。这一刀只搬**无问答、无落盘副作用**的纯函数——移出去不会改变任何
-monkeypatch 点（用例从不替这些名字打桩），因此行为可按原样对照。
+最大一处。这一刀只搬**无问答、不改会话状态**的纯函数——移出去不会改变任何
+monkeypatch 点（用例从不替这些名字打桩），因此行为可按原样对照。2026-11-03 #149
+起，「打印可复制正文 / 点名全片尾帧落点」这类纯输出也搬到这里（只是 print，
+不读输入、不写盘）。
 
 留在 ``wizard.py`` 的是编排（谁在什么时候问、什么时候存）；这里只回答
 「这句话怎么说」「这张素材的模型判定是什么」。新代码请加在本文件，别再把
@@ -37,6 +39,7 @@ def render_director_segment_briefing(plan, segment, session_dir: Path,
     单段计划（i2v）不印这一行：插件根本不为单段写缓存（2026-10-30 现场目录都不存在），
     印一个永远不存在的路径只会误导。
     """
+    from ..director.frames import FIRST_SEGMENT_TYPE, needs_first_frame_image
     from ..director.pack import film_end_still
     from ..director.planning import render_give_images
     from ..director.prompts import segment_path
@@ -69,7 +72,11 @@ def render_director_segment_briefing(plan, segment, session_dir: Path,
             prompt_path.read_text(encoding="utf-8").strip(),
             "-" * 60,
         ]
-    if not segment.guided and segment.index > 1:
+    if segment.type != FIRST_SEGMENT_TYPE and needs_first_frame_image(
+            segment.type, plan.mode):
+        # 判据与给图契约同源（#145），再排除全片开场：opening 的首帧由阶段 1 全片
+        # 首帧承担，段号也没有上一段可关引导。fl2v 的 camera_cut 有首帧槽，r2v 的
+        # 同一类型没有——照类型名判会让 r2v 用户去找一张不存在、也挂不上的首帧图。
         # P4（2026-11-02 验收）：切镜段关引导。包内 continuityFromPrev=false，
         # 但 ComfyUI 里若被勾成「引用上段」，这一段会多出 12 帧「保完整」尾，
         # 帧数判定必挂（#137 段2 实测 136 帧 vs 应出 124）。
@@ -190,6 +197,89 @@ def clean_path_input(raw: str) -> str:
     if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
         text = text[1:-1].strip()
     return text
+
+
+def announce_film_end_still(directory: Path, plan) -> None:
+    """点名全片尾帧该挂到**哪一段**（多段 fl2v 的唯一用途）。
+
+    它在打包时**不进包**（设计 §3.4.1 第 3 条：非开场段的终点画面由用户逐段挂），
+    所以用户必须在这里被告知落点——否则这张图在盘上，却没人知道该挂哪一段。
+    单段 fl2v 例外：打包器会把它挂成那一段的终点画面（``pack._plan_media``）。
+    """
+    from ..director.frames import segment_type_label
+    from ..director.pack import film_end_still
+
+    if plan.mode != "fl2v":
+        return
+    path = film_end_still(directory)
+    if path is None:
+        return
+    ending = next((seg for seg in plan.segments if seg.type == "ending"), plan.segments[-1])
+    print(f"\n[尾帧] 全片终点画面：{path}")
+    if len(plan.segments) == 1:
+        print(f"       单段片子：打包时已挂成第 {ending.index} 段的终点画面。")
+    else:
+        print(f"       多段片子：请在导演台把它挂到第 {ending.index} 段"
+              f"（{segment_type_label(ending.type)}）的尾帧槽——中间段的终点画面"
+              "由尾帧变换提示词逐段产出。")
+
+
+def print_tailframe_document(text: str, *, index: int, path: Path,
+                             note: str = "") -> None:
+    """打印**可直接复制给生图模型**的正文（2026-10-31 用户裁定，同日修订）。
+
+    锁死清单是生成之后的核对表，不是生成指令：它逐字摘自正文，粘给模型是冗余，
+    还可能让模型把清单当成额外约束逐条照做。用户明确要求终端只展示正文；
+    完整三段式仍写盘（``tailframe-NN.md``），核对时打开文件即可。
+
+    **拼成一段而不是两节**：Qwen-Image-2.1 的单图编辑口径就是一段 prompt
+    （官方示例 ``Create a photorealistic photograph ... from the input sketch ...``），
+    带两个 ``###`` 段头粘过去等于把指令拆成文档。段头只留在文件里给校验器用。
+    正文用分隔线包住，方便整段复制；路径留在标题里，事后仍可定位文件。
+    """
+    from ..director.tailframe import (
+        PRESERVE_HEAD, TRANSFORM_HEAD, split_tailframe_sections,
+    )
+
+    header = f"[尾帧] 第 {index} 段可直接复制给生图模型"
+    if note:
+        header += f"（{note}）"
+    print(f"{header}（{path}）：")
+    print("-" * 60)
+    sections = split_tailframe_sections(text)
+    blocks = [sections.get(head, "").strip()
+              for head in (TRANSFORM_HEAD, PRESERVE_HEAD)
+              if sections.get(head, "").strip()]
+    if blocks:
+        print("\n\n".join(blocks))
+    else:
+        # 极端情况下两节都没解析出来（模型产出了坏文档）：**不要**原样打印全文——
+        # 全文可能带着锁死清单，而用户要求终端不展示它。完整内容在文件里，
+        # 下方的校验问题会点名缺了哪一节。
+        print("（没有解析出「变换指令 / 保留项声明」两节；完整内容在文件里，"
+              "请看下方校验问题。）")
+    print("-" * 60)
+    print("锁死清单已留在文件里，生成后核对用（不粘给模型）。")
+    print("生成后把这张终点图的路径留着：跑完这一段会问，下一段拿它当参考图"
+          "（带起点地标，才有距离感）。")
+
+
+def print_firstframe_prompt(text: str, *, index: int, path: Path,
+                            note: str = "") -> None:
+    """打印切镜段**段首帧**的可复制正文（用户要粘给生图模型）。
+
+    与尾帧文档分开：首帧词是文生图的一段正文（没有三段式），粘过去就是一整段；
+    加分隔线只是方便整段选中。
+    """
+    header = f"[首帧] 第 {index} 段可直接复制给生图模型"
+    if note:
+        header += f"（{note}）"
+    print(f"{header}（{path}）：")
+    print("-" * 60)
+    print(text.strip())
+    print("-" * 60)
+    print("用它先生成这一段的**首帧**，挂到导演台该段的「首帧」槽；"
+          "接着写的尾帧词会以这张图为参考。")
 
 
 def semantic_reference(previous_text: str | None) -> str | None:
