@@ -123,7 +123,7 @@ npx skills add agentara/skills@video-storyboard -g -y
 - **Hailuo 的方括号 `[Truck left]` 语法不可移植**（属另一产品线，官方模型表里没有 H3）
 
 **生图侧（Z-Image）**
-- **禁一切运镜、时间、剪辑、时间码词**（`image_prompt_engineer.md:19`、`frame_prompt_engineer.md:66`）
+- **禁一切运镜、时间、剪辑、时间码词**（`image_prompt_engineer.md:19`、`frame_prompt_engineer.md:69`）
 - **禁堆无意义质量标签**（`:20`）——⚠️ 这是**本仓纪律**不是模型限制（BFL 官方示例里就有质量词），别因为官方这么写就放宽
 - **正文语言按出图档**（#148：Z-Image 中文、Qwen/MOSS 英文；见请求【出图模型】与【生图纪律】）；构图词按**画幅族**分两套（近竖→竖幅套、近方→正方套、族外→通用；绑画幅族、不绑模型，issue #42）
 - **景别英文缩写**以 Google / StudioBinder 映射为准（中文表那套的中英对应有偏移）
