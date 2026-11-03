@@ -18,6 +18,7 @@
 #   scripts/check.sh types    # mypy（装了才跑；先只查叶子模块）
 #   scripts/check.sh coverage # 分支覆盖度量（装了才跑；不设门槛）
 #   scripts/check.sh clean    # 干净环境（无 .env）跑全量，模拟 CI
+#   scripts/check.sh rehash   # 打印关键帧角色提示词的 sha256，供更新基线
 set -euo pipefail
 
 cd "$(dirname "$0")/.." || exit 1
@@ -100,6 +101,19 @@ run_fast() {
   lint_changed
 }
 
+# 基线哈希重算（retro 2026-11-03）：`tests/test_base_prompt_bytes.py` 的常量在并行
+# 分支上会各改各的，合并时必冲突，冲突后方要手跑一段带导入路径的 python 才能拿到
+# 合并后的真实值。一个子命令把这段查表变成一条命令——基线仍要人显式更新。
+run_rehash() {
+  local role=${1:-frame_prompt_engineer}
+  local src_dir
+  src_dir="$(pwd -W 2>/dev/null || pwd)/src"
+  echo "[check] rehash: $role 的 sha256（更新基线用）"
+  PYTHONPATH="$src_dir${PYTHONPATH:+:$PYTHONPATH}" "$PY" -c \
+    'import hashlib, sys; from minimax_h3_prompt.agents import load_role_prompt; print(hashlib.sha256(load_role_prompt(sys.argv[1]).encode("utf-8")).hexdigest())' \
+    "$role"
+}
+
 case "${1:-fast}" in
   fast)
     run_fast
@@ -143,8 +157,11 @@ case "${1:-fast}" in
     "$PY" -m coverage run -m pytest -q
     "$PY" -m coverage report
     ;;
+  rehash)
+    run_rehash "${2:-frame_prompt_engineer}"
+    ;;
   *)
-    echo "用法: $0 [fast|full|lint|mutate|types|coverage|clean]" >&2
+    echo "用法: $0 [fast|full|lint|mutate|types|coverage|clean|rehash [角色名]]" >&2
     exit 2
     ;;
 esac

@@ -14,6 +14,7 @@ scripts/check.sh mutate     # 守卫变异检验（无额外依赖，约 5 秒�
 scripts/check.sh types      # mypy 全仓（装了才跑）
 scripts/check.sh coverage   # 分支覆盖度量（装了才跑，不设门槛）
 scripts/check.sh clean      # 干净环境（无 .env）跑全量，模拟 CI 的干净检出
+scripts/check.sh rehash     # 打印关键帧角色提示词的 sha256，供更新基线
 ```
 
 CI（`.github/workflows/ci.yml`）跑的是同一套：docstring 守卫 → ruff（`src tests`）→
@@ -52,6 +53,22 @@ uv add --dev coverage  # 只度量、不设 fail_under，见 pyproject [tool.cov
 - **变异检验**：`scripts/mutation_check.py` 把关键实现改坏、跑指定守卫用例、再还原。
   用例必须变红。新加守卫时往 `MUTATIONS` 里补一条——**没有变异检验的守卫不算守卫**
   （「永不为红＝没有」）。
+
+## 并行拆票前的对票
+
+`/implement-spec` 按文件簇分组是手工动作，手工分组会漏票：2026-11-03 实测 12 张子票
+分三组，漏了 #150，直到文档阶段读「已知缺口」才发现。漏一张票的代价不是少写一段
+代码——它可能完全不出现在任何工作树里，直到某个下游文档引用它才暴露。
+
+派发前先对一次集合，**差集非空不许开工**：
+
+```bash
+# 全票：父 spec 下 ready-for-agent 的子票（按需替换 label / spec 号）
+gh issue list --state open --label ready-for-agent --json number --jq '.[].number' | sort -n > /tmp/all-tickets
+# 已映射：把「票号 → 组」写完后，只填票号
+printf '%s\n' 145 146 147 148 149 150 151 152 153 154 155 156 | sort -n > /tmp/assigned-tickets
+comm -23 /tmp/all-tickets /tmp/assigned-tickets   # 必须为空
+```
 
 ## ADR 的写法与引用
 
