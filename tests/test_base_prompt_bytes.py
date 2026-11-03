@@ -6,9 +6,10 @@
 字符涨到 9197 字符——全量测试全绿、产物逐字节对照也看不出来（它只影响下一次模型调用），
 是 2026-10-25 协调复核时按角色提示词哈希抓到的。
 
-修法：共用词表逐字不动，模型差异只写进 ``prompts/image_prompt_disciplines/``，并在装配
-处把纪律块排在词表**之后**（让它真正压过通用条款）。这条用例就是那个边界的守卫：
-ref 侧再想加模型措辞时，改纪律块，别动共用词表。
+修法：共用词表只在**有意**的规格变更时改（#148 的「正文语言按出图档」就是一次显式
+决定），模型差异通常只写进 ``prompts/image_prompt_disciplines/``，并在装配处把纪律块
+排在词表**之后**（让它真正压过通用条款）。这条用例就是那个边界的守卫：
+ref 侧再想加模型措辞时，改纪律块，别顺手动共用词表。
 """
 
 from __future__ import annotations
@@ -30,7 +31,11 @@ from minimax_h3_prompt.agents import load_role_prompt
 # 末尾**，既有行号不动（人读文档有 4 处按行号引用这份文件）。同一个关键帧节点，base 与
 # 导演台两条路线的关键帧词**同时变**——这是有意的一次显式决定。上一版哈希：
 # 03f32ec9de273b586c0c292ed28ccfb4c1f537fe24799bbba35f775fc4cabb3e
-_BASE_FRAME_PROMPT_SHA256 = "8897ef01b66257feab0e47f5de65a762b3d144266fd583041575fccae6f03940"
+# 2026-11-03 有意更新（#148）：正文语言从「中文」改成「按出图档」（Qwen／MOSS 英文、
+# Z-Image 中文），关键帧角色提示词与共用生图真源同步改；旧的「正文中文」会把 Qwen/MOSS
+# 的英文纪律压掉。同样是 base 与导演台两条路线一起变。上一版哈希：
+# 8897ef01b66257feab0e47f5de65a762b3d144266fd583041575fccae6f03940
+_BASE_FRAME_PROMPT_SHA256 = "b49d60d0f7911c38f6b01eb19a5ca651f80f1fb8e14b23db623954784063386e"
 
 
 def test_base_frame_prompt_is_byte_identical_to_the_pre_change_baseline():

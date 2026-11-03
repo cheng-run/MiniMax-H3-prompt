@@ -86,6 +86,12 @@ DEFAULT_IMAGE_MODELS: Mapping[str, str] = {
 # 让 tools 层另立一份就是第二个家，默认档改名时会有一处静默指向不存在的纪律文件。
 DEFAULT_IMAGE_MODEL = "z_image"
 
+# Z-Image 档自己的键（issue #148）。它与 ``DEFAULT_IMAGE_MODEL`` 值相同，但**语义不同**：
+# 检查器里那五类判据绑的是 Z-Image 的实测事实（ADR 0018），不是「默认档」这个位置——
+# 用户把默认档换成 Qwen 时，判据不能跟着搬过去（否则 Qwen 会挨一片假警告、Z-Image 反
+# 而只剩套话一类）。判据认这个常量，不认默认档。
+Z_IMAGE_MODEL = "z_image"
+
 # 许可红线（spec #84 D8）：Qwen-Image 2.1 是 Qwen Research License，**仅限非商用**。
 # 这句话必须出现在**出词横幅**上（issue #88 AC5）——只写在配置文件注释里，用户在终端
 # 上看不见，等于没写；而选错档的代价是一份不能交付的商用素材。
@@ -203,5 +209,5 @@ __all__ = [
     "FRAME_IMAGE_KEY", "IMAGE_CONFIG_PATH", "IMAGE_KINDS", "IMAGE_MODEL_KEYS",
     "IMAGE_MODEL_LABELS", "ImageSettings", "LEGACY_IMAGE_MODEL_ALIASES", "LICENSE_NOTES",
     "QWEN_LICENSE_NOTE", "canonical_image_model", "image_model_for", "image_model_label",
-    "load_frame_image_model", "load_image_settings",
+    "load_frame_image_model", "load_image_settings", "Z_IMAGE_MODEL",
 ]

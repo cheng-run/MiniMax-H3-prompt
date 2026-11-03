@@ -203,6 +203,18 @@ def test_frame_node_warns_when_the_family_key_does_not_match_the_config(
     assert "z_image" in out and "qwen" in out, f"模型子键不一致没有告警：{out!r}"
 
 
+def test_frame_request_does_not_pass_dialogue_language_as_image_language(monkeypatch):
+    """关键帧请求同样不把对白语言当画面提示词语言（issue #148 AC1）。
+
+    正文语言由【出图模型】与【生图纪律】块决定（Qwen/MOSS 英文、Z-Image 中文）；
+    再塞一个 ``【语言】Chinese`` 就是两处相反的口径，模型只会挑一个。
+    """
+    message = _frame_node_request(monkeypatch)
+
+    assert "【语言】" not in message, "关键帧请求还在把对白语言当画面提示词语言"
+    assert "Chinese" not in message, "关键帧请求里出现了对白语言的值"
+
+
 def test_frame_canvas_follows_the_selected_video_canvas_when_its_family_is_unset():
     """没给帧模型单独特定画布时，沿用用户为这支片子选的那张（成片画幅）。
 
@@ -1088,7 +1100,7 @@ def test_frame_prompt_engineer_outputs_a_single_zimage_version():
     变异检验：把 flux2 输出块或纪律句放回 .md，这条会红（已实测）。
     """
     spec = _frame_prompt_spec()
-    assert '"zimage"' in spec, "输出规格里应保留 zimage 版本层"
+    assert '"z_image"' in spec, "输出规格里应保留 Z-Image 版本层（统一键位，issue #146）"
     assert "flux2" not in spec.lower() and "flux.2" not in spec.lower(), \
         "帧链角色提示词不得再有 flux2 输出键"
     assert "分别重写" not in spec, "「两模型分别重写」纪律应随 Flux.2 退役删除"

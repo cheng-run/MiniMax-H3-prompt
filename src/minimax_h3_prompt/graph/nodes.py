@@ -227,7 +227,10 @@ def _asset_prompt_request(kind: str, design_field: str, state: Mapping[str, Any]
         对应设计=state.get(design_field, ""),
         美术统筹=state.get("art_design", ""),
         视觉风格=brief.style,
-        语言=brief.language,
+        # 对白语言**不进图像请求**（issue #148）：它说的是人物说什么话，与画面提示词的
+        # 语言是两件事。旧请求把 `语言=Chinese` 传给生图模型，模型把它读成「正文用中文」，
+        # 把 Qwen／MOSS 的英文纪律整块盖掉（32 条已落盘资产条目 100% 中文的现场）。
+        # 正文语言由纪律块决定（Z-Image 中文、Qwen／MOSS 英文），这里不再另立一份。
         # 画布是**本次请求的数据**（不住在系统提示词里）：构图那套词按画幅族分
         # 两套，而用户选定的画布形状各案不同。词表里写着「画布与尺寸一律以请求里的
         # 【画布】块为准」——不带这块，那条指针就没有落点（issue #33 在帧节点踩过
@@ -640,7 +643,7 @@ def _frame_discipline_block(model: str) -> str:
     from ..tools.image_prompt_discipline import discipline_text
 
     return (f"以下为 {IMAGE_FAMILY_LABELS[model]} 的写词纪律；"
-            f"与角色提示词里「正文中文／默认不写负向」等通用条款冲突时，以本节为准。\n\n"
+            f"与角色提示词里「正文语言／默认不写负向」等通用条款冲突时，以本节为准。\n\n"
             f"{discipline_text(model)}")
 
 
@@ -787,7 +790,8 @@ def _make_fl2va_frame_prompt_node(agents: dict) -> Callable:
                 起步澄清=brief.clarifications,
                 时长=f"{brief.duration}s",
                 视觉风格=brief.style,
-                语言=brief.language,
+                # 对白语言不进图像请求（issue #148）：理由与资产请求那处同一份——
+                # 它说的是人物说什么话，不是画面提示词的语言；正文语言跟【出图模型】。
                 # 画布是**本次请求的数据**（不住在系统提示词里），所以主请求与下面的
                 # 改写重试都要带：少了它，模型只能按自己的直觉重新安排构图。
                 # 帧链只按一档出词，故只给该档那一行（见 `_frame_canvas_line`）。

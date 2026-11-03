@@ -292,3 +292,49 @@ def test_edit_disciplines_scope_background_continuity_by_camera_move():
         text = discipline.edit_discipline_text(model)
         assert ("机位不动" in text) or ("camera does not move" in text.lower()), \
             f"{model} 编辑档的背景连续仍是无条件句"
+
+
+# ---------------------------------------------------------------------------
+# 7. 关键帧语言与资产图专属规则（issue #148）
+# ---------------------------------------------------------------------------
+
+def test_frame_role_prompt_takes_body_language_from_the_model_tier():
+    """关键帧角色提示词不再写死中文：正文语言按【出图模型】/生图纪律（issue #148 AC2）。
+
+    角色提示词是一份、三档共用；语言分支只能由请求里的【出图模型】【生图纪律】块给。
+    写死「中文」时，Qwen／MOSS 的关键帧词会被角色把纪律块盖掉（同 #139 的现场形态）。
+    """
+    text = load_role_prompt("frame_prompt_engineer")
+
+    assert "【出图模型】" in text, "角色提示词没把语言指给【出图模型】块"
+    for name in ("Qwen", "MOSS", "Z-Image"):
+        assert name in text, f"角色提示词没点出 {name} 档的语言差别"
+    assert "英文" in text
+    assert "必须是完整、可直接复制的中文自然语言生图提示词" not in text, \
+        "关键帧角色提示词还写着无条件的「正文中文」"
+
+
+def test_qwen_gait_order_is_scoped_to_asset_images():
+    """Qwen 的「约 20 句」走帧顺序只管资产图；关键帧按角色八步骨架（issue #148 AC3）。
+
+    两者顺序不同（资产：主体→外观→姿态→构图…／关键帧：背景→主体→头脸→衣物…），
+    同一条纪律块同时喂着资产图与关键帧，不带范围就是在两处里压掉一处。
+    """
+    line = next(line for line in discipline_text("qwen").splitlines() if "约 20 句" in line)
+
+    assert "资产图" in line, "Qwen 的走帧顺序没标适用范围"
+    assert "关键帧" in line and "八步" in line, \
+        "Qwen 的走帧顺序没给关键帧让路（角色八步骨架）"
+
+
+def test_moss_text_and_length_rules_are_scoped_to_asset_images():
+    """MOSS 的「文字与版式」「长度不设上限」只在资产图生效（issue #148 AC3）。
+
+    关键帧有角色八步的两条相反上限（可读文字 ≤2 条、约 20 句 / 400–500 词），
+    不带范围时纪律块（「以本节为准」）会把它们压掉。
+    """
+    lines = discipline_text("moss").splitlines()
+    for keyword in ("文字与版式", "长度不设上限"):
+        line = next(line for line in lines if keyword in line)
+        assert "资产图" in line, f"MOSS 的「{keyword}」没标适用范围"
+        assert "关键帧" in line, f"MOSS 的「{keyword}」没给关键帧让路"

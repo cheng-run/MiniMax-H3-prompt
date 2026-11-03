@@ -372,6 +372,19 @@ def _canvas_request(monkeypatch, canvases: dict, *,
     return captured[0]
 
 
+def test_asset_request_does_not_pass_dialogue_language_as_prompt_language(monkeypatch):
+    """图像请求不把对白语言当画面提示词语言（issue #148 AC1）。
+
+    旧请求带 ``【语言】\\nChinese``：模型会把它读成「正文用中文」，把 Qwen/MOSS 的
+    英文纪律整块盖掉（32 条已落盘资产条目 100% 中文的现场）。对白语言与画面提示词
+    语言是两件事，图像请求不该出现这一块。
+    """
+    request = _canvas_request(monkeypatch, {})
+
+    assert "【语言】" not in request, "资产请求还在把对白语言当画面提示词语言"
+    assert "Chinese" not in request, "资产请求里出现了对白语言的值"
+
+
 def test_canvas_block_carries_the_user_selected_canvas(monkeypatch):
     """选定值进请求【画布】块（AC1）：显示名与尺寸逐字同取 ``canvas_display``，分套指示随行。
 
