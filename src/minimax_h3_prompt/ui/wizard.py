@@ -36,7 +36,10 @@ from ..resume_point import forget as forget_answer
 from ..resume_point import recall as recall_answer
 from ..resume_point import remember as remember_answer
 from .wizard_display import (
+    announce_film_end_still as _announce_film_end_still,
     clean_path_input as _clean_path_input,
+    print_firstframe_prompt as _print_firstframe_prompt,
+    print_tailframe_document as _print_tailframe_document,
     semantic_reference as _semantic_reference,
     asset_assignment as _asset_assignment,
     current_prompt_text as _current_prompt_text,
@@ -757,31 +760,6 @@ def _collect_director_opening_still(session: SessionState, config: Config) -> bo
     return True
 
 
-def _announce_film_end_still(directory: Path, plan) -> None:
-    """点名全片尾帧该挂到**哪一段**（多段 fl2v 的唯一用途）。
-
-    它在打包时**不进包**（设计 §3.4.1 第 3 条：非开场段的终点画面由用户逐段挂），
-    所以用户必须在这里被告知落点——否则这张图在盘上，却没人知道该挂哪一段。
-    单段 fl2v 例外：打包器会把它挂成那一段的终点画面（``pack._plan_media``）。
-    """
-    from ..director.frames import segment_type_label
-    from ..director.pack import film_end_still
-
-    if plan.mode != "fl2v":
-        return
-    path = film_end_still(directory)
-    if path is None:
-        return
-    ending = next((seg for seg in plan.segments if seg.type == "ending"), plan.segments[-1])
-    print(f"\n[尾帧] 全片终点画面：{path}")
-    if len(plan.segments) == 1:
-        print(f"       单段片子：打包时已挂成第 {ending.index} 段的终点画面。")
-    else:
-        print(f"       多段片子：请在导演台把它挂到第 {ending.index} 段"
-              f"（{segment_type_label(ending.type)}）的尾帧槽——中间段的终点画面"
-              "由尾帧变换提示词逐段产出。")
-
-
 def _run_director_flow(session: SessionState) -> int:
     """导演台路线接线（#102 段规划 + #103 逐段方言 + #104 导演包）：规划 → 段表
     → 逐段写 ``director/segment-NN.md`` → 打包 ``director/initial.mmxpack.zip`` → 出站清单。
@@ -996,64 +974,6 @@ def _build_director_llm(purpose: str = "写终点画面提示词"):
         # 不替换的模板（复审 H4）。
         print(f"[错误] 模型构造失败（{exc}）：接下来这一段要{purpose}，客户端没建起来。")
         return None
-
-
-def _print_tailframe_document(text: str, *, index: int, path: Path,
-                              note: str = "") -> None:
-    """打印**可直接复制给生图模型**的正文（2026-10-31 用户裁定，同日修订）。
-
-    锁死清单是生成之后的核对表，不是生成指令：它逐字摘自正文，粘给模型是冗余，
-    还可能让模型把清单当成额外约束逐条照做。用户明确要求终端只展示正文；
-    完整三段式仍写盘（``tailframe-NN.md``），核对时打开文件即可。
-
-    **拼成一段而不是两节**：Qwen-Image-2.1 的单图编辑口径就是一段 prompt
-    （官方示例 ``Create a photorealistic photograph ... from the input sketch ...``），
-    带两个 ``###`` 段头粘过去等于把指令拆成文档。段头只留在文件里给校验器用。
-    正文用分隔线包住，方便整段复制；路径留在标题里，事后仍可定位文件。
-    """
-    from ..director.tailframe import (
-        PRESERVE_HEAD, TRANSFORM_HEAD, split_tailframe_sections,
-    )
-
-    header = f"[尾帧] 第 {index} 段可直接复制给生图模型"
-    if note:
-        header += f"（{note}）"
-    print(f"{header}（{path}）：")
-    print("-" * 60)
-    sections = split_tailframe_sections(text)
-    blocks = [sections.get(head, "").strip()
-              for head in (TRANSFORM_HEAD, PRESERVE_HEAD)
-              if sections.get(head, "").strip()]
-    if blocks:
-        print("\n\n".join(blocks))
-    else:
-        # 极端情况下两节都没解析出来（模型产出了坏文档）：**不要**原样打印全文——
-        # 全文可能带着锁死清单，而用户要求终端不展示它。完整内容在文件里，
-        # 下方的校验问题会点名缺了哪一节。
-        print("（没有解析出「变换指令 / 保留项声明」两节；完整内容在文件里，"
-              "请看下方校验问题。）")
-    print("-" * 60)
-    print("锁死清单已留在文件里，生成后核对用（不粘给模型）。")
-    print("生成后把这张终点图的路径留着：跑完这一段会问，下一段拿它当参考图"
-          "（带起点地标，才有距离感）。")
-
-
-def _print_firstframe_prompt(text: str, *, index: int, path: Path,
-                             note: str = "") -> None:
-    """打印切镜段**段首帧**的可复制正文（用户要粘给生图模型）。
-
-    与尾帧文档分开：首帧词是文生图的一段正文（没有三段式），粘过去就是一整段；
-    加分隔线只是方便整段选中。
-    """
-    header = f"[首帧] 第 {index} 段可直接复制给生图模型"
-    if note:
-        header += f"（{note}）"
-    print(f"{header}（{path}）：")
-    print("-" * 60)
-    print(text.strip())
-    print("-" * 60)
-    print("用它先生成这一段的**首帧**，挂到导演台该段的「首帧」槽；"
-          "接着写的尾帧词会以这张图为参考。")
 
 
 def _cut_first_frame_prompt(plan, segment, session: SessionState, *, llm) -> str | None:
