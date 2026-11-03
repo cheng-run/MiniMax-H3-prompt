@@ -593,7 +593,7 @@ def test_give_images_line_is_rendered_by_the_segment_table_renderer(monkeypatch)
 
     plan, segment = _give_image_segment("fl2v")
     monkeypatch.setattr(prompts, "render_give_images",
-                        lambda item, mode: f"哨兵给图:{item.index}/{mode}")
+                        lambda item, mode, **kwargs: f"哨兵给图:{item.index}/{mode}")
     assert "【本段给图】哨兵给图:1/fl2v" in prompts.build_segment_request(plan, segment)
 
 
@@ -655,6 +655,88 @@ def test_fl2v_endpoint_composition_sentence_is_conditional():
                and any(word in block for word in ("没给", "没有", "未给"))
                for block in blocks), "终点构图句没有写条件触发（没有尾帧时不许点名）"
     assert "end_hook" in fl2v, "没有尾帧时落哪一句没写"
+
+
+# ---------------------------------------------------------------------------
+# #147 fl2v：本段起点事实块与四条给图分支
+# ---------------------------------------------------------------------------
+
+def _fl2v_plan(*types):
+    """按给定类型序列造一张 fl2v 段表；帧数只为可读，写段请求不按总帧判事。"""
+    from dataclasses import replace
+
+    from minimax_h3_prompt.director.frames import DirectorPlan, give_images_for
+
+    segments = []
+    for index, segment_type in enumerate(types, 1):
+        segment = _segment(index, segment_type, (index - 1) * 107, index * 107,
+                           107, 107, segment_type not in ("opening", "camera_cut"))
+        segments.append(replace(segment,
+                                give_images=give_images_for(segment_type, "fl2v")))
+    return DirectorPlan(mode="fl2v", total_frames=107 * len(types),
+                        segments=tuple(segments))
+
+
+def _give_line(request: str) -> str:
+    return next(line for line in request.splitlines()
+                if line.startswith("【本段给图】"))
+
+
+def test_fl2v_request_states_the_segment_start_by_type():
+    """引导段带上一段落定画面；切镜段带「本段首帧／硬切／不承接」；开场带全片开场。
+
+    为什么起点要进请求：fl2v 的段类型只决定给哪几张图，而「第一拍从哪接」既不是图、
+    也不是 end_hook（那是终点）——不写进请求，模型只能按类型名猜，`continue` 会被写成
+    从一张不存在的首帧图开始、`camera_cut` 会被写成本段首帧与上一段同景。
+    """
+    from minimax_h3_prompt.director.prompts import build_segment_request
+
+    plan = _fl2v_plan("opening", "continue", "camera_same", "camera_cut", "ending")
+
+    opening = build_segment_request(plan, plan.segments[0])
+    assert "【本段起点】" in opening and "全片开场" in opening
+
+    for position in (1, 2, 4):  # continue / camera_same / ending 都是引导段
+        segment = plan.segments[position]
+        request = build_segment_request(plan, segment)
+        previous = plan.segments[position - 1]
+        assert "【本段起点】" in request, f"{segment.label} 没有起点事实块"
+        assert previous.end_hook in request, f"{segment.label} 没带上一段落定画面"
+
+    cut = build_segment_request(plan, plan.segments[3])
+    assert "本段首帧" in cut, "切镜段没写「本段第一帧来自本段首帧图」"
+    assert "硬切" in cut, "切镜段没写硬切"
+    assert "不承接" in cut, "切镜段没写不承接上一段"
+
+
+def test_fl2v_opening_tail_image_only_for_single_segment_with_film_end():
+    """单段开场且有全片尾帧 → 首+尾；单段无尾帧 / 多段开场 → 仅首。
+
+    全片尾帧在多段片子里属于**最后一段**，挂到开场等于让第 1 段在几秒里跑完整片
+    （pack._plan_media 的同一条裁定）。所以给图行必须按段数收口，不能一律写「可选尾帧」。
+    """
+    from minimax_h3_prompt.director.prompts import build_segment_request
+
+    single = _fl2v_plan("opening")
+    with_end = _give_line(build_segment_request(single, single.segments[0], film_end=True))
+    assert "首帧" in with_end and "尾帧" in with_end, with_end
+
+    without_end = _give_line(build_segment_request(single, single.segments[0]))
+    assert "尾帧" not in without_end, without_end
+
+    multi = _fl2v_plan("opening", "continue")
+    multi_line = _give_line(build_segment_request(multi, multi.segments[0], film_end=True))
+    assert "尾帧" not in multi_line, multi_line
+
+
+def test_fl2v_instruction_teaches_the_four_give_image_branches():
+    """写段指令按「首+尾 / 仅首 / 仅尾 / 无图」四条分支写，不再一套首尾帧口径通吃。"""
+    from minimax_h3_prompt.director.prompts import load_instruction
+
+    fl2v = load_instruction("fl2v")
+    for branch in ("首帧 + 尾帧", "仅首帧", "仅尾帧", "无图"):
+        assert branch in fl2v, f"fl2v 写段指令缺分支：{branch}"
+    assert "硬切" in fl2v and "不承接" in fl2v, "指令没把切镜段写成硬切/不承接"
 
 
 # ---------------------------------------------------------------------------

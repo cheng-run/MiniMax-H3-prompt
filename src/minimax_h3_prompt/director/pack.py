@@ -1170,9 +1170,14 @@ def render_pack_report(job: DirectorPackJob, *, conclusions: Sequence[str] = ())
             media_text = "、".join(item.pack_rel for item in packed.media)
         else:
             media_text = "（包内无媒体）"
+        # 给图行与包内实际挂的媒体同源：单段 fl2v 的全片尾帧会被挂成这一段的终点，
+        # 清单就写「首+尾」；多段的尾帧不属于开场，写「首帧」。
+        images = render_give_images(segment, plan.mode,
+                                    single_segment=len(plan.segments) == 1,
+                                    film_end=packed.end_image is not None)
         lines.append(
             f"  段{packed.index} {packed.label}  {packed.task_type}  "
-            f"给图：{render_give_images(segment, plan.mode)}  → {media_text}")
+            f"给图：{images}  → {media_text}")
     lines.append("")
     lines.append("装配约束（八条，逐条结论）：")
     for conclusion in conclusions:

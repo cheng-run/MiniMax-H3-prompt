@@ -233,19 +233,24 @@ def give_images_for(segment_type: str, mode: str) -> tuple[str, ...]:
     }[mode]
 
 
-def optional_images_for(segment_type: str, mode: str) -> tuple[str, ...]:
+def optional_images_for(segment_type: str, mode: str, *, single_segment: bool = False,
+                        film_end: bool = False) -> tuple[str, ...]:
     """该段**可选**给图（设计 §3.1 表：只有 ``fl2v`` 的开场尾帧可选）。
 
     ``r2v`` **没有可选首帧**（2026-11-01 真实现场）：首/尾帧是 fl2v 的帧槽，r2v 的
     画面来源只有参考素材；以前这里写着「首帧（可选）」，出站清单于是对每条 r2v 片子
     说一句没有槽位可挂的话，用户照着找槽位只会找到 fl2v 的字段。
+
+    开场尾帧**只在单段片子里算这一段的**（#147）：全片尾帧是多段片子最后一段的终点，
+    打包器也只对单段把它挂到 ``assets/01/end``（``pack._plan_media``）。所以单段且
+    盘上真有 ``film-end`` 时它才是「本段可选尾帧」；多段开场只有首帧。
     """
     give_images_for(segment_type, mode)  # 复用模式/类型合法性校验
     if segment_type != "opening":
         return ()
-    if mode == "fl2v":
-        return (IMAGE_END,)
-    return ()
+    if mode != "fl2v":
+        return ()
+    return (IMAGE_END,) if single_segment and film_end else ()
 
 
 def declared_frames_for_export(export_frames: int, *, guided: bool) -> int:

@@ -894,8 +894,13 @@ def _run_director_flow(session: SessionState) -> int:
         _drain_stdin()
 
     plan_file = write_plan_json(plan_path(session.directory), plan)
+    # 全片尾帧在单段 fl2v 里就是这一段（开场）的终点画面：清单与写段请求都要按
+    # 「首+尾」说，不能一处说首尾、一处说只有首（#147）。
+    from ..director.pack import film_end_still
+
+    film_end = plan.mode == "fl2v" and film_end_still(session.directory) is not None
     print()
-    print(render_plan_listing(plan))
+    print(render_plan_listing(plan, film_end=film_end))
     print(f"\n段表已写入：{plan_file}")
     _announce_film_end_still(session.directory, plan)
 
@@ -909,6 +914,7 @@ def _run_director_flow(session: SessionState) -> int:
                 # 其余模式没有参考素材，不传也不会用到。
                 sections=(sections.as_mapping() if sections is not None else None),
                 registry=registry,
+                film_end=film_end,
             )
     except (RuntimeError, ValueError) as exc:
         # 写段失败不写半段假内容（半份段表比没写更糟：用户会拿它去打包）。
@@ -918,7 +924,7 @@ def _run_director_flow(session: SessionState) -> int:
         _drain_stdin()
 
     print()
-    print(render_written_listing(plan, written))
+    print(render_written_listing(plan, written, film_end=film_end))
 
     # 打包：段表 + 段提示词 + 素材 → ``director/pack/`` 与 ``director/initial.mmxpack.zip``。
     # 参数从配置读（画布/参考图尺寸），不在这里写死（设计 §4）。
@@ -1345,7 +1351,7 @@ def _rewrite_director_segment_round(plan, segment, session: SessionState, *,
     与 ``director/delivery.py`` 的「导演台 UI 内修改」区分开（两种来源混在一处，
     事后分不清哪笔改动是项目侧做的，哪笔是用户在导演台里做的）。
     """
-    from ..director.pack import prepare_director_pack
+    from ..director.pack import film_end_still, prepare_director_pack
     from ..director.prompts import rewrite_director_segment, segment_path
     from ..ref_segments import log_segment_rewrite_round
     from ..segment_prompts import MAX_SEGMENT_ATTEMPTS
@@ -1375,6 +1381,9 @@ def _rewrite_director_segment_round(plan, segment, session: SessionState, *,
                 plan, segment, llm=llm, current_text=before,
                 shot_table=str(state.get("shot_table", "")),
                 sections=sections,
+                # 与首写同一份上下文：单段 fl2v 的给图行要照旧写「首+尾」（#147）。
+                film_end=(plan.mode == "fl2v"
+                          and film_end_still(session.directory) is not None),
             )
     except (OSError, ValueError) as exc:
         # 上下文不完整（如 r2v 缺 subject_defs）：大声报，原词不动、不落账。

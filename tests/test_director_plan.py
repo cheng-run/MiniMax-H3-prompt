@@ -168,6 +168,30 @@ def test_give_images_follow_type_and_mode():
         give_images_for("opening", "t2vv")
 
 
+def test_planner_give_image_column_matches_the_frames_contract():
+    """规划师表里的「给图」列必须与 ``give_images_for`` 一致（#147 AC4）。
+
+    判定规则以前只有一句「起点是上一段终点 → 引导开、只给尾帧」，把 ``continue``
+    （实际不给任何图）也写成了有尾帧；规划师照着那句话判，续接段就会被当成有终点画面。
+    这里按 token 反查每一行的字样：契约一改，静态表必须跟着改，否则本用例报红。
+    """
+    from minimax_h3_prompt.director.frames import SEGMENT_TYPES, give_images_for
+    from minimax_h3_prompt.director.planning import load_instruction
+
+    text = load_instruction()
+    words = {"first": "首帧", "end": "尾帧", "assets": "参考素材"}
+    for segment_type in SEGMENT_TYPES:
+        row = next((line for line in text.splitlines()
+                    if line.startswith(f"| `{segment_type}`")), None)
+        assert row is not None, f"规划师表里没有 {segment_type} 这一行"
+        tokens = give_images_for(segment_type, "fl2v")
+        if not tokens:
+            assert "无图" in row, f"{segment_type} 应写「无图」：{row}"
+            continue
+        for token in tokens:
+            assert words[token] in row, f"{segment_type} 缺给图字样 {words[token]}：{row}"
+
+
 # ---------------------------------------------------------------------------
 # 总帧落位：最接近目标的可达总量（AC1/AC4，ADR 0025）
 # ---------------------------------------------------------------------------

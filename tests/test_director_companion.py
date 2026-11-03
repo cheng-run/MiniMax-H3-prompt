@@ -1910,7 +1910,8 @@ def test_rewrite_round_threads_the_stage_context_from_the_session(
     seen: dict[str, str] = {}
     asks = {"n": 0}
 
-    def spy(plan, segment, *, llm, current_text, shot_table="", sections=None):
+    def spy(plan, segment, *, llm, current_text, shot_table="", sections=None,
+            **kwargs):
         seen["shot_table"] = shot_table
         seen["sections"] = sections
         # 原词照回：本用例只验接线，不验改词内容。
@@ -1989,7 +1990,8 @@ def test_r2v_rewrite_round_reads_the_definition_block_from_the_segment_file(
     seen: dict = {}
     asks = {"n": 0}
 
-    def spy(plan, segment, *, llm, current_text, shot_table="", sections=None):
+    def spy(plan, segment, *, llm, current_text, shot_table="", sections=None,
+            **kwargs):
         seen["sections"] = sections
         return director_prompts.RewriteOutcome(text=current_text, issues=())
 

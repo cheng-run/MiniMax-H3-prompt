@@ -456,11 +456,20 @@ _IMAGE_LABELS = {
 }
 
 
-def render_give_images(segment: DirectorSegment, mode: str) -> str:
-    """给图清单的中文展示（段表清单与写段出站清单**同一份**，不各写一份 token 翻译）。"""
+def render_give_images(segment: DirectorSegment, mode: str, *,
+                       single_segment: bool = False,
+                       film_end: bool = False) -> str:
+    """给图清单的中文展示（段表清单与写段出站清单**同一份**，不各写一份 token 翻译）。
+
+    ``single_segment`` / ``film_end`` 只影响 fl2v 开场的尾帧槽（#147）：全片尾帧在
+    单段片子里就是这一段的终点画面，多段时属于最后一段。收口在 ``optional_images_for``
+    里，这里只负责「有就写首+尾、没有就只写首」的措辞，不另判一次段数。
+    """
     required = [_IMAGE_LABELS[token] for token in segment.give_images]
-    optional = [f"{_IMAGE_LABELS[token]}（可选）"
-                for token in optional_images_for(segment.type, mode)]
+    optional = [f"{_IMAGE_LABELS[token]}{'' if single_segment and film_end else '（可选）'}"
+                for token in optional_images_for(segment.type, mode,
+                                                 single_segment=single_segment,
+                                                 film_end=film_end)]
     if not required and not optional:
         # 引导段靠上一段末帧接续，不是「纯文字」：后者会让用户以为这一段没有任何
         # 画面来源（2026-10-30 的 i2v 给图改动暴露了这句）。i2v 单段制下不会走到
@@ -472,22 +481,28 @@ def render_give_images(segment: DirectorSegment, mode: str) -> str:
     return " + ".join(required + optional)
 
 
-def render_plan_listing(plan: DirectorPlan) -> str:
+def render_plan_listing(plan: DirectorPlan, *, film_end: bool = False) -> str:
     """出站分段清单：逐段展示段号 / 类型 / 声明帧 / 导出帧 / 给图清单（AC3）。
 
     段类型误判会让该段**静默丢弃首帧**（spec 的风险清单），所以「类型 + 给图」必须
     与帧数排在同一行，让用户一眼能核；总长说明（AC4：目标与可达总量的差）跟在合计
     之后，不埋在别处。
+
+    ``film_end`` 由调用方从盘上现查（``pack.film_end_still``）：清单与写段请求必须
+    说同一件事，否则单段 fl2v 会在清单里「只有首帧」、在请求里「首+尾」。
     """
     lines = [
         f"导演台分段清单（{plan.mode} · 总 {plan.total_frames} 帧 / "
         f"{plan.total_s:.3f}s · {len(plan.segments)} 段）",
     ]
+    single_segment = len(plan.segments) == 1
     for segment in plan.segments:
+        images = render_give_images(segment, plan.mode,
+                                    single_segment=single_segment, film_end=film_end)
         lines.append(
             f"  段{segment.index} {segment_type_label(segment.type)}  "
             f"声明 {segment.declared_frames} / 导出 {segment.export_frames}  "
-            f"给图：{render_give_images(segment, plan.mode)}")
+            f"给图：{images}")
     total = sum(segment.export_frames for segment in plan.segments)
     lines.append(f"  合计导出 {total} 帧 = 总帧 {plan.total_frames} 帧")
     for note in plan.notes:

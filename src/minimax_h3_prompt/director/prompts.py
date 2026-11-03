@@ -425,9 +425,37 @@ def _definitions_block(sections: dict[str, str]) -> str:
     )
 
 
+def _fl2v_start_block(plan: DirectorPlan, segment: DirectorSegment) -> str:
+    """fl2v 的「本段起点」事实块（#147）：引导段接上一段落定画面，切镜段硬切新场景。
+
+    为什么必须有这一块：段类型只决定给哪几张图，「第一拍从哪接」既不是图也不是
+    ``end_hook``（那是终点）。不写进请求，模型只能按类型名猜——``continue`` 会被写成
+    从一张不存在的首帧图开始，``camera_cut`` 会被写成与上一段同景的软过渡。
+    """
+    if plan.mode != "fl2v":
+        return ""
+    if segment.type == "opening":
+        return "\n【本段起点】全片开场：本段第一帧就是全片第一帧，没有上一段可承接。\n"
+    previous = next(
+        (item for item in plan.segments if item.index == segment.index - 1), None)
+    if previous is None:
+        return ""
+    if segment.type == "camera_cut":
+        return (
+            "\n【本段起点】切镜：本段第一帧来自**本段首帧图**，是**硬切**的新场景——"
+            "**不承接**上一段的画面、构图与人物位置；上一段落定画面"
+            f"（{previous.end_hook}）只作剧情先后参考，不要写成同一空间。\n")
+    # continue / camera_same / ending：都是引导段，第一拍从上一段终点接着写。
+    return (
+        "\n【本段起点】上一段落定画面："
+        f"{previous.end_hook}\n"
+        "（本段第一拍从这里接着写；本段没有首帧图。）\n")
+
+
 def build_segment_request(plan: DirectorPlan, segment: DirectorSegment, *,
                           shot_table: str = "",
-                          sections: dict[str, str] | None = None) -> str:
+                          sections: dict[str, str] | None = None,
+                          film_end: bool = False) -> str:
     """组装一段的写段请求（入参全部显式，不依赖 state——issue #26 的教训）。
 
     请求里的时间轴提示句取 ``render_timeline_note`` 与 ``absolutize_timestamps`` 的
@@ -466,7 +494,12 @@ def build_segment_request(plan: DirectorPlan, segment: DirectorSegment, *,
     # 本段给图（#130）：改动前请求里**没有任何**「本段有没有首尾帧图」的信息，而
     # 「有尾帧才写终点构图句」等规则全依赖它。这条事实段表里现成、也有中文渲染，
     # 直接调 ``render_give_images``——与段表清单、出站清单同一份，不另写 token 翻译。
-    give = f"【本段给图】{render_give_images(segment, plan.mode)}\n"
+    # ``film_end`` 只对**单段** fl2v 的开场有效：全片尾帧在单段片子里就是这一段的
+    # 终点画面；多段时它属于最后一段（见 ``frames.optional_images_for``，#147）。
+    give_images = render_give_images(segment, plan.mode,
+                                     single_segment=len(plan.segments) == 1,
+                                     film_end=film_end)
+    give = f"【本段给图】{give_images}\n"
     return (
         f"{load_instruction(plan.mode)}\n\n"
         "---\n"
@@ -478,6 +511,7 @@ def build_segment_request(plan: DirectorPlan, segment: DirectorSegment, *,
         "时间轴注记（组装器注入，你不要写；正文叙事须与它一致）：\n"
         f"{note}\n"
         f"{give}"
+        f"{_fl2v_start_block(plan, segment)}"
         f"本段剧情概述（中文，仅供你理解剧情，不得写进提示词）：{segment.summary}\n"
         f"本段落定的画面（end_hook，正文必须落到这个状态）：{segment.end_hook}\n"
         f"{shell}"
@@ -603,7 +637,8 @@ def _write_validated(plan: DirectorPlan, segment: DirectorSegment, *, llm,
 def write_director_segment(plan: DirectorPlan, segment: DirectorSegment, *, llm,
                            shot_table: str = "",
                            sections: dict[str, str] | None = None,
-                           registry: Sequence[Sequence] = ()) -> str | None:
+                           registry: Sequence[Sequence] = (),
+                           film_end: bool = False) -> str | None:
     """写一段（直调看门狗 + 有界重写）。调用失败返回 None（调用方据此大声报错）。
 
     契约与 ``write_ref_segment_v2`` 同形：**调用失败**返回 None；**内容不合格**带着
@@ -611,7 +646,7 @@ def write_director_segment(plan: DirectorPlan, segment: DirectorSegment, *, llm,
     ——不返回 None 装死（那会把「模型写坏了」和「网关卡住了」混成一件事）。
     """
     base_request = build_segment_request(plan, segment, shot_table=shot_table,
-                                         sections=sections)
+                                         sections=sections, film_end=film_end)
     result = _write_validated(
         plan, segment, llm=llm, base_request=base_request, sections=sections,
         role=DIRECTOR_SEGMENT_WRITER_ROLE,
@@ -646,7 +681,8 @@ class RewriteOutcome:
 
 def build_rewrite_request(plan: DirectorPlan, segment: DirectorSegment, *,
                           current_text: str, shot_table: str = "",
-                          sections: dict[str, str] | None = None) -> str:
+                          sections: dict[str, str] | None = None,
+                          film_end: bool = False) -> str:
     """一轮改词的请求（#113）：**同一份写段上下文** ＋ 当前段提示词 ＋ 只改正文的要求。
 
     为什么直接复用 ``build_segment_request`` 而不是另写一份精简请求：改词的落笔纪律与
@@ -660,7 +696,7 @@ def build_rewrite_request(plan: DirectorPlan, segment: DirectorSegment, *,
     不能只靠模型自觉（2026-10-31 复审实测：只写提示时模型照抄，时间戳翻倍）。
     """
     base = build_segment_request(plan, segment, shot_table=shot_table,
-                                 sections=sections)
+                                 sections=sections, film_end=film_end)
     start_s = segment.start_frame / FPS
     relative_current = relativize_timestamps(current_text, segment.start_frame)
     return (
@@ -683,7 +719,7 @@ def build_rewrite_request(plan: DirectorPlan, segment: DirectorSegment, *,
 
 def rewrite_director_segment(plan: DirectorPlan, segment: DirectorSegment, *, llm,
                              current_text: str, shot_table: str = "",
-                             sections=None) -> RewriteOutcome:
+                             sections=None, film_end: bool = False) -> RewriteOutcome:
     """按「看过成片、不满意」重写一段（#113）：与 ``write_director_segment`` 同形。
 
     同形之处就是票面要的「同一份写段指令与同一个校验器」：请求从
@@ -705,7 +741,7 @@ def rewrite_director_segment(plan: DirectorPlan, segment: DirectorSegment, *, ll
     sections = _require_r2v_sections(parts) if plan.mode == "r2v" else None
     base_request = build_rewrite_request(
         plan, segment, current_text=current_text, shot_table=shot_table,
-        sections=sections)
+        sections=sections, film_end=film_end)
     result = _write_validated(
         plan, segment, llm=llm, base_request=base_request, sections=sections,
         role=DIRECTOR_SEGMENT_REVISER_ROLE,
@@ -816,7 +852,8 @@ def load_segment_assets(session_dir: str | Path) -> dict[int, list[dict]]:
 def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
                             shot_table: str = "",
                             sections=None,
-                            registry: Iterable[Sequence] = ()) -> list[WrittenSegment]:
+                            registry: Iterable[Sequence] = (),
+                            film_end: bool = False) -> list[WrittenSegment]:
     """逐段写并落盘 ``GENxxx/director/segment-NN.md``（1 起）。
 
     出错就**停下并点名段号**：调用失败（``RuntimeError``）与模式不可写（``ValueError``）
@@ -839,7 +876,8 @@ def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
         # 「本段素材太多」当一条校验错误回灌，让模型自己取舍后再写一遍；三次仍超才停。
         # 裁完再校验、再落盘——盘上的段文件与段内素材表永远同一版。
         base_request = build_segment_request(
-            plan, segment, shot_table=shot_table, sections=global_sections)
+            plan, segment, shot_table=shot_table, sections=global_sections,
+            film_end=film_end)
         result = _write_validated(
             plan, segment, llm=llm, base_request=base_request,
             sections=global_sections, role=DIRECTOR_SEGMENT_WRITER_ROLE,
@@ -867,7 +905,8 @@ def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
 
 
 def render_written_listing(plan: DirectorPlan,
-                           written: list[WrittenSegment]) -> str:
+                           written: list[WrittenSegment],
+                           *, film_end: bool = False) -> str:
     """出站：逐段给段号 / 类型 / 给图清单 / 文件路径，并把校验问题贴在该段下面。
 
     给图清单与段类型必须并排展示：段类型误判会让该段**静默丢掉首帧**（spec 风险清单），
@@ -876,11 +915,13 @@ def render_written_listing(plan: DirectorPlan,
     from .planning import render_give_images  # 与段表清单同一份渲染（不再抄一份 token 翻译）
 
     lines = [f"导演台段提示词（{plan.mode} · {len(written)} 段）："]
+    single_segment = len(plan.segments) == 1
     for item in written:
         segment = plan.segments[item.index - 1]
+        images = render_give_images(segment, plan.mode,
+                                    single_segment=single_segment, film_end=film_end)
         lines.append(
-            f"  段{item.index} {segment.label}  给图：{render_give_images(segment, plan.mode)}"
-            f"  → {item.path}")
+            f"  段{item.index} {segment.label}  给图：{images}  → {item.path}")
         for issue in item.errors:
             lines.append(f"     [{issue.severity.upper()}] {issue.code}: {issue.message}")
     return "\n".join(lines)
