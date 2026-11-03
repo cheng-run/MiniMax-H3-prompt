@@ -285,6 +285,14 @@ def plan_director_segments(shot_table: str, total_s: float, llm, *, mode: str,
         f"本视频是导演台 {mode} 模式，段类型只能从以下清单里选：{'/'.join(allowed)}\n"
         f"（其他段类型在本模式下一律不许出现，程序会判为不合格。）\n"
     )
+    if mode == "r2v":
+        # r2v 的画面来源只有参考素材：首/尾帧是 fl2v 的槽位（``frames.give_images_for``
+        # 在 r2v 下对五种类型都返回 assets）。系统提示词是五型共用一份、按 fl2v 口径
+        # 写着首帧/尾帧，不在这里点明，规划师就会把 continue/camera_cut 记成首尾帧段。
+        mode_scope += (
+            f"本模式每段都只给参考素材（≤{MAX_PICTURES} 张），**没有首帧/尾帧槽**；"
+            "段类型只决定起点与是否引导，**不决定给图**（静态表里的首帧/尾帧是 fl2v 口径）。\n"
+        )
     if max_segments_for_mode(mode) == 1:
         # 段数上限也要进请求：系统提示词不知道模式，不写在这里模型会照「多段叙事」的
         # 习惯给五段，然后整份回复被判不合格——同样白付一次规划（ADR 0026 修订版）。

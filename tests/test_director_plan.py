@@ -482,6 +482,35 @@ def test_plan_director_segments_calls_llm_with_the_director_instruction():
     assert "雨夜便利店" in request
 
 
+def test_r2v_planning_request_states_reference_only_images():
+    """r2v 每段只给参考素材（#154）：没有首/尾帧槽，段类型不决定给图。
+
+    规划师的静态表按 fl2v 口径写（首帧/尾帧）。r2v 只靠那张表，``continue``/``camera_cut``
+    就会被判成首尾帧段——程序派生给图仍然是 assets，但段边界与起点会被判错。
+    """
+    from minimax_h3_prompt.director.frames import SEGMENT_TYPES, give_images_for
+
+    llm = _FakeLLM(_THIRTY_SECONDS)
+    plan = plan_director_segments("分镜表：[Shot 1] 雨夜便利店……", 30.0, llm, mode="r2v")
+
+    request = llm.last_request
+    assert "参考素材" in request, "r2v 请求没写每段给什么"
+    assert "没有首帧/尾帧槽" in request, "r2v 请求没排除首/尾帧槽"
+    assert "不决定给图" in request, "r2v 请求没说段类型不决定给图"
+    for segment_type in SEGMENT_TYPES:
+        assert give_images_for(segment_type, "r2v") == ("assets",), segment_type
+    assert [segment.give_images for segment in plan.segments] == [("assets",)] * 5
+
+
+def test_planner_table_declares_its_giving_column_is_fl2v_scope():
+    """静态给图表是 fl2v 口径（#154）：r2v 以请求开头的模式说明为准。"""
+    from minimax_h3_prompt.director.planning import load_instruction
+
+    text = load_instruction()
+    assert "fl2v 口径" in text, "静态给图表没注明口径"
+    assert "r2v 每段只给参考素材" in text, "没写 r2v 的参考素材口径"
+
+
 def test_plan_director_segments_uses_its_own_role_for_cost_accounting():
     """角色名单独取：与 ``role_segment_planner`` 混在一处就分不清钱花在哪条路线上。"""
     from minimax_h3_prompt.observability import reporter
