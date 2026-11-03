@@ -368,10 +368,10 @@ def _choose_canvases() -> dict[str, tuple[int, int]]:
 
     「取代系统钦定的推荐尺寸」：比例没有回车默认档——必须显式选（坏输入重问），
     尺寸档不符走自定义自由输入（保留兜底）。issue #146 起只问 Z-Image 这一家
-    （``CANVAS_CHOICE_FAMILIES``，即成片画幅）：Qwen/MOSS 没有自己的选择项时沿用它的
-    选定值，想单独定尺寸走 ``--brief`` 的 `画布 qwen: WxH`。构图词分套绑选定画布的
-    **画幅族**（Q21(c)）。返回家族 → (宽, 高)，落进 Brief.canvases，随请求【画布】块
-    与产物画布行同源下发。
+    （``CANVAS_CHOICE_FAMILIES``，即成片画幅）：这份选择只属于这一档；Qwen/MOSS
+    没有选定值时回落各自 profile 默认（#144 D，不再继承竖幅），要单独定尺寸走
+    ``--brief`` 的 `画布 qwen: WxH`。构图词分套绑选定画布的**画幅族**（Q21(c)）；
+    返回家族 → (宽, 高)，落进 Brief.canvases，随请求【画布】块与产物画布行同源下发。
     """
     from ..generation import CANVAS_CHOICE_FAMILIES, IMAGE_FAMILY_LABELS
 
@@ -990,6 +990,7 @@ def _cut_first_frame_prompt(plan, segment, session: SessionState, *, llm) -> str
     重写一份会让「挂上去的那张图」与文件里的词不再对应）。
     """
     from ..director.firstframe import firstframe_path, write_firstframe_prompt
+    from ..image_config import load_frame_image_model
 
     path = firstframe_path(session.directory, segment.index)
     if path.is_file() and not _frame_meta_rewrite_requested(
@@ -1005,6 +1006,8 @@ def _cut_first_frame_prompt(plan, segment, session: SessionState, *, llm) -> str
         written = write_firstframe_prompt(
             segment, llm=llm, shot_table=shot_table,
             brief=session.brief, session_dir=session.directory,
+            # 档名由写词处落进 sidecar，终端从同一份读：新旧词只有这一个档名来源。
+            model=load_frame_image_model(),
             # 设计上下文只在 stage_state 里（分场剧本/人物/道具/背景/美术/镜头评审/
             # 画面细化/身份锁定）；不传进来，请求就只剩剧情摘要（#152）。
             state=session.stage_state)
@@ -1081,7 +1084,7 @@ def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> b
     # 没有这行时用户只看到「跳过」就静默了（2026-10-31 验收反馈）。
     print(f"\n[进度] 轮到第 {segment.index}/{len(plan.segments)} 段（{segment.label}）："
           "正在取上一段起点画面并写终点画面提示词（需要调用模型，稍等）…")
-    # 起点画面＝**本段起点**（``tailframe_writer_director.md:8``）。两种段分开取：
+    # 起点画面＝**本段起点**（``tailframe_writer_director.md``）。两种段分开取：
     # 切镜段起点在别处，参考图只能是用户挂在该段首帧槽的那张；引导段的起点＝上一段
     # 终点，下面那段「上一段终点图／视频末帧」才是本段起点。2026-11-02 验收
     # （#137 段2）之前这里对两类一视同仁，切镜段的尾帧词因此从错误起点写起。
@@ -1679,7 +1682,7 @@ def _frame_meta_rewrite_requested(prompt_path: Path, label: str) -> bool:
 def _prompt_required_image(question: str, consequence: str) -> Path:
     """问一张**必填**图片路径：空输入讲清后果后重问；``q`` 干净停下。
 
-    切镜段的尾帧词以**本段首帧**为参考图（``tailframe_writer_director.md:8``）。
+    切镜段的尾帧词以**本段首帧**为参考图（``tailframe_writer_director.md``）。
     以前这里回车＝没有、改用上一段终点图兜底，于是「切镜段起点在别处」被静默忽略
     （#137 段2 实测）。没有兜底出口以后，缺图只能停，不能写出一份从错误起点出发的词。
     """

@@ -141,6 +141,14 @@ MUTATIONS: tuple[Mutation, ...] = (
         ("tests/test_director_tailframe.py::test_displacement_accepts_blocked_by_in_both_languages",),
         "位移锚点不认 blocked by＝合法的遮挡写法被重写（#150）",
     ),
+    Mutation(
+        "legacy_zimage_alias_dropped",
+        "src/minimax_h3_prompt/image_config.py",
+        "    return LEGACY_IMAGE_MODEL_ALIASES.get(key, key)",
+        "    return key",
+        ("tests/test_canvas.py::test_legacy_zimage_canvas_key_still_reads",),
+        "别名归一失效＝旧画布键 zimage 读不出，旧会话的画布静默回落默认表（#144 D）",
+    ),
 )
 
 

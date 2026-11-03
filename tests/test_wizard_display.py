@@ -152,3 +152,29 @@ def test_tailframe_document_prints_the_frame_model(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Qwen-Image 2.1" in out and "qwen" in out, "终端没打印出图档名"
     assert "本次按" in out and "档出词" in out
+
+
+def test_firstframe_prompt_prints_the_frame_model(tmp_path, capsys):
+    """#144 C / US18：首帧终端也要打印本次按哪一档出词（尾帧同款）。"""
+    from minimax_h3_prompt.ui.wizard_display import print_firstframe_prompt
+
+    print_firstframe_prompt("A rider under the awning.", index=2,
+                            path=tmp_path / "firstframe-02.md", model="moss")
+
+    out = capsys.readouterr().out
+    assert "本次按 MOSS-Image（moss）档出词" in out, "首帧终端没打印出图档名"
+
+
+def test_firstframe_prompt_reads_the_recorded_model_from_the_sidecar(tmp_path, capsys):
+    """调用方没给档名时读 sidecar 的**写时**档，不现读配置（#150 同款口径）。"""
+    from minimax_h3_prompt.director.frame_meta import write_frame_meta
+    from minimax_h3_prompt.ui.wizard_display import print_firstframe_prompt
+
+    path = tmp_path / "firstframe-02.md"
+    path.write_text("A rider under the awning.", encoding="utf-8")
+    write_frame_meta(path, {"model": "qwen"})
+
+    print_firstframe_prompt("A rider under the awning.", index=2, path=path)
+
+    out = capsys.readouterr().out
+    assert "本次按 Qwen-Image 2.1（qwen）档出词" in out

@@ -124,9 +124,11 @@ def _family_keys(model_family: str) -> tuple[str, ...]:
     return (model_family, legacy) if legacy else (model_family,)
 
 
-# 向导画布问答只问**成片画幅**这一家（issue #146）。用户为这支片子选一次尺寸，
-# Qwen/MOSS 没有自己的选择项时沿用它的选定值（见 ``image_canvas_size``）——同一支片子
-# 的参考图与成片必须同画幅。想给某一档单独定尺寸，用 ``--brief`` 的 `画布 qwen: WxH`。
+# 向导画布问答只问**成片画幅**这一家（issue #146）。它只决定这一档自己的画布；
+# 其他档没有选定值就回落各自的 profile 默认（见 ``image_canvas_size``）——曾经让
+# Qwen/MOSS 沿用这张选定值，结果常规流程（向导只问 Z-Image）把它们按 640×1280 竖幅
+# 出图，正是 US25「不按 Z-Image 构图」要治的形态（#144 D）。想给某一档单独定尺寸，
+# 用 ``--brief`` 的 `画布 qwen: WxH`。
 CANVAS_CHOICE_FAMILIES = ("z_image",)
 
 # 生图模型键 → 给人看的显示名。渲染层与帧节点的模型块都用它，免得同一张对照表
@@ -149,7 +151,7 @@ def image_canvas_size(
     model_family: str,
     canvases: CanvasMap | None = None,
 ) -> tuple[int, int]:
-    """该生图模型的生效画布（宽, 高）：用户选定优先，未选回落 profile 默认表。
+    """该生图模型的生效画布（宽, 高）：用户选定优先，未选回落**本档** profile 默认表。
 
     构图按画布走：同一条构图指令在不同画幅上语义不同，所以帧节点的请求要把画布一并
     送进模型（issue #33）。**形状与数字只住在这一个读取口后面**：2026-10-16 起尺寸由
@@ -157,10 +159,12 @@ def image_canvas_size(
     （家族 → (宽, 高)）；没选的家族（含旧会话、--brief 无画布键）回落默认表——兜底
     让改动前的行为逐字保留。
 
-    **没给本档选定值时沿用 Z-Image 那张**（issue #146）：向导只问一次画布（成片画幅，
-    见 ``ui.wizard._choose_canvases``），换成 Qwen/MOSS 出图的资产或关键帧没有自己的
-    选择项。让它们各自回落 1920×1088，会把同一支片子的参考图做成横幅、成片却是竖幅。
-    旧画布键 ``zimage`` 与旧模型名一样按别名读（``canonical_image_model``）。
+    **不许跨档继承**（#144 D）：向导只问一次画布（标签 Z-Image，见
+    ``ui.wizard._choose_canvases``），但那是**这一档**的选择。一度让 Qwen/MOSS 沿用
+    Z-Image 的选定值，常规流程下它们的资产图与关键帧就被按 640×1280 竖幅构图（US25
+    「不按 Z-Image 构图」）。现在只认本档自己的键；要单独定尺寸用 `--brief` 的
+    `画布 qwen: WxH`。旧画布键 ``zimage`` 与旧模型名一样按别名读（``_family_keys``
+    从 ``canonical_image_model`` 的别名表派生，不在这里重抄字面量）。
     """
     canonical = canonical_image_model(model_family)
     # 家族合法性先于选定值：表外家族带一个选定值也照旧报错——报错要来自「这个家族
@@ -168,7 +172,7 @@ def image_canvas_size(
     profile = IMAGE_PROFILE_DEFAULTS.get(canonical)
     if profile is None:
         raise ValueError(f"未知生图模型：{model_family}")
-    for family in (canonical, str(model_family), "z_image", "zimage"):
+    for family in _family_keys(canonical):
         if canvases and family in canvases:
             width, height = canvases[family]
             return int(width), int(height)

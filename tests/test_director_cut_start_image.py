@@ -279,6 +279,51 @@ def test_confirming_the_rewrite_regenerates_the_firstframe_word(tmp_path, monkey
     assert calls == ["rewritten"]
 
 
+def test_new_firstframe_word_prints_the_frame_model(tmp_path, monkeypatch, capsys):
+    """#144 C / US18：新写出来的段首帧词在终端标明按哪一档出词。"""
+    from minimax_h3_prompt import image_config
+    from minimax_h3_prompt.director import firstframe
+    from minimax_h3_prompt.ui import wizard
+
+    plan = _plan()
+    segment = plan.segments[1]
+    monkeypatch.setattr(image_config, "load_frame_image_model", lambda: "moss")
+    monkeypatch.setattr(
+        firstframe, "write_firstframe_prompt",
+        lambda *args, **kwargs: "A rider steps into the new scene.")
+
+    wizard._cut_first_frame_prompt(plan, segment, _session(tmp_path), llm=object())
+
+    out = capsys.readouterr().out
+    assert "本次按 MOSS-Image（moss）档出词" in out, "新段首帧词没打印出图档名"
+
+
+def test_reused_firstframe_word_prints_its_recorded_model(tmp_path, monkeypatch, capsys):
+    """沿用盘上旧词时打印 sidecar 里**写时**的档，而不是当前配置档（#144 C）。
+
+    当前 ``frame:`` 已换成 MOSS：终端若按配置印，用户会拿 Qwen 写的词去开 MOSS 工作流。
+    """
+    from minimax_h3_prompt import image_config
+    from minimax_h3_prompt.director import firstframe
+    from minimax_h3_prompt.ui import wizard
+
+    plan = _plan()
+    segment = plan.segments[1]
+    path = firstframe.firstframe_path(tmp_path, segment.index)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("旧的段首帧词", encoding="utf-8")
+    _plant_meta(path, model="qwen")
+    monkeypatch.setattr(image_config, "load_frame_image_model", lambda: "moss")
+    monkeypatch.setattr(wizard, "_confirm", lambda text, default=True: False)
+
+    wizard._cut_first_frame_prompt(plan, segment, _session(tmp_path), llm=object())
+
+    out = capsys.readouterr().out
+    assert "本次按 Qwen-Image 2.1（qwen）档出词" in out, \
+        "沿用的旧段首帧词没打印它写时的档名"
+    assert "本次按 MOSS" not in out, "旧词被标成了当前配置的档"
+
+
 def test_tailframe_written_by_another_model_warns_and_keeps_by_default(
         tmp_path, monkeypatch, capsys):
     from minimax_h3_prompt import image_config

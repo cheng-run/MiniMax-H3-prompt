@@ -7,7 +7,7 @@
    票面点名的样本（3:4/2:3 近竖、9:21 极端、横幅不配竖幅词）与起草裁定的
    边界样本（4:5 构图语义接近竖幅）都在这里；
 2. **显示名**：画布显示名与尺寸的唯一格式化口，请求与渲染层同取（AC3）；
-3. **读取口**：用户选定优先、未选回落 profile 默认表（AC1 的「保留兜底」）。
+3. **读取口**：用户选定优先、未选回落**本档** profile 默认表（AC1 的「保留兜底」）。
 """
 from __future__ import annotations
 
@@ -113,15 +113,15 @@ def test_canvas_display_labels_extreme_ratios_as_extreme():
 def test_image_canvas_size_prefers_the_user_selection(monkeypatch):
     """选定值是数据不是默认值的装饰：传了就用它，不用 profile 默认表。
 
-    issue #146 起，**没选的家族沿用成片画布（Z-Image 那张）**，不再各自回落 profile
-    默认尺寸——一支片子只有一个画幅，参考图与成片不能一横一竖。临时加的第二家族用来
-    验证「没有自己选定值时也走成片画布」，而不是另立一套默认。
+    #144 D 起**只认本档自己的键**：临时加的第二家族没有自己的选定值时，回落它自己的
+    profile 默认，不再继承 Z-Image 那张——常规流程里向导只为 Z-Image 选画布，继承会
+    让 Qwen/MOSS 按竖幅构图（US25「不按 Z-Image 构图」）。
     """
     assert image_canvas_size("zimage", {"zimage": (700, 1300)}) == (700, 1300)
     monkeypatch.setitem(IMAGE_PROFILE_DEFAULTS, "zimage_wide",
                         ImageProfile("zimage_wide_v1", "12", 768, 768, "candidate"))
-    assert image_canvas_size("zimage_wide", {"z_image": (700, 1300)}) == (700, 1300), \
-        "没选的家族必须沿用成片画布，不能另立一套画幅"
+    assert image_canvas_size("zimage_wide", {"z_image": (700, 1300)}) == (768, 768), \
+        "没选的家族继承了 Z-Image 的画布，而不是用自己的 profile 默认"
 
 
 def test_image_canvas_size_falls_back_to_the_profile_table():
@@ -177,15 +177,19 @@ def test_legacy_zimage_canvas_key_still_reads():
     assert image_canvas_size("zimage", {"z_image": (700, 1300)}) == (700, 1300)
 
 
-def test_unselected_family_follows_the_film_canvas():
-    """没给本档选定画布时沿用 Z-Image 那张——一支片子一张画幅（issue #146 AC3）。
+def test_unselected_family_uses_its_own_profile_default():
+    """没给本档选定画布时回落**本档** profile 默认，不继承 Z-Image 那张（#144 D）。
 
-    向导只问一次画布（成片画幅）；Qwen/MOSS 资产若各自回落到自己 profile 的默认尺寸，
-    同一支片子的参考图会一半横幅、一半竖幅。只有整场都没选画布时才用各档自己的默认。
+    向导的画布问答只问 Z-Image（标签如此，键位 ``z_image``），那份选择只属于这一档。
+    曾经让它辐射到 Qwen/MOSS：常规流程下（用户只答了 Z-Image 的画布）这两档的资产图与
+    关键帧会按 640×1280 竖幅构图，正是 US25 要治的「不按 Z-Image 构图」。
     """
-    assert image_canvas_size("qwen", {"z_image": (1920, 1080)}) == (1920, 1080)
-    assert image_canvas_size("moss", {"zimage": (1080, 1920)}) == (1080, 1920)
+    assert image_canvas_size("qwen", {"z_image": (1920, 1080)}) == (1920, 1088)
+    assert image_canvas_size("moss", {"zimage": (1080, 1920)}) == (1920, 1088)
     assert image_canvas_size("qwen") == (1920, 1088)
+    # 本档自己的选定值仍然优先（旧别名键也要认）。
+    assert image_canvas_size("qwen", {"qwen": (960, 1152), "z_image": (700, 1300)}) == (960, 1152)
+    assert image_canvas_size("moss", {"moss": (1280, 720)}) == (1280, 720)
 
 
 def test_ratio_preset_sizes_match_their_ratio_exactly():

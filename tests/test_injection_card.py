@@ -437,8 +437,11 @@ def test_brief_path_derives_from_canvas_when_video_output_absent(tmp_path, monke
     from minimax_h3_prompt.topic_generation import create_video_from_topic
 
     _stub_pipeline(monkeypatch)
+    # 三档都给同一尺寸：推导源是**主资产模型**（人物档）自己的画布（#144 D 起不再
+    # 跨档继承），这条考的是「没有视频声明时按画布推导」，不是哪一档的默认值。
     _result, directory = create_video_from_topic(
-        "测试主题", _cfg(tmp_path), mode="ref", canvases={"zimage": (1280, 720)})
+        "测试主题", _cfg(tmp_path), mode="ref",
+        canvases={"z_image": (1280, 720), "qwen": (1280, 720), "moss": (1280, 720)})
     text = (directory / CARD_FILENAME).read_text(encoding="utf-8")
     assert "16:9 (Widescreen)" in text
     assert "megapixels：0.9" in text and "对齐倍数：32" in text

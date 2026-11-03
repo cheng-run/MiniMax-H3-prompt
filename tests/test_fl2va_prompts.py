@@ -215,15 +215,15 @@ def test_frame_request_does_not_pass_dialogue_language_as_image_language(monkeyp
     assert "Chinese" not in message, "关键帧请求里出现了对白语言的值"
 
 
-def test_frame_canvas_follows_the_selected_video_canvas_when_its_family_is_unset():
-    """没给帧模型单独特定画布时，沿用用户为这支片子选的那张（成片画幅）。
+def test_frame_canvas_uses_its_own_family_and_falls_back_to_its_profile():
+    """关键帧画布只认**本档**的选定值；没有就回落本档 profile 默认（#144 D）。
 
-    向导的画布选择器只问成片画幅（issue #146）；关键帧换 Qwen 后没有自己的选择项，
-    但关键帧必须与成片同画幅——不能因为换了出图模型就把 1920×1080 的横幅 PV 变成
-    1920×1088（Qwen 档的默认画布）。
+    向导的画布问答只为 Z-Image 选（成片画幅）；关键帧换 Qwen 后不再继承那张竖幅——
+    继承会让请求【画布】块写 1920×1080，而 Qwen 工作流与实际出图是 1920×1088 横幅，
+    用户按错的画幅安排构图（US25）。
     """
     assert generation.frame_canvas_size(
-        "qwen", {"zimage": (1920, 1080)}) == (1920, 1080)
+        "qwen", {"zimage": (1920, 1080)}) == (1920, 1088)
     # 本档有选定值时以它为准（不会被子集覆盖）。
     assert generation.frame_canvas_size(
         "qwen", {"qwen": (960, 1152), "zimage": (1920, 1080)}) == (960, 1152)
@@ -846,7 +846,9 @@ def test_frame_node_canvas_follows_the_image_profile_table(monkeypatch):
     那张表以前只在渲染层被读（给人看「推荐尺寸」），从没进过任何 LLM 请求；现在它同时喂着
     请求里的画布，两处各写一份数就会漂。做法：把表改成不可能巧合命中的尺寸，看请求跟不跟。
     """
-    # 关键帧用**帧**那一张表（``FRAME_PROFILE_DEFAULTS``），资产表不再参与。
+    # 关键帧读的就是生图 profile 默认表：``FRAME_PROFILE_DEFAULTS`` 与
+    # ``IMAGE_PROFILE_DEFAULTS`` 是**同一个 dict 对象**（issue #146 并表），所以下面这行
+    # setitem 同时改到资产表——不是「只改帧表、资产表不参与」。
     monkeypatch.setitem(generation.FRAME_PROFILE_DEFAULTS, "qwen",
                         generation.ImageProfile("qwen_x", "", 111, 222, "candidate"))
     message = _frame_node_request(monkeypatch)

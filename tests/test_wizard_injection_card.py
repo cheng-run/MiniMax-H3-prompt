@@ -221,10 +221,14 @@ def _run_full_flow(tmp_path, monkeypatch, canvases: dict | None = None):
 
 def test_wizard_derives_video_output_without_asking(tmp_path, monkeypatch):
     """AC1/AC2：向导不再出现视频尺寸问答；三元组由画布自动推导并复现当日手选值
-    ——画布 1280×720 推出 16:9 · 0.9MP · 32 → 1280×736。"""
+    ——画布 1280×720 推出 16:9 · 0.9MP · 32 → 1280×736。
+
+    三档都给同一尺寸：#144 D 起推导取**主资产模型自己那档**的画布，不再继承 Z-Image。
+    """
     from minimax_h3_prompt.workflow_config import workflow_settings
 
-    card, asked = _run_full_flow(tmp_path, monkeypatch, {"zimage": (1280, 720)})
+    canvas = {"z_image": (1280, 720), "qwen": (1280, 720), "moss": (1280, 720)}
+    card, asked = _run_full_flow(tmp_path, monkeypatch, canvas)
     for question in asked:
         assert "视频输出" not in question and "生成尺寸" not in question, question
     text = card.read_text(encoding="utf-8")
@@ -239,7 +243,9 @@ def test_derived_triple_lands_in_the_session_brief(tmp_path, monkeypatch):
     """推导三元组回写 brief 并随会话落盘（复审：只落卡不回写＝快照与卡两处对不上账）。"""
     from minimax_h3_prompt.session_store import load_session
 
-    card, _asked = _run_full_flow(tmp_path, monkeypatch, {"zimage": (1280, 720)})
+    card, _asked = _run_full_flow(
+        tmp_path, monkeypatch,
+        {"z_image": (1280, 720), "qwen": (1280, 720), "moss": (1280, 720)})
     session = load_session(card.parent)
     assert session.brief.video_output is not None
     assert (session.brief.video_output.ratio,

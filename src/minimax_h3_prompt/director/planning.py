@@ -471,7 +471,8 @@ def render_give_images(segment: DirectorSegment, mode: str, *,
 
     ``single_segment`` / ``film_end`` 只影响 fl2v 开场的尾帧槽（#147）：全片尾帧在
     单段片子里就是这一段的终点画面，多段时属于最后一段。收口在 ``optional_images_for``
-    里，这里只负责「有就写首+尾、没有就只写首」的措辞，不另判一次段数。
+    里——同一个 ``single_segment and film_end`` 判据在这里再求一次值，只为决定后缀
+    措辞（兑现时不写「（可选）」），不另立一条段数规则。
     """
     required = [_IMAGE_LABELS[token] for token in segment.give_images]
     optional = [f"{_IMAGE_LABELS[token]}{'' if single_segment and film_end else '（可选）'}"

@@ -254,8 +254,10 @@ def resolve_video_output(video_output: VideoOutputParams | None,
     推导源取**主资产模型**（人物档）的画布（issue #146）：资产图生图提示词就按那一档
     出图，视频跟自己的参考图对齐尺寸才有意义。以前写死 ``zimage``——用户把人物切到
     Qwen/MOSS 后，卡上按 Z-Image 的竖幅推导，进 ComfyUI 出的是另一种画幅。
-    本档没选画布时沿用成片画幅（``image_canvas_size`` 的兜底），所以「用户选定优先」
-    在向导只问一次画布的前提下仍然成立。返回值 ``canvas`` 为空 ＝ 声明分支（未经推导）。
+    「用户选定优先」的口径是**资产模型自己的画布**（#144 D）：这一档没被选过就取它的
+    profile 默认（Qwen/MOSS 1920×1088、Z-Image 640×1280），不再继承向导里为 Z-Image
+    选的那张——那会让卡上写着 Z-Image 的竖幅，用户却在 Qwen 工作流里出横幅。返回值
+    ``canvas`` 为空 ＝ 声明分支（未经推导）。
     """
     if video_output is not None:
         return VideoOutputDerivation(video_output, (), None)

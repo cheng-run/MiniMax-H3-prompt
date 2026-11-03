@@ -744,6 +744,47 @@ def test_fl2v_opening_tail_image_only_for_single_segment_with_film_end():
     assert "尾帧" not in multi_line, multi_line
 
 
+def test_i2v_and_fl2v_teach_the_soundscape_rule_in_instruction_and_request():
+    """L2-02（#144 A）：``overall_soundscape`` 不重复对白、唱歌与角色能听到的音乐。
+
+    两处都要写：角色提示词（纪律）和请求的【本段输出外壳】（离产出最近的格式说明）。
+    只写一处时模型挑一处相信——把对白抄进 soundscape 的那一版仍然「看起来合规」。
+    """
+    from minimax_h3_prompt.director.prompts import (
+        build_segment_request,
+        load_instruction,
+        split_ref_sections,
+    )
+
+    rule = "不重复对白、唱歌与角色能听到的音乐"
+    for mode in ("i2v", "fl2v"):
+        assert rule in load_instruction(mode), f"{mode} 的写段指令缺 L2-02 声场规则"
+        plan, segment = _give_image_segment(mode)
+        assert rule in build_segment_request(plan, segment), \
+            f"{mode} 的请求【本段输出外壳】缺 L2-02 声场规则"
+
+    plan = _plan()
+    r2v = build_segment_request(plan, plan.segments[1],
+                                sections=split_ref_sections(_SUBJECT_DEFS))
+    assert rule not in r2v, "r2v 六节外壳带上了三字段的声场规则"
+
+
+def test_common_guidance_wording_splits_guided_and_cut_segments():
+    """common 的段间衔接按段型分叉（#144 A）：引导段靠潜空间引导，切镜段无引导。
+
+    以前 common 无条件写「段间衔接靠潜空间引导」，``camera_cut`` 的包内
+    ``continuityFromPrev=false`` 与这句相反——模型照抄就会写成续接。用 t2v 断言，
+    因为 t2v 小节本身不提段型：这里出现的「切镜段」只可能来自 common。
+    """
+    from minimax_h3_prompt.director.prompts import load_instruction
+
+    for mode in ("t2v", "fl2v"):
+        text = load_instruction(mode)
+        assert "引导段" in text and "潜空间引导" in text, f"{mode} 缺引导段分支"
+        assert "切镜段" in text and "无引导" in text, f"{mode} 缺切镜段无引导的分叉"
+        assert "不承接上一段" in text, f"{mode} 没写切镜段不承接"
+
+
 def test_fl2v_instruction_teaches_the_four_give_image_branches():
     """写段指令按「首+尾 / 仅首 / 仅尾 / 无图」四条分支写，不再一套首尾帧口径通吃。"""
     from minimax_h3_prompt.director.prompts import load_instruction

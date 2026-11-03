@@ -392,11 +392,15 @@ def test_canvas_block_carries_the_user_selected_canvas(monkeypatch):
     也一起绿。系统默认的 640 × 1280 不许再出现——「取代系统钦定的推荐尺寸」的可证面。
     Flux.2 已全链退役（issue #48 AC3）：【画布】块只渲染现存家族，请求里不得再有
     Flux.2 行——变异检验：把 flux2 行放回家族表，这条会红（已实测）。
-    """
-    request = _canvas_request(monkeypatch, {"zimage": (700, 1300)})
 
-    assert "7:13 · 700 × 1300（近竖）" in request, "请求【画布】块没带 Z-Image 的选定画布"
-    assert "构图用竖幅套" in request, "Z-Image 行没有构图分套指示"
+    三档都给同一尺寸：#144 D 起画布只认**本档**的选定值，不再继承 Z-Image 那张；
+    本用例考的是「选定值进请求」，不是继承。
+    """
+    canvases = {"zimage": (700, 1300), "qwen": (700, 1300), "moss": (700, 1300)}
+    request = _canvas_request(monkeypatch, canvases)
+
+    assert "7:13 · 700 × 1300（近竖）" in request, "请求【画布】块没带本档的选定画布"
+    assert "构图用竖幅套" in request, "本档画布行没有构图分套指示"
     assert "Flux.2" not in request and "flux2" not in request, \
         "Flux.2 已退役，请求【画布】块不得再渲染 Flux.2 行"
     assert "640 × 1280" not in request, "选定了画布却还带着系统钦定的推荐尺寸"
@@ -409,13 +413,16 @@ def test_canvas_block_maps_composition_set_by_aspect_family_not_model(monkeypatc
     曾是「zimage=竖幅」的模型旧形状，用户换比例后就说反话。族外（此处 9:21 极端竖）
     必须降通用构图词，且**明说不用两套**——只写「通用」两个字模型仍可能硬套竖幅措辞。
     两次请求、同一模型：分套只看选定画布的画幅族（issue #48 后单模型，靠换比例翻族验证）。
+    三档都给同一尺寸：#144 D 起画布只认本档的选定值。
     """
-    square = _canvas_request(monkeypatch, {"zimage": (1024, 1024)})
+    square = _canvas_request(monkeypatch, {"zimage": (1024, 1024), "qwen": (1024, 1024),
+                                           "moss": (1024, 1024)})
 
-    assert "构图用正方套" in square, "Z-Image 选了 1:1，构图却没落到正方套（还绑着模型旧形状）"
+    assert "构图用正方套" in square, "选了 1:1，构图却没落到正方套（还绑着模型旧形状）"
     assert "构图用竖幅套" not in square, "没人选竖幅族画布，请求里不该出现竖幅套"
 
-    extreme = _canvas_request(monkeypatch, {"zimage": (540, 1260)})
+    extreme = _canvas_request(monkeypatch, {"zimage": (540, 1260), "qwen": (540, 1260),
+                                            "moss": (540, 1260)})
 
     assert "通用构图词" in extreme, "9:21 极端比例没降通用构图词"
     assert "不用竖幅/正方任一套" in extreme, "族外降级没说清「不硬塞任一套」，模型会硬套"
@@ -510,8 +517,11 @@ def test_ref_result_and_render_keep_asset_prompts_and_selected_canvas(tmp_path, 
     """
     state, _, _ = _run_stage1(tmp_path, monkeypatch)
     state["final_prompt"] = "最终视频提示词"
+    # 三档都选同一尺寸（#144 D 起画布只认本档的选定值，不再继承 Z-Image 那张）：
+    # 这条考的是「选定值有没有透传到每一条产物」，不是跨档继承。
     brief = Brief(mode="ref", variant="T2VA", duration=5.0, style="写实", plot=TOPIC,
-                  canvases={"zimage": (700, 1300)})
+                  canvases={"zimage": (700, 1300), "qwen": (700, 1300),
+                            "moss": (700, 1300)})
 
     result = result_from_state(
         state, brief, generation_id="GEN001", topic_id="t", project_id="p")
@@ -633,7 +643,8 @@ def test_products_show_the_user_selected_canvas(tmp_path, monkeypatch):
     """
     state, _, _ = _run_stage1(tmp_path, monkeypatch)
 
-    variants = image_prompt_variants(state, {"zimage": (700, 1300)})
+    variants = image_prompt_variants(
+        state, {"zimage": (700, 1300), "qwen": (700, 1300), "moss": (700, 1300)})
     assert variants, "资产产物是空的"
     for v in variants:
         assert (v.width, v.height) == (700, 1300), f"{v.name} 的产物尺寸不是选定值"
@@ -879,6 +890,7 @@ def test_entry_width_height_cannot_beat_the_selected_canvas(tmp_path, monkeypatc
         entry["width"] = 111
         entry["height"] = 222
 
-    variants = image_prompt_variants(state, {"zimage": (700, 1300)})
+    variants = image_prompt_variants(
+        state, {"zimage": (700, 1300), "qwen": (700, 1300), "moss": (700, 1300)})
     assert all((v.width, v.height) == (700, 1300) for v in variants), \
         "条目残留的尺寸赢了用户选定"

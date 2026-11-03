@@ -490,6 +490,10 @@ def build_segment_request(plan: DirectorPlan, segment: DirectorSegment, *,
         "本段正文必须是三个字段，字段名逐字、顺序固定、节间空一行：\n"
         "`integrated_multimodal_description:` → `overall_soundscape:` → `non_diegetic_music:`。\n"
         "全英文；`<d>` 对白、歌词与画面可见文字保留原语言。不要输出这三节之外的任何段落。\n"
+        # L2-02（#144 A）：声场与正文的分工写在**离产出最近**的地方。只写在角色提示词里
+        # 时，模型仍会把对白与唱歌抄进 soundscape——两处写的是同一件事，缺一处就会漂。
+        "`overall_soundscape:` 只写环境声、动作声与非语言人声，"
+        "不重复对白、唱歌与角色能听到的音乐（它们只写在正文里）。\n"
         if plan.mode != "r2v" else "")
     # 本段给图（#130）：改动前请求里**没有任何**「本段有没有首尾帧图」的信息，而
     # 「有尾帧才写终点构图句」等规则全依赖它。这条事实段表里现成、也有中文渲染，

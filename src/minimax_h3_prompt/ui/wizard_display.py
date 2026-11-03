@@ -280,16 +280,32 @@ def print_tailframe_document(text: str, *, index: int, path: Path,
 
 
 def print_firstframe_prompt(text: str, *, index: int, path: Path,
-                            note: str = "") -> None:
+                            note: str = "", model: str | None = None) -> None:
     """打印切镜段**段首帧**的可复制正文（用户要粘给生图模型）。
 
     与尾帧文档分开：首帧词是文生图的一段正文（没有三段式），粘过去就是一整段；
     加分隔线只是方便整段选中。
+
+    ``model`` 是这份词**写时**的档（#150 AC2，与 ``print_tailframe_document`` 同一口径）：
+    用户据此知道该开哪个工作流。没传时读 sidecar（写词处落的**写时**档，旧词也给对档），
+    旧产物没有 sidecar 才回落当前 ``frame:``——**不能**直接现读配置，那会把旧词标成新档。
     """
     header = f"[首帧] 第 {index} 段可直接复制给生图模型"
     if note:
         header += f"（{note}）"
     print(f"{header}（{path}）：")
+    if model is None:
+        from ..director.frame_meta import read_frame_meta
+        from ..image_config import load_frame_image_model
+
+        model = str((read_frame_meta(path) or {}).get("model") or "") \
+            or load_frame_image_model()
+    if model:
+        # 展示名取配置层的对照表（与出词横幅同源），不另写一份中文名。
+        from ..image_config import IMAGE_MODEL_LABELS
+
+        print(f"本次按 {IMAGE_MODEL_LABELS.get(model, model)}（{model}）档出词："
+              "首帧词按这一档的写词纪律与画布出。")
     print("-" * 60)
     print(text.strip())
     print("-" * 60)

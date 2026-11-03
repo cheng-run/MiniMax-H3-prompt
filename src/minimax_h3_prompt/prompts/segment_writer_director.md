@@ -8,7 +8,7 @@
 
 - **时间窗纪律（最高优先级）**：只写本段时间窗内发生的事。窗外剧情（请求里【时间窗外剧情禁区】列出的其他段）**一个字都不能出现**——违反即本段作废。
 - **禁止指代前文**（as mentioned before / as described earlier / the previous segment 等）：每段是独立执行，模型没有跨段记忆，这类措辞是无效信息。被指代的内容要么写成本段自足的表述，要么不写。
-- **时间轴注记与起止状态句由组装器注入**：不要自己写「Segment N of M, covering …」这类注记，也不要写「This segment begins with …」「This segment ends with …」——导演台没有桥接帧，段间衔接靠潜空间引导，这两句不属于本模式的输出契约。
+- **时间轴注记与起止状态句由组装器注入**：不要自己写「Segment N of M, covering …」这类注记，也不要写「This segment begins with …」「This segment ends with …」——导演台没有桥接帧，段间衔接按段类型分叉：**引导段**（continue / camera_same / ending）靠潜空间引导承接上一段落定画面；**切镜段**（camera_cut）是硬切、无引导、不承接上一段。这两句状态句在两种段型下都不属于本模式的输出契约。
 - **正文时间基相对本段起点**（00:00.000 = 本段第一帧）：`[Shot 1]` 不写时间戳；后续镜头写 `[Shot 2] At 00:0X.XXX, …`。组装器会加上本段在成片里的起点秒，换算成**成片坐标**——所以你不要自己算绝对秒，也不要写超过本段时长的时刻。
 - **不写自创结构**：`GLOBAL_LOCK:` / `BRIDGE_FROM:` / `END_HOOK:` / 首行时长句 / 图片对齐指令行（`For the target video, …` 与 `How the reference pictures align with the target video …`）都属于别的路线。
 - **机位速度按剧情选**：静场、克制段落才用 `Static Shot`；有动作的段写完整的「运动类型 + 幅度 + 速度」自然句，不要把「静态」当默认——全片默认静态会把动作摊平，成片像慢放。
@@ -41,7 +41,7 @@
 
 ## i2v
 
-**三字段外壳与 t2v 相同**（`integrated_multimodal_description:` → `overall_soundscape:` → `non_diegetic_music:`，字段名逐字、顺序固定、节间空行、全英文）；画面正文按官方 I2VA 路径**四段推进**：
+**三字段外壳与 t2v 相同**（`integrated_multimodal_description:` → `overall_soundscape:` → `non_diegetic_music:`，字段名逐字、顺序固定、节间空行、全英文）；`overall_soundscape` 只写环境声、动作声与非语言人声，**不重复对白、唱歌与角色能听到的音乐**（它们只写在正文里）；画面正文按官方 I2VA 路径**四段推进**：
 
 1. **首帧锚点**：第一句先确立首帧参考图里的风格、主体、构图与场景锚点（人物身份、服装、颜色、关键物件、空间关系），再写下一个动作。不要把首帧已经存在的东西当成「将要出现」重写一遍。
 2. **动作起始**：从首帧里那个姿态接着写第一个动作。
@@ -50,7 +50,7 @@
 
 ## fl2v
 
-**三字段外壳与 t2v 相同**（`integrated_multimodal_description:` → `overall_soundscape:` → `non_diegetic_music:`，字段名逐字、顺序固定、节间空行、全英文）；画面正文按官方 FL2VA 路径**四段推进**，并**优先单镜**。
+**三字段外壳与 t2v 相同**（`integrated_multimodal_description:` → `overall_soundscape:` → `non_diegetic_music:`，字段名逐字、顺序固定、节间空行、全英文）；`overall_soundscape` 只写环境声、动作声与非语言人声，**不重复对白、唱歌与角色能听到的音乐**（它们只写在正文里）；画面正文按官方 FL2VA 路径**四段推进**，并**优先单镜**。
 
 **先读请求里的【本段给图】与【本段起点】，按给图走四条分支**（段类型只决定给哪几张图，不能替代请求里的事实行）：
 
