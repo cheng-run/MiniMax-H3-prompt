@@ -50,6 +50,7 @@ FAST_TESTS=(
   tests/test_network_guard.py
   tests/test_script_line_endings.py
   tests/test_adr_guard.py
+  tests/test_doc_pointer_shape.py
 )
 
 # lint 只查**改动过的** src/*.py：ruff 未入库，且全仓历史告警会一次性刷屏；

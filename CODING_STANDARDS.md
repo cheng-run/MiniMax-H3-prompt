@@ -56,7 +56,7 @@
 | 判据 | 真源 |
 | --- | --- |
 | 改 `prompts/*.md` 优先**追加到列表末尾**（行号引用会集体漂且一处都不报错）；必须插中间就逐处挪指针 | auto memory `line-number-citations-drift`（#36 实测 15 处） |
-| 改实现时**同一次提交内**修掉说反话的 docstring / 注释；代码里的文档指针**不带行号**（真源行号会漂且不报错） | 2026-11-01 code-review 实测：`frames.py` docstring 与 `optional_images_for` 相反、`refdefs.py:18` 过度声明、`image_routing.py` 引 `moss.md:11` |
+| 改实现时**同一次提交内**修掉说反话的 docstring / 注释；代码与活文档里的提示词指针**一律不带行号**（真源行号会漂且不报错）；活文档用小节标题锚点，`docs/research/` 历史记录除外 | 2026-11-01 code-review 实测：`frames.py` docstring 与 `optional_images_for` 相反、`refdefs.py:18` 过度声明、`image_routing.py` 引 `moss.md:11`；`tests/test_doc_pointer_shape.py`（retro 2026-11-03 迁移 26 处） |
 | 给模型读的 `.md` 里**不写 HTML 注释**（`load_role_prompt` 逐字读全文，注释会进系统提示词） | 同上 |
 | `CONTEXT.md` 词条＝`**术语**:` + 正文 + `_Avoid_:`，标题行与正文不许错配 | `tests/test_context_glossary.py` |
 
