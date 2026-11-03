@@ -654,11 +654,54 @@ def test_master_count_and_dedup_priority_are_not_in_conflict():
         "设计端配角张数没写成 1–2"
 
     engine = load_role_prompt("image_prompt_engineer")
-    assert "张数照设计端的母版清单" in engine or "张数照清单" in engine, \
-        "出词端没把母版清单当张数来源"
+    assert ("板数照设计端的母版清单" in engine
+            or "张数照设计端的母版清单" in engine
+            or "张数照清单" in engine), "出词端没把母版清单当张数来源"
     assert "去冗余" in engine, "出词端没写去冗余"
     assert "板内视图" in engine and "整张板" in engine, \
         "没写清「去冗余只删板内视图、不删整张板」"
+
+
+def test_character_board_is_one_comprehensive_sheet():
+    """人物默认一张综合板：3 全身 + 3 脸 + 3 表情，删掉细节矩阵类内容（#151）。
+
+    设计端与写词端必须说同一件事：设计端定张数（一张综合板），写词端按它出词。
+    三张母版（身份／表情／服装）只作记忆里的备份，不在这里出现。
+    """
+    from minimax_h3_prompt.agents import load_role_prompt
+
+    designer = load_role_prompt("character_designer")
+    engine = load_role_prompt("image_prompt_engineer")
+
+    for text, side in ((designer, "设计端"), (engine, "写词端")):
+        assert "综合板" in text, f"{side}没写综合板"
+        assert "3 全身" in text and "3 脸" in text and "3 表情" in text, \
+            f"{side}的综合板没写满三类视图"
+        assert "板数照清单" in text, f"{side}没写「板数照清单」"
+        assert "板内视图" in text and "去冗余" in text, f"{side}没写板内去冗余"
+
+    assert "配角" in engine and ("1–2" in engine or "1-2" in engine), "写词端配角不是 1–2"
+    # 删掉的元素必须点名：不写「不画什么」，模型会按旧习惯把它们塞回综合板。
+    for removed in ("色卡", "固定要点", "细节矩阵", "皮肤", "发丝", "手部"):
+        assert removed in engine, f"综合板没写明删掉 {removed}"
+    # 旧的三张母版方案不得残留在提示词里（备份只在记忆）。
+    assert "转身板" not in engine and "大脸板" not in engine
+    assert "身份、表情、服装各一张" not in designer
+
+
+def test_three_master_backup_is_not_referenced_by_code():
+    """三张母版备份只留在用户记忆里，代码与提示词都不接入（#151 AC4）。"""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "src"
+    hits: list[str] = []
+    for path in root.rglob("*"):
+        if path.suffix not in {".py", ".md", ".json"} or not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        if "character-board-three-master" in text or "三张母版" in text:
+            hits.append(str(path.relative_to(root)))
+    assert hits == [], f"三张母版备份被接进代码/提示词：{hits}"
 
 
 # ---------------------------------------------------------------------------
