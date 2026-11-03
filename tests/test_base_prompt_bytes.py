@@ -30,7 +30,11 @@ from minimax_h3_prompt.agents import load_role_prompt
 # 末尾**，既有行号不动（人读文档有 4 处按行号引用这份文件）。同一个关键帧节点，base 与
 # 导演台两条路线的关键帧词**同时变**——这是有意的一次显式决定。上一版哈希：
 # 03f32ec9de273b586c0c292ed28ccfb4c1f537fe24799bbba35f775fc4cabb3e
-_BASE_FRAME_PROMPT_SHA256 = "8897ef01b66257feab0e47f5de65a762b3d144266fd583041575fccae6f03940"
+# 2026-11-03 有意更新（#152）：导演台切镜段的「段首帧」变体写进同一角色（只出 first、
+# 起点不是整片 0.00s、不与尾帧共享 scene_anchor）。共用生图词表仍逐字未动；变体只影响
+# 关键帧角色自己的变体说明，base 的 FL2VA 口径不变。上一版哈希：
+# 8897ef01b66257feab0e47f5de65a762b3d144266fd583041575fccae6f03940
+_BASE_FRAME_PROMPT_SHA256 = "4bd8ebb231929d6909142c134668d196d1a0555f7437dd592d4c28f98851a4d3"
 
 
 def test_base_frame_prompt_is_byte_identical_to_the_pre_change_baseline():

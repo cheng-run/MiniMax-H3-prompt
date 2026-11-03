@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from pathlib import Path
 
 from ..image_config import load_frame_image_model
 from ..text_patterns import AT_TIMESTAMP as _SHOT_TIME
+from .frame_meta import frame_meta_path, sha256_text, write_frame_meta
 from .frames import DirectorSegment
 from .planning import DIRECTOR_DIRNAME
 
@@ -30,6 +32,11 @@ def firstframe_path(session_dir: str | Path, position: int) -> Path:
     """段首帧词的落点：``GENxxx/director/firstframe-NN.md``。"""
     return Path(session_dir) / DIRECTOR_DIRNAME / FIRSTFRAME_FILENAME.format(
         position=position)
+
+
+def firstframe_meta_path(session_dir: str | Path, position: int) -> Path:
+    """段首帧 sidecar 的落点（与正文同名，见 ``frame_meta``）。"""
+    return frame_meta_path(firstframe_path(session_dir, position))
 
 
 def _shot_blocks(shot_table: str) -> list[tuple[int, float, str]]:
@@ -70,18 +77,39 @@ def shot_excerpt_for_window(shot_table: str, start_s: float, end_s: float) -> st
 
 
 def build_firstframe_request(segment: DirectorSegment,
-                             shot_table: str, brief, model: str) -> str:
-    """只问**一帧**的请求：本段起点那一格，不要 last、不要中间节点。"""
+                             shot_table: str, brief, model: str,
+                             *, state: Mapping[str, object] | None = None) -> str:
+    """只问**一帧**的请求：本段起点那一格，不要 last、不要中间节点。
+
+    ``state`` 是阶段 1 的会话状态：分场剧本、人物/道具/背景设计、美术统筹、镜头
+    评审锁定、画面细化、身份一致性锁定都在那里。切镜段是新场景，缺了这些设计事实，
+    模型只能按剧情摘要自己想一个人——那正是 #137 实跑里「新场景换脸换装」的来源
+    （#152）。
+    """
     # 画布／出图模型／场景词三块与关键帧节点同一份真源（节点侧是私有函数，但两边
     # 描述的是同一件事；另写一份就会各漂）。
     from ..graph.nodes import (  # noqa: PLC0415 - 延迟导入，避免入口期拉起图栈
-        _frame_canvas_line, _frame_discipline_block, _frame_model_line,
+        _ctx, _frame_canvas_line, _frame_discipline_block, _frame_model_line,
         _scene_terms_block,
     )
 
+    state = state or {}
     start_s = segment.start_frame / 24.0
     end_s = segment.end_frame / 24.0
     excerpt = shot_excerpt_for_window(shot_table, start_s, end_s)
+    # 八项设计上下文与全片关键帧节点**同名同源**（`state` 键），不另立一套名字：
+    # 另立一套就等于同一份设计有两个读法，改一处漏一处时首帧词会按旧设计写。
+    design_context = _ctx(
+        语言=str(brief.language or ""),
+        分场剧本=str(state.get("script") or ""),
+        人物设计=str(state.get("character_design") or ""),
+        道具设计=str(state.get("prop_design") or ""),
+        背景设计=str(state.get("background_design") or ""),
+        美术统筹=str(state.get("art_design") or ""),
+        镜头评审锁定=str(state.get("shot_review_lock") or ""),
+        画面细化=str(state.get("visual_design") or ""),
+        身份一致性锁定=str(state.get("identity_lock") or ""),
+    )
     return (
         "只生成**一张**静态生图提示词：下面这一段的**段首帧**（本段第一格画面）。\n"
         "本段是切镜段：起点不在上一段终点（换了空间或时间），所以这一帧必须按本段的\n"
@@ -91,7 +119,11 @@ def build_firstframe_request(segment: DirectorSegment,
         f"第 {segment.index} 段（{segment.type}），"
         f"{start_s:.3f}s–{end_s:.3f}s\n"
         f"【本段剧情】{segment.summary}\n"
-        f"【本段落定画面】{segment.end_hook}\n\n"
+        "【本段终点（不要画成首帧）】"
+        f"{segment.end_hook}\n"
+        "（这是本段**结束时**才达到的落定画面，用来说明运动终点；段首帧要画的是"
+        "这一段的**起点**，不要把完成态画进开场。）\n\n"
+        f"{design_context}\n\n"
         f"【本段镜头（分镜表节选）】\n{excerpt}\n\n"
         "【整片分镜表（对照用）】\n"
         f"{shot_table}\n\n"
@@ -114,8 +146,12 @@ def build_firstframe_request(segment: DirectorSegment,
     )
 
 
-def extract_first_prompt(raw: str, model: str) -> str | None:
-    """从角色回复里取出 ``first`` 的正向提示词；取不到返回 ``None``。"""
+def extract_first_frame(raw: str, model: str) -> dict | None:
+    """从角色回复里取出 ``first`` 那一格（含 composition/lighting/negative）。
+
+    返回的是**模型给出的 holder 字典**，不是拼好的正文：正文进可复制文件，其余字段
+    进 sidecar（#152）。取不到返回 ``None``。
+    """
     text = _FENCE.sub("", raw.strip()).strip()
     start, end = text.find("{"), text.rfind("}")
     if start < 0 or end <= start:
@@ -136,28 +172,77 @@ def extract_first_prompt(raw: str, model: str) -> str | None:
         if isinstance(holder, dict):
             prompt = holder.get("positive_prompt")
             if isinstance(prompt, str) and prompt.strip():
-                return prompt.strip()
+                return holder
     return None
+
+
+def extract_first_prompt(raw: str, model: str) -> str | None:
+    """从角色回复里取出 ``first`` 的正向提示词；取不到返回 ``None``。"""
+    frame = extract_first_frame(raw, model)
+    if frame is None:
+        return None
+    return str(frame["positive_prompt"]).strip()
+
+
+def _segment_prompt_text(session_dir: str | Path,
+                         segment: DirectorSegment) -> str | None:
+    """本段视频词原文（provenance 的 ``segment_prompt_sha256`` 用它）；没有就 ``None``。
+
+    读盘口径走 ``prompts.segment_path`` 一处，不在这里再拼一次文件名。
+    """
+    from .prompts import segment_path  # noqa: PLC0415 - 避免入口期拉起写段依赖
+
+    try:
+        return segment_path(session_dir, segment.index).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
 
 
 def write_firstframe_prompt(segment: DirectorSegment, *, llm,
                             shot_table: str, brief, session_dir: str | Path,
-                            model: str | None = None) -> str | None:
-    """为切镜段产出段首帧词并落盘；调用失败返回 ``None``（不写半份）。"""
+                            model: str | None = None,
+                            state: Mapping[str, object] | None = None) -> str | None:
+    """为切镜段产出段首帧词并落盘；调用失败返回 ``None``（不写半份）。
+
+    正文只落正向提示词（用户说「复制给生图模型」的就是这一段）；composition /
+    lighting / negative_prompt 与模型 provenance 落同名 sidecar，见 ``frame_meta``。
+    """
     from ..agents import build_role_agents, run_agent  # noqa: PLC0415
+    from ..tools.image_prompt_discipline import (  # noqa: PLC0415 - 与写词路径同层
+        check_image_prompt, check_self_contained,
+    )
 
     model = model or load_frame_image_model()
     request = build_firstframe_request(
-        segment, shot_table=shot_table, brief=brief, model=model)
+        segment, shot_table=shot_table, brief=brief, model=model, state=state)
     agents = build_role_agents(
         llm, brief.refs, brief.mode, brief.duration, brief.variant)
     raw = run_agent(agents["frame_prompt_engineer"], request)
-    prompt = extract_first_prompt(raw, model)
-    if prompt is None:
+    frame = extract_first_frame(raw, model)
+    if frame is None:
         print("[警告] 段首帧词没有解析出 first 帧的正向提示词，"
               "原文不落盘（半份词比没有更糟）。")
         return None
+    prompt = str(frame["positive_prompt"]).strip()
+    # 警告级、不拦产出（ADR 0018 同口径）：生图纪律按档判，自包含对所有档成立。
+    # 打在产出那一刻，与尾帧词同一位置——等到出站再报，用户已经拿它去生图了。
+    for warning in (*check_image_prompt(prompt, model=model),
+                    *check_self_contained(prompt)):
+        print(f"[警告] 第 {segment.index} 段段首帧词 "
+              f"{warning.code}: {warning.message}", flush=True)
     path = firstframe_path(session_dir, segment.index)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(prompt + "\n", encoding="utf-8")
+    write_frame_meta(path, {
+        "kind": "firstframe",
+        "segment": segment.index,
+        "model": model,
+        "composition": str(frame.get("composition") or ""),
+        "lighting": str(frame.get("lighting") or ""),
+        "negative_prompt": str(frame.get("negative_prompt") or ""),
+        "segment_prompt_sha256": sha256_text(
+            _segment_prompt_text(session_dir, segment)),
+        # 段首帧是文生图，没有起点图；保留字段让首帧/尾帧 sidecar 同形（#153）。
+        "start_image_sha256": None,
+    })
     return prompt

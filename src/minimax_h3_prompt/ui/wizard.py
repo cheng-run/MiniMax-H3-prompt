@@ -1076,7 +1076,10 @@ def _cut_first_frame_prompt(plan, segment, session: SessionState, *, llm) -> str
     try:
         written = write_firstframe_prompt(
             segment, llm=llm, shot_table=shot_table,
-            brief=session.brief, session_dir=session.directory)
+            brief=session.brief, session_dir=session.directory,
+            # 设计上下文只在 stage_state 里（分场剧本/人物/道具/背景/美术/镜头评审/
+            # 画面细化/身份锁定）；不传进来，请求就只剩剧情摘要（#152）。
+            state=session.stage_state)
     except Exception as exc:  # noqa: BLE001 - 病因原样交回，别伪装成别的问题
         print(f"[错误] 第 {segment.index} 段的段首帧提示词写不出来：{exc}")
         return None
