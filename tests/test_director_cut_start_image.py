@@ -80,9 +80,9 @@ def test_camera_cut_tailframe_uses_its_own_first_image(tmp_path, monkeypatch):
 
     def fake_prompt(question: str):
         asked.append(question)
-        return cut_first
+        return str(cut_first)
 
-    monkeypatch.setattr(wizard, "_prompt_optional_image", fake_prompt)
+    monkeypatch.setattr(wizard, "_prompt", fake_prompt)
     monkeypatch.setattr(
         ledger, "passed_director_rows", lambda directory: {1: {"end_image": str(prev_end)}})
     recorded = _capture(monkeypatch)
@@ -93,6 +93,37 @@ def test_camera_cut_tailframe_uses_its_own_first_image(tmp_path, monkeypatch):
     assert any("首帧" in q for q in asked), "切镜段没有问本段首帧路径"
     assert recorded["start_image"] == cut_first, (
         "切镜段的尾帧词参考图仍是上一段终点图，不是本段首帧")
+
+
+def test_camera_cut_first_image_path_is_required_and_reasks(tmp_path, monkeypatch):
+    """#149：切镜首帧路径必填——空输入讲清后果后重问，不退回上一段终点图。"""
+    from minimax_h3_prompt.director import ledger
+    from minimax_h3_prompt.ui import wizard
+
+    plan = _plan()
+    segment = plan.segments[1]
+    cut_first = tmp_path / "cut-first.png"
+    cut_first.write_bytes(b"first")
+    prev_end = tmp_path / "prev-end.png"
+    prev_end.write_bytes(b"end")
+    answers = ["", str(cut_first)]
+
+    asked: list[str] = []
+
+    def fake_prompt(question: str):
+        asked.append(question)
+        return answers.pop(0)
+
+    monkeypatch.setattr(wizard, "_prompt", fake_prompt)
+    monkeypatch.setattr(
+        ledger, "passed_director_rows", lambda directory: {1: {"end_image": str(prev_end)}})
+    recorded = _capture(monkeypatch)
+
+    assert wizard._write_director_tailframe(
+        plan, segment, _session(tmp_path), llm=object()) is True
+
+    assert len(asked) == 2, "空输入没有重问"
+    assert recorded["start_image"] == cut_first, "重问后仍没把本段首帧交给写词"
 
 
 def test_guided_segment_keeps_using_the_previous_end_image(tmp_path, monkeypatch):
@@ -108,7 +139,7 @@ def test_guided_segment_keeps_using_the_previous_end_image(tmp_path, monkeypatch
 
     def fake_prompt(question: str):
         asked.append(question)
-        return None
+        return ""
 
     monkeypatch.setattr(wizard, "_prompt_optional_image", fake_prompt)
     monkeypatch.setattr(
@@ -120,3 +151,54 @@ def test_guided_segment_keeps_using_the_previous_end_image(tmp_path, monkeypatch
     assert ok is True
     assert not any("首帧" in q for q in asked), "引导段不该问本段首帧"
     assert recorded["start_image"] == prev_end
+
+
+def test_ending_prefers_the_film_end_still_and_skips_the_tailframe_word(
+        tmp_path, monkeypatch, capsys):
+    """#149：盘上有全片尾帧时，ending 直接挂它——不再产出尾帧词，旧词注明不采用。"""
+    from minimax_h3_prompt.director import tailframe
+    from minimax_h3_prompt.director.tailframe import tailframe_path
+    from minimax_h3_prompt.ui import wizard
+
+    plan = _plan()
+    ending = plan.segments[2]
+    assets = tmp_path / "director" / "assets"
+    assets.mkdir(parents=True)
+    film_end = assets / "film-end.png"
+    film_end.write_bytes(b"film end")
+    old_word = tailframe_path(tmp_path, ending.index)
+    old_word.parent.mkdir(parents=True, exist_ok=True)
+    old_word.write_text("旧的尾帧词", encoding="utf-8")
+
+    def fail_write(*args, **kwargs):  # 全片尾帧优先时不应再调用写词
+        raise AssertionError("ending 已有全片尾帧，却仍然产出尾帧词")
+
+    monkeypatch.setattr(tailframe, "write_tailframe_prompts", fail_write)
+
+    assert wizard._write_director_tailframe(
+        plan, ending, _session(tmp_path), llm=object()) is True
+
+    out = capsys.readouterr().out
+    assert "全片尾帧" in out and str(film_end) in out
+    assert "不采用" in out and str(old_word) in out, "旧尾帧词没有注明不采用"
+    assert "旧的尾帧词" not in out, "旧词正文不该再被当作可复制内容打出来"
+
+
+def test_ending_without_film_end_still_writes_the_tailframe_word(tmp_path, monkeypatch):
+    """没有全片尾帧时才走尾帧词——film-end 优先不能把正常路径也跳掉。"""
+    from minimax_h3_prompt.director import ledger
+    from minimax_h3_prompt.ui import wizard
+
+    plan = _plan()
+    ending = plan.segments[2]
+    prev_end = tmp_path / "prev-end.png"
+    prev_end.write_bytes(b"end")
+    monkeypatch.setattr(ledger, "passed_director_rows",
+                        lambda directory: {2: {"end_image": str(prev_end)}})
+    monkeypatch.setattr(wizard, "_prompt_optional_image", lambda question: "")
+    recorded = _capture(monkeypatch)
+
+    assert wizard._write_director_tailframe(
+        plan, ending, _session(tmp_path), llm=object()) is True
+    assert recorded["start_image"] == prev_end
+

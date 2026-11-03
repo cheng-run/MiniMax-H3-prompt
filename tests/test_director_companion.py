@@ -736,7 +736,8 @@ def _plan_types(types: tuple[str, ...], *, mode: str = "t2v"):
     return DirectorPlan(mode=mode, total_frames=cursor, segments=tuple(segments))
 
 
-def _director_session(tmp_path: Path, types: tuple[str, ...] = ("opening", "continue")):
+def _director_session(tmp_path: Path, types: tuple[str, ...] = ("opening", "continue"),
+                      *, mode: str = "t2v"):
     """落一张段表 + 段提示词文件，返回「陪跑进行中」的会话（模拟续跑读到的东西）。"""
     from minimax_h3_prompt.director.planning import plan_path, write_plan_json
     from minimax_h3_prompt.director.prompts import segment_path
@@ -745,14 +746,16 @@ def _director_session(tmp_path: Path, types: tuple[str, ...] = ("opening", "cont
     )
 
     directory = tmp_path / "GEN001"
-    plan = _plan_types(types)
+    plan = _plan_types(types, mode=mode)
     write_plan_json(plan_path(directory), plan)
     for segment in plan.segments:
         path = segment_path(directory, segment.index)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"段 {segment.index} 的提示词\n", encoding="utf-8")
-    return SessionState(directory=directory, brief=_director_brief(),
+    return SessionState(directory=directory,
+                        brief=_director_brief(director_mode=mode),
                         stage_state={}, status=STATUS_DIRECTOR_SEGMENTS_RUNNING)
+
 
 
 def _cache_dir_for(config, brief) -> Path:
@@ -862,6 +865,71 @@ def test_handoff_passes_every_segment_and_records_the_ledger(tmp_path, monkeypat
     assert rows[1]["cache"] is None and rows[1]["sha256"] is None
     assert rows[2]["actual_frames"] == 153
     assert Path(rows[2]["video"]) == film_two.resolve()
+
+
+def test_r2v_camera_cut_gets_no_firstframe_prompt(tmp_path, monkeypatch, capsys):
+    """#149：r2v 的 camera_cut 没有首帧槽——不产首帧词，也不提示挂首帧。"""
+    from minimax_h3_prompt.director.firstframe import firstframe_path
+    from minimax_h3_prompt.ui import wizard
+
+    session = _director_session(tmp_path, ("opening", "camera_cut"), mode="r2v")
+    config = _run_config(monkeypatch, tmp_path)
+    # r2v 两段都是无引导段：导出帧＝声明帧 107。
+    film_one = _write_ffv1_mkv(tmp_path / "film-01.mkv", 107)
+    film_two = _write_ffv1_mkv(tmp_path / "film-02.mkv", 107)
+
+    def fake_prompt(text: str) -> str:
+        if _is_segment_question(text):
+            return str(film_one) if "第 1/2 段" in text else str(film_two)
+        if "成片 mp4 路径" in text:
+            return "q"
+        return ""
+
+    monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
+    monkeypatch.setattr(wizard, "_prompt", fake_prompt)
+
+    assert wizard._resume_director_handoff(config, session) == 0
+
+    out = capsys.readouterr().out
+    assert "段首帧" not in out, "r2v 的切镜段没有首帧槽，不该产生首帧词"
+    assert "挂**首帧**" not in out, "r2v 不该提示去挂一张不存在的首帧图"
+    assert not firstframe_path(session.directory, 2).exists()
+
+
+def test_cut_first_frame_path_q_stops_cleanly_with_code_zero(
+        tmp_path, monkeypatch, capsys):
+    """#149：切镜首帧路径问到时输入 q＝干净停下（退出码 0），不回退上一段终点图。"""
+    from minimax_h3_prompt.director import ledger
+    from minimax_h3_prompt.director.firstframe import firstframe_path
+    from minimax_h3_prompt.ui import wizard
+
+    session = _director_session(tmp_path, ("opening", "camera_cut"), mode="fl2v")
+    config = _run_config(monkeypatch, tmp_path)
+    film_one = _write_ffv1_mkv(tmp_path / "film-01.mkv", 107)
+    # 段首帧词已在盘上：跳过写词（否则会真建模型），直接走到「贴首帧图」那一问。
+    cut_word = firstframe_path(session.directory, 2)
+    cut_word.parent.mkdir(parents=True, exist_ok=True)
+    cut_word.write_text("A rider under the awning.", encoding="utf-8")
+    asked: list[str] = []
+
+    def fake_prompt(text: str) -> str:
+        asked.append(text)
+        if _is_segment_question(text):
+            return str(film_one)
+        if "首帧路径" in text:
+            return "q"
+        return ""
+
+    monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
+    monkeypatch.setattr(wizard, "_prompt", fake_prompt)
+
+    assert wizard._resume_director_handoff(config, session, llm=object()) == 0
+
+    out = capsys.readouterr().out
+    assert "停在" in out and "不落账" in out
+    assert any("首帧路径" in question for question in asked)
+    rows = ledger.passed_director_rows(session.directory)
+    assert sorted(rows) == [1], "第 2 段在拿到首帧图之前就停下了，不该落账"
 
 
 def test_handoff_refuses_a_mistaken_selection_then_accepts_the_rerun(

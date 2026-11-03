@@ -37,7 +37,7 @@ def render_director_segment_briefing(plan, segment, session_dir: Path,
     单段计划（i2v）不印这一行：插件根本不为单段写缓存（2026-10-30 现场目录都不存在），
     印一个永远不存在的路径只会误导。
     """
-    from ..director.frames import needs_first_frame_image
+    from ..director.frames import FIRST_SEGMENT_TYPE, needs_first_frame_image
     from ..director.planning import render_give_images
     from ..director.prompts import segment_path
     from ..director.tailframe import needs_tailframe
@@ -61,9 +61,11 @@ def render_director_segment_briefing(plan, segment, session_dir: Path,
             prompt_path.read_text(encoding="utf-8").strip(),
             "-" * 60,
         ]
-    if needs_first_frame_image(segment.type, plan.mode):
-        # 判据与给图契约同源（#145）：fl2v 的 camera_cut 有首帧槽，r2v 的同一类型
-        # 没有——照类型名判会让 r2v 用户去找一张不存在、也挂不上的首帧图。
+    if segment.type != FIRST_SEGMENT_TYPE and needs_first_frame_image(
+            segment.type, plan.mode):
+        # 判据与给图契约同源（#145），再排除全片开场：opening 的首帧由阶段 1 全片
+        # 首帧承担，段号也没有上一段可关引导。fl2v 的 camera_cut 有首帧槽，r2v 的
+        # 同一类型没有——照类型名判会让 r2v 用户去找一张不存在、也挂不上的首帧图。
         # P4（2026-11-02 验收）：切镜段关引导。包内 continuityFromPrev=false，
         # 但 ComfyUI 里若被勾成「引用上段」，这一段会多出 12 帧「保完整」尾，
         # 帧数判定必挂（#137 段2 实测 136 帧 vs 应出 124）。

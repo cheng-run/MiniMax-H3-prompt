@@ -88,3 +88,15 @@ def test_r2v_cut_segment_briefing_does_not_ask_for_a_first_frame(tmp_path):
     fl2v_text = _render_director_segment_briefing(
         fl2v_plan, fl2v_plan.segments[1], tmp_path)
     assert "挂**首帧**" in fl2v_text, "fl2v 的切镜段必须提示挂首帧"
+
+
+def test_opening_segment_briefing_does_not_ask_for_a_segment_first_frame(tmp_path):
+    """开场段有首帧槽，但那张是全片首帧（阶段 1 已收过），不是「段首帧」。"""
+    from minimax_h3_prompt.ui.wizard import _render_director_segment_briefing
+
+    plan = _plan()
+    _plant_segment(tmp_path, 1, "integrated_multimodal_description: [Shot 1] 开场")
+    text = _render_director_segment_briefing(plan, plan.segments[0], tmp_path)
+
+    assert "挂**首帧**" not in text
+    assert "本段是切镜段" not in text
