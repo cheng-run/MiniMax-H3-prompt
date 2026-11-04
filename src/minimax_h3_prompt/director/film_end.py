@@ -34,8 +34,11 @@ def render_film_end_block(description: str, *, for_planning: bool = False) -> st
     ``for_planning`` 只改「拿它来做什么」那半句（规划最后一段的边界与落定画面 /
     写本段正文），判据与文案仍是同一处，避免两个消费者各自写一套终点口径。
     """
-    target = ("规划最后一段（ending）的边界、summary 与 end_hook 时"
-              if for_planning else "写本段正文时")
+    # 不写死 ``ending``：单段 fl2v 的整片只有一段、类型是 ``opening``，它同样是
+    # 用户那张尾帧图对应的终点（#157 复审）。两个类型都点名，模型才不会在单段时
+    # 找不到「最后一段」。
+    target = ("规划最后一段（多段是 ending，单段 fl2v 是 opening）的边界、"
+              "summary 与 end_hook 时" if for_planning else "写本段正文时")
     return (
         f"\n{FILM_END_BLOCK_HEAD}\n"
         f"终点以这张图为据：全片最后一帧就是图上的画面。{target}以它为准；"

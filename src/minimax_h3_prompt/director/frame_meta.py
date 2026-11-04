@@ -6,7 +6,9 @@
 只留在文件里）。但字段又必须与正文**同生共死**：正文换了、字段不换，就成了「挂着
 一档的牌子、字段按另一档写」。
 
-sidecar 与正文同名同目录：``firstframe-02.md`` ↔ ``firstframe-02.meta.json``。
+sidecar 与被描述文件同名同目录：``firstframe-02.md`` ↔ ``firstframe-02.meta.json``。
+被描述文件既可能是提示词正文（段首帧词），也可能是图片（全片尾帧的读图结果，
+``film-end.png`` ↔ ``film-end.meta.json``）——本模块只按路径换算文件名，不假设内容类型。
 """
 from __future__ import annotations
 
@@ -37,7 +39,11 @@ def sha256_file(path: str | Path | None) -> str | None:
 
 
 def frame_meta_path(prompt_path: str | Path) -> Path:
-    """正文路径 → sidecar 路径（同名换扩展名，不另立一套编号）。"""
+    """被描述文件的路径 → sidecar 路径（同名换扩展名，不另立一套编号）。
+
+    入参名沿用 ``prompt_path`` 是历史命名：调用方也会传**图片路径**（全片尾帧读图），
+    所以本函数只看文件名，不看后缀语义。
+    """
     path = Path(prompt_path)
     return path.with_name(path.stem + META_SUFFIX)
 

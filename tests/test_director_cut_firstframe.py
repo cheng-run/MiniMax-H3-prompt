@@ -276,3 +276,32 @@ def test_firstframe_sidecar_records_the_segment_prompt_fingerprint(tmp_path, mon
     assert meta["start_image_sha256"] is None
 
 
+def test_rewriting_the_firstframe_prompt_keeps_the_recorded_image_path(
+        tmp_path, monkeypatch):
+    """#157 复审：重写首帧词不许抹掉 #158 记的挂图路径。
+
+    路径与正文同生共死：续跑时尾帧词已在盘上会早退、不再问首帧图，sidecar 里这条
+    路径就是画幅核对仅剩的来源。整份覆盖会让核对静默回落到关键帧画布。
+    """
+    import json
+
+    from minimax_h3_prompt import agents
+    from minimax_h3_prompt.director import firstframe
+
+    monkeypatch.setattr(agents, "build_role_agents", lambda *a, **k: {
+        "frame_prompt_engineer": object()})
+    monkeypatch.setattr(
+        agents, "run_agent",
+        lambda agent, request: '{"first": {"qwen": {"positive_prompt": "A rider."}}}')
+
+    firstframe.record_first_frame_image(tmp_path, 2, "D:/frames/cut-2.png")
+    firstframe.write_firstframe_prompt(
+        _segment(), llm=object(), shot_table=_SHOT_TABLE,
+        brief=_brief(), session_dir=tmp_path, model="qwen")
+
+    meta = json.loads(
+        firstframe.firstframe_meta_path(tmp_path, 2).read_text(encoding="utf-8"))
+    assert meta[firstframe.FIRST_FRAME_IMAGE_FIELD] == "D:/frames/cut-2.png"
+    assert meta["model"] == "qwen", "本次 provenance 仍要写进同一个 sidecar"
+
+

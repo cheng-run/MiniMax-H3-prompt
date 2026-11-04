@@ -262,6 +262,24 @@ def test_planner_does_not_inject_for_other_modes_or_without_a_description():
     assert _DESCRIPTION not in llm.requests[0], "t2v 没有全片尾帧，不该注入"
 
 
+def test_planning_wording_also_covers_the_single_segment_fl2v_case():
+    """#157 复审：规划最后一段的措辞不许写死 ``ending``。
+
+    单段 fl2v 的整片只有一段，类型是 ``opening``，它同样是这段的终点；写死
+    ``ending`` 会让模型以为「最后一段」在单段时不存在。
+    """
+    from minimax_h3_prompt.director.film_end import render_film_end_block
+
+    block = render_film_end_block(_DESCRIPTION, for_planning=True)
+    assert "ending" in block, "多段时最后一段是 ending"
+    assert "opening" in block, "单段 fl2v 的最后一段是 opening，措辞必须覆盖它"
+
+    # 写段那一半说的是「写本段正文」，不该自称在规划最后一段。
+    writer = render_film_end_block(_DESCRIPTION)
+    assert "写本段正文" in writer
+    assert "规划最后一段" not in writer
+
+
 def test_writer_injects_the_description_only_into_the_ending_request(tmp_path):
     """写段：只有 ending 段的请求带描述；前面的段不重复这份终点约束。"""
     from minimax_h3_prompt.director.prompts import write_director_segments

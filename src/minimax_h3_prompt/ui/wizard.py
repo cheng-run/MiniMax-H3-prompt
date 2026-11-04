@@ -772,18 +772,17 @@ def _run_director_flow(session: SessionState) -> int:
         return 1
     # #158：画幅预检排在**收图与问打包参数之前**——比例对不上时先让用户决定要不要
     # 继续，别让他先准备首帧、再答三问，最后才被告知锚点会被裁。
-    # 只在这两条路线解析期望/实际值：其余模式不参与核对，不必去碰帧生图配置。
-    if brief.director_mode in ("i2v", "fl2v"):
+    # 模式闸与期望画布都从 `aspect_flow` 派生（#157 复审），不在这里重抄一份清单。
+    from ..director.aspect_flow import PRECHECK_MODES, frame_canvas
+
+    if brief.director_mode in PRECHECK_MODES:
         from ..config import config as app_config
-        from ..generation import frame_canvas_size
-        from ..image_config import load_frame_image_model
         from .wizard_director import confirm_aspect
 
         settings = app_config.director_settings()
         if not confirm_aspect(
                 brief.director_mode,
-                frame_canvas=frame_canvas_size(
-                    load_frame_image_model(), brief.canvases),
+                frame_canvas=frame_canvas(brief.canvases),
                 declared=(settings.width, settings.height),
                 ask=_prompt):
             print("停在段规划之前：画幅比例对不上，没有生成段表，也没有调用模型。")
@@ -858,8 +857,8 @@ def _run_director_flow(session: SessionState) -> int:
 
     film_end = (brief.director_mode == "fl2v"
                 and film_end_still(session.directory) is not None)
-    ok, film_end_description = (
-        prepare_film_end_description(session.directory) if film_end else (True, ""))
+    # 不前置 `film_end` 闸：没有图时取描述口自己返回 (True, "")（#157 复审）。
+    ok, film_end_description = prepare_film_end_description(session.directory)
     if not ok:
         print("  已停下：没有做段规划、没有写段。")
         return 1
@@ -1299,8 +1298,8 @@ def _rewrite_director_segment_round(plan, segment, session: SessionState, *,
 
     film_end = (plan.mode == "fl2v"
                 and film_end_still(session.directory) is not None)
-    ok, film_end_description = (
-        prepare_film_end_description(session.directory) if film_end else (True, ""))
+    # 同首写路径：没有图时取描述口自己返回 (True, "")，不再前置一次闸（#157 复审）。
+    ok, film_end_description = prepare_film_end_description(session.directory)
     if not ok:
         print("  本轮改词没有执行，本段提示词保持原样；可重选出路（贴视频 / 再按 e / q）。")
         return "retry"

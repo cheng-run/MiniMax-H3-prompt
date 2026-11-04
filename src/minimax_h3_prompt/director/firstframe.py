@@ -259,7 +259,12 @@ def write_firstframe_prompt(segment: DirectorSegment, *, llm,
     path = firstframe_path(session_dir, segment.index)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(prompt + "\n", encoding="utf-8")
-    write_frame_meta(path, {
+    # 先合并既有字段再写：sidecar 的契约是「与正文同生共死」，不是「这一次写什么
+    # 就只剩什么」。#158 把用户挂过的首帧图路径记在同一份 sidecar 里，整份覆盖会
+    # 静默抹掉它——续跑时尾帧词已在盘上会早退、不再问首帧图，画幅核对就只剩
+    # 「元信息缺失」可回落。未知字段一并保留，别的写口将来加字段也不被这里吃掉。
+    meta = read_frame_meta(path) or {}
+    meta.update({
         "kind": "firstframe",
         "segment": segment.index,
         "model": model,
@@ -271,4 +276,5 @@ def write_firstframe_prompt(segment: DirectorSegment, *, llm,
         # 段首帧是文生图，没有起点图；保留字段让首帧/尾帧 sidecar 同形（#153）。
         "start_image_sha256": None,
     })
+    write_frame_meta(path, meta)
     return prompt

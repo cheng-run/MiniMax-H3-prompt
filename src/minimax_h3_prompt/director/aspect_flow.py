@@ -1,15 +1,16 @@
 """画幅核对的流程胶水（issue #158）：把纯判定接到导演台的两处真实读取口。
 
-为什么与 ``aspect`` 分开：``aspect`` 只放纯函数，谁也不依赖；这里要读导演包落点、
-段首帧 sidecar、关键帧画布与视频元信息，还要生成给用户看的整段文案。混在一个模块里，
-纯函数的用例就得为「文件读不到」「配置缺失」造一堆桩。
+为什么与纯判定模块（``aspect``）分开：那边只放纯函数，谁也不依赖；这里要读导演包
+落点、段首帧 sidecar、关键帧画布与视频元信息，还要生成给用户看的整段文案。混在
+一个模块里，纯函数的用例就得为「文件读不到」「配置缺失」造一堆桩。
 
-两处调用（段规划前的预检、贴回成片时的核对）都从这里取文案，判定仍只住 ``aspect``。
+两处调用（段规划前的预检、贴回成片时的核对）都从这里取文案，判定仍只住纯判定模块。
 """
 from __future__ import annotations
 
 from pathlib import Path
 
+from ..brief_parser import CanvasMap
 from .aspect import check_aspect, image_size
 from .firstframe import FIRST_FRAME_IMAGE_FIELD, firstframe_path
 from .frame_meta import read_frame_meta
@@ -18,7 +19,19 @@ from .pack import film_end_still, start_still
 
 PRECHECK_MODES = ("i2v", "fl2v")
 """画幅核对只在 i2v／fl2v 触发：t2v 没有关键帧可裁，r2v 的参考图不是锚点——拿帧生图
-画布当期望值会把正常竖片全判成超差。"""
+画布当期望值会把正常竖片全判成超差。**模式闸只住这里一处**，向导预检从这里派生。"""
+
+
+def frame_canvas(canvases: CanvasMap | None = None) -> tuple[int, int]:
+    """关键帧生图模型在当前会话画布表下的生效画布（宽, 高）。
+
+    预检（``wizard``）与回贴核对（``expected_output_frame``）都拿它当回落值：同一份
+    期望画幅只许有一个算法，否则两处会各算一套（#157 复审）。
+    """
+    from ..generation import frame_canvas_size
+    from ..image_config import load_frame_image_model
+
+    return frame_canvas_size(load_frame_image_model(), canvases)
 
 
 def _anchor_frame(
@@ -53,17 +66,13 @@ def _anchor_frame(
 
 def expected_output_frame(
     *, mode: str, segment_index: int, segment_type: str,
-    directory: str | Path, canvases,
+    directory: str | Path, canvases: CanvasMap | None = None,
 ) -> tuple[tuple[int, int], str]:
     """本段成片的期望宽高与来源：有锚图用锚图，没有锚图回落关键帧生图模型的画布。"""
     anchor = _anchor_frame(mode, segment_index, segment_type, Path(directory))
     if anchor is not None:
         return anchor
-    from ..generation import frame_canvas_size
-    from ..image_config import load_frame_image_model
-
-    return (frame_canvas_size(load_frame_image_model(), canvases),
-            "关键帧生图模型的生效画布")
+    return frame_canvas(canvases), "关键帧生图模型的生效画布"
 
 
 def precheck_message(
@@ -94,7 +103,7 @@ def precheck_message(
 
 def output_aspect_verdict(
     *, mode: str, segment_index: int, segment_type: str, video: Path,
-    directory: str | Path, canvases,
+    directory: str | Path, canvases: CanvasMap | None = None,
 ) -> tuple[bool, str | None]:
     """贴回成片的画幅核对：``(是否放行, 要打印的提示)``。
 

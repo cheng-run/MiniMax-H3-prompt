@@ -1,7 +1,7 @@
 """导演台陪跑用到的向导小件（issue #158）：模型构造与画幅预检。
 
-与 ``wizard_display.py`` 的分工：那边只拼字符串；这里要建客户端、要问一句并等回车，
-属于「编排的边角」。放在这里是为了让 6000 行的 ``wizard.py`` 不再增长
+与显示小件（``wizard_display.py``）的分工：那边只拼字符串；这里要建客户端、要问
+一句并等回车，属于「编排的边角」。放在这里是为了让 6000 行的 ``wizard.py`` 不再增长
 （``tests/test_wizard_size.py`` 的闸）；问答入口由调用方注入（``ask``），所以本模块
 不依赖 ``wizard``、也不会形成环。
 """
@@ -23,8 +23,9 @@ def store_director_still(source: Path, generation_dir: Path, stem: str, *,
     段目录——写进 ``assets/01/`` 就会被打包成第 1 段的终点画面（2026-10-30 实跑：
     4 段各 5 秒的片子，第 1 段被要求从雾中远景直接跑到 20 秒处的隧道深处）。
 
-    同一 stem 的**其他扩展名要清掉**：``pack._find_still`` 按扩展名偏好取第一张，
-    留着上次的 ``start.png`` 会让这次交的 ``start.jpg`` 静默失效（用户以为换了图）。
+    同一 stem 的**其他扩展名要清掉**：打包器的取图口（``pack._find_still``）按扩展名
+    偏好取第一张，留着上次的 ``start.png`` 会让这次交的 ``start.jpg`` 静默失效（用户
+    以为换了图）。
 
     从 ``wizard.py`` 搬来（#160）：那是 6000 行的编排文件，``test_wizard_size.py``
     要求新逻辑要么搬出去、要么用等量搬迁换；本函数只做文件落点，不依赖向导状态。
@@ -102,5 +103,12 @@ def confirm_aspect(
         return True
     print(message)
     # 问题里带「画幅」：流程测试按问题文本作答（本仓纪律），换一种问法也要匹配得上。
-    answer = ask("画幅比例超差：回车继续（我知悉锚点会被裁）；q 停下：")
-    return answer.strip().lower() not in ("q", "quit")
+    while True:
+        answer = ask("画幅比例超差：回车继续（我知悉锚点会被裁）；q 停下：")
+        # 只有**空回车**是放行口：任何非 q 输入都继续，等于把「n／乱码」当成同意
+        # （#157 复审）——用户按下回车那一刻才表示「我知道会裁，仍要往下走」。
+        if not answer.strip():
+            return True
+        if answer.strip().lower() in ("q", "quit"):
+            return False
+        print("回车＝继续；q＝停下（其它输入不生效）。")

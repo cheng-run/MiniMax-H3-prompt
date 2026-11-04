@@ -68,18 +68,34 @@ def test_precheck_does_not_run_for_r2v_t2v_or_matching_canvases():
 
 
 def test_precheck_requires_an_explicit_green_light(capsys):
-    """超差时必须回车才继续，``q`` 停下（大写也算）；空回车是唯一放行口。"""
+    """超差时空回车是唯一放行口；``q``/``quit`` 停下；其余输入必须被重问。
+
+    #157 复审：任何非 ``q`` 输入都放行等于把「乱码／n」当成同意——票面要的是
+    **显式回车**。这里按序列作答，钉住「重问」这一步，而不只钉返回值。
+    """
     from minimax_h3_prompt.ui.wizard_director import confirm_aspect
 
-    answers = {"": True, "q": False, "Q": False, "继续": True}
-    for answer, expected in answers.items():
-        assert confirm_aspect(
-            "fl2v", frame_canvas=(1920, 1088), declared=(736, 1280),
-            ask=lambda text, answer=answer: answer) is expected
+    asked: list[str] = []
+    answers = iter(["继续", "n", ""])
+
+    def ask(text: str) -> str:
+        asked.append(text)
+        return next(answers)
+
+    assert confirm_aspect(
+        "fl2v", frame_canvas=(1920, 1088), declared=(736, 1280),
+        ask=ask) is True
+    assert len(asked) == 3, "非放行输入必须重问，只有空回车才继续"
 
     out = capsys.readouterr().out
     assert "1920×1088" in out and "736×1280" in out
     assert "锚点会被裁" in out
+    assert "回车" in out and "q" in out, "重问时要告诉用户哪个键放行、哪个键停下"
+
+    for stop in ("q", "Q", "quit", "Quit"):
+        assert confirm_aspect(
+            "fl2v", frame_canvas=(1920, 1088), declared=(736, 1280),
+            ask=lambda text, answer=stop: answer) is False
 
 
 def test_missing_video_metadata_passes_with_a_warning(tmp_path, capsys):
