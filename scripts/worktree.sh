@@ -110,6 +110,11 @@ case "${1:-}" in
     git -C "$MAIN_ROOT" worktree add "$target" -b "$branch" "$base"
 
     missing=()
+    # 补进来的未跟踪文件要记一笔：它们是脚本带进工作树的（当天调研笔记等），
+    # remove 时若仍与主树逐字节相同就清掉，否则脏检查会拒绝删除脚本自己的副本
+    # （2026-11-04 实测：add 带入未跟踪问卷，remove 被自己的副本拦下）。
+    backfilled="$MAIN_ROOT/worktree/.backfilled-$id"
+    : > "$backfilled"
     # docs/ 也复制：规格与设计文档住在 docs/design/，不复制的话，工作树里的实现
     # 代理看不到票面指向的规格（2026-11-01 retro：协调会话只能给每个代理手写主树
     # 绝对路径）。
@@ -128,25 +133,29 @@ case "${1:-}" in
         while IFS= read -r -d '' rel; do
           mkdir -p "$target/$(dirname "$rel")"
           cp -p "$MAIN_ROOT/$rel" "$target/$rel"
+          printf '%s\n' "$rel" >> "$backfilled"
         done < <(git -C "$MAIN_ROOT" ls-files --others --exclude-standard -z -- "$dir")
       else
         cp -r "$MAIN_ROOT/$dir" "$target/$dir"
       fi
     done
 
-    # tests 基线快照：harvest 靠它区分「这张票改的」与「主树后来多的」。
-    # 放 worktree/ 下——整目录已 gitignore，pytest 的 testpaths 也只收 tests/。
-    if [ -d "$MAIN_ROOT/tests" ]; then
+    # tests 基线快照只在 tests 仍是未跟踪副本时需要（harvest 靠它区分「这张票改的」
+    # 与「主树后来多的」）。2026-11-02 起已入库，git 自己管，快照只会占盘。
+    base_snapshot=""
+    if [ -d "$MAIN_ROOT/tests" ] \
+        && [ -z "$(git -C "$MAIN_ROOT" ls-files -- tests | head -1)" ]; then
       rm -rf "$MAIN_ROOT/worktree/.base-$id"
       mkdir -p "$MAIN_ROOT/worktree/.base-$id"
       cp -r "$MAIN_ROOT/tests" "$MAIN_ROOT/worktree/.base-$id/tests"
+      base_snapshot="$MAIN_ROOT/worktree/.base-$id/tests"
     fi
 
     cat <<EOF
 已建工作树：$target
   分支：$branch（基线 $base）
   tests/scripts/docs：$([ ${#missing[@]} -eq 0 ] && echo "已复制" || echo "主树缺 ${missing[*]}（本仓只发布 src，开发机需自备）")
-  tests 基线快照：$MAIN_ROOT/worktree/.base-$id/tests（remove 时自动 harvest）
+  tests 基线快照：${base_snapshot:-tests 已入库，跳过（git 管测试改动）}
 
 测试命令（在任意目录执行）：
   cd "$target"
@@ -171,7 +180,6 @@ EOF
       exit 1
     fi
 
-    # 先收割测试改动，再同步主树最新副本：tests/ 不入库，工作树里的用例改动不随
     # 2026-11-02 起 tests/ 已入库：git 自己管它，harvest 与「刷新主树副本」都不再
     # 需要。刷新反而会把工作树弄脏——主树带着别的票的测试改动时，刷新后的副本与
     # 本票分支不一致，紧接着的脏检查会拒绝删除（#159 实测：remove 被自己的刷新拦住）。
@@ -187,6 +195,20 @@ EOF
       }
       rm -rf "$target/tests"
       cp -r "$MAIN_ROOT/tests" "$target/tests"
+    fi
+
+    # add 时补进工作树的未跟踪文件（当天调研笔记等）由脚本带入，不是用户的未提交
+    # 改动。删之前只清掉与主树仍逐字节相同的副本；用户改过的留下，让脏检查拒绝。
+    backfilled="$MAIN_ROOT/worktree/.backfilled-$id"
+    if [ -f "$backfilled" ]; then
+      while IFS= read -r rel; do
+        [ -n "$rel" ] || continue
+        if [ -f "$target/$rel" ] && [ -f "$MAIN_ROOT/$rel" ] \
+            && cmp -s "$target/$rel" "$MAIN_ROOT/$rel"; then
+          rm -f "$target/$rel"
+        fi
+      done < "$backfilled"
+      rm -f "$backfilled"
     fi
 
     # 跟踪文件（含未跟踪但未忽略的）有改动：默认拒绝。

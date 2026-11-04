@@ -18,6 +18,7 @@
 #   scripts/check.sh types    # mypy（装了才跑；先只查叶子模块）
 #   scripts/check.sh coverage # 分支覆盖度量（装了才跑；不设门槛）
 #   scripts/check.sh clean    # 干净环境（无 .env）跑全量，模拟 CI
+#   scripts/check.sh worktree # 工作树生命周期冒烟（add/remove）
 #   scripts/check.sh rehash   # 打印关键帧角色提示词的 sha256，供更新基线
 set -euo pipefail
 
@@ -157,11 +158,17 @@ case "${1:-fast}" in
     "$PY" -m coverage run -m pytest -q
     "$PY" -m coverage report
     ;;
+  worktree)
+    # 2026-11-04 #157 实测：add 产生 docs/docs、remove 被自己的刷新拦住——脚本是
+    # /implement-spec 并行的骨架，却没有会跑的用例。全量测试也会收这条（tests/）。
+    echo "[check] worktree: 工作树生命周期冒烟"
+    "$PY" -m pytest -q tests/test_worktree_script.py
+    ;;
   rehash)
     run_rehash "${2:-frame_prompt_engineer}"
     ;;
   *)
-    echo "用法: $0 [fast|full|lint|mutate|types|coverage|clean|rehash [角色名]]" >&2
+    echo "用法: $0 [fast|full|lint|mutate|types|coverage|clean|worktree|rehash [角色名]]" >&2
     exit 2
     ;;
 esac
