@@ -793,6 +793,24 @@ def _run_director_flow(session: SessionState) -> int:
         # 先判这一条再问打包参数：跑不下去的会话不该先让用户答三道题。
         print("[错误] 导演台路线：会话里没有分镜表（阶段 1 产物缺失），无法做段规划。")
         return 1
+    # #158：画幅预检排在**收图与问打包参数之前**——比例对不上时先让用户决定要不要
+    # 继续，别让他先准备首帧、再答三问，最后才被告知锚点会被裁。
+    # 只在这两条路线解析期望/实际值：其余模式不参与核对，不必去碰帧生图配置。
+    if brief.director_mode in ("i2v", "fl2v"):
+        from ..config import config as app_config
+        from ..generation import frame_canvas_size
+        from ..image_config import load_frame_image_model
+        from .wizard_director import confirm_aspect
+
+        settings = app_config.director_settings()
+        if not confirm_aspect(
+                brief.director_mode,
+                frame_canvas=frame_canvas_size(
+                    load_frame_image_model(), brief.canvases),
+                declared=(settings.width, settings.height),
+                ask=_prompt):
+            print("停在段规划之前：画幅比例对不上，没有生成段表，也没有调用模型。")
+            return 0
     # i2v/fl2v 的开场首帧必须在段规划之前就位（2026-10-30 真实跑现场）：修之前这里
     # 一路跑到打包才报「第 1 段缺开场首帧」，而用户当时连生图提示词都没见过。
     # 现在的顺序是：**审查提示词 → 收用户粘贴的图片路径 → 程序复制到导演包落点**，
@@ -966,23 +984,6 @@ def _resume_director_handoff(config: Config, session: SessionState, *,
         plan, session, config=config, passed=passed, llm=llm)
 
 
-def _build_director_llm(purpose: str = "写终点画面提示词"):
-    """陪跑里按需建模型（写尾帧词或改词时才用得上）。失败不静默。
-
-    ``purpose`` 由调用方给：同一份构造在「尾帧词」与「改词」两处失败时要说清各自
-    卡住了什么，否则用户只看到一句与当前动作无关的病因。
-    """
-    from ..model_factory import build_chat_model
-
-    try:
-        return build_chat_model()
-    except Exception as exc:  # noqa: BLE001 - 病因原样交回，别让建客户端失败伪装成别的问题
-        # 不写具体段号：这里拿不到「轮到哪一段」，写死「第 N 段」会变成一句永远
-        # 不替换的模板（复审 H4）。
-        print(f"[错误] 模型构造失败（{exc}）：接下来这一段要{purpose}，客户端没建起来。")
-        return None
-
-
 def _cut_first_frame_prompt(plan, segment, session: SessionState, *, llm) -> str | None:
     """切镜段的段首帧词：轮到该段时先给词，再写尾帧词（尾帧要拿这张图当参考）。
 
@@ -1098,6 +1099,11 @@ def _write_director_tailframe(plan, segment, session: SessionState, *, llm) -> b
             "切镜段的尾帧词必须以本段首帧为参考图，没有它只能从上一段终点写起"
             "（2026-11-02 验收里尾帧词写错起点的成因）。")
         print(f"  起点画面：本段首帧 {image}")
+        # #158：这一段贴回成片时，画幅核对要把这张图当锚点。路径只在这里出现过，
+        # 不记进 sidecar，续跑那一轮就只剩「元信息缺失」，核对等于没做。
+        from ..director.firstframe import record_first_frame_image
+
+        record_first_frame_image(session.directory, segment.index, image)
     if image is None:
         # 起点画面**优先用上一段的终点图**（用户生成并挂在导演台尾帧槽的那张）。
         # #114 原先只认账内上一段成片视频的末帧；2026-10-31 实跑证明视频末帧每段都会漂
@@ -1203,25 +1209,6 @@ def _apply_director_cascade(*, directory: Path, cache_directory: Path,
     except (OSError, ValueError) as exc:
         print(f"[错误] 级联重跑失败：{exc}")
         return None
-
-
-def _segment_cache_path(cache_directory: Path, segment: int) -> Path | None:
-    """这一段在插件缓存里有没有产物：有就返回路径，没有返回 ``None``。
-
-    名字是 **cache_path** 而不是 ``evidence``（2026-10-31 复审采纳）：它只决定账行里
-    照记的缓存路径，**不是证据**。叫 evidence 会让下一个读代码的人以为判定还看它。
-    #112 起判定统一走用户贴回来的成片视频；终稿 ``.frames.mkv`` 与 raw ``.pt``
-    都算「有产物」：账本要回答的是「有没有」，不是「我们能不能读它」。
-    """
-    from ..director import cache
-
-    frames = cache.frames_path(cache_directory, segment)
-    if frames.is_file():
-        return frames
-    raw = cache.raw_frames_path(cache_directory, segment)
-    if raw.is_file():
-        return raw
-    return None
 
 
 def _prompt_segment_video(question: str) -> tuple[str, Path | None, int | None]:
@@ -1407,9 +1394,11 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
     尾问（#106）不变：全部通过后再问「有要改哪一段重来吗」。
     """
     from ..director import cache, ledger
+    from ..director.aspect_flow import output_aspect_verdict
     from ..director.companion import judge_video_evidence
     from ..director.frames import FIRST_SEGMENT_TYPE, needs_first_frame_image
     from ..director.tailframe import needs_tailframe
+    from .wizard_director import build_director_llm as _build_director_llm
 
     directory = Path(session.directory)
     brief = session.brief
@@ -1563,6 +1552,16 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
                           "回导演台重跑**本段**后再贴视频路径，或输入 e 改本段提示词；"
                           "输入 q 停下。")
                     continue
+                # #158：帧数过了不等于画幅对了。画幅不符时**拒绝落账**（段账与改写账
+                # 都不写、进度不前进），并回到同一个等视频问答；已通过的段留在账上。
+                aspect_ok, aspect_note = output_aspect_verdict(
+                    mode=plan.mode, segment_index=segment.index,
+                    segment_type=segment.type, video=video,
+                    directory=directory, canvases=brief.canvases)
+                if aspect_note:
+                    print(aspect_note)
+                if not aspect_ok:
+                    continue
                 # 终点图优先作下一段的参考（2026-10-31）：只有「本段有终点图」且
                 # 「下一段也要终点画面」时才问一次。回车＝没有，下一段回退视频末帧；
                 # 记进账本后，下一段写尾帧词时先找它（干净，不带视频漂移）。
@@ -1578,7 +1577,7 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
                         f"第 {segment.index} 段的终点图路径（下一段拿它当参考；"
                         "它带起点地标，是距离感的锚点；回车=没有，改用本段视频末帧）：")
                 # 缓存有没有都不影响判定；有就照记（现场线索），没有就写 null。
-                cache_file = _segment_cache_path(
+                cache_file = cache.segment_artifact_path(
                     cache_directory, segment.index)
                 ledger.log_director_output(
                     directory,

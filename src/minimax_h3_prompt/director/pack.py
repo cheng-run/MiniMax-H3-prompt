@@ -566,6 +566,15 @@ def film_end_still(session_dir: str | Path) -> Path | None:
     return None
 
 
+def start_still(session_dir: str | Path, position: int = 1) -> Path | None:
+    """开场首帧的落点 ``director/assets/NN/start.<ext>``；没有返回 ``None``。
+
+    公开给向导做贴回画幅核对（#158）：它要知道「这一段盘上真有锚图吗、是哪一张」，
+    而扩展名偏好与落点目录是打包的契约——向导另写一份，换了扩展名列表就会各说一套。
+    """
+    return _find_still(Path(session_dir), position, START_STEM)
+
+
 def opening_start_still_missing(session_dir: str | Path, mode: str) -> Path | None:
     """开场首帧还没就位时，返回它**应该放**的目录；不需要或已就位返回 ``None``。
 

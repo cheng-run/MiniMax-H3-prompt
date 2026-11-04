@@ -168,6 +168,23 @@ def raw_frames_path(cache_directory: str | Path, segment: int) -> Path:
     return Path(cache_directory) / f"{_segment_stem(segment)}{RAW_FRAMES_SUFFIX}"
 
 
+def segment_artifact_path(cache_directory: str | Path, segment: int) -> Path | None:
+    """这一段在插件缓存里有没有产物：有就返回路径，没有返回 ``None``。
+
+    名字是 **artifact** 而不是 ``evidence``（2026-10-31 复审采纳）：它只决定账行里
+    照记的缓存路径，**不是证据**。叫 evidence 会让下一个读代码的人以为判定还看它。
+    #112 起判定统一走用户贴回来的成片视频；终稿 ``.frames.mkv`` 与 raw ``.pt``
+    都算「有产物」：账本要回答的是「有没有」，不是「我们能不能读它」。
+    """
+    frames = frames_path(cache_directory, segment)
+    if frames.is_file():
+        return frames
+    raw = raw_frames_path(cache_directory, segment)
+    if raw.is_file():
+        return raw
+    return None
+
+
 def segment_cache_suffixes() -> tuple[str, ...]:
     """一段的全部副产物后缀：终稿 6 个 ＋ 一采 7 个（含 ``.pre.low.pt``）。
 

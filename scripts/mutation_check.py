@@ -157,6 +157,15 @@ MUTATIONS: tuple[Mutation, ...] = (
         ("tests/test_doc_pointer_shape.py",),
         "活文档指针退回行号＝提示词一插行就静默漂移（retro 2026-11-03）",
     ),
+    Mutation(
+        "aspect_check_inverted",
+        "src/minimax_h3_prompt/director/aspect.py",
+        "        exceeds=relative_delta > tolerance + _TOLERANCE_EPSILON,",
+        "        exceeds=relative_delta <= tolerance + _TOLERANCE_EPSILON,",
+        ("tests/test_director_canvas_aspect.py",
+         "tests/test_director_companion.py::test_handoff_rejects_a_video_whose_aspect_misses_its_anchor"),
+        "画幅判定反了＝2% 的正常取整差被当成事故、218% 的锚点裁切被放行（#158）",
+    ),
 )
 
 

@@ -1148,11 +1148,58 @@ def test_wizard_pack_failure_is_loud_and_returns_nonzero(tmp_path, monkeypatch, 
 
     monkeypatch.setattr(pack_module, "prepare_director_pack", boom)
     monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
+    # #158 起 i2v 在段规划前会做画幅预检（本机 image.yaml 的 qwen 画布与 director 声明
+    # 不符）：回车继续即可。别的问题在本用例里不该出现。
+    monkeypatch.setattr(
+        wizard, "_prompt",
+        lambda text: "" if "画幅" in text else pytest.fail(f"不该问：{text}"))
 
     assert wizard._run_director_flow(session) == 1
     out = capsys.readouterr().out
     assert "[错误]" in out and "第 1 段" in out
     assert not (session.directory / "director" / "initial.mmxpack.zip").exists()
+
+
+def test_wizard_aspect_precheck_blocks_before_planning_when_canvases_disagree(
+        tmp_path, monkeypatch, capsys):
+    """#158：i2v/fl2v 在段规划**之前**核对关键帧画布与 ``director`` 声明画幅。
+
+    1920×1088 的关键帧对 736×1280 的声明画幅差 207%——超 5% 必须**显式回车**才继续；
+    这里按 ``q``，流程应停在规划之前（``plan.json`` 不落盘），文案同时给出两边数值、
+    两边比例与「锚点会被裁」的后果。
+    """
+    from minimax_h3_prompt import config as config_module
+    from minimax_h3_prompt import generation
+    from minimax_h3_prompt.director.planning import plan_path
+    from minimax_h3_prompt.ui import wizard
+
+    _stub_llm(monkeypatch, "i2v")
+    monkeypatch.setitem(config_module.config.raw, "director",
+                        {"width": 736, "height": 1280})
+    # 关键帧档固定回 1920×1088：本用例不读本机 image.yaml，换档也不会漂。
+    monkeypatch.setattr(generation, "frame_canvas_size",
+                        lambda *_args, **_kwargs: (1920, 1088))
+    session = _wizard_session(tmp_path, mode="i2v", duration=_I2V_TOTAL_S,
+                              director_node_id="42", director_cache_name="",
+                              director_continuity_mode="guide")
+    asked: list[str] = []
+
+    def fake_prompt(text: str) -> str:
+        asked.append(text)
+        if "画幅" in text:
+            return "q"
+        raise AssertionError(f"预检拦下之前不该问别的：{text}")
+
+    monkeypatch.setattr(wizard, "_prompt", fake_prompt)
+    monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
+
+    assert wizard._run_director_flow(session) == 0
+
+    out = capsys.readouterr().out
+    assert "1920×1088" in out and "736×1280" in out, "两边数值没有一起打印"
+    assert "1.765" in out and "0.575" in out, "两边比例没有一起打印"
+    assert "锚点会被裁" in out, "后果没有说给用户"
+    assert not plan_path(session.directory).exists(), "q 之后仍然做了段规划"
 
 
 # ---------------------------------------------------------------------------

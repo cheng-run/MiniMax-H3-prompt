@@ -18,11 +18,21 @@ from pathlib import Path
 
 from ..image_config import load_frame_image_model
 from ..text_patterns import AT_TIMESTAMP as _SHOT_TIME
-from .frame_meta import frame_meta_path, sha256_text, write_frame_meta
+from .frame_meta import (
+    frame_meta_path,
+    read_frame_meta,
+    sha256_text,
+    write_frame_meta,
+)
 from .frames import DirectorSegment
 from .planning import DIRECTOR_DIRNAME
 
 FIRSTFRAME_FILENAME = "firstframe-{position:02d}.md"
+
+# 用户挂过的段首帧图路径（#158 贴回画幅核对按它算期望值）。
+# 为什么不另建一份文件：sidecar 的契约就是「与正文同生共死」，路径属于这份词的产物，
+# 跟模型档、构图字段放一起，续跑读同一个口；换一份清单就多一处会与正文脱节的口径。
+FIRST_FRAME_IMAGE_FIELD = "first_frame_image"
 
 _SHOT_HEAD = re.compile(r"\*\*\[Shot\s+(\d+)\]\*\*")
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
@@ -37,6 +47,22 @@ def firstframe_path(session_dir: str | Path, position: int) -> Path:
 def firstframe_meta_path(session_dir: str | Path, position: int) -> Path:
     """段首帧 sidecar 的落点（与正文同名，见 ``frame_meta``）。"""
     return frame_meta_path(firstframe_path(session_dir, position))
+
+
+def record_first_frame_image(session_dir: str | Path, position: int,
+                             image_path: str | Path) -> None:
+    """把用户挂过的段首帧图路径写进段首帧 sidecar（#158）。
+
+    贴回成片时项目要知道这一段该是什么画幅（票面：有锚图用锚图，没有才回落关键帧
+    画布）。切镜段的首帧图是用户在陪跑里临时给的，盘上没有别的登记处——不记下来，
+    续跑那一轮就只剩「元信息缺失」，核对等于没做。
+    """
+    path = firstframe_path(session_dir, position)
+    meta = read_frame_meta(path) or {}
+    meta.setdefault("kind", "firstframe")
+    meta.setdefault("segment", position)
+    meta[FIRST_FRAME_IMAGE_FIELD] = str(image_path)
+    write_frame_meta(path, meta)
 
 
 def _shot_blocks(shot_table: str) -> list[tuple[int, float, str]]:

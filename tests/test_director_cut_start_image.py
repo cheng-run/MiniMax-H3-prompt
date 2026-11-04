@@ -424,3 +424,29 @@ def test_existing_tailframe_document_prints_its_recorded_model(
         "沿用旧尾帧词时没打印它写时的档名"
 
 
+
+
+def test_camera_cut_first_image_path_is_recorded_in_the_sidecar(tmp_path, monkeypatch):
+    """#158：用户挂过的切镜首帧路径要落段首帧 sidecar，续跑贴回时才拿得到期望画幅。"""
+    from minimax_h3_prompt.director import ledger
+    from minimax_h3_prompt.director.firstframe import (
+        FIRST_FRAME_IMAGE_FIELD, firstframe_path,
+    )
+    from minimax_h3_prompt.director.frame_meta import read_frame_meta
+    from minimax_h3_prompt.ui import wizard
+
+    plan = _plan()
+    segment = plan.segments[1]  # camera_cut
+    cut_first = tmp_path / "cut-first.png"
+    cut_first.write_bytes(b"first")
+
+    monkeypatch.setattr(wizard, "_prompt", lambda question: str(cut_first))
+    monkeypatch.setattr(ledger, "passed_director_rows", lambda directory: {})
+    _capture(monkeypatch)
+
+    assert wizard._write_director_tailframe(
+        plan, segment, _session(tmp_path), llm=object()) is True
+
+    meta = read_frame_meta(firstframe_path(tmp_path, 2))
+    assert meta is not None
+    assert meta[FIRST_FRAME_IMAGE_FIELD] == str(cut_first)

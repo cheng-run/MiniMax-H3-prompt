@@ -58,6 +58,19 @@ def _frame_colors(count: int) -> list[tuple[int, int, int]]:
             for index in range(count)]
 
 
+def _write_canvas_png(path: Path, *, width: int = 32, height: int = 24) -> Path:
+    """写一张指定宽高的 png——#158 的画幅核对只吃比例，小图就够。
+
+    测试视频是 32×24；把开场锚图也做成 32×24，i2v/fl2v 的既有陪跑用例才不会被
+    画幅核对正确地拦下（它们验的不是画幅）。
+    """
+    import numpy as np
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    assert cv2.imwrite(str(path), np.zeros((height, width, 3), np.uint8))
+    return path
+
+
 def _write_solid_ffv1_mkv(path: Path, colors: list[tuple[int, int, int]],
                           *, width: int = 32, height: int = 24) -> Path:
     """每帧一种可辨纯色（RGB 由调用方给）：用来断言取到的**是哪一帧**。
@@ -906,6 +919,8 @@ def test_cut_first_frame_path_q_stops_cleanly_with_code_zero(
     session = _director_session(tmp_path, ("opening", "camera_cut"), mode="fl2v")
     config = _run_config(monkeypatch, tmp_path)
     film_one = _write_ffv1_mkv(tmp_path / "film-01.mkv", 107)
+    # #158 起贴回成片要核画幅：开场锚图做成与测试视频同比例，别让本用例被画幅拦下。
+    _write_canvas_png(session.directory / "director" / "assets" / "01" / "start.png")
     # 段首帧词已在盘上：跳过写词（否则会真建模型），直接走到「贴首帧图」那一问。
     cut_word = firstframe_path(session.directory, 2)
     cut_word.parent.mkdir(parents=True, exist_ok=True)
@@ -1548,6 +1563,9 @@ def test_single_segment_plan_takes_the_film_path_instead_of_a_cache(
     config = _run_config(monkeypatch, tmp_path)
     declared = plan.segments[0].declared_frames
     film = _write_ffv1_mkv(tmp_path / "film.mkv", declared)
+    # #158 起贴回成片要核画幅：开场锚图做成与测试视频同比例，本用例验的是「单段没有
+    # 段缓存也能按视频数帧」，不是画幅。
+    _write_canvas_png(directory / "director" / "assets" / "01" / "start.png")
     asked: list[str] = []
 
     def fake_prompt(text: str) -> str:
@@ -2131,3 +2149,51 @@ def test_rewrite_round_on_a_single_segment_tells_the_user_to_click_run(
     assert outcome == "retry"
     assert "直接点运行" in out
     assert "runSelection" not in out, "单段没有可勾的段，不许让用户去找 runSelection"
+
+
+def test_handoff_rejects_a_video_whose_aspect_misses_its_anchor(
+        tmp_path, monkeypatch, capsys):
+    """#158 接线：贴回的成片与本段锚图画幅不符 → 不落账、打印期望/实际。
+
+    打桩 ``_prompt_segment_video``：第一次交一段 48×86 的成片（与 1920×1088 的锚图
+    差约 216%），第二次 quit——拒绝之后必须**回到同一个等视频问答**，而不是越过它
+    去问终点图或写账。
+    """
+    import numpy as np
+
+    from minimax_h3_prompt.director import ledger
+    from minimax_h3_prompt.ui import wizard
+
+    plan = _plan_types(("opening",), mode="fl2v")
+    session = _director_session(tmp_path, ("opening",), mode="fl2v")
+    config = _run_config(monkeypatch, tmp_path)
+    # 本段锚图 1920×1088（与 2026-11-04 验收现场同尺寸）；成片是竖幅小视频。
+    start = session.directory / "director" / "assets" / "01" / "start.png"
+    start.parent.mkdir(parents=True, exist_ok=True)
+    assert cv2.imwrite(str(start), np.zeros((1088, 1920, 3), np.uint8))
+    film = _write_ffv1_mkv(tmp_path / "film.mkv", 107, width=48, height=86)
+
+    calls = {"video": 0}
+
+    def fake_video(question: str):
+        calls["video"] += 1
+        if calls["video"] == 1:
+            return "video", film, 107
+        return "quit", None, None
+
+    monkeypatch.setattr(wizard, "_prompt_segment_video", fake_video)
+    # 画幅不符时流程只该回到「贴视频」那一问，任何别的问句都说明它越过核对继续了
+    # ——用 fail 而不是空串，红的时候会立刻失败而不是在交付问答里死循环。
+    monkeypatch.setattr(
+        wizard, "_prompt", lambda text: pytest.fail(f"不该问：{text}"))
+    monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
+
+    assert wizard._run_director_segment_handoff(plan, session, config=config) == 0
+
+    out = capsys.readouterr().out
+    assert "拒绝落账" in out
+    assert "1920×1088" in out, "期望值（本段锚图）没有打印"
+    assert "48×86" in out, "实际值没有打印"
+    assert "width/height" in out and "重跑本段" in out, "没告诉用户下一步怎么做"
+    assert calls["video"] == 2, "拒绝之后应回到同一个等视频问答"
+    assert ledger.passed_director_rows(session.directory) == {}, "画幅不符却落了账"
