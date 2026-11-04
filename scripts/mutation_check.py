@@ -193,6 +193,25 @@ MUTATIONS: tuple[Mutation, ...] = (
          "tests/test_frame_meta.py::test_merge_keeps_unknown_fields_and_overwrites_named_keys"),
         "sidecar 合并退化成整份覆盖＝重写正文抹掉别的写口字段（#157 复审）",
     ),
+    Mutation(
+        "film_settings_ignores_the_answer",
+        "src/minimax_h3_prompt/director/film_canvas.py",
+        "    film = film_size_for(brief, frame_model=frame_model)\n"
+        "    if film is None:\n        return settings",
+        "    film = None\n"
+        "    if film is None:\n        return settings",
+        ("tests/test_director_film_canvas.py::test_film_settings_takes_width_height_from_the_answer_only",
+         "tests/test_director_pack.py::test_wizard_packs_the_answered_film_size_and_tells_the_node"),
+        "包参数不取成片画幅＝用户答了也不生效，包与节点又是两套口径（#161）",
+    ),
+    Mutation(
+        "film_snap_dropped",
+        "src/minimax_h3_prompt/director/film_canvas.py",
+        "    return _snap(width), _snap(height)",
+        "    return int(width), int(height)",
+        ("tests/test_director_film_canvas.py::test_snap_rounds_to_the_plugin_grid_half_up",),
+        "不对齐 32 网格＝1920×1080 这类尺寸到插件后端点运行才炸（#161）",
+    ),
 )
 
 

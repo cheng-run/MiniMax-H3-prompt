@@ -96,8 +96,9 @@ def precheck_message(
         f"{check.relative_delta * 100:.1f}%，超过 {check.tolerance * 100:.0f}% 容差。",
         "  后果：导演台按声明画幅出片时，关键帧锚点会被裁切——比例差得越多，"
         "画面里的主体越可能被裁掉。",
-        "  该改哪一边：改 config/image.yaml 的 frame: 档画布，或改 config/agent.yaml "
-        "的 director.width/height（并以它设置导演台节点的 width/height）。",
+        "  该改哪一边：重跑向导重选**成片画幅**（#161 起关键帧画布与包输出都由它派生），"
+        "或确认导演台节点的 width/height 已按向导打印的值设置；"
+        "旧会话仍可改 config/agent.yaml 的 director.width/height 兜底。",
     ])
 
 

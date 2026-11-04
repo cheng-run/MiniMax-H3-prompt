@@ -86,6 +86,69 @@ def build_director_llm(purpose: str = "写终点画面提示词"):
         return None
 
 
+def ask_pack_settings(
+    session, *, ask: Callable[[str], str], save: Callable[..., object],
+) -> None:
+    """进导演台流程前问一次打包参数并落 Brief（issue #104，设计 §4）。
+
+    从 ``wizard.py`` 搬来（#161）：原实现只做三问答与一次落盘，不依赖向导的其他
+    状态。``ask`` / ``save`` 由调用方注入（``_prompt`` 与 ``save_session``），
+    本模块因此不反向 import ``wizard``。
+
+    三问答都只问**一次**：节点 id 与缓存名决定段缓存目录名（插件口径是
+    ``<缓存名>_<节点id>``，#105 靠它找 ``seg_XXXX.frames.mkv``），引导模式是包内
+    ``continuityMode``。Brief 里已有节点 id 就整组沿用——续跑反复追问同一件事既是
+    噪音，也容易被误答覆盖。
+
+    节点 id **没有默认值**：缺了 #105 会在用户的 ComfyUI 输出目录里找不到任何缓存，
+    而那时的报错只能是一句「目录不存在」。空输入重问，不是静默留空。
+    """
+    brief = session.brief
+    from ..director import cache as director_cache
+
+    if brief.director_node_id:
+        # 已有答案整组沿用，但要**归一一次**（2026-10-30 真实会话）：旧值可能是照抄
+        # 节点标题的 `#365`，而插件写盘的目录用 `365`——不归一，陪跑会在这条会话上
+        # 永远找不到缓存。归一不重问、不改用户真正的 id。
+        try:
+            normalized = director_cache.validate_node_id(brief.director_node_id)
+        except ValueError:
+            normalized = ""
+        if normalized and normalized != brief.director_node_id:
+            brief.director_node_id = normalized
+            save(session.directory, brief, session.stage_state,
+                 status=session.status)
+        return
+    node_id = ""
+    while not node_id:
+        raw = ask("导演台节点的 unique_id（ComfyUI 里选中导演台节点后显示的 id，必填）：")
+        # 合法性判据只住 ``director/cache.py``（复审 H3）：向导原先自写
+        # ``isalnum() or "_.-"``，恰好放过 ``..``——用户答完三问、进陪跑才在
+        # ``cache_dir`` 炸。这里提前问，报错就在同一道题上。
+        try:
+            node_id = director_cache.validate_node_id(raw)
+        except ValueError as exc:
+            print(f"[提示] {exc}。")
+            continue
+    cache_name = ask(
+        "段缓存名（导演台性能组的 cache_name；回车=空，缓存目录只用节点 id）：").strip()
+    from ..director.pack import CONTINUITY_DEFAULT, CONTINUITY_MODES
+
+    continuity = ""
+    while continuity not in CONTINUITY_MODES:
+        raw = ask(
+            f"段间引导模式（{' / '.join(CONTINUITY_MODES)}；回车={CONTINUITY_DEFAULT}）："
+        ).strip().lower()
+        continuity = raw or CONTINUITY_DEFAULT
+        if continuity not in CONTINUITY_MODES:
+            print(f"[提示] 只能是 {' / '.join(CONTINUITY_MODES)}。")
+    brief.director_node_id = node_id
+    brief.director_cache_name = cache_name
+    brief.director_continuity_mode = continuity
+    # 立刻落盘：这三个答案决定了后面找缓存与写包的参数，重跑向导不该再问一遍。
+    save(session.directory, brief, session.stage_state, status=session.status)
+
+
 def confirm_aspect(
     mode: str, *, frame_canvas: tuple[int, int], declared: tuple[int, int],
     ask: Callable[[str], str],

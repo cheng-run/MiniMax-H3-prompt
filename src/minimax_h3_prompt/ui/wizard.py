@@ -372,6 +372,9 @@ def _choose_canvases() -> dict[str, tuple[int, int]]:
     没有选定值时回落各自 profile 默认（#144 D，不再继承竖幅），要单独定尺寸走
     ``--brief`` 的 `画布 qwen: WxH`。构图词分套绑选定画布的**画幅族**（Q21(c)）；
     返回家族 → (宽, 高)，落进 Brief.canvases，随请求【画布】块与产物画布行同源下发。
+
+    导演台路线**不走这里**：那条路线问的是成片画幅（``_choose_film_canvases``，
+    #161／ADR 0028），关键帧画布由它派生。
     """
     from ..generation import CANVAS_CHOICE_FAMILIES, IMAGE_FAMILY_LABELS
 
@@ -379,6 +382,27 @@ def _choose_canvases() -> dict[str, tuple[int, int]]:
         family: _choose_canvas(IMAGE_FAMILY_LABELS[family])
         for family in CANVAS_CHOICE_FAMILIES
     }
+
+
+def _choose_film_canvases() -> dict[str, tuple[int, int]]:
+    """导演台路线：只问一次成片画幅，关键帧画布由它派生（#161，ADR 0028）。
+
+    返回值的形态与 ``_choose_canvases`` 相同（家族 → (宽, 高)），但家族是**当前
+    关键帧生图模型**那一档、尺寸就是成片画幅：帧请求的【画布】块、画幅预检与
+    导演包 ``output`` 全部从这一份答案取，用户不用再分别对齐两处。
+    """
+    from ..director.film_canvas import film_frame_canvases, snap_film_size
+    from ..image_config import load_frame_image_model
+
+    width, height = _choose_canvas(
+        "成片画幅", title="成片画幅（视频输出尺寸；关键帧画布按同一尺寸派生）")
+    film = snap_film_size(width, height)
+    if film != (width, height):
+        # 对齐要当场说破：菜单给的是生图尺寸，1920×1080 这类不是 32 的倍数，
+        # 插件后端会直接拒绝执行——用户必须看到实际会跑的数字。
+        print(f"[画幅] {width}×{height} 不是 32 的倍数，按插件网格对齐为 "
+              f"{film[0]}×{film[1]}（实际执行尺寸）；关键帧画布同尺寸。")
+    return film_frame_canvases(film, load_frame_image_model())
 
 
 def _menu_pick(title: str, count: int) -> int:
@@ -395,12 +419,15 @@ def _menu_pick(title: str, count: int) -> int:
         print("无效输入，请重输。")
 
 
-def _choose_canvas(label: str) -> tuple[int, int]:
+def _choose_canvas(label: str, *, title: str | None = None) -> tuple[int, int]:
     """单个家族的三步选择：第 1 步比例、第 2 步尺寸，档外/不符走自由输入。
 
     选定后回显**最终**画布（显示名+族类+分套指示）：自定义尺寸可以不合第 1 步选的
     比例（自由输入就是自由输入），菜单预告的构图后果以回显为准——不回显的话用户
     以为选的是 9:16 的横幅通用词，实际落点却按 7:13 走了竖幅套（复审点名）。
+
+    ``title`` 只换问句抬头（导演台问「成片画幅」，别的问题文本照旧）：菜单、校验与
+    回显全共用同一条实现，免得两套选择器各漂。
     """
     from ..generation import (
         CANVAS_RATIO_PRESETS,
@@ -409,7 +436,8 @@ def _choose_canvas(label: str) -> tuple[int, int]:
         composition_hint,
     )
 
-    print(f"\n请选择 {label} 画布——第 1 步：比例")
+    headline = title or f"{label} 画布"
+    print(f"\n请选择 {headline}——第 1 步：比例")
     for index, preset in enumerate(CANVAS_RATIO_PRESETS, 1):
         # 菜单直接标画幅族：用户选比例时就看见构图词后果（近竖/近方/横幅→通用）。
         print(f"  {index}. {preset.name}（{canvas_family(*preset.sizes[0])}）")
@@ -420,7 +448,7 @@ def _choose_canvas(label: str) -> tuple[int, int]:
         width, height = _ask_custom_canvas(label)
     else:
         preset = CANVAS_RATIO_PRESETS[choice - 1]
-        print(f"\n请选择 {label} 画布尺寸——第 2 步（比例 {preset.name}）：")
+        print(f"\n请选择 {headline} 尺寸——第 2 步（比例 {preset.name}）：")
         for index, (size_w, size_h) in enumerate(preset.sizes, 1):
             print(f"  {index}. {size_w} × {size_h}")
         size_custom = len(preset.sizes) + 1
@@ -430,7 +458,7 @@ def _choose_canvas(label: str) -> tuple[int, int]:
             width, height = _ask_custom_canvas(label)
         else:
             width, height = preset.sizes[size_choice - 1]
-    print(f"[已选] {label} 画布：{canvas_display(width, height)}；{composition_hint(width, height)}")
+    print(f"[已选] {headline}：{canvas_display(width, height)}；{composition_hint(width, height)}")
     return width, height
 
 
@@ -579,60 +607,14 @@ def run_wizard(config: Config) -> int:
 
 
 def _ask_director_pack_settings(session: SessionState) -> None:
-    """进导演台流程前问一次打包参数并落 Brief（issue #104，设计 §4）。
+    """导演台打包参数问答（issue #104）：实现已搬到 ``wizard_director.ask_pack_settings``。
 
-    三问答都只问**一次**：节点 id 与缓存名决定段缓存目录名（插件口径是
-    ``<缓存名>_<节点id>``，#105 靠它找 ``seg_XXXX.frames.mkv``），引导模式是包内
-    ``continuityMode``。Brief 里已有节点 id 就整组沿用——续跑反复追问同一件事既是
-    噪音，也容易被误答覆盖。
-
-    节点 id **没有默认值**：缺了 #105 会在用户的 ComfyUI 输出目录里找不到任何缓存，
-    而那时的报错只能是一句「目录不存在」。空输入重问，不是静默留空。
+    ``test_wizard_size.py`` 要求 ``wizard.py`` 不再增长：这里只留一行转接，问答与
+    落盘都住在那边；``ask``/``save`` 注入进去，免得两个模块互相 import。
     """
-    brief = session.brief
-    from ..director import cache as director_cache
+    from .wizard_director import ask_pack_settings
 
-    if brief.director_node_id:
-        # 已有答案整组沿用，但要**归一一次**（2026-10-30 真实会话）：旧值可能是照抄
-        # 节点标题的 `#365`，而插件写盘的目录用 `365`——不归一，陪跑会在这条会话上
-        # 永远找不到缓存。归一不重问、不改用户真正的 id。
-        try:
-            normalized = director_cache.validate_node_id(brief.director_node_id)
-        except ValueError:
-            normalized = ""
-        if normalized and normalized != brief.director_node_id:
-            brief.director_node_id = normalized
-            save_session(session.directory, brief, session.stage_state,
-                         status=session.status)
-        return
-    node_id = ""
-    while not node_id:
-        raw = _prompt("导演台节点的 unique_id（ComfyUI 里选中导演台节点后显示的 id，必填）：")
-        # 合法性判据只住 ``director/cache.py``（复审 H3）：向导原先自写
-        # ``isalnum() or "_.-"``，恰好放过 ``..``——用户答完三问、进陪跑才在
-        # ``cache_dir`` 炸。这里提前问，报错就在同一道题上。
-        try:
-            node_id = director_cache.validate_node_id(raw)
-        except ValueError as exc:
-            print(f"[提示] {exc}。")
-            continue
-    cache_name = _prompt(
-        "段缓存名（导演台性能组的 cache_name；回车=空，缓存目录只用节点 id）：").strip()
-    from ..director.pack import CONTINUITY_DEFAULT, CONTINUITY_MODES
-
-    continuity = ""
-    while continuity not in CONTINUITY_MODES:
-        raw = _prompt(
-            f"段间引导模式（{' / '.join(CONTINUITY_MODES)}；回车={CONTINUITY_DEFAULT}）："
-        ).strip().lower()
-        continuity = raw or CONTINUITY_DEFAULT
-        if continuity not in CONTINUITY_MODES:
-            print(f"[提示] 只能是 {' / '.join(CONTINUITY_MODES)}。")
-    brief.director_node_id = node_id
-    brief.director_cache_name = cache_name
-    brief.director_continuity_mode = continuity
-    # 立刻落盘：这三个答案决定了后面找缓存与写包的参数，重跑向导不该再问一遍。
-    save_session(session.directory, brief, session.stage_state, status=session.status)
+    ask_pack_settings(session, ask=_prompt, save=save_session)
 
 
 def _ask_required_media_path(label: str) -> str:
@@ -777,9 +759,10 @@ def _run_director_flow(session: SessionState) -> int:
 
     if brief.director_mode in PRECHECK_MODES:
         from ..config import config as app_config
+        from ..director.film_canvas import film_settings
         from .wizard_director import confirm_aspect
 
-        settings = app_config.director_settings()
+        settings = film_settings(app_config.director_settings(), brief)
         if not confirm_aspect(
                 brief.director_mode,
                 frame_canvas=frame_canvas(brief.canvases),
@@ -915,13 +898,15 @@ def _run_director_flow(session: SessionState) -> int:
     print(render_written_listing(plan, written, film_end=film_end))
 
     # 打包：段表 + 段提示词 + 素材 → ``director/pack/`` 与 ``director/initial.mmxpack.zip``。
-    # 参数从配置读（画布/参考图尺寸），不在这里写死（设计 §4）。
+    # 画布取**本次成片画幅**（#161／ADR 0028），参考图尺寸仍取配置（设计 §4）。
     from ..config import config as app_config
+    from ..director.film_canvas import film_settings, node_setup_lines
 
+    pack_settings = film_settings(app_config.director_settings(), brief)
     try:
         _, report = prepare_director_pack(
             session.directory, plan,
-            settings=app_config.director_settings(),
+            settings=pack_settings,
             continuity_mode=brief.director_continuity_mode,
         )
     except (ValueError, OSError) as exc:
@@ -931,6 +916,9 @@ def _run_director_flow(session: SessionState) -> int:
         return 1
     print()
     print(report)
+    # 路线 B（#161）：插件不保证把包的 output 应用到节点，向导另行交代节点该设什么。
+    for line in node_setup_lines(pack_settings):
+        print(line)
     # 打包之后直接进入逐段陪跑（#105）：报告的末行「导入后逐段执行由 #105 跟进」
     # 由这里接上——用户导入包之后下一步就是跑第 1 段。轮转放在这里：这是**新一次交付**
     # 的开头（复用 GEN 时追加账不会自动清空，#58 实测）。
@@ -1336,9 +1324,11 @@ def _rewrite_director_segment_round(plan, segment, session: SessionState, *,
     path.write_text(after, encoding="utf-8")
 
     try:
+        from ..director.film_canvas import film_settings
+
         job, _report = prepare_director_pack(
             session.directory, plan,
-            settings=config.director_settings(),
+            settings=film_settings(config.director_settings(), session.brief),
             continuity_mode=session.brief.director_continuity_mode)
     except (OSError, ValueError) as exc:
         # 打包失败 = 这一轮改词整体不成立，必须**回滚段文件**：留下「段文件是新词、
@@ -1944,7 +1934,10 @@ def _phase1_new(config: Config) -> SessionState | None:
         # 白付一整轮（且插件里这压根跑不了）。
         duration = _clamp_single_segment_duration(duration)
     # 画布选择器（issue #42）：选定值进 brief，请求【画布】块与产物画布行同取。
-    canvases = _choose_canvases()
+    # 导演台路线改问**成片画幅**（#161／ADR 0028）：关键帧画布由它派生，导演包与
+    # 节点交代同取这一份答案——这条路线不允许再有第二道画布问答。
+    canvases = (
+        _choose_film_canvases() if is_director_route else _choose_canvases())
 
     brief = Brief(
         mode="director" if is_director_route else ("ref" if is_ref else "base"),

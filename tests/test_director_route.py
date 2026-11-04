@@ -260,6 +260,8 @@ def test_phase1_new_director_route_records_route_and_mode(tmp_path, monkeypatch)
     """
     _silence(monkeypatch)
     monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
+    # 导演台路线走的是成片画幅问答（#161），不是通用的画布问答。
+    monkeypatch.setattr(wizard, "_choose_film_canvases", lambda: {})
     captured: dict = {}
     _stub_stage1(monkeypatch, captured)
     # 主题 / 时长 / 风格 / 方式 5=导演台 / 模式 4=r2v

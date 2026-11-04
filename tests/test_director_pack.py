@@ -1049,6 +1049,45 @@ def test_wizard_asks_pack_settings_once_and_saves_them(tmp_path, monkeypatch, ca
     capsys.readouterr()
 
 
+def test_wizard_packs_the_answered_film_size_and_tells_the_node(tmp_path, monkeypatch, capsys):
+    """#161 接线：向导答的成片画幅要进包 ``output``，并在打包后交代节点。
+
+    「规则在、接线不在」的守卫：``film_canvas`` 的纯函数用例只证明算法对；这条证明
+    ``_run_director_flow`` 真的拿它打包、真的把节点设置打给用户。样本故意用 1920×1088
+    （与 ``config/agent.yaml`` 默认的 736×1280 不同），让「没接线」也能测红。
+    """
+    import json
+
+    from minimax_h3_prompt.image_config import (
+        canonical_image_model, load_frame_image_model)
+    from minimax_h3_prompt.ui import wizard
+
+    _stub_llm(monkeypatch, "t2v")
+    family = canonical_image_model(load_frame_image_model())
+    session = _wizard_session(tmp_path, canvases={family: (1920, 1088)})
+    answers = iter(["42", "雨夜", ""])
+
+    def fake_prompt(text: str) -> str:
+        if "有要重跑的段吗" in text:
+            return ""
+        if "成片视频路径" in text:
+            return "q"
+        return next(answers)
+
+    monkeypatch.setattr(wizard, "_prompt", fake_prompt)
+    monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
+
+    assert wizard._run_director_flow(session) == 0
+    out = capsys.readouterr().out
+
+    timeline = json.loads(
+        (session.directory / "director" / "pack" / "timeline.json").read_text(encoding="utf-8"))
+    assert (timeline["output"]["width"], timeline["output"]["height"]) == (1920, 1088), \
+        "包 output 没有取向导答的成片画幅"
+    assert "width / height" in out and "1920 / 1088" in out, \
+        "打包后没有交代节点该设的画幅"
+
+
 def test_wizard_rejects_an_unsafe_node_id_at_the_question(tmp_path, monkeypatch, capsys):
     """H3：``..`` 这类节点 id 必须在**问答这一步**被拒，不许等进陪跑才炸。
 
