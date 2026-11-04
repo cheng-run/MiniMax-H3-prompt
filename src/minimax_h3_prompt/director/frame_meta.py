@@ -9,6 +9,9 @@
 sidecar 与被描述文件同名同目录：``firstframe-02.md`` ↔ ``firstframe-02.meta.json``。
 被描述文件既可能是提示词正文（段首帧词），也可能是图片（全片尾帧的读图结果，
 ``film-end.png`` ↔ ``film-end.meta.json``）——本模块只按路径换算文件名，不假设内容类型。
+
+sidecar 是**累积记录**：给已有 sidecar 补字段用 ``merge_frame_meta``（同名覆盖、
+未知字段保留），只有「整份重置」才用 ``write_frame_meta`` 并写明意图。
 """
 from __future__ import annotations
 
@@ -71,3 +74,22 @@ def read_frame_meta(prompt_path: str | Path) -> dict | None:
         print(f"[警告] sidecar 读不回来，按没有 provenance 处理：{path}", flush=True)
         return None
     return data if isinstance(data, dict) else None
+
+
+def merge_frame_meta(prompt_path: str | Path,
+                     payload: Mapping[str, object], *,
+                     defaults: Mapping[str, object] | None = None) -> Path:
+    """在既有 sidecar 上合并字段：``defaults`` 只补缺，``payload`` 覆盖同名键。
+
+    为什么默认不是整份覆盖：sidecar 是**累积记录**，同一份文件可能有两个写口——
+    段首帧词写 provenance，陪跑又问到用户挂的首帧图路径（#158）。重写正文时整份
+    覆盖会静默抹掉另一个写口的字段（2026-11-04 #157 复审实测：续跑时只剩「元信息
+    缺失」，画幅核对回落到关键帧画布）。整份重置仍用 ``write_frame_meta``（例如全片
+    尾帧换图后重读描述），意图要显式写出来。
+    """
+    merged: dict[str, object] = dict(read_frame_meta(prompt_path) or {})
+    if defaults:
+        for key, value in defaults.items():
+            merged.setdefault(key, value)
+    merged.update(dict(payload))
+    return write_frame_meta(prompt_path, merged)

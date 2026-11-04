@@ -184,6 +184,15 @@ MUTATIONS: tuple[Mutation, ...] = (
         ("tests/test_doc_references_tracked.py",),
         "引用未入库的 docs 路径＝干净检出丢掉证据（#157 复审）",
     ),
+    Mutation(
+        "sidecar_merge_dropped",
+        "src/minimax_h3_prompt/director/frame_meta.py",
+        "    merged: dict[str, object] = dict(read_frame_meta(prompt_path) or {})",
+        "    merged: dict[str, object] = {}",
+        ("tests/test_director_cut_firstframe.py::test_rewriting_the_firstframe_prompt_keeps_the_recorded_image_path",
+         "tests/test_frame_meta.py::test_merge_keeps_unknown_fields_and_overwrites_named_keys"),
+        "sidecar 合并退化成整份覆盖＝重写正文抹掉别的写口字段（#157 复审）",
+    ),
 )
 
 

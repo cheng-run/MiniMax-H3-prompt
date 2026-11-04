@@ -78,6 +78,8 @@ def _read_and_cache(image: Path, fingerprint: str | None) -> str:
     if not description:
         raise RuntimeError(
             f"全片尾帧读图失败（图：{image}）：视觉模型没有返回任何内容")
+    # 这里**整份重置**而不是合并：图换了＝旧描述作废，sidecar 就该只剩这一张图的
+    # 读图结果（与 ``merge_frame_meta`` 的累积语义相反，是显式选择；见 frame_meta）。
     write_frame_meta(image, {
         "kind": FILM_END_KIND,
         "description": description,

@@ -44,7 +44,7 @@ from ..segment_prompts import MAX_SEGMENT_ATTEMPTS, _direct_write
 from ..tools.h3_validator import ValidationIssue
 from ..tools.image_prompt_discipline import check_image_prompt, edit_discipline_text
 from ..tools.reference_auditor import describe_image
-from .frame_meta import frame_meta_path, sha256_file, sha256_text, write_frame_meta
+from .frame_meta import frame_meta_path, merge_frame_meta, sha256_file, sha256_text
 from .frames import (
     IMAGE_END,
     SEGMENT_TYPES,
@@ -753,8 +753,9 @@ def write_tailframe_prompts(plan: DirectorPlan, *, llm, session_dir: str | Path,
         path.write_text(text.rstrip() + "\n", encoding="utf-8")
         # provenance 与正文同批落盘（#153）：换 `frame:` 后，续跑要靠这份记录发现
         # 「盘上的词是按旧档写的」。段提示词指纹同时记录——改过段词，旧尾帧词的终点
-        # 构图可能已经不对了。
-        write_frame_meta(path, {
+        # 构图可能已经不对了。合并而不是整份覆盖：同一份 sidecar 上别的写口加的
+        # 字段（例如 #158 的首帧图路径）不许被重写词抹掉（#157 复审）。
+        merge_frame_meta(path, {
             "kind": "tailframe",
             "segment": segment.index,
             "model": model,
