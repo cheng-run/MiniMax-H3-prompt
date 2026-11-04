@@ -110,14 +110,27 @@ case "${1:-}" in
     git -C "$MAIN_ROOT" worktree add "$target" -b "$branch" "$base"
 
     missing=()
-    # docs/ 也复制：规格与设计文档住在 docs/design/，而它和 tests/scripts 一样被
-    # .gitignore 挡住——不复制的话，工作树里的实现代理看不到票面指向的规格
-    # （2026-11-01 retro：协调会话只能给每个代理手写主树绝对路径）。
+    # docs/ 也复制：规格与设计文档住在 docs/design/，不复制的话，工作树里的实现
+    # 代理看不到票面指向的规格（2026-11-01 retro：协调会话只能给每个代理手写主树
+    # 绝对路径）。
+    #
+    # 2026-11-02 起 tests/scripts/docs 已入库，git 检出时这些目录**已经存在**；
+    # 此时再 `cp -r 主树/docs 目标/docs` 会复制成 `目标/docs/docs`（#159 实测：
+    # docs/docs/ 让 test_doc_pointer_shape 报一堆假红、pytest 重复收测）。所以
+    # 目录已存在时只补主树里**未跟踪**的文件（例如当天的调研笔记），已跟踪文件
+    # 以分支检出为准。
     for dir in tests scripts docs; do
-      if [ -d "$MAIN_ROOT/$dir" ]; then
-        cp -r "$MAIN_ROOT/$dir" "$target/$dir"
-      else
+      if [ ! -d "$MAIN_ROOT/$dir" ]; then
         missing+=("$dir")
+        continue
+      fi
+      if [ -d "$target/$dir" ]; then
+        while IFS= read -r -d '' rel; do
+          mkdir -p "$target/$(dirname "$rel")"
+          cp -p "$MAIN_ROOT/$rel" "$target/$rel"
+        done < <(git -C "$MAIN_ROOT" ls-files --others --exclude-standard -z -- "$dir")
+      else
+        cp -r "$MAIN_ROOT/$dir" "$target/$dir"
       fi
     done
 
