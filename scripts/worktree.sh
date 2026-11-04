@@ -172,9 +172,15 @@ EOF
     fi
 
     # 先收割测试改动，再同步主树最新副本：tests/ 不入库，工作树里的用例改动不随
-    # git merge 回来。并行票据期间主树本来就会多出别的票的用例，所以刷新副本是
-    # 必须的——但只在「收割确认没有未回灌改动」之后才做，否则会悄悄丢用例。
-    if [ "$force" -eq 0 ] && [ -d "$MAIN_ROOT/worktree/.base-$id/tests" ]; then
+    # 2026-11-02 起 tests/ 已入库：git 自己管它，harvest 与「刷新主树副本」都不再
+    # 需要。刷新反而会把工作树弄脏——主树带着别的票的测试改动时，刷新后的副本与
+    # 本票分支不一致，紧接着的脏检查会拒绝删除（#159 实测：remove 被自己的刷新拦住）。
+    tests_tracked=0
+    [ -n "$(git -C "$target" ls-files -- tests | head -1)" ] && tests_tracked=1
+
+    # 只有 tests/ 仍是「不入库的副本」时才需要收割与刷新（旧口径）。
+    if [ "$force" -eq 0 ] && [ "$tests_tracked" -eq 0 ] \
+        && [ -d "$MAIN_ROOT/worktree/.base-$id/tests" ]; then
       harvest "$id" || {
         echo "[拒绝] 测试收割有冲突，先人工合并再删树（确认丢弃才用 --force）。" >&2
         exit 1
@@ -196,7 +202,9 @@ EOF
     fi
 
     # 复制进去的 tests/ 副本若与主树有差异，说明有测试改动没同步回主树。
-    if [ -d "$MAIN_ROOT/tests" ] && [ -d "$target/tests" ]; then
+    # 入库后这条判据失效（分支本来就可能落后主树），由上面的脏检查兜住。
+    if [ "$tests_tracked" -eq 0 ] \
+        && [ -d "$MAIN_ROOT/tests" ] && [ -d "$target/tests" ]; then
       test_diff=$(diff -rq --exclude=__pycache__ --exclude=.pytest_cache \
         "$MAIN_ROOT/tests" "$target/tests" || true)
       if [ -n "$test_diff" ]; then
@@ -211,7 +219,10 @@ EOF
     fi
 
     # 复制进去的 tests/scripts 是未跟踪副本；先删掉，git worktree remove 才会接受。
-    rm -rf "$target/tests" "$target/scripts"
+    # 已入库时它们受 git 管，删掉反而制造脏状态，交给 worktree remove 处理。
+    if [ "$tests_tracked" -eq 0 ]; then
+      rm -rf "$target/tests" "$target/scripts"
+    fi
     # 此时跟踪文件已干净、测试副本已同步（或用户明确 --force）：允许清掉忽略文件。
     git -C "$MAIN_ROOT" worktree remove --force "$target"
     rm -rf "$MAIN_ROOT/worktree/.base-$id"
