@@ -13,6 +13,8 @@
 - **不写自创结构**：`GLOBAL_LOCK:` / `BRIDGE_FROM:` / `END_HOOK:` / 首行时长句 / 图片对齐指令行（`For the target video, …` 与 `How the reference pictures align with the target video …`）都属于别的路线。
 - **机位速度按剧情选**：静场、克制段落才用 `Static Shot`；有动作的段写完整的「运动类型 + 幅度 + 速度」自然句，不要把「静态」当默认——全片默认静态会把动作摊平，成片像慢放。
 - 只输出提示词纯正文：不要解释、不要 markdown 围栏、不要前言或结语。
+- **跨门槛／门口／门洞的动作，逐人写清门内门外与移动方向**：任何一人跨门槛、穿门口或进门洞，都在同一句里写死他**此刻在门内还是门外**、**朝哪边移动**；同段里没动的人也要交代相对位置（谁在屋内、谁在谁身后一步）——只写「走进门」而不写谁已经在里面，成品会让屋外的人跟着一起进来。正例：`The father is already inside the house, the mother stands one step behind him, and the man outside steps across the threshold into the room.`
+- **同一件穿戴物或道具，一段里只写一处归属**：帽子、头盔、背包、箱子、手机这类一眼能数清的物件，全段只写一次「在谁身上／在谁手里」；后文不要再把它改写成「放在某处」或「另一个人拿着」——两处归属会让成品长出两件。正例：`The helmet stays on his head; the box beside him holds no second helmet.`
 
 ## r2v
 

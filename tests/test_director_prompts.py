@@ -785,6 +785,37 @@ def test_common_guidance_wording_splits_guided_and_cut_segments():
         assert "不承接上一段" in text, f"{mode} 没写切镜段不承接"
 
 
+def test_common_gate_and_prop_ownership_rules_reach_the_writer_request(tmp_path):
+    """#159：门槛里外与「一件物品一处归属」两条纪律随 common 进入真实写段请求。
+
+    断言的是**模型收到的请求**（记录型桩模型抓到的出站字符串），不是
+    ``load_instruction`` 的返回值——本仓踩过「规则在、接线不在」：加载口返回了，
+    模型那侧却没有。两条纪律住在 common，所以四条模式都要能看见；到达性用 fl2v
+    实测（#137 验收里出问题的正是 fl2v 段词）。
+    """
+    from minimax_h3_prompt.director.prompts import (
+        load_instruction,
+        write_director_segments,
+    )
+
+    for mode in ("t2v", "i2v", "fl2v", "r2v"):
+        instruction = load_instruction(mode)
+        assert "门内" in instruction and "门外" in instruction, \
+            f"{mode} 的 common 缺「门内门外逐人写清」纪律"
+        assert "只写一处归属" in instruction, f"{mode} 的 common 缺「一件物品一处归属」纪律"
+
+    plan = _plan("fl2v")
+    llm = _DialectLLM(lambda index: _single_reply(plan.segments[index - 1], plan))
+    write_director_segments(plan, llm=llm, session_dir=tmp_path)
+
+    request = llm.requests[0]
+    assert "门内" in request and "门外" in request, "门槛里外纪律没到模型眼前"
+    assert "移动方向" in request, "门槛纪律没写清「要写移动方向」"
+    assert "already inside the house" in request, "门槛纪律的英文正例没到模型眼前"
+    assert "只写一处归属" in request, "物品归属纪律没到模型眼前"
+    assert "no second helmet" in request, "物品归属的英文正例没到模型眼前"
+
+
 def test_fl2v_instruction_teaches_the_four_give_image_branches():
     """写段指令按「首+尾 / 仅首 / 仅尾 / 无图」四条分支写，不再一套首尾帧口径通吃。"""
     from minimax_h3_prompt.director.prompts import load_instruction
