@@ -175,6 +175,15 @@ MUTATIONS: tuple[Mutation, ...] = (
         ("tests/test_director_film_end.py::test_matching_fingerprint_reuses_the_sidecar_without_reading_again",),
         "尾帧 sidecar 永不命中＝图没换也重读，续跑重复付费且不报错（#160）",
     ),
+    Mutation(
+        "doc_reference_untracked",
+        "src/minimax_h3_prompt/tools/frame_match.py",
+        '"""帧数 / fps / 宽高 / 时长。读不到时返回空 dict。"""',
+        '"""帧数 / fps / 宽高 / 时长。见 docs/research/2099-01-01-不存在.md。'
+        '读不到时返回空 dict。"""',
+        ("tests/test_doc_references_tracked.py",),
+        "引用未入库的 docs 路径＝干净检出丢掉证据（#157 复审）",
+    ),
 )
 
 
