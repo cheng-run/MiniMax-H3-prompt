@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 
 from ..ref_capacity import MAX_PICTURES
+from .film_end import render_film_end_block
 from .frames import (
     FPS,
     GRID_OFFSET,
@@ -256,7 +257,8 @@ def parse_director_plan(text: str, total_s: float, *, mode: str) -> DirectorPlan
 
 def plan_director_segments(shot_table: str, total_s: float, llm, *, mode: str,
                            frame_context: str = "",
-                           revision_context: str = "") -> DirectorPlan:
+                           revision_context: str = "",
+                           film_end_description: str = "") -> DirectorPlan:
     """调 LLM 规划导演台分段（直调走看门狗，与 ``plan_segments`` 同形）。
 
     失败两分法沿用 ADR 0019：**调用失败**（卡住到上限 / 中流断流 / 其他异常）抛
@@ -278,6 +280,13 @@ def plan_director_segments(shot_table: str, total_s: float, llm, *, mode: str,
         if frame_context.strip() else ""
     )
     revision_block = f"\n{revision_context}\n" if revision_context.strip() else ""
+    # 全片尾帧描述只对 fl2v 有意义：其它模式没有这张图（票面：只在 fl2v 且盘上真有
+    # 图时注入）。调用方已按盘面判过，这里再按模式守一道，避免别处误传把终点约束
+    # 塞进没有终点图的请求。
+    film_end_block = (
+        render_film_end_block(film_end_description, for_planning=True)
+        if mode == "fl2v" and film_end_description.strip() else ""
+    )
     allowed = segment_types_for_mode(mode)
     # 允许清单是**本次请求的数据**（系统提示词是五型共用一份，不知道模式）：写死在
     # 提示词里，i2v 就会照着别的模式的口径判运镜段，用户已经付过规划的钱才发现。
@@ -302,6 +311,7 @@ def plan_director_segments(shot_table: str, total_s: float, llm, *, mode: str,
         f"视频总时长：{total_s:g} 秒（总帧 {total_frames} 帧，{FPS}fps）\n"
         f"{mode_scope}"
         f"{frame_block}"
+        f"{film_end_block}"
         f"{revision_block}"
         f"\n分镜表：\n{shot_table}"
     )

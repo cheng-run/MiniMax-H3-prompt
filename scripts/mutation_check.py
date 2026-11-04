@@ -166,6 +166,15 @@ MUTATIONS: tuple[Mutation, ...] = (
          "tests/test_director_companion.py::test_handoff_rejects_a_video_whose_aspect_misses_its_anchor"),
         "画幅判定反了＝2% 的正常取整差被当成事故、218% 的锚点裁切被放行（#158）",
     ),
+    Mutation(
+        "film_end_sidecar_never_hits",
+        "src/minimax_h3_prompt/director/film_end.py",
+        '    if not fingerprint or meta.get("image_sha256") != fingerprint:\n'
+        "        return None",
+        "    if True:\n        return None",
+        ("tests/test_director_film_end.py::test_matching_fingerprint_reuses_the_sidecar_without_reading_again",),
+        "尾帧 sidecar 永不命中＝图没换也重读，续跑重复付费且不报错（#160）",
+    ),
 )
 
 

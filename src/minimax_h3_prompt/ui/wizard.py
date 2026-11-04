@@ -667,38 +667,6 @@ def _ask_optional_director_still(label: str, consequence: str) -> str:
             return ""
 
 
-def _store_director_still(source: Path, generation_dir: Path, stem: str, *,
-                          segment: int | None = 1) -> Path:
-    """把用户交回的图复制到导演包认的落点 ``director/assets/NN/<stem><ext>``。
-
-    为什么由程序复制、而不是让用户自己放到那个目录（2026-10-30 用户现场）：用户的
-    习惯是「生成完把路径粘给程序」，让他去翻 ``output/sessions/<主题>/GENxxx/director/
-    assets/01/`` 这种内部路径，等于把系统约定转嫁给他。
-
-    ``segment=None`` 落 **assets 根**（全片尾帧 ``film-end``）：它不属于任何一段的
-    段目录——写进 ``assets/01/`` 就会被打包成第 1 段的终点画面（2026-10-30 实跑：
-    4 段各 5 秒的片子，第 1 段被要求从雾中远景直接跑到 20 秒处的隧道深处）。
-
-    同一 stem 的**其他扩展名要清掉**：``pack._find_still`` 按扩展名偏好取第一张，
-    留着上次的 ``start.png`` 会让这次交的 ``start.jpg`` 静默失效（用户以为换了图）。
-    """
-    import shutil
-
-    from ..director.pack import ASSETS_DIRNAME, DIRECTOR_DIRNAME
-
-    assets_root = Path(generation_dir) / DIRECTOR_DIRNAME / ASSETS_DIRNAME
-    folder = assets_root if segment is None else assets_root / f"{segment:02d}"
-    folder.mkdir(parents=True, exist_ok=True)
-    suffix = Path(source).suffix.lower() or ".png"
-    target = folder / f"{stem}{suffix}"
-    shutil.copy2(source, target)
-    for ext in (".png", ".jpg", ".jpeg", ".webp"):
-        other = folder / f"{stem}{ext}"
-        if other != target and other.exists():
-            other.unlink()
-    return target
-
-
 def _collect_director_opening_still(session: SessionState, config: Config) -> bool | None:
     """i2v/fl2v 的开场首帧：审查提示词 → 收图片路径 → 落到导演包落点。
 
@@ -745,18 +713,27 @@ def _collect_director_opening_still(session: SessionState, config: Config) -> bo
         break
 
     from ..director.pack import FILM_END_STEM, START_STEM
+    from .wizard_director import prepare_film_end_description, store_director_still
 
     if first_path is None:  # 首帧必填；空输入在这里拦下，不把 None 传进落点
         print("[错误] 首帧路径为空。")
         return False
-    target = _store_director_still(first_path, directory, START_STEM)
+    target = store_director_still(first_path, directory, START_STEM)
     print(f"[已就位] 首帧：{target}")
     if last_path is not None:
         # 全片尾帧落 assets 根（``film-end``），不落 ``assets/01/end``：后者是**第 1 段**
         # 的终点画面。多段时这张图由你在导演台的**最后一段**尾帧槽里挂；单段时打包器
         # 会把它当作这一段的终点（``pack._plan_media``）。
-        film_end = _store_director_still(last_path, directory, FILM_END_STEM, segment=None)
+        film_end = store_director_still(last_path, directory, FILM_END_STEM, segment=None)
         print(f"[已就位] 全片尾帧（最后一段的终点画面）：{film_end}")
+        # #160：收集时读一次图（落 sidecar），失败立刻停——续跑跳过本步时规划前还会补读。
+        ok, description = prepare_film_end_description(directory)
+        if not ok:
+            print("  已停下：没有继续规划、没有写段、也没有落描述 sidecar。"
+                  "修好视觉模型后重跑向导会回到这一步。")
+            return False
+        if description:
+            print(f"[已读图] 全片终点画面：{description}")
     save_session(directory, brief, session.stage_state, status=session.status)
     return True
 
@@ -825,7 +802,8 @@ def _run_director_flow(session: SessionState) -> int:
             # 用户选了「整个流程重来」：修订清单已清空，回阶段 1 重新生成。
             return 0 if _phase1_new(app_config) is not None else 1
         if not ready:
-            print("停在打包之前：图没有就位。重跑向导会回到这一步（不会重做阶段 1）。")
+            print("停在打包之前：图没有就位，或全片尾帧读图失败。"
+                  "重跑向导会回到这一步（不会重做阶段 1）。")
             return 0
         _drain_stdin()
     _ask_director_pack_settings(session)
@@ -873,6 +851,18 @@ def _run_director_flow(session: SessionState) -> int:
                 _drain_stdin()
             refdefs.save_ref_sections(session.directory, sections)
             print(f"[定义块] 已生成并落盘：{refdefs.sections_path(session.directory)}")
+    # #160：续跑时收集步骤会被跳过，规划前仍要经同一个口取描述（缓存命中或补读）；
+    # 读图失败就停在段规划之前，不带着「终点全靠猜」的表往下跑。
+    from ..director.pack import film_end_still
+    from .wizard_director import prepare_film_end_description
+
+    film_end = (brief.director_mode == "fl2v"
+                and film_end_still(session.directory) is not None)
+    ok, film_end_description = (
+        prepare_film_end_description(session.directory) if film_end else (True, ""))
+    if not ok:
+        print("  已停下：没有做段规划、没有写段。")
+        return 1
     try:
         with step_scope("正在按导演台帧网格规划分段"):
             plan = plan_director_segments(
@@ -881,6 +871,8 @@ def _run_director_flow(session: SessionState) -> int:
                 # 与 base 的规划调用同源：真实关键帧画面压过分镜表、修订按优先序注入。
                 frame_context=frame_anchor_context(state),
                 revision_context=render_revision_context(state),
+                # 让最后一段的边界与落定画面按图写，不只按标题写（#160）。
+                film_end_description=film_end_description,
             )
     except (RuntimeError, ValueError) as exc:
         # 两种病分开表达（ADR 0019）：调用失败（卡住/断流）与回复不合格都说明白；
@@ -893,9 +885,6 @@ def _run_director_flow(session: SessionState) -> int:
     plan_file = write_plan_json(plan_path(session.directory), plan)
     # 全片尾帧在单段 fl2v 里就是这一段（开场）的终点画面：清单与写段请求都要按
     # 「首+尾」说，不能一处说首尾、一处说只有首（#147）。
-    from ..director.pack import film_end_still
-
-    film_end = plan.mode == "fl2v" and film_end_still(session.directory) is not None
     print()
     print(render_plan_listing(plan, film_end=film_end))
     print(f"\n段表已写入：{plan_file}")
@@ -912,6 +901,9 @@ def _run_director_flow(session: SessionState) -> int:
                 sections=(sections.as_mapping() if sections is not None else None),
                 registry=registry,
                 film_end=film_end,
+                # 与段表清单同一份判据：ending 段（单段时是 opening）的请求带终点图
+                # 描述，段词与图冲突时以图为准（#160）。
+                film_end_description=film_end_description,
             )
     except (RuntimeError, ValueError) as exc:
         # 写段失败不写半段假内容（半份段表比没写更糟：用户会拿它去打包）。
@@ -1302,6 +1294,16 @@ def _rewrite_director_segment_round(plan, segment, session: SessionState, *,
 
     state = dict(session.stage_state)
     sections = split_ref_sections(before) if plan.mode == "r2v" else None
+    # #160：改词也是写段请求，必须带同一份终点描述，否则按 e 改一次就把约束改丢。
+    from .wizard_director import prepare_film_end_description
+
+    film_end = (plan.mode == "fl2v"
+                and film_end_still(session.directory) is not None)
+    ok, film_end_description = (
+        prepare_film_end_description(session.directory) if film_end else (True, ""))
+    if not ok:
+        print("  本轮改词没有执行，本段提示词保持原样；可重选出路（贴视频 / 再按 e / q）。")
+        return "retry"
     try:
         with step_scope(f"正在改写第 {segment.index}/{len(plan.segments)} 段提示词"):
             outcome = rewrite_director_segment(
@@ -1309,8 +1311,8 @@ def _rewrite_director_segment_round(plan, segment, session: SessionState, *,
                 shot_table=str(state.get("shot_table", "")),
                 sections=sections,
                 # 与首写同一份上下文：单段 fl2v 的给图行要照旧写「首+尾」（#147）。
-                film_end=(plan.mode == "fl2v"
-                          and film_end_still(session.directory) is not None),
+                film_end=film_end,
+                film_end_description=film_end_description,
             )
     except (OSError, ValueError) as exc:
         # 上下文不完整（如 r2v 缺 subject_defs）：大声报，原词不动、不落账。

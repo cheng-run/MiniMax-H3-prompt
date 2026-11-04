@@ -84,6 +84,11 @@ def test_tail_frame_lands_in_the_film_end_slot_not_segment_one(tmp_path, monkeyp
     落错地方就是那个实跑错误的根：``assets/01/end`` 会被打包成第 1 段的终点画面，
     而用户给的是全片尾帧。全片尾帧属于最后一段（首尾帧路线的「末段落尾帧」口径）。
     """
+    # #160：收全片尾帧时会读一次图（存 sidecar）。本用例的接缝是**落点**，图的
+    # 内容无所谓；不打桩就会真的调视觉模型（出网守卫会拦、拖慢全量）。
+    monkeypatch.setattr(
+        "minimax_h3_prompt.tools.reference_auditor.describe_image",
+        lambda path, instruction=None: "院子里的男人背对镜头往前走。")
     session = _session(tmp_path)
     first = _still(tmp_path, "first.png")
     last = _still(tmp_path, "last.png")
