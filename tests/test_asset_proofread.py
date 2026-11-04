@@ -19,7 +19,9 @@ from minimax_h3_prompt.asset_proofread import (
     ProofreadReport,
     Reading,
     build_proofread_request,
+    body_language,
     compare_descriptions,
+    language_slip,
     merge_asset_description,
     parse_reading,
     proofread_descriptions,
@@ -312,6 +314,41 @@ def test_proofread_request_without_locked_list_is_unchanged():
     """未声明锁死清单时请求逐字与改动前一致（旧产物照旧走老口径）。"""
     assert build_proofread_request(_PROMPT) == build_proofread_request(_PROMPT, ())
     assert "锁死清单" not in build_proofread_request(_PROMPT)
+
+
+# ---------------------------------------------------------------------------
+# 语言：observed 与补漏要跟正文说同一种话（issue #162）
+# ---------------------------------------------------------------------------
+
+_EN_PROMPT = ("Professional editorial still-life of one 1980s Chinese countryside "
+              "wooden clapper with a gently curved body, deep brown hardwood.")
+
+
+def test_proofread_request_asks_observed_in_the_body_language():
+    """请求必须要求 observed 跟正文同语言（#162 的治本一侧）。
+
+    2026-11-04 实跑：请求是中文写的、正文是英文，视觉模型回的 observed 是中文，
+    回车默认值把它原样嵌进英文句子中间——链上没有任何一处会响。
+    """
+    for prompt in (_PROMPT, _EN_PROMPT):
+        request = build_proofread_request(prompt)
+        assert "相同的语言" in request, "没要求 observed 跟正文同语言：混排会从读图这一步开始"
+        assert "补漏" in request, "补漏的 observed 同样要跟正文同语言"
+
+
+def test_language_slip_judges_against_the_body_language():
+    """判据是「与正文一致」而不是「必须英文」：中文正文里的中文实况是正常情形。"""
+    assert body_language(_EN_PROMPT) == "en"
+    assert body_language(_PROMPT) == "zh", "中文正文被判成英文＝Z-Image 档会被要求写英文"
+
+    # 英文正文里整句中文 → 混排
+    assert language_slip("图中响板主体呈规则的长方形厚板，外轮廓基本笔直", body=_EN_PROMPT) is not None
+    # 短中文（专名、指代）是合法写法，不判
+    assert language_slip("红裙女孩", body=_EN_PROMPT) is None
+    # 中文正文里写中文 → 不判（Z-Image 档不回归）
+    assert language_slip("宝蓝色长裙", body=_PROMPT) is None
+    # 英文正文里写英文 → 不判
+    assert language_slip("a gently curved body", body=_EN_PROMPT) is None
 
 
 def test_render_report_lists_deviations_and_omissions():

@@ -2969,29 +2969,6 @@ def _ask_deviation_choice(dev, idx: int, total: int) -> str:
         print("  [错误] 只认 1/2/3（回车=1）。")
 
 
-def _pin_rewrite_quote(dev, running: str, *, name: str) -> str:
-    """「按图改文案」落点钉锚：返回在 ``running`` 上唯一命中、语义名之外的引文；放弃返回空串。
-
-    失锚／多处命中／只命中语义名都引导补锚（粘贴正文原文把落点钉到唯一一处），
-    回车＝放弃补锚，由调用方回三选改选其他裁决——三选必须走得到底，不许未捕获崩溃
-    （评审：失锚引文的「按图改文案」路径名不副实）。补锚后的引文记进裁决记录：
-    ``prompt_quote`` ＝ 实际落笔的锚，不是模型原话。
-    """
-    from ..asset_proofread import locate_rewrite_span
-
-    quote = dev.prompt_quote
-    while True:
-        try:
-            locate_rewrite_span(running, quote, name)
-            return quote
-        except ValueError as exc:
-            print(f"  [提示] {exc}")
-            quote = _prompt(
-                "  补锚引文（粘贴描述正文里的原文把落点钉到唯一一处，回车=改选裁决）：").strip()
-            if not quote:
-                return ""
-
-
 def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: str):
     """读图校对**一张**（issue #44 机制，issue #50 逐张闭环调用）。
 
@@ -3025,6 +3002,12 @@ def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: 
         proofread_rows,
         render_proofread_report,
         store_progress,
+    )
+    from .wizard_proofread import (
+        merged_language_warning,
+        omission_language_tip,
+        pin_replacement_language,
+        pin_rewrite_quote,
     )
     from ..generation import image_prompt_variants
     from ..tools.reference_auditor import describe_image
@@ -3126,10 +3109,16 @@ def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: 
                 adjudications.append(adj)
                 progress = _checkpoint(progress.with_decision(adj))
                 break
-            quote = _pin_rewrite_quote(dev, running, name=entry.name)
+            quote = pin_rewrite_quote(dev, running, name=entry.name, ask=_prompt)
             if not quote:
                 continue  # 放弃补锚：回三选改选其他裁决
             repl = _prompt(f"  改后文案（回车=用图中实见「{dev.observed}」）：").strip()
+            # 语言要和正文一致（#162）：回车默认值就是读图实况，英文正文下这一下就
+            # 把中文嵌进了句子中间。问答主体在 wizard_proofread（向导行长有闸）。
+            candidate = repl or dev.observed
+            pinned = pin_replacement_language(candidate, body=running, ask=_prompt)
+            if pinned != candidate:
+                repl = pinned
             adj = Adjudication(Deviation(dev.aspect, quote, dev.observed), choice, repl)
             adjudications.append(adj)
             running = merge_asset_description(running, [adj], [], name=entry.name)
@@ -3146,6 +3135,8 @@ def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: 
             print(f"[续跑] 补漏沿用上次的回答：{'并入' if progress.omissions else '不并入'}"
                   f" {len(report.omissions)} 条。")
         else:
+            if tip := omission_language_tip([o.fact for o in report.omissions], body=running):
+                print(tip)
             take = _confirm(f"把 {len(report.omissions)} 条补漏事实并入素材画面事实？", default=True)
             progress = _checkpoint(progress.with_omissions(take))
             accepted = [o.fact for o in report.omissions] if take else []
@@ -3171,6 +3162,10 @@ def _proofread_one_asset(state: dict, brief: Brief, generation_dir: Path, name: 
     _save()  # 逐张落盘（同上）
     if merged != base:
         print(f"  素材画面事实（合并后）：{merged}")
+    # 兜底告警（issue #162）：上面两处提问只管交互路径，续跑重放的裁决、人自己写进
+    # 补漏的文字都不经它们——合并结果仍是混排时，至少让它在屏幕上露一次面。
+    if warn := merged_language_warning(merged, base=base):
+        print(warn)
     return ProofreadOutcome(PROOFREAD_DONE)
 
 

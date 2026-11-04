@@ -306,6 +306,50 @@ def locate_rewrite_span(text: str, quote: str, name: str = "") -> int:
     return hits[0]
 
 
+# --- 正文语言（issue #162）--------------------------------------------------
+# 生图提示词正文的语言按出图档定（``knowledge/film-language-image.md``：Z-Image 档中文、
+# Qwen／MOSS 档英文）。读图实况与补漏要说**同一种话**：2026-11-04 实跑里，回车默认
+# 「用图中实见」把一句中文塞进了英文正文，补漏又按「；」追加了两句中文——整条链上
+# 没有任何地方会响（``check_image_prompt`` 的五类警告没有语言类），混排就这样一路
+# 进了 ``<Picture N>`` 的描述与段词。
+_CJK_RUN_RE = re.compile(r"[㐀-䶿一-鿿]+")
+_LATIN_LETTER_RE = re.compile(r"[A-Za-z]")
+
+MIN_FOREIGN_RUN = 8
+"""一段连续中文至少这么长，才算「换了一种语言」。
+
+短中文在英文正文里是**合法写法**（专名、「红裙女孩」这类指代），与校验器语言闸
+（issue #75）的「占比＋绝对字数」同一思路：不设下限会把专名误杀，设成零则一整句
+中文插进英文句子也照样放行。
+"""
+
+
+def body_language(text: str) -> str:
+    """正文说的是哪种语言：中文字符多于拉丁字母 → ``"zh"``，否则 ``"en"``。
+
+    判据跟着**正文自己**走，而不是「一律要求英文」：Z-Image 档的正文本来就是中文，
+    读图给中文实况是正常情形（#162 的判据是「与正文一致」）。
+    """
+    body = str(text or "")
+    cjk = len("".join(_CJK_RUN_RE.findall(body)))
+    latin = len(_LATIN_LETTER_RE.findall(body))
+    return "zh" if cjk > latin else "en"
+
+
+def language_slip(text: str, *, body: str) -> str | None:
+    """``text`` 里与 ``body`` 语言不符的第一段；没有返回 ``None``。
+
+    只判一个方向：**正文英文而 text 里出现 ≥ ``MIN_FOREIGN_RUN`` 字的连续中文**。
+    正文中文时中文实况本来就是对的，不判（Z-Image 档不回归）。
+    """
+    if body_language(body) != "en":
+        return None
+    for match in _CJK_RUN_RE.finditer(str(text or "")):
+        if len(match.group(0)) >= MIN_FOREIGN_RUN:
+            return match.group(0)
+    return None
+
+
 def merge_asset_description(
     image_prompt: str,
     adjudications: Sequence[Adjudication],
@@ -361,6 +405,10 @@ def build_proofread_request(image_prompt: str, locked_features: Sequence[str] = 
         '2. 补漏：图中有、而提示词**没有写**的显著事实（外观细节/道具/文字等）。'
         "这类 prompt_quote 留空字符串，observed 写该事实。",
         "只报确定可见的差异，不要臆测；与提示词一致的不要报。",
+        # 语言要求（issue #162）：请求是中文写的，视觉模型默认用中文答 observed——
+        # 英文正文的回车默认值就把中文塞进正文。这条不分支（正文中文时它也成立）。
+        "**observed 用与【生图提示词】相同的语言写**（正文英文就写英文，正文中文就写"
+        "中文），补漏的 observed 同理——两条事实会原样并进正文。",
     ]
     locked = [str(x).strip() for x in locked_features if str(x).strip()]
     if locked:
@@ -634,6 +682,8 @@ __all__ = [
     "DECISIONS", "DECISION_KEEP", "DECISION_LABELS", "DECISION_REGENERATE",
     "DECISION_REWRITE", "DEFAULT_DECISION", "PROGRESS_KEY", "PROOFREADS_KEY",
     "STATUS_DONE", "STATUS_PENDING_REGEN",
+    "MIN_FOREIGN_RUN",
+    "body_language", "language_slip",
     "Adjudication", "Claim", "Deviation", "Omission", "ProofreadProgress",
     "ProofreadRecord", "ProofreadReport", "Reading",
     "build_proofread_request", "clear_progress", "compare_descriptions",

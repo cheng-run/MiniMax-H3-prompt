@@ -212,6 +212,32 @@ MUTATIONS: tuple[Mutation, ...] = (
         ("tests/test_director_film_canvas.py::test_snap_rounds_to_the_plugin_grid_half_up",),
         "不对齐 32 网格＝1920×1080 这类尺寸到插件后端点运行才炸（#161）",
     ),
+    Mutation(
+        "language_slip_never_fires",
+        "src/minimax_h3_prompt/asset_proofread.py",
+        '    if body_language(body) != "en":\n        return None',
+        "    return None",
+        ("tests/test_asset_proofread.py::test_language_slip_judges_against_the_body_language",
+         "tests/test_wizard_asset_proofread.py::test_chinese_observed_in_an_english_body_gets_one_more_ask"),
+        "语言判据失效＝中文整句照旧嵌进英文正文，链上一处都不会响（#162）",
+    ),
+    Mutation(
+        "proofread_request_drops_language_rule",
+        "src/minimax_h3_prompt/asset_proofread.py",
+        '        "**observed 用与【生图提示词】相同的语言写**（正文英文就写英文，正文中文就写"\n'
+        '        "中文），补漏的 observed 同理——两条事实会原样并进正文。",',
+        '        "",',
+        ("tests/test_asset_proofread.py::test_proofread_request_asks_observed_in_the_body_language",),
+        "请求不再要求 observed 跟正文同语言＝治本那一侧失效，只剩事后告警（#162）",
+    ),
+    Mutation(
+        "replacement_language_gate_off",
+        "src/minimax_h3_prompt/ui/wizard_proofread.py",
+        "    text = str(candidate)\n    if language_slip(text, body=body) is None:\n        return text",
+        "    text = str(candidate)\n    return text",
+        ("tests/test_wizard_asset_proofread.py::test_chinese_observed_in_an_english_body_gets_one_more_ask",),
+        "交互处不再给改成英文的机会＝#162 的现场原样复现（回车即混排）",
+    ),
 )
 
 

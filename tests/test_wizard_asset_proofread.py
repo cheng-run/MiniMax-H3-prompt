@@ -128,11 +128,11 @@ def _stub_stage2(monkeypatch, captured: dict | None = None) -> None:
     monkeypatch.setattr(wizard, "run_stage2", fake_run_stage2)
 
 
-def _stub_stage1(monkeypatch) -> None:
+def _stub_stage1(monkeypatch, state: dict | None = None) -> None:
     monkeypatch.setattr(
         wizard, "run_stage1",
-        lambda brief, config, **kw: (_ref_stage1_state(), object(),
-                                     {"prompt_engineer": object()}),
+        lambda brief, config, **kw: (state if state is not None else _ref_stage1_state(),
+                                     object(), {"prompt_engineer": object()}),
     )
 
 
@@ -168,15 +168,17 @@ def _write_source(tmp_path: Path, name: str, content: bytes) -> Path:
 def _run_one_picture_flow(tmp_path, monkeypatch, reading: str,
                           extra_inputs: list[str], *,
                           confirms: list[tuple[str, bool]] | None = None,
-                          run2_captured: dict | None = None):
+                          run2_captured: dict | None = None,
+                          state: dict | None = None):
     """全程：素材循环里只交回红裙女孩一张图（picture-01，队首），其余三张显式放弃。
 
     ``extra_inputs`` 落在「交回之后、校对裁决之间」——三选/补锚等答问按序消耗。
+    ``state`` 换掉阶段 1 的产物表（默认用 ``_ref_stage1_state``），用于换正文语言。
     返回 ``(asked, code, calls)``。
     """
     _silence(monkeypatch)
     monkeypatch.setattr(wizard, "_choose_canvases", lambda: {})
-    _stub_stage1(monkeypatch)
+    _stub_stage1(monkeypatch, state)
     _stub_stage2(monkeypatch, run2_captured)
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: object())
     calls = _stub_describe(monkeypatch, {"红裙女孩":reading})
@@ -215,6 +217,56 @@ def test_deviation_three_way_defaults_to_rewrite_and_merges(tmp_path, monkeypatc
     )
     assert record["deviations"][0]["decision"] == "rewrite"
     assert record["status"] == "done"
+
+
+# ---------------------------------------------------------------------------
+# 语言：替换文案要与正文同语言（issue #162）
+# ---------------------------------------------------------------------------
+
+def _english_girl_state() -> dict:
+    """把红裙女孩的生图提示词换成英文正文（Qwen／MOSS 档的形态）。"""
+    state = _ref_stage1_state()
+    for entry in state["character_image_prompts"]:
+        if entry["name"] == "红裙女孩":
+            entry["positive_prompt"] = (
+                "Professional editorial still-life of one girl in a red dress "
+                "holding a bronze key, three-quarter view.")
+    return state
+
+
+def test_chinese_observed_in_an_english_body_gets_one_more_ask(tmp_path, monkeypatch):
+    """英文正文 + 中文实况：回车默认值是中文，必须再问一次；给了英文就落英文（#162）。
+
+    2026-11-04 实跑就是这么混的：读图请求是中文写的，observed 是中文，回车一下
+    整句中文嵌进英文句子中间，链上一处都不会响。
+    """
+    reading = _claims(deviations=[("裙色", "in a red dress", "穿宝蓝色长裙的女孩")])
+    captured: dict = {}
+    asked, code, _ = _run_one_picture_flow(
+        tmp_path, monkeypatch, reading,
+        # 裁决=按图改文案；替换文案回车=用图中实见（中文）→ 触发再问 → 给英文
+        extra_inputs=["", "", "wearing a blue dress"],
+        run2_captured=captured, state=_english_girl_state())
+
+    assert code == 0
+    assert any("英文替换文案" in text for text in asked), "中文替换没被再问一次"
+    desc = captured["state"]["asset_proofreads"]["红裙女孩"]["description"]
+    assert "wearing a blue dress" in desc
+    assert "穿宝蓝色" not in desc, "中文实况原样进了英文正文（#162 的现场）"
+
+
+def test_chinese_body_never_asks_for_english(tmp_path, monkeypatch):
+    """中文正文 + 中文实况是**正常情形**（Z-Image 档）：不得多问一句（#162 判据是「与正文一致」）。"""
+    reading = _claims(deviations=[("裙色", "红裙", "宝蓝色长裙")])
+    captured: dict = {}
+    asked, code, _ = _run_one_picture_flow(
+        tmp_path, monkeypatch, reading, extra_inputs=["", ""], run2_captured=captured)
+
+    assert code == 0
+    assert not any("英文替换文案" in text for text in asked), "中文正文被要求写英文"
+    assert captured["state"]["asset_proofreads"]["红裙女孩"]["description"] == (
+        "人物·红裙女孩专属生图提示词：宝蓝色长裙、黑发、银项链"
+    )
 
 
 def test_rewrite_spares_semantic_name_when_quote_hits_both(tmp_path, monkeypatch):
