@@ -77,6 +77,15 @@ def _ref_brief() -> Brief:
     return Brief(mode="ref", variant="T2VA", duration=5.0, style="写实", plot=TOPIC)
 
 
+def _manifest_block(names) -> str:
+    """设计端回复合约：末尾附 ```asset-manifest``` 清单块（issue #173 / spec #166 D）。
+
+    出词节点只按这份清单产出并校验名字集合；夹具不给块，设计节点会重问一次后报错。
+    """
+    return "\n```asset-manifest\n" + json.dumps(
+        {"assets": list(names)}, ensure_ascii=False) + "\n```\n"
+
+
 def _assets_json(assets: tuple[tuple[str, str], ...]) -> str:
     """资产图节点的假回复：JSON **数组**，每个资产一项（issue #40 单版形态）。
 
@@ -116,9 +125,12 @@ def _run_stage1(tmp_path, monkeypatch, brief: Brief | None = None
     # 各节点的假回复：按**请求正文**辨认调用方（本文件考的是请求，不是角色提示词）。
     # 设计／美术这两层回可辨认的正文，好让下游请求里能逐字认出「读到了谁」。
     design_replies = {
-        "请完成人物形象设计": "人物设计正文",
-        "请完成背景设计": "背景设计正文",
-        "请完成道具设计": "道具设计正文",
+        "请完成人物形象设计": "人物设计正文" + _manifest_block(
+            [name for name, _prompt in _ASSETS[0][5]]),
+        "请完成背景设计": "背景设计正文" + _manifest_block(
+            [name for name, _prompt in _ASSETS[2][5]]),
+        "请完成道具设计": "道具设计正文" + _manifest_block(
+            [name for name, _prompt in _ASSETS[1][5]]),
         "请统筹并裁决最终美术设计": "美术统筹正文",
     }
 

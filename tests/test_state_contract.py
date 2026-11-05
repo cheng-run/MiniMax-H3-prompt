@@ -67,3 +67,18 @@ def test_asset_prompt_keys_are_persisted_and_declared():
     for key in ASSET_PROMPT_KEYS:
         assert key in _PERSISTED, f"{key} 不在白名单：续跑会丢这类资产"
         assert key in _SCHEMA_KEYS, f"{key} 没在 PipelineState 声明：节点读不到它"
+
+
+def test_asset_manifest_keys_are_persisted_and_declared():
+    """设计端资产清单三键（issue #173 / spec #166 D）：两处都要在，缺口一个都是静默失效。
+
+    - 不在 schema → LangGraph 只搬运声明过的键，出词节点拿不到清单；
+    - 不在白名单 → 续跑后出词节点退回「本会话无资产清单」，整类清单校验静默关掉。
+    这条同时钉住「键名从 ``ASSET_MANIFEST_FIELDS`` 派生」：加第四类资产时两处一起动。
+    """
+    from minimax_h3_prompt.kinds import ASSET_MANIFEST_KEYS
+
+    assert ASSET_MANIFEST_KEYS, "清单键常量是空表，守卫会空转"
+    for key in ASSET_MANIFEST_KEYS:
+        assert key in _PERSISTED, f"{key} 不在白名单：续跑会丢设计端资产清单"
+        assert key in _SCHEMA_KEYS, f"{key} 没在 PipelineState 声明：节点读不到它"

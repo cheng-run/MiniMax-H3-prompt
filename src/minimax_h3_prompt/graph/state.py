@@ -7,9 +7,9 @@ from __future__ import annotations
 from typing import TypedDict
 
 from ..brief_parser import Brief
-from ..kinds import ASSET_KIND_FIELDS, ASSET_PROMPT_KEYS
+from ..kinds import ASSET_KIND_FIELDS, ASSET_MANIFEST_KEYS, ASSET_PROMPT_KEYS
 
-__all__ = ["ASSET_KIND_FIELDS", "ASSET_PROMPT_KEYS", "PipelineState"]
+__all__ = ["ASSET_KIND_FIELDS", "ASSET_MANIFEST_KEYS", "ASSET_PROMPT_KEYS", "PipelineState"]
 
 
 # ``ASSET_KIND_FIELDS`` / ``ASSET_PROMPT_KEYS`` 的唯一声明已迁到 ``kinds.py``
@@ -43,6 +43,15 @@ class PipelineState(TypedDict, total=False):
     character_image_prompts: list  # 人物资产生图提示词列表（每资产一条，issue #40 起）
     prop_image_prompts: list  # 道具资产生图提示词列表
     scene_image_prompts: list  # 场景资产生图提示词列表
+    # 设计端资产清单三键（issue #173 / spec #166 D）：三位设计师回复末尾的
+    # ```asset-manifest``` 块解析成「张」的名字列表，出词节点只按它产出并校验名字集合。
+    # 名字的唯一声明在 ``kinds.ASSET_MANIFEST_FIELDS``；这里逐个写出来只是因为
+    # TypedDict 用类体注解、无法从常量展开——``tests/test_state_contract.py`` 用那条
+    # 常量反查这三个声明，漏一个就红。**必须同时**进 ``session_store`` 的持久化白名单，
+    # 否则续跑时清单被静默丢弃，出词节点退回「无清单」而没人知道。
+    character_asset_manifest: list  # 人物母版清单（粒度到张；空表＝本轮不产母版）
+    prop_asset_manifest: list  # 道具母版清单
+    scene_asset_manifest: list  # 场景母版清单
     identity_lock: str  # 一致性对齐会（圆桌 3）锁定
 
     # 视觉（分镜 → 并行决策 → 并行制作）

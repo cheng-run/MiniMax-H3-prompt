@@ -37,3 +37,16 @@ ASSET_KIND_FIELDS: dict[str, tuple[str, str]] = {
 # 展开。会话持久化白名单、读回时的路线过滤、产物出口都从这个常量派生。
 ASSET_PROMPT_KEYS = tuple(
     prompt_field for prompt_field, _design_field in ASSET_KIND_FIELDS.values())
+
+# 设计端资产清单三键（issue #173 / spec #166 D）：三位设计师在回复末尾附机器可读的
+# ```asset-manifest``` 块，出词节点**只按这份清单**产出并校验名字集合。粒度是「张」——
+# 一个人两张板写两个名字，没有本类资产写空清单。
+#
+# 键名从 ``ASSET_KIND_FIELDS`` 现推而不是另抄一张表：加第四类资产时清单键、状态契约、
+# 持久化白名单与路线过滤要一起动，抄一份就会出现「节点写了、读回丢了」的静默漏。
+# **必须同时**登记进 ``graph/state.py`` 的状态契约与 ``session_store`` 的持久化白名单，
+# 并在非产资产路线随资产键一起丢弃——LangGraph 只搬运声明过的键。
+ASSET_MANIFEST_FIELDS: dict[str, str] = {
+    kind: f"{kind}_asset_manifest" for kind in ASSET_KIND_FIELDS
+}
+ASSET_MANIFEST_KEYS = tuple(ASSET_MANIFEST_FIELDS.values())

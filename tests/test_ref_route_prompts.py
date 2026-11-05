@@ -77,6 +77,15 @@ def _six_section_prompt(include: tuple[int, ...] = (1, 2, 3, 4)) -> str:
     )
 
 
+def _manifest_block(names) -> str:
+    """设计端回复合约：末尾附 ```asset-manifest``` 清单块（issue #173 / spec #166 D）。
+
+    出词节点只按这份清单产出并校验名字集合；夹具不给块，设计节点会重问一次后报错。
+    """
+    return "\n```asset-manifest\n" + json.dumps(
+        {"assets": list(names)}, ensure_ascii=False) + "\n```\n"
+
+
 def _assets_json(assets) -> str:
     # locked_features（issue #53）取语义名——它逐字在提示词正文里（夹具正文都以语义名起头），
     # 节点侧「条目必须是正文原文片段」的不变式因此成立。
@@ -107,9 +116,12 @@ def _run_pipeline(tmp_path, monkeypatch, *, first_video_prompt: str | None = Non
     requests: list[str] = []
     prompt_engineer_calls: list[str] = []
     replies = {
-        "请完成人物形象设计": "人物设计正文",
-        "请完成背景设计": "背景设计正文",
-        "请完成道具设计": "道具设计正文",
+        "请完成人物形象设计": "人物设计正文" + _manifest_block(
+            [name for name, _prompt in _ASSETS[0][3]]),
+        "请完成背景设计": "背景设计正文" + _manifest_block(
+            [name for name, _prompt in _ASSETS[2][3]]),
+        "请完成道具设计": "道具设计正文" + _manifest_block(
+            [name for name, _prompt in _ASSETS[1][3]]),
         "请统筹并裁决最终美术设计": "美术统筹正文",
     }
 

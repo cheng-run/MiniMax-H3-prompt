@@ -239,6 +239,14 @@ MUTATIONS: tuple[Mutation, ...] = (
         "交互处不再给改成英文的机会＝#162 的现场原样复现（回车即混排）",
     ),
     Mutation(
+        "manifest_set_check_off",
+        "src/minimax_h3_prompt/graph/nodes.py",
+        "            if mismatch:\n",
+        "            if False:\n",
+        ("tests/test_asset_manifests.py",),
+        "清单集合校验失效＝清单 2 条产出 3 条照旧进台账，错位无声带进素材循环（#173）",
+    ),
+    Mutation(
         "negated_clause_switches_the_kind",
         "src/minimax_h3_prompt/image_routing.py",
         "            if word is None or _is_negated(body):\n                continue",

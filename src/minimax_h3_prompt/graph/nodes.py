@@ -4,13 +4,14 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, Callable, cast
 
 from langgraph.graph.state import CompiledStateGraph
 
 from .. import image_config, image_routing
 from ..agents import image_prompt_agent_key, run_agent
+from ..asset_manifest import MANIFEST_FENCE, name_set_mismatch, split_manifest_reply
 from ..brief_parser import (
     Brief,
     brief_uses_refs,
@@ -45,7 +46,7 @@ from ..user_revisions import (
     render_revision_block,
     setting_revision_block,
 )
-from ..kinds import ASSET_KIND_FIELDS
+from ..kinds import ASSET_KIND_FIELDS, ASSET_MANIFEST_FIELDS
 from .state import PipelineState
 
 
@@ -164,11 +165,68 @@ def _design_context(state: PipelineState, brief: Brief, layer: str) -> str:
 
 def _make_design_node(agents: dict, role: str, output_field: str, label: str,
                       layer: str) -> Callable:
+    # 设计正文键 → 清单键（从 ``ASSET_KIND_FIELDS`` 的同一张表现推）：只有三类设计有
+    # 资产清单，将来加第四类时这里与出词节点一起从常量派生，不会漏一处。
+    manifest_field = ASSET_MANIFEST_FIELDS.get(
+        _KIND_BY_DESIGN_FIELD.get(output_field, ""))
+
     def node(state: PipelineState) -> dict:
         brief: Brief = state["brief"]
         msg = f"请完成{label}，必须严格契合视频剧情：\n{_design_context(state, brief, layer)}"
-        return {output_field: run_agent(agents[role], msg)}
+        # 只有产资产图的路线才切分清单（spec #166 D）：首尾帧、导演台 t2v 等路线把设计
+        # 融合成关键帧，没有「逐张出母版」这回事——在这里要清单就是让模型产出没人读的块，
+        # 缺块还会让整条阶段 1 失败。
+        if manifest_field is None or not route_emits_asset_prompts(brief):
+            return {output_field: run_agent(agents[role], msg)}
+        msg += _MANIFEST_REQUEST_NOTE
+        raw = run_agent(agents[role], msg)
+        body, names = split_manifest_reply(raw)
+        if names is None:
+            # 偶发的格式抖动多花一次调用即可，不必重跑整段阶段 1。重问要把原请求再带上：
+            # 模型没有对话记忆，只说「补个块」它无从知道要补哪份设计的清单。
+            raw = run_agent(agents[role], msg + _MANIFEST_RETRY_NOTE)
+            body, names = split_manifest_reply(raw)
+            if names is None:
+                raise ValueError(
+                    f"{label}的回复缺少可解析的 ```{MANIFEST_FENCE}``` 资产清单块"
+                    "（已自动重问一次）：出词节点只按这份清单产出，缺了它整类资产无从对号")
+        # 不硬校验名字出现在正文里（spec D）：正文是给人读的叙述、清单是机器口径，
+        # 两者不一致以块为准；但必须让不一致浮出来，否则「正文写了、清单漏了」无声无息。
+        absent = [name for name in names if name not in body]
+        if absent:
+            print(f"[提示] {label}的资产清单里有名字没出现在设计正文里：{absent}")
+        return {output_field: body, manifest_field: names}
     return node
+
+
+# 设计正文键 → 资产类别。清单键取 ``ASSET_MANIFEST_FIELDS``，不另写一份字符串。
+_KIND_BY_DESIGN_FIELD = {
+    design_field: kind for kind, (_prompt_field, design_field) in ASSET_KIND_FIELDS.items()
+}
+
+# 清单块的要求写进**请求**而不是角色提示词：设计提示词在三条路线共用，写进 .md 就是
+# 让首尾帧、导演台 t2v 这些不产资产的路线也照做一个没人读的块——块会留在设计正文里，
+# 被下游帧提示词当成设定读。只有产资产图的路线才在请求末尾要这个块。
+_MANIFEST_REQUEST_NOTE = (
+    "\n\n【资产清单块】在回复最末尾另起一段，附上本类资产的母版清单（机器口径，"
+    "下游出词端只认这个块）：\n"
+    "```" + MANIFEST_FENCE + "\n"
+    '{"assets": ["母版名", ...]}\n'
+    "```\n"
+    '粒度到「张」：一个人两张板就写两个名字，一张板一个名字；本类没有资产时写 '
+    '{"assets": []}。'
+)
+
+# 清单块缺失/不可解析时的重问附言。**带上原请求**（见下面注释）；块形状逐字与
+# ``asset_manifest.split_manifest_reply`` 的判据一致，改一边要改另一边。
+_MANIFEST_RETRY_NOTE = (
+    "\n\n【补充要求】上一次回复末尾缺少机器可读的 ```" + MANIFEST_FENCE + "``` 块，"
+    '或块内不是 {"assets": [...]} 形状。请完整重做上面的设计，并在回复最末尾另起一段附上：\n'
+    "```" + MANIFEST_FENCE + "\n"
+    '{"assets": ["母版名", ...]}\n'
+    "```\n"
+    '粒度到「张」：一个人两张板写两个名字；没有本类资产时写 {"assets": []}。'
+)
 
 
 # 中文资产类（节点请求里说的话）→ 配置里的键（``image_config.IMAGE_KINDS``）。
@@ -203,7 +261,8 @@ _IMAGE_PROMPTS_FIELD_BY_KIND: dict[str, str] = {
 
 
 def _asset_prompt_request(kind: str, design_field: str, state: Mapping[str, Any], brief: Brief,
-                          *, model: str, only: str = "") -> str:
+                          *, model: str, only: str = "",
+                          names: Sequence[str] = ()) -> str:
     """资产图出词请求正文；``only`` 非空时只出**那一张**（issue #88 的单条重出）。
 
     点名资产用「资产「名字」」这个形式：它是模型手上唯一「只回这一条」的锚（请求里同时
@@ -221,7 +280,16 @@ def _asset_prompt_request(kind: str, design_field: str, state: Mapping[str, Any]
         f"请为{kind}设计中的每个资产各生成一条可直接复制的生图提示词。"
         f"设计里有几个{kind}资产就输出几条。只输出 JSON 数组。\n"
     )
-    return scope + _ctx(
+    # 设计端声明的清单是**唯一的张数来源**（spec #166 D）：把名字逐条摆进来，模型才有
+    # 东西可照抄。只写「按清单出词」而不给清单，模型只能回去猜设计正文里有几个资产——
+    # 那正是「人物设计写『不新增母版』却拿场景建置图充数」的来路。
+    manifest = (
+        f"【资产清单】设计端声明本类母版共 {len(names)} 张，名单如下；"
+        "每个名字恰好一条，名字逐字照抄到 name，不得增删或改名：\n"
+        + "".join(f"- {name}\n" for name in names)
+        if names else ""
+    )
+    return scope + manifest + _ctx(
         原始剧情=brief.plot,
         起步澄清=brief.clarifications,
         分场剧本=state.get("script", ""),
@@ -241,15 +309,18 @@ def _asset_prompt_request(kind: str, design_field: str, state: Mapping[str, Any]
 
 
 def _generate_asset_entries(agent, kind: str, design_field: str, state: Mapping[str, Any], brief: Brief,
-                            *, model: str, only: str = "") -> list[dict]:
+                            *, model: str, only: str = "",
+                            names: Sequence[str] = ()) -> list[dict]:
     """跑一次资产图出词并归一成条目（多资产与单条重出共用这一条路）。
 
     ``only`` 非空时要求回复里**恰好是那一张**：模型回了别的名字就响——写进这张条目的
     词会属于另一张资产，而下游按语义名对号，串了也没人看得见（静默失败）。
     ``model`` 是这一单按哪一档出词（决定请求里【画布】块的那一行）。
+    ``names`` 是设计端清单（多资产出词才带）：请求里逐条摆出，模型照名字出词。
     """
     raw = run_agent(
-        agent, _asset_prompt_request(kind, design_field, state, brief, model=model, only=only))
+        agent, _asset_prompt_request(kind, design_field, state, brief, model=model,
+                                     only=only, names=names))
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
@@ -288,6 +359,20 @@ def _generate_asset_entries(agent, kind: str, design_field: str, state: Mapping[
     return entries
 
 
+def _manifest_names(state: Mapping[str, Any], kind_key: str) -> list[str] | None:
+    """读该类的设计端资产清单；**整键缺失**＝旧会话，返回 ``None``（不校验、按现状走）。
+
+    空表是有效答案（本类不产母版），与「没有这个键」是两件事：前者是设计端的结论、
+    后者是这次运行根本没走设计端的清单契约（旧会话/旧产物）。压成同一支就会让旧会话
+    打印「清单为空」，把「没问过」说成「问了、答案是零」。
+    """
+    names = state.get(ASSET_MANIFEST_FIELDS[kind_key])
+    if names is None:
+        print("本会话无资产清单，未校验类别")
+        return None
+    return [str(name) for name in names]
+
+
 def regenerate_asset_prompt(agents: dict, kind_key: str, name: str, state: Mapping[str, Any], brief: Brief,
                             *, model: str) -> dict:
     """按**指定模型**只重出一条资产图提示词（issue #88）。
@@ -303,6 +388,12 @@ def regenerate_asset_prompt(agents: dict, kind_key: str, name: str, state: Mappi
     """
     if kind_key not in ASSET_KIND_FIELDS:
         raise ValueError(f"未知资产类别：{kind_key!r}（只认 {', '.join(ASSET_KIND_FIELDS)}）")
+    # 单条重出只接受清单内的名字（spec #166 D）：清单外的名字是错位，不是待办。
+    # 旧会话没有清单时按现状放行——那边没有「清单」可依，硬拦等于让续跑全部失败。
+    manifest = _manifest_names(state, kind_key)
+    if manifest is not None and name not in manifest:
+        raise ValueError(
+            f"{KIND_LABELS[kind_key]}资产「{name}」不在设计端资产清单里：{manifest}")
     entries = _generate_asset_entries(
         _image_prompt_agent(agents, model), KIND_LABELS[kind_key],
         ASSET_DESIGN_FIELDS[kind_key], state, brief, model=model, only=name)
@@ -339,11 +430,27 @@ def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_f
         # 锁死清单不合规还会让整条阶段 1 失败。只早退、不改管线拓扑。
         if not route_emits_asset_prompts(brief):
             return {}
+        names = _manifest_names(state, kind_key)
+        if names is not None and not names:
+            # 空清单是**设计端的结论**（「本轮不新增人物母版」），不是缺数据：这时
+            # 调用模型只会让它按设计正文凑条目——被拒的正是「拿场景建置图充数」。
+            print(f"{kind}资产清单为空，本次不产母版")
+            return {output_field: []}
         # 模型在**调用时**取：配置是环境事实（换机器换模型只改 yaml），每次出词都现读。
         model_key = image_config.image_model_for(kind_key)
         entries = _generate_asset_entries(
             _image_prompt_agent(agents, model_key), kind, design_field, state, brief,
-            model=model_key)
+            model=model_key, names=names or ())
+        if names is not None:
+            # 清单是权威（spec #166 D）：条目名集合必须与它**集合相等且无重复**。
+            # 多、少、换名都当场停——错位的词进了 state 就会被素材循环照名字逐张取用，
+            # 而错的是哪一张不会有第二个信号。
+            mismatch = name_set_mismatch(
+                names, [str(entry.get("name", "")) for entry in entries])
+            if mismatch:
+                raise ValueError(
+                    f"{kind}资产图条目与设计端资产清单不一致：{mismatch}；"
+                    f"清单为 {names}")
         entries = _route_asset_entries(
             agents, kind_key, entries, state, brief, default_model=model_key)
         # 纪律检查**排在归一与路由之后**：只有形状合规的条目才谈得上「正文写法」，

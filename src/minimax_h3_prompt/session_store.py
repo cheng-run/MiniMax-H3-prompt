@@ -19,7 +19,7 @@ from .brief_parser import (
     validate_director_mode,
     validate_route_mode,
 )
-from .kinds import ASSET_PROMPT_KEYS
+from .kinds import ASSET_MANIFEST_KEYS, ASSET_PROMPT_KEYS
 from .observability import COST_TABLE_KEY, token_meter
 
 SESSION_FILENAME = "session-state.json"
@@ -77,6 +77,9 @@ _STATE_KEYS = (
     # 资产三键从 graph/state.py 的**唯一声明**展开（issue #77 复审 B）：这里再抄一遍
     # 键名字面，加第四类资产时白名单会静默漏掉它、保存即丢。
     *ASSET_PROMPT_KEYS,
+    # 设计端资产清单三键（issue #173 / spec #166 D）同理从常量展开。丢掉它等于续跑后
+    # 出词节点退回「本会话无资产清单」，清单校验整条静默失效。
+    *ASSET_MANIFEST_KEYS,
     "identity_lock", "shot_table", "shot_review_lock", "visual_design",
     "fl2va_prompt_bundle", "fl2va_frame_descriptions", "subject_defs",
     # `frame_images` 是关键帧入库记录（role → 用户原路径/正本副本/SHA256）。阶段 2 的
@@ -171,6 +174,10 @@ def _route_filtered_state(raw_state: Any, brief: Brief) -> dict[str, Any]:
     if route_emits_asset_prompts(brief):
         return stage_state
     for key in _ASSET_PROMPT_KEYS:
+        stage_state.pop(key, None)
+    # 设计端清单键跟着资产键一起丢（issue #173）：它们与三键是同一批产物的两头——
+    # 留下清单而没有条目，或反过来，都是「这条路线根本不该有」的残留。
+    for key in ASSET_MANIFEST_KEYS:
         stage_state.pop(key, None)
     return stage_state
 
