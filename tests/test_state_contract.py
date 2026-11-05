@@ -82,3 +82,22 @@ def test_asset_manifest_keys_are_persisted_and_declared():
     for key in ASSET_MANIFEST_KEYS:
         assert key in _PERSISTED, f"{key} 不在白名单：续跑会丢设计端资产清单"
         assert key in _SCHEMA_KEYS, f"{key} 没在 PipelineState 声明：节点读不到它"
+
+
+def test_film_size_confirmation_is_persisted_but_stays_outside_the_graph():
+    """成片画幅确认（#176）：与清单键**相反**——要持久化，但不进图。
+
+    ``stage_state`` 由向导侧直接读写（``director/aspect_flow.py`` 的
+    ``FILM_SIZE_CONFIRM_KEY``），不参与 ``StateGraph`` 搬运，所以登记的落点是
+    ``PERSISTED_OUTSIDE_GRAPH`` 而不是 ``PipelineState``。两处漏一处都会静默：
+    不在白名单 → 续跑后同一件事反复问；误进 schema → 图把它当状态键搬运，
+    契约上就多了一个没有节点的产物。键名从常量取，不在用例里重抄字面量。
+    """
+    from minimax_h3_prompt.director.aspect_flow import FILM_SIZE_CONFIRM_KEY
+
+    assert FILM_SIZE_CONFIRM_KEY in _PERSISTED, \
+        f"{FILM_SIZE_CONFIRM_KEY} 不在保存白名单：续跑会丢掉尺寸确认、反复重问"
+    assert FILM_SIZE_CONFIRM_KEY in session_store.PERSISTED_OUTSIDE_GRAPH, \
+        f"{FILM_SIZE_CONFIRM_KEY} 没登记成「图外」：状态契约拼不出它的归属"
+    assert FILM_SIZE_CONFIRM_KEY not in _SCHEMA_KEYS, \
+        f"{FILM_SIZE_CONFIRM_KEY} 进了 PipelineState：它是向导侧键，不该被图搬运"

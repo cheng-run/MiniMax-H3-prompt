@@ -16,6 +16,7 @@ import pytest
 
 from minimax_h3_prompt import image_config
 from minimax_h3_prompt.agents import image_prompt_agent_key
+from minimax_h3_prompt.asset_manifest import MANIFEST_FENCE
 from minimax_h3_prompt.brief_parser import Brief
 from minimax_h3_prompt.graph import nodes
 from minimax_h3_prompt.kinds import ASSET_MANIFEST_FIELDS, ASSET_MANIFEST_KEYS
@@ -36,7 +37,10 @@ def _base_brief() -> Brief:
 
 
 def _manifest_block(names: list[str]) -> str:
-    return "\n```asset-manifest\n" + json.dumps({"assets": names}, ensure_ascii=False) + "\n```\n"
+    # 围栏引用常量而不是重抄字面量：标签一改，提示、解析与这份夹具一起动
+    # （CODING_STANDARDS §四；``asset_manifest._BLOCK_RE`` 同样从它派生）。
+    return "\n```" + MANIFEST_FENCE + "\n" + json.dumps(
+        {"assets": names}, ensure_ascii=False) + "\n```\n"
 
 
 def _design_reply(body: str, names: list[str]) -> str:
@@ -105,7 +109,7 @@ def test_design_node_splits_the_manifest_out_of_the_body(monkeypatch):
     out = node({"brief": _ref_brief()})
 
     assert out["character_design"].strip() == "青年男人：短发，灰夹克。\n老妇人：银发，深色长衣。"
-    assert "asset-manifest" not in out["character_design"], "清单块混进了设计正文"
+    assert MANIFEST_FENCE not in out["character_design"], "清单块混进了设计正文"
     assert out[MANIFEST_KEY] == ["青年男人｜综合板", "老妇人｜综合板"], \
         "清单没有按张落进清单键"
 
@@ -166,14 +170,14 @@ def test_missing_block_is_asked_once_more(monkeypatch):
     out = node({"brief": _ref_brief()})
 
     assert len(calls) == 2, f"缺块应当恰好重问一次：{len(calls)} 次调用"
-    assert "asset-manifest" in calls[1], "重问请求没有点名要补的清单块，模型无从照做"
+    assert MANIFEST_FENCE in calls[1], "重问请求没有点名要补的清单块，模型无从照做"
     assert out[MANIFEST_KEY] == ["青年男人｜综合板"]
 
 
 @pytest.mark.parametrize("bad_reply", [
     "人物设计正文（没有块）",
-    "人物设计正文\n```asset-manifest\n这不是 JSON\n```\n",
-    "人物设计正文\n```asset-manifest\n{\"sheets\": [\"x\"]}\n```\n",
+    f"人物设计正文\n```{MANIFEST_FENCE}\n这不是 JSON\n```\n",
+    f"人物设计正文\n```{MANIFEST_FENCE}\n{{\"sheets\": [\"x\"]}}\n```\n",
 ])
 def test_unparseable_manifest_fails_after_one_more_ask(monkeypatch, bad_reply):
     """重问一次仍拿不到可解析的清单 → 报错并点名角色，不带着坏数据往下走。"""
@@ -196,7 +200,7 @@ def test_base_route_designer_is_never_asked_for_a_manifest(monkeypatch, capsys):
 
     assert out == {"character_design": "人物设计正文"}
     assert len(calls) == 1
-    assert "asset-manifest" not in capsys.readouterr().out
+    assert MANIFEST_FENCE not in capsys.readouterr().out
 
 
 def test_only_the_asset_route_request_asks_for_the_manifest_block(monkeypatch):
@@ -212,8 +216,8 @@ def test_only_the_asset_route_request_asks_for_the_manifest_block(monkeypatch):
     base_node, base_calls = _character_design_node(monkeypatch, ["人物设计正文"])
     base_node({"brief": _base_brief()})
 
-    assert "asset-manifest" in asset_calls[0], "产资产路线的设计请求没要清单块"
-    assert "asset-manifest" not in base_calls[0], "非产资产路线的设计请求要了清单块"
+    assert MANIFEST_FENCE in asset_calls[0], "产资产路线的设计请求没要清单块"
+    assert MANIFEST_FENCE not in base_calls[0], "非产资产路线的设计请求要了清单块"
 
 
 # ---------------------------------------------------------------------------

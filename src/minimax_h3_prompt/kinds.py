@@ -23,7 +23,8 @@ OFFICIAL_LABEL = {KIND_PICTURE: "Picture", KIND_VIDEO: "Video", KIND_AUDIO: "Aud
 # 加第四类资产时总有一处静默漏掉，而且没有用例会红（#56 复审：守卫形态要从常量派生）。
 #
 # 每条条目是**四键契约**（name / positive_prompt / negative_prompt / locked_features）
-# 再加系统自己的一个字段 ``image_model``（``{model, source, keyword}``，issue #88）：
+# 再加系统自己的一个字段 ``image_model``（``{model, source, keyword, evidence}``，
+# issue #88；``evidence`` 由 #167 补上）：
 # 它记「这条词按哪一档的纪律写成、为什么是那一档」，改写与出词横幅都按它取模型。
 # 它跟着条目走而不是另开一张 state 表——三个资产图节点在同一个组合节点里并发跑，
 # 共享一张表会被 ``make_parallel`` 的 ``merged.update`` 覆盖掉前两类的记录。

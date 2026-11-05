@@ -27,6 +27,7 @@ import pytest
 
 from minimax_h3_prompt import image_config, model_factory
 from minimax_h3_prompt.agents import image_prompt_agent_key
+from minimax_h3_prompt.asset_manifest import MANIFEST_FENCE
 from minimax_h3_prompt.brief_parser import Brief
 from minimax_h3_prompt.generation import (
     IMAGE_PROFILE_DEFAULTS,
@@ -82,7 +83,7 @@ def _manifest_block(names) -> str:
 
     出词节点只按这份清单产出并校验名字集合；夹具不给块，设计节点会重问一次后报错。
     """
-    return "\n```asset-manifest\n" + json.dumps(
+    return "\n```" + MANIFEST_FENCE + "\n" + json.dumps(
         {"assets": list(names)}, ensure_ascii=False) + "\n```\n"
 
 

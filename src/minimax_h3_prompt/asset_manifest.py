@@ -19,11 +19,15 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 
-# 围栏语言标签。设计端提示词与解析器都写这个字面量，改一处就要改另一处——
-# 用例 ``test_design_node_*`` 通过「重问请求里点名这个标签」把两边钉在一起。
+# 围栏语言标签：设计端提示词（``graph/nodes.py`` 的请求与重问）与解析器共用这一个
+# 常量。两边各写一份字面量时，改一处只有一边跟着动——模型照新标签回、解析器还找旧
+# 标签，清单块被当正文吞掉且不报错（CODING_STANDARDS §四：守卫形态从常量派生）。
 MANIFEST_FENCE = "asset-manifest"
 
-_BLOCK_RE = re.compile(r"```asset-manifest[^\n]*\n(.*?)```", re.DOTALL)
+# 正则从常量派生而非重抄字面量：``re.escape`` 保证标签里的正则元字符（将来的 ``:``、``.``）
+# 不会被当成通配；夹具同样引用 ``MANIFEST_FENCE``，改常量时提示、解析与用例一起动。
+_BLOCK_RE = re.compile(
+    r"```" + re.escape(MANIFEST_FENCE) + r"[^\n]*\n(.*?)```", re.DOTALL)
 
 
 def split_manifest_reply(reply: str) -> tuple[str, list[str] | None]:

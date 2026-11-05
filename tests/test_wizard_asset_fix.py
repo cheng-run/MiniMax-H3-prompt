@@ -24,6 +24,7 @@ from minimax_h3_prompt.session_store import (
 )
 from minimax_h3_prompt.tools import reference_auditor
 from minimax_h3_prompt.ui import wizard
+from minimax_h3_prompt.ui.wizard_asset_fix import EDIT_FILENAME
 
 TOPIC = "红裙女孩走进秋日庭院，把青铜钥匙交给蓝衫少年。"
 
@@ -265,6 +266,42 @@ def test_settled_description_edit_updates_record_without_reread(tmp_path, monkey
     # 下游取材口立刻拿到新值（登记与段词同源）
     assert proofread_descriptions(load_session(directory).stage_state)["红裙女孩"] == \
         FIXED_DESCRIPTION
+
+
+def test_failed_temp_cleanup_warns_on_stderr(tmp_path, monkeypatch, capsys):
+    """临时文件删不掉时 stderr 必须说一句：清理失败不中断流程，但不许静默留垃圾。
+
+    「绝不静默失败」是仓里的红线；清理又处在 ``finally`` 里，吞掉异常就等于把一个
+    真实的「文件被占用」现场变成没人知道的小毛病。
+    """
+    _ask0, directory = _settle_girl_with_chinese_omission(tmp_path, monkeypatch)
+    capsys.readouterr()
+
+    original_unlink = Path.unlink
+
+    def failing_unlink(self, *args, **kwargs):
+        if self.name == EDIT_FILENAME:
+            raise OSError("被别的程序占用")
+        return original_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+
+    def fake_prompt(text: str) -> str:
+        if "改素材画面事实" in text:
+            return "2"
+        if "改好后回车" in text:
+            edit_file = next(iter(directory.glob("proofread-edit*.txt")))
+            edit_file.write_text(FIXED_DESCRIPTION, encoding="utf-8")
+            return ""
+        return ""
+
+    assert _resume(tmp_path, monkeypatch, directory, fake_prompt) == 0
+    err = capsys.readouterr().err
+
+    assert EDIT_FILENAME in err, f"清理失败没有在 stderr 说一句：{err!r}"
+    assert "临时文件" in err
+    # 清理是收尾动作：它失败不该抹掉已经写回的改写。
+    assert _record(directory)["description"] == FIXED_DESCRIPTION
 
 
 def test_edit_to_same_text_is_not_written(tmp_path, monkeypatch, capsys):

@@ -284,6 +284,15 @@ MUTATIONS: tuple[Mutation, ...] = (
         ("tests/test_asset_manifest_duplicates.py",),
         "清单级重名守卫失效＝跨类同名要到交回第一张图才在台账入库时报（#175）",
     ),
+    Mutation(
+        "interaction_log_drops_answer_len",
+        "src/minimax_h3_prompt/observability.py",
+        '            "answer_len": length,\n',
+        '            "answer_len": 0,\n',
+        ("tests/test_interactions.py::test_prompt_question_and_answer_are_recorded",),
+        "交互日志只记摘要不记长度＝事后查不出「他到底答了多少字」，长正文类答案"
+        "（内容被故意丢弃）就彻底失去可核对的量（#171）",
+    ),
 )
 
 

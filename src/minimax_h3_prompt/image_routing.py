@@ -218,7 +218,7 @@ def _validated(raw: Mapping[str, Any]) -> dict[str, str]:
 
 
 def put_assignment(entry: dict[str, Any], value: Mapping[str, str]) -> None:
-    """把判定写进资产条目（形状规范化成三键；坏值当场响，不留坏形状给读口）。"""
+    """把判定写进资产条目（形状规范化成四键；坏值当场响，不留坏形状给读口）。"""
     entry[ENTRY_KEY] = _validated(value)
 
 
@@ -230,7 +230,7 @@ def assignment_of(entry: Mapping[str, Any]) -> dict[str, str] | None:
     if not isinstance(raw, Mapping):
         raise ValueError(
             f"资产条目的 {ENTRY_KEY} 字段错形：{raw!r}"
-            "（应为 {model, source, keyword} 对象）")
+            "（应为 {model, source, keyword, evidence} 对象）")
     return _validated(raw)
 
 

@@ -122,7 +122,7 @@ def asset_assignment(state: dict, item: QueueItem) -> dict[str, str]:
     """这一张当前的模型判定：条目里记的那一份，旧条目（issue #88 之前）回落到配置默认。
 
     回落**走同一个判定函数**（``image_routing.assignment``，不给文本＝不命中）：手搓一个
-    ``{model, source, keyword}`` 字面量就是同一份记录的第二个写点，形状一改就漂。
+    ``{model, source, keyword, evidence}`` 字面量就是同一份记录的第二个写点，形状一改就漂。
     """
     from ..image_routing import assignment, assignment_of
 

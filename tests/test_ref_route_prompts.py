@@ -17,6 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from minimax_h3_prompt import model_factory
+from minimax_h3_prompt.asset_manifest import MANIFEST_FENCE
 from minimax_h3_prompt.brief_parser import Brief, RefItem
 from minimax_h3_prompt.generation import REF_WORKFLOW_NAME, ref_asset_registry
 from minimax_h3_prompt.graph import nodes, pipeline, roundtable
@@ -82,7 +83,7 @@ def _manifest_block(names) -> str:
 
     出词节点只按这份清单产出并校验名字集合；夹具不给块，设计节点会重问一次后报错。
     """
-    return "\n```asset-manifest\n" + json.dumps(
+    return "\n```" + MANIFEST_FENCE + "\n" + json.dumps(
         {"assets": list(names)}, ensure_ascii=False) + "\n```\n"
 
 

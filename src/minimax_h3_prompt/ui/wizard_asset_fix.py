@@ -22,6 +22,7 @@ import ``wizard``——与 ``wizard_proofread`` 同一套防成环口径。
 """
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -166,10 +167,13 @@ def _edit_description(
         return True
     finally:
         # 临时文件是这次编辑的中间物，不是产物：无论落盘还是取消都不留。
+        # 删不掉不中断流程（改写可能已经落盘），但**不许静默**——留在盘上的是含用户
+        # 原文的中间物，事后要能知道它属于哪一次编辑、为什么没清掉。
         try:
             path.unlink()
-        except OSError:
-            pass
+        except OSError as exc:
+            print(f"  [提示] 临时文件清理失败，请手动删除：{path}（{exc}）",
+                  file=sys.stderr)
 
 
 __all__ = ["EDIT_FILENAME", "review_settled"]
