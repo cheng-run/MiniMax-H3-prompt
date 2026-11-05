@@ -215,69 +215,74 @@ def test_keyword_list_is_the_spec_list():
 
 
 # ---------------------------------------------------------------------------
-# 否定句不误切档与命中证据（issue #167 / spec #169 C）
+# 否定句不误切档与命中证据（issue #167 / spec #169 C；粒度 #177 定为「句」）
 #
 # 现场：设计正文里一句「不出现现代塑料包装」把 12 条道具全部切到 MOSS（2026-11-04
 # r2v 实跑）。切档错了不报错，只是整类的词都按另一套纪律写；所以判定必须看**命中词
-# 所在的那一个分句**是不是禁令。取舍写明：宁可漏切、不整类误切——人还能在素材循环里
-# 手动改档，而自动规则误切的整类不会自己浮出来。
+# 所在的那一句**是不是禁令。取舍写明：宁可漏切、不整类误切——人还能在素材循环里
+# 手动改档，而自动规则误切的整类不会自己浮出来。句边界只认句末标点与换行（#177）。
 # ---------------------------------------------------------------------------
 
-def test_hit_carries_the_clause_it_came_from():
-    """命中不只回那个词，还回它所在的分句——终端要念「因为哪一句」。"""
-    hit = image_routing.text_capability_hit("道具设计：瓶身贴着标签，颜色偏暖")
+def test_hit_carries_the_sentence_it_came_from():
+    """命中不只回那个词，还回它所在的句——终端要念「因为哪一句」。
+
+    句边界只认句末标点（#177）：逗号不切，所以「瓶身贴着标签，颜色偏暖」是同一句，
+    证据里带上它自己的开头，用户才对得上正文。
+    """
+    hit = image_routing.text_capability_hit("道具设计：瓶身贴着标签，颜色偏暖。背景是木桌")
 
     assert hit is not None
     assert hit.word == "标签"
-    assert hit.clause == "瓶身贴着标签", "分句按中文标点切开，不带前后那几段"
+    assert hit.sentence == "道具设计：瓶身贴着标签，颜色偏暖", "句按句末标点切开，逗号不切"
 
 
-def test_negated_clause_does_not_hit():
+def test_negated_sentence_does_not_hit():
     """「不得出现现代塑料包装」是禁令不是文字需求：整类道具不许被切到 MOSS。"""
     assert image_routing.text_capability_hit("道具设计：瓶身不得出现现代塑料包装") is None
 
 
-def test_affirmative_clause_beside_a_negated_one_still_hits():
-    """同一段里否定分句与肯定分句并存：只有肯定那一句生效（否定不污染整段）。"""
+def test_affirmative_sentence_beside_a_negated_one_still_hits():
+    """同一段里否定句与肯定句并存：只有肯定那一句生效（否定不污染整段）。"""
     hit = image_routing.text_capability_hit(
-        "不得出现现代塑料包装；瓶身要贴一张手写标签")
+        "不得出现现代塑料包装。瓶身要贴一张手写标签")
 
     assert hit is not None
-    assert (hit.word, hit.clause) == ("标签", "瓶身要贴一张手写标签")
+    assert (hit.word, hit.sentence) == ("标签", "瓶身要贴一张手写标签")
 
 
-def test_a_negation_after_the_keyword_still_covers_the_whole_clause():
-    """否定词出现在命中词之后也算这一句的禁令：分句是判定的粒度，不是位置先后。"""
+def test_a_negation_after_the_keyword_still_covers_the_whole_sentence():
+    """否定词出现在命中词之后也算这一句的禁令：句是判定的粒度，不是位置先后。"""
     assert image_routing.text_capability_hit("道具设计：包装不得使用现代塑料") is None
 
 
-@pytest.mark.parametrize("clause", [
-    "不得出现现代塑料包装",
-    "不出现任何标签",
-    "不需要包装",
-    "不要文字",
-    "不使用海报",
-    "不能有招牌",
-    "禁止添加 logo",
-    "避免出现文字",
-    "没有标签",
-    "无包装",
+@pytest.mark.parametrize("text", [
+    "道具设计：不得出现现代塑料包装",
+    "道具设计：不出现任何标签",
+    "道具设计：不需要包装",
+    "道具设计：不要文字",
+    "道具设计：不使用海报",
+    "道具设计：不能有招牌",
+    "道具设计：禁止添加 logo",
+    "道具设计：避免出现文字",
+    "道具设计：没有标签",
+    # 「无」只在**句首**算否定：句中的它可能是地名或半个词，所以这里另起一句来验。
+    "道具设计：玻璃汽水瓶。无包装",
 ])
-def test_chinese_negations_suppress_the_hit(clause):
-    """中文否定词逐条咬住（票面点名的九个词 ＋ 分句首字「无」）。"""
-    assert image_routing.text_capability_hit(f"道具设计：{clause}") is None
+def test_chinese_negations_suppress_the_hit(text):
+    """中文否定词逐条咬住（票面点名的九个词 ＋ 句首字「无」）。"""
+    assert image_routing.text_capability_hit(text) is None
 
 
-@pytest.mark.parametrize("clause", [
+@pytest.mark.parametrize("sentence", [
     "no labels or packaging",
     "without any text",
     "avoid lettering",
     "never show a logo",
     "not a poster in sight",
 ])
-def test_english_negations_suppress_the_hit(clause):
+def test_english_negations_suppress_the_hit(sentence):
     """英文否定词逐条咬住：MOSS/Qwen 档的正文是英文，只写中文否定词等于对那一半文本失效。"""
-    assert image_routing.text_capability_hit(f"prop design: a bottle, {clause}") is None
+    assert image_routing.text_capability_hit(f"prop design: a bottle, {sentence}") is None
 
 
 def test_english_negation_needs_a_word_boundary():
@@ -288,36 +293,42 @@ def test_english_negation_needs_a_word_boundary():
     assert hit is not None and hit.word == "标签"
 
 
-def test_negation_is_per_clause_not_per_paragraph():
-    """否定只吃它所在的分句：英文同段里另一个肯定分句照旧命中。"""
+def test_negation_is_per_sentence_not_per_paragraph():
+    """否定只吃它所在的句：英文同段里另一个肯定句照旧命中。
+
+    逗号不再切句（#177），所以两句之间用句号——这正是新语义：同一句里「不要 X，但要 Y」
+    会一起漏切，跨句则各自判定。
+    """
     hit = image_routing.text_capability_hit(
-        "prop design: no labels on the cap, but a printed poster on the wall")
+        "prop design: no labels on the cap. But a printed poster on the wall")
 
     assert hit is not None and hit.word == "海报"
 
 
-def test_the_wu_negation_only_counts_at_the_clause_start():
-    """「无」只按**分句首字**算否定（票面口径）。
+def test_the_wu_negation_has_two_narrow_shapes():
+    """「无」算否定的两种窄形态：**句首**（#167）与**紧邻命中词之前**（#177 补充裁定）。
 
-    句中出现的「无」不算：正文里的「无锡」「无需」既可能是地名也可能是半句，放宽到
-    子串会把肯定诉求也吞掉。要放宽得先改规格——所以这条钉住当前的边界。
+    别的形态一律不算：放宽到「句里有『无』」会把地名（无锡）、半词与「无数标签」这类
+    肯定诉求一起吞掉。要放宽得先改规格——这条钉住当前边界。
+    #177 的后果：句边界变大后，冒号后的「无包装」不再自成一句；它能被否定靠的是
+    「紧邻」这条，不是句首那条。
     """
-    assert image_routing.text_capability_hit("道具设计：无包装") is None
-    assert image_routing.text_capability_hit("道具设计：瓶身无文字").word == "文字"
+    assert image_routing.text_capability_hit("道具设计：玻璃汽水瓶。无包装") is None
+    assert image_routing.text_capability_hit("道具设计：瓶身无文字") is None
 
 
-def test_assignment_records_the_source_clause():
-    """切档记录里存来源分句：事后要能回答「当初凭什么切的这一档」。"""
+def test_assignment_records_the_source_sentence():
+    """切档记录里存来源句：事后要能回答「当初凭什么切的这一档」。"""
     result = image_routing.assignment("prop", texts=["道具设计：瓶身包装印着品牌色块"])
 
     assert result == {
         "model": "moss", "source": "auto", "keyword": "包装",
-        "evidence": "瓶身包装印着品牌色块",
+        "evidence": "道具设计：瓶身包装印着品牌色块",
     }
 
 
-def test_assignment_leaves_evidence_empty_when_no_clause_decided_it():
-    """手动与配置默认没有来源分句：证据字段留空，不许拿提示词正文凑数。"""
+def test_assignment_leaves_evidence_empty_when_no_sentence_decided_it():
+    """手动与配置默认没有来源句：证据字段留空，不许拿提示词正文凑数。"""
     manual = image_routing.assignment(
         "prop", texts=["瓶身包装印着品牌色块"], manual="z_image")
     configured = image_routing.assignment("prop", texts=["一把青铜钥匙"])
@@ -325,7 +336,7 @@ def test_assignment_leaves_evidence_empty_when_no_clause_decided_it():
     assert manual["evidence"] == "" and configured["evidence"] == ""
 
 
-def test_described_appends_the_source_clause():
+def test_described_appends_the_source_sentence():
     """终端那一行带上来源：「因为哪一句」决定用户要不要当场手改。"""
     text = image_routing.described({
         "model": "moss", "source": "auto", "keyword": "包装",
@@ -350,3 +361,90 @@ def test_old_records_without_evidence_still_load():
         "model": "moss", "source": "auto", "keyword": "包装", "evidence": ""}
     assert image_routing.manual_model_of(_entry(
         image_model={"model": "moss", "source": "manual", "keyword": ""})) == "moss"
+
+
+# ---------------------------------------------------------------------------
+# 否定按「句」判定，不按「分句」（issue #177，2026-11-05 裁定）
+#
+# #167/#172 按「，、；：」切分句，于是顿号并列的枚举不继承前面的否定：设计正文里
+# 「不得出现现代塑料包装、标签」切完只剩「标签」自成一段，句内没有否定词，整类道具
+# 又被切到 MOSS。主树 15 个会话状态里「否定词后 40 字内出现顿号」共 689 处（占多数
+# 的真实形态），不是边角案例。现裁定：**整句**含否定词即整句跳过，句边界只认句末
+# 标点（。！？.!?）与换行；同句里「不要 X，但要 Y」会一起漏切——沿用 #172 的
+# 「宁可漏切、不整类误切」。
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("sentence", [
+    # 样本全部取自主树 output/sessions/*/GEN*/session-state.json 的真实设计正文
+    "不出现与回忆有关的标签、照片或信物",
+    "不出现地域性糕点、馅料或商业包装",
+    "不使用姓名、记号或家庭标签建立主角",
+    "不得出现中文文字、中文车牌或中国城市设施",
+    "不能出现发光书页、魔法符文或清晰可读文字",
+    "不出现真实品牌、logo、夸张霓虹或童话化装饰",
+    "不出现第二个人、车流或夸张招牌",
+    "没有人物、没有文字、标识或品牌痕迹",
+])
+def test_an_enumeration_after_a_negation_inherits_it(sentence):
+    """顿号并列项整体受否定约束：命中词在顿号之后也算这一句的禁令（#177 主诉）。"""
+    assert image_routing.text_capability_hit(f"道具设计：{sentence}") is None
+
+
+def test_a_comma_separated_english_enumeration_inherits_the_negation():
+    """英文 ``without labels, text, or logos`` 同样整句受否定——两套规则不分叉。"""
+    assert image_routing.text_capability_hit(
+        "prop design: a plain bottle without labels, text, or logos") is None
+
+
+def test_the_ticket_acceptance_samples():
+    """票面「验收草案」原样钉住：禁令枚举不切档，另一句肯定诉求照旧切（#177）。"""
+    assert image_routing.text_capability_hit(
+        "道具设计：不得出现现代塑料包装、标签") is None
+
+    hit = image_routing.text_capability_hit(
+        "道具设计：不得出现现代塑料包装、标签。需要出现年代感的招牌")
+
+    assert hit is not None
+    assert (hit.word, hit.sentence) == ("招牌", "需要出现年代感的招牌")
+
+
+# ---------------------------------------------------------------------------
+# 「无X」否定：命中词紧邻前一个字是「无」（#177 补充裁定，2026-11-05）
+#
+# 冒号不再是句边界之后，真实写法「**行动事实**：无对白、无字幕」这样的行整句没有
+# 否定词表里的词、也不以「无」开头，命中词却紧跟在「无」后面——补这一条窄规则：
+# **只认紧邻**，不新增切句边界。主树真实形态取样如下。
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "**行动事实**：无对白、无文字",              # 票面形态 ＋ 真实命中词
+    "环境：无飞虫、无鸟影、无文字标识",          # 票面形态 ＋ 真实命中词
+    "暗环境下唯一光源；屏幕无文字、无图标、无通知",
+    "热饮使用无标识、无文字、无图案的简洁纸杯",
+    "机身无品牌、无logo、无系统界面元素",
+    "**可识别细节**：**无包装、裸露单条**",
+    "全门无贴纸，无文字",
+    "街角无招牌门面",
+])
+def test_wu_immediately_before_the_hit_suppresses_it(text):
+    """「无文字」「无包装」「无logo」「无招牌」都算否定：那一处命中跳过（#177 补充）。"""
+    assert image_routing.text_capability_hit(text) is None
+
+
+def test_the_wu_rule_needs_adjacency_not_just_presence():
+    """「无」必须在**紧邻前一字**：``无数标签`` 是肯定（数不清的标签），照旧命中。
+
+    放宽成「句子里有『无』就否定」会把这类肯定诉求一起吞掉——窄口径是刻意的。
+    """
+    hit = image_routing.text_capability_hit("画面里有无数标签贴满墙面")
+
+    assert hit is not None and hit.word == "标签"
+
+
+def test_the_wu_rule_does_not_reach_across_an_intervening_word():
+    """边界：「无任何标签」不算否定（规则只认紧邻，不认「无…X」的中间字）。
+
+    这是补充裁定的窄口径：要覆盖「无任何」「无其它」得先改规格。用例钉住当前边界，
+    免得将来有人顺手把它放宽又没人说得清是哪次改的。
+    """
+    assert image_routing.text_capability_hit("房间无任何标签").word == "标签"

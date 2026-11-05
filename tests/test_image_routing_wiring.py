@@ -100,9 +100,10 @@ def test_design_keyword_reroutes_that_asset_to_moss(tmp_path, monkeypatch, capsy
                 "prop_design": "道具设计：玻璃汽水瓶，瓶身包装印着品牌色块"})
 
     entry = out["prop_image_prompts"][0]
+    # #177 起逗号不切句：证据是整句（含它自己的开头），用户才对得上正文。
     assert image_routing.assignment_of(entry) == {
         "model": "moss", "source": "auto", "keyword": "包装",
-        "evidence": "瓶身包装印着品牌色块"}
+        "evidence": "道具设计：玻璃汽水瓶，瓶身包装印着品牌色块"}
 
     # 出站两次：先按配置档（Z-Image）出词，命中后按 MOSS 重出这一条。
     assert len(model.seen) == 2, f"期望「先出词、再按 MOSS 重出」，实际调用 {len(model.seen)} 次"
@@ -169,8 +170,11 @@ def test_only_the_hit_asset_is_rerouted_inside_one_kind(tmp_path, monkeypatch):
 # 否定句不误切档与命中证据（issue #167 / spec #169 C）
 # ---------------------------------------------------------------------------
 
-def test_a_negated_design_clause_does_not_reroute_the_kind(tmp_path, monkeypatch, capsys):
-    """设计正文里的禁令不切档：整类照配置档出一次词，不多花重出调用（#167 AC1）。"""
+def test_a_negated_design_sentence_does_not_reroute_the_kind(tmp_path, monkeypatch, capsys):
+    """设计正文里的禁令不切档：整类照配置档出一次词，不多花重出调用（#167 AC1）。
+
+    样本用 #177 的真实形态（顿号枚举）：命中词「标签」在顿号之后，否定仍覆盖整句。
+    """
     _configure(tmp_path, monkeypatch, prop="z_image")
     model = RoutingChatModel()
     node = _prop_node(model, [
@@ -179,7 +183,7 @@ def test_a_negated_design_clause_does_not_reroute_the_kind(tmp_path, monkeypatch
     ])
 
     out = node({"brief": _ref_brief(),
-                "prop_design": "道具设计：玻璃汽水瓶与纸袋，瓶身不得出现现代塑料包装"})
+                "prop_design": "道具设计：玻璃汽水瓶与纸袋，瓶身不出现现代塑料包装、标签"})
 
     assert {entry["name"]: image_routing.model_of(entry)
             for entry in out["prop_image_prompts"]} == {
@@ -189,21 +193,25 @@ def test_a_negated_design_clause_does_not_reroute_the_kind(tmp_path, monkeypatch
 
 
 def test_a_real_text_demand_in_the_same_paragraph_still_reroutes(tmp_path, monkeypatch):
-    """同一段里真有文字需求（标签）→ 照旧切 MOSS（#167 AC2，否定不连坐整段）。"""
+    """同一段里真有文字需求（标签）→ 照旧切 MOSS（#167 AC2，否定不连坐整段）。
+
+    两句之间必须是**句末标点**：#177 起逗号/分号不再切句，同句里的肯定诉求会被
+    否定一起吃掉（票面写明的取舍：宁可漏切）。
+    """
     _configure(tmp_path, monkeypatch, prop="z_image")
     model = RoutingChatModel()
     node = _prop_node(model, [("橘子汽水", "橘子汽水：一瓶橘色汽水")])
 
     out = node({"brief": _ref_brief(),
-                "prop_design": "道具设计：不得出现塑料包装；瓶身贴一张手写标签"})
+                "prop_design": "道具设计：不得出现塑料包装。瓶身贴一张手写标签"})
 
     entry = out["prop_image_prompts"][0]
     assert image_routing.model_of(entry) == "moss"
     assert image_routing.assignment_of(entry)["evidence"] == "瓶身贴一张手写标签"
 
 
-def test_the_terminal_names_the_clause_that_switched_the_model(tmp_path, monkeypatch, capsys):
-    """终端要回答「凭什么切的这一档」：念出命中的来源分句，用户才能当场判断对不对。"""
+def test_the_terminal_names_the_sentence_that_switched_the_model(tmp_path, monkeypatch, capsys):
+    """终端要回答「凭什么切的这一档」：念出命中的来源句，用户才能当场判断对不对。"""
     _configure(tmp_path, monkeypatch, prop="z_image")
     model = RoutingChatModel()
     node = _prop_node(model, [("橘子汽水", "橘子汽水：一瓶橘色汽水")])
@@ -211,7 +219,8 @@ def test_the_terminal_names_the_clause_that_switched_the_model(tmp_path, monkeyp
     node({"brief": _ref_brief(),
           "prop_design": "道具设计：玻璃汽水瓶，瓶身包装印着品牌色块"})
 
-    assert "（来源：瓶身包装印着品牌色块）" in capsys.readouterr().out
+    # #177 起逗号不切句：证据是整句（含它自己的开头），用户才对得上正文。
+    assert "（来源：道具设计：玻璃汽水瓶，瓶身包装印着品牌色块）" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------

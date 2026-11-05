@@ -139,8 +139,8 @@ def test_asset_model_line_reads_the_recorded_assignment():
     assert line.startswith("[生图模型] 红裙女孩：命中『包装』")
 
 
-def test_asset_model_line_shows_the_clause_that_decided_the_model():
-    """素材循环菜单与终端那一行同源：都念出命中的来源分句（#167）。
+def test_asset_model_line_shows_the_sentence_that_decided_the_model():
+    """素材循环菜单与终端那一行同源：都念出命中的来源句（#167、#177）。
 
     两处各拼一遍理由就会各自漂——一处说命中、另一处说手动。这里走的是菜单那一条出口，
     断言与节点打印的格式一致。

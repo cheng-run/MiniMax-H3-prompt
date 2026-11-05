@@ -275,7 +275,7 @@ def test_each_asset_gets_exactly_one_prompt_in_its_own_profile(tmp_path, monkeyp
     for _node, _k, _d, _t, out_field, _a in _ASSETS:
         for entry in state[out_field]:
             # issue #88 起条目多一键 ``image_model``（系统记的「这条词按哪一档的纪律
-            # 写成」；issue #167 起其中又多了 ``evidence``＝命中的来源分句）。**契约仍是
+            # 写成」；issue #167 起其中又多了 ``evidence``＝命中的来源句）。**契约仍是
             # 四键**：多出来的只能是系统自己的这一个字段——模型键（zimage/flux2）与
             # 已删的 instructions 照旧不许混进来。
             assert set(entry) == {"name", "positive_prompt", "negative_prompt",

@@ -23,13 +23,27 @@
 则中文正文里的「包装」永远看不见。英文针按**整词**匹配（``design`` 里有 ``sign``、
 ``texture`` 里有 ``text``），子串匹配会让每一张都误切到 MOSS，而误切不报错。
 
-**否定分句不切档**（issue #167 / 父 spec #169 C）：2026-11-04 的 r2v 实跑里，设计正文
-一句「不出现现代塑料包装」把 12 条道具全部切到 MOSS——而那句话是**禁令**，恰恰说明这
-一类不需要文字能力。判定的粒度因此是**命中词所在的分句**，不是整段：分句里出现否定词就
-跳过这一处、继续找下一处肯定命中（同一段里「不得塑料包装；瓶身贴一张手写标签」只认后半
-句）。取舍是**宁可漏切、不整类误切**：漏切还能在素材循环里手动改档，而整类误切不报错，
-产出的每一条词都按另一套纪律写。命中记录连同来源分句一起存进条目（``evidence``），终端
-因此能回答「凭什么切的这一档」。
+**否定句不切档**（issue #167 / 父 spec #169 C；粒度由 #177 定为「句」）：2026-11-04 的
+r2v 实跑里，设计正文一句「不出现现代塑料包装」把 12 条道具全部切到 MOSS——而那句话是
+**禁令**，恰恰说明这一类不需要文字能力。判定的粒度是**命中词所在的句**，不是整段：句里
+出现否定词就跳过这一处、继续找下一处肯定命中（同段里「不得塑料包装。瓶身贴一张手写标签」
+只认后半句）。
+
+**为什么是「句」而不是「分句」**（issue #177）：真实设计正文里的禁令多是顿号枚举——
+「不出现与回忆有关的标签、照片或信物」「不得出现中文文字、中文车牌或中国城市设施」。
+按逗号/顿号/分号切分句时，枚举里第二项起的命中词自成一段、段内看不到否定词，于是整类
+资产又被切到 MOSS（主树 15 个会话状态里「否定词后 40 字内出现顿号」共 689 处，是主流
+形态而非边角）。现在整句含否定词即整句跳过，代价是同句里的「不要 X，但要 Y」会一起
+漏切——沿用 #172 的取舍：**宁可漏切、不整类误切**（漏切还能在素材循环里手动改档，
+而整类误切不报错，产出的每一条词都按另一套纪律写）。
+
+**「无X」另算一条窄规则**（#177 补充裁定，2026-11-05）：句首为「无」之外，命中词**紧邻
+前一个字**是「无」也算否定（``无文字``／``无包装``／``无logo``／``无招牌``）。真实正文
+写成 ``**行动事实**：无对白、无字幕`` 时整句既没有否定词表里的词、也不以「无」开头
+（冒号已不再是句边界），缺这条会整类误切。**只认紧邻**——``无数标签`` 是肯定，
+``无任何标签`` 也不在规则里；放宽成「句里有『无』」会把肯定诉求一起吞掉。
+
+命中记录连同来源句一起存进条目（``evidence``），终端因此能回答「凭什么切的这一档」。
 """
 from __future__ import annotations
 
@@ -86,18 +100,21 @@ _ZH_NEEDLES: dict[str, str] = {
 
 
 class TextCapabilityHit(NamedTuple):
-    """一次关键词命中：命中的词 ＋ 它所在的分句。
+    """一次关键词命中：命中的词 ＋ 它所在的句。
 
-    分句是**判定**的粒度（否定只管自己那一句），也是终端要念出来的证据。
+    句是**判定**的粒度（否定只管自己那一句，但顿号/逗号并列项不另起一句），也是终端
+    要念出来的证据。
     """
 
     word: str
-    clause: str
+    sentence: str
 
 
-# 分句：中英文标点与换行都算句子边界。少了英文逗号，一条 ``label, no text`` 式的
-# 英文提示词会把肯定与否定混进同一句，否定词就会连肯定诉求一起吞掉。
-_CLAUSE_SEPARATORS = re.compile(r"[。，、；：！？,.;:!?\n\r]+")
+# 句边界：**只认句末标点与换行**（#177）。逗号、顿号、分号**不算边界**——中文设计正文
+# 的禁令多是顿号枚举（「不出现…标签、照片或信物」），把它们当边界会让枚举里第二项起的
+# 命中词脱离否定词所在的那一段，于是整类误切到 MOSS（#172 的残差）。英文同理：
+# ``without labels, text, or logos`` 也是整句受否定，两套规则不必分叉。
+_SENTENCE_BREAKS = re.compile(r"[。！？.!?\n\r]+")
 
 # 否定词（票面点名的清单）。中文按子串判：中文没有词边界，也不像英文那样有
 # 大小写与复数形态。英文按**整词**判，理由同上面英文针——``anodized`` 里有 ``no``，
@@ -121,28 +138,44 @@ def _first_position(text: str, word: str) -> int | None:
     return min(positions) if positions else None
 
 
-def _clause_hit(clause: str) -> str | None:
-    """这一分句里最先出现的那个命中词；没有 → None。
+def _sentence_hit(sentence: str) -> tuple[str, int] | None:
+    """这一句里最先出现的那个命中词与它的**起始位置**；没有 → None。
 
     取最靠前的那一处而不是词表顺序：用户看到的是「让系统做决定的那个地方」，
-    念一处已经过去的位置会让他对不上正文。
+    念一处已经过去的位置会让他对不上正文。位置要一并回给否定判定——「无X」那条
+    规则看的是命中词紧邻前一个字（#177 补充裁定）。
     """
     candidates = [
         (position, order, word)
         for order, word in enumerate(TEXT_CAPABILITY_KEYWORDS)
-        if (position := _first_position(clause, word)) is not None
+        if (position := _first_position(sentence, word)) is not None
     ]
-    return min(candidates)[2] if candidates else None
+    if not candidates:
+        return None
+    position, _order, word = min(candidates)
+    return word, position
 
 
-def _is_negated(clause: str) -> bool:
-    """这一分句是不是禁令（含否定词，或首字是「无」）。
+def _is_negated(sentence: str, position: int) -> bool:
+    """这一句是不是禁令（含否定词；首字或命中词紧邻前一字是「无」）。
 
-    「无」只认分句首字：句中出现的「无」既可能是地名（无锡）也可能是半个词，放宽到
-    子串会把肯定诉求一起吞掉。放宽需要先改规格（票面口径就是「分句首字为无」）。
+    「无」有两条口径，二者并存、不冲突：
+
+    - **句首为无**（#167）：整句是禁令；
+    - **紧邻命中词为无**（#177 补充裁定，2026-11-05）：``无文字``／``无包装``／
+      ``无logo``／``无招牌`` 这一处命中跳过。真实设计正文写成
+      ``**行动事实**：无对白、无字幕`` 时整句没有任何否定词表里的词、也不以「无」开头，
+      冒号又不再是句边界，缺这条规则会整类误切。
+
+    **只认紧邻**：``无数标签``（数不清的标签）是肯定，``无任何标签`` 也不在这一条里—
+    —放宽成「句里有『无』就否定」会把肯定诉求一起吞掉；要覆盖中间夹字的形态得先改规格。
+
+    否定词出现在命中词**之后**也算——判的是整句的极性，不是词的位置（#167）。
     """
-    body = clause.strip()
+    body = sentence.strip()
     if body.startswith("无"):
+        return True
+    if position > 0 and body[position - 1] == "无":
         return True
     if any(word in body for word in _NEGATION_ZH):
         return True
@@ -150,21 +183,24 @@ def _is_negated(clause: str) -> bool:
 
 
 def text_capability_hit(*texts: str) -> TextCapabilityHit | None:
-    """任一文本命中文字类关键词时返回**命中的词与所在分句**（终端要念它们），否则 None。
+    """任一文本命中文字类关键词时返回**命中的词与所在句**（终端要念它们），否则 None。
 
     多段文本（设计正文 ＋ 该资产提示词）按顺序扫，取**最先出现的那个肯定命中**；文本内部
-    再按分句切分，跳过含否定词的分句。分句顺序即文本顺序，所以「最先出现」与「先命中
-    的分句」是同一件事——不会因为否定跳过一处就跳到词表里排得靠前的词上。
+    再按句切分，跳过含否定词的句。句顺序即文本顺序，所以「最先出现」与「先命中的句」是
+    同一件事——不会因为否定跳过一处就跳到词表里排得靠前的词上。
     """
     for text in texts:
-        for clause in _CLAUSE_SEPARATORS.split(str(text or "")):
-            body = clause.strip()
+        for sentence in _SENTENCE_BREAKS.split(str(text or "")):
+            body = sentence.strip()
             if not body:
                 continue
-            word = _clause_hit(body)
-            if word is None or _is_negated(body):
+            hit = _sentence_hit(body)
+            if hit is None:
                 continue
-            return TextCapabilityHit(word=word, clause=body)
+            word, position = hit
+            if _is_negated(body, position):
+                continue
+            return TextCapabilityHit(word=word, sentence=body)
     return None
 
 
@@ -185,10 +221,10 @@ def assignment(kind: str, *, texts: Sequence[str], manual: str | None = None) ->
     if kind not in AUTO_ROUTING_EXEMPT_KINDS:
         hit = text_capability_hit(*texts)
         if hit is not None:
-            # evidence 存**来源分句**而不只是那个词：词单独一行时「包装」既可能是需求
+            # evidence 存**来源句**而不只是那个词：词单独一行时「包装」既可能是需求
             # 也可能是禁令，只有整句能让用户当场判断这次切档有没有道理（#167）。
             return {"model": TEXT_CAPABILITY_MODEL, "source": SOURCE_AUTO,
-                    "keyword": hit.word, "evidence": hit.clause}
+                    "keyword": hit.word, "evidence": hit.sentence}
     return {"model": image_model_for(kind), "source": SOURCE_CONFIG, "keyword": "", "evidence": ""}
 
 
@@ -256,7 +292,7 @@ def described(value: Mapping[str, str]) -> str:
     就会各自漂（一处说命中、一处说手动）。坏形状越过 ``_validated`` 就响——不认识的来源
     若被伪装成「按配置默认」，终端会理直气壮地报一个错的理由。
 
-    来源分句只在**有证据**时追加：旧记录（issue #167 之前）没有这个字段，印一个空的
+    来源句只在**有证据**时追加：旧记录（issue #167 之前）没有这个字段，印一个空的
     「（来源：）」比不印更像 bug。
     """
     checked = _validated(value)

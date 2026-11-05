@@ -261,11 +261,29 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "negated_clause_switches_the_kind",
         "src/minimax_h3_prompt/image_routing.py",
-        "            if word is None or _is_negated(body):\n                continue",
-        "            if word is None:\n                continue",
+        "            if _is_negated(body, position):\n                continue",
+        "            if False:\n                continue",
         ("tests/test_image_model_routing.py::test_chinese_negations_suppress_the_hit",
-         "tests/test_image_routing_wiring.py::test_a_negated_design_clause_does_not_reroute_the_kind"),
+         "tests/test_image_routing_wiring.py::test_a_negated_design_sentence_does_not_reroute_the_kind"),
         "否定判定被摘掉＝「不得出现现代塑料包装」把整类道具切到 MOSS（#167 的现场）",
+    ),
+    Mutation(
+        "enumeration_breaks_the_negation",
+        "src/minimax_h3_prompt/image_routing.py",
+        '_SENTENCE_BREAKS = re.compile(r"[。！？.!?\\n\\r]+")',
+        '_SENTENCE_BREAKS = re.compile(r"[。，、；：！？,.;:!?\\n\\r]+")',
+        ("tests/test_image_model_routing.py::test_an_enumeration_after_a_negation_inherits_it",
+         "tests/test_image_model_routing.py::"
+         "test_a_comma_separated_english_enumeration_inherits_the_negation"),
+        "顿号/逗号重新当句边界＝枚举里第二项起脱离否定词，整类又被误切到 MOSS（#177）",
+    ),
+    Mutation(
+        "wu_before_hit_ignored",
+        "src/minimax_h3_prompt/image_routing.py",
+        '    if position > 0 and body[position - 1] == "无":\n        return True',
+        '    if position > 0 and body[position - 1] == "有":\n        return True',
+        ("tests/test_image_model_routing.py::test_wu_immediately_before_the_hit_suppresses_it",),
+        "「无X」不被认成否定＝「无文字／无包装」整句照旧切到 MOSS（#177 补充裁定）",
     ),
     Mutation(
         "settled_review_skipped",
