@@ -84,7 +84,7 @@ def _ref_assets_block(state: PipelineState, brief: Brief) -> str:
     （reference_consistency／身份圆桌／提示词工程师）都从这里取、不再各自抄一份的原因。
 
     多参纪律只对**产资产图的路线**说（``route_emits_asset_prompts``：ref 与导演台
-    r2v/rv2v/mixed，复审 H6）：帧变体的 refs 是首/尾帧登记，套「素材语义名指称」
+    r2v，复审 H6）：帧变体的 refs 是首/尾帧登记，套「素材语义名指称」
     会把两套指称体系搅在一起。判据原先读 ``brief.mode == "ref"``：导演台 r2v 的资产图
     提示词照常产出、素材登记却恒为空串，reference_consistency 与写段拿到的参考资产
     是「（无）」——指称与挂图对不上。多参纪律与角色提示词（prompt_engineer.md）互为
@@ -332,9 +332,9 @@ def _make_image_prompt_node(agents: dict, kind: str, design_field: str, output_f
     def node(state: PipelineState) -> dict:
         brief: Brief = state["brief"]
         # 路线守卫（issue #78 / 父 spec #77，issue #103 换判据）：资产图提示词只属于
-        # 「会用参考素材」的路线——ref，以及导演台的 r2v/rv2v/mixed。首尾帧把人物、
+        # 「会用参考素材」的路线——ref，以及导演台的 r2v。首尾帧把人物、
         # 道具、场景**融合**进一张关键帧，没有「每件资产单独出图」这一步；导演台的
-        # t2v/i2v/fl2v/v2v 同样没有参考素材。无条件跑就是白付 3 次调用，
+        # t2v/i2v/fl2v 同样没有参考素材。无条件跑就是白付 3 次调用，
         # 锁死清单不合规还会让整条阶段 1 失败。只早退、不改管线拓扑。
         if not route_emits_asset_prompts(brief):
             return {}
@@ -999,7 +999,7 @@ def _make_reference_consistency_node(agents: dict) -> Callable:
     def node(state: PipelineState) -> dict:
         brief: Brief = state["brief"]
         # 路线能力判据（issue #103）：subject_definitions/retention_analysis 是参考素材的
-        # 定义块，住在「会用参考素材」的路线（ref、导演台 r2v/rv2v/mixed）。base 与导演台的
+        # 定义块，住在「会用参考素材」的路线（ref、导演台 r2v）。base 与导演台的
         # t2v/i2v/fl2v 没有它，跳过而不是产一份没人用的定义。
         if not route_emits_asset_prompts(brief):
             return {"subject_defs": ""}

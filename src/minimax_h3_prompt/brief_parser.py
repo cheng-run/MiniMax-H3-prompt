@@ -69,9 +69,9 @@ class RefItem:
 class Brief:
     mode: str = "base"  # base | ref | director
     variant: str = "T2VA"  # base: T2VA/I2VA/FL2VA/L2VA
-    # 导演台路线的生成模式（issue #101）：七个值见 ``DIRECTOR_MODES``，空串＝不是这条路线。
+    # 导演台路线的生成模式（issue #101；#170 起四种）：见 ``DIRECTOR_MODES``，空串＝不是这条路线。
     # 它与 ``variant`` 是两套口径，**不许混用**：variant 是首尾帧链的帧形态
-    # （T2VA/I2VA/FL2VA/L2VA），导演台模式是导演包的任务类型（t2v/…/mixed）。混用会让
+    # （T2VA/I2VA/FL2VA/L2VA），导演台模式是导演包的任务类型（t2v/i2v/fl2v/r2v）。混用会让
     # 帧链判据（``FRAME_VARIANTS``）把一条导演台会话读成首尾帧（ADR 0024）。
     director_mode: str = ""
     # 导演台打包与会话参数（issue #104，设计 §4）：节点 id 与缓存名决定段缓存目录名
@@ -152,9 +152,10 @@ def validate_route_mode(mode: str) -> str:
     return mode
 
 
-# 导演台路线的七个生成模式（父 spec #100 / ADR 0024）。**唯一声明**：向导菜单、
-# 会话读回的校验、后续按模式分派的段规划与提示词出口都从这里取。顺序即菜单顺序。
-DIRECTOR_MODES = ("t2v", "i2v", "fl2v", "r2v", "v2v", "rv2v", "mixed")
+# 导演台路线的四种生成模式（父 spec #100；#170 收口：v2v／rv2v／mixed 已取消）。
+# **唯一声明**：向导菜单、会话读回的校验、后续按模式分派的段规划与提示词出口都从这里取。
+# 顺序即菜单顺序。三种取消的模式不在这里留墓碑常量——旧值一律由「模式无效」兜底。
+DIRECTOR_MODES = ("t2v", "i2v", "fl2v", "r2v")
 
 
 def is_director_mode(mode: str) -> bool:
@@ -172,9 +173,9 @@ def is_director_mode(mode: str) -> bool:
 
 
 def validate_director_mode(value: str) -> str:
-    """校验导演台模式值并原样返回；**坏值大声报错**（父 spec #100「七种之一」）。
+    """校验导演台模式值并原样返回；**坏值大声报错**（父 spec #100；#170 起四种）。
 
-    七个值是精确数据不是自由文本：``T2V``/``Mixed`` 这类大小写变体如果在入口被
+    四种值是精确数据不是自由文本：``T2V``/``Mixed`` 这类大小写变体如果在入口被
     ``lower()`` 悄悄扶正，后续按模式分派（#103）就会拿一个用户没选过的值去写提示词——
     本仓「绝不静默失败」要消灭的正是这种形态。
 
@@ -189,9 +190,9 @@ def validate_director_mode(value: str) -> str:
 
 
 # 导演台里**产资产图提示词**的生成模式（设计 §4；父 spec #100「阶段 1 的产出随模式变化」）。
-# r2v 用 `<Picture N>` 指称参考素材，rv2v/mixed 也含参考素材段；t2v/i2v/fl2v 没有参考素材，
-# v2v 只吃源视频——给它们出资产图就是白付三次调用，还会让素材登记凭空多出条目。
-DIRECTOR_ASSET_MODES = ("r2v", "rv2v", "mixed")
+# 收口后只剩 r2v：它用 `<Picture N>` 指称参考素材；t2v/i2v/fl2v 没有参考素材，
+# 给它们出资产图就是白付三次调用，还会让素材登记凭空多出条目。
+DIRECTOR_ASSET_MODES = ("r2v",)
 
 # 导演台生成模式 → 首尾帧链的帧变体（``director_frame_variant`` 的唯一映射）。
 # 导演台的 ``Brief.variant`` 恒为 T2VA 占位（ADR 0024：模式与变体是两套口径），照读它

@@ -155,7 +155,7 @@ def _route_filtered_state(raw_state: Any, brief: Brief) -> dict[str, Any]:
     一谈：坏数据要响，错路线的数据要静默但确定地丢掉。
 
     判据只认路线能力判据（``brief_parser.route_emits_asset_prompts``，issue #103 换成它）：
-    多参恒真，导演台按生成模式（r2v/rv2v/mixed 真、t2v/i2v/fl2v 假），base 恒假。
+    多参恒真，导演台按生成模式（r2v 真、t2v/i2v/fl2v 假），base 恒假。
     **禁止**改用「变体是不是 FL2VA」或「有没有首尾帧 bundle」——多参的变体是 T2VA、
     没有 bundle，这两条正是父 spec 逐字点名的错判据。也别写成「``is_ref`` 或
     ``is_director``」：导演台 t2v 没有资产图，留下三键就是给续跑喂错产物。

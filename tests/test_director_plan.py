@@ -163,7 +163,7 @@ def test_give_images_follow_type_and_mode():
     assert give_images_for("opening", "fl2v") == ("first",)
     assert give_images_for("opening", "r2v") == ("assets",)
     with pytest.raises(ValueError):
-        give_images_for("opening", "v2v")   # 一期不做（#109）
+        give_images_for("opening", "v2v")   # 已取消的模式（#170）
     with pytest.raises(ValueError):
         give_images_for("opening", "t2vv")
 
@@ -364,8 +364,8 @@ def test_contract_violations_are_loud(reply, message):
     assert message in str(excinfo.value)
 
 
-def test_planning_refuses_modes_this_ticket_does_not_cover():
-    """一期只做 t2v/i2v/fl2v/r2v 的叙事规划；v2v/rv2v/mixed 不在本票范围。"""
+def test_planning_refuses_cancelled_modes():
+    """只做四种模式的叙事规划；v2v/rv2v/mixed 已取消（#170），一律报模式无效。"""
     for mode in ("v2v", "rv2v", "mixed", "T2V"):
         with pytest.raises(ValueError):
             parse_director_plan(_THIRTY_SECONDS, 30.0, mode=mode)

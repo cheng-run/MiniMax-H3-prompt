@@ -1107,7 +1107,7 @@ def asset_prompts_for(brief: Brief, state: Mapping[str, Any]) -> tuple[ImageProm
     """路线感知的资产图提示词取数口（issue #78）：不产资产图的路线恒为空元组。
 
     四处共享同一路线判据（``brief_parser.route_emits_asset_prompts``，issue #103 从
-    ``is_ref_mode`` 换成它：导演台的 r2v/rv2v/mixed 也产资产图），但只有三处走本
+    ``is_ref_mode`` 换成它：导演台的 r2v 也产资产图），但只有三处走本
     取数口：**产物结果构造、素材登记、描述合并**；`render_generation` 拿不到 Brief，
     只拿 ``result.mode`` 用同一判据决定产物集。新增出口不接这条线就会重演 #40
     「首尾帧路线凭空多出多参产物」。``canvases`` 必须透传——多参产物行的尺寸只有这一个
@@ -1133,7 +1133,7 @@ def ref_asset_registry(state: Mapping[str, Any], brief: Brief) -> list[RefItem]:
     是首尾帧，把资产图提示词派生成 `<Picture N>` 清单会给帧路线的 agent 挂错
     ``list_reference_assets``（实测复审：帧路线 qa/prompt_engineer 多出该工具、报资产级编号，
     AC1「首尾帧路线不受影响」软性回归）。派生只对**产资产图的路线**发生
-    （issue #103：``route_emits_asset_prompts`` 为真的 ref 与导演台 r2v/rv2v/mixed）。
+    （issue #103：``route_emits_asset_prompts`` 为真的 ref 与导演台 r2v）。
 
     ``brief`` **必填**（issue #77 复审 C）：可选的 ``brief=None`` 等于留了一条绕过路线
     守卫的后门——不传就既不过滤也不合并描述，调用方漏传不会有任何症状。所有生产调用点

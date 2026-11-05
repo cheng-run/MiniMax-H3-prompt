@@ -1,15 +1,15 @@
 """导演包构建与装配校验（issue #104）。
 
 导演包是**给插件吃的数据**，不是我们的中间产物：插件导入时只按字节读它，错了不会
-报错，只会「导入成功但图没了」「时间线长度对不上」「mixed 段悄悄变 t2v」。所以本模块
-的纪律是**严格失败优先于静默回落**（设计 §1 第 2 条）：八条装配约束全部在**写盘之前**
+报错，只会「导入成功但图没了」「时间线长度对不上」「切镜段的图悄悄被剥掉」。所以本模块
+的纪律是**严格失败优先于静默回落**（设计 §1 第 2 条）：六条装配约束全部在**写盘之前**
 校验，违规即 ``ValueError`` 并点名字段。
 
 三份口径的住处（设计 §1 第 3 条「一个契约只住一处」）：
 
 - 帧换算只住 ``frames.py``——本模块调 ``duration_sec_for_declared``，不另写换算；
-- 包字段与插件常量只住这里——ASCII 正则、前缀、槽位上限、``mixed`` 合法值集合都由
-  本模块声明，别的模块从这里取；
+- 包字段与插件常量只住这里——ASCII 正则、前缀、槽位上限都由本模块声明，别的模块
+  从这里取；
 - 段提示词文件名只住 ``prompts.segment_path``。
 
 **两套坐标**（设计 §3.2，最容易写错的一处）：``plan.json`` 与导出帧是**成片坐标**
@@ -101,20 +101,14 @@ REQUIRED_OUTPUT = {    "continuityEnabled": True,
     "exportMode": "all",
 }
 
-# ``mixed`` 段内合法任务类型（``gen_timeline.py:27`` 的 ``MIXED_SEGMENT_KEYS``）。
-# 非法值/空值插件会**静默回落 t2v**（``:156-171``）——这条校验就是要抢在它前面。
-# 集合直接由 ``frames.PLAN_MODES`` 派生：一期四个模式与 mixed 段合法值本来就是同一组，
-# 分头写两张表迟早一边漏改。
-MIXED_SEGMENT_TASKS = frozenset(PLAN_MODES)
-
 # 公共参考的总开关契约值（设计 §3.4 约束 2）。写成常量是为了让「打开它」成为一次
 # **可见的**改动：两处写入都取它，校验器按字面 False 判——谁把它改成 True，打包当场
 # 报错而不是产出一份「导入成功、槽号全错」的包。
 COMMON_ENABLED = False
 
 # 生成类时间线的顶层形态（``gen_timeline.py:37-49``）：``timelineMode`` 不写会让插件
-# 按任务类型猜，猜错就走成别的类别（v2v 会因缺源视频报错）。生成类恒 prompt_batch，
-# fl2v 有自己的剥离 UI，写 ``fl2v``。
+# 按任务类型猜，猜错就走成别的类别（例如把生成段时间线读成编辑型）。生成类恒
+# prompt_batch，fl2v 有自己的剥离 UI，写 ``fl2v``。
 TIMELINE_MODE_PROMPT_BATCH = "prompt_batch"
 TIMELINE_MODE_FL2V = "fl2v"
 EDIT_MODE_SEGMENT = "segment"
@@ -255,7 +249,7 @@ class DirectorPackJob:
 
 
 # ---------------------------------------------------------------------------
-# 装配约束（八条，逐条拒绝；违反即 ValueError，写盘之前调用）
+# 装配约束（六条，逐条拒绝；违反即 ValueError，写盘之前调用）
 # ---------------------------------------------------------------------------
 
 def is_ascii_pack_path(rel: str) -> bool:
@@ -356,32 +350,6 @@ def validate_reference_capacity(segments: Sequence[dict]) -> None:
                 "<Picture N> 与实际挂图错位")
 
 
-def validate_mixed_fl2v_fields(segments: Sequence[dict], *, task_type: str) -> None:
-    """约束 6：``mixed`` 里的 ``fl2v`` 段用首尾帧字段，**不是** ``refs`` 数组。
-
-    只在 ``mixed`` 时间线上生效（独立 fl2v 走的是自己的时间线形态）。插件对 fl2v 段
-    用 ``_fl2v_image_raw`` 读 ``startImage``/``endImage``（``gen_timeline.py:177-203``），
-    ``refs`` 会被 ``segment_refs_for_context`` 剥掉——写进 refs 等于图静默消失。
-    """
-    if task_type != "mixed":
-        return
-    for segment in segments:
-        if str(segment.get("taskType") or "") != "fl2v":
-            continue
-        number = segment.get("id") or "?"
-        if segment.get("refs"):
-            raise ValueError(
-                f"段 {number} 是 mixed 下的 fl2v，却把图挂在 refs 数组里："
-                "fl2v 段只认 startImage/endImage（插件会把 refs 剥掉，图静默消失）")
-        start = segment.get("startImage") or segment.get("genImage") or {}
-        end = segment.get("endImage") or {}
-        if not (isinstance(start, dict) and start.get("imageFile")) \
-                and not (isinstance(end, dict) and end.get("imageFile")):
-            raise ValueError(
-                f"段 {number} 是 mixed 下的 fl2v，但首尾帧字段里一张图都没有："
-                "至少要有 startImage（或 genImage）或 endImage")
-
-
 def validate_output_config(output: dict) -> None:
     """约束 7：``output`` 必含五条引导/导出配置，生成类还要 ``mode="fixed"``。
 
@@ -407,24 +375,6 @@ def validate_output_config(output: dict) -> None:
         raise ValueError(
             f"生成类时间线的 output.mode 必须是 {OUTPUT_MODE_FIXED!r}，"
             f"实际 {output.get('mode')!r}（long_edge 只对编辑型/源视频成立）")
-
-
-def validate_mixed_segment_tasks(segments: Sequence[dict], *, task_type: str) -> None:
-    """约束 8：``mixed`` 段类型只允许 t2v/i2v/fl2v/r2v；空值/其它值报错。
-
-    插件 ``_resolve_segment_task`` 对非法值**静默回落 t2v**（``gen_timeline.py:156-171``）：
-    用户选了 i2v 的段会变成纯文生视频，且没有任何日志。项目侧必须抢在它前面。
-    """
-    if task_type != "mixed":
-        return
-    for segment in segments:
-        number = segment.get("id") or "?"
-        value = segment.get("taskType")
-        if value not in MIXED_SEGMENT_TASKS:
-            raise ValueError(
-                f"段 {number} 的任务类型 {value!r} 不是 mixed 的合法值"
-                f"（{' / '.join(sorted(MIXED_SEGMENT_TASKS))}）：插件会静默把它改成 t2v，"
-                "生成方式与给图清单都会错")
 
 
 def validate_segment_media_fields(segments: Sequence[dict]) -> None:
@@ -463,12 +413,11 @@ def zip_path_for(session_dir: str | Path) -> Path:
 
 
 def _require_pack_mode(mode: str) -> str:
-    """一期只打 t2v / i2v / fl2v / r2v 的包；二期模式**明确报错**（票面硬条）。"""
+    """导演台模式必须属于四种可执行值；已取消的旧值**明确报错**（#170）。"""
     if mode in PLAN_MODES:
         return mode
     raise ValueError(
-        f"导演台模式 {mode!r} 一期不打导演包（v2v/rv2v 见 #109、mixed 见 #110）；"
-        f"一期只支持 {'/'.join(PLAN_MODES)}")
+        f"导演台模式无效：{mode!r}（应为 {'/'.join(PLAN_MODES)} 之一，精确小写）")
 
 
 def validate_continuity_mode(value: str) -> str:
@@ -962,22 +911,12 @@ def _refs_are_continuous(refs: object) -> bool:
     return [row.get("index") for row in rows] == list(range(len(rows)))
 
 
-def _fl2v_media_ok(segment: dict[str, Any]) -> bool:
-    """mixed 里的 fl2v 段是否把图挂在首尾帧字段（而不是会被剥掉的 refs）。"""
-    if segment.get("refs"):
-        return False
-    start = segment.get("startImage") or segment.get("genImage") or {}
-    end = segment.get("endImage") or {}
-    return bool((isinstance(start, dict) and start.get("imageFile"))
-                or (isinstance(end, dict) and end.get("imageFile")))
-
-
-def _render_conclusions(plan: DirectorPlan, timeline: dict[str, Any],
+def _render_conclusions(timeline: dict[str, Any],
                         shared: dict[str, Any],
                         all_paths: Sequence[str]) -> tuple[str, ...]:
-    """八条装配约束的逐条结论——**从实际值/校验结果生成**，不是手写的「通过」常量（复审 H5）。
+    """六条装配约束的逐条结论——**从实际值/校验结果生成**，不是手写的「通过」常量（复审 H5）。
 
-    为什么不能手写：校验器被改坏（或被删空）时，报告照样写八行「通过」，而包已经
+    为什么不能手写：校验器被改坏（或被删空）时，报告照样写六行「通过」，而包已经
     导不进去——那份报告正是用户判断「能不能导入」的唯一依据。这里每条结论都各自
     重算一次判据并带上实际值（路径数、画布、模式、最多几张图），写错的结论至少能被
     读报告的人当场看出（用例 ``test_conclusions_report_failure_when_a_validator_is_emptied``
@@ -998,20 +937,6 @@ def _render_conclusions(plan: DirectorPlan, timeline: dict[str, Any],
     output_ok = (not missing_output
                  and output.get("mode") == OUTPUT_MODE_FIXED
                  and bool(str(output.get("continuityMode") or "").strip()))
-    if plan.mode == "mixed":
-        fl2v_rows = [row for row in rows if row.get("taskType") == "fl2v"]
-        bad_fl2v = [row for row in fl2v_rows if not _fl2v_media_ok(row)]
-        bad_tasks = [row.get("taskType") for row in rows
-                     if row.get("taskType") not in MIXED_SEGMENT_TASKS]
-        mixed_shape = (f"{_pass_fail(not bad_fl2v)}（{len(fl2v_rows)} 个 fl2v 段，"
-                       f"违规 {len(bad_fl2v)} 个）")
-        mixed_tasks = (f"{_pass_fail(not bad_tasks)}（{len(rows)} 段，"
-                       f"非法任务类型 {len(bad_tasks)} 个）")
-    else:
-        # 非 mixed 时间线没有 fl2v 段与段内任务类型；写清「按哪个模式预检」而不是
-        # 一句无信息的「本期非 mixed」——模式写错时（比如 r2v 混进 mixed 校验）能看出来。
-        mixed_shape = f"通过（本期非 mixed：taskType={plan.mode}，无 fl2v 段）"
-        mixed_tasks = f"通过（本期非 mixed：taskType={plan.mode}）"
     return (
         f"1. 包内路径 ASCII：{_pass_fail(not bad_paths)}"
         f"（共 {len(all_paths)} 个路径，不合规 {len(bad_paths)} 个）",
@@ -1024,18 +949,16 @@ def _render_conclusions(plan: DirectorPlan, timeline: dict[str, Any],
         f"{'/'.join(REF_IMAGE_SIZES)}）：{_pass_fail(output.get('refImageSize') in REF_IMAGE_SIZES)}",
         f"5. 每段参考图 ≤ {PICTURE_SLOT_LIMIT} 且 index 从 0 连续："
         f"{_pass_fail(refs_ok)}（最多 {max_refs} 张/段）",
-        f"6. mixed 的 fl2v 段用首尾帧字段而非 refs：{mixed_shape}",
-        f"7. output 五条引导/导出配置齐备且挂在 output 下：{_pass_fail(output_ok)}"
+        f"6. output 五条引导/导出配置齐备且挂在 output 下：{_pass_fail(output_ok)}"
         f"（mode={output.get('mode')!r}，continuityMode={output.get('continuityMode')!r}，"
         f"continuityOverlapFrames={output.get('continuityOverlapFrames')!r}）",
-        f"8. mixed 段类型只允许 {'/'.join(sorted(MIXED_SEGMENT_TASKS))}：{mixed_tasks}",
     )
 
 
-def _validate_all(plan: DirectorPlan, timeline: dict[str, Any], pack_json: dict[str, Any],
+def _validate_all(timeline: dict[str, Any], pack_json: dict[str, Any],
                   shared: dict[str, Any], segments: Sequence[PackedSegment],
                   media: Sequence[PackedMedia]) -> tuple[str, ...]:
-    """跑八条装配约束并返回逐条结论（**写盘之前**调用；违规抛 ValueError）。
+    """跑六条装配约束并返回逐条结论（**写盘之前**调用；违规抛 ValueError）。
 
     路径清单与写盘用的是同一个目录命名（``asset_groups/NN``，NN 是 1 起的段号补两位）：
     两处各拼一次的话，一处改了另一处不会报错——只会导出一个空目录加一堆找不到的图。
@@ -1048,12 +971,10 @@ def _validate_all(plan: DirectorPlan, timeline: dict[str, Any], pack_json: dict[
     validate_canvas(timeline["width"], timeline["height"])
     validate_ref_image_size(timeline["output"]["refImageSize"])
     validate_reference_capacity(timeline["segments"])
-    validate_mixed_fl2v_fields(timeline["segments"], task_type=plan.mode)
     validate_output_config(timeline["output"])
-    validate_mixed_segment_tasks(timeline["segments"], task_type=plan.mode)
     validate_segment_media_fields(timeline["segments"])
     validate_pack_task_type(pack_json, timeline)
-    return _render_conclusions(plan, timeline, shared, all_paths)
+    return _render_conclusions(timeline, shared, all_paths)
 
 
 def _write_pack(pack_dir: Path, zip_path: Path, pack_json: dict[str, Any],
@@ -1102,7 +1023,7 @@ def prepare_director_pack(session_dir: str | Path, plan: DirectorPlan, *,
                           ) -> tuple[DirectorPackJob, str]:
     """把段表、段提示词与素材打成导演包，返回 ``(job, report)``。
 
-    **顺序是契约**：先读齐输入、再把整份包在内存里装好、跑完八条约束，最后才落盘
+    **顺序是契约**：先读齐输入、再把整份包在内存里装好、跑完六条约束，最后才落盘
     （设计 §3.4「不得先写包后校验」）。落在半路的坏包会被用户直接拿去导入，插件不会
     替我们拒绝它——它只会「成功了但少几张图」。
     """
@@ -1143,7 +1064,7 @@ def prepare_director_pack(session_dir: str | Path, plan: DirectorPlan, *,
     groups = [_build_group_json(row) for row in timeline["segments"]]
     media = _collect_media(segments)
 
-    conclusions = _validate_all(plan, timeline, pack_json, shared, segments, media)
+    conclusions = _validate_all(timeline, pack_json, shared, segments, media)
 
     pack_dir = pack_dir_for(session_dir)
     zip_path = zip_path_for(session_dir)
@@ -1155,7 +1076,7 @@ def prepare_director_pack(session_dir: str | Path, plan: DirectorPlan, *,
 
 
 def render_pack_report(job: DirectorPackJob, *, conclusions: Sequence[str] = ()) -> str:
-    """出站清单：两个总帧数、逐段段类型/给图/包内路径、八条约束结论、包路径。
+    """出站清单：两个总帧数、逐段段类型/给图/包内路径、六条约束结论、包路径。
 
     **必须同时写两个总帧数**（设计 §3.2「两套坐标」）：导演台里显示的是时间线长度
     （Σ 声明帧），成片会因「保完整」每段多 12 帧而更长——只写一个数，用户会以为
@@ -1188,7 +1109,7 @@ def render_pack_report(job: DirectorPackJob, *, conclusions: Sequence[str] = ())
             f"  段{packed.index} {packed.label}  {packed.task_type}  "
             f"给图：{images}  → {media_text}")
     lines.append("")
-    lines.append("装配约束（八条，逐条结论）：")
+    lines.append("装配约束（六条，逐条结论）：")
     for conclusion in conclusions:
         lines.append(f"  {conclusion}")
     lines.append("")

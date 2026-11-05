@@ -39,9 +39,9 @@ def test_is_director_mode_is_strict_single_source():
     assert Brief(mode="base").is_director is False
 
 
-def test_director_modes_are_the_seven_official_values():
-    """七种模式是路线契约（父 spec #100「七种生成模式之一」），序列本身是真源。"""
-    assert DIRECTOR_MODES == ("t2v", "i2v", "fl2v", "r2v", "v2v", "rv2v", "mixed")
+def test_director_modes_are_the_four_supported_values():
+    """四种模式是路线契约（#170）：v2v／rv2v／mixed 已取消，不再出现在常量里。"""
+    assert DIRECTOR_MODES == ("t2v", "i2v", "fl2v", "r2v")
 
 
 def test_director_mode_value_rejects_case_variants_and_unknowns():
@@ -51,6 +51,22 @@ def test_director_mode_value_rejects_case_variants_and_unknowns():
     for bad in ("T2V", "T2v", "R2V", "MIXED", "", " t2v", "t2v ", "t2va", "fl2va", "xxx"):
         with pytest.raises(ValueError):
             validate_director_mode(bad)
+
+
+def test_cancelled_modes_are_reported_invalid_with_only_the_four_values():
+    """手写 v2v／rv2v／mixed → 「模式无效」，文案只列四种可用值（#170 AC2）。
+
+    「只列四种」是硬判据：留着旧值当提示等于把一个选了就报错的入口又教给用户。
+    """
+    for bad in ("v2v", "rv2v", "mixed"):
+        with pytest.raises(ValueError) as excinfo:
+            validate_director_mode(bad)
+        message = str(excinfo.value)
+        assert "模式无效" in message
+        assert "t2v/i2v/fl2v/r2v 之一" in message
+        assert message.count(bad) == 1, f"可用值里仍列了已取消的 {bad}：{message}"
+        for gone in ("二期", "#109", "#110"):
+            assert gone not in message, f"{bad} 的报错文案仍指向已取消的模式：{message}"
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +186,7 @@ def test_run_stage1_feeds_director_mode_into_the_graph(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 缝 4：起步可选导演台路线与七种模式之一
+# 缝 4：起步可选导演台路线与四种模式之一
 # ---------------------------------------------------------------------------
 
 def _fake_inputs(monkeypatch, inputs: list[str]) -> list[str]:
@@ -194,13 +210,26 @@ def test_choose_generation_mode_accepts_director_route(monkeypatch):
         assert wizard._choose_generation_mode() == expected
 
 
-def test_choose_director_mode_covers_the_seven_modes(monkeypatch):
-    """七种模式都能选到、编号与 ``DIRECTOR_MODES`` 同序；空输入与坏输入重问，不默认。"""
+def test_choose_director_mode_covers_the_four_modes(monkeypatch):
+    """四种模式都能选到、编号与 ``DIRECTOR_MODES`` 同序；空输入与坏输入重问，不默认。"""
     for index, mode in enumerate(DIRECTOR_MODES, 1):
         _fake_inputs(monkeypatch, [str(index)])
         assert wizard._choose_director_mode() == mode
-    _fake_inputs(monkeypatch, ["", "9", "7"])
-    assert wizard._choose_director_mode() == "mixed"
+    _fake_inputs(monkeypatch, ["", "9", "5", "4"])
+    assert wizard._choose_director_mode() == "r2v"
+
+
+def test_director_menu_lists_only_the_four_modes(monkeypatch, capsys):
+    """菜单只有 1–4，且不出现「二期」或已取消的模式名（#170 AC1）。"""
+    asked = _fake_inputs(monkeypatch, ["1"])
+    assert wizard._choose_director_mode() == "t2v"
+    out = capsys.readouterr().out
+    for number, mode in enumerate(DIRECTOR_MODES, 1):
+        assert f"  {number}. {mode} —" in out, out
+    assert "二期" not in out, out
+    for gone in ("v2v", "rv2v", "mixed"):
+        assert gone not in out, f"菜单里仍有已取消的模式 {gone}：{out}"
+    assert asked[-1] == "输入 1–4（必选）：", asked
 
 
 def test_director_mode_labels_derive_from_the_constant():

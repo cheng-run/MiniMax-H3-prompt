@@ -266,7 +266,7 @@ def _choose_generation_mode() -> str:
     帧逻辑一律按 ``FRAME_VARIANTS`` 判，不看它。
 
     导演台（issue #101，父 spec #100）：第三条路线，返回 "DIRECTOR"，由 ``_phase1_new``
-    转为 ``Brief(mode="director")`` **并接着问七种模式之一**（``_choose_director_mode``）。
+    转为 ``Brief(mode="director")`` **并接着问四种模式之一**（``_choose_director_mode``）。
     前四项与回车默认值一字未变——两条老路线的行为不变是本票的硬要求。
     """
     from ..workflow_config import workflow_settings
@@ -288,21 +288,18 @@ def _choose_generation_mode() -> str:
         print("无效输入，请输入 1/2/3/4/5。")
 
 
-# 导演台七种模式的中文说明（issue #101）：序号即 ``DIRECTOR_MODES`` 的顺序。
-# 二期三项在菜单上如实标注——本轮只接线选路与记录，按模式分派的产物在 #103 起。
+# 导演台四种模式的中文说明（issue #101；#170 收口为四模式）：序号即 ``DIRECTOR_MODES`` 的顺序。
+# v2v／rv2v／mixed 已取消，不再留标签——菜单由常量枚举生成，少一条就拿不到旧入口。
 _DIRECTOR_MODE_LABELS = {
     "t2v": "文生视频",
     "i2v": "图生视频（一张首帧 → 一段视频，单段）",
     "fl2v": "首尾帧生视频（分段续写，长片走这条）",
     "r2v": "参考主体生视频",
-    "v2v": "视频转视频（二期）",
-    "rv2v": "参考素材改视频（二期）",
-    "mixed": "混合模式（二期）",
 }
 
 
 def _choose_director_mode() -> str:
-    """导演台路线的七种生成模式之一（父 spec #100「选完路线再选模式」）。
+    """导演台路线的四种生成模式之一（父 spec #100「选完路线再选模式」）。
 
     **没有回车默认**：模式决定后续提示词方言与给图清单（#103/#104），静默替用户选一档
     等于拿没选过的口径出词。空输入与坏输入都重问，合法值只来自 ``DIRECTOR_MODES``
@@ -793,7 +790,7 @@ def _run_director_flow(session: SessionState) -> int:
     # 复审 S2）：打包时 `pack._picture_sources` 只认素材台账里已登记的正本，而段词里的
     # `<Picture N>` 编号又来自同一份登记——不先跑循环，r2v 端到端不可用（打包必然报
     # 「台账是空的」）。循环复用多参那一段（`_asset_loop`），不复制实现。
-    # t2v/i2v/fl2v/v2v 不产资产图，一步都不多走。
+    # t2v/i2v/fl2v 不产资产图，一步都不多走。
     from ..brief_parser import route_emits_asset_prompts
 
     if route_emits_asset_prompts(brief):
@@ -1923,8 +1920,8 @@ def _phase1_new(config: Config) -> SessionState | None:
     # 多参路线（issue #41）：mode=ref，与首尾帧并存。variant 对多参无意义，取 T2VA 占位
     # ——帧逻辑一律按 FRAME_VARIANTS 判，不读它。
     is_ref = route == "REF2VA"
-    # 导演台路线（issue #101）：选完路线再选七种模式之一。variant 同样取 T2VA 占位，
-    # 理由更强——导演台模式（t2v/…/mixed）与帧变体是两套口径，带着 FL2VA 进管道会让
+    # 导演台路线（issue #101）：选完路线再选四种模式之一。variant 同样取 T2VA 占位，
+    # 理由更强——导演台模式（t2v/i2v/fl2v/r2v）与帧变体是两套口径，带着 FL2VA 进管道会让
     # 帧链判据把这条会话读成首尾帧（ADR 0024）。
     is_director_route = route == "DIRECTOR"
     director_mode = _choose_director_mode() if is_director_route else ""
@@ -2078,7 +2075,7 @@ def _show_director_frame_prompts(state: dict, brief: Brief, generation_dir: Path
     from ..brief_parser import route_emits_frame_prompts
 
     if not route_emits_frame_prompts(brief):
-        # t2v/r2v/v2v：本模式不产关键帧词，不打印任何东西（别让用户以为漏发了）。
+        # t2v/r2v：本模式不产关键帧词，不打印任何东西（别让用户以为漏发了）。
         return
     _show_frame_prompts(state, generation_dir)
     if brief.director_mode == "fl2v":

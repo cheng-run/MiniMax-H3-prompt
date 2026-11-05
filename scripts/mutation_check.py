@@ -64,8 +64,8 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "asset_modes_drop_r2v",
         "src/minimax_h3_prompt/brief_parser.py",
-        'DIRECTOR_ASSET_MODES = ("r2v", "rv2v", "mixed")',
-        'DIRECTOR_ASSET_MODES = ("rv2v", "mixed")',
+        'DIRECTOR_ASSET_MODES = ("r2v",)',
+        'DIRECTOR_ASSET_MODES = ()',
         ("tests/test_route_matrix.py",),
         "r2v 不再产出资产图提示词＝导演台 r2v 段没有参考素材",
     ),

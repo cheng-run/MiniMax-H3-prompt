@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from collections.abc import Sequence
 
+from ..brief_parser import DIRECTOR_MODES
+
 FPS = 24
 
 # 导演台插件的对齐函数是 17k+5，只向上取整（``ComfyUI_MiniMaxH3_Director/director/
@@ -43,7 +45,7 @@ SEGMENT_TYPES = ("opening", "continue", "camera_same", "camera_cut", "ending")
 # 是硬切。``continue``/``ending`` 这类靠「起点就是上一段终点」成立的类型，在 i2v 下是
 # 做不到的声明；运镜/切镜同理属 fl2v（用户原话：「fl2v 是一个高级 i2v，因为有首尾帧
 # 可以运镜……你 i2v 来凑什么热闹」）。
-# 没登记的模式＝全部五型（t2v/r2v/fl2v 与二期的 v2v/rv2v/mixed 一个都不收窄）。
+# 没登记的模式＝全部五型（t2v/r2v/fl2v 一个都不收窄）。
 _SEGMENT_TYPES_BY_MODE: dict[str, tuple[str, ...]] = {
     "i2v": ("opening",),
 }
@@ -107,10 +109,9 @@ IMAGE_FIRST = "first"
 IMAGE_END = "end"
 IMAGE_ASSETS = "assets"
 
-# 一期可做**叙事规划**的模式（#102）。v2v/rv2v 的段边界取自源视频时间轴、不由叙事
-# 规划决定（设计 §3.10 / #109），mixed 是二期（#110）——它们一律当场报错，不许被
-# 当成四个模式之一静默跑一遍。
-PLAN_MODES = ("t2v", "i2v", "fl2v", "r2v")
+# 可做**叙事规划**的模式（#102）。#170 收口后四种模式全部走叙事规划，所以这里直接
+# 取 ``brief_parser.DIRECTOR_MODES``——模式值只有一处声明，分头写两张表迟早一边漏改。
+PLAN_MODES = DIRECTOR_MODES
 
 # 一段最少要有一个网格格（17 帧 ≈ 0.71s）：比这还短的段在导演台里没有执行意义，
 # 也凑不进 17 的倍数。
@@ -202,8 +203,7 @@ def give_images_for(segment_type: str, mode: str) -> tuple[str, ...]:
     """
     if mode not in PLAN_MODES:
         raise ValueError(
-            f"导演台模式 {mode!r} 本票不做叙事规划（一期只支持 "
-            f"{'/'.join(PLAN_MODES)}；v2v/rv2v 见 #109、mixed 见 #110）")
+            f"导演台模式无效：{mode!r}（应为 {'/'.join(PLAN_MODES)} 之一，精确小写）")
     is_guided(segment_type)  # 类型合法性
     # r2v **每一段**都挂自己那几张参考图（2026-11-01 用户裁定 + 插件上限核实）：
     # 参考图是这一模式的唯一画面来源，运镜段与收尾段也不例外——它们没有首尾帧可挂

@@ -190,7 +190,7 @@ def test_zip_entries_are_ascii_by_the_plugin_regex(tmp_path):
 
 
 def test_report_lists_both_totals_constraints_and_the_handoff_line(tmp_path):
-    """出站清单：两个总帧数、逐段段类型/给图/包内路径、八条约束逐条结论、包路径。
+    """出站清单：两个总帧数、逐段段类型/给图/包内路径、六条约束逐条结论、包路径。
 
     只报一个总帧数会让用户以为导演台里显示的 27.958s 是错的（设计 §3.2「两套坐标」）；
     末行必须说明逐段执行由 #105 跟进，不让用户以为现在就能跑。
@@ -202,10 +202,26 @@ def test_report_lists_both_totals_constraints_and_the_handoff_line(tmp_path):
     assert "时间线总帧" in report and str(_TIMELINE_TOTAL) in report
     assert "成片预计帧" in report and str(_FILM_TOTAL) in report
     assert "段1" in report and "开场" in report and "段5" in report and "续接" in report
-    for number in range(1, 9):
+    for number in range(1, 7):
         assert re.search(rf"^\s*{number}\. ", report, re.MULTILINE), f"缺约束 {number} 的结论行"
     assert str(job.pack_dir) in report and str(job.zip_path) in report
     assert report.rstrip().splitlines()[-1].strip().endswith("#105 跟进")
+
+
+def test_report_drops_mixed_only_constraints_and_renumbers(tmp_path):
+    """#170：报告只保留六条装配约束，编号连续；mixed 专用两条随校验器一起删除。"""
+    from minimax_h3_prompt.director.pack import prepare_director_pack
+
+    plan = _plan("t2v")
+    _, report = prepare_director_pack(_session(tmp_path, plan), plan, settings=_settings())
+    rows = [line.strip() for line in report.splitlines()
+            if re.match(r"^\d+\. ", line.strip())]
+    assert len(rows) == 6, report
+    assert rows[0].startswith("1. 包内路径 ASCII")
+    assert rows[5].startswith("6. output 五条引导/导出配置")
+    constraint_block = "\n".join(rows)
+    assert "mixed" not in constraint_block, constraint_block
+    assert "装配约束（六条，逐条结论）：" in report, report
 
 
 # ---------------------------------------------------------------------------
@@ -585,8 +601,8 @@ def test_camera_cut_segment_ships_continuity_from_prev_false(tmp_path):
         "continuityFromPrev 必须按段类型派生：切镜/开场 false，续接 true"
 
 
-def test_second_phase_modes_are_refused_explicitly(tmp_path):
-    """v2v/rv2v/mixed 一期不许静默套用别的模式（票面硬条，二期 #109/#110）。
+def test_cancelled_modes_are_refused_with_only_four_values(tmp_path):
+    """v2v/rv2v/mixed 已取消（#170）：打包器自己的模式闸门必须独立咬住，且只列四值。
 
     段表**绕过规划器**直接构造：规划器本来就拒绝这三个模式，而打包器不能依赖
     「上游一定拦住」——它自己的模式闸门必须独立咬得住（本仓「规则在、接线不在」）。
@@ -600,8 +616,14 @@ def test_second_phase_modes_are_refused_explicitly(tmp_path):
     for mode in ("v2v", "rv2v", "mixed"):
         plan = DirectorPlan(mode=mode, total_frames=107, segments=(segment,))
         session_dir = _session(tmp_path / mode, plan)
-        with pytest.raises(ValueError, match="#109|#110|二期"):
+        with pytest.raises(ValueError) as excinfo:
             prepare_director_pack(session_dir, plan, settings=_settings())
+        message = str(excinfo.value)
+        assert "模式无效" in message
+        assert "t2v/i2v/fl2v/r2v 之一" in message
+        assert message.count(mode) == 1, message
+        for gone in ("二期", "#109", "#110"):
+            assert gone not in message, message
 
 
 def test_first_segment_must_be_an_opening_even_outside_the_planner(tmp_path):
@@ -747,26 +769,7 @@ def test_constraint_5_guard_follows_the_slot_limit(monkeypatch):
     pack.validate_reference_capacity([ten])
 
 
-def test_constraint_6_mixed_fl2v_uses_image_fields_not_refs():
-    """约束 6：mixed 的 fl2v 段只认 startImage/endImage，写进 refs 会被插件剥掉。"""
-    from minimax_h3_prompt.director.pack import validate_mixed_fl2v_fields
-
-    # 非 mixed 时间线不做这条校验（独立 fl2v 有自己的时间线形态）。
-    validate_mixed_fl2v_fields([{"id": "s", "taskType": "fl2v", "refs": [{"index": 0}]}],
-                               task_type="fl2v")
-    good = {"id": "seg01", "taskType": "fl2v",
-            "startImage": {"imageFile": "asset_groups/01/start.png"}, "refs": []}
-    validate_mixed_fl2v_fields([good], task_type="mixed")
-    with pytest.raises(ValueError, match="refs"):
-        validate_mixed_fl2v_fields(
-            [{"id": "seg01", "taskType": "fl2v", "refs": [{"index": 0}]}],
-            task_type="mixed")
-    with pytest.raises(ValueError, match="首尾帧|一张图"):
-        validate_mixed_fl2v_fields([{"id": "seg02", "taskType": "fl2v", "refs": []}],
-                                   task_type="mixed")
-
-
-def test_constraint_6_also_catches_gen_and_start_image_conflicts():
+def test_gen_and_start_image_conflicts_are_rejected():
     """同段给出内容不同的 ``genImage`` 与 ``startImage``：导出时后一张会静默消失。"""
     from minimax_h3_prompt.director.pack import validate_segment_media_fields
 
@@ -814,35 +817,6 @@ def test_constraint_7_guard_follows_the_required_map(monkeypatch):
         "exportMode": "all",
     })
     pack.validate_output_config(broken)
-
-
-def test_constraint_8_mixed_segment_tasks_reject_empty_and_unknown():
-    """约束 8：空值/未知值报错——插件会把它们**静默**改成 t2v（``gen_timeline.py:156-171``）。"""
-    from minimax_h3_prompt.director.pack import validate_mixed_segment_tasks
-
-    validate_mixed_segment_tasks(
-        [{"id": f"s{i}", "taskType": value} for i, value in
-         enumerate(("t2v", "i2v", "fl2v", "r2v"))],
-        task_type="mixed")
-    for bad in ("", None, "v2v", "rv2v", "mixed", "T2V"):
-        with pytest.raises(ValueError, match="mixed"):
-            validate_mixed_segment_tasks([{"id": "seg01", "taskType": bad}],
-                                         task_type="mixed")
-    # 非 mixed 时间线的段级任务类型插件根本不读，不该被这条拦。
-    validate_mixed_segment_tasks([{"id": "seg01", "taskType": "v2v"}], task_type="t2v")
-
-
-def test_constraint_8_guard_follows_the_legal_value_set(monkeypatch):
-    """变异检验：把 ``v2v`` 加进合法集合，它立刻从「报错」变成「放行」。"""
-    from minimax_h3_prompt.director import pack
-
-    with pytest.raises(ValueError):
-        pack.validate_mixed_segment_tasks([{"id": "seg01", "taskType": "v2v"}],
-                                          task_type="mixed")
-    monkeypatch.setattr(pack, "MIXED_SEGMENT_TASKS",
-                        frozenset({"t2v", "i2v", "fl2v", "r2v", "v2v"}))
-    pack.validate_mixed_segment_tasks([{"id": "seg01", "taskType": "v2v"}],
-                                      task_type="mixed")
 
 
 def test_pack_settings_are_checked_before_anything_is_written(tmp_path):
@@ -1141,7 +1115,7 @@ def test_wizard_does_not_ask_again_when_the_answers_are_known(tmp_path, monkeypa
 
 
 def test_wizard_flow_packs_and_prints_the_report(tmp_path, monkeypatch, capsys):
-    """写段之后真的打包：出站含两个总帧数、八条约束结论与包路径，末行指向 #105。"""
+    """写段之后真的打包：出站含两个总帧数、六条约束结论与包路径，末行指向 #105。"""
     from minimax_h3_prompt.ui import wizard
 
     _stub_llm(monkeypatch, "t2v")
@@ -1288,9 +1262,9 @@ def test_pack_task_type_mismatch_is_refused():
 
 
 def test_conclusions_report_failure_when_a_validator_is_emptied(tmp_path, monkeypatch):
-    """H5：八条结论由**实际值/校验结果**生成，校验器被改坏时结论必须写成「不通过」。
+    """H5：结论由**实际值/校验结果**生成，校验器被改坏时结论必须写成「不通过」。
 
-    手写「通过」常量的话，校验器删空、包已经导不进去，报告照样八行全绿——用户判断
+    手写「通过」常量的话，校验器删空、包已经导不进去，报告照样全绿——用户判断
     「能不能导入」的唯一依据就是这份报告。这里把画布校验改成空操作、把画布改成
     100（不是 32 的倍数），结论第 3 条必须自己报红并带上实际值。
     """
@@ -1307,7 +1281,7 @@ def test_conclusions_report_failure_when_a_validator_is_emptied(tmp_path, monkey
     timeline["width"] = 100
     monkeypatch.setattr(pack, "validate_canvas", lambda *args, **kwargs: None)
     conclusions = pack._validate_all(
-        job.plan, timeline, pack_json, shared, job.segments,
+        timeline, pack_json, shared, job.segments,
         pack._collect_media(job.segments))
 
     assert "不通过" in conclusions[2], f"结论没有反映失败的校验：{conclusions[2]}"

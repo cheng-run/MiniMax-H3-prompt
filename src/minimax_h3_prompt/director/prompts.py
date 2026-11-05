@@ -1,6 +1,6 @@
-"""导演台逐段提示词（issue #103）：七模式里一期四种的方言、绝对时间轴、确定性校验。
+"""导演台逐段提示词（issue #103）：四种模式的方言、绝对时间轴、确定性校验。
 
-**为什么按模式分派而不是一份通用口径**：导演台的七个生成模式对提示词的要求不同
+**为什么按模式分派而不是一份通用口径**：导演台的四种生成模式对提示词的要求不同
 （`docs/research/2026-10-29-director-插件原生格式.md` §7）。插件侧 `TASK_PROMPT_SPECS`
 的 system_prompt 全是空串——它**不校验、只会在执行期改写**（补 `<Picture N>`、删无效
 `<Audio N>`，`plan.py:554-624`）。所以方言只能由项目侧保证，且**每种模式一份**：
@@ -9,9 +9,8 @@
 - `t2v` / `i2v` / `fl2v` 是官方**三字段外壳**（`integrated_multimodal_description` →
   `overall_soundscape` → `non_diegetic_music`，字段名逐字、顺序固定）。#130 之前这里是
   「单段自由文本、音频并入正文」——那是按插件视图推出来的口径，与官方 base 格式相反；
-  插件对这三种模式读的是一整段文本，三字段本来就在那段文本里（#118 只证到原样透传）；
-- `v2v` / `rv2v` / `mixed` 是二期（#109 / #110），一期**明确报错**，不许被当成四种之一
-  静默跑一遍。
+  插件对这三种模式读的是一整段文本，三字段本来就在那段文本里（#118 只证到原样透传）。
+  已取消的 `v2v` / `rv2v` / `mixed` 不再有方言，#170 起由「模式无效」兜底。
 
 **时间轴按帧重算成成片坐标**：段表以帧为真源（#102），提示词里「第几秒」一律从
 `start_frame / 24` 现算，不沿用「相对本段起点」的旧口径（那是 base/ref 的口径，
@@ -78,7 +77,7 @@ from .planning import DIRECTOR_DIRNAME, render_give_images
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 _INSTRUCTION_NAME = "segment_writer_director.md"
 
-# 一期可写段的模式 = 一期可叙事规划的模式（``frames.PLAN_MODES``）。同一份元组：
+# 可写段的模式 = 可叙事规划的模式（``frames.PLAN_MODES``）。同一份元组：
 # 「能不能规划」与「能不能按它的方言写段」是同一件事，分头写两张表迟早一边漏改。
 WRITE_MODES = PLAN_MODES
 
@@ -116,12 +115,11 @@ SEGMENT_FILENAME = "segment-{position:02d}.md"
 
 
 def _require_write_mode(mode: str) -> str:
-    """一期可写段的模式校验；二期模式**明确报错**（票面硬条）。"""
+    """可写段的模式校验；已取消的旧值**明确报错**（#170）。"""
     if mode in WRITE_MODES:
         return mode
     raise ValueError(
-        f"导演台模式 {mode!r} 一期不写段（v2v/rv2v 的编辑型方言见 #109、"
-        f"mixed 的逐段分派见 #110）；一期只支持 {'/'.join(WRITE_MODES)}")
+        f"导演台模式无效：{mode!r}（应为 {'/'.join(WRITE_MODES)} 之一，精确小写）")
 
 
 def segment_path(session_dir: str | Path, position: int) -> Path:

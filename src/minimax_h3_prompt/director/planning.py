@@ -84,8 +84,7 @@ def plan_path(session_dir: Path) -> Path:
 def _require_mode(mode: str) -> str:
     if mode not in PLAN_MODES:
         raise ValueError(
-            f"导演台模式 {mode!r} 本票不做叙事规划（一期只支持 {'/'.join(PLAN_MODES)}；"
-            "v2v/rv2v 的段边界取自源视频时间轴见 #109、mixed 见 #110）")
+            f"导演台模式无效：{mode!r}（应为 {'/'.join(PLAN_MODES)} 之一，精确小写）")
     return mode
 
 
@@ -365,7 +364,7 @@ def read_plan_json(path: Path) -> DirectorPlan:
     mode = data.get("mode")
     if mode not in PLAN_MODES:
         raise ValueError(
-            f"plan.json 的模式 {mode!r} 不是一期可规划的模式（{'/'.join(PLAN_MODES)}）")
+            f"plan.json 的模式无效：{mode!r}（应为 {'/'.join(PLAN_MODES)} 之一）")
     if data.get("fps") != FPS:
         raise ValueError(f"plan.json 的 fps 必须是 {FPS}，实际 {data.get('fps')!r}")
     total_frames = data.get("total_frames")

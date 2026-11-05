@@ -5,7 +5,7 @@
 1. 路线能力判据（``brief_parser`` 的两个纯函数）与 ``_brief_block`` 送模式；
 2. 校验器/组装器**不许把 director 当 base**（#103 硬约束：不许靠「反正不走那条路」）；
 3. ``director/prompts.py`` 的方言产物：r2v 六节外壳＋时序写法＋无状态句，
-   t2v/i2v/fl2v 单段正文，v2v/rv2v/mixed 一期报错；时间轴注记按帧重算成绝对位置；
+   t2v/i2v/fl2v 单段正文，已取消的 v2v/rv2v/mixed 报模式无效；时间轴注记按帧重算成绝对位置；
 4. 向导接线：逐段落 ``GENxxx/director/segment-NN.md`` 并出站段号/类型/给图/路径。
 
 断言只碰产物与返回值，不断言私有调用顺序。
@@ -30,9 +30,9 @@ from minimax_h3_prompt.brief_parser import (
 # ---------------------------------------------------------------------------
 
 def test_route_capabilities_are_derived_from_route_and_mode():
-    """真值表：ref 全产资产图；director 只有 r2v/rv2v/mixed 产资产图、只有 i2v/fl2v 产帧图。
+    """真值表：ref 全产资产图；director 只有 r2v 产资产图、只有 i2v/fl2v 产帧图。
 
-    为什么必须按模式分派：``t2v``/``v2v`` 没有参考素材可出词，``i2v`` 只要首帧。
+    为什么必须按模式分派：``t2v`` 没有参考素材可出词，``i2v`` 只要首帧。
     一句 ``or brief.is_director`` 会让每个导演台模式都白跑三个资产图节点（设计 §4）。
     """
     cases = [
@@ -46,9 +46,6 @@ def test_route_capabilities_are_derived_from_route_and_mode():
         ("director", "i2v", "T2VA", False, True),
         ("director", "fl2v", "T2VA", False, True),
         ("director", "r2v", "T2VA", True, False),
-        ("director", "v2v", "T2VA", False, False),
-        ("director", "rv2v", "T2VA", True, False),
-        ("director", "mixed", "T2VA", True, False),
     ]
     for mode, director_mode, variant, assets, frames in cases:
         brief = Brief(mode=mode, variant=variant, director_mode=director_mode)
@@ -449,14 +446,14 @@ def test_validate_checks_the_timeline_note_against_the_frame_grid():
     assert "DIRECTOR_TIMESTAMP_OUT_OF_RANGE" in codes
 
 
-def test_phase_two_modes_are_refused_loudly():
-    """v2v/rv2v/mixed 是二期（#109/#110）：一期必须报错，不许静默按别的模式写段。"""
+def test_cancelled_modes_are_refused_loudly():
+    """v2v/rv2v/mixed 已取消（#170）：必须报「模式无效」且只列四种可用值。"""
     from minimax_h3_prompt.director.prompts import validate_director_segment
 
     plan = _plan()
     segment = plan.segments[1]
     for mode in ("v2v", "rv2v", "mixed"):
-        with pytest.raises(ValueError, match="#109|#110|二期"):
+        with pytest.raises(ValueError, match="模式无效.*t2v/i2v/fl2v/r2v"):
             validate_director_segment("x", mode, plan=plan, segment=segment)
 
 
@@ -927,12 +924,12 @@ def test_write_director_segments_fails_loudly_per_segment(tmp_path):
     assert not (tmp_path / "director" / "segment-01.md").exists()
 
 
-def test_phase_two_modes_refuse_to_write(tmp_path):
-    """v2v/rv2v/mixed 一期不写段（票面 AC）：不许静默套用别的模式。"""
+def test_cancelled_modes_refuse_to_write(tmp_path):
+    """v2v/rv2v/mixed 已取消（#170）：不许静默套用别的模式写段。"""
     from minimax_h3_prompt.director.prompts import write_director_segments
 
     for mode in ("v2v", "rv2v", "mixed"):
-        with pytest.raises(ValueError, match="#109|#110|二期"):
+        with pytest.raises(ValueError, match="模式无效.*t2v/i2v/fl2v/r2v"):
             write_director_segments(_plan(mode), llm=_DialectLLM(lambda i: ""),
                                     session_dir=tmp_path)
 
