@@ -255,6 +255,14 @@ MUTATIONS: tuple[Mutation, ...] = (
          "tests/test_image_routing_wiring.py::test_a_negated_design_clause_does_not_reroute_the_kind"),
         "否定判定被摘掉＝「不得出现现代塑料包装」把整类道具切到 MOSS（#167 的现场）",
     ),
+    Mutation(
+        "manifest_duplicate_guard_off",
+        "src/minimax_h3_prompt/asset_manifest.py",
+        "        if len(found) > 1\n",
+        "        if False\n",
+        ("tests/test_asset_manifest_duplicates.py",),
+        "清单级重名守卫失效＝跨类同名要到交回第一张图才在台账入库时报（#175）",
+    ),
 )
 
 

@@ -13,10 +13,13 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 
 from ..agents import build_role_agents, run_agent
-from ..brief_parser import FRAME_VARIANTS, Brief, is_ref_mode
+from ..asset_manifest import duplicate_asset_names
+from ..brief_parser import FRAME_VARIANTS, Brief, is_ref_mode, route_emits_asset_prompts
 from ..clarification import as_block
 from ..config import Config
 from ..errors import error_code
+from ..generation import KIND_LABELS
+from ..kinds import ASSET_MANIFEST_FIELDS
 from ..observability import (
     default_run_log_path, format_step_banner, run_log, run_log_enabled,
     stage_saver, token_meter,
@@ -143,6 +146,53 @@ def build_pipeline_graph(model, brief: Brief, config: Config, *, stage: int = 0,
     return g.compile(), agents
 
 
+def _duplicate_manifest_text(
+    duplicates: list[tuple[str, tuple[str, ...]]]) -> str:
+    """把重名清单拼成人读的报错正文（措辞见 spec #165 E）。"""
+    parts: list[str] = []
+    for name, categories in duplicates:
+        # 去重只为措辞：跨类重名的「涉及的类别」按遇到顺序列一次，
+        # 类内重复则只剩一个类别，用「重复出现 N 次」说清它不是跨类。
+        unique = list(dict.fromkeys(categories))
+        if len(unique) > 1:
+            parts.append(f"语义名 {name!r} 同时出现在 {' 与 '.join(unique)}")
+        else:
+            parts.append(f"语义名 {name!r} 在 {unique[0]} 内重复出现 {len(categories)} 次")
+    return "；".join(parts)
+
+
+def _guard_asset_manifests(inner, brief: Brief):
+    """并行组合节点的外层清单重名守卫（issue #175 / spec #165 E）。
+
+    为什么挂在**合并之后、美术统筹之前**：跨类重名只有三份清单合并后才看得见；等到
+    用户交回第一张图时台账入库才报，用户已经为这张图付过生成成本，报错点也离撞名处
+    太远。这里当场失败并点名两个类别与那个名字。
+
+    为什么套在每个并行组外层而不是点名设计师那一组：要判的东西从
+    ``ASSET_MANIFEST_FIELDS`` 现推——只有 patch 里出现清单键时才检查，别的组合节点
+    不会写这些键，于是「哪一组是设计师」不必另立一份会漂移的清单（同 #173 从常量
+    派生 state 键的理由）。路线判定只住 ``route_emits_asset_prompts`` 一处。
+    """
+    if not route_emits_asset_prompts(brief):
+        return inner
+
+    def node(state):
+        patch = inner(state)
+        manifests = {
+            KIND_LABELS[kind]: [str(name) for name in patch[key]]
+            for kind, key in ASSET_MANIFEST_FIELDS.items()
+            if key in patch
+        }
+        duplicates = duplicate_asset_names(manifests)
+        if duplicates:
+            raise ValueError(
+                "设计端资产清单有语义名冲突，停在设计合并处（交图前就该改）："
+                + _duplicate_manifest_text(duplicates))
+        return patch
+
+    return node
+
+
 def _combined_node(name, nodes, shot_rt, identity_rt, creative_rt, model, brief):
     """按链位名字返回对应节点实现；组合节点与全图构建共用。
 
@@ -159,7 +209,8 @@ def _combined_node(name, nodes, shot_rt, identity_rt, creative_rt, model, brief)
         )
     group = _PARALLEL_GROUPS.get(name)
     if group is not None:
-        return make_parallel(*(nodes[sub] for sub in group))
+        return _guard_asset_manifests(
+            make_parallel(*(nodes[sub] for sub in group)), brief)
     return nodes[name]
 
 

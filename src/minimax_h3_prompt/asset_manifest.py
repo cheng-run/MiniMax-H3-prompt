@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 # 围栏语言标签。设计端提示词与解析器都写这个字面量，改一处就要改另一处——
 # 用例 ``test_design_node_*`` 通过「重问请求里点名这个标签」把两边钉在一起。
@@ -74,3 +74,30 @@ def name_set_mismatch(manifest: Sequence[str], produced: Sequence[str]) -> str:
     if duplicates:
         parts.append(f"重复 {duplicates}")
     return "、".join(parts)
+
+
+def duplicate_asset_names(
+    manifests: Mapping[str, Sequence[str]],
+) -> list[tuple[str, tuple[str, ...]]]:
+    """找出跨类与类内重复的语义名，返回 ``[(名字, 涉及的类别…)]``（issue #175）。
+
+    ``manifests`` 是「类别名 → 该类的名字序列」，类别名只用于报错措辞（人物／场景／道具）。
+    一个名字出现在两个类别里是**跨类重名**；同一类别里出现两次是**类内重复**——返回值
+    里两者都是「出现次数 > 1」，调用方按涉及的类别是否相同分开措辞，判据只有这一份。
+
+    为什么不在 ``split_manifest_reply`` 里判类内重复就完事：那份解析器一次只看见一类，
+    跨类重名要到三份清单合并后才存在。拆成两处判就会出现「类内拦了、跨类漏了」的
+    半截守卫——而漏掉的那一半正是要等到交回第一张图才在台账入库时炸的那条路。
+
+    名字按首次出现顺序返回、类别按遇到顺序记：报错顺序稳定，测试与人工排查都不必
+    依赖字典的偶然顺序。
+    """
+    categories: dict[str, list[str]] = {}
+    for category, names in manifests.items():
+        for name in names:
+            categories.setdefault(str(name), []).append(category)
+    return [
+        (name, tuple(found))
+        for name, found in categories.items()
+        if len(found) > 1
+    ]
