@@ -1553,6 +1553,8 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
                     segment_type=segment.type, video=video, directory=directory,
                     canvases=brief.canvases, brief=brief,
                     stage_state=session.stage_state, ask=_prompt,
+                    # #179：判新旧看会话创建时间（旧会话那格是关键帧画布，不是画幅）。
+                    session_created_at=session.created_at,
                     save=lambda: save_session(
                         directory, brief, session.stage_state,
                         status=STATUS_DIRECTOR_SEGMENTS_RUNNING))
@@ -1718,6 +1720,8 @@ def _finish_director_delivery(plan, session: SessionState) -> int:
     if not confirm_final_film_aspect(
             mode=session.brief.director_mode, film=film, brief=session.brief,
             stage_state=session.stage_state, ask=_prompt,
+            # #179：与逐段贴回同一份判据、同一个判新旧来源。
+            session_created_at=session.created_at,
             save=lambda: save_session(
                 Path(session.directory), session.brief, session.stage_state,
                 status=session.status)):

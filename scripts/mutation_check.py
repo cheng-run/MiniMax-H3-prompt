@@ -312,6 +312,26 @@ MUTATIONS: tuple[Mutation, ...] = (
         "「一个人两张板」静默退化成一张（#178）",
     ),
     Mutation(
+        "legacy_session_check_disabled",
+        "src/minimax_h3_prompt/director/film_canvas.py",
+        '    text = str(created_at or "").strip()\n'
+        "    if not text:\n"
+        "        return True\n"
+        "    try:\n"
+        "        moment = datetime.fromisoformat(text)\n"
+        "    except ValueError:\n"
+        "        return True\n"
+        "    # 无时区的时间无法与常量可靠比较；同样按旧会话处理，不猜。\n"
+        "    if moment.tzinfo is None:\n"
+        "        return True\n"
+        "    return moment < FILM_ASPECT_QUESTION_SINCE",
+        "    return False",
+        ("tests/test_director_legacy_aspect_session.py::test_legacy_session_zimage_canvas_is_not_compared_as_a_film_aspect",
+         "tests/test_director_legacy_aspect_session.py::test_missing_creation_time_is_treated_as_a_legacy_session",
+         "tests/test_director_legacy_aspect_session.py::test_cutoff_is_the_161_commit_time_in_any_equivalent_spelling"),
+        "旧会话判据失效＝帧模型切回 z_image 时旧画布被当成成片画幅，比例误判硬停（#179）",
+    ),
+    Mutation(
         "interaction_log_drops_answer_len",
         "src/minimax_h3_prompt/observability.py",
         '            "answer_len": length,\n',

@@ -414,7 +414,10 @@ def _wizard_session(tmp_path: Path, *, mode: str = "t2v"):
                   director_continuity_mode="guide")
     save_session(session_dir, brief, {}, status=STATUS_DIRECTOR_SEGMENTS_RUNNING)
     session = SessionState(directory=session_dir, brief=brief, stage_state={},
-                           status=STATUS_DIRECTOR_SEGMENTS_RUNNING)
+                           status=STATUS_DIRECTOR_SEGMENTS_RUNNING,
+                           # #179：画幅核对按创建时间判新旧，这些用例是 #161
+                           # 之后的新会话。
+                           created_at="2026-11-05T09:00:00+00:00")
     return session, plan
 
 

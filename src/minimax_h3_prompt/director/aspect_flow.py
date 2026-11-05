@@ -169,6 +169,7 @@ def _remember_confirmation(
 
 def film_size_verdict(
     *, mode: str, video: Path, brief, label: str, consequence: str,
+    session_created_at: str | None,
     stage_state: dict | None = None, ask: Callable[[str], str] | None = None,
 ) -> tuple[bool, str | None]:
     """产资产模式（r2v）的成片宽高核对：``(是否放行, 要打印的提示)``（#163／#176）。
@@ -178,6 +179,10 @@ def film_size_verdict(
     ``film_canvas.film_size_for``（ADR 0028 的单一真源）。拿两条判据互相代替，
     就会一边把正常取整判成事故、另一边把 2.2 倍的尺寸差放过去。
 
+    ``session_created_at`` 是会话的创建时间（#179）：创建早于成片画幅问答（#161）的
+    旧会话直接放行——它 ``canvases`` 里那格是**关键帧画布**，帧模型切回 ``z_image``
+    后拿它比就是假硬停。时间**由调用方沿调用链传进来**，判据内部不读盘。
+
     处置分两档：比例超差 → 停（画面会被裁/拉伸，没有「继续」的出口）；只有尺寸差
     一档 → 打印两边数值、比例、来源，**一次确认**，拒绝则停。确认按
     ``(mode, declared, actual)`` 记住，任一边变化即重问。
@@ -185,7 +190,15 @@ def film_size_verdict(
     if mode not in DIRECTOR_ASSET_MODES:
         return True, None
 
-    from .film_canvas import FILM_SIZE_LABEL, film_size_for
+    from .film_canvas import (
+        FILM_SIZE_LABEL, film_size_for, is_legacy_film_aspect_session,
+    )
+
+    if is_legacy_film_aspect_session(session_created_at):
+        return True, (
+            f"[画幅核对] {label}：这是旧会话（创建于成片画幅问答落地之前，"
+            "按创建时间判定），本次放行，不参与比例／尺寸比对；"
+            "请自行核对导演台节点的 width/height 与你想出的画幅一致。")
 
     expected = film_size_for(brief) if brief is not None else None
     if expected is None:
@@ -250,7 +263,8 @@ def film_size_verdict(
 
 def output_aspect_verdict(
     *, mode: str, segment_index: int, segment_type: str, video: Path,
-    directory: str | Path, canvases: CanvasMap | None = None,
+    directory: str | Path, session_created_at: str | None,
+    canvases: CanvasMap | None = None,
     brief=None, ask: Callable[[str], str] | None = None,
     stage_state: dict | None = None,
 ) -> tuple[bool, str | None]:
@@ -260,13 +274,16 @@ def output_aspect_verdict(
     「元信息缺失」**放行**并给警告——帧数校验已经是更硬的证据。
     ``i2v``／``fl2v`` 走锚图/关键帧画布那条既有判据（行为与文案不变）；产资产模式
     （#170 收口后只剩 ``r2v``）走 ``film_size_verdict``，期望值只取向导答的成片画幅。
+    ``session_created_at`` 只对产资产模式有意义（#179）：旧会话直接放行。它是**必填**
+    的（不给默认值）：漏传就抛 ``TypeError``，不会静默退回「永远放行」。
     """
     if mode in DIRECTOR_ASSET_MODES:
         return film_size_verdict(
             mode=mode, video=video, brief=brief,
             label=f"第 {segment_index} 段成片",
             consequence="这一段不记入段产出账，进度停在这里；已通过的段留在账上。",
-            stage_state=stage_state, ask=ask)
+            stage_state=stage_state, ask=ask,
+            session_created_at=session_created_at)
     if mode not in PRECHECK_MODES:
         return True, None
 
@@ -296,15 +313,18 @@ def output_aspect_verdict(
 
 
 def final_film_verdict(
-    *, mode: str, video: Path, brief, stage_state: dict | None = None,
+    *, mode: str, video: Path, brief, session_created_at: str | None,
+    stage_state: dict | None = None,
     ask: Callable[[str], str] | None = None,
 ) -> tuple[bool, str | None]:
     """最终交付前的成片宽高核对（#176）：收到成片 mp4 之后、打包之前。
 
     与逐段贴回共用 ``film_size_verdict`` 这一份判据；只有标签与后果不同——交付停下
     意味着不进入归档，而不是「这一段不落账」。非产资产模式（t2v）直接放行。
+    ``session_created_at``（#179）同样沿调用链传入，旧会话放行。
     """
     return film_size_verdict(
         mode=mode, video=video, brief=brief, label="最终成片",
         consequence="交付停在打包之前；段产出账里已通过的段保持不动。",
-        stage_state=stage_state, ask=ask)
+        stage_state=stage_state, ask=ask,
+        session_created_at=session_created_at)

@@ -521,8 +521,8 @@ _Avoid_: 分辨率（只说尺寸、丢了画幅，而画幅才是那两套构�
 ## 画幅与视频输出
 
 **成片画幅（film aspect）**:
-成片的宽高比，也是导演台路线**唯一问一次**的画幅答案（#161／ADR 0028）。导演台路线由向导的成片画幅问答定：关键帧画布（写进 `Brief.canvases` 的当前帧模型家族那一格）与导演包 `pack.json` 的 `output.width/height` 都由它派生，打包后向导再**交代节点**该设的 `width / height / ref_max_size`（判据与文案 `director.film_canvas`）。`config/agent.yaml` 的 `director.width/height` 只在旧会话（没有这一问的答案）时兜底。插件不保证把包的 `output` 应用到节点（2026-11-04 实跑未生效，T2），所以节点上的值才是实际执行值。它决定视频的横向/纵向与裁切关系：成片画幅与关键帧画布比例差超过 5% 时导演台的锚点会被中心裁切，所以 `i2v`／`fl2v` 在段规划前有一道画幅预检（判据 `director.aspect.check_aspect`）。`base`／`ref` 路线仍由**画布**推导（注入卡的比例档 + megapixels 预算）。
-_Avoid_: 与**画布**混用（画布只管生图尺寸与构图词分套）、拿 `pack.json` 的 `output` 块当实际执行值、当成**视频输出**（后者是跑出来的真实宽×高）
+成片的宽高比，也是导演台路线**唯一问一次**的画幅答案（#161／ADR 0028）。导演台路线由向导的成片画幅问答定：关键帧画布（写进 `Brief.canvases` 的当前帧模型家族那一格）与导演包 `pack.json` 的 `output.width/height` 都由它派生，打包后向导再**交代节点**该设的 `width / height / ref_max_size`（判据与文案 `director.film_canvas`）。`config/agent.yaml` 的 `director.width/height` 只在旧会话（没有这一问的答案）时兜底。插件不保证把包的 `output` 应用到节点（2026-11-04 实跑未生效，T2），所以节点上的值才是实际执行值。它决定视频的横向/纵向与裁切关系：成片画幅与关键帧画布比例差超过 5% 时导演台的锚点会被中心裁切，所以 `i2v`／`fl2v` 在段规划前有一道画幅预检（判据 `director.aspect.check_aspect`）。`base`／`ref` 路线仍由**画布**推导（注入卡的比例档 + megapixels 预算）。**新旧会话按创建时间判**（`film_canvas.is_legacy_film_aspect_session`）：`Brief.canvases` 不记那一格是画布还是成片画幅，创建早于 #161 的会话里它一律是**关键帧画布**，直接放行——否则帧模型切回 `z_image` 时旧画布会被当成成片画幅误判（#179）。
+_Avoid_: 与**画布**混用（画布只管生图尺寸与构图词分套）、拿 `pack.json` 的 `output` 块当实际执行值、当成**视频输出**（后者是跑出来的真实宽×高）、拿「键名撞不撞」当新旧会话的判据（帧模型一换就会误判，见 #179）
 
 **视频输出（video output）**:
 最终跑出来那条视频的**实际宽×高**。导演台路线以节点 `width/height` 为准——2026-11-04 验收里声明 736×1280、实际 864×480，`pack.json` 也写着 736×1280，只有 ComfyUI 历史与成片本身能证。贴回成片时项目用 `tools/frame_match.video_meta` 读它，并与本段锚图（开场 `start`、全片 `film-end`、切镜段挂过的首帧图）或关键帧画布比，超 5% 拒绝落账。注入卡里的「视频输出参数」是**推导出的声明值**，不是执行结果。

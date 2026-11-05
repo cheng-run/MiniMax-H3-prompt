@@ -13,10 +13,40 @@ ADR 0028 的裁定：**向导只问一次成片画幅**，关键帧画布与导�
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 
 from .pack import CANVAS_ALIGN, DirectorPackSettings
 
 FILM_SIZE_LABEL = "成片画幅"
+
+FILM_ASPECT_QUESTION_SINCE = datetime(
+    2026, 11, 4, 14, 30, 59, tzinfo=timezone(timedelta(hours=8)))
+"""成片画幅问答落地的时刻（#161，提交 ``5def3d1`` 的提交时间）。
+
+**创建早于这一刻的会话没有这一问的答案**：它 ``canvases`` 里那一格一律是**关键帧
+画布**。判据从这一个常量派生，别在别处重抄这个时间（#179）。
+"""
+
+
+def is_legacy_film_aspect_session(created_at: object) -> bool:
+    """会话创建时间早于 #161（或缺失／读不出）＝旧会话（#179）。
+
+    为什么按时间而不是按「键名撞不撞」：``Brief.canvases`` 不记来源，帧模型切回
+    ``z_image`` 后旧画布那格就会被当成成片画幅参与比对，比例差一次就是假硬停。
+    缺失或读不出的时间**按旧会话处理**——宁可放行，不制造假停；解析不出就说明
+    这份数据本来就拿不出判据。
+    """
+    text = str(created_at or "").strip()
+    if not text:
+        return True
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return True
+    # 无时区的时间无法与常量可靠比较；同样按旧会话处理，不猜。
+    if moment.tzinfo is None:
+        return True
+    return moment < FILM_ASPECT_QUESTION_SINCE
 
 
 def _snap(value: int) -> int:

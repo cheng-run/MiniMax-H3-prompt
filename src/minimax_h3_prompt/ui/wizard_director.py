@@ -178,7 +178,7 @@ def prompt_existing_file(
 def check_segment_aspect(
     *, mode: str, segment_index: int, segment_type: str, video: Path,
     directory: Path, canvases, brief, stage_state, ask: Callable[[str], str],
-    save: Callable[[], object],
+    save: Callable[[], object], session_created_at: str | None,
 ) -> str:
     """逐段贴回后的画幅／宽高核对：返回 ``"pass" | "retry" | "stop"``（#158／#176）。
 
@@ -186,6 +186,9 @@ def check_segment_aspect(
     拒绝落账后回到同一个等视频问答（``retry``），后者比例超差或拒绝尺寸确认就
     停下来（``stop``，节点尺寸不改，重贴几次都一样）。把这段分支留在 6000 行的
     ``wizard.py`` 里，两处调用点会各写一套，正是「同一契约两处口径」的温床。
+
+    ``session_created_at``（#179）由调用方从会话状态取出传进来：旧会话（创建于
+    成片画幅问答落地之前）里那一格是关键帧画布，不能当画幅比。本函数不读盘。
     """
     from ..brief_parser import DIRECTOR_ASSET_MODES
     from ..director.aspect_flow import output_aspect_verdict
@@ -193,7 +196,8 @@ def check_segment_aspect(
     ok, note = output_aspect_verdict(
         mode=mode, segment_index=segment_index, segment_type=segment_type,
         video=video, directory=directory, canvases=canvases,
-        brief=brief, ask=ask, stage_state=stage_state)
+        brief=brief, ask=ask, stage_state=stage_state,
+        session_created_at=session_created_at)
     if note:
         print(note)
     if not ok:
@@ -206,14 +210,18 @@ def check_segment_aspect(
 
 def confirm_final_film_aspect(
     *, mode: str, film: Path, brief, stage_state, ask: Callable[[str], str],
-    save: Callable[[], object],
+    save: Callable[[], object], session_created_at: str | None,
 ) -> bool:
-    """最终交付前的成片宽高核对（#176）：``True``＝继续打包，``False``＝停在打包之前。"""
+    """最终交付前的成片宽高核对（#176）：``True``＝继续打包，``False``＝停在打包之前。
+
+    ``session_created_at``（#179）与逐段贴回同源：旧会话放行，新会话行为不变。
+    """
     from ..brief_parser import DIRECTOR_ASSET_MODES
     from ..director.aspect_flow import final_film_verdict
 
     ok, note = final_film_verdict(
-        mode=mode, video=film, brief=brief, stage_state=stage_state, ask=ask)
+        mode=mode, video=film, brief=brief, stage_state=stage_state, ask=ask,
+        session_created_at=session_created_at)
     if note:
         print(note)
     if not ok:

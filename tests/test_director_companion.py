@@ -767,7 +767,10 @@ def _director_session(tmp_path: Path, types: tuple[str, ...] = ("opening", "cont
         path.write_text(f"段 {segment.index} 的提示词\n", encoding="utf-8")
     return SessionState(directory=directory,
                         brief=_director_brief(director_mode=mode),
-                        stage_state={}, status=STATUS_DIRECTOR_SEGMENTS_RUNNING)
+                        stage_state={}, status=STATUS_DIRECTOR_SEGMENTS_RUNNING,
+                        # #179 起画幅核对按创建时间判新旧：这些用例模拟的是 #161
+                        # 之后的新会话，必须带一个落地时刻之后的时间。
+                        created_at="2026-11-05T09:00:00+00:00")
 
 
 

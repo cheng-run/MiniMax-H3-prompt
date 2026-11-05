@@ -93,6 +93,11 @@ def _r2v_brief(size: tuple[int, int] | None = (1920, 1088)):
                  duration=10.0, plot="雨夜旧信", canvases=canvases)
 
 
+# #161 之后创建的会话：这些用例说的都是「新会话照常比对」的行为，旧会话的放行
+# 由 ``tests/test_director_legacy_aspect_session.py`` 单独钉（#179）。
+NEW_SESSION_CREATED_AT = "2026-11-05T01:00:00+00:00"
+
+
 def _pin_frame_model(monkeypatch):
     """把关键帧模型钉成 qwen：``film_size_for`` 的默认档读本机配置，测试不能跟着机器跑。"""
     from minimax_h3_prompt import image_config
@@ -101,13 +106,14 @@ def _pin_frame_model(monkeypatch):
 
 
 def _verdict(video, brief, *, ask=None, stage_state=None, segno=1,
-             segment_type="opening", directory=None):
+             segment_type="opening", directory=None,
+             created_at=NEW_SESSION_CREATED_AT):
     from minimax_h3_prompt.director.aspect_flow import output_aspect_verdict
 
     return output_aspect_verdict(
         mode="r2v", segment_index=segno, segment_type=segment_type, video=video,
         directory=directory or video.parent, brief=brief, ask=ask,
-        stage_state=stage_state)
+        stage_state=stage_state, session_created_at=created_at)
 
 
 def test_r2v_matching_film_size_passes(tmp_path, tmp_video, monkeypatch, capsys):
@@ -224,9 +230,13 @@ def test_r2v_ratio_gap_stops_without_asking(
     assert "停止" in note
 
 
-def test_r2v_old_session_without_the_answer_passes_with_one_line(
+def test_r2v_session_without_the_answer_passes_with_one_line(
         tmp_path, tmp_video, monkeypatch):
-    """旧会话没有成片画幅答案 → 放行并打一行说明，不拿别的档位硬套。"""
+    """会话里没有成片画幅答案 → 放行并打一行说明，不拿别的档位硬套。
+
+    这里判的是「没有答案」这一支（新会话换了帧模型也会走到）；「创建得早」那一支
+    由 ``test_director_legacy_aspect_session.py`` 钉（#179）。
+    """
     _pin_frame_model(monkeypatch)
     video = tmp_video("film.mp4", width=864, height=480, frames=2)
 
@@ -255,7 +265,8 @@ def test_i2v_size_only_gap_still_passes_without_a_question(
 
     ok, note = output_aspect_verdict(
         mode="i2v", segment_index=1, segment_type="opening", video=video,
-        directory=tmp_path, canvases={}, ask=ask, stage_state={})
+        directory=tmp_path, canvases={}, ask=ask, stage_state={},
+        session_created_at=NEW_SESSION_CREATED_AT)
 
     assert (ok, note) == (True, None)
 
@@ -336,7 +347,7 @@ def test_missing_video_metadata_passes_with_a_warning(tmp_path, capsys):
 
     ok, note = output_aspect_verdict(
         mode="i2v", segment_index=1, segment_type="opening", video=broken,
-        directory=tmp_path, canvases={})
+        directory=tmp_path, canvases={}, session_created_at=NEW_SESSION_CREATED_AT)
 
     assert ok is True
     assert note is not None and "元信息缺失" in note
