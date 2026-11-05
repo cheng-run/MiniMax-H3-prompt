@@ -172,6 +172,20 @@ def no_run_log(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_interaction_log_leak():
+    """用例之间不残留交互日志句柄（#171）。
+
+    日志是全局单例：一条用例里 ``run_wizard`` 打开了临时路径上的文件，下一条用例
+    不关就还指向那个 tmp 目录——Windows 上句柄悬着，写入也落到上一轮的目录里。
+    """
+    from minimax_h3_prompt.observability import interactions
+
+    interactions.stop()
+    yield
+    interactions.stop()
+
+
+@pytest.fixture(autouse=True)
 def isolated_asset_library(tmp_path_factory, monkeypatch):
     """所有用例默认把素材库根指到临时目录（issue #85）。
 

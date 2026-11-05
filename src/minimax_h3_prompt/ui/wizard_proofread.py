@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 
 from ..asset_proofread import language_slip, locate_rewrite_span
+from ..observability import interactions
 
 
 def pin_rewrite_quote(dev, running: str, *, name: str, ask: Callable[[str], str]) -> str:
@@ -71,12 +72,18 @@ def omission_language_tip(facts: Sequence[str], *, body: str) -> str | None:
 
 
 def merged_language_warning(merged: str, *, base: str) -> str | None:
-    """合并结果仍是混排时的兜底告警（覆盖续跑重放等不经提问的路径）。"""
+    """合并结果仍是混排时的兜底告警（覆盖续跑重放等不经提问的路径）。
+
+    告警一产生就写交互日志（#171）：这条是「中英混排响过没有」的唯一可查事件；
+    返回串仍由调用方打印，本函数不碰终端。
+    """
     slip = language_slip(merged, body=base)
     if slip is None:
         return None
-    return (f"  [警告] 素材画面事实里有中英混排：「{slip}」——它会原样进 "
-            "<Picture N> 的描述与段词。")
+    message = (f"  [警告] 素材画面事实里有中英混排：「{slip}」——它会原样进 "
+               "<Picture N> 的描述与段词。")
+    interactions.notice("language_mixed", message)
+    return message
 
 
 __all__ = [

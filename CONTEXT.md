@@ -482,6 +482,12 @@ _Avoid_: 与角色调用的看门狗当两套（同一份判据）、只在外�
 长步骤开始前打出的「正在做什么 ＋ 第几轮/N」一行，与心跳行并列。它回答「现在在干什么」，心跳回答「还活着吗」——质量与存活是两种信号，不可互相代替。API 在 `ui.progress`：`format_step_banner`（纯格式化）、`step_scope`（横幅＋等待心跳订阅成对出现，退出必解绑）与 `event_scope`（只订阅、不打横幅；素材循环整段用它兜住步骤之间的间隙，嵌套时共用同一个监听器，不会把心跳打两遍，issue #71）。
 _Avoid_: 把它当进度条（没有可测总量）、与首字节/块间心跳混为一谈、只在循环里逐处订阅（漏一处就是静默窗口）
 
+## 观测与取证
+
+**交互日志（interactions.jsonl）**:
+向导问答与具名告警的追加式账本（#171／spec #169 B）：**会话目录的同级**文件 `<sessions_root>/<主题>/interactions.jsonl`，一行一条 JSON `{ts, event, flow, question, answer, answer_len}`，`event` 只有 `prompt`／`notice` 两类。`flow` 由上下文管理器标注（`phase1`／`asset_loop`／`segment_handoff`／`delivery`，缺省 `wizard`），回答只记**摘要**——折叠空白、路径只留 basename、超过 80 字的长正文不记内容（只留 `answer_len`），所以落盘不等于泄密。**唯一接缝是向导提问函数**（确认函数复用它，天然全覆盖）；日志未启动（测试、阶段外调用）时静默 no-op、不产生文件，写失败只警告一次、不打断流程。它回答「某个具名提示展示过没有」，不是「花了多少 token」——那是**成本表**。
+_Avoid_: 与 run log（`logs/` 下按运行分段的 JSONL，只记结构化事件、不含问答文本）混用、把长正文答案写进去、按会话轮转（追加不轮转，为了让同一句提示的「响过」只留一处可查）
+
 ## 提示词格式纪律（2026-09-22 官方格式迁移）
 
 自创结构 GLOBAL_LOCK / BRIDGE_FROM / END_HOOK / 首行时长句（`This is a N-second continuous shot.`）**已全部删除**：官方 base-en.txt 无这些字段，自创结构偏离模型训练分布导致服从度下降（validator 对其报 error）。段落一致性改由 Picture 1 锚定句 + 首次出场 Shot 内的实体定义 + 桥接帧图片承担。

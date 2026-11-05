@@ -31,7 +31,7 @@ from ..graph.pipeline import (
     run_stage2,
     stage1_rerun_plan,
 )
-from ..observability import COST_TABLE_KEY, token_meter
+from ..observability import COST_TABLE_KEY, flow_scope as _flow, interactions, token_meter
 from ..resume_point import forget as forget_answer
 from ..resume_point import recall as recall_answer
 from ..resume_point import remember as remember_answer
@@ -146,7 +146,9 @@ def _drain_stdin() -> None:
 def _prompt(text: str) -> str:
     # 每次提问前先排水：清掉阻塞期间滞留的旧按键，提示出现后的新输入不受影响。
     _drain_stdin()
-    return input(text).strip()
+    answer = input(text).strip()
+    interactions.prompt(text, answer)  # 唯一接缝：_confirm 也走这里，问答天然全覆盖
+    return answer
 
 
 def _record_answer(state: dict, key: str, value: str, *, generation_dir: Path,
@@ -561,6 +563,8 @@ def run_wizard(config: Config) -> int:
         if session is None:
             return 1
         frames_shown = True  # _phase1_new 收尾已展示生图提示词
+    # 续接会话的交互日志也要开在本会话目录的同级（新开会话已在 _session_dir 里开过）。
+    interactions.start(interactions.path_for(session.directory))
     # 阶段 1 完成（或完成了一半）后若断在阶段 1 中途，先从中断节点续跑完阶段 1
     if session.status == STATUS_STAGE1_RUNNING:
         session = _resume_stage1(config, session)
@@ -1358,6 +1362,7 @@ def _rewrite_director_segment_round(plan, segment, session: SessionState, *,
     return "retry"
 
 
+@_flow("segment_handoff")
 def _run_director_segment_handoff(plan, session: SessionState, *, config: Config,
                                   passed: dict[int, dict] | None = None,
                                   rotate: bool = False, llm=None) -> int:
@@ -1707,6 +1712,7 @@ def _prompt_optional_image(question: str) -> Path | None:
         return path
 
 
+@_flow("delivery")
 def _finish_director_delivery(plan, session: SessionState) -> int:
     """全段通过后的交付（issue #108，设计 §3.9）：成片记录 ＋ 最终包归档 ＋ 补改写行。
 
@@ -1896,6 +1902,7 @@ def _ask_clarifications(config: Config, topic: str) -> str:
     return block
 
 
+@_flow("phase1")
 def _phase1_new(config: Config) -> SessionState | None:
     # 新开一份生成＝新开一本成本账（issue #52）：上一条废弃/重启流程里攒下的累计
     # 成本不许串进来（菜单上那句「估算费用」说的是**这一份**的钱）。清零点放在这里
@@ -2041,6 +2048,7 @@ def _session_dir(config: Config, topic: str) -> Path:
     else:
         directory = slug_dir / "GEN001"
     directory.mkdir(parents=True, exist_ok=True)
+    interactions.start(interactions.path_for(directory))
     return directory
 
 
@@ -2328,6 +2336,7 @@ def _build_role_agents_on_demand(brief: Brief):
     return model, build_role_agents(model, brief.refs, brief.mode, brief.duration, brief.variant)
 
 
+@_flow("phase1")
 def _user_revision_loop(state: dict, generation_dir: Path, brief: Brief, config: Config,
                         *, model=None, agents=None,
                         allow_setting_layers: bool = True,
@@ -3405,6 +3414,7 @@ def _asset_cycle(state: dict, brief: Brief, generation_dir: Path, item: QueueIte
             print("无效输入，请选 1/2/3/4/q。")
 
 
+@_flow("asset_loop")
 def _asset_loop(state: dict, brief: Brief, generation_dir: Path) -> bool:
     """素材循环（issue #50）：队列驱动的逐张闭环，一次只维持一张「当前待办」。
 
@@ -3503,6 +3513,7 @@ def _asset_loop(state: dict, brief: Brief, generation_dir: Path) -> bool:
             records = proofread_rows(state)
 
 
+@_flow("delivery")
 def _collect_extra_media(state: dict, brief: Brief, generation_dir: Path) -> None:
     """素材视频/音频按需挂账（issue #43 三型对齐官方标签）＋无提示词登记项补交。
 
@@ -3713,6 +3724,7 @@ def _write_ref_segment_now(source, position: int, total: int) -> tuple[str, list
     return source.texts[position - 1], []
 
 
+@_flow("segment_handoff")
 def _run_ref_segment_handoff(result, generation_dir: Path,
                              *, passed: dict[int, dict] | None = None) -> bool:
     """多参逐段陪跑（issue #55/#56/#70）：**轮到哪段才写哪段** → 出词 → 交回本段输出视频
@@ -5638,6 +5650,7 @@ def _report_ledger_mismatch(directory: Path, exc: Exception) -> None:
     _print_ledger_way_out(directory)
 
 
+@_flow("segment_handoff")
 def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summary=None,
                         state: dict | None = None) -> bool:
     """把整条提示词按 [Shot N] 拆成单镜头提示词，逐段陪跑。返回**是否跑完全部段**。

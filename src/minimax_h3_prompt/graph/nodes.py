@@ -30,6 +30,7 @@ from ..generation import (
     strip_foreign_frames,
     variant_frame_names,
 )
+from ..observability import interactions
 from ..tools.h3_validator import validate_prompt
 from ..tools.image_prompt_discipline import check_image_prompt, check_self_contained
 from ..tools.ref_metadata import format_ref_meta
@@ -401,7 +402,10 @@ def print_image_prompt_warnings(prompt: str, model: str, prefix: str) -> None:
     消息体同源。
     """
     for warning in check_image_prompt(prompt, model=model):
-        print(f"{prefix}{warning.message}")
+        line = f"{prefix}{warning.message}"
+        print(line)
+        # 告警要能事后取证（#171）：写进交互日志的具名事件，不只是屏幕一滚而过。
+        interactions.notice("image_prompt_discipline", line)
 
 
 def _warn_image_prompt_discipline(entries: list[dict], kind: str, model: str) -> None:

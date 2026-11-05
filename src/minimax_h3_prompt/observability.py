@@ -5,11 +5,14 @@
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
+import re
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TextIO
@@ -129,6 +132,179 @@ class RunLog:
 
 
 run_log = RunLog()
+
+
+# 交互日志的文件名（spec #169 B）：一个会话目录的头一份，追加写、逐条 flush、不轮转。
+INTERACTIONS_FILENAME = "interactions.jsonl"
+
+# 回答摘要的字数上限：超过它按「长正文类答案」处理——只记长度、不记内容。
+# 同一个数兼两个用途是有意的：摘要写不下的时候，截一半既不能取证也会把半句话
+# 伪装成用户原话，不如把「有过一条长回答」和它的长度留在盘上。
+MAX_ANSWER_SUMMARY_CHARS = 80
+
+# 没进任何流程作用域时的 ``flow`` 值。
+DEFAULT_INTERACTION_FLOW = "wizard"
+
+
+def summarize_answer(answer: str) -> tuple[str, int]:
+    """把一条回答压成「摘要 + 原文长度」。
+
+    规则（spec #169 B）：折叠空白；含路径分隔符的值只留 basename（落盘不等于泄密）；
+    空串记 ``""``（与「没答」区分）；超过上限的正文类答案不记内容、只留长度。
+    长度取**用户实际提交的**（向导 ``_prompt`` 已 strip）长度，不是摘要长度——
+    事后问「他到底答了多少字」时，摘要上的数会骗人。
+    """
+    text = str(answer)
+    collapsed = " ".join(text.split())
+    if "/" in collapsed or "\\" in collapsed:
+        # 正反斜杠都当分隔符：用户从资源管理器复制来的是反斜杠，手打的是正斜杠。
+        parts = [part for part in re.split(r"[\\/]", collapsed) if part]
+        collapsed = parts[-1] if parts else ""
+    if len(collapsed) > MAX_ANSWER_SUMMARY_CHARS:
+        return "", len(text)
+    return collapsed, len(text)
+
+
+class InteractionLog:
+    """向导交互日志：与会话目录同级的 ``interactions.jsonl``（spec #169 B）。
+
+    为什么单开一份而不是塞进 ``RunLog``：run log 只记结构化事件、按运行分段；
+    本日志要按**会话**追加、永不轮转，才能事后 grep「某个具名提示展示过」——
+    验收项不靠人回忆，这是唯一取证物。
+
+    三条不变式：
+
+    1. **未启动即空操作**：测试与阶段外调用（没有会话目录可落）不产生任何文件；
+    2. **写失败不打断主流程**：日志是观测，第一次失败在 stderr 说一句即可——
+       与 ``RunLog`` 同口径，否则「日志悄悄没写」会变成新的静默；
+    3. **行形状即契约**：``{ts, event, flow, question, answer, answer_len}`` 六键，
+       提问与告警共用同一形状（告警没有用户回答，``answer`` 留空）。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._path: Path | None = None
+        self._warned = False
+        # flow 用栈而不是单值：流程之间会嵌套（交付里回看素材循环），退出要回到外层。
+        self._flows: list[str] = []
+
+    @property
+    def path(self) -> Path | None:
+        return self._path
+
+    @staticmethod
+    def path_for(session_dir: str | Path) -> Path:
+        """会话目录的**同级**文件：``<sessions_root>/<主题>/interactions.jsonl``。"""
+        return Path(session_dir).parent / INTERACTIONS_FILENAME
+
+    def start(self, path: str | Path) -> Path | None:
+        """开始一份交互日志；同一路径幂等，换路径则换成新的一份。"""
+        path = Path(path)
+        with self._lock:
+            if self._path == path:
+                return path
+            # 一份新日志＝一条新的警告预算：上一份的失败不该吞掉这一份的第一次。
+            self._warned = False
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                # 先探一次可写：写失败要在启动时就说，而不是等到第一条问答。
+                # 探完立刻关——句柄不常驻，Windows 上会话目录才能被正常删除/挪走。
+                with open(path, "a", encoding="utf-8"):
+                    pass
+            except OSError as exc:
+                self._path = None
+                self._warn_once(f"[交互日志] 无法写入 {path}：{exc}")
+                return None
+            self._path = path
+            return path
+
+    def stop(self) -> None:
+        with self._lock:
+            self._path = None
+
+    def prompt(self, question: str, answer: str) -> None:
+        """记一条问答。``question`` 是**全文**（应用自撰），``answer`` 走摘要规则。"""
+        summary, length = summarize_answer(answer)
+        self._write({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "event": "prompt",
+            "flow": self._current_flow(),
+            "question": str(question),
+            "answer": summary,
+            "answer_len": length,
+        })
+
+    def notice(self, name: str, message: str = "") -> None:
+        """记一条具名告警（生图纪律、语言混排……）。
+
+        ``name`` 是稳定的机读名（如 ``image_prompt_discipline``），写进 ``question``
+        的方括号前缀里——行形状固定六键，不另开字段；告警没有用户回答，``answer``
+        留空、``answer_len`` 为 0。
+        """
+        text = f"[{name}] {message}" if message else f"[{name}]"
+        self._write({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "event": "notice",
+            "flow": self._current_flow(),
+            "question": text,
+            "answer": "",
+            "answer_len": 0,
+        })
+
+    @contextmanager
+    def flow(self, name: str):
+        """把作用域内的问答标成 ``name`` 流程；可嵌套，退出即回外层。"""
+        with self._lock:
+            self._flows.append(str(name))
+        try:
+            yield
+        finally:
+            with self._lock:
+                if self._flows:
+                    self._flows.pop()
+
+    def _current_flow(self) -> str:
+        with self._lock:
+            return self._flows[-1] if self._flows else DEFAULT_INTERACTION_FLOW
+
+    def _write(self, row: dict) -> None:
+        with self._lock:
+            path = self._path
+            if path is None:
+                return
+            try:
+                line = json.dumps(row, ensure_ascii=False) + "\n"
+            except (TypeError, ValueError) as exc:
+                self._warn_once(f"[交互日志] 写交互日志失败：{exc}")
+                return
+            try:
+                # 逐条 open/close 而不是常驻句柄：问答是低频事件，换来的是句柄不占着
+                # 文件——Windows 上会话目录被删/被挪（测试与人工清理）不会因它失败。
+                with open(path, "a", encoding="utf-8") as handle:
+                    handle.write(line)
+                    handle.flush()
+            except OSError as exc:
+                self._warn_once(f"[交互日志] 写交互日志失败：{exc}")
+
+    def _warn_once(self, message: str) -> None:
+        if self._warned:
+            return
+        self._warned = True
+        print(message, file=sys.stderr)
+
+
+interactions = InteractionLog()
+
+
+def flow_scope(name: str):
+    """装饰器版 ``interactions.flow``：向导里流程函数太多，包一层 ``with`` 会改缩进。"""
+    def decorate(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            with interactions.flow(name):
+                return fn(*args, **kwargs)
+        return wrapper
+    return decorate
 
 
 class Reporter:
