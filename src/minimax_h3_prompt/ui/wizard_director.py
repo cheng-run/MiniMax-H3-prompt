@@ -149,6 +149,82 @@ def ask_pack_settings(
     save(session.directory, brief, session.stage_state, status=session.status)
 
 
+def prompt_existing_file(
+    question: str, *, what: str, ask: Callable[[str], str],
+) -> Path | None:
+    """问一个**必须已存在**的文件路径；不存在就报错重问（从 wizard.py 搬来，#176）。
+
+    返回 ``None`` ＝ 用户输入 q 停下——这不是失败：已通过的段留在账上，重跑向导回到
+    这里。**不扫目录自动挑**：导出目录里往往躺着上一次的同名文件，自动挑中的那一个
+    用户没看过，拿错成片/拿错包都不会有人发现。``ask`` 由调用方注入，本模块不反向
+    依赖 ``wizard``。
+    """
+    while True:
+        # 用户多半是从资源管理器「复制文件地址」粘过来的，会带一对引号。
+        raw = ask(question).strip().strip('"').strip("'")
+        if raw.lower() in ("q", "quit"):
+            return None
+        if not raw:
+            print(f"[错误] {what}路径不能为空。")
+            continue
+        path = Path(raw)
+        if not path.is_file():
+            print(f"[错误] {what}不存在：{path}")
+            print("  请确认路径后重输（项目不会自动搜目录：猜错的文件发现不了）。")
+            continue
+        return path
+
+
+def check_segment_aspect(
+    *, mode: str, segment_index: int, segment_type: str, video: Path,
+    directory: Path, canvases, brief, stage_state, ask: Callable[[str], str],
+    save: Callable[[], object],
+) -> str:
+    """逐段贴回后的画幅／宽高核对：返回 ``"pass" | "retry" | "stop"``（#158／#176）。
+
+    为什么把「拒绝之后怎么办」也收在这里：i2v／fl2v 与 r2v 的**处置不同**——前者
+    拒绝落账后回到同一个等视频问答（``retry``），后者比例超差或拒绝尺寸确认就
+    停下来（``stop``，节点尺寸不改，重贴几次都一样）。把这段分支留在 6000 行的
+    ``wizard.py`` 里，两处调用点会各写一套，正是「同一契约两处口径」的温床。
+    """
+    from ..brief_parser import DIRECTOR_ASSET_MODES
+    from ..director.aspect_flow import output_aspect_verdict
+
+    ok, note = output_aspect_verdict(
+        mode=mode, segment_index=segment_index, segment_type=segment_type,
+        video=video, directory=directory, canvases=canvases,
+        brief=brief, ask=ask, stage_state=stage_state)
+    if note:
+        print(note)
+    if not ok:
+        return "stop" if mode in DIRECTOR_ASSET_MODES else "retry"
+    if mode in DIRECTOR_ASSET_MODES:
+        # r2v 的尺寸确认一发生就落盘：最终交付再核对时同一组数值不再问。
+        save()
+    return "pass"
+
+
+def confirm_final_film_aspect(
+    *, mode: str, film: Path, brief, stage_state, ask: Callable[[str], str],
+    save: Callable[[], object],
+) -> bool:
+    """最终交付前的成片宽高核对（#176）：``True``＝继续打包，``False``＝停在打包之前。"""
+    from ..brief_parser import DIRECTOR_ASSET_MODES
+    from ..director.aspect_flow import final_film_verdict
+
+    ok, note = final_film_verdict(
+        mode=mode, video=film, brief=brief, stage_state=stage_state, ask=ask)
+    if note:
+        print(note)
+    if not ok:
+        print("\n⚠ 停在交付前（成片宽高）：没有归档最终包，也没有置完成；"
+              "改导演台节点 width/height 后重新导出成片，重跑向导会回到这里。")
+        return False
+    if mode in DIRECTOR_ASSET_MODES:
+        save()
+    return True
+
+
 def confirm_aspect(
     mode: str, *, frame_canvas: tuple[int, int], declared: tuple[int, int],
     ask: Callable[[str], str],

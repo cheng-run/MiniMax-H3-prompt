@@ -94,6 +94,10 @@ _STATE_KEYS = (
     "sound_design", "music", "final_prompt", "final_report", "_progress",
     "user_revisions", "frame_round", "asset_proofreads", "asset_loop",
     "resume_answers", "asset_proofread_progress",
+    # 尺寸差一档的确认记录（#176）：向导侧键、不进图。键名住在
+    # `director/aspect_flow.py` 的 `FILM_SIZE_CONFIRM_KEY`，这里逐字同步；
+    # 不同步的后果是保存时静默丢掉它，续跑后同一件事反复问。
+    "film_size_confirm",
     # **故意不在**这里的：`director_mode`（导演台选定的生成模式，issue #101）。它是
     # ``mode``/``variant`` 的同族——路线级选择只住 brief 一份，`run_stage1` 每次从 brief
     # 现取进图 state。落一份进白名单就等于同一契约两处口径：brief 与 stage_state 一旦
@@ -138,6 +142,9 @@ PERSISTED_OUTSIDE_GRAPH: dict[str, str] = {
     "bridge_frame_descriptions": (
         "各段桥接帧读图结果：wizard.py:4755 写、segment_prompts.py:647 读"
         "（分段陪跑走向导侧，不进图）"),
+    "film_size_confirm": (
+        "尺寸差一档的确认：director/aspect_flow.py 的 FILM_SIZE_CONFIRM_KEY"
+        "（逐段贴回与最终交付共用；任一边数值变化即作废重问）"),
 }
 
 # 资产图提示词三键（父 spec #77 / issue #80）：只属于多参路线。键名从 `graph/state.py`

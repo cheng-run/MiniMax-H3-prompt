@@ -167,6 +167,18 @@ MUTATIONS: tuple[Mutation, ...] = (
         "画幅判定反了＝2% 的正常取整差被当成事故、218% 的锚点裁切被放行（#158）",
     ),
     Mutation(
+        "size_check_disabled",
+        "src/minimax_h3_prompt/director/aspect.py",
+        "        exceeds=(\n"
+        "            width_delta > tolerance + _TOLERANCE_EPSILON\n"
+        "            or height_delta > tolerance + _TOLERANCE_EPSILON\n"
+        "        ),",
+        "        exceeds=False,",
+        ("tests/test_director_canvas_aspect.py::test_size_check_flags_864x480_against_1920x1088",
+         "tests/test_director_canvas_aspect.py::test_size_check_boundary_is_strictly_greater_than_the_tolerance"),
+        "尺寸判据恒不超差＝864×480 对 1920×1088 被放行，2.2 倍的尺寸差看不见（#176）",
+    ),
+    Mutation(
         "film_end_sidecar_never_hits",
         "src/minimax_h3_prompt/director/film_end.py",
         '    if not fingerprint or meta.get("image_sha256") != fingerprint:\n'

@@ -474,6 +474,160 @@ def test_a_broken_final_pack_keeps_the_session_resumable(
     assert loaded.status == STATUS_DIRECTOR_SEGMENTS_RUNNING
 
 
+# ---------------------------------------------------------------------------
+# #176：最终交付前的成片宽高核对（收到成片 mp4 之后、打包之前）
+# ---------------------------------------------------------------------------
+
+def _r2v_delivery_session(tmp_path: Path, *, size=(1920, 1088)):
+    """交付前那一格的 r2v 会话：已答成片画幅 1920×1088。"""
+    from minimax_h3_prompt.director.film_canvas import film_frame_canvases
+
+    session, plan = _wizard_session(tmp_path, mode="r2v")
+    session.brief.canvases = film_frame_canvases(size, "qwen")
+    return session, plan
+
+
+def _pin_delivery_frame_model(monkeypatch):
+    from minimax_h3_prompt import image_config
+
+    monkeypatch.setattr(image_config, "load_frame_image_model", lambda: "qwen")
+
+
+def test_delivery_checks_the_final_film_size_before_archiving(
+        tmp_path, monkeypatch, tmp_video, capsys):
+    """864×480 对 1920×1088：交付前也要报尺寸差，一次确认后照常归档。"""
+    from minimax_h3_prompt.director import delivery
+    from minimax_h3_prompt.director.aspect_flow import FILM_SIZE_CONFIRM_KEY
+    from minimax_h3_prompt.session_store import STATUS_COMPLETED, load_session
+    from minimax_h3_prompt.ui import wizard
+
+    _pin_delivery_frame_model(monkeypatch)
+    session, plan = _r2v_delivery_session(tmp_path)
+    film = tmp_video("final.mp4", width=864, height=480, frames=2)
+    pack_zip = _write_pack_zip(tmp_path / "exported" / "final.mmxpack.zip",
+                               _timeline(DEFAULT_PROMPTS))
+    asked: list[str] = []
+
+    def fake_prompt(text: str) -> str:
+        asked.append(text)
+        if "确认继续使用这条成片" in text:
+            return ""
+        if "成片 mp4 路径" in text:
+            return str(film)
+        if "最终包 zip 路径" in text:
+            return str(pack_zip)
+        return ""
+
+    monkeypatch.setattr(wizard, "_prompt", fake_prompt)
+
+    assert wizard._finish_director_delivery(plan, session) == 0
+
+    assert len([text for text in asked if "确认继续使用这条成片" in text]) == 1
+    out = capsys.readouterr().out
+    assert "最终成片" in out and "1920×1088" in out and "864×480" in out
+    assert "来源" in out and "20%" in out
+    assert delivery.final_film_path(session.directory).is_file()
+    assert delivery.final_pack_path(session.directory).is_file()
+    assert session.stage_state[FILM_SIZE_CONFIRM_KEY]["actual"] == [864, 480]
+    loaded = load_session(session.directory)
+    assert loaded is not None and loaded.status == STATUS_COMPLETED
+    assert loaded.stage_state[FILM_SIZE_CONFIRM_KEY]["actual"] == [864, 480]
+
+
+def test_delivery_stops_when_the_final_size_confirmation_is_refused(
+        tmp_path, monkeypatch, tmp_video, capsys):
+    """拒绝最终成片的尺寸确认 → 停在打包之前，不归档、不置完成。"""
+    from minimax_h3_prompt.director import delivery
+    from minimax_h3_prompt.session_store import (
+        STATUS_DIRECTOR_SEGMENTS_RUNNING, load_session,
+    )
+    from minimax_h3_prompt.ui import wizard
+
+    _pin_delivery_frame_model(monkeypatch)
+    session, plan = _r2v_delivery_session(tmp_path)
+    film = tmp_video("final.mp4", width=864, height=480, frames=2)
+    asked: list[str] = []
+
+    def fake_prompt(text: str) -> str:
+        asked.append(text)
+        if "确认继续使用这条成片" in text:
+            return "n"
+        if "成片 mp4 路径" in text:
+            return str(film)
+        pytest.fail(f"拒绝之后不该再问：{text}")
+
+    monkeypatch.setattr(wizard, "_prompt", fake_prompt)
+
+    assert wizard._finish_director_delivery(plan, session) == 0
+
+    out = capsys.readouterr().out
+    assert "已停下" in out and "未获确认" in out
+    assert not delivery.final_film_path(session.directory).exists()
+    assert not delivery.final_pack_path(session.directory).exists()
+    assert not any("最终包 zip 路径" in text for text in asked), "拒绝后不该再问最终包"
+    loaded = load_session(session.directory)
+    assert loaded is not None
+    assert loaded.status == STATUS_DIRECTOR_SEGMENTS_RUNNING
+
+
+def test_delivery_reuses_the_confirmation_recorded_at_the_segment_handoff(
+        tmp_path, monkeypatch, tmp_video):
+    """逐段贴回时已确认过的同一组数值，交付时不再问（确认跨两处共用）。"""
+    from minimax_h3_prompt.director import delivery
+    from minimax_h3_prompt.director.aspect_flow import FILM_SIZE_CONFIRM_KEY
+    from minimax_h3_prompt.ui import wizard
+
+    _pin_delivery_frame_model(monkeypatch)
+    session, plan = _r2v_delivery_session(tmp_path)
+    session.stage_state[FILM_SIZE_CONFIRM_KEY] = {
+        "mode": "r2v", "declared": [1920, 1088], "actual": [864, 480],
+        "at": "2026-11-05T00:00:00+00:00",
+    }
+    film = tmp_video("final.mp4", width=864, height=480, frames=2)
+    pack_zip = _write_pack_zip(tmp_path / "exported" / "final.mmxpack.zip",
+                               _timeline(DEFAULT_PROMPTS))
+
+    def fake_prompt(text: str) -> str:
+        if "确认继续使用这条成片" in text:
+            pytest.fail("同一组数值已经确认过，不该重问")
+        if "成片 mp4 路径" in text:
+            return str(film)
+        if "最终包 zip 路径" in text:
+            return str(pack_zip)
+        return ""
+
+    monkeypatch.setattr(wizard, "_prompt", fake_prompt)
+
+    assert wizard._finish_director_delivery(plan, session) == 0
+    assert delivery.final_pack_path(session.directory).is_file()
+
+
+def test_delivery_stops_on_a_ratio_gap_without_asking(
+        tmp_path, monkeypatch, tmp_video, capsys):
+    """比例超差（480×864 对 1920×1088）→ 停止并说明，不进入打包。"""
+    from minimax_h3_prompt.director import delivery
+    from minimax_h3_prompt.ui import wizard
+
+    _pin_delivery_frame_model(monkeypatch)
+    session, plan = _r2v_delivery_session(tmp_path)
+    film = tmp_video("final.mp4", width=480, height=864, frames=2)
+
+    def fake_prompt(text: str) -> str:
+        if "确认继续使用这条成片" in text:
+            pytest.fail("比例超差不该问尺寸确认")
+        if "成片 mp4 路径" in text:
+            return str(film)
+        pytest.fail(f"比例超差后不该再问：{text}")
+
+    monkeypatch.setattr(wizard, "_prompt", fake_prompt)
+
+    assert wizard._finish_director_delivery(plan, session) == 0
+
+    out = capsys.readouterr().out
+    assert "停止" in out and "1920×1088" in out and "480×864" in out
+    assert not delivery.final_pack_path(session.directory).exists()
+
+
 def test_q_before_the_paths_leaves_the_session_resumable(tmp_path, monkeypatch, capsys):
     """输入 q 停在交付前：返回 0、不置完成（已通过的段留在账上，重跑接着来）。"""
     from minimax_h3_prompt.session_store import (

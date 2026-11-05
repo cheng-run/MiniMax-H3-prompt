@@ -1387,11 +1387,11 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
     尾问（#106）不变：全部通过后再问「有要改哪一段重来吗」。
     """
     from ..director import cache, ledger
-    from ..director.aspect_flow import output_aspect_verdict
     from ..director.companion import judge_video_evidence
     from ..director.frames import FIRST_SEGMENT_TYPE, needs_first_frame_image
     from ..director.tailframe import needs_tailframe
     from .wizard_director import build_director_llm as _build_director_llm
+    from .wizard_director import check_segment_aspect as _check_segment_aspect
 
     directory = Path(session.directory)
     brief = session.brief
@@ -1545,15 +1545,22 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
                           "回导演台重跑**本段**后再贴视频路径，或输入 e 改本段提示词；"
                           "输入 q 停下。")
                     continue
-                # #158：帧数过了不等于画幅对了。画幅不符时**拒绝落账**（段账与改写账
-                # 都不写、进度不前进），并回到同一个等视频问答；已通过的段留在账上。
-                aspect_ok, aspect_note = output_aspect_verdict(
+                # #158／#176：帧数过了不等于画幅对了。i2v／fl2v 拒绝落账并回到同一个
+                # 等视频问答；r2v 比例超差或拒绝尺寸确认＝停（节点尺寸不改，重贴几次
+                # 都一样）。处置分支收在 wizard_director，别在这里再写一套。
+                aspect_action = _check_segment_aspect(
                     mode=plan.mode, segment_index=segment.index,
-                    segment_type=segment.type, video=video,
-                    directory=directory, canvases=brief.canvases)
-                if aspect_note:
-                    print(aspect_note)
-                if not aspect_ok:
+                    segment_type=segment.type, video=video, directory=directory,
+                    canvases=brief.canvases, brief=brief,
+                    stage_state=session.stage_state, ask=_prompt,
+                    save=lambda: save_session(
+                        directory, brief, session.stage_state,
+                        status=STATUS_DIRECTOR_SEGMENTS_RUNNING))
+                if aspect_action == "stop":
+                    print(f"\n⚠ 停在第 {segment.index}/{total} 段：成片宽高没有核对通过，"
+                          "这一段不落账。重跑向导会从这一段接着走。")
+                    return 0
+                if aspect_action == "retry":
                     continue
                 # 终点图优先作下一段的参考（2026-10-31）：只有「本段有终点图」且
                 # 「下一段也要终点画面」时才问一次。回车＝没有，下一段回退视频末帧；
@@ -1612,29 +1619,6 @@ def _run_director_segment_handoff(plan, session: SessionState, *, config: Config
     # 尾问（#106）排在它**之前**：用户改完段应该回到陪跑，不该带着一段没跑的词直接
     # 交付（#108 的用例与注释也按这个次序写）。
     return _finish_director_delivery(plan, session)
-
-
-def _prompt_existing_file(question: str, *, what: str) -> Path | None:
-    """问一个**必须已存在**的文件路径；不存在就报错重问（2026-10-29 用户裁定）。
-
-    返回 ``None`` ＝ 用户输入 q 停下——这不是失败：已通过的段留在账上，重跑向导回到
-    这里。**不扫目录自动挑**：导出目录里往往躺着上一次的同名文件，自动挑中的那一个用户
-    没看过，拿错成片/拿错包都不会有人发现。
-    """
-    while True:
-        # 用户多半是从资源管理器「复制文件地址」粘过来的，会带一对引号。
-        raw = _prompt(question).strip().strip('"').strip("'")
-        if raw.lower() in ("q", "quit"):
-            return None
-        if not raw:
-            print(f"[错误] {what}路径不能为空。")
-            continue
-        path = Path(raw)
-        if not path.is_file():
-            print(f"[错误] {what}不存在：{path}")
-            print("  请确认路径后重输（项目不会自动搜目录：猜错的文件发现不了）。")
-            continue
-        return path
 
 
 class _HandoffStopped(Exception):
@@ -1696,7 +1680,7 @@ def _prompt_required_image(question: str, consequence: str) -> Path:
 def _prompt_optional_image(question: str) -> Path | None:
     """问一张**可选**图片路径：回车＝没有；路径不存在当场报错重问（不猜目录）。
 
-    与 ``_prompt_existing_file`` 的差别只在「空串」的语义：这里是「没有这张图」，
+    与 ``wizard_director.prompt_existing_file`` 的差别只在「空串」的语义：这里是「没有这张图」，
     不是失败——下一段会回退到视频末帧。用户多半从资源管理器「复制文件地址」粘过来，
     会带一对引号，所以先剥引号再判。
     """
@@ -1720,16 +1704,26 @@ def _finish_director_delivery(plan, session: SessionState) -> int:
     「是否继续」）；失败时**必须不置**——交付坏掉的会话要能重进，而重进靠的就是这个状态。
     """
     from ..director import delivery
+    from .wizard_director import confirm_final_film_aspect, prompt_existing_file
 
     print("\n全部段已通过。接下来在导演台里合并成片、导出最终包，再把两者交给项目。")
-    film = _prompt_existing_file(
-        "成片 mp4 路径（导演台合并导出的文件；输入 q 停下）：", what="成片 mp4")
+    film = prompt_existing_file(
+        "成片 mp4 路径（导演台合并导出的文件；输入 q 停下）：", what="成片 mp4",
+        ask=_prompt)
     if film is None:
         print("\n⚠ 停在交付前（成片路径）：段产出账仍写着全部通过，"
               "重跑向导会回到这里。")
         return 0
-    pack_zip = _prompt_existing_file(
-        "导演台导出的最终包 zip 路径（输入 q 停下）：", what="最终包")
+    # #176：收到成片之后、打包之前再核一次宽高；与逐段贴回共用判据与确认记录。
+    if not confirm_final_film_aspect(
+            mode=session.brief.director_mode, film=film, brief=session.brief,
+            stage_state=session.stage_state, ask=_prompt,
+            save=lambda: save_session(
+                Path(session.directory), session.brief, session.stage_state,
+                status=session.status)):
+        return 0
+    pack_zip = prompt_existing_file(
+        "导演台导出的最终包 zip 路径（输入 q 停下）：", what="最终包", ask=_prompt)
     if pack_zip is None:
         print("\n⚠ 停在交付前（最终包路径）：重跑向导会回到这里。")
         return 0

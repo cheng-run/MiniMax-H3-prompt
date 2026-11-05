@@ -2197,3 +2197,138 @@ def test_handoff_rejects_a_video_whose_aspect_misses_its_anchor(
     assert "width/height" in out and "重跑本段" in out, "没告诉用户下一步怎么做"
     assert calls["video"] == 2, "拒绝之后应回到同一个等视频问答"
     assert ledger.passed_director_rows(session.directory) == {}, "画幅不符却落了账"
+
+
+# ---------------------------------------------------------------------------
+# #176：r2v 的成片宽高核对（向导答的成片画幅 vs 实际成片）
+# ---------------------------------------------------------------------------
+
+def _r2v_session_with_film(tmp_path: Path, *, size=(1920, 1088)):
+    """造一条「r2v 单段、已答成片画幅」的陪跑会话。"""
+    from minimax_h3_prompt.director.film_canvas import film_frame_canvases
+
+    session = _director_session(tmp_path, ("opening",), mode="r2v")
+    session.brief.canvases = film_frame_canvases(size, "qwen")
+    return session
+
+
+def _pin_r2v_frame_model(monkeypatch):
+    from minimax_h3_prompt import image_config
+
+    monkeypatch.setattr(image_config, "load_frame_image_model", lambda: "qwen")
+    monkeypatch.setattr(wizard_module(), "_drain_stdin", lambda: None)
+
+
+def wizard_module():
+    from minimax_h3_prompt.ui import wizard
+
+    return wizard
+
+
+def test_r2v_handoff_asks_once_for_a_size_only_gap_then_records(
+        tmp_path, monkeypatch, capsys):
+    """864×480 对 1920×1088：比例对、尺寸差 2.2 倍 → 确认一次，放行并落账。
+
+    确认记录要进会话状态（向导侧键），续跑时同一组数值不再问。
+    """
+    from minimax_h3_prompt.director import ledger
+    from minimax_h3_prompt.director.aspect_flow import FILM_SIZE_CONFIRM_KEY
+    from minimax_h3_prompt.session_store import load_session
+
+    wizard = wizard_module()
+    _pin_r2v_frame_model(monkeypatch)
+    session = _r2v_session_with_film(tmp_path)
+    config = _run_config(monkeypatch, tmp_path)
+    film = _write_ffv1_mkv(tmp_path / "film.mkv", 107, width=864, height=480)
+    asked: list[str] = []
+
+    monkeypatch.setattr(wizard, "_prompt_segment_video",
+                        lambda question: ("video", film, 107))
+
+    def fake_prompt(text: str) -> str:
+        asked.append(text)
+        if "确认继续使用这条成片" in text:
+            return ""
+        if _is_rerun_question(text):
+            return ""          # 尾问「不用」
+        if "成片 mp4 路径" in text:
+            return "q"         # 交付一问就停
+        return ""
+
+    monkeypatch.setattr(wizard, "_prompt", fake_prompt)
+
+    assert wizard._run_director_segment_handoff(plan_of(session), session,
+                                                config=config) == 0
+
+    confirmations = [text for text in asked if "确认继续使用这条成片" in text]
+    assert len(confirmations) == 1, "尺寸差一档只确认一次"
+    out = capsys.readouterr().out
+    assert "1920×1088" in out and "864×480" in out, "两个数都要打印"
+    assert "来源" in out and "成片画幅" in out, "要报来源"
+    assert "20%" in out, "要报尺寸容差"
+    assert sorted(ledger.passed_director_rows(session.directory)) == [1], "确认后应落账"
+    assert session.stage_state[FILM_SIZE_CONFIRM_KEY]["actual"] == [864, 480]
+    saved = load_session(session.directory)
+    assert saved is not None and saved.stage_state[FILM_SIZE_CONFIRM_KEY]["actual"] == [864, 480]
+
+
+def plan_of(session):
+    """从盘上读回会话的段表（陪跑真正用的是它，不是测试手里另造的一份）。"""
+    from minimax_h3_prompt.director.planning import plan_path, read_plan_json
+
+    return read_plan_json(plan_path(session.directory))
+
+
+def test_r2v_handoff_stops_when_the_size_confirmation_is_refused(
+        tmp_path, monkeypatch, capsys):
+    """尺寸差一档的确认被拒绝 → 停、不落账、不越过这一问。"""
+    from minimax_h3_prompt.director import ledger
+    from minimax_h3_prompt.director.aspect_flow import FILM_SIZE_CONFIRM_KEY
+
+    wizard = wizard_module()
+    _pin_r2v_frame_model(monkeypatch)
+    session = _r2v_session_with_film(tmp_path)
+    config = _run_config(monkeypatch, tmp_path)
+    film = _write_ffv1_mkv(tmp_path / "film.mkv", 107, width=864, height=480)
+
+    monkeypatch.setattr(wizard, "_prompt_segment_video",
+                        lambda question: ("video", film, 107))
+
+    def fake_prompt(text: str) -> str:
+        if "确认继续使用这条成片" in text:
+            return "n"          # 拒绝这一次确认
+        pytest.fail(f"拒绝之后不该再问：{text}")
+
+    monkeypatch.setattr(wizard, "_prompt", fake_prompt)
+
+    assert wizard._run_director_segment_handoff(
+        plan_of(session), session, config=config) == 0
+
+    out = capsys.readouterr().out
+    assert "已停下" in out and "未获确认" in out
+    assert ledger.passed_director_rows(session.directory) == {}, "拒绝后不许落账"
+    assert FILM_SIZE_CONFIRM_KEY not in session.stage_state
+
+
+def test_r2v_handoff_stops_on_a_ratio_gap_without_asking(
+        tmp_path, monkeypatch, capsys):
+    """比例超差（480×864 对 1920×1088）→ 停止并说明，不给确认出口。"""
+    from minimax_h3_prompt.director import ledger
+
+    wizard = wizard_module()
+    _pin_r2v_frame_model(monkeypatch)
+    session = _r2v_session_with_film(tmp_path)
+    config = _run_config(monkeypatch, tmp_path)
+    film = _write_ffv1_mkv(tmp_path / "film.mkv", 107, width=480, height=864)
+
+    monkeypatch.setattr(wizard, "_prompt_segment_video",
+                        lambda question: ("video", film, 107))
+    monkeypatch.setattr(wizard, "_prompt",
+                        lambda text: pytest.fail(f"比例超差不该问：{text}"))
+
+    assert wizard._run_director_segment_handoff(
+        plan_of(session), session, config=config) == 0
+
+    out = capsys.readouterr().out
+    assert "停止" in out and "1920×1088" in out and "480×864" in out
+    assert ledger.passed_director_rows(session.directory) == {}, "比例不符却落了账"

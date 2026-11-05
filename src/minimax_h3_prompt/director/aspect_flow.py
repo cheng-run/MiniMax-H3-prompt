@@ -4,14 +4,18 @@
 落点、段首帧 sidecar、关键帧画布与视频元信息，还要生成给用户看的整段文案。混在
 一个模块里，纯函数的用例就得为「文件读不到」「配置缺失」造一堆桩。
 
-两处调用（段规划前的预检、贴回成片时的核对）都从这里取文案，判定仍只住纯判定模块。
+三处调用（段规划前的预检、逐段贴回成片、最终交付打包前）都从这里取文案与判定，
+纯算法仍只住纯判定模块。``i2v``／``fl2v`` 用锚图/关键帧画布；产资产模式（``r2v``，
+#163／#176）取向导答的成片画幅，并带线性尺寸判据。
 """
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 
-from ..brief_parser import CanvasMap
-from .aspect import check_aspect, image_size
+from ..brief_parser import DIRECTOR_ASSET_MODES, CanvasMap
+from .aspect import check_aspect, check_size, image_size
 from .firstframe import FIRST_FRAME_IMAGE_FIELD, firstframe_path
 from .frame_meta import read_frame_meta
 from .frames import FIRST_SEGMENT_TYPE, needs_first_frame_image
@@ -20,6 +24,11 @@ from .pack import film_end_still, start_still
 PRECHECK_MODES = ("i2v", "fl2v")
 """画幅核对只在 i2v／fl2v 触发：t2v 没有关键帧可裁，r2v 的参考图不是锚点——拿帧生图
 画布当期望值会把正常竖片全判成超差。**模式闸只住这里一处**，向导预检从这里派生。"""
+
+FILM_SIZE_CONFIRM_KEY = "film_size_confirm"
+"""尺寸差一档的确认记录（#176）：向导侧键、不进图，登记在
+``session_store.PERSISTED_OUTSIDE_GRAPH``。形状 ``{mode, declared, actual, at}``——
+「任一边数值变化即作废重问」靠这三项逐项比出来，换第三档尺寸会重新确认。"""
 
 
 def frame_canvas(canvases: CanvasMap | None = None) -> tuple[int, int]:
@@ -102,17 +111,8 @@ def precheck_message(
     ])
 
 
-def output_aspect_verdict(
-    *, mode: str, segment_index: int, segment_type: str, video: Path,
-    directory: str | Path, canvases: CanvasMap | None = None,
-) -> tuple[bool, str | None]:
-    """贴回成片的画幅核对：``(是否放行, 要打印的提示)``。
-
-    ``False`` ＝拒绝落账（段账与改写账都不写、进度不前进）。读不出宽高时按
-    「元信息缺失」**放行**并给警告——帧数校验已经是更硬的证据。
-    """
-    if mode not in PRECHECK_MODES:
-        return True, None
+def _video_size(video: Path) -> tuple[int, int] | None:
+    """视频的实际宽高；读不出（损坏 / 不是视频 / 元信息缺失）返回 ``None``。"""
     from ..tools.frame_match import video_meta
 
     meta = video_meta(video)
@@ -120,10 +120,161 @@ def output_aspect_verdict(
         width = int(meta.get("width") or 0)
         height = int(meta.get("height") or 0)
     except (TypeError, ValueError):
-        width = height = 0
+        return None
     if width <= 0 or height <= 0:
+        return None
+    return width, height
+
+
+def _stored_confirmation(
+    stage_state: dict | None, *, mode: str,
+    declared: tuple[int, int], actual: tuple[int, int],
+) -> bool:
+    """这条 (模式, 向导值, 实际值) 是否已在会话里确认过。
+
+    错形按「没有确认」处理并重问：它是一份「别再来烦我」的缓存，不是产物——坏值
+    重问一次是安全的，为它抛错反而会把整段陪跑卡死。值变化即不匹配，正好实现票面
+    的「任一边数值变化即作废重问」。
+    """
+    if not isinstance(stage_state, dict):
+        return False
+    record = stage_state.get(FILM_SIZE_CONFIRM_KEY)
+    if not isinstance(record, dict) or record.get("mode") != mode:
+        return False
+
+    def _pair(value: object) -> tuple[int, int] | None:
+        if not isinstance(value, (list, tuple)) or len(value) != 2:
+            return None
+        if any(type(item) is not int for item in value):
+            return None
+        return value[0], value[1]
+
+    return _pair(record.get("declared")) == declared and _pair(record.get("actual")) == actual
+
+
+def _remember_confirmation(
+    stage_state: dict | None, *, mode: str,
+    declared: tuple[int, int], actual: tuple[int, int],
+) -> None:
+    """记下这次尺寸确认；没有会话状态可写时只是不记（调用方仍会放行）。"""
+    if not isinstance(stage_state, dict):
+        return
+    stage_state[FILM_SIZE_CONFIRM_KEY] = {
+        "mode": mode,
+        "declared": [declared[0], declared[1]],
+        "actual": [actual[0], actual[1]],
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def film_size_verdict(
+    *, mode: str, video: Path, brief, label: str, consequence: str,
+    stage_state: dict | None = None, ask: Callable[[str], str] | None = None,
+) -> tuple[bool, str | None]:
+    """产资产模式（r2v）的成片宽高核对：``(是否放行, 要打印的提示)``（#163／#176）。
+
+    与 i2v／fl2v 的锚图核对**分开**：那两边比的是「关键帧锚点会不会被裁」，期望值
+    是锚图或关键帧画布；这里比的是「用户答的成片画幅有没有真的跑出来」，期望值只取
+    ``film_canvas.film_size_for``（ADR 0028 的单一真源）。拿两条判据互相代替，
+    就会一边把正常取整判成事故、另一边把 2.2 倍的尺寸差放过去。
+
+    处置分两档：比例超差 → 停（画面会被裁/拉伸，没有「继续」的出口）；只有尺寸差
+    一档 → 打印两边数值、比例、来源，**一次确认**，拒绝则停。确认按
+    ``(mode, declared, actual)`` 记住，任一边变化即重问。
+    """
+    if mode not in DIRECTOR_ASSET_MODES:
+        return True, None
+
+    from .film_canvas import FILM_SIZE_LABEL, film_size_for
+
+    expected = film_size_for(brief) if brief is not None else None
+    if expected is None:
+        return True, (
+            f"[画幅核对] {label}：会话里没有成片画幅的答案（旧会话），本次放行；"
+            "请自行核对导演台节点的 width/height 与你想出的画幅一致。")
+
+    actual = _video_size(video)
+    if actual is None:
+        return True, (f"[警告] {label}读不出宽高（元信息缺失），画幅核对放行：{video}")
+
+    source = f"{FILM_SIZE_LABEL}（向导唯一的画幅问答）"
+    aspect = check_aspect(*actual, *expected)
+    size = check_size(*actual, *expected)
+    if aspect.exceeds:
+        return False, "\n".join([
+            f"\n[画幅核对] {label}的画幅与向导答的成片画幅不符，**停止**。",
+            f"  向导答案（来源：{source}）：{expected[0]}×{expected[1]}"
+            f"（比例 {aspect.expected_ratio:.3f}）",
+            f"  实际成片：{actual[0]}×{actual[1]}"
+            f"（比例 {aspect.actual_ratio:.3f}，{video}）",
+            f"  比例相差 {aspect.relative_delta * 100:.1f}%，"
+            f"超过 {aspect.tolerance * 100:.0f}% 容差；"
+            f"宽相差 {size.width_delta * 100:.1f}%、"
+            f"高相差 {size.height_delta * 100:.1f}%。",
+            "  这不是「尺寸差一档」：比例不同，画面会被裁切或拉伸。"
+            "请改导演台节点的 width/height 后重跑本段，再把这条视频贴上。",
+            f"  {consequence}",
+        ])
+
+    if not size.exceeds:
+        return True, None
+    if _stored_confirmation(stage_state, mode=mode, declared=expected, actual=actual):
+        return True, None
+    if ask is None:
+        # 没有交互入口时不许擅自放行：确认是票面要求的动作，缺入口就只能停。
+        return False, (
+            f"[画幅核对] {label}的尺寸与向导答案差一档，但没有可用的确认入口，按停止处理。"
+            f"\n  {consequence}")
+
+    # 解释先打印再问：用户要看着两边数值、比例与来源决定要不要继续。
+    print("\n".join([
+        f"\n[画幅核对] {label}的宽高与向导答的成片画幅差了一档（比例一致、尺寸不同）。",
+        f"  向导答案（来源：{source}）：{expected[0]}×{expected[1]}"
+        f"（比例 {aspect.expected_ratio:.3f}）",
+        f"  实际成片：{actual[0]}×{actual[1]}"
+        f"（比例 {aspect.actual_ratio:.3f}，{video}）",
+        f"  宽相差 {size.width_delta * 100:.1f}%、"
+        f"高相差 {size.height_delta * 100:.1f}%，"
+        f"超过 {size.tolerance * 100:.0f}% 容差；"
+        f"比例只相差 {aspect.relative_delta * 100:.1f}%（在 "
+        f"{aspect.tolerance * 100:.0f}% 内）。",
+    ]))
+    answer = ask(
+        "[成片画幅] 尺寸差一档：确认继续使用这条成片吗？"
+        "（回车=确认继续；其它输入=停下）：")
+    if answer.strip():
+        return False, f"[成片画幅] 已停下：{label}的尺寸与向导答案差一档，未获确认。\n  {consequence}"
+    _remember_confirmation(stage_state, mode=mode, declared=expected, actual=actual)
+    return True, None
+
+
+def output_aspect_verdict(
+    *, mode: str, segment_index: int, segment_type: str, video: Path,
+    directory: str | Path, canvases: CanvasMap | None = None,
+    brief=None, ask: Callable[[str], str] | None = None,
+    stage_state: dict | None = None,
+) -> tuple[bool, str | None]:
+    """贴回成片的画幅核对：``(是否放行, 要打印的提示)``。
+
+    ``False`` ＝不落账（段账与改写账都不写、进度不前进）。读不出宽高时按
+    「元信息缺失」**放行**并给警告——帧数校验已经是更硬的证据。
+    ``i2v``／``fl2v`` 走锚图/关键帧画布那条既有判据（行为与文案不变）；产资产模式
+    （#170 收口后只剩 ``r2v``）走 ``film_size_verdict``，期望值只取向导答的成片画幅。
+    """
+    if mode in DIRECTOR_ASSET_MODES:
+        return film_size_verdict(
+            mode=mode, video=video, brief=brief,
+            label=f"第 {segment_index} 段成片",
+            consequence="这一段不记入段产出账，进度停在这里；已通过的段留在账上。",
+            stage_state=stage_state, ask=ask)
+    if mode not in PRECHECK_MODES:
+        return True, None
+
+    actual = _video_size(video)
+    if actual is None:
         return True, (f"[警告] 第 {segment_index} 段成片读不出宽高（元信息缺失），"
                       f"画幅核对放行：{video}")
+    width, height = actual
 
     (expected_width, expected_height), source = expected_output_frame(
         mode=mode, segment_index=segment_index, segment_type=segment_type,
@@ -142,3 +293,18 @@ def output_aspect_verdict(
         "（输入 e 改本段提示词、q 停下）。",
         "  这一段不记入段产出账，进度停在这里；已通过的段留在账上。",
     ])
+
+
+def final_film_verdict(
+    *, mode: str, video: Path, brief, stage_state: dict | None = None,
+    ask: Callable[[str], str] | None = None,
+) -> tuple[bool, str | None]:
+    """最终交付前的成片宽高核对（#176）：收到成片 mp4 之后、打包之前。
+
+    与逐段贴回共用 ``film_size_verdict`` 这一份判据；只有标签与后果不同——交付停下
+    意味着不进入归档，而不是「这一段不落账」。非产资产模式（t2v）直接放行。
+    """
+    return film_size_verdict(
+        mode=mode, video=video, brief=brief, label="最终成片",
+        consequence="交付停在打包之前；段产出账里已通过的段保持不动。",
+        stage_state=stage_state, ask=ask)
