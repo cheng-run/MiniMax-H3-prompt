@@ -101,7 +101,8 @@ def test_design_keyword_reroutes_that_asset_to_moss(tmp_path, monkeypatch, capsy
 
     entry = out["prop_image_prompts"][0]
     assert image_routing.assignment_of(entry) == {
-        "model": "moss", "source": "auto", "keyword": "包装"}
+        "model": "moss", "source": "auto", "keyword": "包装",
+        "evidence": "瓶身包装印着品牌色块"}
 
     # 出站两次：先按配置档（Z-Image）出词，命中后按 MOSS 重出这一条。
     assert len(model.seen) == 2, f"期望「先出词、再按 MOSS 重出」，实际调用 {len(model.seen)} 次"
@@ -141,7 +142,7 @@ def test_untouched_asset_keeps_the_configured_model(tmp_path, monkeypatch):
 
     entry = out["prop_image_prompts"][0]
     assert image_routing.assignment_of(entry) == {
-        "model": "z_image", "source": "config", "keyword": ""}
+        "model": "z_image", "source": "config", "keyword": "", "evidence": ""}
     assert len(model.seen) == 1, "未命中的资产不该再发一次请求"
 
 
@@ -165,6 +166,55 @@ def test_only_the_hit_asset_is_rerouted_inside_one_kind(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# 否定句不误切档与命中证据（issue #167 / spec #169 C）
+# ---------------------------------------------------------------------------
+
+def test_a_negated_design_clause_does_not_reroute_the_kind(tmp_path, monkeypatch, capsys):
+    """设计正文里的禁令不切档：整类照配置档出一次词，不多花重出调用（#167 AC1）。"""
+    _configure(tmp_path, monkeypatch, prop="z_image")
+    model = RoutingChatModel()
+    node = _prop_node(model, [
+        ("橘子汽水", "橘子汽水：一瓶橘色汽水"),
+        ("牛皮纸袋", "牛皮纸袋：一只素色纸袋"),
+    ])
+
+    out = node({"brief": _ref_brief(),
+                "prop_design": "道具设计：玻璃汽水瓶与纸袋，瓶身不得出现现代塑料包装"})
+
+    assert {entry["name"]: image_routing.model_of(entry)
+            for entry in out["prop_image_prompts"]} == {
+        "橘子汽水": "z_image", "牛皮纸袋": "z_image"}
+    assert len(model.seen) == 1, "否定句不该触发重出（整类一次出词就够）"
+    assert "命中" not in capsys.readouterr().out
+
+
+def test_a_real_text_demand_in_the_same_paragraph_still_reroutes(tmp_path, monkeypatch):
+    """同一段里真有文字需求（标签）→ 照旧切 MOSS（#167 AC2，否定不连坐整段）。"""
+    _configure(tmp_path, monkeypatch, prop="z_image")
+    model = RoutingChatModel()
+    node = _prop_node(model, [("橘子汽水", "橘子汽水：一瓶橘色汽水")])
+
+    out = node({"brief": _ref_brief(),
+                "prop_design": "道具设计：不得出现塑料包装；瓶身贴一张手写标签"})
+
+    entry = out["prop_image_prompts"][0]
+    assert image_routing.model_of(entry) == "moss"
+    assert image_routing.assignment_of(entry)["evidence"] == "瓶身贴一张手写标签"
+
+
+def test_the_terminal_names_the_clause_that_switched_the_model(tmp_path, monkeypatch, capsys):
+    """终端要回答「凭什么切的这一档」：念出命中的来源分句，用户才能当场判断对不对。"""
+    _configure(tmp_path, monkeypatch, prop="z_image")
+    model = RoutingChatModel()
+    node = _prop_node(model, [("橘子汽水", "橘子汽水：一瓶橘色汽水")])
+
+    node({"brief": _ref_brief(),
+          "prop_design": "道具设计：玻璃汽水瓶，瓶身包装印着品牌色块"})
+
+    assert "（来源：瓶身包装印着品牌色块）" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
 # 人物类：不参与自动关键词路由，手动选择照旧（L6-12 / 2026-11-01 裁定）
 # ---------------------------------------------------------------------------
 
@@ -185,7 +235,7 @@ def test_character_is_not_auto_rerouted_by_keywords(tmp_path, monkeypatch, capsy
 
     entry = out["character_image_prompts"][0]
     assert image_routing.assignment_of(entry) == {
-        "model": "qwen", "source": "config", "keyword": ""}
+        "model": "qwen", "source": "config", "keyword": "", "evidence": ""}
     assert len(model.seen) == 1, "人物不该为自动路由多花一次重出调用"
     assert "命中" not in capsys.readouterr().out
 
@@ -207,7 +257,7 @@ def test_manual_moss_on_a_character_still_regenerates_with_moss(
 
     entry = out["character_image_prompts"][0]
     assert image_routing.assignment_of(entry) == {
-        "model": "moss", "source": "manual", "keyword": ""}
+        "model": "moss", "source": "manual", "keyword": "", "evidence": ""}
     assert len(model.seen) == 2, "人选的 MOSS 与配置档不同，应当重出这一条"
     assert discipline_text("moss") in _system_of(model.seen[-1])
     assert "手动指定" in capsys.readouterr().out
@@ -234,7 +284,7 @@ def test_manual_choice_beats_the_keyword_rule(tmp_path, monkeypatch, capsys):
 
     entry = out["prop_image_prompts"][0]
     assert image_routing.assignment_of(entry) == {
-        "model": "qwen", "source": "manual", "keyword": ""}
+        "model": "qwen", "source": "manual", "keyword": "", "evidence": ""}
     # 重出用的是人选的 Qwen 档（而不是配置档、也不是自动规则给的 MOSS）
     assert discipline_text("qwen") in _system_of(model.seen[-1])
     assert "手动指定" in capsys.readouterr().out

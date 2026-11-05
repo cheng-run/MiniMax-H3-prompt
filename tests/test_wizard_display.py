@@ -139,6 +139,41 @@ def test_asset_model_line_reads_the_recorded_assignment():
     assert line.startswith("[生图模型] 红裙女孩：命中『包装』")
 
 
+def test_asset_model_line_shows_the_clause_that_decided_the_model():
+    """素材循环菜单与终端那一行同源：都念出命中的来源分句（#167）。
+
+    两处各拼一遍理由就会各自漂——一处说命中、另一处说手动。这里走的是菜单那一条出口，
+    断言与节点打印的格式一致。
+    """
+    state = {"prop_image_prompts": [{
+        "name": "橘子汽水",
+        "positive_prompt": "提示词",
+        "image_model": {"model": "moss", "source": "auto", "keyword": "包装",
+                        "evidence": "瓶身包装印着品牌色块"},
+    }]}
+    item = QueueItem(picture=1, kind="prop", name="橘子汽水")
+
+    line = render_asset_model_line(state, item)
+
+    assert line.startswith("[生图模型] 橘子汽水：命中『包装』→ MOSS-Image")
+    assert "（来源：瓶身包装印着品牌色块）" in line
+
+
+def test_asset_model_line_tolerates_a_record_without_evidence():
+    """旧会话的记录没有 evidence：照常展示模型与理由，不许因为缺字段报错。"""
+    state = {"prop_image_prompts": [{
+        "name": "橘子汽水",
+        "positive_prompt": "提示词",
+        "image_model": {"model": "moss", "source": "auto", "keyword": "包装"},
+    }]}
+    item = QueueItem(picture=1, kind="prop", name="橘子汽水")
+
+    line = render_asset_model_line(state, item)
+
+    assert line.startswith("[生图模型] 橘子汽水：命中『包装』")
+    assert "来源" not in line
+
+
 def test_tailframe_document_prints_the_frame_model(tmp_path, capsys):
     """#150 AC2：尾帧终端要打印本次按哪一档出词——用户据此知道该开哪个工作流。"""
     from minimax_h3_prompt.ui.wizard_display import print_tailframe_document

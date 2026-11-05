@@ -1437,7 +1437,8 @@ def test_review_menu_can_change_the_asset_model_and_rereleases(tmp_path, monkeyp
     session = load_session(next((tmp_path / "sessions").rglob("session-state.json")).parent)
     entry = next(e for e in session.stage_state["character_image_prompts"]
                  if e["name"] == "红裙女孩")
-    assert entry["image_model"] == {"model": "moss", "source": "manual", "keyword": ""}
+    assert entry["image_model"] == {
+        "model": "moss", "source": "manual", "keyword": "", "evidence": ""}
     # 换档留痕：旧词与「原来按哪一档写的」只活在追加账里（条目上的记录已被覆盖）
     rounds = [row for row in _rounds(tmp_path) if row["name"] == "红裙女孩"]
     assert [row["trigger"] for row in rounds] == [asset_loop.TRIGGER_REVIEW_MODEL]
@@ -1502,7 +1503,8 @@ def test_confirming_the_current_model_locks_it_as_a_manual_choice(tmp_path, monk
     session = load_session(next((tmp_path / "sessions").rglob("session-state.json")).parent)
     entry = next(e for e in session.stage_state["character_image_prompts"]
                  if e["name"] == "红裙女孩")
-    assert entry["image_model"] == {"model": "z_image", "source": "manual", "keyword": ""}
+    assert entry["image_model"] == {
+        "model": "z_image", "source": "manual", "keyword": "", "evidence": ""}
     assert not _rounds(tmp_path), "没换词就不留改写轮（轮次账记的是改写）"
 
 

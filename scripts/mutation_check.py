@@ -238,6 +238,15 @@ MUTATIONS: tuple[Mutation, ...] = (
         ("tests/test_wizard_asset_proofread.py::test_chinese_observed_in_an_english_body_gets_one_more_ask",),
         "交互处不再给改成英文的机会＝#162 的现场原样复现（回车即混排）",
     ),
+    Mutation(
+        "negated_clause_switches_the_kind",
+        "src/minimax_h3_prompt/image_routing.py",
+        "            if word is None or _is_negated(body):\n                continue",
+        "            if word is None:\n                continue",
+        ("tests/test_image_model_routing.py::test_chinese_negations_suppress_the_hit",
+         "tests/test_image_routing_wiring.py::test_a_negated_design_clause_does_not_reroute_the_kind"),
+        "否定判定被摘掉＝「不得出现现代塑料包装」把整类道具切到 MOSS（#167 的现场）",
+    ),
 )
 
 

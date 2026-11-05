@@ -22,11 +22,19 @@
 英文提示词上恒不命中，等于这条路由对「已经被切过去的那一类资产」结构性失效；只写英文针
 则中文正文里的「包装」永远看不见。英文针按**整词**匹配（``design`` 里有 ``sign``、
 ``texture`` 里有 ``text``），子串匹配会让每一张都误切到 MOSS，而误切不报错。
+
+**否定分句不切档**（issue #167 / 父 spec #169 C）：2026-11-04 的 r2v 实跑里，设计正文
+一句「不出现现代塑料包装」把 12 条道具全部切到 MOSS——而那句话是**禁令**，恰恰说明这
+一类不需要文字能力。判定的粒度因此是**命中词所在的分句**，不是整段：分句里出现否定词就
+跳过这一处、继续找下一处肯定命中（同一段里「不得塑料包装；瓶身贴一张手写标签」只认后半
+句）。取舍是**宁可漏切、不整类误切**：漏切还能在素材循环里手动改档，而整类误切不报错，
+产出的每一条词都按另一套纪律写。命中记录连同来源分句一起存进条目（``evidence``），终端
+因此能回答「凭什么切的这一档」。
 """
 from __future__ import annotations
 
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, NamedTuple, Sequence
 
 from .image_config import IMAGE_MODEL_KEYS, image_model_for, image_model_label
 
@@ -77,6 +85,30 @@ _ZH_NEEDLES: dict[str, str] = {
 }
 
 
+class TextCapabilityHit(NamedTuple):
+    """一次关键词命中：命中的词 ＋ 它所在的分句。
+
+    分句是**判定**的粒度（否定只管自己那一句），也是终端要念出来的证据。
+    """
+
+    word: str
+    clause: str
+
+
+# 分句：中英文标点与换行都算句子边界。少了英文逗号，一条 ``label, no text`` 式的
+# 英文提示词会把肯定与否定混进同一句，否定词就会连肯定诉求一起吞掉。
+_CLAUSE_SEPARATORS = re.compile(r"[。，、；：！？,.;:!?\n\r]+")
+
+# 否定词（票面点名的清单）。中文按子串判：中文没有词边界，也不像英文那样有
+# 大小写与复数形态。英文按**整词**判，理由同上面英文针——``anodized`` 里有 ``no``，
+# 子串匹配会让每一张金属质感的道具都被当成禁令而漏切。
+_NEGATION_ZH: tuple[str, ...] = (
+    "不得", "不出现", "不需要", "不要", "不使用", "不能", "禁止", "避免", "没有",
+)
+_NEGATION_LATIN = re.compile(
+    r"(?<![0-9A-Za-z_])(?:no|without|avoid|never|not)(?![0-9A-Za-z_])", re.IGNORECASE)
+
+
 def _first_position(text: str, word: str) -> int | None:
     """该词在文本里第一次出现的位置；没有 → None。"""
     positions: list[int] = []
@@ -89,22 +121,50 @@ def _first_position(text: str, word: str) -> int | None:
     return min(positions) if positions else None
 
 
-def text_capability_hit(*texts: str) -> str | None:
-    """任一文本命中文字类关键词时返回**命中的那个词**（终端要念它），否则 None。
+def _clause_hit(clause: str) -> str | None:
+    """这一分句里最先出现的那个命中词；没有 → None。
 
-    多段文本（设计正文 ＋ 该资产提示词）按顺序扫，取**最先出现**的那一个词：一段文本
-    同时提到「包装」与「文字」时，念最靠前的那处——用户看到的是「让系统做决定的那个
-    地方」，而不是词表里排得最靠前的那个（那会念出一处已经过去的词）。
+    取最靠前的那一处而不是词表顺序：用户看到的是「让系统做决定的那个地方」，
+    念一处已经过去的位置会让他对不上正文。
+    """
+    candidates = [
+        (position, order, word)
+        for order, word in enumerate(TEXT_CAPABILITY_KEYWORDS)
+        if (position := _first_position(clause, word)) is not None
+    ]
+    return min(candidates)[2] if candidates else None
+
+
+def _is_negated(clause: str) -> bool:
+    """这一分句是不是禁令（含否定词，或首字是「无」）。
+
+    「无」只认分句首字：句中出现的「无」既可能是地名（无锡）也可能是半个词，放宽到
+    子串会把肯定诉求一起吞掉。放宽需要先改规格（票面口径就是「分句首字为无」）。
+    """
+    body = clause.strip()
+    if body.startswith("无"):
+        return True
+    if any(word in body for word in _NEGATION_ZH):
+        return True
+    return _NEGATION_LATIN.search(body) is not None
+
+
+def text_capability_hit(*texts: str) -> TextCapabilityHit | None:
+    """任一文本命中文字类关键词时返回**命中的词与所在分句**（终端要念它们），否则 None。
+
+    多段文本（设计正文 ＋ 该资产提示词）按顺序扫，取**最先出现的那个肯定命中**；文本内部
+    再按分句切分，跳过含否定词的分句。分句顺序即文本顺序，所以「最先出现」与「先命中
+    的分句」是同一件事——不会因为否定跳过一处就跳到词表里排得靠前的词上。
     """
     for text in texts:
-        body = str(text or "")
-        candidates = [
-            (position, order, word)
-            for order, word in enumerate(TEXT_CAPABILITY_KEYWORDS)
-            if (position := _first_position(body, word)) is not None
-        ]
-        if candidates:
-            return min(candidates)[2]
+        for clause in _CLAUSE_SEPARATORS.split(str(text or "")):
+            body = clause.strip()
+            if not body:
+                continue
+            word = _clause_hit(body)
+            if word is None or _is_negated(body):
+                continue
+            return TextCapabilityHit(word=word, clause=body)
     return None
 
 
@@ -121,20 +181,25 @@ def assignment(kind: str, *, texts: Sequence[str], manual: str | None = None) ->
         if manual not in IMAGE_MODEL_KEYS:
             raise ValueError(
                 f"生图模型无效：{manual!r}（只认 {', '.join(IMAGE_MODEL_KEYS)}）")
-        return {"model": manual, "source": SOURCE_MANUAL, "keyword": ""}
+        return {"model": manual, "source": SOURCE_MANUAL, "keyword": "", "evidence": ""}
     if kind not in AUTO_ROUTING_EXEMPT_KINDS:
         hit = text_capability_hit(*texts)
         if hit is not None:
-            return {"model": TEXT_CAPABILITY_MODEL, "source": SOURCE_AUTO, "keyword": hit}
-    return {"model": image_model_for(kind), "source": SOURCE_CONFIG, "keyword": ""}
+            # evidence 存**来源分句**而不只是那个词：词单独一行时「包装」既可能是需求
+            # 也可能是禁令，只有整句能让用户当场判断这次切档有没有道理（#167）。
+            return {"model": TEXT_CAPABILITY_MODEL, "source": SOURCE_AUTO,
+                    "keyword": hit.word, "evidence": hit.clause}
+    return {"model": image_model_for(kind), "source": SOURCE_CONFIG, "keyword": "", "evidence": ""}
 
 
 def _validated(raw: Mapping[str, Any]) -> dict[str, str]:
-    """校验并规范化一份判定（``{model, source, keyword}``）。
+    """校验并规范化一份判定（``{model, source, keyword, evidence}``）。
 
     **读写同一套校验**：写口不收坏值、读口不吞坏值。两边一紧一松就是同一份形状的两处
     口径——写进去一个不存在的来源，读的时候还会被伪装成「按配置默认」（静默，且看起来
     完全正常）。认不出的模型更坏：后续 AI 改词会按别家的纪律改它。
+
+    ``evidence`` 缺省空串：issue #167 之前写进 state 的记录没有这个键，旧会话要照常续跑。
     """
     model = str(raw.get("model") or "")
     if model not in IMAGE_MODEL_KEYS:
@@ -145,7 +210,11 @@ def _validated(raw: Mapping[str, Any]) -> dict[str, str]:
     if source not in SOURCES:
         raise ValueError(
             f"资产条目的模型来源无效：{source!r}（只认 {', '.join(SOURCES)}）")
-    return {"model": model, "source": source, "keyword": str(raw.get("keyword") or "")}
+    return {
+        "model": model, "source": source,
+        "keyword": str(raw.get("keyword") or ""),
+        "evidence": str(raw.get("evidence") or ""),
+    }
 
 
 def put_assignment(entry: dict[str, Any], value: Mapping[str, str]) -> None:
@@ -180,25 +249,33 @@ def manual_model_of(entry: Mapping[str, Any]) -> str | None:
 
 
 def described(value: Mapping[str, str]) -> str:
-    """终端那一行的人话：「命中『包装』→ MOSS-Image」／「手动指定 → …」／「按配置默认 → …」。
+    """终端那一行的人话：「命中『包装』→ MOSS-Image（来源：…）」／「手动指定 → …」／
+    「按配置默认 → …」。
 
     **唯一写源**：节点出词时打的那一行与素材循环菜单展示的是同一件事，两处各拼一遍
     就会各自漂（一处说命中、一处说手动）。坏形状越过 ``_validated`` 就响——不认识的来源
     若被伪装成「按配置默认」，终端会理直气壮地报一个错的理由。
+
+    来源分句只在**有证据**时追加：旧记录（issue #167 之前）没有这个字段，印一个空的
+    「（来源：）」比不印更像 bug。
     """
     checked = _validated(value)
     label = image_model_label(checked["model"])
     if checked["source"] == SOURCE_AUTO:
-        return f"命中『{checked['keyword']}』→ {label}"
-    if checked["source"] == SOURCE_MANUAL:
-        return f"手动指定 → {label}"
-    return f"按配置默认 → {label}"
+        text = f"命中『{checked['keyword']}』→ {label}"
+    elif checked["source"] == SOURCE_MANUAL:
+        text = f"手动指定 → {label}"
+    else:
+        text = f"按配置默认 → {label}"
+    if checked["evidence"]:
+        text += f"（来源：{checked['evidence']}）"
+    return text
 
 
 __all__ = [
     "AUTO_ROUTING_EXEMPT_KINDS",
     "ENTRY_KEY", "SOURCES", "SOURCE_AUTO", "SOURCE_CONFIG", "SOURCE_MANUAL",
-    "TEXT_CAPABILITY_KEYWORDS", "TEXT_CAPABILITY_MODEL",
+    "TEXT_CAPABILITY_KEYWORDS", "TEXT_CAPABILITY_MODEL", "TextCapabilityHit",
     "assignment", "assignment_of", "described", "manual_model_of", "model_of",
     "put_assignment", "text_capability_hit",
 ]

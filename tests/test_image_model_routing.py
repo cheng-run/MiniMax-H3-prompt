@@ -31,7 +31,7 @@ from minimax_h3_prompt import image_config, image_routing
 ])
 def test_chinese_keywords_hit(text, expected):
     """六类中文关键词各自命中，并回**那一个词**——终端要念的就是它。"""
-    assert image_routing.text_capability_hit(text) == expected
+    assert image_routing.text_capability_hit(text).word == expected
 
 
 @pytest.mark.parametrize("text, expected", [
@@ -44,7 +44,7 @@ def test_chinese_keywords_hit(text, expected):
 ])
 def test_english_keywords_hit(text, expected):
     """英文提示词同样命中（大小写不敏感）：MOSS/Qwen 出的词是英文，只认中文＝漏判。"""
-    assert image_routing.text_capability_hit(text) == expected
+    assert image_routing.text_capability_hit(text).word == expected
 
 
 def test_english_needles_do_not_match_inside_longer_words():
@@ -64,7 +64,7 @@ def test_no_keyword_means_no_hit():
 
 def test_multiple_texts_are_scanned_in_order():
     """多段文本（设计正文 + 该资产提示词）合并判断：任一段命中即算命中。"""
-    assert image_routing.text_capability_hit("设计正文没提", "瓶身贴着标签") == "标签"
+    assert image_routing.text_capability_hit("设计正文没提", "瓶身贴着标签").word == "标签"
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +75,10 @@ def test_auto_hit_routes_to_moss():
     """命中关键词 → MOSS（spec #84 D8：文字/版式 MOSS 最强）。"""
     result = image_routing.assignment("prop", texts=["瓶身的包装上印着一只橘猫"])
 
-    assert result == {"model": "moss", "source": "auto", "keyword": "包装"}
+    assert result == {
+        "model": "moss", "source": "auto", "keyword": "包装",
+        "evidence": "瓶身的包装上印着一只橘猫",
+    }
 
 
 def test_miss_keeps_the_configured_kind_model(tmp_path, monkeypatch):
@@ -86,7 +89,7 @@ def test_miss_keeps_the_configured_kind_model(tmp_path, monkeypatch):
 
     result = image_routing.assignment("prop", texts=["一把青铜钥匙"])
 
-    assert result == {"model": "qwen", "source": "config", "keyword": ""}
+    assert result == {"model": "qwen", "source": "config", "keyword": "", "evidence": ""}
 
 
 def test_manual_choice_beats_auto_hit():
@@ -94,7 +97,7 @@ def test_manual_choice_beats_auto_hit():
     result = image_routing.assignment(
         "prop", texts=["瓶身的包装上印着一只橘猫"], manual="z_image")
 
-    assert result == {"model": "z_image", "source": "manual", "keyword": ""}
+    assert result == {"model": "z_image", "source": "manual", "keyword": "", "evidence": ""}
 
 
 def test_manual_choice_is_checked_against_the_model_vocabulary():
@@ -116,7 +119,7 @@ def test_character_skips_the_keyword_rule(tmp_path, monkeypatch):
     result = image_routing.assignment(
         "character", texts=["身份板：校服胸前绣着校名，臂章上有文字与 logo"])
 
-    assert result == {"model": "qwen", "source": "config", "keyword": ""}
+    assert result == {"model": "qwen", "source": "config", "keyword": "", "evidence": ""}
 
 
 def test_manual_moss_still_works_for_character():
@@ -124,7 +127,7 @@ def test_manual_moss_still_works_for_character():
     result = image_routing.assignment(
         "character", texts=["身份板：校服胸前绣着校名"], manual="moss")
 
-    assert result == {"model": "moss", "source": "manual", "keyword": ""}
+    assert result == {"model": "moss", "source": "manual", "keyword": "", "evidence": ""}
 
 
 def test_exempt_kinds_are_real_asset_kinds():
@@ -147,11 +150,12 @@ def _entry(**extra) -> dict:
 def test_entry_round_trips_the_assignment():
     """写进条目、再读回来是同一份——节点与素材循环之间只走这一种形状。"""
     entry = _entry()
-    image_routing.put_assignment(
-        entry, {"model": "moss", "source": "auto", "keyword": "包装"})
+    image_routing.put_assignment(entry, {
+        "model": "moss", "source": "auto", "keyword": "包装",
+        "evidence": "瓶身的包装印着品牌色块"})
 
     assert image_routing.assignment_of(entry) == {
-        "model": "moss", "source": "auto", "keyword": "包装"}
+        "model": "moss", "source": "auto", "keyword": "包装", "evidence": "瓶身的包装印着品牌色块"}
     assert image_routing.model_of(entry) == "moss"
 
 
@@ -208,3 +212,141 @@ def test_described_refuses_to_guess_a_bad_source():
 def test_keyword_list_is_the_spec_list():
     """词表就是票面那六类（issue #88）：多一类或少一类都会改变哪些资产被切到 MOSS。"""
     assert image_routing.TEXT_CAPABILITY_KEYWORDS == ("标签", "招牌", "包装", "logo", "文字", "海报")
+
+
+# ---------------------------------------------------------------------------
+# 否定句不误切档与命中证据（issue #167 / spec #169 C）
+#
+# 现场：设计正文里一句「不出现现代塑料包装」把 12 条道具全部切到 MOSS（2026-11-04
+# r2v 实跑）。切档错了不报错，只是整类的词都按另一套纪律写；所以判定必须看**命中词
+# 所在的那一个分句**是不是禁令。取舍写明：宁可漏切、不整类误切——人还能在素材循环里
+# 手动改档，而自动规则误切的整类不会自己浮出来。
+# ---------------------------------------------------------------------------
+
+def test_hit_carries_the_clause_it_came_from():
+    """命中不只回那个词，还回它所在的分句——终端要念「因为哪一句」。"""
+    hit = image_routing.text_capability_hit("道具设计：瓶身贴着标签，颜色偏暖")
+
+    assert hit is not None
+    assert hit.word == "标签"
+    assert hit.clause == "瓶身贴着标签", "分句按中文标点切开，不带前后那几段"
+
+
+def test_negated_clause_does_not_hit():
+    """「不得出现现代塑料包装」是禁令不是文字需求：整类道具不许被切到 MOSS。"""
+    assert image_routing.text_capability_hit("道具设计：瓶身不得出现现代塑料包装") is None
+
+
+def test_affirmative_clause_beside_a_negated_one_still_hits():
+    """同一段里否定分句与肯定分句并存：只有肯定那一句生效（否定不污染整段）。"""
+    hit = image_routing.text_capability_hit(
+        "不得出现现代塑料包装；瓶身要贴一张手写标签")
+
+    assert hit is not None
+    assert (hit.word, hit.clause) == ("标签", "瓶身要贴一张手写标签")
+
+
+def test_a_negation_after_the_keyword_still_covers_the_whole_clause():
+    """否定词出现在命中词之后也算这一句的禁令：分句是判定的粒度，不是位置先后。"""
+    assert image_routing.text_capability_hit("道具设计：包装不得使用现代塑料") is None
+
+
+@pytest.mark.parametrize("clause", [
+    "不得出现现代塑料包装",
+    "不出现任何标签",
+    "不需要包装",
+    "不要文字",
+    "不使用海报",
+    "不能有招牌",
+    "禁止添加 logo",
+    "避免出现文字",
+    "没有标签",
+    "无包装",
+])
+def test_chinese_negations_suppress_the_hit(clause):
+    """中文否定词逐条咬住（票面点名的九个词 ＋ 分句首字「无」）。"""
+    assert image_routing.text_capability_hit(f"道具设计：{clause}") is None
+
+
+@pytest.mark.parametrize("clause", [
+    "no labels or packaging",
+    "without any text",
+    "avoid lettering",
+    "never show a logo",
+    "not a poster in sight",
+])
+def test_english_negations_suppress_the_hit(clause):
+    """英文否定词逐条咬住：MOSS/Qwen 档的正文是英文，只写中文否定词等于对那一半文本失效。"""
+    assert image_routing.text_capability_hit(f"prop design: a bottle, {clause}") is None
+
+
+def test_english_negation_needs_a_word_boundary():
+    """英文否定词按整词匹配：``anodized`` 里的 ``no`` 不是否定（否则每张金属道具都漏切）。"""
+    hit = image_routing.text_capability_hit(
+        "An anodized bottle with a printed label on the body.")
+
+    assert hit is not None and hit.word == "标签"
+
+
+def test_negation_is_per_clause_not_per_paragraph():
+    """否定只吃它所在的分句：英文同段里另一个肯定分句照旧命中。"""
+    hit = image_routing.text_capability_hit(
+        "prop design: no labels on the cap, but a printed poster on the wall")
+
+    assert hit is not None and hit.word == "海报"
+
+
+def test_the_wu_negation_only_counts_at_the_clause_start():
+    """「无」只按**分句首字**算否定（票面口径）。
+
+    句中出现的「无」不算：正文里的「无锡」「无需」既可能是地名也可能是半句，放宽到
+    子串会把肯定诉求也吞掉。要放宽得先改规格——所以这条钉住当前的边界。
+    """
+    assert image_routing.text_capability_hit("道具设计：无包装") is None
+    assert image_routing.text_capability_hit("道具设计：瓶身无文字").word == "文字"
+
+
+def test_assignment_records_the_source_clause():
+    """切档记录里存来源分句：事后要能回答「当初凭什么切的这一档」。"""
+    result = image_routing.assignment("prop", texts=["道具设计：瓶身包装印着品牌色块"])
+
+    assert result == {
+        "model": "moss", "source": "auto", "keyword": "包装",
+        "evidence": "瓶身包装印着品牌色块",
+    }
+
+
+def test_assignment_leaves_evidence_empty_when_no_clause_decided_it():
+    """手动与配置默认没有来源分句：证据字段留空，不许拿提示词正文凑数。"""
+    manual = image_routing.assignment(
+        "prop", texts=["瓶身包装印着品牌色块"], manual="z_image")
+    configured = image_routing.assignment("prop", texts=["一把青铜钥匙"])
+
+    assert manual["evidence"] == "" and configured["evidence"] == ""
+
+
+def test_described_appends_the_source_clause():
+    """终端那一行带上来源：「因为哪一句」决定用户要不要当场手改。"""
+    text = image_routing.described({
+        "model": "moss", "source": "auto", "keyword": "包装",
+        "evidence": "瓶身包装印着品牌色块",
+    })
+
+    assert text == "命中『包装』→ MOSS-Image（来源：瓶身包装印着品牌色块）"
+
+
+def test_described_says_nothing_about_sources_when_there_is_no_evidence():
+    """旧记录没有证据字段：照常展示，不印一个空的「（来源：）」。"""
+    text = image_routing.described({"model": "moss", "source": "auto", "keyword": "包装"})
+
+    assert text == "命中『包装』→ MOSS-Image"
+
+
+def test_old_records_without_evidence_still_load():
+    """issue #167 之前写进 state 的记录没有 evidence：读回空串，不报错（旧会话照常续跑）。"""
+    entry = _entry(image_model={"model": "moss", "source": "auto", "keyword": "包装"})
+
+    assert image_routing.assignment_of(entry) == {
+        "model": "moss", "source": "auto", "keyword": "包装", "evidence": ""}
+    assert image_routing.manual_model_of(_entry(
+        image_model={"model": "moss", "source": "manual", "keyword": ""})) == "moss"
