@@ -148,17 +148,16 @@ def build_pipeline_graph(model, brief: Brief, config: Config, *, stage: int = 0,
 
 def _duplicate_manifest_text(
     duplicates: list[tuple[str, tuple[str, ...]]]) -> str:
-    """把重名清单拼成人读的报错正文（措辞见 spec #165 E）。"""
-    parts: list[str] = []
-    for name, categories in duplicates:
-        # 去重只为措辞：跨类重名的「涉及的类别」按遇到顺序列一次，
-        # 类内重复则只剩一个类别，用「重复出现 N 次」说清它不是跨类。
-        unique = list(dict.fromkeys(categories))
-        if len(unique) > 1:
-            parts.append(f"语义名 {name!r} 同时出现在 {' 与 '.join(unique)}")
-        else:
-            parts.append(f"语义名 {name!r} 在 {unique[0]} 内重复出现 {len(categories)} 次")
-    return "；".join(parts)
+    """把**跨类**重名清单拼成人读的报错正文（措辞见 spec #165 E）。
+
+    只处理跨类：类内重复在解析器拿到单份清单时就报并点名了（#178 定案），
+    到不了合并处。这里若再留一条「类内重复」分支，它在生产路径上永不执行
+    （「永不为红＝没有」）。
+    """
+    return "；".join(
+        f"语义名 {name!r} 同时出现在 {' 与 '.join(categories)}"
+        for name, categories in duplicates
+    )
 
 
 def _guard_asset_manifests(inner, brief: Brief):

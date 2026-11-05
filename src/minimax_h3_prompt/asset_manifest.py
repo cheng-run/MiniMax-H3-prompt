@@ -18,6 +18,8 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from enum import Enum
 
 # 围栏语言标签：设计端提示词（``graph/nodes.py`` 的请求与重问）与解析器共用这一个
 # 常量。两边各写一份字面量时，改一处只有一边跟着动——模型照新标签回、解析器还找旧
@@ -30,33 +32,69 @@ _BLOCK_RE = re.compile(
     r"```" + re.escape(MANIFEST_FENCE) + r"[^\n]*\n(.*?)```", re.DOTALL)
 
 
-def split_manifest_reply(reply: str) -> tuple[str, list[str] | None]:
-    """把设计师回复切成 ``(正文, 清单)``；拿不到合法清单时返回 ``(原文, None)``。
+class ManifestProblem(str, Enum):
+    """清单块不可解析的具体原因（issue #178）。
 
-    ``None`` 的几种来源：块缺失、块内不是 JSON、形状不是 ``{"assets": [str, ...]}``、
-    名字是空串或重复。调用方据此**重问一次**，仍失败才报错（spec #166 D）。
-    重复名字也算无效：清单是「张」的枚举，同一个名字出现两次就说不出这是几张，
-    放着它过会让「一个人两张板」实际退化成一张。
+    为什么要分而不是统一返回 ``None``：调用方的补救方式不同——块缺失／不是 JSON／
+    形状不对，重问一句「照格式重写」就够；空名与**重复名**必须点名，否则模型收到
+    笼统提示，很可能把同一份坏清单原样再写一遍，一次重问白花。
+    """
+
+    BLOCK_MISSING = "block_missing"
+    NOT_JSON = "not_json"
+    SHAPE = "shape"
+    EMPTY_NAME = "empty_name"
+    DUPLICATE_NAME = "duplicate_name"
+
+
+@dataclass(frozen=True)
+class ManifestSplit:
+    """``split_manifest_reply`` 的结果：``names`` 有值＝解析成功，否则看 ``problem``。
+
+    ``duplicates`` 只在 ``DUPLICATE_NAME`` 时有值，且要由调用方**原样点名**出去
+    （重问附言与最终报错都点名）——这是 #178 定案「重复名由解析器独占判定」的落点：
+    合并处守卫只判跨类重名，类内重复不存在第二条判定路径。
+    """
+
+    body: str
+    names: list[str] | None
+    problem: ManifestProblem | None = None
+    duplicates: tuple[str, ...] = ()
+
+
+def split_manifest_reply(reply: str) -> ManifestSplit:
+    """把设计师回复切成 ``(正文, 清单)``；拿不到合法清单时 ``names`` 为 ``None``。
+
+    ``None`` 的几种来源见 ``ManifestProblem``；调用方据此**重问一次**，仍失败才报错
+    （spec #166 D）。重复名字也算无效：清单是「张」的枚举，同一个名字出现两次就说不出
+    这是几张，放着它过会让「一个人两张板」实际退化成一张。判定留在这里、名字带出去，
+    是因为解析器一次只看见一份清单——类内重复只有这一处看得见（#178）。
     """
     match = _BLOCK_RE.search(reply)
     if match is None:
-        return reply, None
+        return ManifestSplit(reply, None, ManifestProblem.BLOCK_MISSING)
     try:
         payload = json.loads(match.group(1))
     except json.JSONDecodeError:
-        return reply, None
+        return ManifestSplit(reply, None, ManifestProblem.NOT_JSON)
     if not isinstance(payload, dict):
-        return reply, None
+        return ManifestSplit(reply, None, ManifestProblem.SHAPE)
     assets = payload.get("assets")
     if not isinstance(assets, list) or not all(isinstance(name, str) for name in assets):
-        return reply, None
+        return ManifestSplit(reply, None, ManifestProblem.SHAPE)
     names = [name.strip() for name in assets]
-    if any(not name for name in names) or len(set(names)) != len(names):
-        return reply, None
+    if any(not name for name in names):
+        return ManifestSplit(reply, None, ManifestProblem.EMPTY_NAME)
+    # sorted 只为报错顺序稳定（集合本身无序）：用户按报错改清单时，两次跑出来的顺序
+    # 不该忽前忽后。
+    duplicates = tuple(sorted({name for name in names if names.count(name) > 1}))
+    if duplicates:
+        return ManifestSplit(
+            reply, None, ManifestProblem.DUPLICATE_NAME, duplicates)
     # 块从正文里摘掉：下游写词 agent 拿整段设计当设定，围栏与 JSON 出现在设定里，
     # 模型会照着「asset-manifest」这个词去写画面。
     body = (reply[:match.start()] + reply[match.end():]).strip()
-    return body, names
+    return ManifestSplit(body, names)
 
 
 def name_set_mismatch(manifest: Sequence[str], produced: Sequence[str]) -> str:
@@ -83,23 +121,26 @@ def name_set_mismatch(manifest: Sequence[str], produced: Sequence[str]) -> str:
 def duplicate_asset_names(
     manifests: Mapping[str, Sequence[str]],
 ) -> list[tuple[str, tuple[str, ...]]]:
-    """找出跨类与类内重复的语义名，返回 ``[(名字, 涉及的类别…)]``（issue #175）。
+    """找出**跨类**重名的语义名，返回 ``[(名字, (涉及的类别…))]``（issue #175）。
 
     ``manifests`` 是「类别名 → 该类的名字序列」，类别名只用于报错措辞（人物／场景／道具）。
-    一个名字出现在两个类别里是**跨类重名**；同一类别里出现两次是**类内重复**——返回值
-    里两者都是「出现次数 > 1」，调用方按涉及的类别是否相同分开措辞，判据只有这一份。
+    一个名字出现在**两个及以上类别**里才是跨类重名，涉及的类别按遇到顺序记一次；
+    同一类别里出现两次（类内重复）**不在这里判**——解析器 ``split_manifest_reply``
+    拿到单份清单时就判「不可解析」并点名重问（#178 定案）。在这里再判一次，那条分支
+    在真实路径上永远走不到，只有直造 patch 的用例能点亮它（「永不为红＝没有」）。
 
-    为什么不在 ``split_manifest_reply`` 里判类内重复就完事：那份解析器一次只看见一类，
-    跨类重名要到三份清单合并后才存在。拆成两处判就会出现「类内拦了、跨类漏了」的
-    半截守卫——而漏掉的那一半正是要等到交回第一张图才在台账入库时炸的那条路。
+    为什么是这个分工：解析器一次只看见一类，类内重复它看得见；跨类重名要到三份清单
+    合并后才存在，只有合并处看得见。各判各的那一半，谁都不是摆设。
 
-    名字按首次出现顺序返回、类别按遇到顺序记：报错顺序稳定，测试与人工排查都不必
-    依赖字典的偶然顺序。
+    名字按首次出现顺序返回：报错顺序稳定，测试与人工排查都不必依赖字典的偶然顺序。
     """
     categories: dict[str, list[str]] = {}
     for category, names in manifests.items():
         for name in names:
-            categories.setdefault(str(name), []).append(category)
+            found = categories.setdefault(str(name), [])
+            # 同一类别记一次：类内重复交给解析器，这里只关心「跨了几个类别」。
+            if category not in found:
+                found.append(category)
     return [
         (name, tuple(found))
         for name, found in categories.items()

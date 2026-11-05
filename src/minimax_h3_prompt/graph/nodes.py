@@ -11,7 +11,13 @@ from langgraph.graph.state import CompiledStateGraph
 
 from .. import image_config, image_routing
 from ..agents import image_prompt_agent_key, run_agent
-from ..asset_manifest import MANIFEST_FENCE, name_set_mismatch, split_manifest_reply
+from ..asset_manifest import (
+    MANIFEST_FENCE,
+    ManifestProblem,
+    ManifestSplit,
+    name_set_mismatch,
+    split_manifest_reply,
+)
 from ..brief_parser import (
     Brief,
     brief_uses_refs,
@@ -180,16 +186,16 @@ def _make_design_node(agents: dict, role: str, output_field: str, label: str,
             return {output_field: run_agent(agents[role], msg)}
         msg += _MANIFEST_REQUEST_NOTE
         raw = run_agent(agents[role], msg)
-        body, names = split_manifest_reply(raw)
-        if names is None:
+        parsed = split_manifest_reply(raw)
+        if parsed.names is None:
             # 偶发的格式抖动多花一次调用即可，不必重跑整段阶段 1。重问要把原请求再带上：
             # 模型没有对话记忆，只说「补个块」它无从知道要补哪份设计的清单。
-            raw = run_agent(agents[role], msg + _MANIFEST_RETRY_NOTE)
-            body, names = split_manifest_reply(raw)
-            if names is None:
-                raise ValueError(
-                    f"{label}的回复缺少可解析的 ```{MANIFEST_FENCE}``` 资产清单块"
-                    "（已自动重问一次）：出词节点只按这份清单产出，缺了它整类资产无从对号")
+            raw = run_agent(agents[role], msg + _manifest_retry_note(parsed))
+            parsed = split_manifest_reply(raw)
+        names = parsed.names
+        if names is None:
+            raise ValueError(_manifest_failure_text(label, parsed))
+        body = parsed.body
         # 不硬校验名字出现在正文里（spec D）：正文是给人读的叙述、清单是机器口径，
         # 两者不一致以块为准；但必须让不一致浮出来，否则「正文写了、清单漏了」无声无息。
         absent = [name for name in names if name not in body]
@@ -219,6 +225,7 @@ _MANIFEST_REQUEST_NOTE = (
 
 # 清单块缺失/不可解析时的重问附言。**带上原请求**（见下面注释）；块形状逐字与
 # ``asset_manifest.split_manifest_reply`` 的判据一致，改一边要改另一边。
+# 重复名另有附言（``_manifest_retry_note``）——这一句是通用款，点名要按原因叠。
 _MANIFEST_RETRY_NOTE = (
     "\n\n【补充要求】上一次回复末尾缺少机器可读的 ```" + MANIFEST_FENCE + "``` 块，"
     '或块内不是 {"assets": [...]} 形状。请完整重做上面的设计，并在回复最末尾另起一段附上：\n'
@@ -227,6 +234,54 @@ _MANIFEST_RETRY_NOTE = (
     "```\n"
     '粒度到「张」：一个人两张板写两个名字；没有本类资产时写 {"assets": []}。'
 )
+
+# 不可解析原因的人读说法（issue #178）：重问附言与最终报错共用这一份，别再各写一句会漂移的话。
+_MANIFEST_PROBLEM_TEXT = {
+    ManifestProblem.BLOCK_MISSING: "回复里找不到清单块",
+    ManifestProblem.NOT_JSON: "清单块里不是 JSON",
+    ManifestProblem.SHAPE: '清单块不是 {"assets": [名字, ...]} 形状',
+    ManifestProblem.EMPTY_NAME: "清单里有空名字",
+    ManifestProblem.DUPLICATE_NAME: "清单里有重复的语义名",
+}
+
+
+def _manifest_duplicates_text(duplicates: tuple[str, ...]) -> str:
+    """重复名的人读形态：名字本身常含「｜」，只用逗号标不出边界。"""
+    return "、".join(f"「{name}」" for name in duplicates)
+
+
+def _manifest_retry_note(parsed: ManifestSplit) -> str:
+    """按失败原因拼重问附言；重复名必须点名（issue #178）。
+
+    只说通用的「块形状不对」，模型多半会把同一份清单原样再写一遍——重问的那次调用
+    白花，还得再报错一次给用户。这里只描述**哪里不对**，不重复原请求：调用方会把
+    原请求拼在前面（模型没有对话记忆）。
+    """
+    if parsed.problem is not ManifestProblem.DUPLICATE_NAME:
+        return _MANIFEST_RETRY_NOTE
+    return _MANIFEST_RETRY_NOTE + (
+        "\n另外：这一次清单里这些语义名出现了不止一次："
+        + _manifest_duplicates_text(parsed.duplicates)
+        + "。清单粒度到「张」，每张板必须是不同的名字，别把同一张写成两行。")
+
+
+def _manifest_failure_text(label: str, parsed: ManifestSplit) -> str:
+    """重问一次仍不可解析时的报错正文；重复名要点出具体名字（issue #178）。
+
+    报错是用户唯一能看到的线索：只说「缺可解析的块」，用户会去查格式，而真正该改的
+    可能是那两行同名清单。
+    """
+    problem = parsed.problem
+    reason = _MANIFEST_PROBLEM_TEXT[problem] if problem is not None else "原因不明"
+    text = (
+        f"{label}的回复缺少可解析的 ```{MANIFEST_FENCE}``` 资产清单块"
+        "（已自动重问一次，本次原因：" + reason + "）")
+    if parsed.duplicates:
+        text += (
+            "：清单里这些语义名出现了不止一次："
+            + _manifest_duplicates_text(parsed.duplicates)
+            + "——清单是「张」的枚举，同一个名字说不出是几张，请给每张板写不同的名字")
+    return text + "。出词节点只按这份清单产出，缺了它整类资产无从对号"
 
 
 # 中文资产类（节点请求里说的话）→ 配置里的键（``image_config.IMAGE_KINDS``）。

@@ -188,6 +188,48 @@ def test_unparseable_manifest_fails_after_one_more_ask(monkeypatch, bad_reply):
     assert len(calls) == 2, f"重问次数不是一次：{len(calls)} 次调用"
 
 
+def test_duplicate_names_are_named_when_asking_again(monkeypatch):
+    """同一类清单里名字重复 → 判不可解析并重问，重问附言点名重复的那个名字。
+
+    清单是「张」的枚举，同一个名字出现两次说不出这是几张（#173 越权假设 #2 的判据，
+    口径在 #178 收拢到解析器）。只说「块不可解析」模型会把同一份清单原样再写一遍，
+    白花一次重问。
+    """
+    duplicated = ["青年男人｜综合板", "青年男人｜综合板"]
+    node, calls = _character_design_node(monkeypatch, [
+        _design_reply("青年男人：短发，灰夹克。", duplicated),
+        _design_reply("青年男人：短发，灰夹克。", ["青年男人｜综合板", "青年男人｜正面板"]),
+    ])
+
+    out = node({"brief": _ref_brief()})
+
+    assert len(calls) == 2, f"重复名应当判不可解析并重问一次：{len(calls)} 次调用"
+    assert "青年男人｜综合板" in calls[1], \
+        f"重问附言没点名重复的语义名：{calls[1]}"
+    assert out[MANIFEST_KEY] == ["青年男人｜综合板", "青年男人｜正面板"], \
+        "重问后拿到的清单没有落键"
+
+
+def test_duplicate_names_still_fail_after_the_retry_and_are_named(monkeypatch):
+    """重问后仍然重复 → 报错点名角色与重复的名字，不带着重名清单往下走。
+
+    报错文案是用户唯一能看到的线索：只说「缺可解析的块」，用户会去查格式，
+    而真正该改的是那两行同名清单。
+    """
+    duplicated = ["青年男人｜综合板", "青年男人｜综合板"]
+    reply = _design_reply("青年男人：短发，灰夹克。", duplicated)
+    node, calls = _character_design_node(monkeypatch, [reply, reply])
+
+    with pytest.raises(ValueError) as excinfo:
+        node({"brief": _ref_brief()})
+
+    message = str(excinfo.value)
+    assert "人物形象设计" in message, f"报错没点名角色：{message}"
+    assert "青年男人｜综合板" in message, f"报错没点名重复的语义名：{message}"
+    assert "重复" in message, f"报错没说明是重复名：{message}"
+    assert len(calls) == 2, f"重问次数不是一次：{len(calls)} 次调用"
+
+
 def test_base_route_designer_is_never_asked_for_a_manifest(monkeypatch, capsys):
     """非产资产路线：设计端回复照旧整段落设计键，不解析、不重问、不多键。
 

@@ -282,7 +282,16 @@ MUTATIONS: tuple[Mutation, ...] = (
         "        if len(found) > 1\n",
         "        if False\n",
         ("tests/test_asset_manifest_duplicates.py",),
-        "清单级重名守卫失效＝跨类同名要到交回第一张图才在台账入库时报（#175）",
+        "清单级跨类重名守卫失效＝跨类同名要到交回第一张图才在台账入库时报（#175）",
+    ),
+    Mutation(
+        "manifest_parser_accepts_duplicate_names",
+        "src/minimax_h3_prompt/asset_manifest.py",
+        "    duplicates = tuple(sorted({name for name in names if names.count(name) > 1}))\n",
+        "    duplicates = ()\n",
+        ("tests/test_asset_manifests.py",),
+        "解析器放行类内重复名＝同名清单被当合法，重问不点名、报错也不点名，"
+        "「一个人两张板」静默退化成一张（#178）",
     ),
     Mutation(
         "interaction_log_drops_answer_len",
