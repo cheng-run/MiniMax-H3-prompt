@@ -797,6 +797,8 @@ def test_wizard_director_r2v_asset_loop_pause_resumes_at_the_same_asset(
             return "q"
         if "成片视频路径" in text:
             return "q"           # #112：全新开跑不再先问首问，停在贴视频一问
+        if "改素材画面事实" in text:
+            return ""            # #174：已裁决项的新菜单，回车＝跳过（不改存量描述）
         raise AssertionError(f"意外的问题：{text}")
 
     monkeypatch.setattr(wizard, "_prompt", second_run_prompt)

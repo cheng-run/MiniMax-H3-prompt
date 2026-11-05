@@ -459,12 +459,54 @@ STATUS_PENDING_REGEN = "pending_regen"
 
 
 @dataclass(frozen=True)
+class ManualEdit:
+    """一条**人工改写**留痕（#174，spec #169 G）：谁在什么时候把哪段文字改成了什么。
+
+    为什么要留痕而不是只改 ``description``：存量混排（#168）是人为绕开模型改的，
+    下一个人读到新描述时得知道「它被改过、改前长什么样」——只改正文的话，盘上分不出
+    「模型合并出来的」与「人手写的」，事后也无法复核这次改动是否越权。
+    三字段是落盘契约：``at`` 记时间（UTC ISO，同 ``asset_loop`` 轮次账口径）、
+    ``before``/``after`` 记全文而非差异——描述不长，全量快照读的时候不必再拼。
+    """
+
+    at: str
+    before: str
+    after: str
+
+    def __post_init__(self) -> None:
+        # 缺时间或改后文本的留痕等于没留：读回时说不清改了什么、何时改的。
+        if not str(self.at).strip():
+            raise ValueError("人工改写缺时间（at）")
+        if not str(self.after).strip():
+            raise ValueError("人工改写缺改后文本（after）")
+
+    def to_dict(self) -> dict:
+        return {"at": self.at, "before": self.before, "after": self.after}
+
+    @classmethod
+    def from_dict(cls, raw: object) -> "ManualEdit":
+        if not isinstance(raw, dict):
+            raise ValueError(f"人工改写必须是对象：{raw!r}")
+        unknown = set(raw) - {"at", "before", "after"}
+        if unknown:
+            raise ValueError(f"人工改写包含未知字段：{', '.join(sorted(unknown))}")
+        return cls(
+            at=str(raw.get("at", "")),
+            before=str(raw.get("before", "")),
+            after=str(raw.get("after", "")),
+        )
+
+
+@dataclass(frozen=True)
 class ProofreadRecord:
     """一个语义名的读图校对记录（写进 ``state[PROOFREADS_KEY]``，随会话持久化）。
 
     ``description`` 是**素材画面事实**：生图提示词为底 + 已裁决的定点纠偏 + 并入的补漏。
     ``sha256`` 钉住校对针对的那版正本——换版后旧裁决自动失效、重新校对（LoRA
     可变文件名教训的同款防线）。
+    ``manual_edits`` 是**人工改写**的追加列表（#174）：会越过模型直接改
+    ``description`` 的唯一口子是「改素材画面事实」，改动必须留痕；旧记录没有这一键
+    ＝空表（存量会话照常加载，不做自动迁移）。
     """
 
     name: str
@@ -473,6 +515,7 @@ class ProofreadRecord:
     description: str
     adjudications: tuple[Adjudication, ...] = ()
     omissions: tuple[str, ...] = ()
+    manual_edits: tuple[ManualEdit, ...] = ()
 
     def __post_init__(self) -> None:
         if not str(self.name).strip():
@@ -487,13 +530,16 @@ class ProofreadRecord:
             "sha256": self.sha256, "status": self.status, "description": self.description,
             "deviations": [a.to_dict() for a in self.adjudications],
             "omissions": list(self.omissions),
+            "manual_edits": [e.to_dict() for e in self.manual_edits],
         }
 
     @classmethod
     def from_dict(cls, name: str, raw: object) -> "ProofreadRecord":
         if not isinstance(raw, dict):
             raise ValueError(f"校对记录必须是对象（{name!r}）：{raw!r}")
-        unknown = set(raw) - {"sha256", "status", "description", "deviations", "omissions"}
+        unknown = set(raw) - {
+            "sha256", "status", "description", "deviations", "omissions", "manual_edits",
+        }
         if unknown:
             raise ValueError(
                 f"校对记录（{name!r}）包含未知字段：{', '.join(sorted(unknown))}")
@@ -504,6 +550,10 @@ class ProofreadRecord:
             description=str(raw.get("description", "")),
             adjudications=tuple(Adjudication.from_dict(x) for x in raw.get("deviations") or ()),
             omissions=tuple(str(x) for x in raw.get("omissions") or ()),
+            # 旧记录没有这一键 → 空表（#174 明写「旧记录能正常加载」）；白名单与
+            # to_dict 同批更新，写读两侧不许各记一份。
+            manual_edits=tuple(
+                ManualEdit.from_dict(x) for x in raw.get("manual_edits") or ()),
         )
 
 
@@ -684,7 +734,7 @@ __all__ = [
     "STATUS_DONE", "STATUS_PENDING_REGEN",
     "MIN_FOREIGN_RUN",
     "body_language", "language_slip",
-    "Adjudication", "Claim", "Deviation", "Omission", "ProofreadProgress",
+    "Adjudication", "Claim", "Deviation", "ManualEdit", "Omission", "ProofreadProgress",
     "ProofreadRecord", "ProofreadReport", "Reading",
     "build_proofread_request", "clear_progress", "compare_descriptions",
     "load_progress", "locate_rewrite_span", "merge_asset_description",

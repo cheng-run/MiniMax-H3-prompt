@@ -15,7 +15,9 @@ from minimax_h3_prompt.asset_proofread import (
     Adjudication,
     Claim,
     Deviation,
+    ManualEdit,
     Omission,
+    ProofreadRecord,
     ProofreadReport,
     Reading,
     build_proofread_request,
@@ -413,3 +415,53 @@ def test_proofread_descriptions_wrong_shape_shouts():
         proofread_descriptions({"asset_proofreads": []})
     with pytest.raises(ValueError):
         proofread_descriptions({"asset_proofreads": "坏账"})
+
+
+# ---------------------------------------------------------------------------
+# 人工改写留痕（#174）：校对记录多一条 {at, before, after}
+# ---------------------------------------------------------------------------
+
+def test_record_without_manual_edits_still_loads():
+    """旧记录没有 `manual_edits` 字段 → 缺省空表（存量会话照常加载）。"""
+    raw = {"sha256": "ab", "status": "done", "description": "英文正文",
+           "deviations": [], "omissions": []}
+    record = ProofreadRecord.from_dict("红裙女孩", raw)
+    assert record.manual_edits == ()
+    assert "manual_edits" in record.to_dict()
+
+
+def test_manual_edit_round_trips_through_dict():
+    """人工改写存得下、读得回：{at, before, after} 三字段是落盘契约。"""
+    raw = {"sha256": "ab", "status": "done", "description": "英文正文",
+           "deviations": [], "omissions": []}
+    edit = ManualEdit(at="2026-11-05T08:00:00+00:00",
+                      before="英文正文", after="英文正文 with the bike")
+    record = ProofreadRecord.from_dict("红裙女孩", raw)
+    record = ProofreadRecord(
+        name=record.name, sha256=record.sha256, status=record.status,
+        description=edit.after, adjudications=record.adjudications,
+        omissions=record.omissions, manual_edits=(edit,),
+    )
+    data = record.to_dict()
+    assert data["manual_edits"] == [{
+        "at": "2026-11-05T08:00:00+00:00",
+        "before": "英文正文", "after": "英文正文 with the bike",
+    }]
+    assert ProofreadRecord.from_dict("红裙女孩", data).manual_edits == (edit,)
+
+
+def test_manual_edit_whitelist_still_shouts_on_unknown_fields():
+    """白名单同步收进 `manual_edits`，但错字段照旧响——不许静默吞。"""
+    with pytest.raises(ValueError, match="未知字段"):
+        ProofreadRecord.from_dict("红裙女孩", {
+            "sha256": "ab", "status": "done", "description": "x",
+            "deviations": [], "omissions": [], "manual_edit": [],
+        })
+
+
+def test_manual_edit_entry_requires_time_and_text():
+    """一条改写必须有时间与改后文本——缺了它，读回时「谁在什么时候改的」是空的。"""
+    with pytest.raises(ValueError):
+        ManualEdit(at="", before="a", after="b")
+    with pytest.raises(ValueError):
+        ManualEdit(at="2026-11-05T08:00:00+00:00", before="a", after="")

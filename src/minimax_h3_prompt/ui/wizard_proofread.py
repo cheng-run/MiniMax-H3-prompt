@@ -71,6 +71,24 @@ def omission_language_tip(facts: Sequence[str], *, body: str) -> str | None:
             "并入后会中英混排（稍后要自己译成英文）。")
 
 
+def settled_mixed_language_warning(name: str, description: str, *, base: str) -> str | None:
+    """**读时**告警（#174）：已裁决记录里读到中英混排时，点名资产与那段中文。
+
+    与 ``merged_language_warning`` 分开写而不是复用：那条的读者是「刚合并完、知道
+    是哪张」的调用方，所以只说有混排；这条的现场是续接时**一堆**已裁决记录，不说
+    名字用户不知道该改哪一张（spec #169 G：读数时点名资产）。
+    底本 ``base`` 取当前生图提示词的同名条目——判据仍是「与正文语言一致」
+    （``language_slip``），不是「一律必须英文」（Z-Image 档正文本来就是中文）。
+    """
+    slip = language_slip(description, body=base)
+    if slip is None:
+        return None
+    message = (f"  [警告] 已裁决资产「{name}」的素材画面事实里有中英混排：「{slip}」——"
+               "它会原样进 <Picture N> 的描述与段词（可在这里就地改成正文语言）。")
+    interactions.notice("language_mixed", message)
+    return message
+
+
 def merged_language_warning(merged: str, *, base: str) -> str | None:
     """合并结果仍是混排时的兜底告警（覆盖续跑重放等不经提问的路径）。
 
@@ -89,4 +107,5 @@ def merged_language_warning(merged: str, *, base: str) -> str | None:
 __all__ = [
     "merged_language_warning", "omission_language_tip",
     "pin_replacement_language", "pin_rewrite_quote",
+    "settled_mixed_language_warning",
 ]

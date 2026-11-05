@@ -268,6 +268,15 @@ MUTATIONS: tuple[Mutation, ...] = (
         "否定判定被摘掉＝「不得出现现代塑料包装」把整类道具切到 MOSS（#167 的现场）",
     ),
     Mutation(
+        "settled_review_skipped",
+        "src/minimax_h3_prompt/ui/wizard.py",
+        "    review_settled(state, brief, generation_dir, queue, abandoned, _settled, _prompt, _confirm)",
+        "    pass  # 变异：撤掉已裁决项复查",
+        ("tests/test_wizard_asset_fix.py::test_settled_record_with_chinese_reminder_is_flagged_on_read",
+         "tests/test_wizard_asset_fix.py::test_settled_description_edit_updates_record_without_reread"),
+        "撤掉已裁决项复查＝存量混排不告警、没有就地改写入口，只能手改会话文件（#174）",
+    ),
+    Mutation(
         "manifest_duplicate_guard_off",
         "src/minimax_h3_prompt/asset_manifest.py",
         "        if len(found) > 1\n",

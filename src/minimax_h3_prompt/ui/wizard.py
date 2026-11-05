@@ -3430,6 +3430,7 @@ def _asset_loop(state: dict, brief: Brief, generation_dir: Path) -> bool:
     from ..asset_loop import asset_queue, loop_state, set_current
     from ..asset_proofread import STATUS_DONE, ProofreadRecord, proofread_rows
     from ..generation import image_prompt_variants, ref_asset_registry
+    from .wizard_asset_fix import review_settled
 
     variants = image_prompt_variants(state, brief.canvases)
     registry = ref_asset_registry(state, brief)
@@ -3471,10 +3472,12 @@ def _asset_loop(state: dict, brief: Brief, generation_dir: Path) -> bool:
     def _pending():
         return [q for q in queue if q.name not in abandoned and not _settled(q.name)]
 
-    # 循环整体纳入事件订阅（issue #71 / ADR 0019）：读图、改写、回灌是三步已知的
-    # 长调用，但**串起它们的那层**原先在进展作用域之外——任何一处漏套 step_scope
-    # 都会退回「没有订阅者的静默窗口」。这里兜底订阅；每一步的横幅仍由 step_scope
-    # 自己打（嵌套共用同一个监听器，不会把心跳打两遍）。
+    # #174：已裁决项不进待办队列、续接时静默消失——这里给一次读时告警＋修复菜单。
+    review_settled(state, brief, generation_dir, queue, abandoned, _settled, _prompt, _confirm)
+
+    # 循环整体纳入事件订阅（issue #71 / ADR 0019）：读图、改写、回灌是三步已知的长
+    # 调用，但**串起它们的那层**原先在进展作用域之外——漏套 step_scope 就是「没有订阅
+    # 者的静默窗口」。这里兜底订阅；每一步的横幅仍由 step_scope 自己打（嵌套共用监听器）。
     with event_scope():
         while True:
             pending = _pending()
