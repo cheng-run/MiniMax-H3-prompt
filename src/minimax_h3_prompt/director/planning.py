@@ -57,6 +57,11 @@ _INSTRUCTION_NAME = "segment_planner_director.md"
 # （ADR 0019 的记账口径）——混在一处就分不清钱花在哪条路线上。
 DIRECTOR_PLANNER_ROLE = "role_director_segment_planner"
 
+# 预算超限后最多重问几次（#187 / ADR 0029 决定 5）：首次回复之后**再**问两次。
+# 这是调用预算而不是重试策略——回灌内容是可执行的二选一，两次还不改说明规划师在
+# 这条约束上帮不上忙，继续问只是把同一笔钱再付一遍。
+MAX_BUDGET_REQUEUES = 2
+
 # 规划产物落 **`GENxxx/director/plan.json`**（设计 §3.2，2026-10-29 修订）。刻意不写
 # `segments/plan.json`：共享读取口 ``tools/ledger.read_plan_segment_count`` 只认 JSON
 # **数组**，同一路径放第二种形态（dict）会让它在导演台会话上**静默返回 None**。新形态
@@ -276,6 +281,11 @@ def plan_director_segments(shot_table: str, total_s: float, llm, *, mode: str,
     （编号 + 语义名），进请求的「素材清单」；后者是全片英文定义块，算预算闭包用。
     返回值把**段表与预算分开**交回——``plan.json`` 形态不变、不存预算复本
     （ADR 0029 决定 6），预算由调用方在写段之前单独落盘。
+
+    r2v 的预算超限（闭包 + 锚降级之后 ``pictures`` 仍 > ``MAX_PICTURES``）时，把超限
+    清单回灌给**同一个**规划师重挑，最多 ``MAX_BUDGET_REQUEUES`` 次（#187）。仍超抛
+    ``AssetBudgetOverflowError``：代码不自动截断到 9、也不自动整片重规划——砍哪张没有
+    依据，且重规划等于整片重来，只能由用户决定（ADR 0029 决定 5）。
     """
     _require_mode(mode)
     total_s = _require_number(total_s, "视频总时长")
@@ -329,11 +339,24 @@ def plan_director_segments(shot_table: str, total_s: float, llm, *, mode: str,
     # 延迟导入：``agents`` 会拉起 langchain 的角色装配栈，纯件测试不该为它付入口成本。
     from ..agents import run_direct_call  # noqa: PLC0415 - 避免入口期拉起角色装配栈
 
-    result = run_direct_call(llm, request, role=DIRECTOR_PLANNER_ROLE)
-    if not result.ok:
-        raise RuntimeError(result.error)
-    return _planning_result(result.text, total_s, mode=mode, registry=registry,
-                            subject_definitions=subject_definitions)
+    # 首次 + 最多两次重问。每次回灌都从**原始请求**重新拼（附上最新一轮的超限清单），
+    # 而不是在上一次请求上叠加：叠加会把前几轮的清单越滚越长，模型更容易照抄旧回复。
+    request_now = request
+    requeues_left = MAX_BUDGET_REQUEUES
+    while True:
+        result = run_direct_call(llm, request_now, role=DIRECTOR_PLANNER_ROLE)
+        if not result.ok:
+            raise RuntimeError(result.error)
+        planning = _planning_result(result.text, total_s, mode=mode, registry=registry,
+                                    subject_definitions=subject_definitions)
+        # 非 r2v 的预算是空表，这一支自然为假；锚不计数由 ``slot_count`` 保证。
+        over = _over_budget_segments(planning.plan, planning.budget)
+        if not over:
+            return planning
+        if requeues_left == 0:
+            raise _budget_overflow_error(over)
+        requeues_left -= 1
+        request_now = f"{request}\n\n{_render_budget_feedback(over)}"
 
 
 def write_plan_json(path: Path, plan: DirectorPlan) -> Path:
@@ -844,3 +867,62 @@ def _budget_summary(entry: SegmentBudget | None) -> str:
     if entry.anchors:
         text += f"（锚 {len(entry.anchors)}）"
     return text
+
+
+class AssetBudgetOverflowError(ValueError):
+    """规划期某段的素材预算仍超过每段上限（#187 / ADR 0029 决定 5）。
+
+    单独立一个类型是为了让调用方能把它与「回复格式不合格」分开说：前者要用户动
+    素材或剧情分配，后者是模型没守输出契约。它仍然继承 ``ValueError``——向导与
+    续跑入口的 ``except (RuntimeError, ValueError)`` 必须照常接住，否则一次超限
+    会把整个流程炸穿。
+    """
+
+
+def _over_budget_segments(
+    plan: DirectorPlan, budget: AssetBudget,
+) -> list[tuple[int, SegmentBudget]]:
+    """超限段（按段号）：**只看 ``pictures`` 张数**，锚不占槽（ADR 0029 决定 2）。"""
+    over: list[tuple[int, SegmentBudget]] = []
+    for segment in plan.segments:
+        entry = budget.for_segment(segment.index)
+        if entry is not None and entry.slot_count > MAX_PICTURES:
+            over.append((segment.index, entry))
+    return over
+
+
+def _budget_picture_list(entry: SegmentBudget) -> str:
+    """完整清单（编号 + 语义名）：编号供规划师照抄，名字让人读懂是哪几张。"""
+    return "、".join(f"<Picture {item.number}>「{item.name}」"
+                     for item in entry.pictures)
+
+
+def _render_budget_feedback(over: Sequence[tuple[int, SegmentBudget]]) -> str:
+    """超限回灌（#187 / 用户故事 6、7）：只给两条**真能执行**的路。
+
+    不提「把这一段再拆短」：4–15 秒硬下限加 17k+5 网格决定规划之后的段没有拆段
+    自由，那句话只会把模型逼去改时长凑数（ADR 0029 决定 4）。
+    """
+    lines = [f"【素材预算超限，请重挑后重写整份段表：每段最多 {MAX_PICTURES} 张】"]
+    for index, entry in over:
+        lines.append(
+            f"第 {index} 段列了 {entry.slot_count} 张（{_budget_picture_list(entry)}），"
+            f"上限 {MAX_PICTURES}。请二选一：把其中一张改为纯文字描述，"
+            "或调整本段与相邻段的剧情分配。")
+    # 回复会被整份重新解析：只说「改第 N 段」会让其余段从回复里消失。
+    lines.append("请重新给出完整段表 JSON（其余段原样保留，不要只给改动的那一段）。")
+    return "\n".join(lines)
+
+
+def _budget_overflow_error(
+    over: Sequence[tuple[int, SegmentBudget]],
+) -> AssetBudgetOverflowError:
+    """两次重问后仍超：点名段号与完整清单，交用户决定（代码不代劳）。"""
+    details = "；".join(
+        f"第 {index} 段 {entry.slot_count} 张（{_budget_picture_list(entry)}）"
+        for index, entry in over)
+    return AssetBudgetOverflowError(
+        f"素材预算超过每段上限 {MAX_PICTURES} 张：{details}。"
+        f"已把超限清单回灌给规划师重挑 {MAX_BUDGET_REQUEUES} 次，仍超过上限。"
+        "代码不自动截断到上限，也不替你整片重规划（ADR 0029）："
+        "请手动精简这些素材，或调整本段与相邻段的剧情分配后重跑规划。")

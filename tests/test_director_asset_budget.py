@@ -18,6 +18,7 @@ import pytest
 
 from minimax_h3_prompt.director.planning import (
     AssetBudget,
+    AssetBudgetOverflowError,
     asset_budget_path,
     load_asset_budget,
     plan_director_segments,
@@ -231,3 +232,140 @@ def test_listing_shows_the_slot_count_and_anchors():
     text = render_plan_listing(result.plan, budget=result.budget)
     assert "素材预算：1 张" in text
     assert "锚 1" in text, "锚要能看到，才能解释「为什么只有 1 张却提到了前院」"
+
+
+# ---------------------------------------------------------------------------
+# 规划期 ≤9 守卫与有限回灌（#187 / ADR 0029 决定 5）
+# ---------------------------------------------------------------------------
+
+# 11 张：超过上限的形态。真实事故是第 5 段 10 张（#180）。
+_BIG_REGISTRY = tuple((number, f"素材{number}") for number in range(1, 12))
+
+
+class _ScriptedLLM:
+    """按序回放回复；回放完就重复最后一条（「两次后仍超」需要同一份回复答三次）。"""
+
+    def __init__(self, *replies: str) -> None:
+        self.replies = list(replies)
+        self.requests: list[str] = []
+
+    def invoke(self, request, config=None):
+        self.requests.append(str(request))
+        for callback in (config or {}).get("callbacks") or []:
+            callback.on_llm_new_token("…")
+        return self.replies[min(len(self.requests), len(self.replies)) - 1]
+
+
+def _reply_with(assets_by_segment: dict[int, list[int]]) -> str:
+    """30 秒五段；只给点名的段带 ``assets``（其余段保持「没挑图」）。"""
+    windows = [(0, 6), (6, 12), (12, 18), (18, 24), (24, 30)]
+    segments = []
+    for index, (start, end) in enumerate(windows, 1):
+        item = {
+            "start_s": start, "end_s": end,
+            "type": "opening" if index == 1 else "continue",
+            "summary": f"s{index}", "end_hook": f"h{index}",
+        }
+        if index in assets_by_segment:
+            item["assets"] = assets_by_segment[index]
+        segments.append(item)
+    return json.dumps({"segments": segments}, ensure_ascii=False)
+
+
+def _expected_feedback(index: int, numbers: list[int]) -> str:
+    """票面 AC 逐字：第 N 段列了 M 张（清单…），上限 9。请二选一：…"""
+    picked = "、".join(f"<Picture {number}>「素材{number}」" for number in numbers)
+    return (
+        f"第 {index} 段列了 {len(numbers)} 张（{picked}），上限 9。"
+        "请二选一：把其中一张改为纯文字描述，或调整本段与相邻段的剧情分配。")
+
+
+def test_over_budget_segment_is_fed_back_and_the_redrawn_plan_is_used():
+    """超限 → 回灌同一个规划师 → 按**新回复**重算预算（不截断到 9）。"""
+    llm = _ScriptedLLM(
+        _reply_with({1: list(range(1, 12))}),   # 11 张，超限
+        _reply_with({1: list(range(1, 8))}),    # 重挑后 7 张
+    )
+    result = plan_director_segments(
+        "分镜表：[Shot 1] ……", 30.0, llm, mode="r2v",
+        registry=_BIG_REGISTRY, subject_definitions="")
+
+    assert len(llm.requests) == 2, "一次回灌就该收下合格回复"
+    assert llm.requests[1].startswith(llm.requests[0]), "重问要带着原始请求（含素材清单/分镜表）"
+    assert _expected_feedback(1, list(range(1, 12))) in llm.requests[1]
+    # 预算取的是新回复的那 7 张：截断到 9 会多出两张没被点名的图。
+    assert result.budget.segments[1].slot_count == 7
+    assert [item.number for item in result.budget.segments[1].pictures] == list(range(1, 8))
+
+
+def test_requeue_never_suggests_splitting_the_segment():
+    """4–15 秒下限＋17k+5 网格让「拆段」在规划之后无路可走（ADR 0029 决定 4）。"""
+    llm = _ScriptedLLM(
+        _reply_with({1: list(range(1, 12))}),
+        _reply_with({1: list(range(1, 10))}),
+    )
+    plan_director_segments("分镜表：[Shot 1] ……", 30.0, llm, mode="r2v",
+                           registry=_BIG_REGISTRY, subject_definitions="")
+
+    feedback = llm.requests[1][len(llm.requests[0]):]
+    assert feedback.strip(), "第二次请求必须在原文之后追加回灌内容"
+    for wording in ("拆短", "拆段"):
+        assert wording not in feedback
+
+
+def test_every_over_budget_segment_is_named_in_the_same_feedback():
+    """两段都超时，一份回灌要点名两段——只报第一段会白白多问一轮。"""
+    llm = _ScriptedLLM(
+        _reply_with({1: list(range(1, 12)), 2: list(range(1, 11))}),
+        _reply_with({1: list(range(1, 10)), 2: list(range(10, 12))}),
+    )
+    plan_director_segments("分镜表：[Shot 1] ……", 30.0, llm, mode="r2v",
+                           registry=_BIG_REGISTRY, subject_definitions="")
+
+    assert len(llm.requests) == 2
+    assert _expected_feedback(1, list(range(1, 12))) in llm.requests[1]
+    assert _expected_feedback(2, list(range(1, 11))) in llm.requests[1]
+
+
+def test_two_requeues_then_a_named_error_names_the_segment_and_every_picture():
+    """首次 + 最多两次重问；仍超就停下并点名，不自动截断、不自动整片重规划。"""
+    over = _reply_with({1: list(range(1, 12))})
+    llm = _ScriptedLLM(over)
+
+    with pytest.raises(AssetBudgetOverflowError) as excinfo:
+        plan_director_segments("分镜表：[Shot 1] ……", 30.0, llm, mode="r2v",
+                               registry=_BIG_REGISTRY, subject_definitions="")
+
+    assert len(llm.requests) == 3, "首次 + 2 次重问；第三次之后不许再整体规划一次"
+    message = str(excinfo.value)
+    assert "第 1 段" in message and "11" in message
+    for number in range(1, 12):
+        assert f"<Picture {number}>" in message, f"报错没点名 <Picture {number}>"
+    # 向导已有的 ``except (RuntimeError, ValueError)`` 必须照常接住它。
+    assert issubclass(AssetBudgetOverflowError, ValueError)
+
+
+def test_anchors_do_not_count_toward_the_nine_picture_limit():
+    """9 张出镜 + 1 张锚不算超限：槽位只看 ``pictures``（ADR 0029 决定 2）。"""
+    registry = tuple((number, f"素材{number}") for number in range(1, 10)) + (
+        (22, "BG05_住宅前院与家庭车辆车道"),)
+    llm = _ScriptedLLM(_reply_with({1: list(range(1, 10))}))
+
+    result = plan_director_segments(
+        "分镜表：[Shot 1] ……", 30.0, llm, mode="r2v",
+        registry=registry, subject_definitions=_DEFINITIONS)
+
+    assert len(llm.requests) == 1, "锚不占槽，不该触发回灌"
+    assert result.budget.segments[1].slot_count == 9
+    assert [item.number for item in result.budget.segments[1].anchors] == [22]
+
+
+def test_non_r2v_planning_never_requeues():
+    """t2v / i2v / fl2v 没有参考素材：`assets` 再多也不进预算，自然不触发守卫。"""
+    llm = _ScriptedLLM(_reply_with({1: list(range(1, 12))}))
+
+    result = plan_director_segments("分镜表：[Shot 1] ……", 30.0, llm, mode="t2v",
+                                    registry=_BIG_REGISTRY)
+
+    assert len(llm.requests) == 1
+    assert result.budget.segments == {}

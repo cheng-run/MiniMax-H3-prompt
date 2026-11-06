@@ -351,6 +351,15 @@ MUTATIONS: tuple[Mutation, ...] = (
          "tests/test_segment_refs.py::test_scope_demotes_a_picture_pulled_in_only_by_an_anchor_sentence"),
         "一致性锚句式失效＝该占槽的锚照样占槽，而身份来源图会被误降级（#180 用户故事 9）",
     ),
+    Mutation(
+        "budget_guard_off",
+        "src/minimax_h3_prompt/director/planning.py",
+        "        if entry is not None and entry.slot_count > MAX_PICTURES:\n",
+        "        if False:\n",
+        ("tests/test_director_asset_budget.py::test_over_budget_segment_is_fed_back_and_the_redrawn_plan_is_used",
+         "tests/test_director_asset_budget.py::test_two_requeues_then_a_named_error_names_the_segment_and_every_picture"),
+        "规划期预算守卫恒假＝11 张的段直接落盘，打包期才发现（#180 事故原样复现，#187）",
+    ),
 )
 
 
