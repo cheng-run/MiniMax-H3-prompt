@@ -15,9 +15,11 @@ import pytest
 
 from minimax_h3_prompt.segment_refs import (
     SegmentAssetOverflowError,
+    SegmentAssetScope,
     compute_asset_closure,
     compute_segment_scope,
     render_segment_injection_card,
+    rewrite_anchor_picture_labels,
     rewrite_picture_labels,
     scope_ref_sections,
     scope_retention_to_shots,
@@ -418,3 +420,129 @@ def test_closure_reports_only_the_sentence_that_cites_the_label():
     assert edge.evidence == (
         "Its stone floor pattern must agree with <Picture 7> for continuity.")
     assert edge.anchor is True
+
+
+# ---------------------------------------------------------------------------
+# 锚降级（#183）：只被一致性锚句式勾进来的图不占槽
+#
+# 真实现场（2026-11-06，父 spec #180）：第 5 段正文点名 9 张，第 10 张 <Picture 22>
+# 是 Subject 21 定义里「must agree with <Subject 22>」把 Subject 22（前院）勾进来、
+# 再沿 Subject 22 自己的定义落到 Picture 22 的——镜头全程在室内，前院根本没出镜。
+# 这张图不占槽，但 Subject 22 的定义必须留着（否则段词里 <Subject 22> 悬空）。
+# ---------------------------------------------------------------------------
+
+_ANCHOR_REGISTRY = (
+    *[(n, f"素材{n}", "") for n in range(1, 10)],
+    (22, "前院与车道", ""),
+)
+
+
+def _anchor_defs(count: int = 9, extra: str = "") -> str:
+    return "\n".join([
+        *(f"<Subject {n}> is 素材{n} in <Picture {n}>." for n in range(1, count + 1)),
+        "<Subject 21> is the entrance hall that must agree with <Subject 22>.",
+        "<Subject 22> is the front yard whose layout comes from <Picture 22>.",
+        extra,
+    ]).strip()
+
+
+def _anchor_shot(count: int = 9, extra: str = "") -> str:
+    return (
+        "[Shot 5] At 00:25.917, "
+        + " ".join(f"<Picture {n}>" for n in range(1, count + 1))
+        + " stay in frame while <Subject 21> holds still." + extra)
+
+
+def _anchor_scope(*, defs: str | None = None, shot: str | None = None,
+                  refs_per_segment: int = 9):
+    return compute_segment_scope(
+        shot_text=shot or _anchor_shot(), subject_definitions=defs or _anchor_defs(),
+        registry=_ANCHOR_REGISTRY, refs_per_segment=refs_per_segment)
+
+
+def test_scope_demotes_a_picture_pulled_in_only_by_an_anchor_sentence():
+    """AC1：闭包 10 张 → 出镜 9 张且不含 <Picture 22>，锚记 via 溯源。
+
+    ``refs_per_segment=9`` 本身就是判据：不降级就会在这里抛超限。
+    """
+    scope = _anchor_scope()
+    assert [item.original_picture for item in scope.pictures] == list(range(1, 10))
+    assert 22 not in scope.picture_map
+    assert [(a.original_picture, a.name, a.via) for a in scope.anchors] == [
+        (22, "前院与车道", "Subject 21")]
+    assert scope.anchors[0].evidence == (
+        "<Subject 21> is the entrance hall that must agree with <Subject 22>.")
+    # 锚的 Subject 定义条目仍在本段范围内（否则段词里 <Subject 22> 悬空）
+    assert 21 in scope.subject_numbers and 22 in scope.subject_numbers
+
+
+def test_scope_keeps_a_picture_that_also_has_a_depicted_source_edge():
+    """AC3：同一张图另有非锚边（``comes from``）→ 仍算出镜，不被降级。
+
+    这是「身份来源图」的形态：把它误降级会让人物/场景相似度悄悄变差。
+    """
+    defs = _anchor_defs(8, "<Subject 23> is the doorway whose colour comes from "
+                           "<Picture 22>.")
+    shot = _anchor_shot(8, " <Subject 23> frames the doorway.")
+    scope = _anchor_scope(defs=defs, shot=shot)
+    assert [item.original_picture for item in scope.pictures] == [*range(1, 9), 22]
+    assert scope.anchors == ()
+
+
+def test_scope_never_demotes_a_picture_the_segment_itself_names():
+    """种子永远算出镜：正文点了 <Picture 22> 就是本段要拍它。"""
+    shot = _anchor_shot(8, " The locked gate of <Picture 22> stays shut.")
+    scope = _anchor_scope(shot=shot)
+    assert 22 in scope.picture_map
+    assert scope.anchors == ()
+
+
+def test_scoped_sections_keep_the_anchor_subject_definition_without_the_label():
+    """AC2：锚的 Subject 定义留在段内定义块，但不再含指向被撤图的 <Picture N>。
+
+    只改那半句，同一条定义里的其它字句原样——这是确定性文本改写，不交给模型。
+    """
+    scope = _anchor_scope()
+    sections = {
+        "subject_definitions": _anchor_defs(),
+        "retention_analysis": (
+            "<Subject 22> (appears in [Shot 5]): fully_preserved - the yard behind "
+            "matches <Picture 22>.\n"
+            "<Picture 22>: not_in_frame."),
+    }
+    scoped = scope_ref_sections(sections, scope)
+    defs = scoped["subject_definitions"]
+    assert "<Subject 22>" in defs, "锚的 Subject 定义必须保留：删掉会让段词里 <Subject 22> 悬空"
+    assert "<Picture 22>" not in defs, "被撤下的图不能在定义块里留下标签"
+    assert "<Subject 21> is the entrance hall that must agree with <Subject 22>." in defs, \
+        "锚边自己那句一字不改（它没有指向被撤图）"
+    assert "<Subject 22> is the front yard whose layout comes from" in defs, \
+        "只改写「来源图」半句，其余字句原样"
+    assert "<Picture 9>" in defs, "其余条目照常保留并重编号"
+    retention = scoped["retention_analysis"]
+    assert "<Subject 22>" in retention and "<Picture 22>" not in retention
+
+
+def test_anchor_records_survive_the_plan_json_roundtrip():
+    """锚跟着 plan.json 走：续跑照同一份改写，不重算也不丢锚。
+
+    旧 plan.json 没有 ``anchors`` 键（本次改动之前落的盘）：照旧读得回来，锚为空。
+    """
+    scope = _anchor_scope()
+    restored = SegmentAssetScope.from_dict(scope.to_dict())
+    assert restored.anchors == scope.anchors
+    old = SegmentAssetScope.from_dict({
+        "pictures": [{"new": 1, "original": 3, "name": "门厅"}], "subjects": [3]})
+    assert old.anchors == ()
+
+
+def test_rewrite_anchor_picture_labels_keeps_everything_but_the_tag():
+    """确定性改写：只换标签本身，句子其余部分一字不动；不命中的号原样保留。"""
+    text = "<Subject 22> is the front yard whose layout comes from <Picture 22>."
+    assert rewrite_anchor_picture_labels(text, {22}) == (
+        "<Subject 22> is the front yard whose layout comes from "
+        "the corresponding reference material.")
+    assert rewrite_anchor_picture_labels(text, {7}) == text
+    zh = "<Subject 24> is the doorway whose colour 与 <Picture 25> 一致。"
+    rewritten = rewrite_anchor_picture_labels(zh, {25})
+    assert "<Picture" not in rewritten and "与" in rewritten and "一致" in rewritten

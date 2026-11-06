@@ -275,3 +275,71 @@ def test_old_plan_json_without_assets_in_segment_keeps_whole_definitions(tmp_pat
     defs = split_ref_sections(text)["subject_definitions"]
     assert "<Picture 10>" in defs and "<Subject 12>" in defs   # 原号，未裁剪
     assert (tmp_path / "segments" / "injection-card-02.md").exists() is False
+
+
+# ---------------------------------------------------------------------------
+# 锚降级在多参路线同样生效（票 #183 AC5）
+#
+# 闭包是两条路线共用的：这里走的是多参**真实规划入口**（不是直接调纯函数），
+# 证明降级不是只在导演台/单测里成立。
+# ---------------------------------------------------------------------------
+
+_ANCHOR_REGISTRY = (
+    *[(n, f"素材{n}", f"素材{n}的专属生图提示词") for n in range(1, 10)],
+    (22, "前院与车道", "前院与车道的专属生图提示词"),
+)
+
+# 9 张正文点名 + 第 10 张 <Picture 22> 只由 Subject 21 的锚句勾入（父 spec #180 的
+# 第 5 段形态）。段长 5s 落在 4–15s 档内，切出来就是一段。
+_ANCHOR_WHOLE_5S = """subject_definitions:
+{defs}
+
+summary:
+[reference generation] 素材1 holds the entrance hall while the camera drifts.
+
+retention_analysis:
+{retention}
+
+detailed_description:
+[Shot 1] {shot}
+
+overall_soundscape:
+Soft indoor ambience with a distant click.
+
+non_diegetic_music:
+N/A
+""".format(
+    defs="\n".join([
+        *(f"<Subject {n}> is 素材{n} in <Picture {n}>." for n in range(1, 10)),
+        "<Subject 21> is the entrance hall that must agree with <Subject 22>.",
+        "<Subject 22> is the front yard whose layout comes from <Picture 22>.",
+    ]),
+    retention="\n".join(
+        f"<Subject {n}> (appears in [Shot 1]): fully_preserved - look retained."
+        for n in range(1, 10)),
+    shot=" ".join(f"<Picture {n}>" for n in range(1, 10))
+         + " stay in frame while <Subject 21> holds still.",
+)
+
+
+def test_ref_route_demotes_the_anchor_picture_before_it_counts_against_the_cap(tmp_path):
+    """多参路线：闭包 10 张 → 预算/子集 9 张，定义块保留 Subject 22 但不留 <Picture 22>。
+
+    不降级的话 ``prepare_ref_segmentation`` 会在准备阶段就抛超限（10 > 9），
+    所以这个入口本身就能证伪。
+    """
+    job = prepare_ref_segmentation(
+        whole_prompt=_ANCHOR_WHOLE_5S, total_s=5.0, out_dir=tmp_path,
+        ref_meta=list(_ANCHOR_REGISTRY))
+
+    rows = _plan_rows(tmp_path)
+    originals = [item["original"] for item in rows[0]["assets_in_segment"]["pictures"]]
+    assert originals == list(range(1, 10)), "锚不该进段内素材子集"
+    anchors = rows[0]["assets_in_segment"].get("anchors", [])
+    assert [(item["number"], item["via"]) for item in anchors] == [(22, "Subject 21")]
+
+    text, issues = job.write_segment(1)
+    defs = split_ref_sections(text)["subject_definitions"]
+    assert "<Subject 22>" in defs and "<Picture 22>" not in defs
+    errors = [issue for issue in issues if issue.severity == "error"]
+    assert errors == [], [(issue.code, issue.message) for issue in errors]

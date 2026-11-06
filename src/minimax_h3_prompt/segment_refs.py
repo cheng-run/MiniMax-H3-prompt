@@ -71,11 +71,33 @@ class SegmentAsset:
 
 
 @dataclass(frozen=True)
+class SegmentAnchor:
+    """本段**不占槽**的一致性锚（#183）：图被撤下，只留语义名与溯源。
+
+    它存在的意义是「和某张图保持一致」，不是「要被画出来」——所以不挂图、不进接线槽、
+    不参与 ``refs_per_segment`` 计数。``via`` 记「是哪个 Subject 的哪句话把它勾进来的」
+    （锚链上第一个锚边的定义，真实形态里是 ``Subject 21`` 而不是它直属的 ``Subject 22``），
+    ``evidence`` 是那句话的原文：将来问「这张为什么被降级」时，两者就是答案。
+    """
+
+    original_picture: int
+    name: str = ""
+    via: str = ""
+    evidence: str = ""
+
+
+@dataclass(frozen=True)
 class SegmentAssetScope:
-    """一段的参考素材子集：保留的图（新号↔原号）与保留的 Subject 原号。"""
+    """一段的参考素材子集：保留的图（新号↔原号）与保留的 Subject 原号。
+
+    ``pictures`` 只含**出镜**的图；只作一致性锚的图在 ``anchors`` 里，不占槽但保留溯源
+    （#183）。``subject_numbers`` 含锚链上的 Subject——它们的定义条目要留在段内，否则
+    段词里 ``<Subject N>`` 会悬空。
+    """
 
     pictures: tuple[SegmentAsset, ...]
     subject_numbers: tuple[int, ...] = ()
+    anchors: tuple[SegmentAnchor, ...] = ()
 
     @property
     def picture_map(self) -> dict[int, int]:
@@ -92,8 +114,12 @@ class SegmentAssetScope:
         return [(item.new_picture, item.name, "") for item in self.pictures]
 
     def to_dict(self) -> dict[str, Any]:
-        """落 ``plan.json`` 的 ``assets_in_segment``：续跑照这张表改写，不重算。"""
-        return {
+        """落 ``plan.json`` 的 ``assets_in_segment``：续跑照这张表改写，不重算。
+
+        ``anchors`` 只在非空时出现：没有锚的段（绝大多数）落盘形态与改动前逐字节相同，
+        旧读者也不会因为多一个空键而认不出来。
+        """
+        data: dict[str, Any] = {
             "pictures": [
                 {"new": item.new_picture, "original": item.original_picture,
                  "name": item.name, "path": item.path}
@@ -101,6 +127,13 @@ class SegmentAssetScope:
             ],
             "subjects": list(self.subject_numbers),
         }
+        if self.anchors:
+            data["anchors"] = [
+                {"number": item.original_picture, "name": item.name,
+                 "via": item.via, "evidence": item.evidence}
+                for item in self.anchors
+            ]
+        return data
 
     @classmethod
     def from_dict(cls, raw: Any) -> "SegmentAssetScope":
@@ -126,8 +159,26 @@ class SegmentAssetScope:
         subjects_raw = raw.get("subjects", [])
         if not isinstance(subjects_raw, list):
             raise ValueError(f"assets_in_segment.subjects 必须是数组：{subjects_raw!r}")
+        # 旧 plan.json 没有这个键（锚降级是 #183 才有的）：缺省空表，不把用户进度读废。
+        anchors_raw = raw.get("anchors", [])
+        if not isinstance(anchors_raw, list):
+            raise ValueError(f"assets_in_segment.anchors 必须是数组：{anchors_raw!r}")
+        anchors: list[SegmentAnchor] = []
+        for item in anchors_raw:
+            if not isinstance(item, Mapping):
+                raise ValueError(f"assets_in_segment.anchors 的条目必须是对象：{item!r}")
+            try:
+                anchors.append(SegmentAnchor(
+                    original_picture=int(item["number"]),
+                    name=str(item.get("name", "")),
+                    via=str(item.get("via", "")),
+                    evidence=str(item.get("evidence", "")),
+                ))
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(f"assets_in_segment.anchors 的条目读不出：{item!r}") from exc
         return cls(pictures=tuple(pictures),
-                   subject_numbers=tuple(int(n) for n in subjects_raw))
+                   subject_numbers=tuple(int(n) for n in subjects_raw),
+                   anchors=tuple(anchors))
 
 
 def parse_definition_entries(subject_definitions: str) -> list[tuple[str, int, str]]:
@@ -219,6 +270,10 @@ class AssetClosure:
     pictures: tuple[int, ...]
     subjects: tuple[int, ...]
     edges: tuple[ClosureEdge, ...] = ()
+    # 本次闭包**实际**用的种子（``(kind, number)``，已含「种子为空→全量」那一支的
+    # 展开）。降级要判「这张是不是本段自己点名的」，判据必须与闭包同源：让调用方
+    # 再传一遍种子，两处一旦不一致就会把种子降成锚，而且不报错。
+    seeds: tuple[tuple[str, int], ...] = ()
 
     def edges_into(self, kind: str, number: int) -> tuple[ClosureEdge, ...]:
         """指向某个节点的全部边（查「它为什么进来」用，按记录顺序）。"""
@@ -262,8 +317,9 @@ def compute_asset_closure(
     3. **种子为空时保留全部登记图与全部 Subject**：分不清本段用什么时宁可超限报错，
        也不静默让段内无参照。
 
-    锚句式**只做分类标记、不做降级**（降级是 #183）：本函数不改变任何调用方的可观察
-    行为，只把判据的依据（边）交出来。
+    锚句式在这里**只做分类标记、不做降级**：本函数不改变任何调用方的可观察行为，只把
+    判据的依据（边 ∧ 实际用的种子）交出来。降级是 ``demote_consistency_anchors`` 的事
+    （#183），规划期与写段期都调那一份——两处各写一遍，同一张图会在两个阶段被分成两类。
     """
     entries = {(kind, number): text
                for kind, number, text in parse_definition_entries(subject_definitions)
@@ -336,7 +392,84 @@ def compute_asset_closure(
 
     return AssetClosure(pictures=tuple(sorted(kept_pictures)),
                         subjects=tuple(sorted(kept_subjects)),
-                        edges=tuple(unique_edges))
+                        edges=tuple(unique_edges),
+                        seeds=tuple(sorted(seeds)))
+
+
+def _node_label(node: tuple[str, int]) -> str:
+    """溯源里给节点起名：``("subject", 21)`` → ``"Subject 21"``（与段词里的标签同形）。"""
+    kind, number = node
+    return f"{'Subject' if kind == 'subject' else 'Picture'} {number}"
+
+
+def demote_consistency_anchors(
+    closure: AssetClosure, *, names: Mapping[int, str] | None = None,
+) -> tuple[tuple[int, ...], tuple[SegmentAnchor, ...]]:
+    """把只靠一致性锚句式勾进来的图从出镜集合里撤下来（#183）。
+
+    判据是**白名单＋传播**，不是黑名单：
+
+    - **种子永远算出镜**（本段正文/规划师点名要拍的图）；
+    - 一条**非锚**边（如 ``comes from <Picture N>``）从出镜节点出发，目标也出镜——
+      「同一张图若另有出镜边，仍算出镜」；
+    - 其余节点算锚：只能经锚边到达的，以及挂在它们下游的（``Subject 21`` 锚到
+      ``Subject 22``，``Subject 22`` 自己的定义再落到 ``Picture 22``——图本身没有锚句，
+      但它整条来路都是锚）。
+
+    返回 ``(出镜图号, 锚列表)``。``via`` 取**锚链上第一个锚边的定义**，不是图直属的
+    那条定义：真实现场问「这张为什么被降级」，答案是 ``Subject 21`` 那句
+    ``must agree with <Subject 22>``，而不是 ``Subject 22`` 的 ``comes from``。
+
+    种子为空（``compute_asset_closure`` 退回「保留全部登记图」那一支）时全部算出镜：
+    那一路本来就分不清本段用什么，此时降级只会把参考素材悄悄删光。
+    """
+    seeds = set(closure.seeds)
+    if not seeds:
+        # 防御性：闭包一定会填 seeds（含全量展开），走到这里说明有人手工拼了一个
+        # AssetClosure。宁可一张不降，也不凭一个空种子集把图全撤掉。
+        return closure.pictures, ()
+
+    depicted: set[tuple[str, int]] = set(seeds)
+    changed = True
+    while changed:
+        changed = False
+        for edge in closure.edges:
+            if edge.anchor or edge.target in depicted or edge.via not in depicted:
+                continue
+            depicted.add(edge.target)
+            changed = True
+
+    # 锚的来路：先认「从出镜节点直接跨出去的那条锚边」，再沿闭包往下游继承——
+    # 下游节点自己是靠什么进来的，对「为什么被撤」没有解释力。
+    causes: dict[tuple[str, int], ClosureEdge] = {}
+    changed = True
+    while changed:
+        changed = False
+        for edge in closure.edges:
+            if edge.target in depicted or edge.target in causes:
+                continue
+            if edge.via in causes:
+                causes[edge.target] = causes[edge.via]
+                changed = True
+            elif edge.anchor and edge.via in depicted:
+                causes[edge.target] = edge
+                changed = True
+
+    name_map = dict(names or {})
+    anchors: list[SegmentAnchor] = []
+    for number in closure.pictures:
+        node = ("picture", number)
+        if node in depicted:
+            continue
+        cause = causes.get(node)
+        anchors.append(SegmentAnchor(
+            original_picture=number,
+            name=name_map.get(number, ""),
+            via=_node_label(cause.definition) if cause else "",
+            evidence=cause.evidence if cause else "",
+        ))
+    pictures = tuple(n for n in closure.pictures if ("picture", n) in depicted)
+    return pictures, tuple(anchors)
 
 
 def _mentioned_names(shot_text: str, registry: Sequence[tuple[int, str, str]]
@@ -415,7 +548,10 @@ def compute_segment_scope(
 
     names = {picture: name for picture, name, _desc in registry}
     path_map = dict(paths or {})
-    ordered = closure.pictures
+    # 锚降级（#183）：只被「must agree with / consistent with / 与…一致」这类句式勾进来
+    # 的图不占槽——它不挂图，只把定义里那句改写成不含标签的描述（见
+    # ``rewrite_anchor_picture_labels``）。出镜的判定由闭包的边说话，本函数不另立判据。
+    ordered, anchors = demote_consistency_anchors(closure, names=names)
     # 每段张数取「配置值」与「官方单次上限」的较小者（issue #86 / spec #84 D4）：
     # `refs_per_segment` 是本机想喂几张，官方上限是一次请求收得下几张——后者更硬。
     # 不取小值的话，把配置调大就会让卡与工作流对不上，而请求照样非法。
@@ -440,7 +576,10 @@ def compute_segment_scope(
                          name=names.get(original, _MISSING_NAME),
                          path=path_map.get(original, ""))
             for new, original in enumerate(ordered, 1)),
+        # Subject 保留闭包全部：锚链上的 Subject 定义也要留在段内，只撤图不撤定义
+        # （删掉定义，段词里的 <Subject N> 就悬空了）。
         subject_numbers=closure.subjects,
+        anchors=anchors,
     )
 
 
@@ -457,12 +596,43 @@ def rewrite_picture_labels(text: str, picture_map: Mapping[int, int]) -> str:
     return _PICTURE_RE.sub(_replace, str(text or ""))
 
 
+# 被撤下的锚图在定义句里的替身：不含任何标签的名词短语（#183）。按句子语言挑一个，
+# 是用一个常量表而不是调模型——改写必须确定性、可复现。
+_ANCHOR_PLACEHOLDER_LATIN = "the corresponding reference material"
+_ANCHOR_PLACEHOLDER_CJK = "对应参考素材"
+_CJK_RE = re.compile(r"[㐀-䶿一-鿿]")
+
+
+def rewrite_anchor_picture_labels(text: str, anchor_numbers: Iterable[int]) -> str:
+    """把被降级为锚的 ``<Picture N>`` 换成不含标签的描述（#183，确定性，不调模型）。
+
+    为什么必须改写：锚的 Subject 定义要留着（否则段词里 ``<Subject N>`` 悬空），可那条
+    定义里的「来源图」半句还指着被撤下的图——段内既没有这个号的定义、也没有接线可落，
+    模型会照着写一个不存在的槽位。只换标签本身、其余字句原样，是因为模型本来就是按
+    「原样复制定义块」被要求的：改写范围越小，段词越接近它写出来的那一版。
+    """
+    numbers = {int(number) for number in anchor_numbers}
+    body = str(text or "")
+    if not numbers:
+        return body
+    placeholder = (_ANCHOR_PLACEHOLDER_CJK if _CJK_RE.search(body)
+                   else _ANCHOR_PLACEHOLDER_LATIN)
+
+    def _replace(match: re.Match) -> str:
+        return placeholder if int(match.group(1)) in numbers else match.group(0)
+
+    return _PICTURE_RE.sub(_replace, body)
+
+
 def scope_ref_sections(sections: Mapping[str, str],
                        scope: SegmentAssetScope) -> dict[str, str]:
     """整片六段式 → 只含本段素材的版本（issue #75 AC2）。
 
     - ``subject_definitions``：裁掉本段用不到的 Subject/Picture 条目，图号换新号；
       **Subject 原号不动**（模型对 Subject 连续性没有要求，只有 Picture 跟接线有关）。
+      **锚的 Subject 定义留着**（``scope.subject_numbers`` 含锚链上的 Subject），
+      但里面指向被撤锚图的 ``<Picture N>`` 改写成不含标签的描述——删定义会让
+      ``<Subject N>`` 悬空，留标签会让段内指着一个没挂的槽位（#183）。
     - ``retention_analysis``：同样按条目裁剪并改写图号；[Shot N] 的出现记录**原样
       保留**——那是整片的出现事实，改成段内编号反而是编造。按**本段镜头**再裁一次
       是另一件事，由 ``scope_retention_to_shots`` 在写段前做（这里只管素材范围：
@@ -474,6 +644,9 @@ def scope_ref_sections(sections: Mapping[str, str],
     picture_map = scope.picture_map
     kept = {("subject", n) for n in scope.subject_numbers}
     kept |= {("picture", item.original_picture) for item in scope.pictures}
+    # 锚的**图**条目不留（那张图不挂、也不该在段内被引用），只留引用它的 Subject
+    # 定义；定义里指向锚图的那半句改写成不含标签的描述（#183）。
+    anchor_numbers = {item.original_picture for item in scope.anchors}
     out = dict(sections)
 
     def _filter_block(text: str) -> str:
@@ -481,7 +654,8 @@ def scope_ref_sections(sections: Mapping[str, str],
         for kind, number, entry in parse_definition_entries(text):
             if kind and (kind, number) not in kept:
                 continue
-            kept_lines.append(rewrite_picture_labels(entry, picture_map))
+            line = rewrite_picture_labels(entry, picture_map)
+            kept_lines.append(rewrite_anchor_picture_labels(line, anchor_numbers))
         return "\n".join(kept_lines)
 
     if "subject_definitions" in out:
@@ -652,14 +826,17 @@ __all__ = [
     "AssetClosure",
     "CONSISTENCY_ANCHOR_PATTERNS",
     "ClosureEdge",
+    "SegmentAnchor",
     "SegmentAsset",
     "SegmentAssetOverflowError",
     "SegmentAssetScope",
     "compute_asset_closure",
     "compute_segment_scope",
+    "demote_consistency_anchors",
     "is_consistency_anchor",
     "parse_definition_entries",
     "render_segment_injection_card",
+    "rewrite_anchor_picture_labels",
     "rewrite_picture_labels",
     "scope_ref_sections",
     "scope_retention_to_shots",

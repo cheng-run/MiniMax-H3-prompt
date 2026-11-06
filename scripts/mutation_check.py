@@ -345,7 +345,10 @@ MUTATIONS: tuple[Mutation, ...] = (
         "src/minimax_h3_prompt/segment_refs.py",
         're.compile(r"must\\s+agree\\s+with", re.IGNORECASE),',
         're.compile(r"must\\s+disagree\\s+with", re.IGNORECASE),',
-        ("tests/test_segment_refs.py::test_closure_marks_edges_that_hit_the_consistency_anchor_sentence",),
+        ("tests/test_segment_refs.py::test_closure_marks_edges_that_hit_the_consistency_anchor_sentence",
+         # #183 起这条常量还决定「降不降级」：句式失效时锚会重新占槽（第 5 段 10 张
+         # 直接超限），所以降级用例也必须跟着变红。
+         "tests/test_segment_refs.py::test_scope_demotes_a_picture_pulled_in_only_by_an_anchor_sentence"),
         "一致性锚句式失效＝该占槽的锚照样占槽，而身份来源图会被误降级（#180 用户故事 9）",
     ),
 )
