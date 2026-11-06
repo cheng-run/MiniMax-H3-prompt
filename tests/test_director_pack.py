@@ -249,6 +249,42 @@ def _write_asset(path: Path) -> Path:
     return path
 
 
+def _write_budget(session_dir: Path, numbers_by_segment: dict[int, list[int]]) -> None:
+    """写一份真实预算文件（走生产读取口，不放假对象）。"""
+    from minimax_h3_prompt.director.planning import (
+        AssetBudget,
+        BudgetPicture,
+        SegmentBudget,
+        write_asset_budget,
+    )
+
+    write_asset_budget(session_dir, AssetBudget(segments={
+        index: SegmentBudget(pictures=tuple(
+            BudgetPicture(number=number, name=f"图{number}") for number in numbers))
+        for index, numbers in numbers_by_segment.items()
+    }))
+
+
+def _r2v_with_subset(tmp_path: Path, *, originals: dict[int, list[int]]):
+    """五段 r2v + 三张台账 + 段内素材子集；返回 ``(session_dir, plan)``。"""
+    from minimax_h3_prompt.director.prompts import write_segment_assets
+
+    plan = _plan("r2v")
+    session_dir = _session(tmp_path, plan,
+                           texts={i: "<Picture 1>" for i in range(1, 6)})
+    records = []
+    for number in range(1, 4):
+        _write_asset(session_dir / "assets" / f"图{number}.png")
+        records.append(_picture_record(f"图{number}", number, f"assets/图{number}.png"))
+    _write_ledger(session_dir, records)
+    write_segment_assets(session_dir, {
+        index: [{"new": slot, "original": number, "name": f"图{number}"}
+                for slot, number in enumerate(numbers, 1)]
+        for index, numbers in originals.items()
+    })
+    return session_dir, plan
+
+
 def test_r2v_mounts_every_registered_picture_on_every_segment(tmp_path):
     """r2v 每段挂**全量**已登记图：全局登记号 = 段内局部槽号，段词一字不改。
 
@@ -353,6 +389,85 @@ def test_r2v_refuses_a_subset_naming_an_unregistered_asset(tmp_path):
         prepare_director_pack(session_dir, plan, settings=_settings())
 
 
+def test_r2v_with_a_budget_accepts_a_subset_inside_it(tmp_path):
+    """有预算且每段子集都在预算里 → 照常打包，清单不出现「无预算」那句。
+
+    预算按**段号**对齐：段 2 的预算可以比段 1 大，校验只看各段自己那一份。
+    """
+    from minimax_h3_prompt.director.pack import prepare_director_pack
+
+    session_dir, plan = _r2v_with_subset(
+        tmp_path, originals={1: [1], 2: [1, 2], 3: [2], 4: [3], 5: [1, 3]})
+    _write_budget(session_dir, {
+        1: [1], 2: [1, 2], 3: [2, 3], 4: [3], 5: [1, 2, 3]})
+
+    job, report = prepare_director_pack(session_dir, plan, settings=_settings())
+
+    assert [ref["index"] for ref in _pack_timeline(job)["segments"][1]["refs"]] == \
+        [0, 1], "预算只做上限，不改变实际挂的那几张"
+    assert "本会话无预算，未做预算校验" not in report, \
+        "真校验过了就不能再说「未校验」——两句不许混成一句"
+
+
+def test_r2v_refuses_a_subset_outside_the_budget(tmp_path):
+    """子集里有预算外的图 → 点名段号与多出来的那张，不静默挂上去。"""
+    from minimax_h3_prompt.director.pack import prepare_director_pack
+
+    session_dir, plan = _r2v_with_subset(
+        tmp_path, originals={index: [1, 2] for index in range(1, 6)})
+    # 只有第 3 段的预算装不下它的两张：按段号对齐，别段不能被牵连。
+    _write_budget(session_dir, {
+        1: [1, 2], 2: [1, 2], 3: [1], 4: [1, 2], 5: [1, 2]})
+
+    with pytest.raises(ValueError, match="第 3 段.*图2") as caught:
+        prepare_director_pack(session_dir, plan, settings=_settings())
+    assert "预算" in str(caught.value)
+    assert not (session_dir / "director" / "pack").exists(), "校验没过就不许落盘"
+
+
+def test_r2v_with_a_budget_refuses_a_segment_without_a_subset_record(tmp_path):
+    """有预算却没有该段子集记录 → 报错点名段号，不静默跳过校验。
+
+    缺子集时打包器会按旧口径全量挂图，那条路绕开了预算门；「没核对」不能因为
+    产物缺一块就变成「不在核对范围内」。
+    """
+    from minimax_h3_prompt.director.pack import prepare_director_pack
+
+    session_dir, plan = _r2v_with_subset(
+        tmp_path, originals={index: [1] for index in range(1, 5)})
+    _write_budget(session_dir, {index: [1] for index in range(1, 6)})
+
+    with pytest.raises(ValueError, match="第 5 段.*子集"):
+        prepare_director_pack(session_dir, plan, settings=_settings())
+
+
+def test_r2v_without_a_budget_says_it_did_not_check(tmp_path):
+    """旧会话（没有预算文件）照子集挂图，但清单固定写明「没校验」。"""
+    from minimax_h3_prompt.director.pack import prepare_director_pack
+
+    session_dir, plan = _r2v_with_subset(
+        tmp_path, originals={index: [1, 2] for index in range(1, 6)})
+
+    job, report = prepare_director_pack(session_dir, plan, settings=_settings())
+
+    assert [ref["index"] for ref in _pack_timeline(job)["segments"][0]["refs"]] == \
+        [0, 1], "无预算不阻断，照子集挂图"
+    assert "本会话无预算，未做预算校验" in report
+
+
+def test_r2v_refuses_a_corrupt_budget_instead_of_calling_it_absent(tmp_path):
+    """预算文件在但读不出 → 报错点名文件，不静默当成「旧会话没有预算」。"""
+    from minimax_h3_prompt.director.pack import prepare_director_pack
+
+    session_dir, plan = _r2v_with_subset(
+        tmp_path, originals={index: [1] for index in range(1, 6)})
+    budget_path = session_dir / "director" / "asset-budget.json"
+    budget_path.write_text('{"1": {"pictures": not-json', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="asset-budget.json"):
+        prepare_director_pack(session_dir, plan, settings=_settings())
+
+
 def test_r2v_resolves_library_root_layout(tmp_path):
     """新布局台账（``library_root``）也要走 ``resolve_asset_path`` 这一个解析口。"""
     from minimax_h3_prompt.director.pack import prepare_director_pack
@@ -391,8 +506,10 @@ def test_r2v_refuses_registered_picture_missing_on_disk(tmp_path):
 
 
 def test_r2v_refuses_more_than_the_slot_limit(tmp_path):
-    """约束 5 的素材侧：登记图超过槽位上限（9）就拒绝，不静默截断。
+    """约束 5 的素材侧：旧会话（无子集表）登记图超 9 就拒绝，且**点名段号**。
 
+    旧口径每段都挂全量，所以超限的是**每一段**——报错要这么说，并把张数说清是
+    台账全量，不能让人读成「某一段挂了 10 张」（#180 事故原话就是错的）。
     变异检验：把 ``ref_capacity.MAX_PICTURES`` 改成 12，这条立刻变红（10 张会被放行）。
     """
     from minimax_h3_prompt.director.pack import prepare_director_pack
@@ -404,8 +521,12 @@ def test_r2v_refuses_more_than_the_slot_limit(tmp_path):
         _write_asset(session_dir / "assets" / f"图{number}.png")
         records.append(_picture_record(f"图{number}", number, f"assets/图{number}.png"))
     _write_ledger(session_dir, records)
-    with pytest.raises(ValueError, match="9"):
+    with pytest.raises(ValueError) as caught:
         prepare_director_pack(session_dir, plan, settings=_settings())
+    message = str(caught.value)
+    assert "第 1–5 段" in message, "要点名是哪几段超限"
+    assert "按旧会话口径整份台账挂图" in message
+    assert "台账全量，不是任何一段的张数" in message
 
 
 def test_r2v_refuses_a_prompt_referencing_an_unregistered_slot(tmp_path):

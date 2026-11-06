@@ -47,7 +47,13 @@ from .frames import (
     duration_sec_for_declared,
     validate_segment_types,
 )
-from .planning import DIRECTOR_DIRNAME, render_give_images
+from .planning import (
+    DIRECTOR_DIRNAME,
+    AssetBudget,
+    asset_budget_path,
+    load_asset_budget,
+    render_give_images,
+)
 from .prompts import load_segment_assets, segment_path
 
 # ---------------------------------------------------------------------------
@@ -577,11 +583,14 @@ def _segment_slots(segment: DirectorSegment, scopes: dict[int, list[dict]],
     """
     entries = scopes.get(segment.index)
     if entries is None:
+        # 只有**部分段**缺记录时才会走到这里（整份都缺的情形在 ``_plan_media`` 里
+        # 一次点名所有段）：能说的只有这一段，就只说这一段。
         if len(pictures) > PICTURE_SLOT_LIMIT:
             raise ValueError(
-                f"素材台账登记了 {len(pictures)} 张图片，超过插件单段上限 "
-                f"{PICTURE_SLOT_LIMIT}（Picture1–{PICTURE_SLOT_LIMIT}），而这份会话没有"
-                "段内素材表（旧会话全量挂图口径）。请重跑向导写段以生成按段素材子集")
+                f"第 {segment.index} 段没有段内素材子集记录：按旧会话口径整份台账挂图，"
+                f"该段要挂全量 {len(pictures)} 张，超过插件单段上限 "
+                f"{PICTURE_SLOT_LIMIT}（Picture1–{PICTURE_SLOT_LIMIT}）。"
+                "请重跑向导写段以生成按段素材子集")
         return [(slot, (path, ext))
                 for slot, (_name, path, ext) in enumerate(pictures, 1)]
 
@@ -605,7 +614,70 @@ def _segment_slots(segment: DirectorSegment, scopes: dict[int, list[dict]],
     return slots
 
 
-def _plan_media(session_dir: Path, plan: DirectorPlan) -> dict[int, SegmentMedia]:
+def _old_session_overflow_message(plan: DirectorPlan, count: int) -> str:
+    """旧会话（无段内素材子集表）超限：点名**每一段**，并说清张数是谁的。
+
+    #180 事故原话把「台账全量 28 张」说成某一段的张数，用户没法定位。旧口径是每段
+    都挂全量，所以超限的确实是每一段——报错就得这么写，不能借第一段顶替全部。
+    """
+    indices = [segment.index for segment in plan.segments]
+    if len(indices) == 1:
+        where = f"第 {indices[0]} 段会超限"
+    else:
+        where = (f"第 {indices[0]}–{indices[-1]} 段（共 {len(indices)} 段）"
+                 "每一段都会超限")
+    return (
+        f"素材台账登记了 {count} 张图片，超过插件单段上限 {PICTURE_SLOT_LIMIT}"
+        f"（Picture1–{PICTURE_SLOT_LIMIT}）。这份会话没有段内素材子集表，"
+        f"按旧会话口径整份台账挂图，所以{where}——{count} 张是台账全量，"
+        "不是任何一段的张数。请重跑向导写段以生成按段素材子集")
+
+
+def _validate_subset_against_budget(segment: DirectorSegment,
+                                    entries: list[dict] | None,
+                                    budget: AssetBudget) -> None:
+    """打包期最后一道核对：本段子集里的每张图都得在**本段预算**里（#189）。
+
+    子集少于预算是合法的（写段没把预算用满）；超出才是错——挂上去的图会让段词里的
+    ``<Picture N>`` 指到预算外的素材，而插件的 9 个槽位是给预算内的图算的。
+    只按**段号**对齐，不按内容复制：预算与子集是两份产物，各自有自己的读者。
+    """
+    if entries is None:
+        # 有预算却没子集记录＝产物缺一块，不能走旧口径全量挂图绕过预算门：
+        # 「没核对」不该因为这一段缺文件就变成「不在核对范围内」。
+        raise ValueError(
+            f"第 {segment.index} 段有素材预算但没有段内素材子集记录："
+            "没有子集就核不了「子集 ⊆ 预算」，请重跑本段写段")
+    budget_entry = budget.for_segment(segment.index)
+    allowed = ({picture.number: picture.name for picture in budget_entry.pictures}
+               if budget_entry is not None else {})
+    extras: list[tuple[int, str]] = []
+    for entry in entries:
+        original = entry.get("original")
+        # 缺编号的条目连「在不在预算里」都判不了——静默放行等于把没核对说成通过。
+        if isinstance(original, bool) or not isinstance(original, int):
+            raise ValueError(
+                f"第 {segment.index} 段的段内素材子集条目缺全局登记号 original："
+                f"{entry!r}——没有它就核不了预算")
+        if original not in allowed:
+            extras.append((original, str(entry.get("name", ""))))
+    if not extras:
+        return
+
+    def _label(number: int, name: str) -> str:
+        return f"{name}（编号 {number}）" if name else f"编号 {number}"
+
+    listed = "、".join(_label(number, name) for number, name in extras)
+    budget_text = "、".join(_label(number, name)
+                           for number, name in allowed.items()) or "（空）"
+    raise ValueError(
+        f"第 {segment.index} 段的段内素材子集超出本段素材预算：{listed} 不在预算里。"
+        f"本段预算 {len(allowed)} 张：{budget_text}。子集只能是预算的子集"
+        "（预算才是写段的上限），请重跑本段写段或重新规划本段预算")
+
+
+def _plan_media(session_dir: Path,
+                plan: DirectorPlan) -> tuple[dict[int, SegmentMedia], str | None]:
     """按模式决定每段进包的媒体（设计 §3.4.1，2026-10-29 用户裁定）。
 
     三条来源，**不许互相顶替**：
@@ -613,20 +685,36 @@ def _plan_media(session_dir: Path, plan: DirectorPlan) -> dict[int, SegmentMedia
     - ``r2v``：台账里每张已登记图 × **每一段**（全局登记号 = 段内局部槽号）；
     - ``i2v`` / ``fl2v``：只有**开场段**的 ``assets/NN/start``（fl2v 可选 ``end``）；
     - 运镜/收尾段的终点画面**不进包**：#107 出尾帧变换提示词，用户在导演台里挂。
+
+    第二个返回值是出站清单里那句**预算校验说明**（#189）：r2v 没有预算文件时固定
+    写「本会话无预算，未做预算校验」——「没校验」与「校验通过」不许混成同一句话。
+    其它模式没有参考素材，也就没有预算这回事，返回 ``None``（清单不加噪音）。
     """
     empty = {segment.index: SegmentMedia() for segment in plan.segments}
     if plan.mode == "r2v":
         pictures = _picture_sources(session_dir)
         by_name = {name: (path, ext) for name, path, ext in pictures}
         scopes = load_segment_assets(session_dir)
+        if not scopes and len(pictures) > PICTURE_SLOT_LIMIT:
+            # 整份都缺子集表＝旧会话：一次点名所有段，别让第一段顶替全部。
+            raise ValueError(_old_session_overflow_message(plan, len(pictures)))
+        # 预算文件在就**必须**读得出来：坏预算（``load_asset_budget`` 抛 ValueError）
+        # 不能被吞成「没有预算」，否则校验被跳过、清单还会说「未校验」。
+        budget = (load_asset_budget(session_dir)
+                  if asset_budget_path(session_dir).is_file() else None)
+        note = ("预算校验：本会话无预算，未做预算校验"
+                if budget is None else None)
         planned: dict[int, SegmentMedia] = {}
         for segment in plan.segments:
+            if budget is not None:
+                _validate_subset_against_budget(
+                    segment, scopes.get(segment.index), budget)
             folder = f"asset_groups/{segment.index:02d}"
             slots = _segment_slots(segment, scopes, pictures, by_name)
             planned[segment.index] = SegmentMedia(refs=tuple(
                 PackedMedia(source=path, pack_rel=f"{folder}/Picture{slot}{ext}")
                 for slot, (path, ext) in slots))
-        return planned
+        return planned, note
     if plan.mode in ("i2v", "fl2v"):
         opening = plan.segments[0]  # 首段必是开场（frames.validate_segment_types 保证）
         folder = f"asset_groups/{opening.index:02d}"
@@ -648,8 +736,8 @@ def _plan_media(session_dir: Path, plan: DirectorPlan) -> dict[int, SegmentMedia
                              pack_rel=f"{folder}/{END_STEM}{end_path.suffix.lower()}")
                  if end_path is not None else None),
         )
-        return empty
-    return empty  # t2v：不给图
+        return empty, None
+    return empty, None  # t2v：不给图
 
 
 def _validate_picture_slots(plan: DirectorPlan, texts: dict[int, str],
@@ -1039,7 +1127,7 @@ def prepare_director_pack(session_dir: str | Path, plan: DirectorPlan, *,
     validate_ref_image_size(settings.ref_image_size)
 
     texts = _read_segment_prompts(session_dir, plan)
-    media_by_segment = _plan_media(session_dir, plan)
+    media_by_segment, budget_note = _plan_media(session_dir, plan)
     _validate_picture_slots(plan, texts, media_by_segment)
     segments = tuple(
         PackedSegment(
@@ -1072,15 +1160,20 @@ def prepare_director_pack(session_dir: str | Path, plan: DirectorPlan, *,
 
     job = DirectorPackJob(plan=plan, settings=settings, pack_dir=pack_dir,
                           zip_path=zip_path, segments=segments)
-    return job, render_pack_report(job, conclusions=conclusions)
+    return job, render_pack_report(job, conclusions=conclusions,
+                                   budget_note=budget_note)
 
 
-def render_pack_report(job: DirectorPackJob, *, conclusions: Sequence[str] = ()) -> str:
+def render_pack_report(job: DirectorPackJob, *, conclusions: Sequence[str] = (),
+                       budget_note: str | None = None) -> str:
     """出站清单：两个总帧数、逐段段类型/给图/包内路径、六条约束结论、包路径。
 
     **必须同时写两个总帧数**（设计 §3.2「两套坐标」）：导演台里显示的是时间线长度
     （Σ 声明帧），成片会因「保完整」每段多 12 帧而更长——只写一个数，用户会以为
     「导演台里显示 28 秒」是个错误。
+
+    ``budget_note`` 是预算校验的那一句（#189）：旧会话没有预算文件时必须出现
+    「本会话无预算，未做预算校验」，让「没校验」不会被读成「校验通过」。
     """
     plan = job.plan
     settings = job.settings
@@ -1113,6 +1206,11 @@ def render_pack_report(job: DirectorPackJob, *, conclusions: Sequence[str] = ())
     for conclusion in conclusions:
         lines.append(f"  {conclusion}")
     lines.append("")
+    if budget_note:
+        # 独立成段而不是混进六条约束：预算校验是打包期额外的核对（#189），
+        # 六条约束的条数与编号都不动。
+        lines.append(budget_note)
+        lines.append("")
     # 说清「哪些给图故意不在包里」：用户最容易在这里以为打包漏了图。终点画面要靠
     # #107 的尾帧变换提示词产出，打包时它根本不存在（设计 §3.4.1 第 3 条）。
     lines.append("未进包的给图（由 #107 出词、在导演台 UI 里逐段挂）："
