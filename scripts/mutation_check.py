@@ -340,6 +340,14 @@ MUTATIONS: tuple[Mutation, ...] = (
         "交互日志只记摘要不记长度＝事后查不出「他到底答了多少字」，长正文类答案"
         "（内容被故意丢弃）就彻底失去可核对的量（#171）",
     ),
+    Mutation(
+        "anchor_pattern_blind",
+        "src/minimax_h3_prompt/segment_refs.py",
+        're.compile(r"must\\s+agree\\s+with", re.IGNORECASE),',
+        're.compile(r"must\\s+disagree\\s+with", re.IGNORECASE),',
+        ("tests/test_segment_refs.py::test_closure_marks_edges_that_hit_the_consistency_anchor_sentence",),
+        "一致性锚句式失效＝该占槽的锚照样占槽，而身份来源图会被误降级（#180 用户故事 9）",
+    ),
 )
 
 

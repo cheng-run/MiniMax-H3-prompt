@@ -15,6 +15,7 @@ import pytest
 
 from minimax_h3_prompt.segment_refs import (
     SegmentAssetOverflowError,
+    compute_asset_closure,
     compute_segment_scope,
     render_segment_injection_card,
     rewrite_picture_labels,
@@ -324,3 +325,96 @@ def test_picture_definition_references_to_other_pictures_are_followed():
         registry=[(1, "卧室", ""), (2, "她", ""), (3, "夜灯", "")],
     )
     assert [p.original_picture for p in scope.pictures] == [1, 3]
+
+
+# ---------------------------------------------------------------------------
+# 闭包本身（#181）：规划期与写段期必须调同一份实现，且每条边带得出溯源
+# ---------------------------------------------------------------------------
+
+def test_closure_reports_the_definition_that_pulled_each_node_in():
+    """种子 Subject 2 → 它的定义点了 <Picture 2>：边要指出「哪条定义、哪句话」。"""
+    closure = compute_asset_closure(
+        seed_subjects=[2], subject_definitions=_DEFS, registry=_REGISTRY)
+    assert closure.pictures == (2,)
+    assert closure.subjects == (2,)
+    (edge,) = closure.edges_into("picture", 2)
+    assert edge.definition == ("subject", 2)
+    assert edge.evidence == (
+        "<Subject 2> is the brass key in <Picture 2>, with an old green patina.")
+    assert edge.anchor is False
+
+
+def test_closure_marks_edges_that_hit_the_consistency_anchor_sentence():
+    """一致性锚是白名单句式（父 spec #180 用户故事 9）：默认算出镜，命中才标锚。
+
+    三种句式各来一条；``comes from <Picture N>`` 是**身份来源**，不是一致性锚——
+    把它误标成锚，降级时会把人物的身份来源图撤掉（用户故事 9 的原话）。
+    """
+    defs = (
+        "<Subject 21> is the entrance hall that must agree with <Subject 22>.\n"
+        "<Subject 22> is the front yard whose layout comes from <Picture 22>.\n"
+        "<Subject 23> is the corridor whose floor stays consistent with <Picture 24>.\n"
+        "<Subject 24> is the doorway whose colour 与 <Picture 25> 一致。\n"
+    )
+    closure = compute_asset_closure(
+        seed_subjects=[21, 23, 24], subject_definitions=defs)
+
+    def _anchored(kind: str, number: int) -> bool:
+        # 一个节点可能有多条边进来（Subject 22 自己的定义也点了它），锚是**这条边**
+        # 的属性：只要有一条是锚，这个节点就是靠锚勾进来的。
+        return any(edge.anchor for edge in closure.edges_into(kind, number))
+
+    assert _anchored("subject", 22) is True
+    assert _anchored("picture", 24) is True
+    assert _anchored("picture", 25) is True
+    assert _anchored("picture", 22) is False
+
+
+def test_closure_records_the_reverse_edge_for_a_picture_without_its_own_definition():
+    """图只内联在 Subject 定义里（官方写法）：反向拉引用它的 Subject，边指向那条定义。
+
+    ``via`` 是触发它的图、``definition`` 是点了它的 Subject 定义——两者不同正是反向
+    边的特征（正向边里两者相同）。少了这一支，段内 ``<Picture N>`` 会悬空。
+    """
+    defs = (
+        "<Subject 1> is the young woman whose appearance comes from <Picture 1>.\n"
+        "<Subject 2> is the brass key in <Picture 2>.\n"
+    )
+    closure = compute_asset_closure(
+        seed_pictures=[1], subject_definitions=defs)
+    assert closure.pictures == (1,)
+    assert closure.subjects == (1,)
+    (edge,) = closure.edges_into("subject", 1)
+    assert edge.via == ("picture", 1)
+    assert edge.definition == ("subject", 1)
+    assert edge.evidence == (
+        "<Subject 1> is the young woman whose appearance comes from <Picture 1>.")
+    assert edge.anchor is False
+
+
+def test_closure_falls_back_to_the_whole_registry_when_there_are_no_seeds():
+    """种子为空＝分不清本段要用什么：保留全部登记图与全部 Subject（规则 ③）。
+
+    宁可超限报错也不静默让段内无参照；只留图不留 Subject 会让段内定义块半缺。
+    """
+    closure = compute_asset_closure(
+        subject_definitions=_DEFS, registry=_REGISTRY)
+    assert closure.pictures == (1, 2, 3)
+    assert closure.subjects == (1, 2, 3, 4)
+
+
+def test_closure_reports_only_the_sentence_that_cites_the_label():
+    """一条定义可以有好几句：溯源要的是点了标签的**那一句**，不是整条。
+
+    整条交出去，锚句式就会被别的句子带进来——「这句到底算不算锚」将无从分辨。
+    """
+    defs = (
+        "<Subject 5> is the lobby of the building. Its stone floor pattern must agree "
+        "with <Picture 7> for continuity.\n"
+    )
+    closure = compute_asset_closure(
+        seed_subjects=[5], subject_definitions=defs)
+    (edge,) = closure.edges_into("picture", 7)
+    assert edge.evidence == (
+        "Its stone floor pattern must agree with <Picture 7> for continuity.")
+    assert edge.anchor is True

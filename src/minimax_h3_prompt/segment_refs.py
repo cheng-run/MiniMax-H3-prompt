@@ -7,7 +7,12 @@
 （ADR 0017：9 是每段默认值仍然合理，作为全局容量才是错的）。
 
 本模块是那一步的纯函数层：不读盘、不调模型、不打印——输入本段 Shot 原文与整片定义，
-输出「保留哪些素材、图号怎么改」。三件事分开做，是因为它们各有各的失败形态：
+输出「保留哪些素材、图号怎么改」。下面四件事分开做，是因为它们各有各的失败形态：
+
+0. **闭包**（``compute_asset_closure``，#181）：沿定义块做传递闭包，并且是全仓**唯一**
+   的一份实现——规划期算段内素材预算与写段期算段内素材子集都调它。两份实现迟早会对
+   同一段给出两个答案，后果是段词与挂图不同源、而且不报错。它同时交回**每条边的
+   来源**（被哪条定义、哪句话拉进来，是否命中一致性锚句式），锚的降级判据才有据可查。
 
 1. **子集**（``compute_segment_scope``）：从本段 Shot 原文收集 ``<Subject N>`` /
    ``<Picture N>``，再沿定义做**闭包**——Subject 的定义里常常引用它的来源图
@@ -154,6 +159,186 @@ def _labels_in(text: str) -> tuple[set[int], set[int]]:
             {int(m.group(1)) for m in _PICTURE_RE.finditer(text)})
 
 
+# 句子边界：闭包溯源要交回「拉它进来的**那句**文本」，不是整条定义（一条定义可以是
+# 好几个句子，锚句式只看它自己那句才判得准）。中文标点与换行都算边界。
+_SENTENCE_END_RE = re.compile(r"[.!?。！？\n]")
+
+
+def _sentence_at(text: str, index: int) -> str:
+    """``text[index]`` 落在的那一句（含句末标点，首尾去空白）。
+
+    认不出边界时退化成整段：溯源少一点精度可以接受，**指错句子**不行——所以宁可
+    把范围放大到整条定义，也不猜。
+    """
+    start = 0
+    for match in _SENTENCE_END_RE.finditer(text, 0, index):
+        start = match.end()
+    end_match = _SENTENCE_END_RE.search(text, index)
+    end = end_match.end() if end_match else len(text)
+    return text[start:end].strip()
+
+
+# 一致性锚句式（父 spec #180 用户故事 9）：白名单式判据——默认算出镜，只有定义原文
+# 明写「与…一致」才算锚。全仓**只此一处**：降级逻辑（#183）也读它，两处各写一份，
+# 同一张图在规划期与写段期就会被分成两类，而且不报错。
+CONSISTENCY_ANCHOR_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"must\s+agree\s+with", re.IGNORECASE),
+    re.compile(r"consistent\s+with", re.IGNORECASE),
+    # 「与…一致」中间只许到句读为止：「与」和「一致」跨句时说的是两件事。
+    re.compile(r"与[^，。；！？,;!?\n]{1,40}一致"),
+)
+
+
+def is_consistency_anchor(text: str) -> bool:
+    """这句是不是一致性锚句式（只判传来的一句，不判整条定义）。"""
+    return any(pattern.search(str(text or ""))
+               for pattern in CONSISTENCY_ANCHOR_PATTERNS)
+
+
+@dataclass(frozen=True)
+class ClosureEdge:
+    """一条「因为某条定义点了它，所以它进入本段」的溯源边（#181）。
+
+    ``via`` 是触发它的**已保留节点**，``definition`` 是行文里点了它的**那条定义**：
+    正向闭包里两者相同（Subject 1 的定义点了 Picture 2）；反向拉取时不同（图没有
+    独立定义行，是 Subject 3 的定义点了这张图，才把 Subject 3 拉进来）。将来要问
+    「这张图为什么会挂在只拍室内的一段里」，靠的就是这两个字段加上 ``evidence``。
+    """
+
+    target: tuple[str, int]
+    via: tuple[str, int]
+    definition: tuple[str, int]
+    evidence: str
+    anchor: bool
+
+
+@dataclass(frozen=True)
+class AssetClosure:
+    """沿定义块做传递闭包的结果：保留的图号、Subject 号，以及每条边的来源。"""
+
+    pictures: tuple[int, ...]
+    subjects: tuple[int, ...]
+    edges: tuple[ClosureEdge, ...] = ()
+
+    def edges_into(self, kind: str, number: int) -> tuple[ClosureEdge, ...]:
+        """指向某个节点的全部边（查「它为什么进来」用，按记录顺序）。"""
+        target = (kind, int(number))
+        return tuple(edge for edge in self.edges if edge.target == target)
+
+
+def _citations(entry: str) -> list[tuple[str, int, str]]:
+    """一条定义点了谁：``[(kind, number, 它所在的那句), ...]``，按出现位置排序。
+
+    按位置排序而不是先 Subject 后 Picture，是为了让溯源边的顺序与原文一致——两条
+    边来自同一句话时，读起来才是「先读到哪张就记哪张」。
+    """
+    hits: list[tuple[int, str, int]] = []
+    for kind, pattern in (("subject", _SUBJECT_RE), ("picture", _PICTURE_RE)):
+        for match in pattern.finditer(entry):
+            hits.append((match.start(), kind, int(match.group(1))))
+    hits.sort()
+    return [(kind, number, _sentence_at(entry, at)) for at, kind, number in hits]
+
+
+def compute_asset_closure(
+    *,
+    seed_subjects: Iterable[int] = (),
+    seed_pictures: Iterable[int] = (),
+    subject_definitions: str = "",
+    registry: Iterable[Sequence] = (),
+) -> AssetClosure:
+    """沿 ``subject_definitions`` 做传递闭包（#181：规划期与写段期共用的唯一实现）。
+
+    纯函数：不读盘、不认识路线。输入只有种子（本段点名的 Subject/Picture 号）、
+    全片定义块与素材登记表，输出保留的号与**每条边的来源**——被哪条定义拉进来、
+    拉它进来的那句文本、是否命中一致性锚句式。
+
+    三条既有规则原样保留（``compute_segment_scope`` 的外部行为全靠它们）：
+
+    1. **有独立定义行的 Picture 不反向拉引用它的 Subject**：它自己把图讲清楚了，
+       反向拉取会把「全片空间系统」这类大 Subject 拖进只拍一间的段（2026-10-22 实测）。
+    2. **没有独立定义行的 Picture 反向拉引用它的 Subject**：官方写法就是「图只作为
+       来源内联在 Subject 定义里」，这时不反向拉，段内标签会悬空。
+    3. **种子为空时保留全部登记图与全部 Subject**：分不清本段用什么时宁可超限报错，
+       也不静默让段内无参照。
+
+    锚句式**只做分类标记、不做降级**（降级是 #183）：本函数不改变任何调用方的可观察
+    行为，只把判据的依据（边）交出来。
+    """
+    entries = {(kind, number): text
+               for kind, number, text in parse_definition_entries(subject_definitions)
+               if kind}
+    subject_entries = [(number, text) for (kind, number), text in entries.items()
+                       if kind == "subject"]
+    seeds = ([("subject", int(n)) for n in seed_subjects]
+             + [("picture", int(n)) for n in seed_pictures])
+    if not seeds:
+        # 无从判定本段素材：保留全部登记图与全部 Subject。只留图不留 Subject 会让
+        # 段内定义块半缺——正文引用的实体没有定义，比多喂几张图坏得多。
+        seeds = [("picture", int(item[0])) for item in registry]
+        seeds += [("subject", number) for kind, number in entries if kind == "subject"]
+
+    kept_subjects: set[int] = set()
+    kept_pictures: set[int] = set()
+    edges: list[ClosureEdge] = []
+    seen: set[tuple[str, int]] = set()
+    pending = list(seeds)
+    while pending:
+        key = pending.pop()
+        if key in seen:
+            continue
+        seen.add(key)
+        kind, number = key
+        if kind == "subject":
+            kept_subjects.add(number)
+        else:
+            kept_pictures.add(number)
+        entry = entries.get(key)
+        if not entry:
+            if kind == "picture":
+                # 反向：图没有独立定义行（官方写法：只作为 Subject 的来源内联），
+                # 就以这张图为来源的 Subject 定义也要保留——不拉，段内标签会悬空。
+                # 有独立定义行的图**不**走这一支（见 ``compute_segment_scope`` 的注释：
+                # 无条件反向拉取会把「全片空间系统」拖进只拍一间的段）。
+                for subject_number, subject_text in subject_entries:
+                    target = ("subject", subject_number)
+                    cited = re.search(rf"<Picture\s+{number}>", subject_text)
+                    if not cited:
+                        continue
+                    evidence = _sentence_at(subject_text, cited.start())
+                    # 已经进来的 Subject 也要记边：将来问「这张图为什么被降级」时，
+                    # 少一条边就等于少一条解释（kept 集合本来就与是否记账无关）。
+                    edges.append(ClosureEdge(
+                        target=target, via=key, definition=target,
+                        evidence=evidence,
+                        anchor=is_consistency_anchor(evidence)))
+                    if target not in seen:
+                        pending.append(target)
+            continue
+        for target_kind, target_number, evidence in _citations(entry):
+            target = (target_kind, target_number)
+            if target == key:
+                # 定义行行首的标签是它自己的名字，不是一条引用。留着会让溯源表里
+                # 每个节点都多一条「自己拉自己」，查「为什么进来」时反而被淹没。
+                continue
+            edges.append(ClosureEdge(target=target, via=key, definition=key,
+                                    evidence=evidence,
+                                    anchor=is_consistency_anchor(evidence)))
+            if target not in seen:
+                pending.append(target)
+
+    # 同一条边可能被同一句话点两次（``<Picture 1> … <Picture 1>``）：留一份就够，
+    # 重复只会在溯源表里制造噪声。保持首次出现的顺序。
+    unique_edges: list[ClosureEdge] = []
+    for edge in edges:
+        if edge not in unique_edges:
+            unique_edges.append(edge)
+
+    return AssetClosure(pictures=tuple(sorted(kept_pictures)),
+                        subjects=tuple(sorted(kept_subjects)),
+                        edges=tuple(unique_edges))
+
+
 def _mentioned_names(shot_text: str, registry: Sequence[tuple[int, str, str]]
                      ) -> tuple[set[int], set[str]]:
     """Shot 原文里出现的**语义名** → (图号集合, 命中的名字集合)。
@@ -199,6 +384,9 @@ def compute_segment_scope(
        Picture 定义里**反向**被哪些 Subject 引用。闭包必须做，是因为官方写法就是
        「只作为来源的图内联在 Subject 定义里」（ref-en.txt:37）。
 
+    第 3 条本身不由这里实现：本函数只负责收种子（1、2）与判上限，闭包调
+    ``compute_asset_closure``（#181 的唯一实现，规划期的素材预算也调它）。
+
     分不清（Shot 原文既没有标签也没有语义名）时**保留全部**登记图：静默让段内无
     参照比超限报错坏得多，而超限会在这里点名报错，用户还能改。
 
@@ -208,8 +396,6 @@ def compute_segment_scope(
 
     超过 ``refs_per_segment`` 抛 ``SegmentAssetOverflowError``（点名超限素材）。
     """
-    kept_subjects: set[int] = set()
-    kept_pictures: set[int] = set()
     entries = {(kind, number): text for kind, number, text in parse_definition_entries(
         subject_definitions) if kind}
     subject_entries = [(number, text) for (kind, number), text in entries.items()
@@ -220,56 +406,16 @@ def compute_segment_scope(
     for number, text in subject_entries:
         if any(name in text for name in mentioned):
             seed_subjects.add(number)
-    if not seed_subjects and not seed_pictures:
-        # 无从判定本段素材：保留全部（超限照报，不静默饿死本段）。Subject 也一并保留
-        # ——只留图不留 Subject 会让段内定义块半缺，正文引用的实体没有定义。
-        seed_pictures = {picture for picture, _name, _desc in registry}
-        seed_subjects = {number for (kind, number) in entries if kind == "subject"}
 
-    pending: list[tuple[str, int]] = [("subject", n) for n in seed_subjects]
-    pending += [("picture", n) for n in seed_pictures]
-    seen: set[tuple[str, int]] = set()
-    while pending:
-        key = pending.pop()
-        if key in seen:
-            continue
-        seen.add(key)
-        kind, number = key
-        if kind == "subject":
-            kept_subjects.add(number)
-            entry = entries.get(key)
-            if entry:
-                subjects, pictures = _labels_in(entry)
-                pending += [("subject", n) for n in subjects - kept_subjects]
-                pending += [("picture", n) for n in pictures - kept_pictures]
-            continue
-        kept_pictures.add(number)
-        entry = entries.get(key)
-        if entry:
-            # 独立 Picture 定义：它自己讲清楚了这张图，所以**不**反向拉「所有引用这张图
-            # 的 Subject」——2026-10-22 实测：段 1 只用到 <Picture 1>，反向闭包把「公寓
-            # 材质与空间系统」Subject 6 拉进来（它引用 Picture 1/4/9/10/24），于是夜间
-            # 卧室、卸妆棉、窗边起居区全被拖进本段，8 张里 4 张本段根本拍不到。
-            # 反向拉取只服务「图没有独立定义行、只内联在 Subject 里」的官方写法（见
-            # else 分支）。
-            subjects, pictures = _labels_in(entry)
-            pending += [("subject", n) for n in subjects - kept_subjects]
-            # Picture→Picture：定义里引用的其他参考图（如夜间卧室引用夜灯/充电器）
-            # 也是本段的依赖。漏掉它们，段内会留下 `<Picture N>` 悬空引用：模型看到
-            # 标签却拿不到图，校验器也会报 PICTURE_UNDEFINED。
-            pending += [("picture", n) for n in pictures - kept_pictures]
-        else:
-            # 反向：以这张图为来源的 Subject 定义也要保留（「只作为来源的图内联在
-            # Subject 定义里」是官方推荐写法，图自己没有独立定义行）。
-            for subject_number, subject_text in subject_entries:
-                if subject_number in kept_subjects:
-                    continue
-                if re.search(rf"<Picture\s+{number}>", subject_text):
-                    pending.append(("subject", subject_number))
+    # 闭包只此一份（#181）：规划期算预算（#186）与写段期算子集必须调它，否则同一段
+    # 会被算出两个答案，段词与挂图静默不同源。这里只负责「收种子」与「判上限」。
+    closure = compute_asset_closure(
+        seed_subjects=seed_subjects, seed_pictures=seed_pictures,
+        subject_definitions=subject_definitions, registry=registry)
 
     names = {picture: name for picture, name, _desc in registry}
     path_map = dict(paths or {})
-    ordered = sorted(kept_pictures)
+    ordered = closure.pictures
     # 每段张数取「配置值」与「官方单次上限」的较小者（issue #86 / spec #84 D4）：
     # `refs_per_segment` 是本机想喂几张，官方上限是一次请求收得下几张——后者更硬。
     # 不取小值的话，把配置调大就会让卡与工作流对不上，而请求照样非法。
@@ -294,7 +440,7 @@ def compute_segment_scope(
                          name=names.get(original, _MISSING_NAME),
                          path=path_map.get(original, ""))
             for new, original in enumerate(ordered, 1)),
-        subject_numbers=tuple(sorted(kept_subjects)),
+        subject_numbers=closure.subjects,
     )
 
 
@@ -503,10 +649,15 @@ def total_pictures(scope: SegmentAssetScope) -> int:
 
 
 __all__ = [
+    "AssetClosure",
+    "CONSISTENCY_ANCHOR_PATTERNS",
+    "ClosureEdge",
     "SegmentAsset",
     "SegmentAssetOverflowError",
     "SegmentAssetScope",
+    "compute_asset_closure",
     "compute_segment_scope",
+    "is_consistency_anchor",
     "parse_definition_entries",
     "render_segment_injection_card",
     "rewrite_picture_labels",
