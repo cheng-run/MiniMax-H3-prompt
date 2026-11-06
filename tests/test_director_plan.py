@@ -472,7 +472,8 @@ class _FakeLLM:
 
 def test_plan_director_segments_calls_llm_with_the_director_instruction():
     llm = _FakeLLM(_ADR_SHAPE)
-    plan = plan_director_segments("分镜表：[Shot 1] 雨夜便利店……", 30.0, llm, mode="r2v")
+    plan = plan_director_segments(
+        "分镜表：[Shot 1] 雨夜便利店……", 30.0, llm, mode="r2v").plan
 
     assert plan.total_frames == 719
     request = llm.last_request
@@ -491,7 +492,8 @@ def test_r2v_planning_request_states_reference_only_images():
     from minimax_h3_prompt.director.frames import SEGMENT_TYPES, give_images_for
 
     llm = _FakeLLM(_THIRTY_SECONDS)
-    plan = plan_director_segments("分镜表：[Shot 1] 雨夜便利店……", 30.0, llm, mode="r2v")
+    plan = plan_director_segments(
+        "分镜表：[Shot 1] 雨夜便利店……", 30.0, llm, mode="r2v").plan
 
     request = llm.last_request
     assert "参考素材" in request, "r2v 请求没写每段给什么"
@@ -560,8 +562,14 @@ def test_wizard_director_flow_writes_plan_and_prints_listing(tmp_path, monkeypat
     from minimax_h3_prompt.ui import wizard
 
     monkeypatch.setattr(model_factory, "build_chat_model", lambda: _FakeLLM(_ADR_SHAPE))
-    monkeypatch.setattr(prompts, "write_director_segments",
-                        lambda plan, **kwargs: [])
+
+    def _write_segments(plan, **kwargs):
+        # #186：预算必须在**写段之前**落盘，否则写段期拿不到本段上限。
+        assert (tmp_path / "GEN001" / "director" / "asset-budget.json").is_file(), \
+            "写段开始时还没有 asset-budget.json"
+        return []
+
+    monkeypatch.setattr(prompts, "write_director_segments", _write_segments)
     # r2v 的定义块（2026-11-01 起写段前的一次调用）同样打桩：本票接缝是**段表**，
     # 定义块的生成/校验由 ``tests/test_director_r2v_refdefs.py`` 覆盖。
     from minimax_h3_prompt.director import refdefs
@@ -591,9 +599,17 @@ def test_wizard_director_flow_writes_plan_and_prints_listing(tmp_path, monkeypat
     data = json.loads(plan_file.read_text(encoding="utf-8"))
     assert data["total_frames"] == 719
 
+    # #186：r2v 的素材预算与段表同目录、按段号对齐；这次回复没挑任何图，
+    # 每段都落一条空预算（不是缺键），清单上逐段点名「未挑图」。
+    budget_file = tmp_path / "GEN001" / "director" / "asset-budget.json"
+    budget_raw = json.loads(budget_file.read_text(encoding="utf-8"))
+    assert set(budget_raw) == {"1", "2", "3", "4", "5"}
+    assert all(entry == {"pictures": [], "anchors": []} for entry in budget_raw.values())
+
     out = capsys.readouterr().out
     assert "段1" in out and "开场" in out and "续接" in out
     assert "719" in out and "目标 720" in out and "差 1 帧" in out
+    assert out.count("未挑图") == 5, "清单要逐段点名「未挑图」"
     assert "导演包" in out
 
 

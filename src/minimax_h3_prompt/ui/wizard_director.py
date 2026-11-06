@@ -9,6 +9,36 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # 只为注解：运行时走函数内的延迟导入，别把规划栈拖进模块入口
+    from ..director.planning import AssetBudget, DirectorPlan
+
+
+def persist_director_plan(session_dir: str | Path, plan: DirectorPlan,
+                          budget: AssetBudget, *, mode: str,
+                          film_end: bool = False) -> tuple[Path, Path | None]:
+    """落段表与段内素材预算，并出站分段清单（#186 从 6000 行的 wizard 搬出来）。
+
+    预算必须在**写段之前**落盘：写段只能在本段预算里选图（#188）。两份文件同目录、
+    按段号对齐，``plan.json`` 不存预算复本（ADR 0029 决定 6）。非 r2v 没有参考素材，
+    不写预算文件，清单也不显示预算（否则每段都会凭空多一句「未挑图」）。
+
+    ``film_end`` 的说明与调用方同义：单段 fl2v 的尾帧就是这一段的终点画面（#147）。
+    """
+    from ..director.planning import (plan_path, render_plan_listing,
+                                     write_asset_budget, write_plan_json)
+
+    session_dir = Path(session_dir)
+    plan_file = write_plan_json(plan_path(session_dir), plan)
+    budget_file = write_asset_budget(session_dir, budget) if mode == "r2v" else None
+    print()
+    print(render_plan_listing(plan, film_end=film_end,
+                              budget=budget if mode == "r2v" else None))
+    print(f"\n段表已写入：{plan_file}")
+    if budget_file is not None:
+        print(f"素材预算已写入：{budget_file}")
+    return plan_file, budget_file
 
 
 def store_director_still(source: Path, generation_dir: Path, stem: str, *,

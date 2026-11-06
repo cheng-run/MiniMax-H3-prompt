@@ -13,7 +13,9 @@ base/ref 两处规划与成片覆盖判据共用（设计 §3.2「不碰 Segment
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Iterable, Mapping, Sequence
 
 from ..ref_capacity import MAX_PICTURES
 from .film_end import render_film_end_block
@@ -257,7 +259,9 @@ def parse_director_plan(text: str, total_s: float, *, mode: str) -> DirectorPlan
 def plan_director_segments(shot_table: str, total_s: float, llm, *, mode: str,
                            frame_context: str = "",
                            revision_context: str = "",
-                           film_end_description: str = "") -> DirectorPlan:
+                           film_end_description: str = "",
+                           registry: Iterable[Sequence] = (),
+                           subject_definitions: str = "") -> DirectorPlanningResult:
     """调 LLM 规划导演台分段（直调走看门狗，与 ``plan_segments`` 同形）。
 
     失败两分法沿用 ADR 0019：**调用失败**（卡住到上限 / 中流断流 / 其他异常）抛
@@ -267,6 +271,11 @@ def plan_director_segments(shot_table: str, total_s: float, llm, *, mode: str,
     ``frame_context`` / ``revision_context`` 与 ``plan_segments`` 同源同义：真实
     关键帧读图结果压过分镜表，用户累积修订按注入优先序进来。本函数**不依赖 state**，
     「规划层到底看到了什么」在调用点一眼可见（issue #26 的教训）。
+
+    ``registry`` / ``subject_definitions`` 只对 r2v 有意义（#186）：前者是素材台账
+    （编号 + 语义名），进请求的「素材清单」；后者是全片英文定义块，算预算闭包用。
+    返回值把**段表与预算分开**交回——``plan.json`` 形态不变、不存预算复本
+    （ADR 0029 决定 6），预算由调用方在写段之前单独落盘。
     """
     _require_mode(mode)
     total_s = _require_number(total_s, "视频总时长")
@@ -279,6 +288,8 @@ def plan_director_segments(shot_table: str, total_s: float, llm, *, mode: str,
         if frame_context.strip() else ""
     )
     revision_block = f"\n{revision_context}\n" if revision_context.strip() else ""
+    # 素材清单只进 r2v：别的模式没有参考素材，给一张空表只会让规划师编 `assets`。
+    material_block = render_material_list(registry) if mode == "r2v" else ""
     # 全片尾帧描述只对 fl2v 有意义：其它模式没有这张图（票面：只在 fl2v 且盘上真有
     # 图时注入）。调用方已按盘面判过，这里再按模式守一道，避免别处误传把终点约束
     # 塞进没有终点图的请求。
@@ -309,6 +320,7 @@ def plan_director_segments(shot_table: str, total_s: float, llm, *, mode: str,
         f"{load_instruction()}\n\n"
         f"视频总时长：{total_s:g} 秒（总帧 {total_frames} 帧，{FPS}fps）\n"
         f"{mode_scope}"
+        f"{material_block}"
         f"{frame_block}"
         f"{film_end_block}"
         f"{revision_block}"
@@ -320,7 +332,8 @@ def plan_director_segments(shot_table: str, total_s: float, llm, *, mode: str,
     result = run_direct_call(llm, request, role=DIRECTOR_PLANNER_ROLE)
     if not result.ok:
         raise RuntimeError(result.error)
-    return parse_director_plan(result.text, total_s, mode=mode)
+    return _planning_result(result.text, total_s, mode=mode, registry=registry,
+                            subject_definitions=subject_definitions)
 
 
 def write_plan_json(path: Path, plan: DirectorPlan) -> Path:
@@ -499,7 +512,8 @@ def render_give_images(segment: DirectorSegment, mode: str, *,
     return " + ".join(required + optional)
 
 
-def render_plan_listing(plan: DirectorPlan, *, film_end: bool = False) -> str:
+def render_plan_listing(plan: DirectorPlan, *, film_end: bool = False,
+                        budget: AssetBudget | None = None) -> str:
     """出站分段清单：逐段展示段号 / 类型 / 声明帧 / 导出帧 / 给图清单（AC3）。
 
     段类型误判会让该段**静默丢弃首帧**（spec 的风险清单），所以「类型 + 给图」必须
@@ -508,6 +522,10 @@ def render_plan_listing(plan: DirectorPlan, *, film_end: bool = False) -> str:
 
     ``film_end`` 由调用方从盘上现查（``pack.film_end_still``）：清单与写段请求必须
     说同一件事，否则单段 fl2v 会在清单里「只有首帧」、在请求里「首+尾」。
+
+    ``budget`` 是 r2v 的段内素材预算（#186）；给了就在每段后面写出本段挑了几张图。
+    规划师没挑图的段必须**点名**「未挑图」：空预算本身不是错误（票面 AC6），但用户
+    得看见它是空的，否则会以为这一段的参考图后面会自己出现。
     """
     lines = [
         f"导演台分段清单（{plan.mode} · 总 {plan.total_frames} 帧 / "
@@ -517,12 +535,312 @@ def render_plan_listing(plan: DirectorPlan, *, film_end: bool = False) -> str:
     for segment in plan.segments:
         images = render_give_images(segment, plan.mode,
                                     single_segment=single_segment, film_end=film_end)
-        lines.append(
+        line = (
             f"  段{segment.index} {segment_type_label(segment.type)}  "
             f"声明 {segment.declared_frames} / 导出 {segment.export_frames}  "
             f"给图：{images}")
+        if budget is not None:
+            line += f"  素材预算：{_budget_summary(budget.for_segment(segment.index))}"
+        lines.append(line)
     total = sum(segment.export_frames for segment in plan.segments)
     lines.append(f"  合计导出 {total} 帧 = 总帧 {plan.total_frames} 帧")
     for note in plan.notes:
         lines.append(f"  说明：{note}")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 段内素材预算（#186 / ADR 0029）：规划期给定「每段能用哪几张图」
+# ---------------------------------------------------------------------------
+# 与 ``plan.json`` 同目录、按**段号**对齐；``plan.json`` 不存复本——两份各存一份预算
+# 迟早会各推一套口径（ADR 0029 决定 1）。槽位数只看 ``pictures``；``anchors`` 不挂图、
+# 不计数，只留溯源。
+ASSET_BUDGET_FILENAME = "asset-budget.json"
+
+# 出镜图的角色标记。目前只有这一种取值：锚根本**不进** ``pictures``（它不占槽），
+# 所以 ``role`` 不是分类器，而是把「这条记录代表要画出来的图」写进产物供下游读取。
+BUDGET_ROLE_DEPICTED = "depicted"
+
+
+@dataclass(frozen=True)
+class BudgetPicture:
+    """本段要**挂上去**的一张参考图（占槽）。``number`` 是全局登记号。"""
+
+    number: int
+    name: str
+    role: str = BUDGET_ROLE_DEPICTED
+
+    def to_dict(self) -> dict:
+        return {"number": self.number, "name": self.name, "role": self.role}
+
+    @classmethod
+    def from_dict(cls, raw: object, where: str) -> "BudgetPicture":
+        if not isinstance(raw, dict):
+            raise ValueError(f"{where} 的条目必须是对象：{raw!r}")
+        number = raw.get("number")
+        # bool 是 int 的子类：True 会让编号校验静默放行，单独挡。
+        if isinstance(number, bool) or not isinstance(number, int):
+            raise ValueError(f"{where} 的 number 必须是整数：{number!r}")
+        return cls(number=number, name=str(raw.get("name", "")),
+                   role=str(raw.get("role", BUDGET_ROLE_DEPICTED)))
+
+
+@dataclass(frozen=True)
+class BudgetAnchor:
+    """本段**不占槽**的一致性锚：图不挂，只留语义名与「被哪条定义勾进来」。"""
+
+    number: int
+    name: str
+    via: str = ""
+
+    def to_dict(self) -> dict:
+        return {"number": self.number, "name": self.name, "via": self.via}
+
+    @classmethod
+    def from_dict(cls, raw: object, where: str) -> "BudgetAnchor":
+        if not isinstance(raw, dict):
+            raise ValueError(f"{where} 的条目必须是对象：{raw!r}")
+        number = raw.get("number")
+        if isinstance(number, bool) or not isinstance(number, int):
+            raise ValueError(f"{where} 的 number 必须是整数：{number!r}")
+        return cls(number=number, name=str(raw.get("name", "")),
+                   via=str(raw.get("via", "")))
+
+
+@dataclass(frozen=True)
+class SegmentBudget:
+    """一段的素材预算：出镜（占槽）与锚（不占槽）分开存。"""
+
+    pictures: tuple[BudgetPicture, ...] = ()
+    anchors: tuple[BudgetAnchor, ...] = ()
+
+    @property
+    def slot_count(self) -> int:
+        """占槽张数：**只看 pictures**，锚不参与（ADR 0029 决定 2）。"""
+        return len(self.pictures)
+
+    def to_dict(self) -> dict:
+        return {
+            "pictures": [item.to_dict() for item in self.pictures],
+            "anchors": [item.to_dict() for item in self.anchors],
+        }
+
+    @classmethod
+    def from_dict(cls, raw: object, where: str) -> "SegmentBudget":
+        if not isinstance(raw, dict):
+            raise ValueError(f"{where} 必须是对象：{raw!r}")
+        pictures = raw.get("pictures")
+        if not isinstance(pictures, list):
+            raise ValueError(f"{where} 缺 pictures 数组：{pictures!r}")
+        # 锚是 #183 才有的概念；缺键＝没有锚（不把旧产物读废）。
+        anchors = raw.get("anchors", [])
+        if not isinstance(anchors, list):
+            raise ValueError(f"{where} 的 anchors 必须是数组：{anchors!r}")
+        return cls(
+            pictures=tuple(BudgetPicture.from_dict(item, f"{where}.pictures")
+                           for item in pictures),
+            anchors=tuple(BudgetAnchor.from_dict(item, f"{where}.anchors")
+                          for item in anchors),
+        )
+
+
+@dataclass(frozen=True)
+class AssetBudget:
+    """整份段内素材预算：段号 → 该段预算。
+
+    空表有两层含义，调用方按 ``segments`` 是否为空区分：非 r2v（没有参考素材）与
+    旧会话（盘上没有预算文件）。r2v 规划出来的预算**每段都有一条**（没挑图就是空
+    ``pictures``），所以「有预算但没挑图」与「根本没有预算」不会混成一句话。
+    """
+
+    segments: Mapping[int, SegmentBudget] = field(default_factory=dict)
+
+    def for_segment(self, index: int) -> SegmentBudget | None:
+        return self.segments.get(int(index))
+
+    def to_dict(self) -> dict[str, dict]:
+        return {str(index): self.segments[index].to_dict()
+                for index in sorted(self.segments)}
+
+    @classmethod
+    def from_dict(cls, raw: object, where: str = ASSET_BUDGET_FILENAME) -> "AssetBudget":
+        if not isinstance(raw, dict):
+            raise ValueError(f"{where} 顶层必须是对象（段号 → 段预算）")
+        segments: dict[int, SegmentBudget] = {}
+        for key, value in raw.items():
+            try:
+                index = int(key)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{where} 的段号必须是整数：{key!r}") from exc
+            if index <= 0:
+                raise ValueError(f"{where} 的段号必须从 1 起：{key!r}")
+            segments[index] = SegmentBudget.from_dict(value, f"{where} 第 {index} 段")
+        return cls(segments=segments)
+
+
+@dataclass(frozen=True)
+class DirectorPlanningResult:
+    """规划入口的两个**独立**结果：段表与预算。
+
+    ``plan.json`` 形态不变、不存预算复本（ADR 0029 决定 6），所以预算不能挂在
+    ``DirectorPlan`` 上随计划序列化；调用方拿到后在**写段之前**单独落盘（#186）。
+    """
+
+    plan: DirectorPlan
+    budget: AssetBudget
+
+
+def asset_budget_path(session_dir: Path) -> Path:
+    """预算落点：``GENxxx/director/asset-budget.json``（与 ``plan.json`` 同目录）。"""
+    return Path(session_dir) / DIRECTOR_DIRNAME / ASSET_BUDGET_FILENAME
+
+
+def render_material_list(registry: Iterable[Sequence]) -> str:
+    """规划请求里的「素材清单」块（#186）：``<Picture N> = 语义名``，一行一张。
+
+    清单是规划师挑图的**唯一来源**：它只按编号写 ``assets``，中间不引入第二套标识
+    （语义名会改，编号不会）。台账为空时整块省略——给一张空表只会让它编号。
+    """
+    rows = [f"<Picture {int(item[0])}> = {item[1]}" for item in registry]
+    if not rows:
+        return ""
+    return (
+        "\n素材清单（编号 = 语义名；给每段挑图时在 assets 里写编号）：\n"
+        + "\n".join(rows)
+        + "\n"
+    )
+
+
+def build_asset_budget(plan: DirectorPlan, planner_assets: Mapping[int, Sequence[int]], *,
+                       subject_definitions: str,
+                       registry: Iterable[Sequence]) -> AssetBudget:
+    """规划师的 ``assets`` → 预算：闭包 → 锚降级 → 出镜/锚分栏（#186 / ADR 0029）。
+
+    闭包与降级都调 ``segment_refs`` 的**同一份**实现（#181/#183）：规划期算预算与
+    写段期算子集必须同源，否则同一张图会在两个阶段被分成两类，而且不报错。
+
+    **没挑图 = 空预算**，直接跳过闭包：``compute_asset_closure`` 的「种子为空→保留
+    全部登记图」是写段期「分不清用什么」的兜底，用在预算上会把整份台账塞进每段
+    （#180 事故形态：28 张全量）。这里是「规划师明确没挑」，语义不同。
+
+    未登记的图号是契约违规（规划师只能按清单挑）：预算里塞一个挂不上的号，写段与
+    打包会对不上，所以在**落盘之前**抛 ``ValueError`` 点名段号与图号。
+    """
+    # 延迟导入：``segment_refs`` 拉配置栈，纯段表用例不该为它付入口成本。
+    from ..segment_refs import compute_asset_closure, demote_consistency_anchors  # noqa: PLC0415
+
+    rows = [(int(item[0]), str(item[1])) for item in registry]
+    names = dict(rows)
+    segments: dict[int, SegmentBudget] = {}
+    for segment in plan.segments:
+        numbers = tuple(int(number) for number in planner_assets.get(segment.index, ()))
+        if not numbers:
+            segments[segment.index] = SegmentBudget()
+            continue
+        unknown = [number for number in numbers if number not in names]
+        if unknown:
+            listed = "、".join(str(number) for number in unknown)
+            known = "、".join(str(number) for number in sorted(names)) or "（空台账）"
+            raise ValueError(
+                f"第 {segment.index} 段的 assets 含未登记图号 {listed}："
+                f"素材清单里只有 {known}。规划师只能按清单挑图（编号逐字照抄，"
+                "不得自编）")
+        closure = compute_asset_closure(
+            seed_pictures=numbers, subject_definitions=subject_definitions,
+            registry=rows)
+        depicted, anchors = demote_consistency_anchors(closure, names=names)
+        segments[segment.index] = SegmentBudget(
+            pictures=tuple(BudgetPicture(number=number, name=names[number])
+                           for number in depicted),
+            anchors=tuple(BudgetAnchor(number=item.original_picture, name=item.name,
+                                       via=item.via)
+                          for item in anchors),
+        )
+    return AssetBudget(segments=segments)
+
+
+def _planner_assets(text: str) -> dict[int, tuple[int, ...]]:
+    """从**已通过** ``parse_director_plan`` 校验的同一份回复里取每段 ``assets``。
+
+    缺键＝规划师没挑图（票面 AC6：不崩溃、按空预算落盘），不当作契约违规；类型不对
+    则抛 ``ValueError``——把字符串或布尔当编号会让预算写出一个错误图号。
+    """
+    data = _extract_json(text)
+    raw_segments = data.get("segments") if isinstance(data, dict) else None
+    if not isinstance(raw_segments, list):
+        return {}
+    assets: dict[int, tuple[int, ...]] = {}
+    for position, item in enumerate(raw_segments, 1):
+        if not isinstance(item, dict):
+            continue
+        raw = item.get("assets")
+        if raw is None:
+            continue
+        if not isinstance(raw, list):
+            raise ValueError(
+                f"第 {position} 段的 assets 必须是 Picture 编号数组：{raw!r}")
+        numbers: list[int] = []
+        for value in raw:
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(
+                    f"第 {position} 段的 assets 里 {value!r} 不是整数编号："
+                    "只许写素材清单里的 <Picture N> 的 N")
+            numbers.append(value)
+        assets[position] = tuple(numbers)
+    return assets
+
+
+def _planning_result(text: str, total_s: float, *, mode: str,
+                     registry: Iterable[Sequence],
+                     subject_definitions: str) -> DirectorPlanningResult:
+    """解析回复并算预算；非 r2v 没有参考素材，交回空预算（不写文件）。"""
+    plan = parse_director_plan(text, total_s, mode=mode)
+    if mode != "r2v":
+        return DirectorPlanningResult(plan=plan, budget=AssetBudget())
+    return DirectorPlanningResult(
+        plan=plan,
+        budget=build_asset_budget(
+            plan, _planner_assets(text),
+            subject_definitions=subject_definitions, registry=registry))
+
+
+def write_asset_budget(session_dir: Path, budget: AssetBudget) -> Path | None:
+    """落 ``director/asset-budget.json``；没有段预算（非 r2v）时**不写文件**。
+
+    空表不写 ``{}``：``load_asset_budget`` 读不到文件＝旧会话（#189 要据此说「本会话
+    无预算，未做预算校验」），而 r2v 的「每段都没挑图」是**有**预算文件的空条目——
+    两种情形不能混成一句话。
+    """
+    if not budget.segments:
+        return None
+    path = asset_budget_path(session_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(budget.to_dict(), ensure_ascii=False, indent=2),
+                    encoding="utf-8")
+    return path
+
+
+def load_asset_budget(session_dir: Path) -> AssetBudget:
+    """读回预算；文件不在＝旧会话，返回空表（不是错误）。
+
+    形态坏了要响（``ValueError``）：续跑照坏预算挂图就是接错线，而预算还要被打包期
+    消费（#189）——静默读成空表会让「没预算」与「预算坏了」变成同一句话。
+    """
+    path = asset_budget_path(session_dir)
+    if not path.is_file():
+        return AssetBudget()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{ASSET_BUDGET_FILENAME} 读不出：{exc}") from exc
+    return AssetBudget.from_dict(raw)
+
+
+def _budget_summary(entry: SegmentBudget | None) -> str:
+    """清单里的一句话摘要：没挑图就点名，别让空预算看起来像「还没显示」。"""
+    if entry is None or not entry.pictures:
+        return "未挑图"
+    text = f"{entry.slot_count} 张"
+    if entry.anchors:
+        text += f"（锚 {len(entry.anchors)}）"
+    return text

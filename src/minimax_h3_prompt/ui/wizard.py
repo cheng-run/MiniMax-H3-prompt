@@ -735,13 +735,9 @@ def _run_director_flow(session: SessionState) -> int:
     **大声报错并返回非零**：残缺包被导入后插件只会「成功但少图」。
     """
     from ..director.pack import prepare_director_pack
-    from ..director.planning import (
-        plan_director_segments,
-        plan_path,
-        render_plan_listing,
-        write_plan_json,
-    )
+    from ..director.planning import plan_director_segments
     from ..director.prompts import render_written_listing, write_director_segments
+    from .wizard_director import persist_director_plan
     from ..model_factory import build_chat_model
     from ..segment_prompts import frame_anchor_context, render_revision_context
 
@@ -848,7 +844,7 @@ def _run_director_flow(session: SessionState) -> int:
         return 1
     try:
         with step_scope("正在按导演台帧网格规划分段"):
-            plan = plan_director_segments(
+            result = plan_director_segments(
                 shot_table, brief.duration, llm,
                 mode=brief.director_mode,
                 # 与 base 的规划调用同源：真实关键帧画面压过分镜表、修订按优先序注入。
@@ -856,6 +852,11 @@ def _run_director_flow(session: SessionState) -> int:
                 revision_context=render_revision_context(state),
                 # 让最后一段的边界与落定画面按图写，不只按标题写（#160）。
                 film_end_description=film_end_description,
+                # #186：r2v 规划师要看见素材台账才能按编号挑图；闭包用同一份英文定义块。
+                # 其它模式没有参考素材，两个参数保持空值（返回空预算、不落文件）。
+                registry=registry,
+                subject_definitions=(sections.subject_definitions
+                                     if sections is not None else ""),
             )
     except (RuntimeError, ValueError) as exc:
         # 两种病分开表达（ADR 0019）：调用失败（卡住/断流）与回复不合格都说明白；
@@ -865,12 +866,10 @@ def _run_director_flow(session: SessionState) -> int:
     finally:
         _drain_stdin()
 
-    plan_file = write_plan_json(plan_path(session.directory), plan)
-    # 全片尾帧在单段 fl2v 里就是这一段（开场）的终点画面：清单与写段请求都要按
-    # 「首+尾」说，不能一处说首尾、一处说只有首（#147）。
-    print()
-    print(render_plan_listing(plan, film_end=film_end))
-    print(f"\n段表已写入：{plan_file}")
+    plan = result.plan
+    # #186：段表与预算（r2v）一起落盘并出站清单；预算必须在**写段之前**就位。
+    persist_director_plan(session.directory, plan, result.budget,
+                          mode=brief.director_mode, film_end=film_end)
     _announce_film_end_still(session.directory, plan)
 
     try:
