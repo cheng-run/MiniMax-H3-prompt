@@ -910,6 +910,37 @@ def test_write_director_segment_retries_with_the_issue_list(monkeypatch):
     assert "DIRECTOR_SECTION_MISSING" in llm.requests[1], "重写请求必须点名上一版的问题"
 
 
+def test_written_issues_come_from_the_rewrite_loop(tmp_path, monkeypatch):
+    """出站清单的问题必须是重写循环交回的那一份，不许在调用处复跑校验器（#185）。
+
+    复跑恰恰算不出循环里合成的 ``DIRECTOR_PICTURE_OVERFLOW``（它只存在于循环内）。
+    这里用一个「同一段文本第二次被校验就换一套结论」的假校验器把两条来源分开：
+    ``WrittenSegment.issues`` 拿到 ``FROM_LOOP`` ＝ 用的是循环那份；拿到
+    ``FROM_RERUN`` ＝ 调用处又跑了一遍。
+    """
+    from minimax_h3_prompt.director import prompts
+    from minimax_h3_prompt.director.prompts import write_director_segments
+    from minimax_h3_prompt.tools.h3_validator import ValidationIssue
+
+    seen: dict[tuple[str, int], int] = {}
+
+    def fake_validate(text, mode, *, plan, segment):
+        key = (text, segment.index)
+        seen[key] = seen.get(key, 0) + 1
+        code = "FROM_LOOP" if seen[key] == 1 else "FROM_RERUN"
+        return [ValidationIssue("warning", code, "marker")]
+
+    monkeypatch.setattr(prompts, "validate_director_segment", fake_validate)
+
+    plan = _plan("t2v")
+    llm = _DialectLLM(lambda index: _single_reply(plan.segments[index - 1], plan))
+    written = write_director_segments(plan, llm=llm, session_dir=tmp_path)
+
+    for item in written:
+        assert {issue.code for issue in item.issues} == {"FROM_LOOP"}, \
+            f"第 {item.index} 段的出站问题被复跑的校验器覆盖了"
+
+
 def test_write_director_segments_fails_loudly_per_segment(tmp_path):
     """写段调用失败→点名段号抛错，不写半段假内容（ADR 0019：回退可以，静默不可以）。"""
     from minimax_h3_prompt.director.prompts import write_director_segments

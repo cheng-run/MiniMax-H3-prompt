@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 import re
 
+import pytest
+
 
 # 真实会话里 ``subject_defs`` 的形态：中文、markdown 标题、正文带反引号标签。
 _REAL_SHAPE_MATERIAL = """## subject_definitions
@@ -254,12 +256,13 @@ class _ScopeThenBreakLLM:
         )
 
 
-def test_record_is_reset_each_round_so_it_matches_the_returned_text(tmp_path):
-    """预算耗尽返回时，``record`` 必须属于**这一轮**文本，不能是上一轮剩下的。
+def test_failed_round_never_lands_a_stale_scope_sidecar(tmp_path):
+    """第 2 轮写坏：第 1 轮的子集记录不许落成段内素材表（#185 起该段硬失败）。
 
-    真实后果：第 1 轮裁出子集、复判失败；第 2 轮写坏。旧实现把第 1 轮的 record 一起
-    交出去，``write_director_segments`` 于是照它落 ``assets-in-segment.json``——
-    而盘上的段文件是第 2 轮的坏词。打包期按表挂图，段词与挂图从此不同源。
+    旧实现把「第 1 轮 record + 第 2 轮坏词」一起交回，调用方照 record 落
+    ``assets-in-segment.json``，而盘上的段文件是第 2 轮的坏词——打包期按表挂图，
+    段词与挂图从此不同源。现在内容不合格即拒绝：坏词只进 ``.rejected.md``，
+    正式段文件与素材表都不写，这个错配在结构上不再可能发生。
     """
     from minimax_h3_prompt.director import prompts
 
@@ -270,15 +273,102 @@ def test_record_is_reset_each_round_so_it_matches_the_returned_text(tmp_path):
     session_dir = tmp_path / "GEN001"
     llm = _ScopeThenBreakLLM()
 
-    written = prompts.write_director_segments(
-        plan, llm=llm, session_dir=session_dir,
-        sections=_SCOPE_SECTIONS, registry=_SCOPE_REGISTRY)
+    with pytest.raises(prompts.DirectorSegmentRejectedError) as excinfo:
+        prompts.write_director_segments(
+            plan, llm=llm, session_dir=session_dir,
+            sections=_SCOPE_SECTIONS, registry=_SCOPE_REGISTRY)
 
     assert len(llm.requests) == 2, "第 1 轮裁完复判失败，应触发一次重写"
-    assert "DIRECTOR_SECTION_MISSING" in {issue.code for issue in written[0].issues}, \
+    assert "DIRECTOR_SECTION_MISSING" in str(excinfo.value), \
         "第 2 轮写坏必须带着问题清单交回（不是 None 装死）"
     assert not prompts.segment_assets_path(session_dir).exists(), \
         "第 2 轮没有裁子集，不能把第 1 轮的子集记录落成段内素材表（段词与挂图会不同源）"
+    assert not prompts.segment_path(session_dir, 1).exists(), "坏段不许写正式文件名"
+    assert prompts.rejected_segment_path(session_dir, 1).is_file()
+
+
+class _SecondSegmentStaysOverBudgetLLM(_RefDefsLLM):
+    """第 1 段正常；第 2 段每一版都写 10 张——有界重写用尽仍超限的现场。"""
+
+    def invoke(self, request, config=None):
+        if "subject_definitions 与 retention_analysis" in request:
+            return super().invoke(request, config)
+        index = int(re.search(r"Segment (\d+)/", request).group(1))
+        if index != 2:
+            return super().invoke(request, config)
+        self.requests.append(request)
+        note = re.search(r"Segment \d+ of \d+, covering [^\n]+", request).group(0)
+        pictures = " ".join(f"<Picture {n}>" for n in range(1, 11))
+        return (
+            "subject_definitions:\nplaceholder\n\n"
+            "summary:\n[reference generation] the girl looks at the door.\n\n"
+            "retention_analysis:\nplaceholder\n\n"
+            "detailed_description:\n"
+            f"{note}\n"
+            f"[Shot 1] {pictures} appear in order as the camera pans the room.\n\n"
+            "overall_soundscape:\nA television murmurs.\n\n"
+            "non_diegetic_music:\nN/A"
+        )
+
+
+def test_segment_that_stays_over_budget_is_rejected_not_written(tmp_path):
+    """重试用尽仍超 9 张：中止写段、点名段号，坏段改存 ``.rejected.md``。
+
+    2026-11-06 事故形态：第 5 段真实引用了 10 张，坏段被照写成正式文件，用户直到
+    打包才收到一句不点名的话。现在超限在写段期就硬失败，且坏文本仍留档可对照。
+    """
+    from minimax_h3_prompt.director import prompts
+
+    plan = _plan()
+    session_dir = tmp_path / "GEN001"
+    sections = {"subject_definitions": "<Picture 1> is the girl.",
+                "retention_analysis": "<Picture 1>: fully_preserved."}
+    llm = _SecondSegmentStaysOverBudgetLLM()
+
+    with pytest.raises(prompts.DirectorSegmentRejectedError) as excinfo:
+        prompts.write_director_segments(
+            plan, llm=llm, session_dir=session_dir,
+            sections=sections, registry=_REGISTRY)
+
+    message = str(excinfo.value)
+    assert "第 2 段" in message, "失败信息必须点名段号（用户不必翻完整份日志）"
+    assert "DIRECTOR_PICTURE_OVERFLOW" in message, "失败信息必须点名真正的问题"
+    assert "调用失败" not in message, "内容不合格与调用失败是两种表达，不能混成一类"
+    assert not isinstance(excinfo.value, RuntimeError), \
+        "内容不合格不能用「调用失败」那一种异常类型表达"
+
+    director = session_dir / "director"
+    assert (director / "segment-01.md").is_file(), "已落盘的前几段必须保留"
+    assert not (director / "segment-02.md").exists(), "坏段不许占正式文件名"
+    rejected = director / "segment-02.rejected.md"
+    assert rejected.is_file(), "坏段要留档：同目录、同段号"
+    assert "<Picture 10>" in rejected.read_text(encoding="utf-8"), \
+        ".rejected.md 里必须是被拒的那一版原文（不是空壳）"
+
+
+def test_rejected_file_is_cleaned_only_for_the_segment_that_now_passes(tmp_path):
+    """该段重写成功后清掉它自己那份 ``.rejected.md``；别的段的一律不动。"""
+    from minimax_h3_prompt.director import prompts, refdefs
+
+    plan = _plan()
+    session_dir = tmp_path / "GEN001"
+    director = session_dir / "director"
+    director.mkdir(parents=True)
+    own = director / "segment-01.rejected.md"
+    unrelated = director / "segment-03.rejected.md"
+    own.write_text("旧的坏段 1", encoding="utf-8")
+    unrelated.write_text("别的段的坏段", encoding="utf-8")
+
+    llm = _RefDefsLLM()
+    sections = refdefs.build_ref_sections(
+        material=_REAL_SHAPE_MATERIAL, registry=_REGISTRY, llm=llm)
+    prompts.write_director_segments(
+        plan, llm=llm, session_dir=session_dir,
+        sections=sections, registry=_REGISTRY)
+
+    assert not own.exists(), "本段这次写成功了，它自己的坏段证据该清掉"
+    assert unrelated.is_file(), \
+        "不许整批清空：别的段的 .rejected.md 是用户排查到一半的证据"
 
 
 def test_request_states_the_per_segment_budget_up_front():

@@ -131,6 +131,18 @@ def segment_path(session_dir: str | Path, position: int) -> Path:
     return Path(session_dir) / DIRECTOR_DIRNAME / SEGMENT_FILENAME.format(position=position)
 
 
+# 坏段（内容不合格、有界重写用尽）的扩展名。名字**从 ``segment_path`` 派生**而不是再写
+# 一份 ``segment-{position:02d}.rejected.md`` 模板：两处各抄一份，段号位数或目录名一改
+# 就会分家——坏段写到别处、正式文件照写，用户失去左右对照的凭据（#185）。
+REJECTED_SEGMENT_SUFFIX = ".rejected.md"
+
+
+def rejected_segment_path(session_dir: str | Path, position: int) -> Path:
+    """第 ``position`` 段坏段的落点：与正式段文件**同目录、同段号**，多一段后缀。"""
+    path = segment_path(session_dir, position)
+    return path.with_name(path.stem + REJECTED_SEGMENT_SUFFIX)
+
+
 def load_instruction(mode: str) -> str:
     """取该模式的写作指令小节（一个文件按模式分节，加载口按模式取节）。
 
@@ -391,6 +403,26 @@ class WrittenSegment:
         return tuple(issue for issue in self.issues if issue.severity == "error")
 
 
+class DirectorSegmentRejectedError(ValueError):
+    """写段**内容不合格**（有界重写用尽）：坏段已存 ``.rejected.md``，正式段文件未写。
+
+    为什么单独一个类型而不是复用 ``RuntimeError``：调用失败（网关/卡住/空回复）是
+    「这次没写成」，重跑可能就好；内容不合格是「模型按清单改过仍未改好」，用户要去看
+    坏段或改素材。两类处置不同，混成一个类型就只能靠读消息分辨（ADR 0019 的同一条纪律）。
+    """
+
+    def __init__(self, index: int, issues: Sequence[ValidationIssue],
+                 rejected_path: Path) -> None:
+        self.index = index
+        self.issues = tuple(issues)
+        self.rejected_path = Path(rejected_path)
+        detail = "；".join(f"{issue.code}: {issue.message}" for issue in self.issues)
+        # 点名段号与问题：用户不该为了定位去翻完整份日志（#185）。
+        super().__init__(
+            f"第 {index} 段导演台写段内容不合格（有界重写用尽），正式段文件未写："
+            f"{detail}；坏段已存 {self.rejected_path}")
+
+
 def _require_r2v_sections(sections: dict[str, str] | None) -> dict[str, str]:
     """r2v 的定义块必须有：六节的第 1、3 段内容全部来自它，缺了就是半份空定义。"""
     if not sections:
@@ -598,9 +630,9 @@ def _write_validated(plan: DirectorPlan, segment: DirectorSegment, *, llm,
     改一处（比如重试探针或问题清单标题）另一处会静默漂——「同一语义只许一处口径」。
 
     返回 ``None`` ＝ **调用失败**（网关/卡住/空回复）；否则返回 ``(最后一版文本,
-    问题清单, 段内素材子集记录)``。预算用尽后仍不合格时也照常返回文本与清单：首写把
-    它交给出行清单逐段展示，改词由调用方「不落盘」地报给用户——两种处置不同，判定
-    内容却同源。
+    问题清单, 段内素材子集记录)``。预算用尽后仍不合格时也照常返回文本与清单：改词由
+    调用方「不落盘」地报给用户；批量写段据清单里的 error 硬失败，把坏文本存成
+    ``.rejected.md``（#185）——处置不同，判定内容却同源。
 
     ``registry`` 非空时（r2v）每轮合格后还要**裁段内素材子集**；超过每段上限会作为
     一条校验错误回灌给模型重写（2026-11-01 真实现场：第 2 段引用了 10 张、上限 9）。
@@ -902,6 +934,13 @@ def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
     都不许写成半段假内容——半份段表比没写更糟，用户会拿它去打包（#104）。
     已落盘的前几段保留：它们是真实产物，重跑会覆盖同名文件。
 
+    **内容不合格同样硬失败（#185）**：有界重写用尽仍有 error（含
+    ``DIRECTOR_PICTURE_OVERFLOW``）时不写正式段文件，坏文本改存同目录同段号的
+    ``segment-NN.rejected.md``，抛 ``DirectorSegmentRejectedError``。以前这里照写正式
+    文件，用户要等到打包才收到一句不点名的话——「超了也照写」让坏段看起来是成品。
+    每次写成功后只清掉**该段自己**那份 ``.rejected.md``，绝不整批清空：别的段的坏段
+    是用户排查到一半的证据，跑一次第 1 段就抹掉它们等于毁证。
+
     ``sections`` 是**全片**定义块（r2v 必填；来自 ``refdefs.build_ref_sections`` 的英文
     两节）。每段写完后按本段正文裁一份子集（≤9 张，插件单请求上限），裁完的子集落
     ``assets-in-segment.json`` 给打包期照挂——段词与挂图同源，不许各推一遍。
@@ -928,19 +967,34 @@ def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
             raise RuntimeError(
                 f"第 {segment.index} 段导演台写段调用失败（已落盘 {len(written)} 段）："
                 "失败原因见上一行警告；已落盘的段可续跑复用")
-        text, _issues, record = result
+        text, issues, record = result
+        errors = tuple(issue for issue in issues if issue.severity == "error")
+        if errors:
+            # 有界重写用尽仍不合格：坏文本**只**存成 ``.rejected.md``，正式段文件一个
+            # 字节都不写。继续往下走会让一份注定打不出包的段表看起来像成品（#185）。
+            rejected = rejected_segment_path(session_dir, segment.index)
+            rejected.parent.mkdir(parents=True, exist_ok=True)
+            rejected.write_text(text.rstrip() + "\n", encoding="utf-8")
+            raise DirectorSegmentRejectedError(segment.index, errors, rejected)
         if record is not None:
             scopes[segment.index] = record
         path = segment_path(session_dir, segment.index)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text.rstrip() + "\n", encoding="utf-8")
+        # 该段这次合格了：它自己那份坏段证据已无对照价值，清掉。只删这一段——别的段的
+        # ``.rejected.md`` 归它们自己，批量 glob 会把用户还没看的排查证据一起抹掉。
+        rejected = rejected_segment_path(session_dir, segment.index)
+        if rejected.is_file():
+            rejected.unlink()
         written.append(WrittenSegment(
             index=segment.index,
             type=segment.type,
             path=path,
             text=text,
-            issues=tuple(validate_director_segment(
-                text, plan.mode, plan=plan, segment=segment)),
+            # 用**重写循环交回的那一份**，不在调用处复跑校验器：复跑算不出循环里合成的
+            # ``DIRECTOR_PICTURE_OVERFLOW``（它只活在 ``_write_validated`` 里），
+            # 出站清单会漏报真正的问题（#185）。
+            issues=issues,
         ))
     write_segment_assets(session_dir, scopes)
     return written

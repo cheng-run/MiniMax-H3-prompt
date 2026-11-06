@@ -938,8 +938,17 @@ def test_bad_director_continuity_mode_is_refused_on_read(tmp_path):
 # 向导接线：问一次 → 写段之后打包 → 出站清单；失败大声报错并返回非零
 # ---------------------------------------------------------------------------
 
-_SINGLE_BODY = """[Shot 1] A woman in a grey trench coat steps under the awning.
+# 写段桩：t2v/i2v/fl2v 的官方三字段外壳。#185 起内容不合格会硬失败（坏段只进
+# ``.rejected.md``），所以打包流程的桩必须是**合格**段词，否则用例测的就不是打包了。
+_SINGLE_BODY = """integrated_multimodal_description:
+[Shot 1] A woman in a grey trench coat steps under the awning.
 [Shot 2] The camera pushes in until her face fills the frame.
+
+overall_soundscape:
+Rain drums on the metal awning; footsteps on wet concrete.
+
+non_diegetic_music:
+N/A
 """
 
 
