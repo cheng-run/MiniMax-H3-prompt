@@ -450,3 +450,178 @@ def test_scope_sidecar_records_per_segment_mounts(tmp_path):
         entries = data[index]
         assert [entry["new"] for entry in entries] == list(range(1, len(entries) + 1))
         assert {entry["name"] for entry in entries} <= {name for _n, name in _REGISTRY}
+
+
+# --- 重跑单段：合并写与摘要按子集重编号（票 #184） -------------------------
+#
+# 真实现场 ``output/sessions/一段电影的预告片-内容是在美国某个州突然-efeace45``：
+# 第 1 段只挂两张图（原号 8、18 → 段内 1、2），摘要却按整片编号写成 ``<Picture 18>`` /
+# ``<Picture 8>``——重建段文本时摘要、环境声、配乐三节取了未裁剪的原文，于是留在了
+# 段内不存在的号上。同一处整份覆盖写的表还会让「只重跑第 5 段」把其它 9 段一起抹掉。
+
+# 登记 5 张、本段只用其中 2 张：只有真子集才会走重建那一支（全量即为子集时不改一字）。
+_STALE_SUMMARY_REGISTRY = (
+    (5, "commuter car"),
+    (8, "neighborhood notice sign"),
+    (16, "distant skyline"),
+    (18, "suburban street corner"),
+    (22, "front yard and driveway"),
+)
+
+_STALE_SUMMARY_SECTIONS = {
+    "subject_definitions": (
+        "<Subject 8> is the fixed neighborhood notice sign; "
+        "its appearance comes from <Picture 8>.\n"
+        "<Picture 8> is the notice sign master.\n"
+        "<Subject 18> is the suburban street corner; "
+        "its establishing frame comes from <Picture 18>.\n"
+        "<Picture 18> is the street corner master.\n"
+        "<Picture 5> is the commuter car.\n"
+        "<Picture 16> is the distant skyline.\n"
+        "<Picture 22> is the front yard and driveway."),
+    "retention_analysis": (
+        "<Picture 8>: fully_preserved.\n"
+        "<Picture 18>: fully_preserved.\n"
+        "<Picture 5>: not_in_frame.\n"
+        "<Picture 16>: not_in_frame.\n"
+        "<Picture 22>: not_in_frame."),
+}
+
+
+class _StaleSummaryLLM:
+    """段正文只点名两张图，摘要/音轨两节却按整片编号写旧号（真实现场的形态）。"""
+
+    def invoke(self, request, config=None):
+        note = re.search(r"Segment \d+ of \d+, covering [^\n]+", request).group(0)
+        return (
+            "subject_definitions:\nplaceholder\n\n"
+            "summary:\n[reference generation] The opening wide shot anchors the corner of "
+            "<Picture 18> and the notice sign of <Picture 8>.\n\n"
+            "retention_analysis:\nplaceholder\n\n"
+            "detailed_description:\n"
+            f"{note}\n"
+            "[Shot 1] The suburban street corner (<Subject 18>) holds still while the fixed "
+            "notice sign (<Subject 8>) switches to its amber alert state.\n\n"
+            "overall_soundscape:\nA short electronic alert tone enters beside <Picture 8>.\n\n"
+            "non_diegetic_music:\nA low drone rises as <Picture 18> lights up."
+        )
+
+
+def _one_segment_plan():
+    from minimax_h3_prompt.director.frames import DirectorPlan
+
+    return DirectorPlan(mode="r2v", total_frames=107,
+                        segments=(_segment(1, "opening", 0, 107, 107, 107, False),))
+
+
+def _segment_block(raw: str, index: int) -> str:
+    """段内素材表原文里某一号的整块（含前导缩进与尾随逗号），用于逐字节比对。"""
+    match = re.search(rf'^  "{index}": \[.*?^  \],?\n', raw, flags=re.S | re.M)
+    assert match, f"段内素材表里没有第 {index} 段的记录"
+    return match.group(0)
+
+
+def test_summary_and_audio_sections_are_renumbered_with_the_subset(tmp_path):
+    """摘要/环境声/配乐按**裁剪后**的版本重建：段内不再残留整片旧号。
+
+    只改摘要不换号的话，用户拿到的段词是「正文只有 ``<Picture 1>``、``<Picture 2>``，
+    摘要却指着 ``<Picture 18>``」——一个段内根本不存在的号，模型与打包都无从对。
+    """
+    from minimax_h3_prompt.director import prompts
+    from minimax_h3_prompt.tools.h3_validator import split_ref_sections
+
+    plan = _one_segment_plan()
+    written = prompts.write_director_segments(
+        plan, llm=_StaleSummaryLLM(), session_dir=tmp_path / "GEN001",
+        sections=_STALE_SUMMARY_SECTIONS, registry=_STALE_SUMMARY_REGISTRY)
+
+    assert written[0].issues == (), f"段校验没过：{written[0].issues}"
+    text = written[0].path.read_text(encoding="utf-8")
+    parts = split_ref_sections(text)
+    assert parts["summary"].startswith("[reference generation]"), \
+        "换号不能把 summary 的任务类型前缀一起洗掉（那是整片共用的）"
+    assert "<Picture 2>" in parts["summary"] and "<Picture 1>" in parts["summary"], \
+        f"摘要必须换成本段新号（18→2、8→1）：{parts['summary']!r}"
+    assert "<Picture 18>" not in parts["summary"] and "<Picture 8>" not in parts["summary"], \
+        "摘要里不能残留整片旧号"
+    assert "<Picture 1>" in parts["overall_soundscape"], \
+        f"环境声也要按裁剪后的版本重建：{parts['overall_soundscape']!r}"
+    assert "<Picture 2>" in parts["non_diegetic_music"], \
+        f"配乐也要按裁剪后的版本重建：{parts['non_diegetic_music']!r}"
+    assert "<Picture 18>" not in text and "<Picture 8>" not in text, \
+        "整份段文件里都不该再出现整片旧号（定义块也换过号）"
+    data = json.loads((tmp_path / "GEN001" / "director" /
+                       "assets-in-segment.json").read_text(encoding="utf-8"))
+    assert [entry["original"] for entry in data["1"]] == [8, 18], \
+        "子集记录仍是原号：段内新号只活在段词里"
+
+
+def test_rerunning_one_segment_keeps_the_other_segments_byte_identical(tmp_path):
+    """只重跑第 5 段：其余 9 段的记录逐字节不变（整份覆盖写会静默抹掉它们）。"""
+    from minimax_h3_prompt.director import prompts
+
+    session_dir = tmp_path / "GEN001"
+    prompts.write_segment_assets(session_dir, {
+        index: [{"new": 1, "original": index, "name": f"图{index}"}]
+        for index in range(1, 11)
+    })
+    path = prompts.segment_assets_path(session_dir)
+    before = path.read_text(encoding="utf-8")
+
+    prompts.write_segment_assets(session_dir, {
+        5: [{"new": 1, "original": 8, "name": "告示牌"},
+            {"new": 2, "original": 18, "name": "街角环境"}],
+    })
+    after = path.read_text(encoding="utf-8")
+
+    for index in range(1, 11):
+        if index == 5:
+            continue
+        assert _segment_block(after, index) == _segment_block(before, index), \
+            f"重跑第 5 段不能动第 {index} 段的记录"
+    data = json.loads(after)
+    assert sorted(data, key=int) == [str(index) for index in range(1, 11)], \
+        "合并写不能把没在本轮出现的段号丢掉"
+    assert data["5"] == [{"new": 1, "original": 8, "name": "告示牌"},
+                         {"new": 2, "original": 18, "name": "街角环境"}], \
+        "本轮出现的段号要被这一轮的新记录替换"
+
+
+def test_writer_does_not_wipe_segments_it_did_not_write_this_run(tmp_path):
+    """写段入口也走合并：本轮只写段 1、2 时，盘上已有的 3–10 段必须原样保留。"""
+    from minimax_h3_prompt.director import prompts
+
+    session_dir = tmp_path / "GEN001"
+    prompts.write_segment_assets(session_dir, {
+        index: [{"new": 1, "original": index, "name": f"图{index}"}]
+        for index in range(3, 11)
+    })
+    path = prompts.segment_assets_path(session_dir)
+    before = path.read_text(encoding="utf-8")
+
+    prompts.write_director_segments(
+        _plan(), llm=_StaleSummaryLLM(), session_dir=session_dir,
+        sections=_STALE_SUMMARY_SECTIONS, registry=_STALE_SUMMARY_REGISTRY)
+
+    after = path.read_text(encoding="utf-8")
+    for index in range(3, 11):
+        assert _segment_block(after, index) == _segment_block(before, index), \
+            f"本轮没写第 {index} 段，记录不能变"
+    data = json.loads(after)
+    assert sorted(data, key=int) == [str(index) for index in range(1, 11)]
+    assert [entry["original"] for entry in data["1"]] == [8, 18]
+
+
+def test_empty_scope_table_leaves_an_existing_file_untouched(tmp_path):
+    """空表不写文件（别的模式没有素材子集）；盘上已有的表也不能被清空。"""
+    from minimax_h3_prompt.director import prompts
+
+    session_dir = tmp_path / "GEN001"
+    prompts.write_segment_assets(
+        session_dir, {1: [{"new": 1, "original": 3, "name": "图3"}]})
+    path = prompts.segment_assets_path(session_dir)
+    before = path.read_text(encoding="utf-8")
+
+    assert prompts.write_segment_assets(session_dir, {}) is None
+    assert path.read_text(encoding="utf-8") == before, \
+        "空表＝本次没有 r2v 段，不能把别的段留下的表清空"

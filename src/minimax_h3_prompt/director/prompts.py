@@ -840,15 +840,18 @@ def _scope_segment_text(text: str, *, plan: DirectorPlan, segment: DirectorSegme
     if detailed.startswith(note):
         # 组装器已注入的注记：重建时由 assemble_ref_segment 再加一次，先摘掉。
         detailed = detailed[len(note):].lstrip("\n")
-    task_type, summary_body = split_task_type(parts.get("summary", ""))
+    # 摘要与音轨两节也要取**裁剪后**的版本（票 #184）：它们本来就是段内视角的文本，
+    # 模型却按整片编号写（真实现场：第 1 段只挂 2 张，摘要却写 <Picture 18>）。
+    # 用未裁剪的 ``parts`` 重建，正文换了号、摘要还指着旧号，段内标签于是悬空。
+    task_type, summary_body = split_task_type(scoped.get("summary", ""))
     rebuilt = assemble_ref_segment(
         subject_definitions=scoped.get("subject_definitions", ""),
         retention_analysis=scoped.get("retention_analysis", ""),
         task_type=task_type or _REF_TASK_TYPE,
         summary_body=summary_body,
         detailed_body=detailed,
-        overall_soundscape=parts.get("overall_soundscape", ""),
-        non_diegetic_music=parts.get("non_diegetic_music", ""),
+        overall_soundscape=scoped.get("overall_soundscape", ""),
+        non_diegetic_music=scoped.get("non_diegetic_music", ""),
         annotations=note,
     )
     return rebuilt, record
@@ -856,12 +859,21 @@ def _scope_segment_text(text: str, *, plan: DirectorPlan, segment: DirectorSegme
 
 def write_segment_assets(session_dir: str | Path,
                          scopes: dict[int, list[dict]]) -> Path | None:
-    """段内素材表落盘；没有 r2v 段（空表）时**不写文件**（别的模式没有素材子集）。"""
+    """段内素材表**合并写**；没有 r2v 段（空表）时**不写文件**（别的模式没有素材子集）。
+
+    为什么先读盘再并（票 #184）：重跑单段时调用方只带本轮那一段的记录，整份覆盖写会把
+    其它段的子集一起抹掉，而且不报错——打包期就照空表挂图、或退回旧口径整份挂，
+    「修好一段、弄坏九段」。所以盘上已有的段原样保留，只有本轮出现的段号被替换；
+    条目仍由同一份 ``json.dumps`` 序列化，其它段逐字节不变。
+    """
     if not scopes:
         return None
     path = segment_assets_path(session_dir)
+    merged = load_segment_assets(session_dir)
+    for index, entries in scopes.items():
+        merged[int(index)] = list(entries)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {str(index): entries for index, entries in sorted(scopes.items())}
+    payload = {str(index): entries for index, entries in sorted(merged.items())}
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
 
