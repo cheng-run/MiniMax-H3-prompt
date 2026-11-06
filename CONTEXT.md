@@ -120,7 +120,7 @@
 |---|---|
 | 段表 / 段提示词 | `director/plan.json` / `director/segment-NN.md` |
 | 切镜段首帧词 / 尾帧变换词 | `director/firstframe-NN.md` / `director/tailframe-NN.md`（**按需**：轮到时才产，初始包里没有）；同名 `.meta.json` 记模型档、段号、`segment_prompt` / 起点图的 sha256（provenance，不进可复制正文） |
-| r2v 定义块 / 段内素材表 | `director/ref-sections.json` / `director/assets-in-segment.json` |
+| r2v 定义块 / 段内素材预算 / 段内素材子集 | `director/ref-sections.json` / `director/asset-budget.json` / `director/assets-in-segment.json`（预算与 `plan.json` 同目录、按段号对齐；前者是**写段输入**，后者是**写段产出**） |
 | 关键帧与全片尾帧 | `director/assets/NN/`、`director/assets/film-end.*` |
 | 初始导演包 | `director/initial.mmxpack.zip`（解包目录 `director/pack/`） |
 | 段产出账 | `segments/segment-ledger.jsonl`（`output` / `invalidate`） |
@@ -591,9 +591,13 @@ _Avoid_: 把裸 `timeline_data` JSON 当交付物（那是节点的隐藏字段�
 导演台 `r2v` 每段提示词是 ref 六节外壳，第 1、3 节（`subject_definitions` / `retention_analysis`）由组装器**逐字**取用。它的源不是阶段 1 的 `subject_defs`（那份是**中文 markdown 素材**，解析器只认行首裸标签、语言闸也要求英文），而是 `director/ref-sections.json` 里那份由 `director/refdefs.py` 生成的**英文两节**：一次生成（不是每段一次）、过 `validate_ref` 的四类判据（图号定义、登记图覆盖、英文），续跑与改词都从它读。
 _Avoid_: 拿 `subject_defs` 原样当第 1、3 节（2026-11-01 真实现场：`## subject_definitions` 解析为空字典，写段当场报「定义块缺失」）、每段重生成一次定义块（同一批素材会逐段漂出版本）
 
-**段内素材表（director segment assets）**:
-`director/assets-in-segment.json`：`r2v` 每段实际挂哪几张参考图（`new` 段内槽号 / `original` 全局登记号 / `name` 台账语义名）。插件上限是**每次请求**（＝每段）9 张图 + 3 视频 + 3 音频（`lib/ref_images.py` 的 `MAX_REFERENCE_IMAGES = 9`），全片素材可以多于 9 张，所以段词里的 `<Picture N>` 是**段内局部号**。写段时按本段正文现算子集并落这张表，打包照表挂图——两边同源，不各推一遍。
-_Avoid_: 把 9 张当全片素材上限（那是单段上限）、在打包期重算子集（写段与打包各算一次，段词与挂图会静默错位）、拿全局登记号当段内槽号（只有每段挂全量时才恰好相等）
+**段内素材预算（director segment asset budget）**:
+`director/asset-budget.json`：`r2v` 每段**在写段之前**能挂哪几张参考图，**规划期给定**，与 `director/plan.json` 同目录、按段号对齐（段号作键；`plan.json` 不存复本，两份靠段号对齐而不是靠内容复制）。每个段号下两栏：`pictures`（**占槽**，逐条 `number` 全局登记号 / `name` 台账语义名 / `role`）与 `anchors`（**不占槽**，只作溯源与改写依据，`via` 记「是哪个 Subject 的哪句话把它勾进来的」）。槽位数**只看 `pictures` 的长度**（≤9，容量口径见 ADR 0021）；`anchors` 不参与挂图与计数。它是**写段的输入**——写段实际挂的图只能是本段预算的子集；这条「输入 vs 产出」的时点差别就是它与**段内素材子集**两个词的分界。超限在规划期回灌规划师重挑，两次仍超则停下点名（不自动砍数、不自动拆段），见 ADR 0029。
+_Avoid_: 把它与「段内素材子集」混成一个词（前者在写段之前、后者在写段之后；「表里没有第 5 段」这类话混用两个时点就会指错文件）、把 `anchors` 算进 9 张上限（它们本来就不挂图，只降级成文字）、让 `plan.json` 存一份预算复本（两份会各推一套口径）
+
+**段内素材子集（director segment subset）**:
+`director/assets-in-segment.json`：`r2v` 每段**写段之后实际挂的**哪几张参考图（`new` 段内槽号 / `original` 全局登记号 / `name` 台账语义名），是**写段的产出**，与规划期的**段内素材预算**（写段的输入）对置。插件上限是**每次请求**（＝每段）9 张图 + 3 视频 + 3 音频（`lib/ref_images.py` 的 `MAX_REFERENCE_IMAGES = 9`），全片素材可以多于 9 张，所以段词里的 `<Picture N>` 是**段内局部号**。写段时按本段正文现算子集并落这张表，打包照表挂图——两边同源，不各推一遍。它必须是本段预算的子集：**少于**预算不阻断（只在出站清单说一句「本段预算 N、实用 M」），超出则打包期报错并点名段号。落盘用**合并写**（先读盘上已有的表再并入本轮的段），重跑单段不会抹掉其它段的记录。2026-11-06 前这个产物叫「段内素材表（director segment assets）」，代码注释与早于该日的文档里仍是旧名。
+_Avoid_: 把 9 张当全片素材上限（那是单段上限）、在打包期重算子集（写段与打包各算一次，段词与挂图会静默错位）、拿全局登记号当段内槽号（只有每段挂全量时才恰好相等）、整份覆盖写这张表（重跑单段会静默抹掉其它段）、把「子集少于预算」当错误（那是合法的，只提示）
 
 **初始包（initial pack）**:
 项目在开始执行**之前**生成的那份导演包：段规划、段提示词、段1 的首帧、参考素材一次装齐。它只打一次——之后的终点画面依赖上一段产出，打包时还不存在，所以在导演台 UI 里逐段挂。它与最终包的关系是**计划 vs 结论**。
