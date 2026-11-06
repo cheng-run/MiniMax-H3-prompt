@@ -1030,7 +1030,6 @@ def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
     budget = (load_asset_budget(Path(session_dir))
               if plan.mode == "r2v" else None)
     registry_rows = tuple(registry)
-    scopes: dict[int, list[dict]] = {}
     written: list[WrittenSegment] = []
     for segment in plan.segments:
         # 子集裁剪在**有界重写循环里**（``_write_validated``）：超过每段 9 张时把
@@ -1059,11 +1058,14 @@ def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
             rejected.parent.mkdir(parents=True, exist_ok=True)
             rejected.write_text(text.rstrip() + "\n", encoding="utf-8")
             raise DirectorSegmentRejectedError(segment.index, errors, rejected)
-        if record is not None:
-            scopes[segment.index] = record
         path = segment_path(session_dir, segment.index)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text.rstrip() + "\n", encoding="utf-8")
+        if record is not None:
+            # 每段写完就**合并落盘**（#190 复审）：攒到循环结束再整份写的话，第 K 段
+            # 硬失败会把 1..K-1 段已经写出的记录一起丢掉——段文件在、挂图表不在，
+            # 打包期照空表挂图，而且不报错。失败段走不到这里，所以失败段不留记录。
+            write_segment_assets(session_dir, {segment.index: record})
         # 该段这次合格了：它自己那份坏段证据已无对照价值，清掉。只删这一段——别的段的
         # ``.rejected.md`` 归它们自己，批量 glob 会把用户还没看的排查证据一起抹掉。
         rejected = rejected_segment_path(session_dir, segment.index)
@@ -1080,7 +1082,6 @@ def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
             issues=issues,
             used_pictures=len(record) if record is not None else None,
         ))
-    write_segment_assets(session_dir, scopes)
     return written
 
 

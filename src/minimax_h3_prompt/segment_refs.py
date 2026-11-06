@@ -56,7 +56,7 @@ class SegmentAssetOverflowError(ValueError):
     """本段用到的参考图超过 ``refs_per_segment``（issue #75 AC3）。
 
     单独立一个类型是为了让调用方能把它与「数据坏了」的 ValueError 分开处理：这条
-    是**设计边界**（本段素材太多，得拆段或精简），不是解析失败。
+    是**设计边界**（本段素材太多，得在段内取舍或精简），不是解析失败。
     """
 
 
@@ -77,7 +77,7 @@ class SegmentAnchor:
     它存在的意义是「和某张图保持一致」，不是「要被画出来」——所以不挂图、不进接线槽、
     不参与 ``refs_per_segment`` 计数。``via`` 记「是哪个 Subject 的哪句话把它勾进来的」
     （锚链上第一个锚边的定义，真实形态里是 ``Subject 21`` 而不是它直属的 ``Subject 22``），
-    ``evidence`` 是那句话的原文：将来问「这张为什么被降级」时，两者就是答案。
+    ``evidence`` 是该从句的原文：将来问「这张为什么被降级」时，两者就是答案。
     """
 
     original_picture: int
@@ -210,21 +210,23 @@ def _labels_in(text: str) -> tuple[set[int], set[int]]:
             {int(m.group(1)) for m in _PICTURE_RE.finditer(text)})
 
 
-# 句子边界：闭包溯源要交回「拉它进来的**那句**文本」，不是整条定义（一条定义可以是
-# 好几个句子，锚句式只看它自己那句才判得准）。中文标点与换行都算边界。
-_SENTENCE_END_RE = re.compile(r"[.!?。！？\n]")
+# 从句边界（#190 复审）：锚判据按**citation 所在从句**判，不按整句。同一句里
+# ``comes from <Picture 1>, and the wall must agree with <Picture 2>`` 两条边说的是
+# 两件事；按整句判会把身份来源图也带上锚标记，降级时把它一起撤掉（#183 AC3）。
+# 中英文逗号/分号、句末标点与换行都算边界。
+_CLAUSE_END_RE = re.compile(r"[,;，；.!?。！？\n]")
 
 
-def _sentence_at(text: str, index: int) -> str:
-    """``text[index]`` 落在的那一句（含句末标点，首尾去空白）。
+def _clause_at(text: str, index: int) -> str:
+    """``text[index]`` 落在的那个从句（含末尾标点，首尾去空白）。
 
     认不出边界时退化成整段：溯源少一点精度可以接受，**指错句子**不行——所以宁可
     把范围放大到整条定义，也不猜。
     """
     start = 0
-    for match in _SENTENCE_END_RE.finditer(text, 0, index):
+    for match in _CLAUSE_END_RE.finditer(text, 0, index):
         start = match.end()
-    end_match = _SENTENCE_END_RE.search(text, index)
+    end_match = _CLAUSE_END_RE.search(text, index)
     end = end_match.end() if end_match else len(text)
     return text[start:end].strip()
 
@@ -282,17 +284,17 @@ class AssetClosure:
 
 
 def _citations(entry: str) -> list[tuple[str, int, str]]:
-    """一条定义点了谁：``[(kind, number, 它所在的那句), ...]``，按出现位置排序。
+    """一条定义点了谁：``[(kind, number, 它所在的那个从句), ...]``，按出现位置排序。
 
     按位置排序而不是先 Subject 后 Picture，是为了让溯源边的顺序与原文一致——两条
-    边来自同一句话时，读起来才是「先读到哪张就记哪张」。
+    边来自同一从句时，读起来才是「先读到哪张就记哪张」。
     """
     hits: list[tuple[int, str, int]] = []
     for kind, pattern in (("subject", _SUBJECT_RE), ("picture", _PICTURE_RE)):
         for match in pattern.finditer(entry):
             hits.append((match.start(), kind, int(match.group(1))))
     hits.sort()
-    return [(kind, number, _sentence_at(entry, at)) for at, kind, number in hits]
+    return [(kind, number, _clause_at(entry, at)) for at, kind, number in hits]
 
 
 def compute_asset_closure(
@@ -306,7 +308,7 @@ def compute_asset_closure(
 
     纯函数：不读盘、不认识路线。输入只有种子（本段点名的 Subject/Picture 号）、
     全片定义块与素材登记表，输出保留的号与**每条边的来源**——被哪条定义拉进来、
-    拉它进来的那句文本、是否命中一致性锚句式。
+    拉它进来的那个从句、是否命中一致性锚句式。
 
     三条既有规则原样保留（``compute_segment_scope`` 的外部行为全靠它们）：
 
@@ -361,7 +363,7 @@ def compute_asset_closure(
                     cited = re.search(rf"<Picture\s+{number}>", subject_text)
                     if not cited:
                         continue
-                    evidence = _sentence_at(subject_text, cited.start())
+                    evidence = _clause_at(subject_text, cited.start())
                     # 已经进来的 Subject 也要记边：将来问「这张图为什么被降级」时，
                     # 少一条边就等于少一条解释（kept 集合本来就与是否记账无关）。
                     edges.append(ClosureEdge(
@@ -569,7 +571,8 @@ def compute_segment_scope(
         raise SegmentAssetOverflowError(
             f"{where}本段要用 {len(ordered)} 张参考图，超过{limit_text}"
             f"（{listed}）。超限不截断——截掉的图在正文里就没有接线可落。"
-            "出路：把这一段再拆短（素材随镜头走），或精简本段真正需要的素材。")
+            "出路：把其中一张改为纯文字描述，或精简本段真正需要的素材；"
+            "预算可在规划期调整。")
     return SegmentAssetScope(
         pictures=tuple(
             SegmentAsset(new_picture=new, original_picture=original,
@@ -654,8 +657,12 @@ def scope_ref_sections(sections: Mapping[str, str],
         for kind, number, entry in parse_definition_entries(text):
             if kind and (kind, number) not in kept:
                 continue
-            line = rewrite_picture_labels(entry, picture_map)
-            kept_lines.append(rewrite_anchor_picture_labels(line, anchor_numbers))
+            # 顺序不能反（#190 复审）：锚替换按**原号**判，必须先于重编号。先重编号
+            # 的话，出镜图的新号会撞上某个锚的原号（出镜 3、4→新 1、2 而锚原号 2 时，
+            # 原号 4 刚变成 <Picture 2> 就被当成锚误换成无标签描述）。
+            line = rewrite_anchor_picture_labels(entry, anchor_numbers)
+            line = rewrite_picture_labels(line, picture_map)
+            kept_lines.append(line)
         return "\n".join(kept_lines)
 
     if "subject_definitions" in out:
@@ -664,7 +671,9 @@ def scope_ref_sections(sections: Mapping[str, str],
         out["retention_analysis"] = _filter_block(out["retention_analysis"])
     for name in ("summary", "overall_soundscape", "non_diegetic_music"):
         if name in out:
-            out[name] = rewrite_picture_labels(out[name], picture_map)
+            # 三节同样先锚替换（原号）再重编号：理由与 _filter_block 相同。
+            body = rewrite_anchor_picture_labels(out[name], anchor_numbers)
+            out[name] = rewrite_picture_labels(body, picture_map)
     return out
 
 

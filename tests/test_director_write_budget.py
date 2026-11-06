@@ -60,11 +60,20 @@ def _plan():
                         segments=(_segment(1, "opening", 0, 107, 107, 107, False),))
 
 
-def _reply(plan, pictures):
+def _two_segment_plan():
+    from minimax_h3_prompt.director.frames import DirectorPlan
+
+    return DirectorPlan(mode="r2v", total_frames=214,
+                        segments=(_segment(1, "opening", 0, 107, 107, 107, False),
+                                  _segment(2, "continue", 107, 214, 107, 107, True)))
+
+
+def _reply(plan, pictures, segment=None):
     """写段回复：正文点名给定的原号（正例会引用预算内的图）。"""
     from minimax_h3_prompt.director.prompts import render_timeline_note
 
-    note = render_timeline_note(plan, plan.segments[0])
+    segment = segment or plan.segments[0]
+    note = render_timeline_note(plan, segment)
     refs = ", ".join(f"<Picture {number}>" for number in pictures)
     return (
         "subject_definitions:\nplaceholder\n\n"
@@ -268,3 +277,29 @@ def test_budget_line_counts_the_mounted_subset_not_the_pictures_in_the_text(tmp_
     assert written[0].used_pictures == 1
     assert json.loads(prompts.segment_assets_path(session_dir).read_text(
         encoding="utf-8"))["1"][0]["name"] == "父亲_综合角色板"
+
+
+def test_segments_written_before_a_hard_failure_keep_their_subset_record(tmp_path):
+    """第 2 段硬失败时，第 1 段的子集记录必须已经落盘（#190 复审）。
+
+    改动前子集表只在循环结束后整份写：第 K 段失败会连前面已写段的记录一起丢，
+    打包期照空表挂图——「段词在、挂图不在」，而且不报错。
+    """
+    from minimax_h3_prompt.director import prompts
+
+    plan = _two_segment_plan()
+    session_dir = tmp_path / "GEN001"
+    # 第 2 段的预算只给父亲；它的回复照旧点了前院/车道 → 子集超预算，重试用尽即硬失败。
+    write_asset_budget(session_dir, AssetBudget(segments={2: _BUDGET}))
+
+    with pytest.raises(prompts.DirectorSegmentRejectedError):
+        prompts.write_director_segments(
+            plan,
+            llm=_ScriptedLLM([_reply(plan, (1,)), _reply(plan, (1, 22), segment=plan.segments[1])]),
+            session_dir=session_dir, sections=_DEFINITIONS, registry=_REGISTRY)
+
+    assets = prompts.load_segment_assets(session_dir)
+    assert set(assets) == {1}, "已写出的第 1 段子集必须先落盘；失败的第 2 段不许留记录"
+    assert [row["original"] for row in assets[1]] == [1]
+    assert prompts.segment_path(session_dir, 1).is_file()
+    assert not prompts.segment_path(session_dir, 2).exists()

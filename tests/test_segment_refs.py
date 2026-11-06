@@ -123,6 +123,26 @@ def test_scope_refuses_more_pictures_than_the_limit_and_names_them():
     assert "素材10" in message and "素材1" in message
 
 
+def test_overflow_message_offers_only_actions_inside_the_segment():
+    """超限出路不许再提「拆短/拆段」（#180 决定 7 / #190 复审）。
+
+    规划之后段没有拆段自由，写着「把这一段再拆短」等于给一条用户执行不了的出路。
+    消息仍要点名超限素材（否则用户不知道该删哪张）。
+    """
+    ten = " ".join(f"<Picture {n}>" for n in range(1, 11))
+    defs = "".join(f"<Subject {n}> is item in <Picture {n}>.\n" for n in range(1, 11))
+    with pytest.raises(SegmentAssetOverflowError) as excinfo:
+        compute_segment_scope(
+            shot_text=ten, subject_definitions=defs,
+            registry=[(n, f"素材{n}", "") for n in range(1, 11)], refs_per_segment=9)
+
+    message = str(excinfo.value)
+    assert "素材10" in message and "素材1" in message, "超限必须点名素材"
+    assert "拆短" not in message and "拆段" not in message, \
+        "规划之后没有拆段自由，出路必须是段内可执行的"
+    assert "纯文字描述" in message, "要给出可执行出路"
+
+
 def test_rewrite_picture_labels_maps_every_occurrence():
     """重编号是全文改写：同一原号出现几次都要换成同一个新号。"""
     text = "<Picture 7> is the anchor; later <Picture 7> is cited again."
@@ -334,16 +354,39 @@ def test_picture_definition_references_to_other_pictures_are_followed():
 # ---------------------------------------------------------------------------
 
 def test_closure_reports_the_definition_that_pulled_each_node_in():
-    """种子 Subject 2 → 它的定义点了 <Picture 2>：边要指出「哪条定义、哪句话」。"""
+    """种子 Subject 2 → 它的定义点了 <Picture 2>：边要指出「哪条定义、哪个从句」。
+
+    ``evidence`` 取的是 citation 所在的**从句**（#190 复审）：整句交出去时，同一句里
+    后半段的 ``must agree with`` 会把这条 ``comes from`` 边带成锚。
+    """
     closure = compute_asset_closure(
         seed_subjects=[2], subject_definitions=_DEFS, registry=_REGISTRY)
     assert closure.pictures == (2,)
     assert closure.subjects == (2,)
     (edge,) = closure.edges_into("picture", 2)
     assert edge.definition == ("subject", 2)
-    assert edge.evidence == (
-        "<Subject 2> is the brass key in <Picture 2>, with an old green patina.")
+    assert edge.evidence == "<Subject 2> is the brass key in <Picture 2>,"
     assert edge.anchor is False
+
+
+def test_anchor_sentence_is_judged_per_clause_so_comes_from_keeps_its_picture():
+    """同一句里的两条边各按**自己的从句**判锚（#183 AC3 / #190 复审）。
+
+    整句判的话，``comes from <Picture 1>`` 被后半句的 ``must agree with`` 带成锚，
+    身份来源图就被降级——人物/场景相似度悄悄变差，而且不报错。
+    """
+    defs = (
+        "<Subject 1> is the lamp whose appearance comes from <Picture 1>, "
+        "and the wall must agree with <Picture 2>.\n"
+    )
+    registry = [(1, "台灯", ""), (2, "墙面", "")]
+    scope = compute_segment_scope(
+        shot_text="[Shot 1] <Subject 1> glows on the desk.",
+        subject_definitions=defs, registry=registry, refs_per_segment=9)
+
+    assert [a.original_picture for a in scope.pictures] == [1], \
+        "comes from 是身份来源边，不是一致性锚——这张必须出镜"
+    assert [(a.original_picture, a.via) for a in scope.anchors] == [(2, "Subject 1")]
 
 
 def test_closure_marks_edges_that_hit_the_consistency_anchor_sentence():
@@ -521,6 +564,41 @@ def test_scoped_sections_keep_the_anchor_subject_definition_without_the_label():
     assert "<Picture 9>" in defs, "其余条目照常保留并重编号"
     retention = scoped["retention_analysis"]
     assert "<Subject 22>" in retention and "<Picture 22>" not in retention
+
+
+def test_anchor_rewrite_runs_before_renumbering_so_new_numbers_cannot_collide():
+    """锚按**原号**替换、重编号在之后（#190 复审）：反过来会让出镜图的新号撞上锚原号。
+
+    出镜原号 3、4 → 新号 1、2；锚原号 2。先重编号的话，原号 4 变成 ``<Picture 2>``，
+    紧接着「按原号 2 替换锚」就会把这张**出镜**图误换成无标签描述——段词与挂图不同源。
+    """
+    defs = (
+        "<Subject 1> is 素材3 in <Picture 3>.\n"
+        "<Subject 2> is 素材4 in <Picture 4>.\n"
+        "<Subject 3> is the wall that must agree with <Picture 2>.\n"
+    )
+    registry = [(2, "锚图", ""), (3, "素材3", ""), (4, "素材4", "")]
+    scope = compute_segment_scope(
+        shot_text="[Shot 1] <Subject 1>, <Subject 2> and <Subject 3> stand together.",
+        subject_definitions=defs, registry=registry, refs_per_segment=9)
+    assert scope.picture_map == {3: 1, 4: 2}
+    assert [a.original_picture for a in scope.anchors] == [2]
+
+    scoped = scope_ref_sections({
+        "subject_definitions": defs,
+        "summary": ("[reference generation] <Picture 4> holds the beat while "
+                    "<Picture 2> anchors the wall."),
+    }, scope)
+
+    defs_out = scoped["subject_definitions"]
+    assert "<Subject 2> is 素材4 in <Picture 2>." in defs_out, \
+        "原号 4 重编号成新号 2 后被当成锚原号 2 误替换了"
+    assert ("<Subject 3> is the wall that must agree with "
+            "the corresponding reference material.") in defs_out, \
+        "指向被撤锚图的原号 2 标签应当改写成不含标签的描述"
+    assert scoped["summary"] == (
+        "[reference generation] <Picture 2> holds the beat while "
+        "the corresponding reference material anchors the wall.")
 
 
 def test_anchor_records_survive_the_plan_json_roundtrip():
