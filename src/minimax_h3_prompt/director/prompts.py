@@ -72,7 +72,15 @@ from .frames import FPS, PLAN_MODES, DirectorPlan, DirectorSegment
 # 会各自漂的路径口径（某一条改了，另一条只会表现为「读不到/缺文件」）。
 # ``render_give_images`` 同理（#130）：写段请求里的「本段给图」与段表清单、出站清单
 # **同一份**渲染，不在这里另写一份 token 翻译。
-from .planning import DIRECTOR_DIRNAME, render_give_images
+# 预算的三个类型也从规划层取（#188）：写段只在**规划期定下的那份预算**里选图，两处
+# 各定义一套预算形态就会各推一套口径。
+from .planning import (
+    DIRECTOR_DIRNAME,
+    AssetBudget,
+    SegmentBudget,
+    load_asset_budget,
+    render_give_images,
+)
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 _INSTRUCTION_NAME = "segment_writer_director.md"
@@ -397,6 +405,9 @@ class WrittenSegment:
     path: Path
     text: str
     issues: tuple[ValidationIssue, ...]
+    # 实际挂上去的参考图张数（子集记录的长度，锚不算）。出站清单的「实用 M」取它，
+    # 不在展示层另数一遍正文标签——那会把定义块里的标签也算进去（#188）。
+    used_pictures: int | None = None
 
     @property
     def errors(self) -> tuple[ValidationIssue, ...]:
@@ -499,11 +510,58 @@ def _film_end_block(plan: DirectorPlan, segment: DirectorSegment, *,
     return render_film_end_block(str(description)) if is_endpoint else ""
 
 
+def _segment_budget_block(entry: SegmentBudget | None) -> str:
+    """写段请求里的预算清单（#188）：``<Picture 原号> = 语义名`` 是可执行的那一份。
+
+    抽象约束（「别超过 9 张」）模型只会当成一句提醒；把本段预算的**原号与语义名**逐行
+    写出来，它才有据可依地在第一版就按剧情取舍。清单外的图会被退回重写，不是截断。
+    """
+    if entry is None:
+        return ""
+    if not entry.pictures:
+        # 规划师没挑图（#186 的「空预算」）：写段照常按正文需要挑，仍受每段 9 张上限。
+        # 这条"不约束"是刻意的——空预算在这里若当"零张"用，写段永远满足不了
+        # （``compute_segment_scope`` 认不出素材时会保留全部登记图）。
+        return (
+            "\n【本段参考图预算清单】规划师没有为本段挑图（预算为空）："
+            f"按正文实际需要引用定义块里的素材，仍受每段 {MAX_PICTURES} 张上限。\n")
+    rows = "\n".join(f"<Picture {item.number}> = {item.name}"
+                     for item in entry.pictures)
+    return (
+        "\n【本段参考图预算清单】本段预算清单就是上限：最多挂 "
+        f"{entry.slot_count} 张，且只能从下列清单里挑（清单外的图一律不许挂）：\n"
+        f"{rows}\n"
+        "挂了清单外的图会被退回重写；少用几张不算错——预算只是上限，不是承诺。\n")
+
+
+def _budget_violation(segment: DirectorSegment, record: Sequence[dict] | None,
+                      entry: SegmentBudget | None) -> ValidationIssue | None:
+    """本段实际子集 vs 预算：多出来的图做成一条校验错误（点名段号与图）。
+
+    空预算**不**触发（见 ``_segment_budget_block`` 的理由）；``entry is None`` 是旧会话
+    没有预算文件，同样不校验（打包期由 #189 出声）。少于预算是合法的：预算本是上限。
+    """
+    if entry is None or not entry.pictures or record is None:
+        return None
+    permitted = {item.number for item in entry.pictures}
+    extra = [row for row in record if int(row["original"]) not in permitted]
+    if not extra:
+        return None
+    listed = "、".join(f"<Picture {row['original']}> {row['name']}" for row in extra)
+    allowed = "、".join(f"<Picture {item.number}> {item.name}" for item in entry.pictures)
+    return ValidationIssue(
+        "error", "DIRECTOR_BUDGET_VIOLATION",
+        f"第 {segment.index} 段挂了本段预算之外的参考图：{listed}。"
+        f"本段预算清单就是上限（{allowed}）；请删掉预算外的引用，"
+        "或把它们改写成不含 <Picture N> 的纯文字描述。")
+
+
 def build_segment_request(plan: DirectorPlan, segment: DirectorSegment, *,
                           shot_table: str = "",
                           sections: dict[str, str] | None = None,
                           film_end: bool = False,
-                          film_end_description: str = "") -> str:
+                          film_end_description: str = "",
+                          budget: SegmentBudget | None = None) -> str:
     """组装一段的写段请求（入参全部显式，不依赖 state——issue #26 的教训）。
 
     请求里的时间轴提示句取 ``render_timeline_note`` 与 ``absolutize_timestamps`` 的
@@ -524,12 +582,15 @@ def build_segment_request(plan: DirectorPlan, segment: DirectorSegment, *,
     # 参考图预算是**事前的**，不是事后截断：插件按「每次请求」限 9 张（
     # ``lib/ref_images.py`` 的 MAX_REFERENCE_IMAGES），而本段最终只会挂正文真正点名
     # 的那几张。先写清上限，模型才在第一版就按剧情取舍，而不是写满 13 张再被退回。
-    budget = (
+    budget_note = (
         f"\n【本段参考图预算】最多引用 {MAX_PICTURES} 张不同的 <Picture N>："
         "插件每次生成（＝每段）只接受这么多个参考图槽位。请按本段剧情挑选**真正出场**"
         f"的素材，超过 {MAX_PICTURES} 张会被退回重写（不会替你删图——删掉的图在正文里"
         "没有接线可落）。\n"
         if plan.mode == "r2v" else "")
+    # 本段的具体预算清单（#188）：上限之外还要说清**哪几张**能挂，否则规划期挑的图
+    # 与写段实际挂的图会各推一套（#180 事故的第 10 张就是这么来的）。
+    budget_list = _segment_budget_block(budget) if plan.mode == "r2v" else ""
     # 本段输出外壳（#130）：r2v 的六节外壳已在指令里写死，这里只服务三条单段模式。
     # 为什么要在**请求里**再写一遍：指令是通用纪律，请求是这一次的执行前提；三字段是
     # 逐字要照抄的格式，写在离产出最近的地方，模型才不会按自己习惯改字段名。
@@ -573,7 +634,8 @@ def build_segment_request(plan: DirectorPlan, segment: DirectorSegment, *,
         f"{_future_events_block(plan, segment)}"
         f"\n{shots_block}\n"
         f"{definitions}"
-        f"{budget}"
+        f"{budget_note}"
+        f"{budget_list}"
         "\n## 词表切片（ADR 0007 落笔侧同一份）\n"
         "下面词表**前言**里「edge-stability 句」「分段首行的锚定行」两处指针是首尾帧链的"
         "义务，导演台分段**一概不用**（见上方禁止清单）。词表正文的选词与写法照用。\n\n"
@@ -620,7 +682,8 @@ def normalize_segment_output(text: str, *, plan: DirectorPlan,
 def _write_validated(plan: DirectorPlan, segment: DirectorSegment, *, llm,
                      base_request: str, sections: dict[str, str] | None,
                      role: str, label: str,
-                     registry: Sequence[Sequence] = ()
+                     registry: Sequence[Sequence] = (),
+                     budget: SegmentBudget | None = None
                      ) -> tuple[str, tuple[ValidationIssue, ...], list[dict] | None] | None:
     """首写与改词共用的循环：请求 → 直调 → 归一 → 校验 → 有界重写。
 
@@ -637,6 +700,7 @@ def _write_validated(plan: DirectorPlan, segment: DirectorSegment, *, llm,
     ``registry`` 非空时（r2v）每轮合格后还要**裁段内素材子集**；超过每段上限会作为
     一条校验错误回灌给模型重写（2026-11-01 真实现场：第 2 段引用了 10 张、上限 9）。
     「超了就地截断」不是选项——截掉的图在正文里没有接线可落，写出来的段会指着空气。
+    给了 ``budget`` 时再核一道「子集 ⊆ 预算」（#188）：预算外的图同样回灌重写。
     """
     request = base_request
     # 初值给空串而不是 None：循环体保证第一次走到 return 前一定赋过值，
@@ -675,7 +739,13 @@ def _write_validated(plan: DirectorPlan, segment: DirectorSegment, *, llm,
                     text, plan.mode, plan=plan, segment=segment))
                 errors = [issue for issue in issues if issue.severity == "error"]
                 if not errors:
-                    return text, issues, record
+                    # 子集 ⊆ 预算才算合格（#188）：超出去的图是规划与写段各推一套的
+                    # 证据，回灌给模型自己取舍——用尽后由调用方的硬失败接住。
+                    violation = _budget_violation(segment, record, budget)
+                    if violation is None:
+                        return text, issues, record
+                    issues = (*issues, violation)
+                    errors = [violation]
         elif not errors:
             return text, issues, record
         if attempt + 1 == MAX_SEGMENT_ATTEMPTS:
@@ -944,11 +1014,21 @@ def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
     ``sections`` 是**全片**定义块（r2v 必填；来自 ``refdefs.build_ref_sections`` 的英文
     两节）。每段写完后按本段正文裁一份子集（≤9 张，插件单请求上限），裁完的子集落
     ``assets-in-segment.json`` 给打包期照挂——段词与挂图同源，不许各推一遍。
+
+    段内素材预算（``asset-budget.json``，#186 落盘）从盘上读：本段实际子集必须是它的
+    **子集**（#188）。超出的图作为一条 ``DIRECTOR_BUDGET_VIOLATION`` 进有界重写，用尽
+    仍超就走下面的硬失败。少于预算不阻断；没有预算文件的旧会话不校验（#189 出声）。
     """
     _require_write_mode(plan.mode)
     global_sections = _sections_mapping(sections)
     if plan.mode == "r2v":
         global_sections = _require_r2v_sections(global_sections)
+    # 预算从**盘上**读：向导在写段之前已由 #186 落盘（``persist_director_plan``）。
+    # 文件不在＝旧会话，空表 → 每段 ``for_segment`` 返回 None → 不做预算校验（#189
+    # 在打包期出声）；r2v 的「规划师没挑图」是**有**条目的空 ``pictures``，两种情形
+    # 不混（见 ``_budget_violation``）。
+    budget = (load_asset_budget(Path(session_dir))
+              if plan.mode == "r2v" else None)
     registry_rows = tuple(registry)
     scopes: dict[int, list[dict]] = {}
     written: list[WrittenSegment] = []
@@ -956,13 +1036,16 @@ def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
         # 子集裁剪在**有界重写循环里**（``_write_validated``）：超过每段 9 张时把
         # 「本段素材太多」当一条校验错误回灌，让模型自己取舍后再写一遍；三次仍超才停。
         # 裁完再校验、再落盘——盘上的段文件与段内素材表永远同一版。
+        segment_budget = budget.for_segment(segment.index) if budget is not None else None
         base_request = build_segment_request(
             plan, segment, shot_table=shot_table, sections=global_sections,
-            film_end=film_end, film_end_description=film_end_description)
+            film_end=film_end, film_end_description=film_end_description,
+            budget=segment_budget)
         result = _write_validated(
             plan, segment, llm=llm, base_request=base_request,
             sections=global_sections, role=DIRECTOR_SEGMENT_WRITER_ROLE,
-            label=f"第 {segment.index} 段导演台写段", registry=registry_rows)
+            label=f"第 {segment.index} 段导演台写段", registry=registry_rows,
+            budget=segment_budget)
         if result is None:
             raise RuntimeError(
                 f"第 {segment.index} 段导演台写段调用失败（已落盘 {len(written)} 段）："
@@ -995,6 +1078,7 @@ def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
             # ``DIRECTOR_PICTURE_OVERFLOW``（它只活在 ``_write_validated`` 里），
             # 出站清单会漏报真正的问题（#185）。
             issues=issues,
+            used_pictures=len(record) if record is not None else None,
         ))
     write_segment_assets(session_dir, scopes)
     return written
@@ -1002,11 +1086,16 @@ def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
 
 def render_written_listing(plan: DirectorPlan,
                            written: list[WrittenSegment],
-                           *, film_end: bool = False) -> str:
+                           *, film_end: bool = False,
+                           budget: AssetBudget | None = None) -> str:
     """出站：逐段给段号 / 类型 / 给图清单 / 文件路径，并把校验问题贴在该段下面。
 
     给图清单与段类型必须并排展示：段类型误判会让该段**静默丢掉首帧**（spec 风险清单），
     用户只有在这一步能核。
+
+    ``budget`` 给了就在该段下补一句「本段预算 N、实用 M」（#188）：预算估多了、写段
+    用少了不阻断，但用户得看得见差在哪。M 取写段期的子集记录（``used_pictures``），
+    没有记录（非 r2v / 无素材登记）时不显示，不另造一份「数正文标签」的口径。
     """
     from .planning import render_give_images  # 与段表清单同一份渲染（不再抄一份 token 翻译）
 
@@ -1018,6 +1107,9 @@ def render_written_listing(plan: DirectorPlan,
                                     single_segment=single_segment, film_end=film_end)
         lines.append(
             f"  段{item.index} {segment.label}  给图：{images}  → {item.path}")
+        entry = budget.for_segment(item.index) if budget is not None else None
+        if entry is not None and item.used_pictures is not None:
+            lines.append(f"    本段预算 {entry.slot_count}、实用 {item.used_pictures}")
         for issue in item.errors:
             lines.append(f"     [{issue.severity.upper()}] {issue.code}: {issue.message}")
     return "\n".join(lines)

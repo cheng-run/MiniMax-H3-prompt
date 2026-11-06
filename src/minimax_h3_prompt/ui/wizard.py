@@ -895,7 +895,8 @@ def _run_director_flow(session: SessionState) -> int:
         _drain_stdin()
 
     print()
-    print(render_written_listing(plan, written, film_end=film_end))
+    print(render_written_listing(plan, written, film_end=film_end,
+                                 budget=result.budget))
 
     # 打包：段表 + 段提示词 + 素材 → ``director/pack/`` 与 ``director/initial.mmxpack.zip``。
     # 画布取**本次成片画幅**（#161／ADR 0028），参考图尺寸仍取配置（设计 §4）。

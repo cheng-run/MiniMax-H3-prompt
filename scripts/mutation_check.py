@@ -360,6 +360,14 @@ MUTATIONS: tuple[Mutation, ...] = (
          "tests/test_director_asset_budget.py::test_two_requeues_then_a_named_error_names_the_segment_and_every_picture"),
         "规划期预算守卫恒假＝11 张的段直接落盘，打包期才发现（#180 事故原样复现，#187）",
     ),
+    Mutation(
+        "write_budget_guard_off",
+        "src/minimax_h3_prompt/director/prompts.py",
+        "    permitted = {item.number for item in entry.pictures}\n",
+        "    return None\n",
+        ("tests/test_director_write_budget.py::test_budget_violation_is_written_back_and_the_fix_lands",),
+        "写段预算守卫恒不触发＝预算外的图照写，规划与写段各推一套（#180 事故形态，#188）",
+    ),
 )
 
 
