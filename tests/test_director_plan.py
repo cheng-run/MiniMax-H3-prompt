@@ -838,3 +838,21 @@ def test_planner_instruction_example_numbers_segments_from_one():
     text = load_instruction()
     assert '"index": 0' not in text
     assert '"index": 1' in text and '"index": 2' in text
+
+
+def test_planner_end_hook_is_the_cut_frame_not_a_held_pose():
+    """#193：`end_hook` 是本段**切开的那一帧**（谁在哪、正在做什么），不要求摆好姿势站定。
+
+    规划期写成「终点构图／造型」，写段期再怎么改也只是在追一个静态目标；同一件事
+    两个口径会互相抵消（本仓「同一契约两处口径」已咬过两次）。「动作完整」「收尾落定」
+    两条拆分原则也必须跟着改口，否则同一份提示词自己跟自己说反话。
+    """
+    from minimax_h3_prompt.director.planning import load_instruction
+
+    text = load_instruction()
+    assert "姿态" not in text, "规划师提示词还留着「姿态」——摆造型暗示"
+    assert "切开的那一帧" in text, "end_hook 没被写成「切开的那一帧」"
+    assert "正在做什么" in text, "end_hook 没要求写动作在途中"
+
+    for old in ("不允许切在动作进行中", "不要停在一半的动作上", "可以停住"):
+        assert old not in text, f"规划师提示词还留着「{old}」——与切点语义相反"

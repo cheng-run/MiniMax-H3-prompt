@@ -395,6 +395,16 @@ def validate_director_segment(text: str, mode: str, *, plan: DirectorPlan,
 # 会各自漂的词表。取不到会报错（真源小节标题改了就是改了），不静默少送。
 _WRITING_WORDLIST = film_language.video_slice("segment_writer")
 
+# #193：``end_hook`` 是本段的**切点**，不是要停下来的终点画面。请求行与词表免责块
+# 引用同一句；两处各抄一份就会各自漂（「同一契约两处口径」在本仓已咬过两次）。
+END_HOOK_CUT_CLAUSE = (
+    "正文写到这个状态的那一刻就结束——不要为它停顿、不要补一个落定的收尾镜头、"
+    "不要把它摆成静止构图"
+)
+# 四个角色共用的词表里与导演台相左的那条指针。免责块点名它、测试也按它派生：
+# 真源那句措辞一改，这里会一起报红，而不是静默指着一句不存在的话。
+SETTLED_FRAME_POINTER = "没给尾帧时改成落本段的落定画面"
+
 
 @dataclass(frozen=True)
 class WrittenSegment:
@@ -639,7 +649,7 @@ def build_segment_request(plan: DirectorPlan, segment: DirectorSegment, *,
         f"{_fl2v_start_block(plan, segment)}"
         f"{film_end_block}"
         f"本段剧情概述（中文，仅供你理解剧情，不得写进提示词）：{segment.summary}\n"
-        f"本段落定的画面（end_hook，正文必须落到这个状态）：{segment.end_hook}\n"
+        f"本段最后一帧的画面（end_hook）：{segment.end_hook}。{END_HOOK_CUT_CLAUSE}\n"
         f"{shell}"
         f"{_future_events_block(plan, segment)}"
         f"\n{shots_block}\n"
@@ -648,7 +658,11 @@ def build_segment_request(plan: DirectorPlan, segment: DirectorSegment, *,
         f"{budget_list}"
         "\n## 词表切片（ADR 0007 落笔侧同一份）\n"
         "下面词表**前言**里「edge-stability 句」「分段首行的锚定行」两处指针是首尾帧链的"
-        "义务，导演台分段**一概不用**（见上方禁止清单）。词表正文的选词与写法照用。\n\n"
+        "义务，导演台分段**一概不用**（见上方禁止清单）。"
+        # 词表被四个角色共用，改一句等于改四份系统提示词；只能用近处声明压过远处词表。
+        f"「{SETTLED_FRAME_POINTER}」这一条按上面的 end_hook 语义理解："
+        "导演台 r2v 段的最后一帧是本段切开的那一刻，不是要停下来摆好的落定构图。"
+        "词表正文的选词与写法照用。\n\n"
         f"{_WRITING_WORDLIST}\n"
     )
 

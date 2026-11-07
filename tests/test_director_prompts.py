@@ -1290,3 +1290,74 @@ def test_rewrite_director_segment_returns_none_when_the_call_fails(monkeypatch):
         plan, segment, llm=object(), current_text="段 1 的提示词")
     assert outcome.text is None
     assert outcome.errors == ()
+
+
+# ---------------------------------------------------------------------------
+# #193 落点语义：end_hook 是切点，不是要停下来的终点画面
+# ---------------------------------------------------------------------------
+
+def _r2v_request_for_segment(index: int) -> tuple:
+    """造一份 r2v 请求（六节定义块必须给，否则 build_segment_request 报错）。"""
+    from minimax_h3_prompt.director.prompts import build_segment_request, split_ref_sections
+
+    plan = _plan("r2v")
+    return plan, build_segment_request(plan, plan.segments[index],
+                                       sections=split_ref_sections(_SUBJECT_DEFS))
+
+
+def test_segment_request_reads_end_hook_as_the_cut_point():
+    """端到端实测形态是「段尾先把画面停住、再硬跳」（#191）：请求行不能再要求落到终点。
+
+    请求是模型离产出最近的前提，角色提示词里的纪律只有在这一行不反着说时才生效。
+    """
+    from minimax_h3_prompt.director.prompts import END_HOOK_CUT_CLAUSE
+
+    plan, request = _r2v_request_for_segment(1)
+    hook_line = next(line for line in request.splitlines()
+                     if line.startswith("本段最后一帧的画面（end_hook）"))
+
+    assert "正文必须落到这个状态" not in request, "旧的「落到终点」口径还在请求里"
+    assert END_HOOK_CUT_CLAUSE in hook_line, "请求行没写「写到那一刻就结束」"
+    assert plan.segments[1].end_hook in hook_line, "end_hook 原文没被注入"
+
+
+def test_request_disclaimer_overrides_the_shared_settled_frame_pointer():
+    """共用词表仍说「没给尾帧时落本段落定画面」，靠免责块就近压过（#191 U2）。
+
+    改词表等于同时改分镜师／摄影指导／提示词工程师三份系统提示词，所以这一条只能
+    在导演台请求的切片前言里声明「这一句按 end_hook 切点语义理解」。
+    """
+    from minimax_h3_prompt.director.prompts import SETTLED_FRAME_POINTER
+
+    _, request = _r2v_request_for_segment(1)
+    disclaimer = request.split("## 词表切片", 1)[1]
+    assert SETTLED_FRAME_POINTER in disclaimer, "免责块没点名词表里那条「落定画面」指针"
+    assert "落定画面" in disclaimer
+    assert "导演台 r2v 段" in disclaimer and "end_hook 语义" in disclaimer, \
+        "免责块没说导演台 r2v 段按 end_hook 语义理解"
+
+
+def test_shared_wordlist_keeps_the_settled_frame_pointer_verbatim():
+    """共用词表正文逐字未改：本票只加免责块，不去动四个角色共用的真源。
+
+    选「钉住那句话」而不是整份 sha256：整份哈希会在别的票合法改词表时同样报红，
+    那不是这条不变式要守的东西；要守的是免责块所指的那句话仍在、仍是原话。
+    去空白与强调符后再比，因为真源里这句话跨了行、还带 ``**``。
+    """
+    from minimax_h3_prompt import film_language
+    from minimax_h3_prompt.director.prompts import SETTLED_FRAME_POINTER
+
+    source = film_language.VIDEO_SOURCE_PATH.read_text(encoding="utf-8")
+    normalized = re.sub(r"[\s*]+", "", source)
+    assert re.sub(r"[\s*]+", "", SETTLED_FRAME_POINTER) in normalized, \
+        "共用词表里「没给尾帧时改成落本段的落定画面」那一句被改掉了"
+
+
+def test_r2v_instruction_stops_at_the_end_hook_without_a_still_tail_shot():
+    """写段角色的 r2v 节要有落点纪律：末镜写到那一刻即停，不得补静止尾镜。"""
+    from minimax_h3_prompt.director.prompts import load_instruction
+
+    r2v = load_instruction("r2v")
+    assert "那一刻即停" in r2v, "r2v 指令没说末镜写到 end_hook 那一刻即停"
+    assert "静止" in r2v and "尾镜" in r2v, "r2v 指令没禁止追加静止尾镜"
+    assert "落点纪律" in r2v, "r2v 指令没把这条写成可认出的纪律块"
