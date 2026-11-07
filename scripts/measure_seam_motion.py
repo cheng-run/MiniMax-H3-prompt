@@ -31,6 +31,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+# 量尺刻意不 import 产品代码（``test_measure_seam_motion`` 钉了这条：它只读 mp4），
+# 所以帧率是独立常量，不与 ``director.frames.FPS`` 联动——两边都是 24，但改一边
+# 不该悄悄改变这条脚本的读数。
 FPS = 24.0
 DEFAULT_TAIL_FRAMES = 6          # 0.25s @ 24fps（#191 验收线）
 DEFAULT_RATIO = 0.5              # 低于本段中位运动量的 50% 记为「停」
@@ -118,7 +121,7 @@ def measure(motion: np.ndarray, bounds: list[tuple[int, int]], *,
             if neighbors and float(np.median(neighbors)) > 0 else None)
 
     total_frames = int(len(motion) + 1)
-    still_frames = sum(min(item["tail_below_ratio"], item["tail_frames"]) for item in segments)
+    still_frames = sum(item["tail_below_ratio"] for item in segments)
     # 全片口径独立于段尾窗口：整段里低于本段中位 50% 的帧都算（不只段尾）。
     whole_still = 0
     for (start, end), segment in zip(bounds, segments):
@@ -173,6 +176,12 @@ def render(result: dict) -> str:
 
 
 def main() -> int:
+    # Windows 控制台默认 cp1252：中文一 print 就 UnicodeEncodeError，整个量尺以崩溃
+    # 收场（engineering-cadence 的同一道兜底，工作流的 PYTHONIOENCODING 管不到本机）。
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("video", type=Path, help="mp4 路径（只读）")
     parser.add_argument("--boundaries", default="",

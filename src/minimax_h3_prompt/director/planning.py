@@ -65,6 +65,8 @@ MAX_BUDGET_REQUEUES = 2
 # 摆位 ``end_hook`` 判据的谓词表（#196 / 父 spec #191 U3）。**只此一份**：判据、
 # 回灌反馈与报错文案都从这里派生。别处再抄一份字面，改了这个表就会留下一条不说话
 # 的死规则（本仓「守卫形态从常量派生」已经咬过一次）。
+# ``"按住不动"`` 是 ``"不动"`` 的子串，判定上冗余；保留它是为了与规格原表逐条对齐，
+# 删掉不改变任何判定（表驱动 10 条真实段尾仍全过）。
 END_HOOK_STILL_WORDS = ("站", "坐", "停", "静", "不动", "定格", "摆好", "按住不动")
 END_HOOK_MOTION_WORDS = ("走", "跑", "冲", "推", "拉", "抓", "转", "扑", "举", "递",
                          "落下", "撞", "绕")
@@ -243,7 +245,7 @@ def parse_director_plan(text: str, total_s: float, *, mode: str) -> DirectorPlan
                 f"{windows[position - 2][1]}（段表不许有缝/重叠）")
         if not hooks[position - 1].strip():
             raise ValueError(
-                f"第 {position} 段缺 end_hook：它是本段落定的画面状态，"
+                f"第 {position} 段缺 end_hook：它是本段切开的最后一帧，"
                 "写段（#103）与尾帧变换（#107）都要拿它当约束")
     if abs(windows[-1][1] - total_s) > _BOUNDARY_TOLERANCE:
         raise ValueError(

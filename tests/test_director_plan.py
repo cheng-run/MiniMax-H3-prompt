@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -859,6 +860,22 @@ def test_planner_end_hook_is_the_cut_frame_not_a_held_pose():
 
     for old in ("不允许切在动作进行中", "不要停在一半的动作上", "可以停住"):
         assert old not in text, f"规划师提示词还留着「{old}」——与切点语义相反"
+
+
+def test_planner_example_end_hooks_do_not_trip_the_placement_guard():
+    """规划师提示词里的每个 ``end_hook`` 示例都必须过自家守卫（#196 复审）。
+
+    模型会照抄提示词里的示例：示例本身是摆位形态时，一次合格的输出会因为模仿了
+    提示词而被回灌。这里把示例逐条喂给 ``is_placement_end_hook``，以后谁写回
+    「站在……定住」式的例句都会立刻红。
+    """
+    from minimax_h3_prompt.director.planning import load_instruction
+
+    examples = re.findall(r'"end_hook":\s*"([^"]+)"', load_instruction())
+    assert examples, "规划师提示词里没有任何 end_hook 示例可查"
+    for example in examples:
+        assert is_placement_end_hook(example) is False, (
+            f"规划师示例被自家 #196 守卫判为摆位：{example}")
 
 
 # ---------------------------------------------------------------------------

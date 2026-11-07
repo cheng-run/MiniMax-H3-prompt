@@ -398,6 +398,32 @@ MUTATIONS: tuple[Mutation, ...] = (
          "tests/test_director_prompts.py::test_disconnected_first_shot_goes_through_the_rewrite_loop"),
         "首镜承接守卫恒不触发＝凭空重新起势的开头照落盘，写段期毫无信号（#197）",
     ),
+    Mutation(
+        "r2v_start_block_dropped",
+        "src/minimax_h3_prompt/director/prompts.py",
+        '    if plan.mode not in ("fl2v", "r2v"):',
+        '    if plan.mode != "fl2v":',
+        ("tests/test_director_prompts.py::"
+         "test_r2v_guided_and_opening_requests_state_the_segment_start",),
+        "起点事实块退回只认 fl2v＝r2v 引导段拿不到上一段落定画面（#192）",
+    ),
+    Mutation(
+        "end_hook_request_reads_as_a_held_endpoint",
+        "src/minimax_h3_prompt/director/prompts.py",
+        r'f"本段最后一帧的画面（end_hook）：{segment.end_hook}。{END_HOOK_CUT_CLAUSE}\n"',
+        r'f"本段落定的画面（end_hook，正文必须落到这个状态）：{segment.end_hook}\n"',
+        ("tests/test_director_prompts.py::test_segment_request_reads_end_hook_as_the_cut_point",),
+        "请求行退回「落到终点」口径＝模型又去追静止构图，切点纪律在最近处被反着说（#193）",
+    ),
+    Mutation(
+        "designer_visible_text_follows_working_language",
+        "src/minimax_h3_prompt/prompts/character_designer.md",
+        "画面内可见文字的语言由故事发生地/时代决定，不跟随工作语言",
+        "画面内可见文字的语言跟随工作语言",
+        ("tests/test_designer_visible_text_language.py::"
+         "test_designers_set_visible_text_language_from_the_story_not_the_working_language",),
+        "可见文字语言跟随工作语言＝美国故事里烧进中文角标（#191 实测形态，#195）",
+    ),
 )
 
 

@@ -1459,8 +1459,13 @@ def test_request_disclaimer_overrides_the_shared_settled_frame_pointer():
     disclaimer = request.split("## 词表切片", 1)[1]
     assert SETTLED_FRAME_POINTER in disclaimer, "免责块没点名词表里那条「落定画面」指针"
     assert "落定画面" in disclaimer
-    assert "导演台 r2v 段" in disclaimer and "end_hook 语义" in disclaimer, \
-        "免责块没说导演台 r2v 段按 end_hook 语义理解"
+    # #193 复审：免责块不能只放宽 r2v——fl2v 的「仅首帧」「无图」两段同样按切点理解。
+    assert "导演台分段没给尾帧时" in disclaimer, \
+        "免责块没说导演台分段没给尾帧时按 end_hook 切点语义理解"
+    assert "有尾帧时仍以尾帧构图为终点" in disclaimer, \
+        "免责块没说有尾帧时仍以尾帧构图为终点"
+    assert "end_hook 语义" in disclaimer, \
+        "免责块没说按 end_hook 语义理解"
 
 
 def test_shared_wordlist_keeps_the_settled_frame_pointer_verbatim():
@@ -1487,3 +1492,21 @@ def test_r2v_instruction_stops_at_the_end_hook_without_a_still_tail_shot():
     assert "那一刻即停" in r2v, "r2v 指令没说末镜写到 end_hook 那一刻即停"
     assert "静止" in r2v and "尾镜" in r2v, "r2v 指令没禁止追加静止尾镜"
     assert "落点纪律" in r2v, "r2v 指令没把这条写成可认出的纪律块"
+
+
+def test_i2v_and_fl2v_instructions_stop_at_the_end_hook_instead_of_settling():
+    """#193 切点句要覆盖 i2v/fl2v 的每一条 end_hook 分支（复审口径不一致）。
+
+    r2v 已有专门的落点纪律块，但 i2v 的「结果或反应」与 fl2v 的「仅首帧」「无图」
+    「差异逐步收窄」「没有尾帧时」仍写着「落到 end_hook」——同一份提示词里两种口径
+    会让模型去追一个静止终点。**有尾帧时**的官方 ``settles into …`` 句式不动。
+    """
+    from minimax_h3_prompt.director.prompts import load_instruction
+
+    for mode in ("i2v", "fl2v"):
+        text = load_instruction(mode)
+        assert "那一刻即停" in text, f"{mode} 指令没写「写到 end_hook 那一刻即停」"
+        assert "落到请求里的 end_hook" not in text, \
+            f"{mode} 仍留着「落到 end_hook」的终点口径"
+    assert "settles into the pose" in load_instruction("fl2v"), \
+        "有尾帧时的官方终点构图句被误改（它保持不变）"

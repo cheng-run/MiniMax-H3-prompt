@@ -289,16 +289,23 @@ def _at_timestamps(text: str) -> list[float]:
 # 段词里的 ``[Shot N]`` 是模型自己写的分镜块（形状闸不管它，节头才是格式）。
 # 这里只借它切「首镜」与「上一段末镜」两块正文。
 _SHOT_MARKER_RE = re.compile(r"\[Shot\s+(\d+)\]", re.IGNORECASE)
-_FIRST_SHOT_RE = re.compile(r"\[Shot\s+1\]", re.IGNORECASE)
 
 
-def _section_head_re() -> re.Pattern[str]:
-    """节头正则，从 ``REF_SECTIONS`` / ``BASE_SECTIONS`` 现派生。
+def _next_section_offset(text: str) -> int:
+    """``text`` 里第一个节头的字符偏移；没有节头时返回全文长度（＝取到结尾）。
 
-    不在这里重抄一份节名：节常量一改，抄的那份会静默失效（「永不为红＝没有」）。
+    节头怎么认只有 ``_find_sections`` 一处实现（#130）。它返回的是行号，这里换算成
+    字符偏移，好与 ``_SHOT_MARKER_RE`` 的匹配位置直接取小——重抄一份节头正则会随
+    ``REF_SECTIONS`` / ``BASE_SECTIONS`` 的改动静默失效（「永不为红＝没有」）。
     """
-    names = "|".join(re.escape(header) for header in (*REF_SECTIONS, *BASE_SECTIONS))
-    return re.compile(rf"^(?:{names})\s*[:：]", re.MULTILINE)
+    found = _find_sections(text, [*REF_SECTIONS, *BASE_SECTIONS])
+    if not found:
+        return len(text)
+    line = min(entry[1] for entry in found.values())
+    offset = 0
+    for _ in range(line):
+        offset = text.index("\n", offset) + 1
+    return offset
 
 
 def _shot_block_body(text: str, marker_end: int) -> str:
@@ -308,14 +315,15 @@ def _shot_block_body(text: str, marker_end: int) -> str:
     让重叠更容易发生、把该拦的漏掉。
     """
     rest = text[marker_end:]
-    stops = [match.start() for match in (_SHOT_MARKER_RE.search(rest),
-                                         _section_head_re().search(rest)) if match]
-    return rest[:min(stops)] if stops else rest
+    shot = _SHOT_MARKER_RE.search(rest)
+    stops = ([shot.start()] if shot else []) + [_next_section_offset(rest)]
+    return rest[:min(stops)]
 
 
 def _first_shot_body(text: str) -> str:
     """本段第一个 ``[Shot 1]`` 的正文；取不到返回空串（空串＝不判）。"""
-    match = _FIRST_SHOT_RE.search(text)
+    match = next((found for found in _SHOT_MARKER_RE.finditer(text)
+                  if found.group(1) == "1"), None)
     return _shot_block_body(text, match.end()) if match else ""
 
 
@@ -676,7 +684,7 @@ def build_segment_request(plan: DirectorPlan, segment: DirectorSegment, *,
         f"分镜表（**只取本段 {start_s:.3f}s 起的 {duration_s:.3f}s 窗口内**的镜头；"
         f"其他镜头一个字都不能写进正文）：\n{shot_table}"
         if str(shot_table).strip() else
-        "（缺分镜表原文：按本段剧情概述与落定画面写，不得虚构窗外事件）"
+        "（缺分镜表原文：按本段剧情概述与 end_hook（切点）写，不得虚构窗外事件）"
     )
     definitions = (
         _definitions_block(_require_r2v_sections(sections)) if plan.mode == "r2v" else "")
@@ -742,8 +750,8 @@ def build_segment_request(plan: DirectorPlan, segment: DirectorSegment, *,
         "义务，导演台分段**一概不用**（见上方禁止清单）。"
         # 词表被四个角色共用，改一句等于改四份系统提示词；只能用近处声明压过远处词表。
         f"「{SETTLED_FRAME_POINTER}」这一条按上面的 end_hook 语义理解："
-        "导演台 r2v 段的最后一帧是本段切开的那一刻，不是要停下来摆好的落定构图。"
-        "词表正文的选词与写法照用。\n\n"
+        "导演台分段没给尾帧时，最后一帧是本段切开的那一刻，不是要停下来摆好的落定构图；"
+        "有尾帧时仍以尾帧构图为终点。词表正文的选词与写法照用。\n\n"
         f"{_WRITING_WORDLIST}\n"
     )
 
@@ -945,7 +953,7 @@ def build_rewrite_request(plan: DirectorPlan, segment: DirectorSegment, *,
         "---\n"
         f"{_REWRITE_REQUIREMENT_HEAD}\n"
         "用户已经在导演台里看过这一段的成片，画面不满意。请按同样的写作纪律重写本段，"
-        "让画面更贴合本段剧情概述、落定画面与分镜表。\n\n"
+        "让画面更贴合本段剧情概述、end_hook（切点）与分镜表。\n\n"
         "纪律：\n"
         "1. **只改画面正文**：不写时间轴注记、不写起止状态句、不写图片对齐指令行"
         "（上文禁止清单照旧生效）——注记由组装器按帧注入。\n"
