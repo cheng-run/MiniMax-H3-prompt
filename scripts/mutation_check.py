@@ -368,6 +368,14 @@ MUTATIONS: tuple[Mutation, ...] = (
         ("tests/test_director_write_budget.py::test_budget_violation_is_written_back_and_the_fix_lands",),
         "写段预算守卫恒不触发＝预算外的图照写，规划与写段各推一套（#180 事故形态，#188）",
     ),
+    Mutation(
+        "music_guided_segment_writes_na",
+        "src/minimax_h3_prompt/prompts/segment_writer_director.md",
+        "**不许写 `N/A`**",
+        "**无声写 `N/A`**",
+        ("tests/test_director_prompts.py::test_music_rule_continues_one_cue_across_segments",),
+        "引导段配乐退回「无声写 N/A」＝段间持续曲重新断开（#194，实测 −9.8/+26.6 dB 台阶）",
+    ),
 )
 
 

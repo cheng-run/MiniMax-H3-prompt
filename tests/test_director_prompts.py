@@ -782,6 +782,41 @@ def test_common_guidance_wording_splits_guided_and_cut_segments():
         assert "不承接上一段" in text, f"{mode} 没写切镜段不承接"
 
 
+def test_music_rule_continues_one_cue_across_segments():
+    """#194：跨段配乐写「同一支 cue 延续」，不按本段各写各的。
+
+    旧的「无声写 `N/A`」让实测 10 段里 7 段配乐写 N/A，接缝处出现 −9.8 / +26.6 dB
+    电平台阶。引导段的音画已被段间引导钉在上一段上，文字侧必须延续同一支 cue；
+    硬切段两侧也写同一支 cue，只许改力度与织体。
+
+    分叉只认请求里已有的段类型标签（``段类型：{segment.label}``），不新增事实块；
+    所以断言的是**模型实际收到的切片文本**（``load_instruction``），而不是文件字节。
+    """
+    from minimax_h3_prompt.director.frames import GUIDED_SEGMENT_TYPES, segment_type_label
+    from minimax_h3_prompt.director.prompts import build_segment_request, load_instruction
+
+    old_phrase = "无声写 `N/A`"
+    for mode in ("r2v", "t2v", "i2v", "fl2v"):
+        text = load_instruction(mode)
+        assert old_phrase not in text, f"{mode} 还留着「无声写 N/A」的旧配乐纪律"
+        # 引导段分支：点名请求里会出现的段类型标签，并给出「延续同一支 cue」的可执行要点
+        for segment_type in GUIDED_SEGMENT_TYPES:
+            label = segment_type_label(segment_type)
+            assert label in text, f"{mode} 的配乐纪律没点名引导段类型「{label}」"
+        assert segment_type_label("camera_cut") in text, f"{mode} 的配乐纪律没点名切镜段"
+        for point in ("同一支 cue", "配器", "力度", "乐器", "速度", "织体"):
+            assert point in text, f"{mode} 的配乐纪律缺可执行要点 {point!r}"
+
+    # 分叉判据能在请求里直接对上：每一种段类型都带着同名中文标签出站；
+    # 纪律本身也要随指令进请求（「规则在、接线不在」是本仓反复踩的坑）
+    plan = _fl2v_plan("opening", "continue", "camera_same", "camera_cut", "ending")
+    for segment in plan.segments:
+        request = build_segment_request(plan, segment)
+        assert f"段类型：{segment_type_label(segment.type)}" in request, \
+            f"{segment.type} 的请求没有段类型标签，配乐分叉无从执行"
+        assert "同一支 cue" in request, f"{segment.type} 的写段请求缺配乐延续纪律"
+
+
 def test_common_gate_and_prop_ownership_rules_reach_the_writer_request(tmp_path):
     """#159：门槛里外与「一件物品一处归属」两条纪律随 common 进入真实写段请求。
 
