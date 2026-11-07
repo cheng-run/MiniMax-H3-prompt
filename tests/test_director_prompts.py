@@ -493,6 +493,132 @@ def test_note_and_section_guards_follow_their_source_constants(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# #197 写段期：引导段的首镜必须接上上一段
+# ---------------------------------------------------------------------------
+
+def _first_shot(text: str, line: str) -> str:
+    """把段正文的 ``[Shot 1]`` 那一镜换成给定句子，其余字节不动。"""
+    return re.sub(r"\[Shot 1\][^\n]*", f"[Shot 1] {line}", text, count=1)
+
+
+def test_guided_segment_first_shot_with_no_overlap_is_flagged():
+    """引导段首镜与上一段末尾**毫无交集** → 判红，用**自己的**错误码。
+
+    参照物是上一段**实际写出的段词**，不是 plan 里的 ``end_hook``：``end_hook`` 是
+    中文规划、段词是英文，跨语言取二元组必然恒零重叠（A 臂第 9 段实测），拿它当
+    参照物会把已知合格的段判红。承诺判据仍是启发式——零重叠只证明「完全没交集」，
+    不证明「承接得好」。
+    """
+    from minimax_h3_prompt.director.prompts import validate_director_segment
+
+    plan = _plan("t2v")
+    segment = plan.segments[1]  # continue：引导段
+    text = _first_shot(_single_text(segment, plan), "Man punches wall.")
+
+    codes = {i.code for i in validate_director_segment(
+        text, "t2v", plan=plan, segment=segment,
+        previous_text="[Shot 2] Fog drifts.")}
+    assert "DIRECTOR_FIRST_SHOT_DISCONNECTED" in codes, \
+        "首镜与上一段毫无交集，守卫没响"
+
+
+def test_guided_segment_sharing_any_bigram_passes():
+    """只要有一个共享二元组就放行——门槛刻意做低，避免把正常承接判死。"""
+    from minimax_h3_prompt.director.prompts import validate_director_segment
+
+    plan = _plan("t2v")
+    segment = plan.segments[1]
+    text = _first_shot(_single_text(segment, plan), "The fog thickens.")
+
+    codes = {i.code for i in validate_director_segment(
+        text, "t2v", plan=plan, segment=segment,
+        previous_text="[Shot 2] Fog drifts.")}
+    assert "DIRECTOR_FIRST_SHOT_DISCONNECTED" not in codes
+
+
+def test_camera_cut_segment_is_never_judged():
+    """硬切段本来就不承接：对它判「首镜要接上」是假错。"""
+    from minimax_h3_prompt.director.prompts import validate_director_segment
+
+    plan = _fl2v_plan("continue", "camera_cut")
+    segment = plan.segments[1]
+    text = _first_shot(_single_text(segment, plan), "Man punches wall.")
+
+    codes = {i.code for i in validate_director_segment(
+        text, "fl2v", plan=plan, segment=segment,
+        previous_text="[Shot 2] Fog drifts.")}
+    assert "DIRECTOR_FIRST_SHOT_DISCONNECTED" not in codes, \
+        "硬切段被当成承接段判红了"
+
+
+def test_first_segment_and_missing_previous_text_are_never_judged():
+    """第 1 段没有上一段；上一段文本为空、或本段取不到 ``[Shot 1]`` 时都放过。
+
+    宁可放过不可错杀：这条判据只是「完全没交集」的信号，不是语义检查。
+    """
+    from minimax_h3_prompt.director.prompts import validate_director_segment
+
+    plan = _plan("t2v")
+    opening = plan.segments[0]  # opening：非引导段，也没有上一段
+    first_text = _first_shot(_single_text(opening, plan), "Man punches wall.")
+    codes = {i.code for i in validate_director_segment(
+        first_text, "t2v", plan=plan, segment=opening,
+        previous_text="[Shot 2] Fog drifts.")}
+    assert "DIRECTOR_FIRST_SHOT_DISCONNECTED" not in codes, "第 1 段被误判"
+
+    segment = plan.segments[1]
+    text = _first_shot(_single_text(segment, plan), "Man punches wall.")
+    assert "DIRECTOR_FIRST_SHOT_DISCONNECTED" not in {
+        i.code for i in validate_director_segment(
+            text, "t2v", plan=plan, segment=segment, previous_text="")}
+    assert "DIRECTOR_FIRST_SHOT_DISCONNECTED" not in {
+        i.code for i in validate_director_segment(
+            text, "t2v", plan=plan, segment=segment, previous_text="   \n")}
+
+    # 取不到 [Shot 1] 时同样不判（信号不够，不臆造）
+    no_shot_one = text.replace("[Shot 1]", "[Opening beat]")
+    assert "DIRECTOR_FIRST_SHOT_DISCONNECTED" not in {
+        i.code for i in validate_director_segment(
+            no_shot_one, "t2v", plan=plan, segment=segment,
+            previous_text="[Shot 2] Fog drifts.")}
+
+
+def test_disconnected_first_shot_goes_through_the_rewrite_loop(tmp_path):
+    """批量写段时，首镜完全另起的第一版被退回重写；重写请求点名新错误码。
+
+    断言的是**模型收到的出站请求**（第 2 段的第二次请求）与最终落盘文本——不测私有
+    调用顺序。上一段的段词由假模型自己写出，守卫拿到的就是 ``written[-1].text``。
+    """
+    from minimax_h3_prompt.director.prompts import write_director_segments
+
+    plan = _plan("t2v")
+    fresh_start = _first_shot(_single_reply(plan.segments[1], plan),
+                              "Man punches wall.")
+    retry_marker = "上一次产出被校验器判为不合格"
+
+    def behaviour(call, request):
+        index = int(re.search(r"Segment (\d+)/", request).group(1))
+        segment = plan.segments[index - 1]
+        reply = _single_reply(segment, plan)
+        if index == 1:
+            # 上一段的最后一镜故意与 "Man punches wall." 零重叠
+            return reply.replace(
+                "[Shot 2] At 00:02.500, the camera pushes in until her face fills the frame.",
+                "[Shot 2] Fog drifts.")
+        if index == 2 and retry_marker not in request:
+            return fresh_start
+        return reply
+
+    llm = _DialectLLM(None, behaviour=behaviour)
+    written = write_director_segments(plan, llm=llm, session_dir=tmp_path)
+
+    assert len(llm.requests) == 6, "第 2 段应恰好被退回重写一次（5 段 + 1 次重写）"
+    assert "DIRECTOR_FIRST_SHOT_DISCONNECTED" in llm.requests[2], \
+        "重写请求没点名「首镜没接上」"
+    assert written[1].text.strip() == _single_text(plan.segments[1], plan).strip()
+
+
+# ---------------------------------------------------------------------------
 # 组装：定义块由代码给定、注记由代码注入、时间戳由代码重算
 # ---------------------------------------------------------------------------
 
@@ -1035,7 +1161,7 @@ def test_written_issues_come_from_the_rewrite_loop(tmp_path, monkeypatch):
 
     seen: dict[tuple[str, int], int] = {}
 
-    def fake_validate(text, mode, *, plan, segment):
+    def fake_validate(text, mode, *, plan, segment, previous_text=""):
         key = (text, segment.index)
         seen[key] = seen.get(key, 0) + 1
         code = "FROM_LOOP" if seen[key] == 1 else "FROM_RERUN"

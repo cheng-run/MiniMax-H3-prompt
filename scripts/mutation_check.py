@@ -389,6 +389,15 @@ MUTATIONS: tuple[Mutation, ...] = (
         "摆位判据恒假＝「摆好位置站定、画面静止」的段尾原样落盘，接缝照样停顿（#196）。"
         "真实样本第 9 条必须变红",
     ),
+    Mutation(
+        "first_shot_disconnect_never_fires",
+        "src/minimax_h3_prompt/director/prompts.py",
+        "        if _first_shot_disconnected(body, segment, previous_text):\n",
+        "        if False and _first_shot_disconnected(body, segment, previous_text):\n",
+        ("tests/test_director_prompts.py::test_guided_segment_first_shot_with_no_overlap_is_flagged",
+         "tests/test_director_prompts.py::test_disconnected_first_shot_goes_through_the_rewrite_loop"),
+        "首镜承接守卫恒不触发＝凭空重新起势的开头照落盘，写段期毫无信号（#197）",
+    ),
 )
 
 

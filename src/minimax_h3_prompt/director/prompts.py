@@ -66,7 +66,7 @@ from ..tools.h3_validator import (
     has_align_instruction,
     split_ref_sections,
 )
-from .frames import FPS, PLAN_MODES, DirectorPlan, DirectorSegment
+from .frames import FPS, PLAN_MODES, DirectorPlan, DirectorSegment, is_guided
 # 产物目录名只有 ``planning.DIRECTOR_DIRNAME`` 一处声明（复审 H1）：段文件、段表、
 # 尾帧与导演包必须落在**同一个** ``GENxxx/director/`` 下，各写一份字面量就是几条
 # 会各自漂的路径口径（某一条改了，另一条只会表现为「读不到/缺文件」）。
@@ -286,14 +286,79 @@ def _at_timestamps(text: str) -> list[float]:
             for m in _AT_TIME_RE.finditer(text)]
 
 
+# 段词里的 ``[Shot N]`` 是模型自己写的分镜块（形状闸不管它，节头才是格式）。
+# 这里只借它切「首镜」与「上一段末镜」两块正文。
+_SHOT_MARKER_RE = re.compile(r"\[Shot\s+(\d+)\]", re.IGNORECASE)
+_FIRST_SHOT_RE = re.compile(r"\[Shot\s+1\]", re.IGNORECASE)
+
+
+def _section_head_re() -> re.Pattern[str]:
+    """节头正则，从 ``REF_SECTIONS`` / ``BASE_SECTIONS`` 现派生。
+
+    不在这里重抄一份节名：节常量一改，抄的那份会静默失效（「永不为红＝没有」）。
+    """
+    names = "|".join(re.escape(header) for header in (*REF_SECTIONS, *BASE_SECTIONS))
+    return re.compile(rf"^(?:{names})\s*[:：]", re.MULTILINE)
+
+
+def _shot_block_body(text: str, marker_end: int) -> str:
+    """``marker_end`` 之后那一镜的正文：到下一个镜头标记、本节结束或全文结束。
+
+    取到节尾就停，避免把环境声/配乐段落进「首镜」——那些句子与承接无关，混进来只会
+    让重叠更容易发生、把该拦的漏掉。
+    """
+    rest = text[marker_end:]
+    stops = [match.start() for match in (_SHOT_MARKER_RE.search(rest),
+                                         _section_head_re().search(rest)) if match]
+    return rest[:min(stops)] if stops else rest
+
+
+def _first_shot_body(text: str) -> str:
+    """本段第一个 ``[Shot 1]`` 的正文；取不到返回空串（空串＝不判）。"""
+    match = _FIRST_SHOT_RE.search(text)
+    return _shot_block_body(text, match.end()) if match else ""
+
+
+def _last_shot_body(text: str) -> str:
+    """上一段最后一个 ``[Shot N]`` 的正文；没有镜头标记时整段都算。"""
+    markers = list(_SHOT_MARKER_RE.finditer(text))
+    return _shot_block_body(text, markers[-1].end()) if markers else text
+
+
+def _bigrams(text: str) -> set[str]:
+    """归一成小写字母/数字/汉字后取相邻二元组（标点与空白先丢掉）。"""
+    normalized = re.sub(r"[^0-9a-z一-鿿]+", "", str(text).lower())
+    return {normalized[i:i + 2] for i in range(len(normalized) - 1)}
+
+
+def _first_shot_disconnected(text: str, segment: DirectorSegment,
+                             previous_text: str) -> bool:
+    """引导段首镜与上一段末镜**零二元组重叠**。
+
+    这是**启发式**：零重叠只能证明两边「毫无交集」，不能证明上一版就承接得好，也
+    不能证明这一版承接得对。``<Subject N>`` / ``<Picture N>`` 编号不同仍会共享
+    ``subj``、``ubje`` 这类二元组——放行不等于真的接上了，别把它读成语义检查。
+    任意一侧取不出正文（空段、没有 ``[Shot 1]``）时一律放行：信号不够就不臆造。
+    """
+    if not is_guided(segment.type):
+        return False
+    if not str(previous_text or "").strip():
+        return False
+    first = _bigrams(_first_shot_body(text))
+    previous = _bigrams(_last_shot_body(str(previous_text)))
+    return bool(first) and bool(previous) and not (first & previous)
+
+
+
 def validate_director_segment(text: str, mode: str, *, plan: DirectorPlan,
-                              segment: DirectorSegment) -> list[ValidationIssue]:
+                              segment: DirectorSegment,
+                              previous_text: str = "") -> list[ValidationIssue]:
     """导演台段提示词的确定性校验（票面 AC：每种模式都有对应测试）。
 
     与 ``validate_ref_segment`` 的差别是**判据的来源不同**：多参那套按「段序 + 相对
     时间轴 + 起止状态声明」判，导演台没有桥接帧、时间轴是绝对坐标，照搬会把每一段
     都判红（设计 §3.3 点名「不得复用多参段序/时间轴相关的假错判据」）。这里只判本路线
-    的五条契约：
+    的六条契约：
 
     1. ``DIRECTOR_EMPTY``：空段；
     2. ``DIRECTOR_SECTION_*``：r2v 六节齐全且有序；t2v/i2v/fl2v 三字段齐全且有序
@@ -302,7 +367,12 @@ def validate_director_segment(text: str, mode: str, *, plan: DirectorPlan,
        base/ref 的产物，写进来就是错口径）；
     4. ``DIRECTOR_ALIGN_LINE``：出现 base 的图片对齐指令行（帧槽属于首尾帧链）；
     5. ``DIRECTOR_TIMELINE_*`` / ``DIRECTOR_TIMESTAMP_OUT_OF_RANGE``：注记与段表一致、
-       所有 ``At`` 时间戳落在本段帧窗口内（相对口径漏改的信号）。
+       所有 ``At`` 时间戳落在本段帧窗口内（相对口径漏改的信号）；
+    6. ``DIRECTOR_FIRST_SHOT_DISCONNECTED``：引导段（``continue`` / ``camera_same`` /
+       ``ending``）的首镜与**上一段实际写出的段词**末镜零二元组重叠（#197）。参照物
+       刻意不取 ``plan`` 的 ``end_hook``：它是中文规划，段词是英文，跨语言取二元组
+       必然恒零重叠（A 臂第 9 段实测），会把已知合格的段判红。判据是**启发式**——零
+       重叠只证明「毫无交集」，不证明「承接得好」；硬切段本来就不承接，不判。
     """
     _require_write_mode(mode)
     body = str(text or "").strip()
@@ -383,6 +453,17 @@ def validate_director_segment(text: str, mode: str, *, plan: DirectorPlan,
             f"时间戳落在本段帧窗口 {start_s:.3f}s-{end_s:.3f}s 之外："
             f"{', '.join(f'{stamp:.3f}s' for stamp in outside)}"
             "——多半是还按「相对本段起点」写的，组装器应已加过 start_frame/24"))
+
+    # 段号与「上一段在不在表里」都由 plan 判：单段入口（改词/首写单段）拿不到上一段，
+    # 传空串即自动不判——守卫只在批量逐段写的时候有足够的事实。
+    if segment.index > 1 and any(item.index == segment.index - 1
+                                 for item in plan.segments):
+        if _first_shot_disconnected(body, segment, previous_text):
+            issues.append(ValidationIssue(
+                "error", "DIRECTOR_FIRST_SHOT_DISCONNECTED",
+                "引导段的首镜与上一段末尾没有任何共同字符二元组：主体名、地点名、"
+                "正在进行的动作一个都没延续，读起来像凭空重新起势。请让第一拍接上"
+                "上一段最后一镜（延续同一主体/空间/动作），而不是另起一个场面"))
     return issues
 
 
@@ -707,7 +788,8 @@ def _write_validated(plan: DirectorPlan, segment: DirectorSegment, *, llm,
                      base_request: str, sections: dict[str, str] | None,
                      role: str, label: str,
                      registry: Sequence[Sequence] = (),
-                     budget: SegmentBudget | None = None
+                     budget: SegmentBudget | None = None,
+                     previous_text: str = ""
                      ) -> tuple[str, tuple[ValidationIssue, ...], list[dict] | None] | None:
     """首写与改词共用的循环：请求 → 直调 → 归一 → 校验 → 有界重写。
 
@@ -725,6 +807,10 @@ def _write_validated(plan: DirectorPlan, segment: DirectorSegment, *, llm,
     一条校验错误回灌给模型重写（2026-11-01 真实现场：第 2 段引用了 10 张、上限 9）。
     「超了就地截断」不是选项——截掉的图在正文里没有接线可落，写出来的段会指着空气。
     给了 ``budget`` 时再核一道「子集 ⊆ 预算」（#188）：预算外的图同样回灌重写。
+
+    ``previous_text`` 是上一段的**定稿段词**，只服务跨段首镜守卫（#197）：批量逐段写
+    时由 ``write_director_segments`` 传现成的 ``written[-1].text``；单段首写与改词拿不到
+    上一段，传空串即自动不判（宁可放过，不做无事实的猜测）。
     """
     request = base_request
     # 初值给空串而不是 None：循环体保证第一次走到 return 前一定赋过值，
@@ -741,7 +827,8 @@ def _write_validated(plan: DirectorPlan, segment: DirectorSegment, *, llm,
             return None
         text = normalize_segment_output(raw, plan=plan, segment=segment, sections=sections)
         issues = tuple(validate_director_segment(
-            text, plan.mode, plan=plan, segment=segment))
+            text, plan.mode, plan=plan, segment=segment,
+            previous_text=previous_text))
         errors = [issue for issue in issues if issue.severity == "error"]
         if not errors and registry and sections is not None:
             try:
@@ -760,7 +847,8 @@ def _write_validated(plan: DirectorPlan, segment: DirectorSegment, *, llm,
             else:
                 # 裁完的正文换了图号，再走一遍同一条校验器（标号改了，悬空与否重算）。
                 issues = tuple(validate_director_segment(
-                    text, plan.mode, plan=plan, segment=segment))
+                    text, plan.mode, plan=plan, segment=segment,
+                    previous_text=previous_text))
                 errors = [issue for issue in issues if issue.severity == "error"]
                 if not errors:
                     # 子集 ⊆ 预算才算合格（#188）：超出去的图是规划与写段各推一套的
@@ -1060,6 +1148,10 @@ def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
         # 「本段素材太多」当一条校验错误回灌，让模型自己取舍后再写一遍；三次仍超才停。
         # 裁完再校验、再落盘——盘上的段文件与段内素材表永远同一版。
         segment_budget = budget.for_segment(segment.index) if budget is not None else None
+        # 上一段的**定稿文本**（不是 end_hook）：跨段首镜守卫要比的是同一条流水线
+        # 真的写出来的东西，中英混排的规划字段无法与英文段词比二元组（#197）。
+        previous_text = (written[-1].text
+                         if written and written[-1].index == segment.index - 1 else "")
         base_request = build_segment_request(
             plan, segment, shot_table=shot_table, sections=global_sections,
             film_end=film_end, film_end_description=film_end_description,
@@ -1068,7 +1160,7 @@ def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
             plan, segment, llm=llm, base_request=base_request,
             sections=global_sections, role=DIRECTOR_SEGMENT_WRITER_ROLE,
             label=f"第 {segment.index} 段导演台写段", registry=registry_rows,
-            budget=segment_budget)
+            budget=segment_budget, previous_text=previous_text)
         if result is None:
             raise RuntimeError(
                 f"第 {segment.index} 段导演台写段调用失败（已落盘 {len(written)} 段）："
