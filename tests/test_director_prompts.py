@@ -824,6 +824,82 @@ def test_fl2v_instruction_teaches_the_four_give_image_branches():
 
 
 # ---------------------------------------------------------------------------
+# #192 r2v：本段起点事实块（同一份措辞，切镜段不指向不存在的首帧图）
+# ---------------------------------------------------------------------------
+
+def _r2v_plan(*types):
+    """按给定类型序列造一张 r2v 段表：每段都挂参考素材（r2v 没有帧槽）。"""
+    from dataclasses import replace
+
+    from minimax_h3_prompt.director.frames import DirectorPlan, give_images_for
+
+    segments = []
+    for index, segment_type in enumerate(types, 1):
+        segment = _segment(index, segment_type, (index - 1) * 107, index * 107,
+                           107, 107, segment_type not in ("opening", "camera_cut"))
+        segments.append(replace(segment,
+                                give_images=give_images_for(segment_type, "r2v")))
+    return DirectorPlan(mode="r2v", total_frames=107 * len(types),
+                        segments=tuple(segments))
+
+
+def _start_line(request: str) -> str:
+    """请求里的【本段起点】块首行（块内事实都在这一行，引导段的 end_hook 也在）。"""
+    line = next((row for row in request.splitlines()
+                 if row.startswith("【本段起点】")), "")
+    assert line, "请求里没有【本段起点】块"
+    return line
+
+
+def test_r2v_guided_and_opening_requests_state_the_segment_start(tmp_path):
+    """r2v 引导段拿得到上一段 end_hook 原文；开场段写明没有上一段可承接。
+
+    为什么起点要进 r2v 请求：六节外壳只教「引导段靠潜空间引导承接上一段落定画面」，
+    那句话的内容从来不在请求里——模型只被告知「去承接」，却没被告知承接什么。
+    """
+    from minimax_h3_prompt.director.prompts import write_director_segments
+    from minimax_h3_prompt.tools.h3_validator import split_ref_sections
+
+    plan = _plan("r2v")
+    llm = _DialectLLM(lambda index: _r2v_reply(plan.segments[index - 1], plan))
+    write_director_segments(plan, llm=llm, session_dir=tmp_path,
+                            sections=split_ref_sections(_SUBJECT_DEFS))
+
+    opening = _start_line(llm.requests[0])
+    assert "全片开场" in opening and "没有上一段可承接" in opening
+    # 开场段不能出现任何别的段的 end_hook（它自己的 end_hook 在请求行里，允许）
+    others = [segment.end_hook for segment in plan.segments[1:]]
+    assert all(hook not in llm.requests[0] for hook in others), \
+        "开场段的起点块带进了别的段的落定画面"
+
+    # 第 2 段（continue）与末段（ending）都是引导段：块内含上一段 end_hook 原文
+    for position in (1, len(plan.segments) - 1):
+        previous = plan.segments[position - 1]
+        assert "上一段落定画面" in _start_line(llm.requests[position])
+        assert previous.end_hook in _start_line(llm.requests[position]), \
+            f"{plan.segments[position].label} 没带上一段落定画面原文"
+
+
+def test_r2v_camera_cut_does_not_point_at_a_first_frame_image(tmp_path):
+    """r2v 没有帧槽：切镜段写成硬切新场景，不能出现「本段首帧图」引向不存在的图。"""
+    from minimax_h3_prompt.director.prompts import write_director_segments
+    from minimax_h3_prompt.tools.h3_validator import split_ref_sections
+
+    plan = _r2v_plan("opening", "camera_same", "camera_cut")
+    llm = _DialectLLM(lambda index: _r2v_reply(plan.segments[index - 1], plan))
+    write_director_segments(plan, llm=llm, session_dir=tmp_path,
+                            sections=split_ref_sections(_SUBJECT_DEFS))
+
+    cut = _start_line(llm.requests[2])
+    assert "硬切" in cut and "不承接" in cut, cut
+    assert "本段首帧图" not in cut, \
+        "r2v 没有帧槽，切镜段不能指向不存在的首帧图"
+
+    # camera_same 也是引导段：块内含上一段 end_hook 原文
+    assert plan.segments[0].end_hook in _start_line(llm.requests[1])
+
+
+# ---------------------------------------------------------------------------
 # 逐段写与落盘：GENxxx/director/segment-NN.md
 # ---------------------------------------------------------------------------
 

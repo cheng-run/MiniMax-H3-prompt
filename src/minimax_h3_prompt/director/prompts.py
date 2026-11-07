@@ -468,13 +468,18 @@ def _definitions_block(sections: dict[str, str]) -> str:
 
 
 def _fl2v_start_block(plan: DirectorPlan, segment: DirectorSegment) -> str:
-    """fl2v 的「本段起点」事实块（#147）：引导段接上一段落定画面，切镜段硬切新场景。
+    """「本段起点」事实块（#147 fl2v / #192 r2v）：引导段接上一段落定画面，切镜段硬切新场景。
 
     为什么必须有这一块：段类型只决定给哪几张图，「第一拍从哪接」既不是图也不是
     ``end_hook``（那是终点）。不写进请求，模型只能按类型名猜——``continue`` 会被写成
     从一张不存在的首帧图开始，``camera_cut`` 会被写成与上一段同景的软过渡。
+
+    r2v 与 fl2v 共用同一份事实，但切镜段措辞必须分叉：r2v 没有帧槽
+    （``frames.give_images_for`` 对 r2v 恒给参考素材），照抄 fl2v 的「本段第一帧
+    来自本段首帧图」会把模型引向一张不存在的图。函数名保留 fl2v 是因为改名只会
+    波及既有用例、不改变行为。
     """
-    if plan.mode != "fl2v":
+    if plan.mode not in ("fl2v", "r2v"):
         return ""
     if segment.type == "opening":
         return "\n【本段起点】全片开场：本段第一帧就是全片第一帧，没有上一段可承接。\n"
@@ -483,10 +488,15 @@ def _fl2v_start_block(plan: DirectorPlan, segment: DirectorSegment) -> str:
     if previous is None:
         return ""
     if segment.type == "camera_cut":
+        if plan.mode == "r2v":
+            return (
+                "\n【本段起点】切镜：**硬切**的新场景——**不承接**上一段的画面、"
+                "构图与人物位置。\n")
         return (
             "\n【本段起点】切镜：本段第一帧来自**本段首帧图**，是**硬切**的新场景——"
             "**不承接**上一段的画面、构图与人物位置；上一段落定画面"
             f"（{previous.end_hook}）只作剧情先后参考，不要写成同一空间。\n")
+
     # continue / camera_same / ending：都是引导段，第一拍从上一段终点接着写。
     return (
         "\n【本段起点】上一段落定画面："
