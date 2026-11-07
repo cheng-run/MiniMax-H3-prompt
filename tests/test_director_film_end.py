@@ -178,9 +178,9 @@ def test_no_film_end_image_returns_none_without_reading(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 _PLAN_JSON = """{"segments": [
-  {"start_s": 0, "end_s": 6, "type": "opening", "summary": "男人走出屋门", "end_hook": "他站在门口"},
+  {"start_s": 0, "end_s": 6, "type": "opening", "summary": "男人走出屋门", "end_hook": "他跨出门槛，回身把门拉上"},
   {"start_s": 6, "end_s": 12, "type": "continue", "summary": "沿小路走向院门", "end_hook": "他走到路中间"},
-  {"start_s": 12, "end_s": 18, "type": "ending", "summary": "走到院门前", "end_hook": "他停在院门前"}
+  {"start_s": 12, "end_s": 18, "type": "ending", "summary": "走到院门前", "end_hook": "他停在院门前，抬手推开院门"}
 ]}"""
 
 _SINGLE_BODY = """{note}
@@ -219,7 +219,7 @@ def _plan():
     segments = (
         DirectorSegment(index=1, type="opening", guided=False, start_frame=0,
                         end_frame=107, declared_frames=107, export_frames=107,
-                        summary="男人走出屋门", end_hook="他站在门口",
+                        summary="男人走出屋门", end_hook="他跨出门槛，回身把门拉上",
                         give_images=("first",)),
         DirectorSegment(index=2, type="continue", guided=True, start_frame=107,
                         end_frame=260, declared_frames=141, export_frames=153,
@@ -227,7 +227,7 @@ def _plan():
                         give_images=()),
         DirectorSegment(index=3, type="ending", guided=True, start_frame=260,
                         end_frame=413, declared_frames=141, export_frames=153,
-                        summary="走到院门前", end_hook="他停在院门前",
+                        summary="走到院门前", end_hook="他停在院门前，抬手推开院门",
                         give_images=()),
     )
     return DirectorPlan(mode="fl2v", total_frames=413, segments=segments)

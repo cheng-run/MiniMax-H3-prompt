@@ -28,6 +28,8 @@ from minimax_h3_prompt.director.frames import (
 )
 from minimax_h3_prompt.director.planning import (
     DIRECTOR_PLANNER_ROLE,
+    EndHookPlacementError,
+    is_placement_end_hook,
     parse_director_plan,
     plan_director_segments,
     plan_path,
@@ -269,12 +271,13 @@ def test_landing_rejects_targets_too_small_for_the_segment_count():
 # ---------------------------------------------------------------------------
 
 # 30 秒五段、每段提议 6 秒；类型覆盖开场/续接/同场景运镜/切镜/收尾（2 段无引导）。
+# 段尾一律写成动作在途中：#196 起摆位形态会被规划期回灌，夹具本身不该是坏样本。
 _THIRTY_SECONDS = """```json
 {"segments": [
   {"index": 0, "start_s": 0, "end_s": 6, "type": "opening",
-   "summary": "雨夜门口", "end_hook": "她停在便利店门口，右手还搭在伞柄上"},
+   "summary": "雨夜门口", "end_hook": "她推开玻璃门，右手还搭在伞柄上"},
   {"index": 1, "start_s": 6, "end_s": 12, "type": "continue",
-   "summary": "推门进店", "end_hook": "门在身后合上，她站在货架前"},
+   "summary": "推门进店", "end_hook": "门在身后合上，她走向货架"},
   {"index": 2, "start_s": 12, "end_s": 18, "type": "camera_same",
    "summary": "环绕货架", "end_hook": "镜头绕到货架另一侧，她的侧脸停在灯下"},
   {"index": 3, "start_s": 18, "end_s": 24, "type": "camera_cut",
@@ -856,3 +859,129 @@ def test_planner_end_hook_is_the_cut_frame_not_a_held_pose():
 
     for old in ("不允许切在动作进行中", "不要停在一半的动作上", "可以停住"):
         assert old not in text, f"规划师提示词还留着「{old}」——与切点语义相反"
+
+
+# ---------------------------------------------------------------------------
+# 规划期 end_hook 摆位守卫（#196 / 父 spec #191 U3）
+# ---------------------------------------------------------------------------
+
+# 本片 10 段真实 end_hook（60 秒丧尸预告片）：逐条写明「该拦／该放」。
+# 期望按**规格判据**（有静止谓词且无任何动作谓词）写死，不由实现反推。
+_REAL_END_HOOKS = (
+    ("琥珀色警示牌固定在画面右侧，远处曼哈顿天际线仍压在道路尽头，"
+     "减速通勤车正驶出下方前景", False),
+    ("儿子举着黑色手机站在右前方，父母分立其身后，三人的脸与电视、手机冷光同时亮起",
+     False),
+    ("窗帘垂到父亲肩部并遮住画面右侧，父子仍贴在左侧窗前，窗外通勤车列堵成一条线",
+     False),
+    ("感染者的牙齿咬在成年人上臂，三条传播与异变规则字幕完整压在电视画面下方", False),
+    ("父亲握住唯一车钥匙，母亲背好灰褐斜挎包并拉紧拉链，深海军蓝旧书包落在儿子背后，"
+     "三人齐齐转向屋门", False),
+    ("父亲停在SUV左前驾驶门前，母亲扶住右前副驾驶门把手，儿子绕到车尾右侧", False),
+    ("被咬男子的右上臂被感染者咬住衣袖，00:59倒计时悬在画面上方，"
+     "一家三口从车内望向前方", False),
+    ("男子立在停滞车旁，灰黄皮肤与浅灰眼膜被冷光照亮，身体前倾扑向家庭SUV", False),
+    ("副驾车门已经闭合上锁，母亲坐回右前座、父亲回到左前驾驶位，儿子缩在中央后排，"
+     "感染者的前臂被留在车外", True),
+    ("冲击声落下后，冷白车灯、封路车辆与一家三口的轮廓全部消失，画面彻底转为纯黑",
+     False),
+)
+
+
+@pytest.mark.parametrize(
+    "end_hook, placement", _REAL_END_HOOKS,
+    ids=[f"真实段尾-{position}" for position in range(1, len(_REAL_END_HOOKS) + 1)])
+def test_real_end_hooks_are_judged_by_the_narrow_placement_criterion(end_hook, placement):
+    """判据是窄的：只有「静止谓词且无动作谓词」才拦（#191 U3、用户故事 16）。"""
+    assert is_placement_end_hook(end_hook) is placement, end_hook
+
+
+def test_the_placement_form_named_by_the_spec_is_blocked():
+    """规格点名的形态必须拦住——它是这条守卫存在的理由。"""
+    assert is_placement_end_hook("三个人各自摆好位置站定、画面静止") is True
+
+
+class _ScriptedLLM:
+    """按序回放回复；回放完重复最后一条（「两次回灌后仍摆位」要同一份回复答三次）。"""
+
+    def __init__(self, *replies: str) -> None:
+        self.replies = list(replies)
+        self.requests: list[str] = []
+
+    def invoke(self, request, config=None):
+        self.requests.append(str(request))
+        for callback in (config or {}).get("callbacks") or []:
+            callback.on_llm_new_token("…")
+        return self.replies[min(len(self.requests), len(self.replies)) - 1]
+
+
+def _reply_with_end_hooks(hooks: dict[int, str],
+                          assets: dict[int, list[int]] | None = None) -> str:
+    """30 秒五段（与 ``_ADR_SHAPE`` 同形）；只替换点名的段尾与段内选图。"""
+    windows = [("opening", 0, 6), ("continue", 6, 12), ("continue", 12, 18),
+               ("continue", 18, 24), ("continue", 24, 30)]
+    segments = []
+    for index, (segment_type, start, end) in enumerate(windows, 1):
+        item = {
+            "start_s": start, "end_s": end, "type": segment_type,
+            "summary": f"s{index}", "end_hook": hooks.get(index, f"h{index}"),
+        }
+        if assets and index in assets:
+            item["assets"] = assets[index]
+        segments.append(item)
+    return json.dumps({"segments": segments}, ensure_ascii=False)
+
+
+_PLACEMENT_HOOK = "三个人各自摆好位置站定、画面静止"
+_ACTION_HOOK = "儿子举着黑色手机站在右前方，父母分立其身后，三人的脸与电视、手机冷光同时亮起"
+
+_BIG_REGISTRY = tuple((number, f"素材{number}") for number in range(1, 12))
+
+
+def test_placement_end_hook_is_fed_back_and_the_redrawn_plan_is_used():
+    """摆位不是硬失败：回灌同一个规划师，按新回复重算段表（#196 AC2）。"""
+    llm = _ScriptedLLM(
+        _reply_with_end_hooks({3: _PLACEMENT_HOOK}),
+        _reply_with_end_hooks({3: _ACTION_HOOK}),
+    )
+    result = plan_director_segments("分镜表：[Shot 1] ……", 30.0, llm, mode="t2v")
+
+    assert len(llm.requests) == 2, "一次回灌就该收下合格回复"
+    assert llm.requests[1].startswith(llm.requests[0]), "重问要带着原始请求（含分镜表）"
+    feedback = llm.requests[1]
+    assert "第 3 段" in feedback, "回灌要点名段号，模型才知道改哪一段"
+    assert "动作在途中" in feedback, "回灌要给出具体指向：改成动作在途中"
+    assert "完整段表 JSON" in feedback, "整份会被重新解析，只说改第 N 段会让其余段消失"
+    # 用的是新回复，不是「就地删掉那一句」的自作主张。
+    assert result.plan.segments[2].end_hook == _ACTION_HOOK
+
+
+def test_two_requeues_then_a_named_error_for_a_still_placement():
+    """两次重问后仍摆位：抛具名错误，消息点名段号与原文，走既有硬失败机制（AC3）。"""
+    llm = _ScriptedLLM(_reply_with_end_hooks({2: _PLACEMENT_HOOK}))
+
+    with pytest.raises(EndHookPlacementError) as excinfo:
+        plan_director_segments("分镜表：[Shot 1] ……", 30.0, llm, mode="t2v")
+
+    assert len(llm.requests) == 3, "首次 + 两次重问；不许有第二套重试机制"
+    assert isinstance(excinfo.value, ValueError), "向导的 except (RuntimeError, ValueError) 要接得住"
+    message = str(excinfo.value)
+    assert "第 2 段" in message
+    assert _PLACEMENT_HOOK in message, "报错要点名原文，用户才知道改哪一句"
+
+
+def test_budget_and_placement_problems_share_one_requeue_and_both_are_fed_back():
+    """两种问题同时出现：两块反馈都附上（不互相吞掉），但仍只花一次重问预算。"""
+    llm = _ScriptedLLM(
+        _reply_with_end_hooks({3: _PLACEMENT_HOOK}, assets={1: list(range(1, 12))}),
+        _reply_with_end_hooks({3: _ACTION_HOOK}, assets={1: [1]}),
+    )
+    result = plan_director_segments(
+        "分镜表：[Shot 1] ……", 30.0, llm, mode="r2v",
+        registry=_BIG_REGISTRY, subject_definitions="")
+
+    assert len(llm.requests) == 2, "两种问题共用同一条回灌路径与同一个重问预算"
+    feedback = llm.requests[1]
+    assert "素材预算超限" in feedback, "预算反馈被摆位反馈吞掉了"
+    assert "第 3 段" in feedback and "动作在途中" in feedback, "摆位反馈被预算反馈吞掉了"
+    assert result.budget.segments[1].slot_count == 1

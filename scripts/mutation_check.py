@@ -376,6 +376,19 @@ MUTATIONS: tuple[Mutation, ...] = (
         ("tests/test_director_prompts.py::test_music_rule_continues_one_cue_across_segments",),
         "引导段配乐退回「无声写 N/A」＝段间持续曲重新断开（#194，实测 −9.8/+26.6 dB 台阶）",
     ),
+    Mutation(
+        "end_hook_placement_guard_off",
+        "src/minimax_h3_prompt/director/planning.py",
+        "    text = str(end_hook or \"\")\n"
+        "    if not any(word in text for word in END_HOOK_STILL_WORDS):\n"
+        "        return False",
+        "    text = str(end_hook or \"\")\n"
+        "    if True:\n"
+        "        return False",
+        ("tests/test_director_plan.py::test_real_end_hooks_are_judged_by_the_narrow_placement_criterion",),
+        "摆位判据恒假＝「摆好位置站定、画面静止」的段尾原样落盘，接缝照样停顿（#196）。"
+        "真实样本第 9 条必须变红",
+    ),
 )
 
 

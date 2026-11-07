@@ -57,10 +57,17 @@ _INSTRUCTION_NAME = "segment_planner_director.md"
 # （ADR 0019 的记账口径）——混在一处就分不清钱花在哪条路线上。
 DIRECTOR_PLANNER_ROLE = "role_director_segment_planner"
 
-# 预算超限后最多重问几次（#187 / ADR 0029 决定 5）：首次回复之后**再**问两次。
-# 这是调用预算而不是重试策略——回灌内容是可执行的二选一，两次还不改说明规划师在
-# 这条约束上帮不上忙，继续问只是把同一笔钱再付一遍。
+# 首次回复之后最多再问几次（#187 / ADR 0029 决定 5；#196 起摆位问题共用这一个
+# 预算）。这是调用预算而不是重试策略——回灌内容是可执行的二选一，两次还不改说明
+# 规划师在这条约束上帮不上忙，继续问只是把同一笔钱再付一遍。
 MAX_BUDGET_REQUEUES = 2
+
+# 摆位 ``end_hook`` 判据的谓词表（#196 / 父 spec #191 U3）。**只此一份**：判据、
+# 回灌反馈与报错文案都从这里派生。别处再抄一份字面，改了这个表就会留下一条不说话
+# 的死规则（本仓「守卫形态从常量派生」已经咬过一次）。
+END_HOOK_STILL_WORDS = ("站", "坐", "停", "静", "不动", "定格", "摆好", "按住不动")
+END_HOOK_MOTION_WORDS = ("走", "跑", "冲", "推", "拉", "抓", "转", "扑", "举", "递",
+                         "落下", "撞", "绕")
 
 # 规划产物落 **`GENxxx/director/plan.json`**（设计 §3.2，2026-10-29 修订）。刻意不写
 # `segments/plan.json`：共享读取口 ``tools/ledger.read_plan_segment_count`` 只认 JSON
@@ -140,6 +147,22 @@ def _build_segments(mode: str, types: list[str], exports: list[int],
         ))
         cursor = end_frame
     return tuple(segments)
+
+
+def is_placement_end_hook(end_hook: str) -> bool:
+    """``end_hook`` 是不是「摆位式」：有静止谓词、且一个动作词都没有（#196）。
+
+    判据**刻意是窄的**：它只咬「三个人各自摆好位置站定、画面静止」这一种实测形态，
+    被它放过的 ``end_hook`` 未必都好。不做宽判据的理由是代价不对称——规划回灌比写段
+    回灌贵一个数量级，宽的启发式会把一次规划反复拖成五次（#191 U3）。
+
+    也不复用 ``tailframe.is_static_segment``：那一个判「无运镜 + end_hook 是状态
+    变化」，只在尾帧链上被调用，与「段尾切点是不是摆好的造型」不是同一件事。
+    """
+    text = str(end_hook or "")
+    if not any(word in text for word in END_HOOK_STILL_WORDS):
+        return False
+    return not any(word in text for word in END_HOOK_MOTION_WORDS)
 
 
 def parse_director_plan(text: str, total_s: float, *, mode: str) -> DirectorPlan:
@@ -286,6 +309,9 @@ def plan_director_segments(shot_table: str, total_s: float, llm, *, mode: str,
     清单回灌给**同一个**规划师重挑，最多 ``MAX_BUDGET_REQUEUES`` 次（#187）。仍超抛
     ``AssetBudgetOverflowError``：代码不自动截断到 9、也不自动整片重规划——砍哪张没有
     依据，且重规划等于整片重来，只能由用户决定（ADR 0029 决定 5）。
+
+    ``end_hook`` 被判为静止摆位时走**同一条**回灌路径与同一个重问预算（#196）：两块
+    反馈可以同时附上（互不吞掉），两次重问后仍摆位抛 ``EndHookPlacementError``。
     """
     _require_mode(mode)
     total_s = _require_number(total_s, "视频总时长")
@@ -351,12 +377,23 @@ def plan_director_segments(shot_table: str, total_s: float, llm, *, mode: str,
                                     subject_definitions=subject_definitions)
         # 非 r2v 的预算是空表，这一支自然为假；锚不计数由 ``slot_count`` 保证。
         over = _over_budget_segments(planning.plan, planning.budget)
-        if not over:
+        placed = _placement_segments(planning.plan)
+        if not over and not placed:
             return planning
         if requeues_left == 0:
+            if placed:
+                raise _placement_error(placed, over)
             raise _budget_overflow_error(over)
         requeues_left -= 1
-        request_now = f"{request}\n\n{_render_budget_feedback(over)}"
+        # 两种问题同时出现时两块都附上：只报一种会让模型修完一处又带着另一处回来，
+        # 白烧一次重问预算（#196）。它们仍然共用这一个 ``requeues_left``。
+        blocks = [
+            text for text in (
+                _render_budget_feedback(over) if over else "",
+                _render_placement_feedback(placed) if placed else "",
+            ) if text
+        ]
+        request_now = f"{request}\n\n" + "\n\n".join(blocks)
 
 
 def write_plan_json(path: Path, plan: DirectorPlan) -> Path:
@@ -889,6 +926,52 @@ def _over_budget_segments(
         if entry is not None and entry.slot_count > MAX_PICTURES:
             over.append((segment.index, entry))
     return over
+
+
+def _placement_segments(plan: DirectorPlan) -> list[tuple[int, str]]:
+    """判为摆位的段（段号 + ``end_hook`` 原文），按段号顺序（#196）。"""
+    return [(segment.index, segment.end_hook) for segment in plan.segments
+            if is_placement_end_hook(segment.end_hook)]
+
+
+def _render_placement_feedback(placed: Sequence[tuple[int, str]]) -> str:
+    """摆位回灌（#196）：点名段号与原文，只给「改成动作在途中」这一条可执行指向。"""
+    still = "／".join(END_HOOK_STILL_WORDS)
+    motion = "／".join(END_HOOK_MOTION_WORDS)
+    lines = ["【end_hook 是静止摆位，请改成动作在途中后重写整份段表】"]
+    for index, hook in placed:
+        lines.append(
+            f"第 {index} 段的 end_hook：「{hook}」——只写了静止谓词（{still}），"
+            f"没有任何位移或动作谓词（{motion}）。")
+    lines.append(
+        "end_hook 是本段切开的最后一帧，不是终点构图：请让动作在途中"
+        "（人物正在走、推、转向……），不要写成位置摆好、画面静止。")
+    # 回复会被整份重新解析：只说「改第 N 段」会让其余段从回复里消失（与预算回灌同理）。
+    lines.append("请重新给出完整段表 JSON（其余段原样保留，不要只给改动的那一段）。")
+    return "\n".join(lines)
+
+
+class EndHookPlacementError(ValueError):
+    """两次重问后 ``end_hook`` 仍是静止摆位（#196）。
+
+    继承 ``ValueError`` 与 ``AssetBudgetOverflowError`` 同理：向导与续跑入口的
+    ``except (RuntimeError, ValueError)`` 必须照常接住，否则一次摆位会把流程炸穿。
+    """
+
+
+def _placement_error(placed: Sequence[tuple[int, str]],
+                     over: Sequence[tuple[int, SegmentBudget]]) -> EndHookPlacementError:
+    """回灌用尽仍摆位：点名段号与原文，交用户决定（代码不替它改写分镜）。"""
+    details = "；".join(f"第 {index} 段「{hook}」" for index, hook in placed)
+    message = (
+        f"end_hook 仍是静止摆位：{details}。"
+        f"已把摆位清单回灌给规划师重写 {MAX_BUDGET_REQUEUES} 次，仍是摆位。"
+        "判据是「含静止谓词且不含任何动作谓词」；end_hook 是本段切开的最后一帧，"
+        "要写成动作在途中，不要写成位置摆好、画面静止。")
+    if over:
+        # 两块问题同时存在时别把预算那块吞掉：用户要一次看到两条才能一起改。
+        message += "\n" + str(_budget_overflow_error(over))
+    return EndHookPlacementError(message)
 
 
 def _budget_picture_list(entry: SegmentBudget) -> str:
