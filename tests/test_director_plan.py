@@ -450,6 +450,98 @@ def test_plan_json_readback_is_strict(tmp_path, mutate, message):
 
 
 # ---------------------------------------------------------------------------
+# 旧 t2v 段表续跑：给图清单按派生值归一（#202）
+# ---------------------------------------------------------------------------
+
+def _legacy_t2v_plan_on_disk(tmp_path):
+    """按旧口径落一条 t2v 段表：运镜段写 ``end`` / ``first,end``、收尾写 ``end``。
+
+    这是 #199 实测会话（GEN001）的形态：旧契约把 fl2v 的给图规则套到 t2v 上，段表
+    于是记下了这个模式根本没有的图槽。空清单（续接段）一并原样保留。
+    """
+    plan = parse_director_plan(_THIRTY_SECONDS, 30.0, mode="t2v")
+    path = tmp_path / "plan.json"
+    write_plan_json(path, plan)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    for index, legacy in ((3, ["end"]), (4, ["first", "end"]), (5, ["end"])):
+        data["segments"][index - 1]["give_images"] = legacy
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    return path, plan
+
+
+def test_legacy_t2v_plan_reads_back_with_empty_giving_lists(tmp_path, capsys):
+    """#202 AC1：含 ``end`` / ``first,end`` / 空清单的旧 t2v 表都读得回，清单为空。"""
+    path, plan = _legacy_t2v_plan_on_disk(tmp_path)
+    reread = read_plan_json(path)
+    assert [segment.give_images for segment in reread.segments] == [()] * len(plan.segments)
+    assert reread.to_dict()["mode"] == "t2v"
+
+
+def test_legacy_t2v_plan_normalization_prints_one_line_per_segment(tmp_path, capsys):
+    """#202 AC2：每段打印一行提示，点名段号与旧值——用户要知道这是旧口径被归一。"""
+    path, _ = _legacy_t2v_plan_on_disk(tmp_path)
+    read_plan_json(path)
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert len(lines) == 3, "只有清单不符的段该出提示，空清单段不打扰用户"
+    assert "第 3 段" in lines[0] and "['end']" in lines[0]
+    assert "第 4 段" in lines[1] and "['first', 'end']" in lines[1]
+    assert "第 5 段" in lines[2] and "['end']" in lines[2]
+    for line in lines:
+        assert "归一" in line and "不回写" in line
+
+
+def test_legacy_t2v_readback_leaves_the_file_byte_for_byte(tmp_path, capsys):
+    """#202 AC3：盘上的段表是「曾按错口径产出」的证据，读回一个字节都不许改。"""
+    path, _ = _legacy_t2v_plan_on_disk(tmp_path)
+    before = path.read_bytes()
+    read_plan_json(path)
+    capsys.readouterr()
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("mode, reply, total_s, position, legacy", [
+    ("r2v", _THIRTY_SECONDS, 30.0, 1, ["end"]),
+    ("fl2v", _THIRTY_SECONDS, 30.0, 1, ["first"]),
+    # i2v 是单段模式（整片上限 15 秒，ADR 0026），所以另造一条 6 秒开场。
+    ("i2v", '{"segments": [{"start_s": 0, "end_s": 6, "type": "opening",'
+            ' "summary": "a", "end_hook": "h1"}]}', 6.0, 0, ["end"]),
+])
+def test_other_modes_still_reject_hand_written_giving_lists(
+        tmp_path, capsys, mode, reply, total_s, position, legacy):
+    """#202 AC4：归一只对 t2v 生效，其它模式的报错文案与改动前逐字一致。"""
+    plan = parse_director_plan(reply, total_s, mode=mode)
+    path = tmp_path / "plan.json"
+    write_plan_json(path, plan)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["segments"][position]["give_images"] = legacy
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    with pytest.raises(ValueError, match="给图清单不接受手写"):
+        read_plan_json(path)
+
+
+@pytest.mark.parametrize("mutate, message", [
+    (lambda data: data["segments"][0].update(export_frames=108, declared_frames=108),
+     "网格"),
+    (lambda data: data.update(total_frames=721), "导出合计"),
+    (lambda data: data["segments"][1].update(type="opennig"), "未知段类型"),
+    (lambda data: data["segments"][0].update(guided=True), "guided"),
+    # 改成引导型开场并让帧数自洽，才能把「首段必须是开场」这一条单独逼出来。
+    (lambda data: data["segments"][0].update(
+        type="camera_same", guided=True, export_frames=153), "必须是 opening"),
+])
+def test_t2v_normalization_does_not_loosen_hard_contracts(tmp_path, capsys, mutate, message):
+    """#202 AC5：给图清单是派生字段才可归一；帧数与段类型仍是硬契约，照旧报错。"""
+    plan = parse_director_plan(_THIRTY_SECONDS, 30.0, mode="t2v")
+    path = tmp_path / "plan.json"
+    write_plan_json(path, plan)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    mutate(data)
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    with pytest.raises(ValueError, match=message):
+        read_plan_json(path)
+
+
+# ---------------------------------------------------------------------------
 # 出站清单：逐段展示段号 / 类型 / 声明帧 / 导出帧 / 给图清单（AC3）
 # ---------------------------------------------------------------------------
 

@@ -426,6 +426,9 @@ def read_plan_json(path: Path) -> DirectorPlan:
     为什么严格：续跑要照**当初定案的那张表**继续（同一教训见
     ``SegmentPlan.from_dict``）。导演台的帧数是执行契约（导出帧决定成片总长），
     一处算错不会自己露馅——只会让成片短掉或长掉几帧。
+
+    唯一例外：t2v 段表的给图清单与派生值不符时按派生值归一（#202）——它是派生字段、
+    不决定执行帧数，旧口径落盘的表不该把正在跑的片子卡死。
     """
     path = Path(path)
     try:
@@ -497,9 +500,19 @@ def read_plan_json(path: Path) -> DirectorPlan:
                 f"{where}声明帧 {declared} 与导出帧 {export} 不符（应为 {expected_declared}）")
         expected_images = list(give_images_for(segment_type, mode))
         if item.get("give_images") != expected_images:
-            raise ValueError(
-                f"{where}给图清单 {item.get('give_images')!r} 与类型派生的 "
-                f"{expected_images!r} 不符（给图清单不接受手写）")
+            if mode != "t2v":
+                raise ValueError(
+                    f"{where}给图清单 {item.get('give_images')!r} 与类型派生的 "
+                    f"{expected_images!r} 不符（给图清单不接受手写）")
+            # 旧口径的 t2v 段表（#199 之前）把 fl2v 的给图规则也套了上来，盘上写着
+            # ``end`` / ``first,end``。给图清单是**派生字段、不决定执行帧数**，改它
+            # 不改变插件要跑多少帧，所以读回按派生值归一，让用户正在跑的片子能续完。
+            # 这不是放宽硬契约：帧数与段类型照旧逐项校验；旧 i2v 五段表仍硬拒，因为
+            # 那时的表会让插件在建计划期抛 ``Segment #2 has no source image``。
+            # 不回写盘上的 plan.json——它是「这条会话曾按错口径产出」的证据。
+            print(
+                f"[旧口径] {where}给图清单 {item.get('give_images')!r} 与 t2v 派生值 "
+                f"{expected_images!r} 不符，已按派生值归一（盘上 plan.json 不回写）")
         end_hook = item.get("end_hook")
         if not isinstance(end_hook, str) or not end_hook.strip():
             raise ValueError(f"{where}缺 end_hook：写段（#103）与尾帧变换（#107）要拿它当约束")
