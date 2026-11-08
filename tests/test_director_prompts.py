@@ -1510,3 +1510,86 @@ def test_i2v_and_fl2v_instructions_stop_at_the_end_hook_instead_of_settling():
             f"{mode} 仍留着「落到 end_hook」的终点口径"
     assert "settles into the pose" in load_instruction("fl2v"), \
         "有尾帧时的官方终点构图句被误改（它保持不变）"
+
+
+# ---------------------------------------------------------------------------
+# #201 t2v 段词点名图片即报错（t2v 没有任何图槽）
+# ---------------------------------------------------------------------------
+
+def _with_picture_line(text: str, line: str) -> str:
+    """把 ``[Shot 2]`` 那一镜的正文换成给定句子，其余字节不动。"""
+    return re.sub(r"\[Shot 2\] At [^\n]*", f"[Shot 2] {line}", text, count=1)
+
+
+def test_t2v_segment_naming_a_picture_without_angle_brackets_is_flagged():
+    """#199 实测原话 ``established by Picture 2``——没有尖括号也是图片指称。
+
+    t2v 没有任何图槽，这处指称指向一张不存在的图；不判就等于把假指称放行。
+    """
+    from minimax_h3_prompt.director.prompts import validate_director_segment
+
+    plan = _plan("t2v")
+    segment = plan.segments[1]
+    text = _with_picture_line(_single_text(segment, plan),
+                              "The pose established by Picture 2 holds as the man turns.")
+    issues = validate_director_segment(text, "t2v", plan=plan, segment=segment)
+
+    hits = [i for i in issues if i.code == "DIRECTOR_PICTURE_PHANTOM"]
+    assert len(hits) == 1, f"t2v 段词点名了 Picture 2 却没报：{issues}"
+    assert hits[0].severity == "error"
+
+
+def test_t2v_segment_naming_a_picture_in_angle_brackets_is_flagged():
+    """r2v 的 ``<Picture 1>`` 形态同样进 t2v 段词＝同一个假指称。"""
+    from minimax_h3_prompt.director.prompts import validate_director_segment
+
+    plan = _plan("t2v")
+    segment = plan.segments[1]
+    text = _with_picture_line(_single_text(segment, plan),
+                              "The pose established by <Picture 2> holds as the man turns.")
+    codes = {i.code for i in validate_director_segment(
+        text, "t2v", plan=plan, segment=segment)}
+
+    assert "DIRECTOR_PICTURE_PHANTOM" in codes
+
+
+@pytest.mark.parametrize("mode", ["fl2v", "i2v"])
+def test_picture_reference_guard_does_not_touch_i2v_or_fl2v(mode):
+    """本票的硬判据只归 t2v：i2v/fl2v 的同类字样靠提示词纪律，不得被误伤。"""
+    from minimax_h3_prompt.director.prompts import validate_director_segment
+
+    plan = _plan(mode)
+    segment = plan.segments[1]
+    text = _with_picture_line(_single_text(segment, plan),
+                              "The pose established by Picture 2 holds as the man turns.")
+    codes = {i.code for i in validate_director_segment(
+        text, mode, plan=plan, segment=segment)}
+
+    assert "DIRECTOR_PICTURE_PHANTOM" not in codes, f"{mode} 被 t2v 的图片判据误伤"
+
+
+def test_t2v_segment_without_a_picture_reference_keeps_passing():
+    """新守卫不得把既有合格段判红：三字段外壳与时间戳判据照旧给零 issue。"""
+    from minimax_h3_prompt.director.prompts import validate_director_segment
+
+    plan = _plan("t2v")
+    segment = plan.segments[1]
+    assert validate_director_segment(_single_text(segment, plan), "t2v",
+                                     plan=plan, segment=segment) == []
+
+
+def test_phantom_message_says_where_continuity_comes_from():
+    """消息要说清「没有图槽、靠段间引导」，人才知道该删指称而不是去补图。"""
+    from minimax_h3_prompt.director.prompts import validate_director_segment
+
+    plan = _plan("t2v")
+    segment = plan.segments[1]
+    text = _with_picture_line(_single_text(segment, plan),
+                              "The pose established by Picture 2 holds as the man turns.")
+    message = next(i.message for i in validate_director_segment(
+        text, "t2v", plan=plan, segment=segment)
+        if i.code == "DIRECTOR_PICTURE_PHANTOM")
+
+    assert "图槽" in message
+    assert "段间引导" in message
+    assert "Picture 2" in message

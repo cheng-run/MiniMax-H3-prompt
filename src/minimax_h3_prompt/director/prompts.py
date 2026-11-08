@@ -290,6 +290,10 @@ def _at_timestamps(text: str) -> list[float]:
 # 这里只借它切「首镜」与「上一段末镜」两块正文。
 _SHOT_MARKER_RE = re.compile(r"\[Shot\s+(\d+)\]", re.IGNORECASE)
 
+# #201：t2v 没有图槽，段词里任何图片指称都指向一张不存在的图。两种形态都要咬：
+# r2v 写 ``<Picture 1>``，实测 t2v 段词却写出没有尖括号的 ``Picture 2``。
+_PICTURE_REFERENCE_RE = re.compile(r"<Picture\s+\d+>|\bPicture\s+\d+", re.IGNORECASE)
+
 
 def _next_section_offset(text: str) -> int:
     """``text`` 里第一个节头的字符偏移；没有节头时返回全文长度（＝取到结尾）。
@@ -366,7 +370,7 @@ def validate_director_segment(text: str, mode: str, *, plan: DirectorPlan,
     与 ``validate_ref_segment`` 的差别是**判据的来源不同**：多参那套按「段序 + 相对
     时间轴 + 起止状态声明」判，导演台没有桥接帧、时间轴是绝对坐标，照搬会把每一段
     都判红（设计 §3.3 点名「不得复用多参段序/时间轴相关的假错判据」）。这里只判本路线
-    的六条契约：
+    的七条契约：
 
     1. ``DIRECTOR_EMPTY``：空段；
     2. ``DIRECTOR_SECTION_*``：r2v 六节齐全且有序；t2v/i2v/fl2v 三字段齐全且有序
@@ -381,6 +385,10 @@ def validate_director_segment(text: str, mode: str, *, plan: DirectorPlan,
        刻意不取 ``plan`` 的 ``end_hook``：它是中文规划，段词是英文，跨语言取二元组
        必然恒零重叠（A 臂第 9 段实测），会把已知合格的段判红。判据是**启发式**——零
        重叠只证明「毫无交集」，不证明「承接得好」；硬切段本来就不承接，不判。
+    7. ``DIRECTOR_PICTURE_PHANTOM``：**只对 t2v** 生效，段词里出现图片指称
+       （``Picture N`` 或 ``<Picture N>``）即报错——t2v 没有图槽，这类指称指向一张
+       不存在的图，段间衔接靠段间引导（#201）。i2v/fl2v 的同类字样靠提示词纪律，
+       不做硬判据。
     """
     _require_write_mode(mode)
     body = str(text or "").strip()
@@ -426,6 +434,15 @@ def validate_director_segment(text: str, mode: str, *, plan: DirectorPlan,
                     "error", "DIRECTOR_SECTION_ORDER",
                     f"三字段顺序错误：应为 {' → '.join(BASE_SECTIONS)}，"
                     f"实际 {' → '.join(order)}"))
+
+    if mode == "t2v":
+        picture = _PICTURE_REFERENCE_RE.search(body)
+        if picture:
+            issues.append(ValidationIssue(
+                "error", "DIRECTOR_PICTURE_PHANTOM",
+                f"第 {segment.index} 段正文出现图片指称「{picture.group(0)}」——"
+                "t2v 没有任何图槽，段间衔接靠段间引导：请删掉这处图片指称，"
+                "改成按承接写法接上一段的落定画面，而不是去补一张图"))
 
     state_hits = [prefix for prefix in (_REF_START_STATE_PREFIX, _REF_END_STATE_PREFIX)
                   if prefix in body]

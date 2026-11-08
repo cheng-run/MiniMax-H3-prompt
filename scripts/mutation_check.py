@@ -424,6 +424,18 @@ MUTATIONS: tuple[Mutation, ...] = (
          "test_designers_set_visible_text_language_from_the_story_not_the_working_language",),
         "可见文字语言跟随工作语言＝美国故事里烧进中文角标（#191 实测形态，#195）",
     ),
+    Mutation(
+        "t2v_picture_guard_off",
+        "src/minimax_h3_prompt/director/prompts.py",
+        '    if mode == "t2v":\n        picture = _PICTURE_REFERENCE_RE.search(body)',
+        '    if False and mode == "t2v":\n        picture = _PICTURE_REFERENCE_RE.search(body)',
+        ("tests/test_director_prompts.py::"
+         "test_t2v_segment_naming_a_picture_without_angle_brackets_is_flagged",
+         "tests/test_director_prompts.py::"
+         "test_t2v_segment_naming_a_picture_in_angle_brackets_is_flagged"),
+        "关掉这条判据，t2v 段词里会重新出现 Picture N（指一张不存在的图），"
+        "贴给导演台即污染执行（#201）",
+    ),
 )
 
 
