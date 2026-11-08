@@ -1553,19 +1553,40 @@ def test_t2v_segment_naming_a_picture_in_angle_brackets_is_flagged():
     assert "DIRECTOR_PICTURE_PHANTOM" in codes
 
 
-@pytest.mark.parametrize("mode", ["fl2v", "i2v"])
-def test_picture_reference_guard_does_not_touch_i2v_or_fl2v(mode):
-    """本票的硬判据只归 t2v：i2v/fl2v 的同类字样靠提示词纪律，不得被误伤。"""
+def test_picture_reference_guard_does_not_touch_fl2v():
+    """本票的硬判据只归 t2v：fl2v 的同类字样靠提示词纪律，不得被误伤。"""
     from minimax_h3_prompt.director.prompts import validate_director_segment
 
-    plan = _plan(mode)
+    plan = _plan("fl2v")
     segment = plan.segments[1]
     text = _with_picture_line(_single_text(segment, plan),
                               "The pose established by Picture 2 holds as the man turns.")
     codes = {i.code for i in validate_director_segment(
-        text, mode, plan=plan, segment=segment)}
+        text, "fl2v", plan=plan, segment=segment)}
 
-    assert "DIRECTOR_PICTURE_PHANTOM" not in codes, f"{mode} 被 t2v 的图片判据误伤"
+    assert "DIRECTOR_PICTURE_PHANTOM" not in codes, "fl2v 被 t2v 的图片判据误伤"
+
+
+def test_picture_reference_guard_does_not_touch_i2v():
+    """i2v 产线只允许**单段 opening**（``frames.segment_types_for_mode``、ADR 0026）。
+
+    夹具必须是产线能产出的那种段表：拿五段 ``continue`` 去查「是否误伤」，查的是一张
+    i2v 永远不会生成的表。时间轴注记按同一个 plan 重算，否则 ``DIRECTOR_TIMELINE_MISSING``
+    会先一步判红、把本用例要验的图片判据蒙住。
+    """
+    from minimax_h3_prompt.director.frames import DirectorPlan
+    from minimax_h3_prompt.director.prompts import validate_director_segment
+
+    multi = _plan("i2v")
+    segment = multi.segments[0]
+    plan = DirectorPlan(mode="i2v", total_frames=segment.end_frame,
+                        segments=(segment,))
+    text = _with_picture_line(_single_text(segment, plan),
+                              "The pose established by Picture 2 holds as the man turns.")
+    codes = {i.code for i in validate_director_segment(
+        text, "i2v", plan=plan, segment=segment)}
+
+    assert "DIRECTOR_PICTURE_PHANTOM" not in codes, "i2v 被 t2v 的图片判据误伤"
 
 
 def test_t2v_segment_without_a_picture_reference_keeps_passing():

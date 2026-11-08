@@ -177,6 +177,23 @@ def test_give_images_follow_type_and_mode():
         give_images_for("opening", "t2vv")
 
 
+def test_mode_has_image_slots_is_derived_from_the_image_contract():
+    """模式级谓词恒等于「五种段类型里至少一种给了图」（#199 复审）。
+
+    写段守卫与旧段表读回问的是同一件事：「这个模式有没有图槽」。三处各写一份
+    ``mode == "t2v"``，加一个模式、或 t2v 哪天有了图槽，就会漏改一处（CONTEXT
+    「模式差异只住 ``give_images_for`` 一处」）。
+    """
+    from minimax_h3_prompt.director.frames import PLAN_MODES, mode_has_image_slots
+
+    for mode in PLAN_MODES:
+        assert mode_has_image_slots(mode) == any(
+            give_images_for(segment_type, mode) for segment_type in SEGMENT_TYPES), mode
+    assert mode_has_image_slots("t2v") is False
+    for mode in ("i2v", "fl2v", "r2v"):
+        assert mode_has_image_slots(mode) is True, mode
+
+
 def test_planner_give_image_column_matches_the_frames_contract():
     """规划师表里的「给图」列必须与 ``give_images_for`` 一致（#147 AC4、#203）。
 
@@ -198,15 +215,18 @@ def test_planner_give_image_column_matches_the_frames_contract():
         assert row is not None, f"规划师表里没有 {segment_type} 这一行"
         cells = row.split("|")
         assert len(cells) >= 5, f"{segment_type} 这一行不是表格行：{row}"
-        cell = cells[3]   # | type | 中文 | 给图 | 用在什么时候 |
-        for mode in ("fl2v", "t2v"):
+        cell = cells[3]   # | type | 中文 | 给图（fl2v / t2v） | 用在什么时候 |
+        slots = [part.strip() for part in cell.split("/")]
+        assert len(slots) == 2, (
+            f"{segment_type} 的给图格应写成「fl2v / t2v」两档：{cell}")
+        for slot, mode in zip(slots, ("fl2v", "t2v")):
             tokens = give_images_for(segment_type, mode)
             if not tokens:
-                assert "无图" in cell, f"{segment_type} 的 {mode} 档应写「无图」：{cell}"
+                assert "无图" in slot, f"{segment_type} 的 {mode} 档应写「无图」：{slot}"
                 continue
             for token in tokens:
-                assert words[token] in cell, (
-                    f"{segment_type} 的 {mode} 档缺给图字样 {words[token]}：{cell}")
+                assert words[token] in slot, (
+                    f"{segment_type} 的 {mode} 档缺给图字样 {words[token]}：{slot}")
 
 
 # ---------------------------------------------------------------------------

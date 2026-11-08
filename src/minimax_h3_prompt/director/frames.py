@@ -238,6 +238,16 @@ def give_images_for(segment_type: str, mode: str) -> tuple[str, ...]:
     }[mode]
 
 
+def mode_has_image_slots(mode: str) -> bool:
+    """该模式有没有**任何**图槽——由给图契约现算，调用点别再写 ``mode == "t2v"``。
+
+    写段守卫（t2v 段词不得点名图片）与旧段表读回归一问的是同一件事；三处各写一份
+    字面判断，加一个模式、或 t2v 哪天有了图槽，就会漏改一处（CONTEXT「模式差异只住
+    给图契约一处」）。``give_images_for`` 仍负责模式合法性校验，这里直接复用。
+    """
+    return any(give_images_for(segment_type, mode) for segment_type in SEGMENT_TYPES)
+
+
 def needs_first_frame_image(segment_type: str, mode: str) -> bool:
     """该段在本模式下**有没有首帧槽**——判据只有一条：给图清单里有没有 ``first``。
 

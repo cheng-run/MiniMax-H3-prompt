@@ -37,6 +37,7 @@ from .frames import (
     land_exports,
     max_segments_for_mode,
     max_total_seconds_for_mode,
+    mode_has_image_slots,
     optional_images_for,
     segment_type_label,
     segment_types_for_mode,
@@ -500,7 +501,7 @@ def read_plan_json(path: Path) -> DirectorPlan:
                 f"{where}声明帧 {declared} 与导出帧 {export} 不符（应为 {expected_declared}）")
         expected_images = list(give_images_for(segment_type, mode))
         if item.get("give_images") != expected_images:
-            if mode != "t2v":
+            if mode_has_image_slots(mode):
                 raise ValueError(
                     f"{where}给图清单 {item.get('give_images')!r} 与类型派生的 "
                     f"{expected_images!r} 不符（给图清单不接受手写）")

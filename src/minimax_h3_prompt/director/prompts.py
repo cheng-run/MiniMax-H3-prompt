@@ -66,7 +66,14 @@ from ..tools.h3_validator import (
     has_align_instruction,
     split_ref_sections,
 )
-from .frames import FPS, PLAN_MODES, DirectorPlan, DirectorSegment, is_guided
+from .frames import (
+    FPS,
+    PLAN_MODES,
+    DirectorPlan,
+    DirectorSegment,
+    is_guided,
+    mode_has_image_slots,
+)
 # 产物目录名只有 ``planning.DIRECTOR_DIRNAME`` 一处声明（复审 H1）：段文件、段表、
 # 尾帧与导演包必须落在**同一个** ``GENxxx/director/`` 下，各写一份字面量就是几条
 # 会各自漂的路径口径（某一条改了，另一条只会表现为「读不到/缺文件」）。
@@ -290,9 +297,10 @@ def _at_timestamps(text: str) -> list[float]:
 # 这里只借它切「首镜」与「上一段末镜」两块正文。
 _SHOT_MARKER_RE = re.compile(r"\[Shot\s+(\d+)\]", re.IGNORECASE)
 
-# #201：t2v 没有图槽，段词里任何图片指称都指向一张不存在的图。两种形态都要咬：
-# r2v 写 ``<Picture 1>``，实测 t2v 段词却写出没有尖括号的 ``Picture 2``。
-_PICTURE_REFERENCE_RE = re.compile(r"<Picture\s+\d+>|\bPicture\s+\d+", re.IGNORECASE)
+# #201：t2v 没有图槽，段词里任何图片指称都指向一张不存在的图。有/无尖括号两种形态
+# 由同一个 ``\b`` 边界覆盖：``<`` 与空格都是非词字符，``\bPicture`` 在两处都成立
+# （r2v 写 ``<Picture 1>``，实测 t2v 段词写的是没有尖括号的 ``Picture 2``）。
+_PICTURE_REFERENCE_RE = re.compile(r"\bPicture\s+\d+", re.IGNORECASE)
 
 
 def _next_section_offset(text: str) -> int:
@@ -435,13 +443,13 @@ def validate_director_segment(text: str, mode: str, *, plan: DirectorPlan,
                     f"三字段顺序错误：应为 {' → '.join(BASE_SECTIONS)}，"
                     f"实际 {' → '.join(order)}"))
 
-    if mode == "t2v":
+    if not mode_has_image_slots(mode):
         picture = _PICTURE_REFERENCE_RE.search(body)
         if picture:
             issues.append(ValidationIssue(
                 "error", "DIRECTOR_PICTURE_PHANTOM",
                 f"第 {segment.index} 段正文出现图片指称「{picture.group(0)}」——"
-                "t2v 没有任何图槽，段间衔接靠段间引导：请删掉这处图片指称，"
+                f"{mode} 没有任何图槽，段间衔接靠段间引导：请删掉这处图片指称，"
                 "改成按承接写法接上一段的落定画面，而不是去补一张图"))
 
     state_hits = [prefix for prefix in (_REF_START_STATE_PREFIX, _REF_END_STATE_PREFIX)

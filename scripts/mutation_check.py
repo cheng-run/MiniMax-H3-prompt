@@ -22,6 +22,7 @@ uv run python scripts/mutation_check.py --only ffmpeg_shell
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -425,18 +426,6 @@ MUTATIONS: tuple[Mutation, ...] = (
         "可见文字语言跟随工作语言＝美国故事里烧进中文角标（#191 实测形态，#195）",
     ),
     Mutation(
-        "t2v_picture_guard_off",
-        "src/minimax_h3_prompt/director/prompts.py",
-        '    if mode == "t2v":\n        picture = _PICTURE_REFERENCE_RE.search(body)',
-        '    if False and mode == "t2v":\n        picture = _PICTURE_REFERENCE_RE.search(body)',
-        ("tests/test_director_prompts.py::"
-         "test_t2v_segment_naming_a_picture_without_angle_brackets_is_flagged",
-         "tests/test_director_prompts.py::"
-         "test_t2v_segment_naming_a_picture_in_angle_brackets_is_flagged"),
-        "关掉这条判据，t2v 段词里会重新出现 Picture N（指一张不存在的图），"
-        "贴给导演台即污染执行（#201）",
-    ),
-    Mutation(
         "t2v_segments_ask_for_images",
         "src/minimax_h3_prompt/director/frames.py",
         '    if mode == "t2v":\n        return ()\n',
@@ -446,6 +435,18 @@ MUTATIONS: tuple[Mutation, ...] = (
          "test_tailframe_triggers_only_for_moving_and_ending_segments"),
         "删掉 t2v 早返回＝t2v 的运镜/收尾段重新索要终点画面：白费一次生图调用、"
         "写段请求里还会点名一张不存在的图（#199 实测 established by Picture 2，#200）",
+    ),
+    Mutation(
+        "t2v_picture_guard_off",
+        "src/minimax_h3_prompt/director/prompts.py",
+        '    if not mode_has_image_slots(mode):\n        picture = _PICTURE_REFERENCE_RE.search(body)',
+        '    if False and not mode_has_image_slots(mode):\n        picture = _PICTURE_REFERENCE_RE.search(body)',
+        ("tests/test_director_prompts.py::"
+         "test_t2v_segment_naming_a_picture_without_angle_brackets_is_flagged",
+         "tests/test_director_prompts.py::"
+         "test_t2v_segment_naming_a_picture_in_angle_brackets_is_flagged"),
+        "关掉这条判据，t2v 段词里会重新出现 Picture N（指一张不存在的图），"
+        "贴给导演台即污染执行（#201）",
     ),
 )
 
@@ -467,9 +468,18 @@ def _git_clean(path: Path) -> bool:
 
 
 def _run_tests(nodes: tuple[str, ...]) -> int:
+    # PYTHONPATH 必须显式指向本次变异的那棵树的 ``src``：工作树里没有自己的 .venv，
+    # 继承来的包路径指向主树，变异打在 A 树、用例读的却是 B 树——用例照绿，变异被
+    # 报成「存活（守卫是摆设）」（2026-11-08 #199 复审实测）。主树里两者同一份，
+    # 这一句不改变任何结果。
+    env = dict(os.environ)
+    src = str(ROOT / "src")
+    env["PYTHONPATH"] = src + (os.pathsep + env["PYTHONPATH"]
+                               if env.get("PYTHONPATH") else "")
     return subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *nodes],
-        cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace").returncode
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", env=env).returncode
 
 
 def check(mutation: Mutation) -> tuple[bool, str]:
