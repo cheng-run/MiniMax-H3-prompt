@@ -178,11 +178,14 @@ def test_give_images_follow_type_and_mode():
 
 
 def test_planner_give_image_column_matches_the_frames_contract():
-    """规划师表里的「给图」列必须与 ``give_images_for`` 一致（#147 AC4）。
+    """规划师表里的「给图」列必须与 ``give_images_for`` 一致（#147 AC4、#203）。
 
     判定规则以前只有一句「起点是上一段终点 → 引导开、只给尾帧」，把 ``continue``
     （实际不给任何图）也写成了有尾帧；规划师照着那句话判，续接段就会被当成有终点画面。
     这里按 token 反查每一行的字样：契约一改，静态表必须跟着改，否则本用例报红。
+
+    **#203 起按模式各查一档**：表里 fl2v 与 t2v 并排，t2v 全部段类型都要写「无图」。
+    断言取「给图」单元格而不是整行——两档并排后整行里另一档的字样会让断言假绿。
     """
     from minimax_h3_prompt.director.frames import SEGMENT_TYPES, give_images_for
     from minimax_h3_prompt.director.planning import load_instruction
@@ -193,12 +196,17 @@ def test_planner_give_image_column_matches_the_frames_contract():
         row = next((line for line in text.splitlines()
                     if line.startswith(f"| `{segment_type}`")), None)
         assert row is not None, f"规划师表里没有 {segment_type} 这一行"
-        tokens = give_images_for(segment_type, "fl2v")
-        if not tokens:
-            assert "无图" in row, f"{segment_type} 应写「无图」：{row}"
-            continue
-        for token in tokens:
-            assert words[token] in row, f"{segment_type} 缺给图字样 {words[token]}：{row}"
+        cells = row.split("|")
+        assert len(cells) >= 5, f"{segment_type} 这一行不是表格行：{row}"
+        cell = cells[3]   # | type | 中文 | 给图 | 用在什么时候 |
+        for mode in ("fl2v", "t2v"):
+            tokens = give_images_for(segment_type, mode)
+            if not tokens:
+                assert "无图" in cell, f"{segment_type} 的 {mode} 档应写「无图」：{cell}"
+                continue
+            for token in tokens:
+                assert words[token] in cell, (
+                    f"{segment_type} 的 {mode} 档缺给图字样 {words[token]}：{cell}")
 
 
 # ---------------------------------------------------------------------------
@@ -514,12 +522,14 @@ def test_r2v_planning_request_states_reference_only_images():
     assert [segment.give_images for segment in plan.segments] == [("assets",)] * 5
 
 
-def test_planner_table_declares_its_giving_column_is_fl2v_scope():
-    """静态给图表是 fl2v 口径（#154）：r2v 以请求开头的模式说明为准。"""
+def test_planner_table_declares_its_giving_column_per_mode():
+    """静态给图表按模式表述（#154、#203）：r2v 仍以请求开头的模式说明为准。"""
     from minimax_h3_prompt.director.planning import load_instruction
 
     text = load_instruction()
-    assert "fl2v 口径" in text, "静态给图表没注明口径"
+    assert "给图（fl2v / t2v）" in text, "静态给图表没按模式标注"
+    assert "t2v 在全部段类型下都不给图" in text, "没写 t2v 的无图口径"
+    assert "需要终点画面锚点请选 fl2v" in text, "没写「要终点锚点请选 fl2v」的理由"
     assert "r2v 每段只给参考素材" in text, "没写 r2v 的参考素材口径"
 
 
