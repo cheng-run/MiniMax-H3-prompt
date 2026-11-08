@@ -37,7 +37,7 @@ spec 与票住 issue 是因为 `/to-spec`、`/to-tickets` 按 `docs/agents/issue
 - **默认不开工作树**：只有用户明确要求并行执行任务时才 `git worktree add worktree/ticket-NN`（`/worktree/` 已 gitignore）；单票照常在主树做。
 - **工作树的提交不进历史**：工作树里可以提交到它自己的临时分支，但那些提交**永不 push**；合并回原分支走 `git merge --squash`，**最终提交只落在主分支上、一票一次**。
 - **推送放最后，验收通过才推**：改动碰到 `src/` 或 `tests/` 时必须重跑全量；**纯文档/占位改动沿用最近一次绿的结果**，并在推送时说明依据哪一次。全量绿只是**交验收的前提**——用户说「验收通过／可以合了」之后才合 main 并 `git push`；验收前不推。全局 `~/.claude/AGENTS.md` 的验收门是唯一真源（覆盖 2026-10-21 版「绿了即自动 push」）。
-- 工作树内跑测试先设 `PYTHONPATH=<工作树>\src` 再用主仓 `.venv`，否则测的是主树（判据：`CONFIG_PATH` 打印应指向该工作树）。
+- 工作树内**直接**跑 pytest 要先设 `PYTHONPATH=<工作树>\src` 再用主仓 `.venv`，否则测的是主树（`scripts/check.sh` 已自设，走它就不用管；判据：`CONFIG_PATH` 打印应指向该工作树）。
 - **跨工作树查改动用 `git -C worktree/...`（或绝对路径），不要 `cd`**：`cd` 会把主会话的工作目录切走，后续命令全部落在工作树里（2026-11-03 实测）。
 - 每合一张票后主树跑全量：票各自绿 ≠ 合起来绿；语义冲突的典型形态＝测试仍按旧流程喂输入。**例外（2026-11-04 起）**：从集成树按票拆回 main 时，若拆完 `git diff --stat main <集成分支>` 为空（拆分是内容保真的重放，交互风险已在集成树的逐票全量里验过），每票可只跑**受影响用例**、最后在 main 跑一次全量；拆完 diff 非空则照旧逐票全量。交验收时说明依据哪一次全量。
 - **并行期全量耗时不可比**：多个工作树同时跑全量时 CPU 争用会把 80s 拉成 180s+（2026-11-01 实测 183s／195s，空载复测 78–84s）。判「接线回归」前先空载复测一次，别拿并行期的墙钟下结论。
@@ -48,9 +48,8 @@ spec 与票住 issue 是因为 `/to-spec`、`/to-tickets` 按 `docs/agents/issue
 ## 守卫（2026-11-02 起入库）
 
 `tests/`、`scripts/`、`docs/` 与 `AGENTS.md` 自 2026-11-02 起恢复入库（体检 P0-1）：干净检出即可跑测试与结构守卫，CI 与本机跑同一套命令。`.git/hooks/` 仍是每台机器自己的目录、不随 clone 走——新机器跑一次 `scripts/bootstrap-dev.sh` 装回；钩子本体在 `scripts/hooks/`，已被跟踪。
-- `scripts/check.sh fast|full`：快档结构守卫（出网守卫、f-string docstring）＋改动文件的 lint ＋测试；`.git/hooks/pre-commit` 调快档。`full` 另跑 mypy 与全量测试；`clean` 把本机 `.env` 从测试里摘掉、模拟 CI 的干净检出（推送前跑它，2026-11-02 CI 首跑红了三条本地看不见的）。**看结尾而退出码不被吞**，直接用这条：
-  `bash scripts/check.sh full 2>&1 | tail -5; echo "EXIT=${PIPESTATUS[0]}"`
-  （裸 `| tail` 会让红的检查显示成绿——2026-11-01 漏看过一次 collection error。）
+- `scripts/check.sh fast|full`：快档结构守卫（出网守卫、f-string docstring）＋改动文件的 lint ＋测试；`.git/hooks/pre-commit` 调快档。`full` 另跑 mypy 与全量测试；`clean` 把本机 `.env` 从测试里摘掉、模拟 CI 的干净检出（推送前跑它，2026-11-02 CI 首跑红了三条本地看不见的）。**判据是最后一行**：`[check] <档位>: PASS` / `FAIL（退出码 N）`——管道随便接，`| tail -3` 也不会把红显示成绿（2026-11-08 起由脚本自己保证，不用再记 `PIPESTATUS`）。
+  它自己把本树 `src` 放进 `PYTHONPATH`，工作树里跑也是测工作树（2026-11-08 #199 实测：此前工作树里跑会静默测主树）。
 - `scripts/check_docstring_shape.py`：AST 守卫，docstring 写成 f-string 即报红（ruff 的 F 规则不抓，全量测试也不报）。
 - `scripts/check_commit_msg.sh`：提交信息格式 `type(scope): 摘要（#N）`（无 issue 的 retro 用 `（retro YYYY-MM-DD）`）；`.git/hooks/commit-msg` 调用它。
 - `scripts/worktree.sh add|harvest|remove NN`：建树自动复制 `tests/`、`scripts/`、`docs/` 并留一份 tests 基线快照；`harvest` 把工作树里的测试改动回灌主树（主树已分叉就报冲突、不覆盖）；删树先自动 harvest。
@@ -58,6 +57,7 @@ spec 与票住 issue 是因为 `/to-spec`、`/to-tickets` 按 `docs/agents/issue
 - lint：`ruff` 在 `[dependency-groups].dev` 里、装在 `.venv`；`scripts/check.sh` 用 `"$PY" -m ruff`（不走 PATH）。缺装时 fast 会跳过并提示，安装由用户执行：`uv add --dev ruff`。
 - `scripts/check.sh mutate`：守卫变异检验（`scripts/mutation_check.py`），把关键实现改坏、跑指定用例、还原；用例必须红。**新加守卫就往 `MUTATIONS` 补一条**——没有变异检验的守卫不算守卫。
 - `scripts/check.sh types|coverage`：mypy（先只查叶子模块）与分支覆盖度量，两个都**装了才跑**，安装由用户执行（`uv add --dev mypy` / `uv add --dev coverage`）。
+- 单条用例超时 300 秒（`pyproject.toml` 的 `timeout`）：卡死时以「哪个用例超时」收场，而不是把机器拖到换页。要 `pytest-timeout` 才生效，未装时 `check.sh` 会提示；安装由用户执行：`uv add --dev pytest-timeout`（2026-11-08 实测一条卡死的全量吃到 24 GB 工作集 / 95 GB 私有提交）。
 - `scripts/ac_trace.py`：按注释/docstring 里的 `#NNN` 汇总 issue → 代码 → 测试；用来发现「只有代码、没有测试」的票。不是门禁。
 - `tests/test_adr_guard.py`（fast 档）：① 注释/docstring/文档里的 `ADR NNNN` 必须指向真实文件（外部 ADR 写 `ADR-NNNN`，连字符形式不核对）；② 27 份 ADR 必须有且只有一行合规状态行。ADR 写法与索引口径见 `docs/agents/engineering-cadence.md`；索引用 `scripts/adr_index.py` 现生成，不落静态清单。
 - 工程化常态（检查档位、发布管理、追溯口径）见 `docs/agents/engineering-cadence.md`；变更记录见根 `CHANGELOG.md`。

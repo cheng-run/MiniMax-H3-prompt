@@ -45,6 +45,7 @@
 | 判据 | 真源 |
 | --- | --- |
 | 守卫/钉合测试要做**变异检验**：扰动来源必须变红（永不为红＝没有守卫） | auto memory `guard-tests-need-mutation-check`（#56 复审硬条） |
+| 断言钉**静态产物**（表格、提示词文案、清单）时，要实测「改坏即红」——对调两档、删一个字——并把实跑写进报告；咬不住的断言不算守卫 | 2026-11-08 #199 复审：给图表守卫对调两档仍绿、i2v 用例用产线不可达的 5 段表 |
 | 会真建 LLM 客户端的用例一律打桩（暗读 `.env` 真 key 的用例只在本机能过）。**已由 `tests/conftest.py` 的 `no_real_network` 强制：漏打桩即红，确需联网标 `@pytest.mark.allow_network`** | auto memory `h3-ticket-workflow` |
 | 加新环节后要跑**受影响的旧用例文件**并看耗时：接线变更会让旧用例开始走新路真发网络请求（信号＝CPU 时间远低于墙钟） | auto memory `wiring-change-makes-old-tests-hit-network`（#56：80s→145s） |
 | 给向导加新问答别动用例输入表**末尾**（会被上游队列菜单吃掉、把流程挪一步）；在 `fake_prompt` 里只对那道新题作答 | auto memory `wizard-test-inputs-new-question`（#57：2.25s→249s） |

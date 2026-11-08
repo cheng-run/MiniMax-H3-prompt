@@ -20,9 +20,16 @@
 #   scripts/check.sh clean    # 干净环境（无 .env）跑全量，模拟 CI
 #   scripts/check.sh worktree # 工作树生命周期冒烟（add/remove）
 #   scripts/check.sh rehash   # 打印关键帧角色提示词的 sha256，供更新基线
-set -euo pipefail
+set -Eeuo pipefail
 
 cd "$(dirname "$0")/.." || exit 1
+
+# 本树的 src 必须排在 PYTHONPATH 最前。工作树里没有自己的 .venv，解释器回落到**主树**
+# 的 .venv，而那是 editable 安装（指向主树）——不显式指定，就会出现「变异打在 A 树、
+# 用例读的是 B 树」，绿得毫无意义（2026-11-08 #199 实测：mutation_check 因此把两条
+# 真守卫报成「摆设」）。主树里这行是恒等变换。
+SRC_DIR="$(pwd -W 2>/dev/null || pwd)/src"
+export PYTHONPATH="$SRC_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
 # 解释器回落链：环境变量 → 本地 .venv → **主工作树**的 .venv → PATH 上的 python。
 # 为什么要有第三档：工作树里没有 .venv，而本机 ``python`` 是 ComfyUI 的内嵌解释器
@@ -40,6 +47,17 @@ fi
 # 「未安装，跳过」，lint 从来没真正跑过（2026-11-01 retro 扩开后有 6 条真错误，
 # 含 main.py 的 F821 未定义名）。
 ruff_available() { "$PY" -m ruff --version >/dev/null 2>&1; }
+
+# 超时保护：pyproject 的 ``timeout = 300`` 只在 pytest-timeout 装着时生效，插件不在时
+# 那条配置静默无效——「规则在、接线不在」的老形态。装没装都照跑，但要说一声：
+# 2026-11-08 实测一条卡死的全量吃到 24 GB 工作集 / 95 GB 私有提交，机器只剩 1.4 GB。
+report_timeout_guard() {
+  if "$PY" -c "import pytest_timeout" >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "[check] timeout: pytest-timeout 未安装，本次全量没有单条用例超时保护" \
+       "（安装由用户执行：uv add --dev pytest-timeout）"
+}
 
 # 快档只放「秒级 + 结构性强」的几条：词条形态、配置解析、直呼覆盖、出网守卫。
 # 刻意不按文件大小自动挑——那会让档位随仓库演化和意图脱钩。
@@ -97,6 +115,7 @@ run_types() {
 
 run_fast() {
   echo "[check] fast: ${#FAST_TESTS[@]} 个结构守卫文件"
+  report_timeout_guard
   "$PY" -m pytest -q "${FAST_TESTS[@]}"
   run_docstring_guard
   lint_changed
@@ -115,12 +134,19 @@ run_rehash() {
     "$role"
 }
 
-case "${1:-fast}" in
+# 唯一的结论行：`| tail -N` 这类管道会把退出码吞掉，曾经把红的检查显示成绿
+# （2026-11-01 漏看一次 collection error，AGENTS.md 因此留了一段 PIPESTATUS 咒语）。
+# 结论行让「最后一行」自己就是判据，不用再让每个人记那串咒语。
+MODE="${1:-fast}"
+trap 'rc=$?; echo "[check] ${MODE}: FAIL（退出码 ${rc}）" >&2; exit "$rc"' ERR
+
+case "$MODE" in
   fast)
     run_fast
     ;;
   full)
     echo "[check] full: 全量测试"
+    report_timeout_guard
     "$PY" -m pytest -q
     run_docstring_guard
     lint_changed
@@ -138,6 +164,7 @@ case "${1:-fast}" in
     # 干净环境（retro 2026-11-02）：把本机 .env 从测试里摘掉，模拟 CI 的干净检出。
     # 推送前跑一次，就能看见「远端会看见而本地看不见」的那类红（首跑 CI 红了三条）。
     echo "[check] clean: 干净环境（无 .env / 无模型环境变量）下跑全量"
+    report_timeout_guard
     H3_TEST_NO_ENV=1 "$PY" -m pytest -q
     run_docstring_guard
     ;;
@@ -152,9 +179,11 @@ case "${1:-fast}" in
   coverage)
     if ! "$PY" -m coverage --version >/dev/null 2>&1; then
       echo "[check] coverage: coverage 未安装，跳过（安装由用户执行：uv add --dev coverage）"
+      echo "[check] ${MODE}: SKIP"
       exit 0
     fi
     echo "[check] coverage: 全量测试 + 分支覆盖（只度量，不设门槛）"
+    report_timeout_guard
     "$PY" -m coverage run -m pytest -q
     "$PY" -m coverage report
     ;;
@@ -169,6 +198,10 @@ case "${1:-fast}" in
     ;;
   *)
     echo "用法: $0 [fast|full|lint|mutate|types|coverage|clean|worktree|rehash [角色名]]" >&2
+    printf '[check] %s: SKIP（无此档位）\n' "$MODE" >&2
     exit 2
     ;;
 esac
+
+trap - ERR
+echo "[check] ${MODE}: PASS"

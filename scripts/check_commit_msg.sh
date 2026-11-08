@@ -8,14 +8,15 @@
 # 允许两种可追溯后缀：
 #   （#123）               issue / 票号
 #   （retro 2026-10-31）  没有 issue 的 retro 类改动，用日期追溯
-# Merge / Revert / fixup! / squash! 等特殊提交放行。
+# Merge / Revert / fixup! / squash! 等特殊提交放行；`merge(scope): …` 也是——它是
+# 手工写的合并提交信息（2026-11-08 #199 实测被拦，白跑一次），与 `Merge branch` 同类。
 set -euo pipefail
 
 msg_file=${1:?用法: check_commit_msg.sh <commit-msg-file>}
 subject=$(sed -n '1p' "$msg_file" | sed 's/[[:space:]]*$//')
 
 case "$subject" in
-  Merge\ *|merge:*|Revert\ *|revert:*|fixup!*|squash!*) exit 0 ;;
+  Merge\ *|merge:*|merge\(*|Revert\ *|revert:*|fixup!*|squash!*) exit 0 ;;
 esac
 
 # 类型白名单与 CODING_STANDARDS 第七节一致；scope 允许中文（仓内已有 `fix(导演台)`），
@@ -31,6 +32,6 @@ cat >&2 <<'MSG'
     type(scope): 摘要（#N）
   例：fix(director): 陪跑改以成片视频为证据（#112）
   没有 issue 的 retro 类改动用：（retro YYYY-MM-DD）
-  Merge / Revert / fixup! / squash! 自动放行。
+  Merge / Revert / fixup! / squash! / merge(scope): … 自动放行。
 MSG
 exit 1

@@ -42,6 +42,11 @@ testpaths = ["tests"]
 markers = [
     "allow_network: 允许该用例建立真实网络连接（默认全部禁止，见 conftest.no_real_network）",
 ]
+# 单条用例上限（秒）。卡死时要以「哪个用例超时」收场，而不是让整台机器被换页拖垮：
+# 2026-11-08 实测一条卡住的全量吃到 24 GB 工作集 / 95 GB 私有提交，可用内存掉到 1.4 GB，
+# 全程没有任何信号指出是哪条用例。这条只在装了 pytest-timeout 时生效——未装时
+# `scripts/check.sh` 会显式提示（安装由用户执行：uv add --dev pytest-timeout）。
+timeout = 300
 
 [tool.mypy]
 # 体检 P6（2026-11-02）：先只查**叶子模块**——它们没有项目内循环依赖，注解能真
