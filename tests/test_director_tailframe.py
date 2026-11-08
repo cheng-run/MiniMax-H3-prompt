@@ -36,7 +36,7 @@ def _segment(index, segment_type, start, end, declared, export, guided):
     )
 
 
-def _plan(mode: str = "t2v"):
+def _plan(mode: str = "fl2v"):
     from minimax_h3_prompt.director.frames import DirectorPlan
 
     segments = (
@@ -152,14 +152,22 @@ def _stub_vision(monkeypatch, description="画中人物穿灰色风衣，站在�
 # ---------------------------------------------------------------------------
 
 def test_tailframe_triggers_only_for_moving_and_ending_segments():
-    """五种段类型逐一核对：开场/续接不产，两种运镜与收尾定格要产。"""
+    """fl2v 五种段类型逐一核对：开场/续接不产，两种运镜与收尾定格要产。
+
+    t2v 在任何段类型下都给不出图（#199／#200）：终点画面不是它能用的槽位，触发集合
+    必须跟着契约空掉，否则每段白跑一次生图、段词还会点名一张不存在的图。
+    """
     from minimax_h3_prompt.director import frames, tailframe
 
-    triggered = [t for t in frames.SEGMENT_TYPES if tailframe.needs_tailframe(t, "t2v")]
+    triggered = [t for t in frames.SEGMENT_TYPES if tailframe.needs_tailframe(t, "fl2v")]
     assert triggered == ["camera_same", "camera_cut", "ending"]
 
+    assert tailframe.tailframe_segment_types("t2v") == ()
+    for segment_type in frames.SEGMENT_TYPES:
+        assert tailframe.needs_tailframe(segment_type, "t2v") is False, segment_type
+
     with pytest.raises(ValueError, match="unknown_type"):
-        tailframe.needs_tailframe("unknown_type", "t2v")
+        tailframe.needs_tailframe("unknown_type", "fl2v")
 
 
 def test_trigger_set_follows_the_give_image_contract(monkeypatch):
@@ -167,16 +175,17 @@ def test_trigger_set_follows_the_give_image_contract(monkeypatch):
 
     触发集合不是手抄的字面量，而是从 ``frames.give_images_for`` 现算的——
     另写一份会各自漂的集合，改段类型规则时这里就静默失效（本仓吃过多次）。
+    夹具用 fl2v：t2v 已经没有任何终点画面，改契约也看不出增量的那一段。
     """
     from minimax_h3_prompt.director import frames, tailframe
 
-    assert "continue" not in tailframe.tailframe_segment_types("t2v")
+    assert "continue" not in tailframe.tailframe_segment_types("fl2v")
     original = frames.give_images_for
     monkeypatch.setattr(
         tailframe, "give_images_for",
         lambda segment_type, mode: ((frames.IMAGE_END,) if segment_type == "continue"
                                     else original(segment_type, mode)))
-    assert "continue" in tailframe.tailframe_segment_types("t2v")
+    assert "continue" in tailframe.tailframe_segment_types("fl2v")
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +198,7 @@ def test_request_carries_the_reference_frame_and_the_three_section_heads():
 
     segment = _plan().segments[2]
     request = tailframe.build_tailframe_request(
-        segment, mode="t2v", start_image="GEN001/director/start-03.png",
+        segment, mode="fl2v", start_image="GEN001/director/start-03.png",
         start_frame_description="画中人物穿灰色风衣，站在便利店门前。")
 
     for head in tailframe.tailframe_sections():
@@ -208,7 +217,7 @@ def test_non_triggering_segment_refuses_to_build_a_request():
 
     with pytest.raises(ValueError, match="开场|不需要|opening"):
         tailframe.build_tailframe_request(
-            _plan().segments[0], mode="t2v", start_image="x.png",
+            _plan().segments[0], mode="fl2v", start_image="x.png",
             start_frame_description="…")
 
 
@@ -276,7 +285,7 @@ def test_request_carries_the_identity_baseline():
     from minimax_h3_prompt.director import tailframe
 
     request = tailframe.build_tailframe_request(
-        _plan().segments[2], mode="t2v", start_image="start.png",
+        _plan().segments[2], mode="fl2v", start_image="start.png",
         start_frame_description="…",
         identity_baseline="主角：短黑褐色头发，干净无胡须，不戴墨镜或帽子。")
 
@@ -291,7 +300,7 @@ def test_request_carries_the_segment_video_prompt_for_the_camera_move():
     from minimax_h3_prompt.director import tailframe
 
     request = tailframe.build_tailframe_request(
-        _plan().segments[2], mode="t2v", start_image="start.png",
+        _plan().segments[2], mode="fl2v", start_image="start.png",
         start_frame_description="…",
         segment_prompt="[Shot 2] an eye-level medium-wide tracking shot follows him "
                        "to the corner; final composition places him before the corner.")
@@ -476,7 +485,7 @@ def test_write_uses_the_unique_direct_write_exit_with_its_own_role(monkeypatch):
     monkeypatch.setattr(tailframe, "_direct_write", fake_direct_write)
     segment = _plan().segments[2]
     text = tailframe.write_tailframe_prompt(
-        segment, mode="t2v", llm=object(), start_image="start.png",
+        segment, mode="fl2v", llm=object(), start_image="start.png",
         start_frame_description="…")
 
     assert text.strip() == _TAILFRAME_TEXT.strip()
@@ -492,7 +501,7 @@ def test_write_retries_with_the_issue_list_then_gives_up_loudly(monkeypatch):
     _stub_vision(monkeypatch)
     llm = _StubLLM(["人物转过身去。"])  # 一段都没解析出来
     text = tailframe.write_tailframe_prompt(
-        _plan().segments[2], mode="t2v", llm=llm, start_image="start.png",
+        _plan().segments[2], mode="fl2v", llm=llm, start_image="start.png",
         start_frame_description="…")
 
     assert text == "人物转过身去。"
@@ -565,7 +574,7 @@ def test_tailframe_request_puts_the_source_slice_before_the_edit_discipline():
     from minimax_h3_prompt.tools.image_prompt_discipline import edit_discipline_text
 
     request = tailframe.build_tailframe_request(
-        _plan().segments[2], mode="t2v", start_image="start.png",
+        _plan().segments[2], mode="fl2v", start_image="start.png",
         start_frame_description="…", model="qwen")
     marker = film_language.tailframe_source_headline().strip()
     assert marker, "尾帧真源没有标题行"
@@ -692,14 +701,14 @@ def test_request_names_the_model_tier_and_the_segment_kind():
     from minimax_h3_prompt.generation import IMAGE_FAMILY_LABELS
 
     guided = tailframe.build_tailframe_request(
-        _plan().segments[2], mode="t2v", start_image="start.png",
+        _plan().segments[2], mode="fl2v", start_image="start.png",
         start_frame_description="…", model="qwen")
     assert "本次尾帧按" in guided
     assert IMAGE_FAMILY_LABELS["qwen"] in guided and "qwen" in guided
     assert "本段是引导段" in guided, "引导段没有在请求里点明"
 
     cut = tailframe.build_tailframe_request(
-        _plan().segments[3], mode="t2v", start_image="start.png",
+        _plan().segments[3], mode="fl2v", start_image="start.png",
         start_frame_description="…", model="moss")
     assert "本段是硬切段" in cut, "切镜段没有在请求里点明硬切"
     assert "本段是引导段" not in cut, "切镜段被写成了引导段"
@@ -781,7 +790,7 @@ def test_request_carries_the_static_branch_note():
 
     segment = _with_end_hook(_plan().segments[2], _STATIC_END_HOOK)
     request = tailframe.build_tailframe_request(
-        segment, mode="t2v", start_image="start.png",
+        segment, mode="fl2v", start_image="start.png",
         start_frame_description="…", segment_prompt=_STATIC_VIDEO)
 
     assert "【静态分支（本段机位不动，终点是姿态/状态变化）】" in request, \

@@ -68,16 +68,40 @@ def test_multi_segment_briefing_keeps_the_acceptance_hard_lines(tmp_path):
 
 
 def test_cut_segment_briefing_tells_you_to_disable_previous_clip(tmp_path):
+    """fl2v 的切镜段才有首帧槽，简报要明写「挂首帧 + 关引用上段」（#200 夹具迁到 fl2v）。"""
     segments = (
         _segment(1, "opening", 0, 107, 107, False),
         _segment(2, "camera_cut", 107, 124, 136, False),
     )
-    plan = _plan(*segments)
+    plan = _plan(*segments, mode="fl2v")
 
     text = render_director_segment_briefing(plan, segments[1], tmp_path)
 
     assert "本段是切镜段" in text and "引用上段" in text
     assert "continuityFromPrev=false" in text, "包内已关，用户手动勾回会多 12 帧"
+
+
+def test_t2v_briefing_never_asks_for_images(tmp_path):
+    """t2v 没有任何图槽：多段简报里不许出现「终点画面」与「挂首帧」两句（#199／#200）。
+
+    这两句是用户在 t2v 里去找挂图槽的直接来源；给图契约归零后它们必须一起消失，
+    而不是靠调用点各写一个模式判断。
+    """
+    segments = (
+        _segment(1, "opening", 0, 107, 107, False),
+        _segment(2, "continue", 107, 153, 153, True),
+        _segment(3, "camera_same", 260, 153, 153, True),
+        _segment(4, "camera_cut", 413, 136, 136, False),
+        _segment(5, "ending", 549, 153, 153, True),
+    )
+    plan = _plan(*segments, mode="t2v")
+
+    for segment in segments[1:]:
+        text = render_director_segment_briefing(plan, segment, tmp_path)
+        assert "本段有终点画面" not in text, segment.type
+        assert "本段是切镜段" not in text, segment.type
+        assert "挂**首帧**" not in text, segment.type
+        assert "给图：无" in text, segment.type
 
 
 def test_single_shot_briefing_omits_cache_lines(tmp_path):

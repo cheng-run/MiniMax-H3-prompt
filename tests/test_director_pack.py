@@ -673,6 +673,38 @@ def test_fl2v_end_image_is_optional(tmp_path):
     assert opening["genImage"]["imageFile"] == "asset_groups/01/start.png"
 
 
+def test_t2v_pack_ignores_images_left_in_the_session(tmp_path):
+    """t2v 没有任何图槽：段目录里放着图，包内也不带媒体（#199／#200）。
+
+    ``pack._plan_media`` 早就对 t2v 返回空媒体；这条把它钉在包的**可观察产物**上——
+    用户误放一个文件时，包不该因此变样，段词也不该被引向一张不存在的图。
+    各条媒体路径都放一张，任何一种被挑进包都会让这条变红。
+    """
+    from minimax_h3_prompt.director.pack import prepare_director_pack
+
+    plan = _plan("t2v")
+    session_dir = _session(tmp_path, plan)
+    _write_asset(session_dir / "director" / "assets" / "01" / "start.png")
+    _write_asset(session_dir / "director" / "assets" / "01" / "end.png")
+    _write_asset(session_dir / "director" / "assets" / "film-end.png")
+    _write_asset(session_dir / "assets" / "图1.png")
+
+    job, _ = prepare_director_pack(session_dir, plan, settings=_settings())
+
+    # 段目录下的 group.json 是结构件，不是媒体：媒体只看它之外的包内文件。
+    packed_media = [name for name in _zip_names(job)
+                    if name.startswith("asset_groups/") and not name.endswith("/group.json")]
+    assert packed_media == [], f"t2v 包内带了媒体：{packed_media}"
+    for position in range(1, 6):
+        files = sorted(path.name for path in
+                       (job.pack_dir / "asset_groups" / f"{position:02d}").iterdir())
+        assert files == ["group.json"], (position, files)
+    for segment in _pack_timeline(job)["segments"]:
+        assert segment["refs"] == []
+        assert segment["genImage"] == {"imageFile": "", "fileName": ""}
+        assert segment["startImage"] is None and segment["endImage"] is None
+
+
 def test_repacking_replaces_the_pack_dir_so_stale_media_does_not_survive(tmp_path):
     """重打一次包必须清掉上一轮的媒体：残留的 Picture3 会被导入侧一起拷进 input。
 

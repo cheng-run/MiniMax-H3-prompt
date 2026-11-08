@@ -467,17 +467,17 @@ def _write_ffv1_mkv(path: Path, frames: int, *, width: int = 32, height: int = 2
     return path
 
 
-def _director_brief():
+def _director_brief(*, mode: str = "t2v"):
     from minimax_h3_prompt.brief_parser import Brief
 
-    return Brief(mode="director", variant="T2VA", director_mode="t2v",
+    return Brief(mode="director", variant="T2VA", director_mode=mode,
                  duration=30.0, plot="雨夜旧信",
                  director_node_id="42", director_cache_name="雨夜",
                  director_continuity_mode="guide")
 
 
-def _plan_of(types: tuple[str, ...]):
-    """按段类型造一张段表；``continue`` 在 t2v 下不要终点画面，陪跑不会去调模型。"""
+def _plan_of(types: tuple[str, ...], *, mode: str = "t2v"):
+    """按段类型造一张段表；尾帧触发器从给图契约现算（t2v 已经不再要终点画面）。"""
     from minimax_h3_prompt.director.frames import (
         DirectorPlan, DirectorSegment, export_frames_for_declared, give_images_for,
         is_guided,
@@ -494,13 +494,14 @@ def _plan_of(types: tuple[str, ...]):
             start_frame=cursor, end_frame=cursor + export,
             declared_frames=declared, export_frames=export,
             summary=f"段{index}概述", end_hook=f"段{index}落定画面",
-            give_images=tuple(give_images_for(segment_type, "t2v")),
+            give_images=tuple(give_images_for(segment_type, mode)),
         ))
         cursor += export
-    return DirectorPlan(mode="t2v", total_frames=cursor, segments=tuple(segments))
+    return DirectorPlan(mode=mode, total_frames=cursor, segments=tuple(segments))
 
 
-def _director_session(tmp_path: Path, types: tuple[str, ...] = ("opening", "continue", "continue")):
+def _director_session(tmp_path: Path, types: tuple[str, ...] = ("opening", "continue", "continue"),
+                      *, mode: str = "t2v"):
     from minimax_h3_prompt.director.planning import plan_path, write_plan_json
     from minimax_h3_prompt.director.prompts import segment_path
     from minimax_h3_prompt.session_store import (
@@ -508,13 +509,13 @@ def _director_session(tmp_path: Path, types: tuple[str, ...] = ("opening", "cont
     )
 
     directory = tmp_path / "GEN001"
-    plan = _plan_of(types)
+    plan = _plan_of(types, mode=mode)
     write_plan_json(plan_path(directory), plan)
     for segment in plan.segments:
         path = segment_path(directory, segment.index)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"段 {segment.index} 的提示词\n", encoding="utf-8")
-    return SessionState(directory=directory, brief=_director_brief(),
+    return SessionState(directory=directory, brief=_director_brief(mode=mode),
                         stage_state={}, status=STATUS_DIRECTOR_SEGMENTS_RUNNING)
 
 
@@ -763,10 +764,13 @@ def test_cascade_then_the_tailframe_prompt_is_written_again(tmp_path, monkeypatc
     #114 起起点画面取账内上一段的**成片视频**（不再读段缓存），所以第 1 段的
     ``film-1.mkv`` 必须是真能解码的视频——``_record_pass`` 落的是占位字节，这里覆盖它。
     """
-    from minimax_h3_prompt.director import tailframe
+    from minimax_h3_prompt.director import aspect_flow, tailframe
     from minimax_h3_prompt.ui import wizard
 
-    session = _director_session(tmp_path, ("opening", "camera_same"))
+    session = _director_session(tmp_path, ("opening", "camera_same"), mode="fl2v")
+    # 尾帧词只对「有尾帧槽的段」有意义（#200 夹具迁到 fl2v）。fl2v 逐段贴回会核画幅，
+    # 本用例验的是级联后重写尾帧词，不是画幅：把期望画布对齐夹具视频的 32×24。
+    monkeypatch.setattr(aspect_flow, "frame_canvas", lambda *args, **kwargs: (32, 24))
     config = _run_config(monkeypatch, tmp_path)
     cache_directory = _plant_ready(config, session, {1: 107, 2: 153})
     for segment in (1, 2):

@@ -152,18 +152,24 @@ def test_invalid_or_missing_type_is_loud_and_first_segment_must_open():
 def test_give_images_follow_type_and_mode():
     """给图清单从段类型派生；开场段再按模式分派（设计 §3.1 表）。
 
-    **r2v 每段都给参考素材**（2026-11-01 用户裁定）：它是这个模式唯一的画面来源，
-    运镜段与收尾段也不例外——首/尾帧是 fl2v 的槽位，r2v 没有。t2v/fl2v 的段类型
-    分派保持原样（续接段什么都不给、只靠段间引导；误判会让该段静默丢弃首帧）。
+    **t2v 在五种段类型下都给不出图**（#199／#200）：这个模式的语义就是纯文字，没有
+    任何图槽；需要终点画面锚点应选 fl2v。**r2v 每段都给参考素材**（2026-11-01 用户
+    裁定）：它是这个模式唯一的画面来源，运镜段与收尾段也不例外——首/尾帧是 fl2v 的
+    槽位，r2v 没有。fl2v 的段类型分派保持原样（续接段什么都不给、只靠段间引导；
+    误判会让该段静默丢弃首帧）。
     """
     for segment_type in ("opening", "continue", "camera_same", "camera_cut", "ending"):
+        assert give_images_for(segment_type, "t2v") == (), segment_type
         assert give_images_for(segment_type, "r2v") == ("assets",), segment_type
     assert optional_images_for("opening", "r2v") == (), "r2v 没有可选首帧"
-    assert give_images_for("continue", "t2v") == ()
-    assert give_images_for("ending", "t2v") == ("end",)
-    assert give_images_for("opening", "t2v") == ()
     assert give_images_for("opening", "i2v") == ("first",)
     assert give_images_for("opening", "fl2v") == ("first",)
+    # fl2v 的其余四种段类型逐项保留（t2v 归零不许把它们一起改掉）。
+    assert give_images_for("continue", "fl2v") == ()
+    assert give_images_for("camera_same", "fl2v") == ("end",)
+    assert give_images_for("camera_cut", "fl2v") == ("first", "end")
+    assert give_images_for("ending", "fl2v") == ("end",)
+    assert give_images_for("continue", "i2v") == ()
     assert give_images_for("opening", "r2v") == ("assets",)
     with pytest.raises(ValueError):
         give_images_for("opening", "v2v")   # 已取消的模式（#170）

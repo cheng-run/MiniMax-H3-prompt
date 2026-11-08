@@ -196,10 +196,11 @@ def give_images_for(segment_type: str, mode: str) -> tuple[str, ...]:
     """该段**必填**给图清单（出站清单，不是打包清单；设计 §3.1 表）。
 
     尾帧（终点画面）打包时还不存在：它由 #107 的尾帧变换提示词产出、用户在导演台
-    UI 里逐段挂。``opening`` 段按模式分派；``fl2v`` 的尾帧是**可选**的，见
-    ``optional_images_for``。``r2v`` 没有帧槽（首/尾帧是 fl2v 的槽位），它的画面来源
-    只有参考素材，所以每段都**必填**参考素材、没有可选图。``i2v`` 段内不要终点画面
-    （见下方分支）。
+    UI 里逐段挂。``t2v`` 在任何段类型下都给不出图——它的语义就是纯文字，需要终点
+    画面锚点应选 ``fl2v``；``opening`` 段在其余模式里按模式分派。``fl2v`` 的尾帧是
+    **可选**的，见 ``optional_images_for``。``r2v`` 没有帧槽（首/尾帧是 fl2v 的槽位），
+    它的画面来源只有参考素材，所以每段都**必填**参考素材、没有可选图。``i2v`` 段内
+    不要终点画面（见下方分支）。
     """
     if mode not in PLAN_MODES:
         raise ValueError(
@@ -211,6 +212,11 @@ def give_images_for(segment_type: str, mode: str) -> tuple[str, ...]:
     # 给图清单只说「有参考素材」，不在这里猜张数。
     if mode == "r2v":
         return (IMAGE_ASSETS,)
+    # t2v 提前归零：这个模式一个图槽都没有（#199／#200）。放在段类型分支之前而不是
+    # 每支各写一次——运镜段与收尾段若继续索要终点画面，就会白跑一次生图，写段模型
+    # 还会据此编出不存在的 Picture N。想用终点画面锚点，请选 fl2v。
+    if mode == "t2v":
+        return ()
     if segment_type == "continue":
         return ()
     # i2v 单段（ADR 0026 修订版）：唯一那段就是开场，给首帧；其余段类型在本模式下
@@ -224,10 +230,9 @@ def give_images_for(segment_type: str, mode: str) -> tuple[str, ...]:
         return (IMAGE_FIRST, IMAGE_END)
     if segment_type == "ending":
         return (IMAGE_END,)
-    # opening：按模式分派（t2v 无图；i2v/fl2v 给首帧）。r2v 在上方已提前返回，
-    # 这里不再列它——写了也是死分支，而它会让 i2v 上面的「不发明不可达规则」变成空话。
+    # opening：只剩 i2v/fl2v 两种有图槽的模式。r2v 与 t2v 都在上方提前返回，这里
+    # 不再列它们——写了也是死分支，而它会让上面「不发明不可达规则」的说法变成空话。
     return {
-        "t2v": (),
         "i2v": (IMAGE_FIRST,),
         "fl2v": (IMAGE_FIRST,),
     }[mode]

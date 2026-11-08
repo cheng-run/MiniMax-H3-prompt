@@ -436,6 +436,17 @@ MUTATIONS: tuple[Mutation, ...] = (
         "关掉这条判据，t2v 段词里会重新出现 Picture N（指一张不存在的图），"
         "贴给导演台即污染执行（#201）",
     ),
+    Mutation(
+        "t2v_segments_ask_for_images",
+        "src/minimax_h3_prompt/director/frames.py",
+        '    if mode == "t2v":\n        return ()\n',
+        "",
+        ("tests/test_director_plan.py::test_give_images_follow_type_and_mode",
+         "tests/test_director_tailframe.py::"
+         "test_tailframe_triggers_only_for_moving_and_ending_segments"),
+        "删掉 t2v 早返回＝t2v 的运镜/收尾段重新索要终点画面：白费一次生图调用、"
+        "写段请求里还会点名一张不存在的图（#199 实测 established by Picture 2，#200）",
+    ),
 )
 
 

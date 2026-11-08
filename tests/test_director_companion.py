@@ -773,6 +773,18 @@ def _director_session(tmp_path: Path, types: tuple[str, ...] = ("opening", "cont
                         created_at="2026-11-05T09:00:00+00:00")
 
 
+def _fl2v_tailframe_session(tmp_path: Path, monkeypatch):
+    """尾帧词接线的陪跑会话：**fl2v**，第 2 段是运镜段。
+
+    尾帧词本来就只对「有尾帧槽的段」有意义（#200）：t2v 的给图契约归零后，这里
+    必须迁到 fl2v，否则轮到第 2 段时不再触发写词，用例测的东西就消失了。
+    期望画布对齐夹具视频的 32×24：fl2v 逐段贴回会核画幅，而这些用例验的不是画幅。
+    """
+    from minimax_h3_prompt.director import aspect_flow
+
+    monkeypatch.setattr(aspect_flow, "frame_canvas", lambda *args, **kwargs: (32, 24))
+    return _director_session(tmp_path, ("opening", "camera_same"), mode="fl2v")
+
 
 def _cache_dir_for(config, brief) -> Path:
     from minimax_h3_prompt.director import cache
@@ -1100,7 +1112,7 @@ def test_handoff_writes_the_tailframe_prompt_from_the_previous_video(
     from minimax_h3_prompt.director import tailframe
     from minimax_h3_prompt.ui import wizard
 
-    session = _director_session(tmp_path, ("opening", "camera_same"))
+    session = _fl2v_tailframe_session(tmp_path, monkeypatch)
     config = _run_config(monkeypatch, tmp_path)
     colors_one = _frame_colors(107)
     film_one = _write_solid_ffv1_mkv(tmp_path / "film-01.mkv", colors_one)
@@ -1175,7 +1187,7 @@ def test_tailframe_start_frame_ignores_the_segment_cache(
     from minimax_h3_prompt.director import tailframe
     from minimax_h3_prompt.ui import wizard
 
-    session = _director_session(tmp_path, ("opening", "camera_same"))
+    session = _fl2v_tailframe_session(tmp_path, monkeypatch)
     config = _run_config(monkeypatch, tmp_path)
     cache_directory = _cache_dir_for(config, session.brief)
     # 缓存刻意与视频不同色：它只是「当时盘上有没有产物」的现场线索。
@@ -1230,7 +1242,7 @@ def test_tailframe_prefers_the_previous_endpoint_image_over_the_video_tail(
     from minimax_h3_prompt.director import ledger, tailframe
     from minimax_h3_prompt.ui import wizard
 
-    session = _director_session(tmp_path, ("opening", "camera_same"))
+    session = _fl2v_tailframe_session(tmp_path, monkeypatch)
     config = _run_config(monkeypatch, tmp_path)
     film_one = _write_solid_ffv1_mkv(tmp_path / "film-01.mkv", _frame_colors(107))
     endpoint = tmp_path / "endpoint-01.png"
@@ -1291,7 +1303,7 @@ def test_handoff_reuses_an_existing_tailframe_prompt_even_without_the_video(
     from minimax_h3_prompt.director import ledger, tailframe
     from minimax_h3_prompt.ui import wizard
 
-    session = _director_session(tmp_path, ("opening", "camera_same"))
+    session = _fl2v_tailframe_session(tmp_path, monkeypatch)
     config = _run_config(monkeypatch, tmp_path)
     film_one = _write_solid_ffv1_mkv(tmp_path / "film-01.mkv", _frame_colors(107))
     ledger.log_director_output(
@@ -1354,7 +1366,7 @@ def test_resumed_tailframe_check_reads_the_segment_prompt(
     from minimax_h3_prompt.director import ledger, tailframe
     from minimax_h3_prompt.ui import wizard
 
-    session = _director_session(tmp_path, ("opening", "camera_same"))
+    session = _fl2v_tailframe_session(tmp_path, monkeypatch)
     config = _run_config(monkeypatch, tmp_path)
     film_one = _write_solid_ffv1_mkv(tmp_path / "film-01.mkv", _frame_colors(107))
     ledger.log_director_output(
@@ -1411,7 +1423,7 @@ def test_tailframe_failure_stops_at_the_current_segment_without_half_a_prompt(
     from minimax_h3_prompt.director import ledger, tailframe
     from minimax_h3_prompt.ui import wizard
 
-    session = _director_session(tmp_path, ("opening", "camera_same"))
+    session = _fl2v_tailframe_session(tmp_path, monkeypatch)
     config = _run_config(monkeypatch, tmp_path)
     film_one = _write_solid_ffv1_mkv(tmp_path / "film-01.mkv", _frame_colors(107))
     ledger.log_director_output(
@@ -1691,7 +1703,7 @@ def test_handoff_warns_within_tolerance_and_still_records(tmp_path, monkeypatch,
     from minimax_h3_prompt.director import ledger
     from minimax_h3_prompt.ui import wizard
 
-    session = _director_session(tmp_path, ("opening", "camera_same"))
+    session = _fl2v_tailframe_session(tmp_path, monkeypatch)
     config = _run_config(monkeypatch, tmp_path)
     # 本用例只看视频告警口径：第 2 段需要尾帧词，那会把模型与上一段末帧拖进来。
     from minimax_h3_prompt.director import tailframe
