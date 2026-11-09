@@ -66,3 +66,123 @@ jobs:
       # 「永不为红＝没有」——不做这一步，没人知道新守卫是不是摆设。
       - name: 守卫变异检验
         run: uv run python scripts/mutation_check.py
+
+  # 前端质量门禁（D1-6，#211）：契约 drift、lint、格式、类型、单测+覆盖率、构建全过。
+  frontend-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: "3.14"
+          enable-cache: true
+
+      - name: 安装 Python 依赖（严格按 uv.lock）
+        run: uv sync --frozen
+
+      # 契约唯一真源是 Python：重新导出后必须与入库文件逐字节一致，否则类型会静默分叉。
+      - name: 导出 OpenAPI 并检查 drift
+        run: |
+          uv run python scripts/export_openapi.py
+          git diff --exit-code contracts/openapi.json
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "11.7.0"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: frontend/.node-version
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: 安装前端依赖（frozen lockfile）
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      # 重新生成类型，必须与入库的 generated.ts 一致——手改生成文件会被这里抓住。
+      - name: 重新生成 API 类型并检查 drift
+        working-directory: frontend
+        run: |
+          pnpm run openapi
+          git -C .. diff --exit-code frontend/src/api/generated.ts
+
+      - name: lint
+        working-directory: frontend
+        run: pnpm run lint
+
+      - name: 格式检查
+        working-directory: frontend
+        run: pnpm run format:check
+
+      - name: 类型检查（vue-tsc）
+        working-directory: frontend
+        run: pnpm run typecheck
+
+      - name: 单测 + 组件测试 + 覆盖率门禁
+        working-directory: frontend
+        run: pnpm run coverage
+
+      - name: 生产构建
+        working-directory: frontend
+        run: pnpm run build
+
+  # 真实浏览器 E2E（D1-6，#211）：真实构建产物 + 真实 FastAPI 同源托管。
+  # Windows 是当前唯一支持平台，不能用 Linux 绿替代真实平台证据。
+  frontend-e2e:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: "3.14"
+          enable-cache: true
+
+      - name: 安装 Python 依赖（严格按 uv.lock）
+        run: uv sync --frozen
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "11.7.0"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: frontend/.node-version
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: 安装前端依赖（frozen lockfile）
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: 构建前端产物
+        working-directory: frontend
+        run: pnpm run build
+
+      - name: 缓存 Playwright chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/AppData/Local/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('frontend/pnpm-lock.yaml') }}
+
+      - name: 安装 Playwright chromium（不加 --with-deps）
+        working-directory: frontend
+        run: pnpm exec playwright install chromium
+
+      - name: E2E
+        working-directory: frontend
+        run: pnpm run e2e
+
+      - name: 失败时上传 Playwright 报告
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: frontend/playwright-report
+          retention-days: 7
