@@ -12,6 +12,7 @@ from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel
 
 from .. import SERVICE_NAME
+from ..problems import COMMON_ERROR_RESPONSES
 
 router = APIRouter(prefix="/api/v1", tags=["health"])
 
@@ -24,7 +25,7 @@ class HealthResponse(BaseModel):
     version: str
 
 
-@router.get("/health", response_model=HealthResponse)
+@router.get("/health", response_model=HealthResponse, responses=COMMON_ERROR_RESPONSES)
 def get_health(request: Request, response: Response) -> HealthResponse:
     response.headers["Cache-Control"] = "no-store"
     return HealthResponse(
