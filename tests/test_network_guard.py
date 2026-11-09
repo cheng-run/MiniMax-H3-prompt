@@ -33,6 +33,17 @@ def test_default_refuses_socket_connect():
         sock.close()
 
 
+def test_loopback_is_allowed_without_marker():
+    """回环地址默认放行：失败必须来自操作系统（端口没人听），而不是守卫。
+
+    这是 Starlette ``TestClient`` 能用的前提——它在 127.0.0.1 开真实 socket。守卫应当只挡
+    外部网络，回环放行后 FastAPI 用例不必整文件 ``allow_network``（retro 2026-11-09）。
+    """
+    with pytest.raises(OSError) as excinfo:
+        socket.create_connection(("127.0.0.1", 1), timeout=0.1)
+    assert not isinstance(excinfo.value, RuntimeError), "回环被守卫误拦了"
+
+
 @pytest.mark.allow_network
 def test_marker_disables_the_guard():
     """放行标记生效时，失败必须来自操作系统（端口没人听），而不是守卫。"""

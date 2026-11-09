@@ -11,11 +11,6 @@ import importlib.metadata
 import pytest
 from fastapi.testclient import TestClient
 
-# Starlette 1.10 的 TestClient 会在本机回环开一个真实 socket（127.0.0.1 随机端口），
-# 而 conftest 的出网守卫连回环也一并拦。本文件全部请求只打到进程内 app 的回环服务，
-# 不触达任何外部网络，因此整文件放行（这是守卫文档里写明的 escape hatch）。
-pytestmark = pytest.mark.allow_network
-
 
 def _client() -> TestClient:
     from minimax_h3_prompt.api.app import create_app
