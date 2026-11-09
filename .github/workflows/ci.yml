@@ -32,7 +32,7 @@ jobs:
       # Windows runner 默认 cp1252：脚本里的中文输出会直接崩
       PYTHONIOENCODING: utf-8
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       # uv 负责解释器与锁文件：requires-python >= 3.14，由 setup-uv 现装。
       # 钉精确版本：该仓库只发语义化版本标签，没有 v10 这种移动主版本标签
@@ -72,7 +72,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       - uses: astral-sh/setup-uv@v10.3.3
         with:
@@ -88,11 +88,12 @@ jobs:
           uv run python scripts/export_openapi.py
           git diff --exit-code contracts/openapi.json
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v4.4.0
         with:
-          version: "11.7.0"
+          # 从 frontend/package.json 的 packageManager 读取 pnpm 版本，避免第二处硬编码。
+          package_json_file: frontend/package.json
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4.4.0
         with:
           node-version-file: frontend/.node-version
           cache: pnpm
@@ -137,7 +138,7 @@ jobs:
     env:
       PYTHONIOENCODING: utf-8
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       - uses: astral-sh/setup-uv@v10.3.3
         with:
@@ -147,11 +148,12 @@ jobs:
       - name: 安装 Python 依赖（严格按 uv.lock）
         run: uv sync --frozen
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v4.4.0
         with:
-          version: "11.7.0"
+          # 从 frontend/package.json 的 packageManager 读取 pnpm 版本，避免第二处硬编码。
+          package_json_file: frontend/package.json
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4.4.0
         with:
           node-version-file: frontend/.node-version
           cache: pnpm
@@ -166,7 +168,7 @@ jobs:
         run: pnpm run build
 
       - name: 缓存 Playwright chromium
-        uses: actions/cache@v4
+        uses: actions/cache@v4.3.0
         with:
           path: ~/AppData/Local/ms-playwright
           key: playwright-chromium-${{ runner.os }}-${{ hashFiles('frontend/pnpm-lock.yaml') }}
@@ -181,7 +183,7 @@ jobs:
 
       - name: 失败时上传 Playwright 报告
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: playwright-report
           path: frontend/playwright-report
