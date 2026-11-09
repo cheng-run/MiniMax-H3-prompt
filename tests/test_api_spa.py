@@ -10,9 +10,6 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-# 同 test_api_health：Starlette TestClient 走本机回环 socket，守卫连回环也拦。
-pytestmark = pytest.mark.allow_network
-
 _INDEX = "<!doctype html><html><body><div id='app'>SPA-SHELL</div></body></html>"
 
 

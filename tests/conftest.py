@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import ipaddress
 import os
 import socket
 from pathlib import Path
@@ -114,19 +115,52 @@ def no_real_network(request, monkeypatch):
 
     只拦「真正建连」这一层（``connect`` / ``create_connection``）：造视频走的是 ffmpeg
     子进程、读盘走文件系统，都不受影响。``connect_ex`` 一并拦，因为轮询式客户端常用它。
+
+    **回环地址放行（retro 2026-11-09）**：Starlette 的 ``TestClient`` 会在本机回环开真实
+    socket（127.0.0.1 随机端口）。原实现连回环也一并拦，逼得每个 FastAPI 用例整文件标
+    ``allow_network``——而那把**外部**保护也一起关了，最该拦的地方反而不拦。现在只拦非回环
+    地址：``TestClient``/进程内服务的回环连接照常，外部 LLM/网关仍被挡。
     """
     if request.node.get_closest_marker("allow_network") is not None:
         return
 
-    def _blocked(*_args, **_kwargs):
-        raise RuntimeError(
-            "禁止真实网络连接：测试默认不得出网。"
-            "确需联网的用例请加 @pytest.mark.allow_network"
+    def _is_loopback(address: object) -> bool:
+        host = address[0] if isinstance(address, tuple) and address else address
+        if not isinstance(host, str) or not host:
+            return False
+        try:
+            return ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            return host == "localhost"
+
+    def _refuse() -> RuntimeError:
+        return RuntimeError(
+            "禁止真实网络连接：测试默认不得出网（回环地址已放行）。"
+            "确需外部联网的用例请加 @pytest.mark.allow_network"
             "（见 pyproject.toml 的 markers 说明）。")
 
-    monkeypatch.setattr(socket, "create_connection", _blocked)
-    monkeypatch.setattr(socket.socket, "connect", _blocked)
-    monkeypatch.setattr(socket.socket, "connect_ex", _blocked)
+    original_create_connection = socket.create_connection
+    original_connect = socket.socket.connect
+    original_connect_ex = socket.socket.connect_ex
+
+    def _guarded_create_connection(address, *args, **kwargs):
+        if not _is_loopback(address):
+            raise _refuse()
+        return original_create_connection(address, *args, **kwargs)
+
+    def _guarded_connect(self, address, *args, **kwargs):
+        if not _is_loopback(address):
+            raise _refuse()
+        return original_connect(self, address, *args, **kwargs)
+
+    def _guarded_connect_ex(self, address, *args, **kwargs):
+        if not _is_loopback(address):
+            raise _refuse()
+        return original_connect_ex(self, address, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "create_connection", _guarded_create_connection)
+    monkeypatch.setattr(socket.socket, "connect", _guarded_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", _guarded_connect_ex)
 
 
 @pytest.fixture(scope="session", autouse=True)
