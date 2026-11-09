@@ -62,9 +62,23 @@ def _title_for(status: int) -> str:
         return "请求错误"
 
 
-def _problem_response(problem: ProblemDetail) -> JSONResponse:
+def _problem_response(
+    status: int,
+    detail: str,
+    request: Request,
+    errors: list[ProblemFieldError] | None = None,
+) -> JSONResponse:
+    """统一构造 ProblemDetail 响应：title/instance 由状态码与请求路径派生，避免三条
+    失败路径各拼一遍样板（改字段时只改这一处）。"""
+    problem = ProblemDetail(
+        title=_title_for(status),
+        status=status,
+        detail=detail,
+        instance=request.url.path,
+        errors=errors,
+    )
     return JSONResponse(
-        status_code=problem.status,
+        status_code=status,
         content=problem.model_dump(exclude_none=True),
         media_type=PROBLEM_CONTENT_TYPE,
     )
@@ -77,13 +91,7 @@ def install_problem_handlers(app: FastAPI) -> None:
     async def _handle_http_exception(
         request: Request, exc: StarletteHTTPException
     ) -> JSONResponse:
-        problem = ProblemDetail(
-            title=_title_for(exc.status_code),
-            status=exc.status_code,
-            detail=str(exc.detail),
-            instance=request.url.path,
-        )
-        return _problem_response(problem)
+        return _problem_response(exc.status_code, str(exc.detail), request)
 
     @app.exception_handler(RequestValidationError)
     async def _handle_validation_error(
@@ -93,26 +101,13 @@ def install_problem_handlers(app: FastAPI) -> None:
             ProblemFieldError(loc=list(err["loc"]), msg=err["msg"], type=err["type"])
             for err in exc.errors()
         ]
-        problem = ProblemDetail(
-            title=_title_for(422),
-            status=422,
-            detail="请求参数未通过校验。",
-            instance=request.url.path,
-            errors=errors,
-        )
-        return _problem_response(problem)
+        return _problem_response(422, "请求参数未通过校验。", request, errors=errors)
 
     @app.exception_handler(Exception)
     async def _handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
         # 只在服务端记录细节；响应体保持安全、稳定，不回传堆栈或内部路径。
         logger.exception("未处理异常：%s %s", request.method, request.url.path)
-        problem = ProblemDetail(
-            title=_title_for(500),
-            status=500,
-            detail="服务器内部错误，请联系维护者。",
-            instance=request.url.path,
-        )
-        return _problem_response(problem)
+        return _problem_response(500, "服务器内部错误，请联系维护者。", request)
 
 
 # 每个 API 路由声明同一组通用错误响应：既让契约里出现 ProblemDetail，也让读者一眼
@@ -123,3 +118,38 @@ COMMON_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     422: {"model": ProblemDetail, "description": "请求参数校验失败（problem+json）"},
     500: {"model": ProblemDetail, "description": "服务器内部错误（problem+json）"},
 }
+
+
+def apply_problem_media_type_openapi(app: FastAPI) -> None:
+    """让附加错误响应在 OpenAPI 里声明 ``application/problem+json``。
+
+    FastAPI 的 ``responses={...: {"model": ...}}`` 一律把内容标成 ``application/json``，
+    与运行时真实返回的 ``problem+json`` 不一致——契约说一套、服务端做一套。这里在生成
+    OpenAPI 时把「内容 schema 指向 ProblemDetail」的响应媒体键改写过来，使运行时
+    ``/openapi.json`` 与入库的 ``contracts/openapi.json`` 同口径；``model`` 注册仍在，
+    所以 ProblemDetail 继续留在 ``components.schemas`` 里被 ``$ref`` 引用。
+    """
+    original_openapi = app.openapi
+
+    def _custom_openapi() -> dict[str, Any]:
+        if app.openapi_schema:
+            return app.openapi_schema
+        schema = original_openapi()
+        for path_item in schema.get("paths", {}).values():
+            for key, operation in path_item.items():
+                if not isinstance(operation, dict) or key in {"parameters", "servers"}:
+                    continue
+                for response in operation.get("responses", {}).values():
+                    content = response.get("content")
+                    if not isinstance(content, dict):
+                        continue
+                    json_body = content.get("application/json")
+                    if not isinstance(json_body, dict):
+                        continue
+                    ref = json_body.get("schema", {}).get("$ref", "")
+                    if ref.endswith("/ProblemDetail"):
+                        content[PROBLEM_CONTENT_TYPE] = content.pop("application/json")
+        app.openapi_schema = schema
+        return schema
+
+    app.openapi = _custom_openapi  # type: ignore[method-assign]

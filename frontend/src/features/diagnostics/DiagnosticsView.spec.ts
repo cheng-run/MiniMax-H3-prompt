@@ -52,6 +52,9 @@ describe('DiagnosticsView 四态与客户端状态', () => {
     const toggle = wrapper.findAll('button').find((b) => b.text().includes('展开详情'))!
     // 原生 <button> 天生支持键盘 Enter/Space；真实按键在 E2E（#211）验证。
     expect(toggle.element.tagName).toBe('BUTTON')
+    // 键盘可达：原生 button 的 tabIndex 为 0（可 Tab 聚焦）；真实 Enter 切换在 E2E 覆盖，
+    // 因为 jsdom 不实现 Enter→click 的默认行为，这里硬断言按键切换等于伪造。
+    expect((toggle.element as HTMLElement).tabIndex).toBe(0)
     expect(toggle.attributes('aria-expanded')).toBe('false')
     expect(wrapper.find('pre').exists()).toBe(false)
 

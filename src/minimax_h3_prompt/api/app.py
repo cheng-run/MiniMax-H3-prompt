@@ -11,7 +11,7 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from . import SERVICE_NAME
-from .problems import install_problem_handlers
+from .problems import apply_problem_media_type_openapi, install_problem_handlers
 from .routes.health import router as health_router
 from .spa import DEFAULT_DIST, install_spa
 
@@ -47,4 +47,6 @@ def create_app(
         app.include_router(probe_router)
     # 兜底路由必须最后注册：/openapi.json、/docs 与 /api/* 都要先匹配到自己的处理器。
     install_spa(app, dist_dir if dist_dir is not None else DEFAULT_DIST)
+    # 让错误响应在契约里声明 application/problem+json（与运行时一致）。
+    apply_problem_media_type_openapi(app)
     return app
