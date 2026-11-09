@@ -1,0 +1,7 @@
+# pnpm 11 的构建脚本批准表（不是二级 workspace；frontend 仍是单包）。
+# esbuild 装二进制、vue-demi 切换 Vue 版本、msw 需要 postinstall，干净安装必须放行，
+# 否则 CI 的 --frozen-lockfile 装完却缺构建产物/二进制。
+allowBuilds:
+  esbuild: true
+  msw: true
+  vue-demi: true

@@ -1,0 +1,11 @@
+# 生成文件只由生成脚本产出，不做二次格式化（否则 CI 的 drift check 会假红）。
+src/api/generated.ts
+
+# 构建与测试产物
+dist/
+coverage/
+playwright-report/
+test-results/
+
+# 锁文件由 pnpm 维护，不经 Prettier。
+pnpm-lock.yaml
