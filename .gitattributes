@@ -15,3 +15,9 @@ scripts/hooks/* text eol=lf
 *.toml text eol=lf
 *.json text eol=lf
 *.jsonl text eol=lf
+
+# 前端源码统一 LF（D1，#205）：生成的 generated.ts 与 CI（Linux）必须逐字节一致，
+# 否则 drift check 会被 CRLF 差异假红。
+*.ts text eol=lf
+*.css text eol=lf
+*.mjs text eol=lf

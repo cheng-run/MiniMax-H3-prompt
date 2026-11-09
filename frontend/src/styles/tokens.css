@@ -1,0 +1,26 @@
+/* 设计令牌：颜色、字体、间距、圆角。组件只用这些变量，方便后续统一替换主题。 */
+:root {
+  --font-sans: system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif;
+
+  --color-bg: #f7f7f8;
+  --color-surface: #ffffff;
+  --color-text: #1c1c1e;
+  --color-text-muted: #5a5a62;
+  --color-border: #d7d7dd;
+  --color-accent: #2f6feb;
+  --color-focus: #1a73e8;
+
+  --color-ok-bg: #e6f4ea;
+  --color-ok-text: #1b5e20;
+  --color-error-bg: #fdecea;
+  --color-error-text: #b3261e;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 16px;
+  --space-4: 24px;
+  --space-5: 32px;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+}

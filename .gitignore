@@ -68,4 +68,10 @@ architecture-review-*.html
 # /docs/、/tests/、/scripts/、/AGENTS.md 恢复入库。排除它们的代价是干净检出跑不了
 # 测试、守卫不可复现、CI 无从建立——「本机全绿」于是成了唯一证据，而它不能当反证。
 
+# 前端（D1，#205）：依赖、覆盖率、Playwright 产物一律不入库
+node_modules/
+frontend/coverage/
+playwright-report/
+test-results/
+
 
