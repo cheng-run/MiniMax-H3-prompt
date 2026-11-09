@@ -6,12 +6,14 @@
 from __future__ import annotations
 
 import importlib.metadata
+from pathlib import Path
 
 from fastapi import FastAPI
 
 from . import SERVICE_NAME
 from .problems import install_problem_handlers
 from .routes.health import router as health_router
+from .spa import DEFAULT_DIST, install_spa
 
 
 def _resolve_version() -> str:
@@ -25,11 +27,14 @@ def _resolve_version() -> str:
         ) from exc
 
 
-def create_app(*, include_test_routes: bool = False) -> FastAPI:
+def create_app(
+    *, include_test_routes: bool = False, dist_dir: Path | None = None
+) -> FastAPI:
     """构造 FastAPI 应用。
 
     ``include_test_routes=True`` 挂载测试专用的校验/崩溃探针（证明 422/500 接线），
     生产入口与 OpenAPI 导出都用默认 ``False``，探针不进入契约。
+    ``dist_dir`` 默认指向仓库的 ``frontend/dist``；测试可注入临时目录。
     """
     app = FastAPI(title="MiniMax H3 Prompt API")
     # 版本在启动阶段解析并落在 app.state：健康接口读它，而非每次请求都查元数据。
@@ -40,4 +45,6 @@ def create_app(*, include_test_routes: bool = False) -> FastAPI:
         from .routes.validation_probe import router as probe_router
 
         app.include_router(probe_router)
+    # 兜底路由必须最后注册：/openapi.json、/docs 与 /api/* 都要先匹配到自己的处理器。
+    install_spa(app, dist_dir if dist_dir is not None else DEFAULT_DIST)
     return app
