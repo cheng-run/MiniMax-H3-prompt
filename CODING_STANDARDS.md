@@ -39,6 +39,7 @@
 | 经 LangGraph 图传的 state 键必须在 `StateGraph` schema 里声明，否则到节点手上静默没有 | auto memory `langgraph-drops-undeclared-state-keys`（#28） |
 | 删参数要追传递闭包 | auto memory `rule-exists-plumbing-missing` |
 | 官方文本只有一个可写源 | ADR 0008 |
+| 契约的**媒体类型**要与运行时同口径（OpenAPI 声明哪种、服务端就返回哪种）；不一致会在生成类型里分叉 | D1 #205：FastAPI `responses={model}` 默认写 `application/json`，`api/problems.py` 改写为 `problem+json` |
 
 ## 五、测试
 
@@ -51,6 +52,7 @@
 | 给向导加新问答别动用例输入表**末尾**（会被上游队列菜单吃掉、把流程挪一步）；在 `fake_prompt` 里只对那道新题作答 | auto memory `wizard-test-inputs-new-question`（#57：2.25s→249s） |
 | 工作树内跑测试先设 `PYTHONPATH=<工作树>\src` 再用主仓 `.venv`，否则测的是主树 | `AGENTS.md`「票据工作流」 |
 | 已知的环境性失败一句话带过并点名失败项，不反复归因；已知项不再当新发现陈述 | 全局 `~/.codex/AGENTS.md`「测试基线的报告纪律」 |
+| 前端覆盖率 `include` 必须排除 `*.spec.ts`——测试文件跑一遍就 100% 行，混进去等于拿测试自身凑覆盖 | D1 #205：`vitest.config.ts` exclude `src/**/*.spec.ts` |
 
 ## 六、文档
 
