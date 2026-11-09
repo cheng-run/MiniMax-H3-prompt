@@ -37,4 +37,11 @@ export default tseslint.config(
       },
     },
   },
+  {
+    // D1 spec §9 明确基础组件就叫 Button（单文件、无业务语义），与「组件名多词」的
+    // 通用建议冲突，这里按 spec 豁免；其余组件（AppShell/StatusBadge/…）已是多词。
+    rules: {
+      'vue/multi-word-component-names': ['error', { ignores: ['Button'] }],
+    },
+  },
 )
