@@ -57,6 +57,7 @@ spec 与票住 issue 是因为 `/to-spec`、`/to-tickets` 按 `docs/agents/issue
 - lint：`ruff` 在 `[dependency-groups].dev` 里、装在 `.venv`；`scripts/check.sh` 用 `"$PY" -m ruff`（不走 PATH）。缺装时 fast 会跳过并提示，安装由用户执行：`uv add --dev ruff`。
 - `scripts/check.sh mutate`：守卫变异检验（`scripts/mutation_check.py`），把关键实现改坏、跑指定用例、还原；用例必须红。**新加守卫就往 `MUTATIONS` 补一条**——没有变异检验的守卫不算守卫。
 - `scripts/check.sh types|coverage`：mypy（先只查叶子模块）与分支覆盖度量，两个都**装了才跑**，安装由用户执行（`uv add --dev mypy` / `uv add --dev coverage`）。
+- `scripts/check.sh frontend`：前端守卫（`eslint .` + `vue-tsc --noEmit`），**装了 `frontend/node_modules` 才跑**，缺依赖像 ruff 一样提示跳过（安装由用户：`cd frontend && npx pnpm@11.7.0 install`）。`fast` 档在「前端有改动」时自动带上它、无改动跳过，不拖慢纯 Python 提交。此前前端只在 CI 有 lint/typecheck，本地提交坏 TS 不会红（retro 2026-11-09）。
 - 单条用例超时 300 秒（`pyproject.toml` 的 `timeout`）：卡死时以「哪个用例超时」收场，而不是把机器拖到换页。要 `pytest-timeout` 才生效，未装时 `check.sh` 会提示；安装由用户执行：`uv add --dev pytest-timeout`（2026-11-08 实测一条卡死的全量吃到 24 GB 工作集 / 95 GB 私有提交）。
 - `scripts/ac_trace.py`：按注释/docstring 里的 `#NNN` 汇总 issue → 代码 → 测试；用来发现「只有代码、没有测试」的票。不是门禁。
 - `tests/test_adr_guard.py`（fast 档）：① 注释/docstring/文档里的 `ADR NNNN` 必须指向真实文件（外部 ADR 写 `ADR-NNNN`，连字符形式不核对）；② 27 份 ADR 必须有且只有一行合规状态行。ADR 写法与索引口径见 `docs/agents/engineering-cadence.md`；索引用 `scripts/adr_index.py` 现生成，不落静态清单。

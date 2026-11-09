@@ -113,12 +113,34 @@ run_types() {
   "$PY" -m mypy
 }
 
+# 前端守卫（retro 2026-11-09）：前端原先只在 CI 有 lint/typecheck，本地提交坏 TS 不会红。
+# 装了依赖才跑（未装像 ruff 一样提示跳过）；fast 档只在「前端有改动」时触发，其余提交
+# 不被拖慢。用 frontend/node_modules/.bin 直调，绕开 npx pnpm 解析错版本（实测会去拉 12.x）。
+run_frontend_guard() {
+  local force=${1:-false}
+  local root frontend
+  root=$(git rev-parse --show-toplevel)
+  frontend="$root/frontend"
+  if [ ! -d "$frontend/node_modules" ]; then
+    echo "[check] frontend: 跳过（未装前端依赖：cd frontend && npx pnpm@11.7.0 install）"
+    return 0
+  fi
+  if [ "$force" != true ] && [ -z "$(git status --porcelain -- frontend)" ]; then
+    echo "[check] frontend: 没有前端改动，跳过"
+    return 0
+  fi
+  echo "[check] frontend: eslint + vue-tsc"
+  ( cd "$frontend" && ./node_modules/.bin/eslint . )
+  ( cd "$frontend" && ./node_modules/.bin/vue-tsc --noEmit )
+}
+
 run_fast() {
   echo "[check] fast: ${#FAST_TESTS[@]} 个结构守卫文件"
   report_timeout_guard
   "$PY" -m pytest -q "${FAST_TESTS[@]}"
   run_docstring_guard
   lint_changed
+  run_frontend_guard false
 }
 
 # 基线哈希重算（retro 2026-11-03）：`tests/test_base_prompt_bytes.py` 的常量在并行
@@ -151,6 +173,9 @@ case "$MODE" in
     run_docstring_guard
     lint_changed
     run_types
+    ;;
+  frontend)
+    run_frontend_guard true
     ;;
   lint)
     if ! ruff_available; then
@@ -197,7 +222,7 @@ case "$MODE" in
     run_rehash "${2:-frame_prompt_engineer}"
     ;;
   *)
-    echo "用法: $0 [fast|full|lint|mutate|types|coverage|clean|worktree|rehash [角色名]]" >&2
+    echo "用法: $0 [fast|full|lint|frontend|mutate|types|coverage|clean|worktree|rehash [角色名]]" >&2
     printf '[check] %s: SKIP（无此档位）\n' "$MODE" >&2
     exit 2
     ;;
