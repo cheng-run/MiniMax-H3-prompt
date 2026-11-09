@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import http
 import logging
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -115,8 +116,9 @@ def install_problem_handlers(app: FastAPI) -> None:
 
 
 # 每个 API 路由声明同一组通用错误响应：既让契约里出现 ProblemDetail，也让读者一眼
-# 看到这些状态码都可能以 problem+json 返回。
-COMMON_ERROR_RESPONSES = {
+# 看到这些状态码都可能以 problem+json 返回。显式标注类型：FastAPI 的 responses 参数
+# 要 dict[int | str, dict[str, Any]]，否则 mypy 会把不透明值推断成 dict[str, object]。
+COMMON_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     404: {"model": ProblemDetail, "description": "资源不存在（problem+json）"},
     422: {"model": ProblemDetail, "description": "请求参数校验失败（problem+json）"},
     500: {"model": ProblemDetail, "description": "服务器内部错误（problem+json）"},
