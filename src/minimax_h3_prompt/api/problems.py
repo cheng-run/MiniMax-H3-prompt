@@ -28,9 +28,26 @@ _TITLE_BY_STATUS = {
     403: "禁止访问",
     404: "资源不存在",
     405: "方法不允许",
+    409: "资源状态冲突",
     422: "请求参数校验失败",
     500: "服务器内部错误",
+    501: "功能尚未实现",
 }
+
+
+class ProblemError(Exception):
+    """业务层可抛出、由统一处理器落成 problem+json 的错误。
+
+    ``code`` 是前端分支用的稳定错误码（spec §7），与 HTTP 状态码并存：
+    状态码说「哪一类失败」，``code`` 说「具体哪条规则」。
+    """
+
+    status_code = 500
+    code = "internal_error"
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
 
 
 class ProblemFieldError(BaseModel):
@@ -67,6 +84,7 @@ def _problem_response(
     detail: str,
     request: Request,
     errors: list[ProblemFieldError] | None = None,
+    code: str | None = None,
 ) -> JSONResponse:
     """统一构造 ProblemDetail 响应：title/instance 由状态码与请求路径派生，避免三条
     失败路径各拼一遍样板（改字段时只改这一处）。"""
@@ -75,6 +93,7 @@ def _problem_response(
         status=status,
         detail=detail,
         instance=request.url.path,
+        code=code,
         errors=errors,
     )
     return JSONResponse(
@@ -102,6 +121,24 @@ def install_problem_handlers(app: FastAPI) -> None:
             for err in exc.errors()
         ]
         return _problem_response(422, "请求参数未通过校验。", request, errors=errors)
+
+    @app.exception_handler(ProblemError)
+    async def _handle_problem_error(
+        request: Request, exc: ProblemError
+    ) -> JSONResponse:
+        return _problem_response(
+            exc.status_code, exc.detail, request, code=exc.code)
+
+    # 工作台领域错误自带 HTTP 状态与稳定错误码（#215）：在这里统一落成 problem+json，
+    # 路由只负责抛语义错误，不各自拼响应体。
+    from ..workbench_store import WorkbenchError
+
+    @app.exception_handler(WorkbenchError)
+    async def _handle_workbench_error(
+        request: Request, exc: WorkbenchError
+    ) -> JSONResponse:
+        return _problem_response(
+            exc.status_code, str(exc), request, code=exc.code)
 
     @app.exception_handler(Exception)
     async def _handle_unexpected(request: Request, exc: Exception) -> JSONResponse:

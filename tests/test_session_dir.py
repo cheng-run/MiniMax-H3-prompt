@@ -52,3 +52,46 @@ def test_no_session_file_opens_next_gen(tmp_path):
     first = _session_dir(cfg, "某主题")
     (first / "segments").mkdir()
     assert _session_dir(cfg, "某主题") != first
+
+
+def test_workbench_session_is_not_reused_or_overwritten(tmp_path):
+    """API 建的 workbench 会话（created）绝不被向导续接，原文件逐字不变（#215）。
+
+    两者同用 ``sessions_root/<slug>/GEN00N`` 布局；旧的「非 completed 就复用」判据
+    会让 ``_phase1_new`` 重跑阶段 1 并把 API 会话整份 save 覆盖——静默数据丢失。
+    """
+    cfg = type("C", (), {"sessions_root": str(tmp_path)})()
+    seed = _session_dir(cfg, "某主题")
+    save_session(seed, _brief(), {"k": "v"}, status="created",
+                 session_id=f"{seed.parent.name}/GEN001")
+    before = (seed / "session-state.json").read_bytes()
+
+    again = _session_dir(cfg, "某主题")
+
+    assert again.name == "GEN002", "向导复用了 API 建的工作台会话目录"
+    assert (seed / "session-state.json").read_bytes() == before, "API 会话文件被向导改动"
+
+
+def test_awaiting_frames_is_still_reused(tmp_path):
+    """对照：新白名单没有把正常续接关掉（awaiting_frames 仍复用）。"""
+    cfg = type("C", (), {"sessions_root": str(tmp_path)})()
+    first = _session_dir(cfg, "某主题")
+    save_session(first, _brief(), {"k": "v"}, status=STATUS_AWAITING_FRAMES)
+
+    assert _session_dir(cfg, "某主题") == first
+
+
+def test_resumable_statuses_is_the_single_guard_list():
+    """可续接清单只有一份，且不收录工作台状态（两处共用同一常量）。"""
+    from minimax_h3_prompt import session_store
+
+    assert session_store.RESUMABLE_STATUSES == (
+        session_store.STATUS_AWAITING_FRAMES,
+        session_store.STATUS_STAGE1_RUNNING,
+        session_store.STATUS_SEGMENTED_RUNNING,
+        session_store.STATUS_REF_SEGMENTS_RUNNING,
+        session_store.STATUS_DIRECTOR_SEGMENTS_RUNNING,
+    )
+    for status in ("created", "running", "awaiting_human", "failed",
+                   "cancelled", "interrupted"):
+        assert status not in session_store.RESUMABLE_STATUSES

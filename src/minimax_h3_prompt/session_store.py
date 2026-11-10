@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,7 +25,9 @@ from .kinds import ASSET_MANIFEST_KEYS, ASSET_PROMPT_KEYS
 from .observability import COST_TABLE_KEY, token_meter
 
 SESSION_FILENAME = "session-state.json"
-_SCHEMA_VERSION = "wizard_session.v1"
+# D2（#215）起新会话文件是 workbench.v1；旧的 wizard_session.v1 只读兼容、不迁移。
+WORKBENCH_SCHEMA_VERSION = "workbench.v1"
+LEGACY_SCHEMA_VERSION = "wizard_session.v1"
 
 # status: awaiting_frames = 阶段 1 完成、等待用户交回产出物——首尾帧路线是关键帧图，
 #   多参路线是参考素材（素材交回，issue #43：缺项可停在这续接补交）。同一个「等交回」
@@ -49,6 +53,19 @@ STATUS_REF_SEGMENTS_RUNNING = "ref_segments_running"
 # 五档出路），它读的是**段缓存的帧数**。同一个值会让导演台会话被别的路线续接，等于拿
 # 另一条路线的步骤去走它（2026-10-20 #55 复核已标记该风险）。
 STATUS_DIRECTOR_SEGMENTS_RUNNING = "director_segments_running"
+
+# 向导可以续接的状态清单：**唯一一份**。``find_awaiting_sessions`` 与
+# ``ui/wizard._session_dir`` 都从这里取，谁再抄一份字面量，新增状态时就会漏一处
+# （``segmented_running`` 曾长期只存在于 docstring 里，issue #17）。
+# API 建的 workbench 状态（created/running/awaiting_human/...）**故意不在**这里：
+# 向导只续接向导自己的会话，按「非 completed 就复用」判会整份覆盖 API 会话。
+RESUMABLE_STATUSES = (
+    STATUS_AWAITING_FRAMES,
+    STATUS_STAGE1_RUNNING,
+    STATUS_SEGMENTED_RUNNING,
+    STATUS_REF_SEGMENTS_RUNNING,
+    STATUS_DIRECTOR_SEGMENTS_RUNNING,
+)
 
 # state 中允许持久化的键；brief 对象单独序列化。`_progress` 是阶段 1 断点的元数据（哪个节点跑完了）。
 # `fl2va_frame_descriptions` 是用户提交帧图的读图结果——阶段 2 分段流程的唯一画面事实源，
@@ -191,6 +208,48 @@ def _route_filtered_state(raw_state: Any, brief: Brief) -> dict[str, Any]:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def atomic_write_text(target: Path, text: str) -> None:
+    """写临时文件再 ``os.replace``：中途被杀只留旧文件，不留半截快照。
+
+    会话文件是崩溃恢复的唯一真源（D2-AC2）；裸 ``write_text`` 会先截断旧文件，
+    写入途中失败就同时失去新旧两份。临时文件与目标同目录，``os.replace`` 才是
+    同一文件系统内的原子替换。
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(
+        dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, target)
+    except BaseException:
+        # 替换失败时旧文件仍在；临时文件必须清掉，否则每次失败都在会话目录留垃圾。
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _non_negative_int(raw: dict[str, Any], key: str, default: int) -> int:
+    """读回整数字段；错形大声报错（会话文件是系统自己写的，错形只可能是损坏）。"""
+    value = raw.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"会话文件的 {key} 必须是非负整数：{value!r}")
+    return value
+
+
+def _dict_tuple(raw: dict[str, Any], key: str) -> tuple[dict[str, Any], ...]:
+    """读回 job / 待办摘要列表；元素必须是对象，错形大声报错。"""
+    value = raw.get(key, [])
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise ValueError(f"会话文件的 {key} 必须是对象数组：{value!r}")
+    return tuple(dict(item) for item in value)
 
 
 def _brief_to_dict(brief: Brief) -> dict[str, Any]:
@@ -377,6 +436,14 @@ class SessionState:
     frame_images: tuple[dict[str, Any], ...] = ()
     created_at: str = ""
     updated_at: str = ""
+    # 以下五键自 workbench.v1 起存在（#215）。向导直接保存时 session_id 为空——
+    # 那种会话没有工作台身份，API 侧按 legacy 处理；#216 接步骤机后由步骤机填。
+    schema_version: str = WORKBENCH_SCHEMA_VERSION
+    session_id: str = ""
+    revision: int = 0
+    last_event_seq: int = 0
+    jobs: tuple[dict[str, Any], ...] = ()
+    action_items: tuple[dict[str, Any], ...] = ()
 
     @property
     def awaiting_frames(self) -> bool:
@@ -391,7 +458,7 @@ class SessionState:
         # 是上一次保存时的旧数，照抄它就是把这段时间的成本抹掉。
         stage_state[COST_TABLE_KEY] = token_meter.snapshot()
         payload: dict[str, Any] = {
-            "schema_version": _SCHEMA_VERSION,
+            "schema_version": self.schema_version,
             "status": self.status,
             "brief": _brief_to_dict(self.brief),
             "stage_state": stage_state,
@@ -402,20 +469,66 @@ class SessionState:
         }
         self.directory.mkdir(parents=True, exist_ok=True)
         target = self.directory / SESSION_FILENAME
-        if not self.created_at and target.exists():
-            old = json.loads(target.read_text(encoding="utf-8"))
-            payload["created_at"] = str(old.get("created_at") or payload["created_at"])
-        target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        previous_revision = 0
+        if target.exists():
+            try:
+                old = json.loads(target.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                old = {}
+            if not self.created_at:
+                payload["created_at"] = str(old.get("created_at") or payload["created_at"])
+            previous_revision = _non_negative_int(old, "revision", 0)
+        if self.schema_version == WORKBENCH_SCHEMA_VERSION:
+            # revision 以文件里的数为准再 +1：调用方每次新建 SessionState（向导就是），
+            # 只看内存字段会永远写 1，等于没有版本号。
+            payload["session_id"] = self.session_id
+            payload["revision"] = max(self.revision, previous_revision) + 1
+            payload["last_event_seq"] = self.last_event_seq
+            payload["jobs"] = [dict(item) for item in self.jobs]
+            payload["action_items"] = [dict(item) for item in self.action_items]
+        atomic_write_text(
+            target, json.dumps(payload, ensure_ascii=False, indent=2))
         return target
 
 
 def save_session(directory: str | Path, brief: Brief, stage_state: dict[str, Any], *,
-                 status: str = STATUS_AWAITING_FRAMES) -> Path:
+                 status: str = STATUS_AWAITING_FRAMES,
+                 session_id: str = "",
+                 schema_version: str = WORKBENCH_SCHEMA_VERSION,
+                 revision: int = 0,
+                 last_event_seq: int = 0,
+                 jobs: tuple[dict[str, Any], ...] = (),
+                 action_items: tuple[dict[str, Any], ...] = ()) -> Path:
     """保存或更新会话；directory 为 generation 目录。"""
-    session = SessionState(Path(directory), brief, stage_state, status)
+    session = SessionState(
+        Path(directory), brief, stage_state, status,
+        session_id=session_id,
+        schema_version=schema_version,
+        revision=revision,
+        last_event_seq=last_event_seq,
+        jobs=tuple(jobs),
+        action_items=tuple(action_items),
+    )
     return session.save()
 
 
+def update_session_file(directory: str | Path, **fields: Any) -> Path | None:
+    """原子地补写会话文件的若干顶层字段；workbench.v1 顺带把 ``revision`` +1。
+
+    给「不经过 SessionState 的小改写」用（向导的变体降级补记）：重新序列化整份
+    state 会丢掉不在白名单里的键，裸 ``write_text`` 又会破坏原子性。读不到或写不进
+    时返回 None，调用方按既有「补记失败不阻断主流程」处理。
+    """
+    target = Path(directory) / SESSION_FILENAME
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+        raw.update(fields)
+        if raw.get("schema_version") == WORKBENCH_SCHEMA_VERSION:
+            raw["revision"] = _non_negative_int(raw, "revision", 0) + 1
+        atomic_write_text(target, json.dumps(raw, ensure_ascii=False, indent=2))
+    except (OSError, ValueError):
+        return None
+    return target
 def load_session(directory: str | Path) -> SessionState | None:
     """加载会话；文件不存在或 JSON 损坏返回 None（调用方决定回退到新建流程）。
 
@@ -432,8 +545,12 @@ def load_session(directory: str | Path) -> SessionState | None:
         raw = json.loads(target.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    if raw.get("schema_version") != _SCHEMA_VERSION:
+    schema_version = str(raw.get("schema_version", ""))
+    if schema_version not in (WORKBENCH_SCHEMA_VERSION, LEGACY_SCHEMA_VERSION):
         return None
+    session_id = raw.get("session_id", "")
+    if not isinstance(session_id, str):
+        raise ValueError(f"会话文件的 session_id 必须是字符串：{session_id!r}")
     # brief 先解出来：路线判据是 `Brief.mode`，stage_state 的过滤要按它走（issue #80）。
     brief = _brief_from_dict(raw.get("brief", {}))
     return SessionState(
@@ -445,6 +562,12 @@ def load_session(directory: str | Path) -> SessionState | None:
         frame_images=tuple(dict(x) for x in raw.get("frame_images", [])),
         created_at=str(raw.get("created_at", "")),
         updated_at=str(raw.get("updated_at", "")),
+        schema_version=schema_version,
+        session_id=session_id,
+        revision=_non_negative_int(raw, "revision", 0),
+        last_event_seq=_non_negative_int(raw, "last_event_seq", 0),
+        jobs=_dict_tuple(raw, "jobs"),
+        action_items=_dict_tuple(raw, "action_items"),
     )
 
 
@@ -460,8 +583,6 @@ def find_awaiting_sessions(root_dir: str | Path) -> list[SessionState]:
     results: list[SessionState] = []
     if not root.is_dir():
         return results
-    resumable = (STATUS_AWAITING_FRAMES, STATUS_STAGE1_RUNNING, STATUS_SEGMENTED_RUNNING,
-                 STATUS_REF_SEGMENTS_RUNNING, STATUS_DIRECTOR_SEGMENTS_RUNNING)
     for session_file in sorted(root.glob("**/" + SESSION_FILENAME)):
         try:
             session = load_session(session_file.parent)
@@ -470,7 +591,7 @@ def find_awaiting_sessions(root_dir: str | Path) -> list[SessionState]:
             # 打印出来跳过，用户看得到哪个会话坏了（issue #42 复审：严格读回的连带面）。
             print(f"[警告] 会话文件损坏，已跳过：{session_file}（{exc}）")
             continue
-        if session is not None and session.status in resumable:
+        if session is not None and session.status in RESUMABLE_STATUSES:
             results.append(session)
     return results
 
@@ -478,6 +599,7 @@ def find_awaiting_sessions(root_dir: str | Path) -> list[SessionState]:
 __all__ = [
     "SessionState", "SESSION_FILENAME", "STATUS_AWAITING_FRAMES", "STATUS_COMPLETED",
     "STATUS_STAGE1_RUNNING", "STATUS_SEGMENTED_RUNNING", "STATUS_REF_SEGMENTS_RUNNING",
-    "STATUS_DIRECTOR_SEGMENTS_RUNNING",
-    "save_session", "load_session", "find_awaiting_sessions",
+    "STATUS_DIRECTOR_SEGMENTS_RUNNING", "RESUMABLE_STATUSES",
+    "WORKBENCH_SCHEMA_VERSION", "LEGACY_SCHEMA_VERSION", "atomic_write_text",
+    "update_session_file", "save_session", "load_session", "find_awaiting_sessions",
 ]

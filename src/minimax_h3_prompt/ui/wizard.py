@@ -62,6 +62,7 @@ from ..session_store import (
     find_awaiting_sessions,
     load_session,
     save_session,
+    update_session_file,
 )
 from ..user_revisions import (
     FRAME_BASELINE_KEY,
@@ -2013,20 +2014,22 @@ def _topic_slug(topic: str) -> str:
 def _session_dir(config: Config, topic: str) -> Path:
     """该主题的会话目录：``<sessions_root>/<topic_slug>/GEN00N``。
 
-    续接规则：最新 GEN 的会话**未完成** → 复用续接；``completed`` 或无会话文件 →
-    自动开下一个 GEN 编号（同主题重新生成 = 新的一次验收运行，2026-09-22 裁定）。
+    续接规则：最新 GEN 的会话状态在 ``session_store.RESUMABLE_STATUSES`` 里 → 复用；
+    其余（``completed``、API 建的工作台状态、无会话文件/损坏）→ 开下一个 GEN。
 
-    「未完成」指 ``awaiting_frames`` / ``stage1_running`` / ``segmented_running`` /
-    ``ref_segments_running`` 四态。这里只按「不是 completed」判，所以新增未完成态自动
-    获得续接语义——但前提是**确实有代码在写那个态**：``segmented_running`` 曾长期只
-    存在于本 docstring 里（分段陪跑从不改会话状态），于是「分段进行中」这一态在运行时
-    不存在，向导会另开新 GEN、``progress.json`` 永远读不到（issue #17）。
+    **向导只续接向导自己的会话**（#215 追加裁定）：API 建的 workbench 会话与向导同用
+    这套目录布局；按「不是 completed 就复用」判，``created`` 会话会被 ``_phase1_new``
+    重新跑阶段 1 再整份 save——静默数据覆盖，比崩溃更坏。所以非向导状态一律另开新 GEN。
+
+    可续接清单只有 ``RESUMABLE_STATUSES`` 一份，别在这里再抄字面量：``segmented_running``
+    曾长期只存在于 docstring 里，于是运行时不存在该态、``progress.json`` 永远读不到
+    （issue #17）。
 
     复用 GEN 有个副作用要留意（issue #58 复审实测）：用户**拒绝续接**再重走流程时，
     同一个 GEN 的段产物会被新一轮交付整份覆盖，而**追加式**的账（多参的段产出账）
     不会——所以新一次交付开头要把它挪开（``ref_segments.rotate_segment_ledger``）。
     """
-    from ..session_store import STATUS_COMPLETED, load_session
+    from ..session_store import RESUMABLE_STATUSES, load_session
 
     slug_dir = Path(config.sessions_root) / _topic_slug(topic)
     existing = sorted(slug_dir.glob("GEN*"), key=lambda p: p.name)
@@ -2040,10 +2043,11 @@ def _session_dir(config: Config, topic: str) -> Path:
             # traceback，用户连绕开的机会都没有（issue #42 复审：严格读回的连带面）。
             print(f"[警告] 最近的会话文件损坏，已跳过续接：{latest}（{exc}）")
             session = None
-        if session is not None and session.status != STATUS_COMPLETED:
-            directory = latest  # 未完成 → 续接
+        if session is not None and session.status in RESUMABLE_STATUSES:
+            directory = latest  # 向导自己的未完成会话 → 续接
         else:
-            directory = slug_dir / f"GEN{len(existing) + 1:03d}"  # 已完成/无会话/损坏 → 新 GEN
+            # 已完成/API 工作台会话/无会话/损坏 → 新 GEN（绝不复用别人的会话目录）。
+            directory = slug_dir / f"GEN{len(existing) + 1:03d}"
     else:
         directory = slug_dir / "GEN001"
     directory.mkdir(parents=True, exist_ok=True)
@@ -6251,16 +6255,8 @@ def _store_frame(source: Path, generation_dir: Path, role: str) -> dict:
 
 
 def _record_downgrade(directory: Path, downgraded: str) -> None:
-    """把变体降级事实补写进 session-state.json。"""
-    import json
-
-    target = directory / "session-state.json"
-    try:
-        raw = json.loads(target.read_text(encoding="utf-8"))
-        raw["variant_downgraded"] = downgraded
-        target.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
-    except (OSError, json.JSONDecodeError):
-        pass
+    """把变体降级事实补写进 session-state.json（原子替换，revision +1）。"""
+    update_session_file(directory, variant_downgraded=downgraded)
 
 
 __all__ = ["run_wizard", "resolve_effective_variant"]
