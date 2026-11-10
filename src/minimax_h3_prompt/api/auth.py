@@ -23,9 +23,9 @@ import logging
 import secrets
 from dataclasses import dataclass
 from http.cookies import SimpleCookie
-from typing import Any
 from urllib.parse import urlsplit
 
+from fastapi import FastAPI
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -43,7 +43,10 @@ LOOPBACK_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1"})
 
 # 豁免面是**闭合**的三处（#222 §4.3）：健康检查、引导端点、静态资源与 SPA 兜底。
 # 最后一项按「不在 /api 下」判定，因此 /openapi.json 与 /docs 一并豁免。
+# 前两处 spec 写的是 GET：PUT/POST 打到这些路径不应得到「免凭据」待遇，否则
+# 「401 与 405 的差别」会泄露这两个路由存在。
 EXEMPT_API_PATHS = frozenset({"/api/v1/health", "/api/v1/auth/token"})
+_EXEMPT_METHODS = frozenset({"GET", "HEAD"})
 
 _DETAILS = {
     "host_forbidden": "Host 主机名不在允许的本机回环集合内。",
@@ -85,8 +88,22 @@ def _cookie_token(headers: Headers) -> str | None:
 
 
 def _matches(presented: str | None, expected: str) -> bool:
-    # compare_digest 要求同类型；presented 可能来自任意请求头，先筛类型。
-    return isinstance(presented, str) and hmac.compare_digest(presented, expected)
+    """常量时间比较；**按字节比**，畸形凭据只该得到 False。
+
+    为什么不能直接 ``compare_digest(str, str)``：请求头按 latin-1 解码成 str，
+    任意非 ASCII 字节（obs-text）都会让它抛 ``TypeError``——中间件在异常处理器
+    外层，一个畸形头就能把 401 打成 500。
+    """
+    if not isinstance(presented, str):
+        return False
+    return hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8"))
+
+
+def is_exempt(method: str | None, path: str) -> bool:
+    """豁免面判定：闭合三处（#222 §4.3），见 ``EXEMPT_API_PATHS`` 的说明。"""
+    if path in EXEMPT_API_PATHS:
+        return method in _EXEMPT_METHODS
+    return not (path == "/api" or path.startswith("/api/"))
 
 
 @dataclass(frozen=True)
@@ -99,13 +116,9 @@ class LocalAccessPolicy:
     def generate(cls) -> LocalAccessPolicy:
         return cls(token=secrets.token_urlsafe(TOKEN_BYTES))
 
-    @staticmethod
-    def is_exempt(path: str) -> bool:
-        if path in EXEMPT_API_PATHS:
-            return True
-        return not (path == "/api" or path.startswith("/api/"))
-
-    def denial(self, headers: Headers, path: str) -> tuple[int, str] | None:
+    def denial(
+        self, headers: Headers, method: str | None, path: str,
+    ) -> tuple[int, str] | None:
         """返回 ``(状态码, 错误码)``；None 表示放行。"""
         host = headers.get("host")
         if host is None or _host_header_hostname(host) not in LOOPBACK_HOSTNAMES:
@@ -113,7 +126,7 @@ class LocalAccessPolicy:
         origin = headers.get("origin")
         if origin is not None and _origin_hostname(origin) not in LOOPBACK_HOSTNAMES:
             return 403, "origin_forbidden"
-        if self.is_exempt(path):
+        if is_exempt(method, path):
             return None
         if _matches(headers.get(TOKEN_HEADER), self.token):
             return None
@@ -138,7 +151,7 @@ class LocalAccessMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        denial = self.policy.denial(Headers(scope=scope), scope["path"])
+        denial = self.policy.denial(Headers(scope=scope), scope.get("method"), scope["path"])
         if denial is None:
             await self.app(scope, receive, send)
             return
@@ -150,7 +163,7 @@ class LocalAccessMiddleware:
         await response(scope, receive, send)
 
 
-def attach_local_access(app: Any) -> LocalAccessPolicy:
+def attach_local_access(app: FastAPI) -> LocalAccessPolicy:
     """给 app 装上策略与中间件，并把策略放进 ``app.state`` 供端点读取。
 
     令牌在 ``create_app`` 阶段生成：一个进程一份，测试里每个 app 也各一份。
@@ -159,15 +172,3 @@ def attach_local_access(app: Any) -> LocalAccessPolicy:
     app.state.local_access = policy
     app.add_middleware(LocalAccessMiddleware, policy=policy)
     return policy
-
-
-__all__ = [
-    "COOKIE_PATH",
-    "EXEMPT_API_PATHS",
-    "LOOPBACK_HOSTNAMES",
-    "LocalAccessMiddleware",
-    "LocalAccessPolicy",
-    "SESSION_COOKIE",
-    "TOKEN_HEADER",
-    "attach_local_access",
-]

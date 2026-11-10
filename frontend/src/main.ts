@@ -10,8 +10,10 @@ import './styles/tokens.css'
 
 // 页面一启动就取启动令牌：引导端点同时下发 wb_session Cookie，`<video>` / `<img>`
 // 由浏览器自己发请求、挂不上自定义头，只能靠这个 Cookie（D3-1 / ADR 0033）。
-// 失败不阻塞渲染：令牌不进模块缓存，第一次 API 调用会自动重试。
-void ensureSessionToken().catch(() => {})
+// 失败不阻塞渲染：令牌不进模块缓存，第一次 API 调用会自动重试；这里只留一条信号。
+void ensureSessionToken().catch((error: unknown) => {
+  console.warn('启动令牌获取失败，首次 API 调用会重试', error)
+})
 
 const app = createApp(App)
 

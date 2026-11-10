@@ -205,6 +205,20 @@ def test_401_body_never_echoes_the_token(tmp_path: Path) -> None:
     assert token not in resp.text
 
 
+def test_non_ascii_credential_is_401_not_500(tmp_path: Path) -> None:
+    """畸形凭据头只该是「无效凭据」。``hmac.compare_digest`` 对非 ASCII str 会抛
+    ``TypeError``，而中间件在异常处理器外层——不按字节比较，一个 obs-text 头就能把
+    401 打成未捕获的 500（复审实测）。
+    """
+    client = _client(_app(tmp_path))
+
+    resp = client.get(
+        "/api/v1/sessions", headers=[(b"x-workbench-token", b"tok\xff")])
+
+    assert resp.status_code == 401
+    assert resp.json()["code"] == "auth_required"
+
+
 # ---------------------------------------------------------------------------
 # 豁免面与引导端点（D3-AC2 / AC3）
 # ---------------------------------------------------------------------------
@@ -230,6 +244,16 @@ def test_token_endpoint_is_exempt_and_issues_a_strict_cookie() -> None:
 
 def test_health_endpoint_is_exempt() -> None:
     assert _client(_app()).get("/api/v1/health").status_code == 200
+
+
+@pytest.mark.parametrize("path", ["/api/v1/health", "/api/v1/auth/token"])
+def test_exempt_api_paths_only_exempt_get_and_head(path: str, tmp_path: Path) -> None:
+    """spec 写的是 ``GET``：其它方法打到这两个路径仍要凭据，否则 401/405 的差别
+    会泄露它们的存在。"""
+    resp = _client(_app(tmp_path)).post(path)
+
+    assert resp.status_code == 401
+    assert resp.json()["code"] == "auth_required"
 
 
 def test_static_and_spa_fallback_are_exempt(tmp_path: Path) -> None:

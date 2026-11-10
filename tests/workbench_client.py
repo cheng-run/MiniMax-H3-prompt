@@ -10,7 +10,9 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
-TOKEN_HEADER = "X-Workbench-Token"
+# 头名从实现派生：这里是测试基础设施，不是契约断言（契约名由 test_api_auth.py
+# 用字面量钉住）。字面重抄一份，改常量时它会静默指向旧名字。
+from minimax_h3_prompt.api.auth import TOKEN_HEADER
 
 
 def workbench_client(

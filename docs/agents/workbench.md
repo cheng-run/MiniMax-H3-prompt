@@ -38,7 +38,7 @@
 | Host | `api/auth.py` | 主机名 ∈ `127.0.0.1` / `localhost` / `[::1]`，**端口不限**；否则 403 `host_forbidden` |
 | Origin | 同上 | 带 Origin 时主机名同样须回环，否则 403 `origin_forbidden`；无 Origin 放行 |
 | 凭据 | 同上 | `X-Workbench-Token` 头**或** `wb_session` Cookie，任一有效即通过；否则 401 `auth_required` |
-| 豁免面 | `LocalAccessPolicy.is_exempt` | 闭合三处：`/api/v1/health`、`/api/v1/auth/token`、不在 `/api` 下的一切 |
+| 豁免面 | `auth.is_exempt` | 闭合三处：`GET /api/v1/health`、`GET /api/v1/auth/token`（仅 GET/HEAD）、不在 `/api` 下的一切 |
 
 - **令牌每进程随机、只存内存**（`create_app` 生成，`app.state.local_access`）。重启即换；
   测试里每个 app 各一份。

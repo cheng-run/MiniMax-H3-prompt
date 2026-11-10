@@ -175,6 +175,14 @@ COMMON_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     500: {"model": ProblemDetail, "description": "服务器内部错误（problem+json）"},
 }
 
+# 本地访问控制在中间件层先于路由拒绝（api/auth.py），所以「没有凭据」与「来源不对」
+# 对**所有**受保护路由都可能发生。不写进契约，前端生成类型里就看不到这两个分支——
+# 契约说「只有 404/422/500」，服务端却还会回 401/403，正是本模块开头反对的两处口径。
+AUTH_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
+    401: {"model": ProblemDetail, "description": "缺少或无效的工作台访问令牌（problem+json）"},
+    403: {"model": ProblemDetail, "description": "Host/Origin 不是本机回环地址（problem+json）"},
+}
+
 
 def apply_problem_media_type_openapi(app: FastAPI) -> None:
     """让附加错误响应在 OpenAPI 里声明 ``application/problem+json``。

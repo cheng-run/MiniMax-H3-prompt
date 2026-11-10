@@ -518,10 +518,26 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "auth_token_compare_off",
         "src/minimax_h3_prompt/api/auth.py",
-        "    return isinstance(presented, str) and hmac.compare_digest(presented, expected)",
+        "    return hmac.compare_digest(presented.encode(\"utf-8\"), expected.encode(\"utf-8\"))",
         "    return True",
         ("tests/test_api_auth.py::test_wrong_header_credential_is_rejected",),
         "不比令牌＝任何字符串都能通过，启动令牌变成装饰（#223 / D3-AC2）",
+    ),
+    Mutation(
+        "auth_cookie_credential_off",
+        "src/minimax_h3_prompt/api/auth.py",
+        "        if _matches(_cookie_token(headers), self.token):\n            return None",
+        "        if False:\n            return None",
+        ("tests/test_api_auth.py::test_cookie_credential_passes",),
+        "只认请求头＝<video>/<img> 由浏览器自己发请求、挂不上头，媒体永远 401（#223 / D3-AC3）",
+    ),
+    Mutation(
+        "auth_exempt_surface_off",
+        "src/minimax_h3_prompt/api/auth.py",
+        "        if is_exempt(method, path):\n            return None",
+        "        if False:\n            return None",
+        ("tests/test_api_auth.py::test_health_endpoint_is_exempt",),
+        "豁免面失守＝健康检查被令牌挡住，排障入口先于业务不可用（#223 / D3-AC2）",
     ),
 )
 

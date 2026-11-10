@@ -633,6 +633,24 @@ export interface operations {
                     "text/plain": string;
                 };
             };
+            /** @description 缺少或无效的工作台访问令牌（problem+json） */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Host/Origin 不是本机回环地址（problem+json） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
             /** @description 产物不存在、标识越界，或该产物不提供内容（problem+json） */
             404: {
                 headers: {
@@ -795,6 +813,24 @@ export interface operations {
                     "application/json": components["schemas"]["SessionPage"];
                 };
             };
+            /** @description 缺少或无效的工作台访问令牌（problem+json） */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Host/Origin 不是本机回环地址（problem+json） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
             /** @description 资源不存在（problem+json） */
             404: {
                 headers: {
@@ -868,6 +904,24 @@ export interface operations {
                     "application/json": components["schemas"]["SessionDetail"];
                 };
             };
+            /** @description 缺少或无效的工作台访问令牌（problem+json） */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Host/Origin 不是本机回环地址（problem+json） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
             /** @description 资源不存在（problem+json） */
             404: {
                 headers: {
@@ -926,6 +980,24 @@ export interface operations {
                     "application/json": components["schemas"]["SessionDetail"];
                 };
             };
+            /** @description 缺少或无效的工作台访问令牌（problem+json） */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Host/Origin 不是本机回环地址（problem+json） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
             /** @description 资源不存在（problem+json） */
             404: {
                 headers: {
@@ -982,6 +1054,24 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ActionItemOut"][];
+                };
+            };
+            /** @description 缺少或无效的工作台访问令牌（problem+json） */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Host/Origin 不是本机回环地址（problem+json） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
                 };
             };
             /** @description 资源不存在（problem+json） */
@@ -1051,6 +1141,24 @@ export interface operations {
                     "application/json": components["schemas"]["JobSummary"];
                 };
             };
+            /** @description 缺少或无效的工作台访问令牌（problem+json） */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Host/Origin 不是本机回环地址（problem+json） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
             /** @description 待办不存在（problem+json） */
             404: {
                 headers: {
@@ -1107,6 +1215,24 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ArtifactInfo"][];
+                };
+            };
+            /** @description 缺少或无效的工作台访问令牌（problem+json） */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Host/Origin 不是本机回环地址（problem+json） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
                 };
             };
             /** @description 资源不存在（problem+json） */
@@ -1173,6 +1299,24 @@ export interface operations {
                     "text/event-stream": string;
                 };
             };
+            /** @description 缺少或无效的工作台访问令牌（problem+json） */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Host/Origin 不是本机回环地址（problem+json） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
             /** @description 资源不存在（problem+json） */
             404: {
                 headers: {
@@ -1235,6 +1379,24 @@ export interface operations {
                     "application/json": components["schemas"]["JobSummary"];
                 };
             };
+            /** @description 缺少或无效的工作台访问令牌（problem+json） */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Host/Origin 不是本机回环地址（problem+json） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
             /** @description 任务不存在（problem+json） */
             404: {
                 headers: {
@@ -1294,6 +1456,24 @@ export interface operations {
                     "application/json": components["schemas"]["JobSummary"];
                 };
             };
+            /** @description 缺少或无效的工作台访问令牌（problem+json） */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Host/Origin 不是本机回环地址（problem+json） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
             /** @description 任务不存在（problem+json） */
             404: {
                 headers: {
@@ -1351,6 +1531,24 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["JobSummary"];
+                };
+            };
+            /** @description 缺少或无效的工作台访问令牌（problem+json） */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Host/Origin 不是本机回环地址（problem+json） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
                 };
             };
             /** @description 任务不存在（problem+json） */

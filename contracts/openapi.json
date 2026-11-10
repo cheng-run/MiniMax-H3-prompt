@@ -806,6 +806,26 @@
             },
             "description": "文本产物全文（UTF-8）；视频类在 D2 不提供内容。"
           },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "缺少或无效的工作台访问令牌（problem+json）"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "Host/Origin 不是本机回环地址（problem+json）"
+          },
           "404": {
             "content": {
               "application/problem+json": {
@@ -1009,6 +1029,26 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "缺少或无效的工作台访问令牌（problem+json）"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "Host/Origin 不是本机回环地址（problem+json）"
+          },
           "404": {
             "content": {
               "application/problem+json": {
@@ -1114,6 +1154,26 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "缺少或无效的工作台访问令牌（problem+json）"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "Host/Origin 不是本机回环地址（problem+json）"
+          },
           "404": {
             "content": {
               "application/problem+json": {
@@ -1185,6 +1245,26 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "缺少或无效的工作台访问令牌（problem+json）"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "Host/Origin 不是本机回环地址（problem+json）"
           },
           "404": {
             "content": {
@@ -1262,6 +1342,26 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "缺少或无效的工作台访问令牌（problem+json）"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "Host/Origin 不是本机回环地址（problem+json）"
           },
           "404": {
             "content": {
@@ -1379,6 +1479,26 @@
               }
             }
           },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "缺少或无效的工作台访问令牌（problem+json）"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "Host/Origin 不是本机回环地址（problem+json）"
+          },
           "404": {
             "content": {
               "application/problem+json": {
@@ -1455,6 +1575,26 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "缺少或无效的工作台访问令牌（problem+json）"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "Host/Origin 不是本机回环地址（problem+json）"
           },
           "404": {
             "content": {
@@ -1569,6 +1709,26 @@
               }
             }
           },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "缺少或无效的工作台访问令牌（problem+json）"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "Host/Origin 不是本机回环地址（problem+json）"
+          },
           "404": {
             "content": {
               "application/problem+json": {
@@ -1666,6 +1826,26 @@
               }
             }
           },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "缺少或无效的工作台访问令牌（problem+json）"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "Host/Origin 不是本机回环地址（problem+json）"
+          },
           "404": {
             "content": {
               "application/problem+json": {
@@ -1746,6 +1926,26 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "缺少或无效的工作台访问令牌（problem+json）"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "Host/Origin 不是本机回环地址（problem+json）"
           },
           "404": {
             "content": {
@@ -1828,6 +2028,26 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "缺少或无效的工作台访问令牌（problem+json）"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "Host/Origin 不是本机回环地址（problem+json）"
           },
           "404": {
             "content": {

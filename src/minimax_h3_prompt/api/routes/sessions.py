@@ -35,9 +35,11 @@ from ...workbench_store import (
     SessionPage,
     WorkbenchSessionStore,
 )
-from ..problems import COMMON_ERROR_RESPONSES, ProblemDetail
+from ..problems import AUTH_ERROR_RESPONSES, COMMON_ERROR_RESPONSES, ProblemDetail
 
-router = APIRouter(prefix="/api/v1", tags=["sessions"])
+# 401/403 来自最外层的访问控制（api/auth.py），对所有会话路由都成立；豁免的健康检查
+# 与引导端点不在此路由器下，所以它们不会在契约里多出这两个分支。
+router = APIRouter(prefix="/api/v1", tags=["sessions"], responses=AUTH_ERROR_RESPONSES)
 
 # 心跳间隔是 spec §8 的 15 秒。写成模块常量而不是字面量 sleep(15)，用例才能把它
 # 调小去验证「空闲时真的会发心跳」——否则那条断言要么等 15 秒，要么只能删掉。

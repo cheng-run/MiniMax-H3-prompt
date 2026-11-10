@@ -457,7 +457,10 @@ def _bootstrap_credential(acc: Acceptor) -> None:
         raise StepError("取启动令牌", "响应不是 JSON", response.text) from exc
     if not isinstance(token, str) or not token:
         raise StepError("取启动令牌", "响应里没有 token", response.text)
-    acc.client.headers["X-Workbench-Token"] = token
+    # 头名从实现派生，避免与 auth.TOKEN_HEADER 各写一份（改常量时静默失效）。
+    from minimax_h3_prompt.api.auth import TOKEN_HEADER
+
+    acc.client.headers[TOKEN_HEADER] = token
     print("[凭据] 已取到启动令牌并挂到后续请求", flush=True)
 
 

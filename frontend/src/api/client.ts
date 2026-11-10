@@ -78,8 +78,10 @@ async function fetchSessionToken(): Promise<string> {
 }
 
 /**
- * 取（或复用）本页面的启动令牌。并发调用共享同一次请求。
- * 失败**不缓存**：服务重启后令牌会换，下一次调用应重新取。
+ * 取（或复用）本页面的启动令牌。并发调用共享同一次请求，成功后一直复用。
+ *
+ * 注意：服务重启后旧令牌失效，而缓存里仍是**成功取到的**旧值——页面需要刷新
+ * （或由调用方 `resetSessionToken()`）才会重新引导。失败不缓存，下一次调用重试。
  */
 export function ensureSessionToken(): Promise<string> {
   if (sessionToken !== null) {
