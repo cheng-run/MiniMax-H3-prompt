@@ -40,6 +40,7 @@
 | 删参数要追传递闭包 | auto memory `rule-exists-plumbing-missing` |
 | 官方文本只有一个可写源 | ADR 0008 |
 | 契约的**媒体类型**要与运行时同口径（OpenAPI 声明哪种、服务端就返回哪种）；不一致会在生成类型里分叉 | D1 #205：FastAPI `responses={model}` 默认写 `application/json`，`api/problems.py` 改写为 `problem+json` |
+| **边界只做判定**：中间件、头/Cookie 解析这类安全边界对任何输入都落到「放行 / 拒绝」，畸形值不抛异常（它在异常处理器外层，一抛就是 500） | 2026-11-10 #223 复审：非 ASCII 凭据头让 `hmac.compare_digest` 抛 `TypeError`，401 变 500 |
 
 ## 五、测试
 

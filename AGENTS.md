@@ -17,7 +17,7 @@ Issues 活在 GitHub Issues（github.com/cheng-run/MiniMax-H3-prompt），用 `g
 ### Domain docs
 
 单上下文：根 `CONTEXT.md`（术语表）+ `docs/adr/`（架构决策）。见 `docs/agents/domain.md`。
-前端工程（技术栈、版本矩阵、本地坑、跑前后端与关端口）见 `docs/agents/frontend.md`。
+前端工程（技术栈、本地坑、`PW_CHANNEL` 跑 E2E、起前后端与关端口、契约生成）见 `docs/agents/frontend.md`。
 工作台会话与 Headless API（模块地图、事件/写入/产物不变量、契约链）见 `docs/agents/workbench.md`。
 导演台路线另有实现与插件契约：`docs/design/2026-10-29-导演台路线实现设计.md`、`docs/research/2026-10-29-director-插件原生格式.md`；2026-10-31 的陪跑证据改造（#112–#114）见同目录的 `2026-10-31-director-fl2v-video-evidence-*.md`。
 

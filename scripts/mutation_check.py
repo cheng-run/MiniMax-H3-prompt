@@ -13,8 +13,8 @@ uv run python scripts/mutation_check.py --only ffmpeg_shell
 
 约束：
 
-- 只改**工作区里干净**的文件（``git status --porcelain`` 有改动就拒绝），
-  免得把用户没提交的东西卷进去；
+- 只改**工作区里干净且已被 git 跟踪**的文件（``git status --porcelain`` 有改动就拒绝，
+  未跟踪的文件也拒绝——还原走 ``git checkout --``，未跟踪路径回不去）；
 - 每条变异都声明 ``old`` 在文件里**恰好出现一次**（多处出现说明锚点选错了，
   会用错地方）；
 - 无论用例结果如何都还原（``finally``），还原后再核对文件与原文逐字相同。
@@ -573,6 +573,17 @@ def _run_tests(nodes: tuple[str, ...]) -> int:
         errors="replace", env=env).returncode
 
 
+def _tracked(path: Path) -> bool:
+    """必须是 git 已跟踪的文件：还原走 ``git checkout --``，未跟踪路径 checkout 会失败，
+    文件就留在被改坏的状态（2026-11-10 retro：新守卫常写在刚创建、还没提交的文件里）。
+    """
+    rel = str(path.relative_to(ROOT))
+    return subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", rel],
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+        errors="replace").returncode == 0
+
+
 def check(mutation: Mutation) -> tuple[bool, str]:
     """应用变异、跑到红、还原。返回 (是否被杀死, 说明)。"""
     path = ROOT / mutation.path
@@ -580,6 +591,9 @@ def check(mutation: Mutation) -> tuple[bool, str]:
     occurrences = original.count(mutation.old)
     if occurrences != 1:
         return False, f"锚点在 {mutation.path} 出现 {occurrences} 次（要求恰好 1 次）"
+    if not _tracked(path):
+        return False, (f"{mutation.path} 未被 git 跟踪：还原靠 git checkout，未跟踪文件"
+                       "改坏后回不去；先 git add / 提交再跑变异")
     if not _git_clean(path):
         return False, f"{mutation.path} 工作区不干净，拒绝变异"
 

@@ -24,6 +24,10 @@ set -Eeuo pipefail
 
 cd "$(dirname "$0")/.." || exit 1
 
+# Windows 控制台默认 cp936：pytest/mypy 的中文输出会变乱码，失败时连断言里的
+# 中文片段都读不出来（2026-11-10 实测）。CI 已设同一个变量。
+export PYTHONIOENCODING="${PYTHONIOENCODING:-utf-8}"
+
 # 本树的 src 必须排在 PYTHONPATH 最前。工作树里没有自己的 .venv，解释器回落到**主树**
 # 的 .venv，而那是 editable 安装（指向主树）——不显式指定，就会出现「变异打在 A 树、
 # 用例读的是 B 树」，绿得毫无意义（2026-11-08 #199 实测：mutation_check 因此把两条
@@ -140,30 +144,41 @@ run_frontend_guard() {
 
 # 契约守卫（retro 2026-11-10）：OpenAPI 与前端生成类型的 drift 原先只在 CI 有，
 # D2 验收时还要手跑两条命令才拿得到 AC14 的证据。这里把同一套判据搬进本地：
-# Python 导出必须零 diff；装了前端依赖再生成 TS 并 diff。生成失败/漂移都算红——
-# 契约是类型链的源头，看着绿而实际分叉比直接报错更贵。
+# 导出/生成必须与**工作区里的文件**逐字节一致；装了前端依赖再生成 TS 并比。
+# 生成失败/漂移都算红——契约是类型链的源头，看着绿而实际分叉比直接报错更贵。
+#
+# 为什么比工作区文件、不比 HEAD（2026-11-10 #223 实测）：开发期契约改动还没提交时，
+# `git diff --exit-code` 必然红，把「未提交」误报成「漂移」，白跑一轮全量。
+# 「提交后的文件是否与代码一致」由 CI 的 git diff --exit-code 负责（ci.yml 已有）。
 run_contract_guard() {
-  local root frontend
+  local root frontend exported generated
   root=$(git rev-parse --show-toplevel)
   frontend="$root/frontend"
-  echo "[check] contracts: 重新导出 OpenAPI 并检查 drift"
-  "$PY" "$root/scripts/export_openapi.py"
-  if ! git -C "$root" diff --exit-code -- contracts/openapi.json >/dev/null 2>&1; then
-    echo "[check] contracts: contracts/openapi.json 与代码漂移（重新导出后有 diff）：" >&2
-    git -C "$root" diff --stat -- contracts/openapi.json >&2
+  # 临时文件放 .git/：不在工作区，不会被别的守卫或 git status 看见。
+  exported="$root/.git/contract-check.$$.json"
+  generated="$root/.git/generated-check.$$.ts"
+  echo "[check] contracts: 重新导出 OpenAPI 并与工作区文件比对"
+  "$PY" "$root/scripts/export_openapi.py" --out "$exported"
+  if ! cmp -s "$exported" "$root/contracts/openapi.json"; then
+    echo "[check] contracts: 导出结果与 contracts/openapi.json 不一致（改了契约没重导）：" >&2
+    diff -u "$root/contracts/openapi.json" "$exported" | head -40 >&2 || true
+    rm -f "$exported"
     return 1
   fi
+  rm -f "$exported"
   if ! command -v node >/dev/null 2>&1 \
       || [ ! -e "$frontend/node_modules/openapi-typescript" ]; then
     echo "[check] contracts: 跳过 TS 生成（node 或前端依赖未就绪）"
     return 0
   fi
-  ( cd "$frontend" && node scripts/generate-api.mjs >/dev/null )
-  if ! git -C "$root" diff --exit-code -- frontend/src/api/generated.ts >/dev/null 2>&1; then
-    echo "[check] contracts: frontend/src/api/generated.ts 漂移（重新生成后有 diff）：" >&2
-    git -C "$root" diff --stat -- frontend/src/api/generated.ts >&2
+  ( cd "$frontend" && node scripts/generate-api.mjs "$generated" >/dev/null )
+  if ! cmp -s "$generated" "$frontend/src/api/generated.ts"; then
+    echo "[check] contracts: frontend/src/api/generated.ts 与契约不一致（重新生成后有差异）：" >&2
+    diff -u "$frontend/src/api/generated.ts" "$generated" | head -40 >&2 || true
+    rm -f "$generated"
     return 1
   fi
+  rm -f "$generated"
 }
 
 run_fast() {

@@ -24,8 +24,14 @@ scripts/check.sh rehash     # 打印关键帧角色提示词的 sha256，供更�
 
 - **判据是最后一行**：`[check] <档位>: PASS` / `FAIL（退出码 N）`。管道随便接，
   `| tail -3` 也不会把红显示成绿（脚本自己保证，不用记 `PIPESTATUS`）。
-- **契约漂移**：重新导出 `contracts/openapi.json`（装了前端依赖再生成
-  `frontend/src/api/generated.ts`），有 diff 即红。CI 跑同一套（`.github/workflows/ci.yml`）。
+- **跑动时机**：提交前 `fast`；**复审修完**再跑 `full` + `clean`。复审还可能改代码时
+  先别跑这一对——一轮全量约 2 分钟，复审一改就作废（2026-11-10 #223 实测白跑一轮）。
+- **契约漂移比的是工作区文件，不是 HEAD**：`check.sh` 导出到临时文件再与
+  `contracts/openapi.json` / `generated.ts` 逐字节比，所以契约改动**未提交时也能跑**
+  （与 HEAD 比会把「未提交」误报成「漂移」）。「提交后的文件与代码一致」由 CI 的
+  `git diff --exit-code` 负责。
+- **本机中文输出**：Git Bash 的控制台默认 cp936，pytest/mypy 的中文失败信息会乱码；
+  `check.sh` 已设 `PYTHONIOENCODING=utf-8`，手跑 `pytest` 时自己带上。
 - **前端守卫的「装了」判据是 `node_modules/.bin/eslint` 与 `.bin/vue-tsc`**，不是目录
   存在——空/半装目录按「未安装」跳过，不误报成代码坏了（2026-11-10 实测）。
 - **工作树借用前端依赖**只能走 `scripts/worktree.sh link-frontend NN` /
