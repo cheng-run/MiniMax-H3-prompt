@@ -9,15 +9,17 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
 import re
+import secrets
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Literal, Sequence, cast
+from typing import Any, BinaryIO, Callable, Literal, Sequence, cast
 
 from pydantic import BaseModel, Field
 
@@ -72,6 +74,58 @@ _KNOWN_ARTIFACTS = {**_ARTIFACT_KINDS, **_METADATA_ONLY_ARTIFACTS}
 ARTIFACT_MAX_BYTES = 1024 * 1024
 # 阶段 2 的交付物名字是契约的一部分：执行器写它、登记它，用例按它找。
 ARTIFACT_VIDEO_PROMPT = "video-prompt.md"
+
+# ---------------------------------------------------------------------------
+# 上传素材（D3-2，#222 §5）
+# ---------------------------------------------------------------------------
+ASSETS_DIRNAME = "assets"
+# 临时文件的固定前缀：崩溃残留靠它认出来（启动清理只删这一种）。
+ASSET_TMP_PREFIX = ".tmp-"
+# 上传的读块大小。它同时是「边写边判」的粒度：一次最多多读一块就能发现超限，
+# 不会出现「先把 512 MiB 读完再判」。
+ASSET_CHUNK_BYTES = 64 * 1024
+# 嗅探窗口。spec §5.2 写的是「前 16 字节」——PNG / JPEG / WebP / WAV / MP3 / MP4 的
+# 魔数在这个窗口里就够。EBML 不够：WebM 与 Matroska 共用同一个 4 字节头，判据是后面的
+# DocType（``webm`` / ``matroska``，通常落在第 24–40 字节）。所以窗口取 64，
+# 前 16 字节就能定的格式行为不变。
+ASSET_SNIFF_BYTES = 64
+ASSET_NAME_MAX_CHARS = 120
+
+# 支持的类型与各自上限（#222 §5.2）。按类型分开是因为视频本来就比图片大两个数量级：
+# 一个统一上限要么拦不住图，要么把短视频也卡死。
+ASSET_KIND_LIMITS: dict[str, int] = {
+    "image": 20 * 1024 * 1024,
+    "video": 512 * 1024 * 1024,
+    "audio": 64 * 1024 * 1024,
+}
+
+# 落盘扩展名 → (kind, 规范化格式)。嗅探与目录扫描共用这一张表：两处各写一份
+# 「哪些扩展名算图片/视频/音频」时，改一处就会让列表与上传各说各话。
+# ``jpg``/``jpeg`` 是同一个格式的两个写法，落盘一律取 ``jpg``。
+_ASSET_FORMATS: dict[str, tuple[str, str]] = {
+    "png": ("image", "png"),
+    "jpg": ("image", "jpeg"),
+    "jpeg": ("image", "jpeg"),
+    "webp": ("image", "webp"),
+    "mp4": ("video", "mp4"),
+    "webm": ("video", "webm"),
+    "wav": ("audio", "wav"),
+    "mp3": ("audio", "mp3"),
+}
+
+# ISO 基础媒体文件（MP4）的 major brand 白名单（``ftyp`` 盒第 8–12 字节）。
+# 只认 ``ftyp`` 盒子不够：QuickTime（``qt  ``）、HEIC（``heic``/``mif1``）与 MP4 用
+# 同一个盒子结构，前者不在 §5.2 白名单里、后者根本是图片——只判盒子会让它们以
+# ``kind=video`` 落成 ``.mp4``（复审实测）。名单取常见封装器的输出。
+_MP4_BRANDS = frozenset({
+    b"isom", b"iso2", b"iso3", b"iso4", b"iso5", b"iso6", b"iso8", b"iso9",
+    b"mp41", b"mp42", b"M4V ", b"M4A ", b"avc1", b"dash", b"MSNV", b"f4v ",
+})
+
+# 素材文件名形如 ``<sha256 前 16 位>.<已知扩展名>``。``.tmp-*`` 不匹配这个形状；
+# 边车 ``<hash>.json`` 形状上匹配，但扩展名不在 ``_ASSET_FORMATS`` 里，同样落选——
+# 「残片/边车不出现在列表里」由这两条判据共同保证，不需要额外的排除清单。
+_ASSET_NAME_RE = re.compile(r"^(?P<hash>[0-9a-f]{16})\.(?P<ext>[a-z0-9]+)$")
 
 _GEN_RE = re.compile(r"^GEN(\d+)$")
 _IDEMPOTENCY_CAPACITY = 50
@@ -149,6 +203,40 @@ class ArtifactNotFound(WorkbenchError):
 class ArtifactTooLarge(WorkbenchError):
     status_code = 413
     code = "artifact_too_large"
+
+
+class UploadInvalid(WorkbenchError):
+    """multipart 结构不对（不是表单、没有 ``file`` 字段、边界坏掉）。
+
+    与 FastAPI 的 422 分开：422 说的是「字段值不合法」，这里说的是「请求根本不是
+    一份能读的上传」——前端对这两种的处理不同（补字段 vs 改发送方式）。
+    """
+
+    status_code = 400
+    code = "upload_invalid"
+
+
+class UnsupportedMediaType(WorkbenchError):
+    """魔数不在白名单（含「声明的扩展名与字节不符」）。
+
+    判定只认字节（#222 §5.2）：用户文件名只作显示名。声明的扩展名若是**已知格式**却
+    与嗅探结果不符，同样按 415 拒绝——文件名与内容互相矛盾时不猜哪一个是真的。
+    """
+
+    status_code = 415
+    code = "unsupported_media_type"
+
+
+class AssetTooLarge(WorkbenchError):
+    status_code = 413
+    code = "asset_too_large"
+
+
+class StorageUnavailable(WorkbenchError):
+    """素材落盘失败（磁盘满、只读目录）。请求本身没错，是这台机器的存储不行。"""
+
+    status_code = 507
+    code = "storage_unavailable"
 
 
 # ---------------------------------------------------------------------------
@@ -536,6 +624,17 @@ class ArtifactInfo(BaseModel):
     created_at: str
 
 
+class Asset(BaseModel):
+    """上传素材的对外形状（#222 §9）。``asset_id`` 与 ``artifact_id`` 同形：
+    ``<session_id>/<sha256 前 16 位>``——路径参数按 ``{asset_id:path}`` 承接。"""
+
+    asset_id: str
+    kind: str
+    name: str
+    bytes: int
+    created_at: str
+
+
 class SessionSummary(BaseModel):
     session_id: str
     status: SessionStatus
@@ -555,6 +654,8 @@ class SessionDetail(SessionSummary):
     jobs: list[JobSummary] = Field(default_factory=list)
     action_items: list[ActionItemOut] = Field(default_factory=list)
     artifacts: list[ArtifactInfo] = Field(default_factory=list)
+    # 素材是目录现扫的结果，与产物同款（#222 §5.3）：不进快照、不占会话状态写入。
+    assets: list[Asset] = Field(default_factory=list)
 
 
 class SessionPage(BaseModel):
@@ -666,6 +767,14 @@ def _is_within(path: Path, root: Path) -> bool:
     return True
 
 
+def _unlink_quietly(path: Path) -> None:
+    """删临时文件；已经不在就当成功。清理路径不该因为「本来就没有」再失败一次。"""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("删除素材临时文件失败：%s（%s）", path, exc)
+
+
 def _artifacts(session_id: str, directory: Path, root: Path) -> list[ArtifactInfo]:
     """会话目录下已知文件名的产物元数据；不读内容（内容读取归 #220）。
 
@@ -677,6 +786,163 @@ def _artifacts(session_id: str, directory: Path, root: Path) -> list[ArtifactInf
         if not path.is_file() or not _is_within(path, root):
             continue
         found.append(_artifact_info(session_id, name, path))
+    return found
+
+
+def _is_webm(head: bytes) -> bool:
+    """EBML 容器里只接受 WebM：DocType 元素（ID ``0x4282``）的值必须是 ``webm``。
+
+    Matroska（``matroska``）与 WebM 共用同一个 4 字节 EBML 头。只认头会把 ``.mkv``
+    当视频收进来，而它不在 §5.2 的白名单里（复审实测）。
+    """
+    marker = head.find(b"\x42\x82")
+    if marker < 0:
+        return False
+    return b"webm" in head[marker:marker + 16]
+
+
+def _sniff_asset(head: bytes) -> tuple[str, str] | None:
+    """按前若干字节判定 ``(kind, 落盘扩展名)``；认不出返回 None。
+
+    只认魔数、不解码（#222 §5.2）：魔数对但内容损坏的文件放行，交给下游报错。
+    RIFF 同时是 WebP 与 WAV 的容器头，``ftyp`` 同时被 MP4 / MOV / HEIC 使用，
+    EBML 同时被 WebM / Matroska 使用——这三处都必须再往后看一层才算定案。
+    """
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image", "png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image", "jpg"
+    if head[:4] == b"RIFF":
+        if head[8:12] == b"WEBP":
+            return "image", "webp"
+        if head[8:12] == b"WAVE":
+            return "audio", "wav"
+        return None
+    if head[4:8] == b"ftyp":
+        if head[8:12] in _MP4_BRANDS:
+            return "video", "mp4"
+        return None
+    if head.startswith(b"\x1a\x45\xdf\xa3"):
+        return ("video", "webm") if _is_webm(head) else None
+    # MP3 有两种开头：ID3v2 标签，或直接是帧同步（``0xFF`` + 高三位全 1）。
+    # JPEG 的 ``0xFF 0xD8`` 不满足后半条（``0xD8 & 0xE0 != 0xE0``），不会撞车。
+    if head.startswith(b"ID3"):
+        return "audio", "mp3"
+    if len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0:
+        return "audio", "mp3"
+    return None
+
+
+def _claimed_extension(filename: str) -> str:
+    """取用户文件名声明的扩展名（小写、不含点）；取不出返回空串。"""
+    name = filename.replace("\\", "/").rsplit("/", 1)[-1]
+    _, dot, ext = name.rpartition(".")
+    if not dot or len(ext) > 8:
+        return ""
+    return ext.lower()
+
+
+def _check_declared_extension(filename: str, ext: str) -> None:
+    """声明的扩展名与嗅探结果矛盾时按 415 拒绝（#222 §5.2 / §14）。
+
+    为什么不是「以字节为准、悄悄改扩展名」：扩展名是发送方的声明，字节是事实；
+    两者矛盾说明这份上传的来源本身不可信，替它挑一个不报错，等于把矛盾藏起来。
+    声明里没有扩展名（或扩展名不在已知表里）时不做这层判定——那不算矛盾。
+    """
+    claimed = _claimed_extension(filename)
+    known = _ASSET_FORMATS.get(claimed)
+    if known is None:
+        return
+    if known[0] != _ASSET_FORMATS[ext][0] or known[1] != _ASSET_FORMATS[ext][1]:
+        raise UnsupportedMediaType(
+            f"文件内容的实际格式（{ext}）与文件名声明的扩展名（{claimed}）不符。")
+
+
+def _display_name(filename: str, fallback: str) -> str:
+    """显示名：去掉路径分隔符与控制字符，超长保留尾部（保住扩展名）。
+
+    它**永不参与路径构造**（#222 §5.2）：落盘名永远是内容哈希加嗅探出的扩展名，
+    所以这里清洗不干净也不会影响落点，只影响用户看到的名字。
+    """
+    cleaned = "".join(
+        ch for ch in filename
+        if ch not in '\\/:*?"<>|' and ord(ch) >= 32 and ch != "\x7f")
+    cleaned = cleaned.strip()
+    if not cleaned:
+        return fallback
+    return cleaned[-ASSET_NAME_MAX_CHARS:]
+
+
+def _read_asset_sidecar(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        # 边车坏了不影响正本可用：按最小形态退回（显示名由哈希现拼）。
+        logger.warning("素材边车无法读取，按最小形态处理：%s（%s）", path, exc)
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _asset_sidecar(name: str, kind: str, size: int, created_at: str) -> str:
+    return json.dumps(
+        {"name": name, "kind": kind, "bytes": size, "created_at": created_at},
+        ensure_ascii=False, indent=2)
+
+
+def _asset_default_name(hash16: str, ext: str) -> str:
+    """没有可用显示名时的兜底名：孤儿正本与「用户没给文件名」都走它。"""
+    return f"asset-{hash16}.{ext}"
+
+
+def _asset_from_path(session_id: str, path: Path, root: Path) -> Asset | None:
+    """把一个磁盘文件解释成素材；不是素材形态（临时文件、边车、未知扩展名）返回 None。
+
+    ``bytes`` 与 ``kind`` 一律从磁盘取：边车只是**显示名与首次创建时间**的载体，
+    它坏了或被改过都不该让列表里的字节数说谎。
+    """
+    match = _ASSET_NAME_RE.match(path.name)
+    if match is None:
+        return None
+    ext = match.group("ext")
+    known = _ASSET_FORMATS.get(ext)
+    if known is None:
+        return None
+    resolved = path.resolve()
+    if not resolved.is_file() or not _is_within(resolved, root):
+        return None
+    hash16 = match.group("hash")
+    stat = resolved.stat()
+    kind = known[0]
+    name = _asset_default_name(hash16, ext)
+    created_at = datetime.fromtimestamp(
+        stat.st_mtime, tz=timezone.utc).isoformat()
+    sidecar = _read_asset_sidecar(resolved.with_suffix(".json"))
+    if sidecar is not None:
+        if isinstance(sidecar.get("name"), str) and sidecar["name"]:
+            name = str(sidecar["name"])
+        if isinstance(sidecar.get("created_at"), str) and sidecar["created_at"]:
+            created_at = str(sidecar["created_at"])
+    return Asset(asset_id=f"{session_id}/{hash16}", kind=kind, name=name,
+                 bytes=stat.st_size, created_at=created_at)
+
+
+def _assets_of(session_id: str, directory: Path, root: Path) -> list[Asset]:
+    """会话素材清单：``assets/`` 目录现扫（#222 §5.3，与产物登记同款）。
+
+    没有登记表要维护，所以「残片不出现在列表里」不靠清洗、靠命名规则：只有
+    ``<16 位十六进制>.<已知扩展名>`` 才是素材，``.tmp-*`` 与边车天然落选。
+    """
+    assets_dir = directory / ASSETS_DIRNAME
+    if not assets_dir.is_dir():
+        return []
+    found: list[Asset] = []
+    for path in sorted(assets_dir.iterdir()):
+        asset = _asset_from_path(session_id, path, root)
+        if asset is not None:
+            found.append(asset)
+    found.sort(key=lambda item: (item.created_at, item.asset_id))
     return found
 
 
@@ -851,6 +1117,7 @@ class WorkbenchSessionStore:
             jobs=jobs,
             action_items=action_items,
             artifacts=_artifacts(derived, directory, self.root.resolve()),
+            assets=_assets_of(derived, directory, self.root.resolve()),
         )
 
     def _replay_if_needed(self, session_id: str) -> None:
@@ -1033,6 +1300,167 @@ class WorkbenchSessionStore:
             return None
         return path
 
+    def ensure_upload_target(self, session_id: str) -> None:
+        """上传前的会话判定：存在且非 legacy（#222 §5.2 的第一条）。
+
+        单独成方法是为了让路由能在**读请求体之前**就把 404/409 发出去：先收完 512 MiB
+        再告诉对方「这个会话不存在」没有道理，也不是 spec 的检查顺序。
+        """
+        _directory, _session, _derived, legacy = self._load(session_id)
+        if legacy:
+            raise SessionLegacy("历史会话（legacy）只读，不能上传素材。")
+
+    def list_assets(self, session_id: str) -> list[Asset]:
+        """会话的素材清单（目录现扫）；会话不存在与产物清单同口径，一律 404。"""
+        directory, _session, derived, _legacy = self._load(session_id)
+        return _assets_of(derived, directory, self.root.resolve())
+
+    def store_asset(
+        self,
+        session_id: str,
+        source: BinaryIO,
+        *,
+        filename: str = "",
+        idempotency_key: str | None = None,
+    ) -> tuple[Asset, bool]:
+        """把一份上传写进 ``<会话目录>/assets``；返回 ``(素材, 是否幂等重放)``。
+
+        顺序照 #222 §5.2：会话存在且非 legacy → 嗅探（顺带定上限）→ 边写边判超限。
+        嗅探**先于**读完整份内容：类型不在白名单就立刻 415，不陪一份 512 MiB 的垃圾
+        走完全程。
+
+        「流式」的边界要说清：multipart 的解析由 Starlette 完成，>1 MiB 的部件先落
+        **系统临时目录**里的 SpooledTemporaryFile——那一层不归本函数管（#222 §13 已
+        记录）。这里保证的是「从部件到会话目录」这一段逐块搬运、逐块计数、超限即停，
+        整份内容从不进内存。
+
+        幂等键的指纹是**完整内容哈希**：同一个键配另一份内容属于冲突，不能把第一次的
+        素材冒充成第二次的答案（与建会话的 ``idempotency_conflict`` 同一口径）。指纹
+        就是内容本身，所以重放判定只能在读完之后——那一次仍会先落临时文件再删掉；
+        「不重复写盘」说的是**正式正本**一份都不多写（#222 §5.3 的去重同款）。
+        """
+        # 会话判定与路由共用一处（``ensure_upload_target``）：两处各写一遍 legacy
+        # 判据时，改判据的人只会改到一处。
+        self.ensure_upload_target(session_id)
+        directory, _session, derived, _legacy = self._load(session_id)
+        assets_dir = directory / ASSETS_DIRNAME
+        tmp = assets_dir / f"{ASSET_TMP_PREFIX}{secrets.token_hex(8)}"
+        digest = hashlib.sha256()
+        total = 0
+        kind = ""
+        ext = ""
+        limit = 0
+        try:
+            try:
+                assets_dir.mkdir(parents=True, exist_ok=True)
+                handle = tmp.open("wb")
+            except OSError as exc:
+                raise StorageUnavailable(f"素材目录写不进去：{exc}") from exc
+            with handle:
+                while True:
+                    chunk = source.read(ASSET_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    if not ext:
+                        sniffed = _sniff_asset(chunk[:ASSET_SNIFF_BYTES])
+                        if sniffed is None:
+                            raise UnsupportedMediaType(
+                                "认不出上传内容的类型：只接受 PNG / JPEG / WebP 图片、"
+                                "MP4 / WebM 视频与 WAV / MP3 音频。")
+                        kind, ext = sniffed
+                        _check_declared_extension(filename, ext)
+                        limit = ASSET_KIND_LIMITS[kind]
+                    # 先判后写：超限的那一块一个字节都不落盘，残片也不会长过上限。
+                    if total + len(chunk) > limit:
+                        raise AssetTooLarge(
+                            f"素材超过 {kind} 类型的 {limit} 字节上限，已中止写入。")
+                    handle.write(chunk)
+                    digest.update(chunk)
+                    total += len(chunk)
+            if not ext:
+                raise UnsupportedMediaType("上传内容为空：无法判定类型。")
+        except OSError as exc:
+            # 磁盘满、只读目录：请求本身没错，是这台机器的存储不行（#222 §10 的 507）。
+            _unlink_quietly(tmp)
+            raise StorageUnavailable(f"素材落盘失败：{exc}") from exc
+        except BaseException:
+            # 任何失败（超限、客户端断开）都不许留下残片。
+            _unlink_quietly(tmp)
+            raise
+
+        hash_full = digest.hexdigest()
+        hash16 = hash_full[:16]
+        target = assets_dir / f"{hash16}.{ext}"
+        registry = self.session_registry(session_id)
+        with self._lock_for(session_id):
+            if idempotency_key:
+                cached = registry.replay(idempotency_key, fingerprint=hash_full)
+                if cached is not None:
+                    _unlink_quietly(tmp)
+                    return Asset.model_validate(cached), True
+            if target.exists():
+                # 去重：同内容不产生第二份文件，``created_at`` 保持首次（#222 §5.3）。
+                _unlink_quietly(tmp)
+            else:
+                try:
+                    os.replace(tmp, target)
+                except OSError as exc:
+                    _unlink_quietly(tmp)
+                    raise StorageUnavailable(f"素材落盘失败：{exc}") from exc
+            sidecar = target.with_suffix(".json")
+            if not sidecar.exists():
+                # 先正本后边车（#222 §5.3）：崩在两者之间只留孤儿正本，启动时补边车。
+                try:
+                    atomic_write_text(sidecar, _asset_sidecar(
+                        _display_name(filename, _asset_default_name(hash16, ext)),
+                        kind, target.stat().st_size,
+                        datetime.now(timezone.utc).isoformat()))
+                except OSError as exc:
+                    # 正本已在盘上、列表也能按最小形态读出它，但这次请求确实没完整落盘；
+                    # 按存储错误回报，别让调用方以为一切正常（重发会走去重补上边车）。
+                    raise StorageUnavailable(f"素材边车写入失败：{exc}") from exc
+            asset = _asset_from_path(derived, target, self.root.resolve())
+            if asset is None:
+                raise StorageUnavailable(f"素材落盘后读不回来：{target.name}")
+            if idempotency_key:
+                registry.record(idempotency_key, fingerprint=hash_full,
+                                response=asset.model_dump(mode="json"))
+            return asset, False
+
+    def cleanup_assets(self) -> None:
+        """启动清理（#222 §5.3）：删崩溃残留的 ``.tmp-*``，给孤儿正本补最小边车。
+
+        为什么在启动做：「残片不出现在列表里」已由命名规则保证（见 ``_assets_of``），
+        这里要的是**把盘上的垃圾清掉**，而崩溃残留只可能来自上一个进程。单个文件读写
+        失败不阻断启动——与 ``list_sessions`` 跳过坏文件是同一个取舍。
+        """
+        if not self.root.is_dir():
+            return
+        for path in self.root.glob(f"**/{ASSETS_DIRNAME}/*"):
+            try:
+                if not path.is_file():
+                    continue
+                if path.name.startswith(ASSET_TMP_PREFIX):
+                    _unlink_quietly(path)
+                    continue
+                match = _ASSET_NAME_RE.match(path.name)
+                if match is None:
+                    continue
+                known = _ASSET_FORMATS.get(match.group("ext"))
+                if known is None:
+                    continue
+                sidecar = path.with_suffix(".json")
+                if sidecar.exists():
+                    continue
+                hash16 = match.group("hash")
+                stat = path.stat()
+                atomic_write_text(sidecar, _asset_sidecar(
+                    _asset_default_name(hash16, match.group("ext")), known[0],
+                    stat.st_size,
+                    datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()))
+            except OSError as exc:
+                logger.warning("启动清理素材时跳过：%s（%s）", path, exc)
+
     def session_directories(self) -> list[Path]:
         """登记根下所有会话目录；单个坏文件由调用方自己决定怎么跳过。"""
         if not self.root.is_dir():
@@ -1142,12 +1570,14 @@ class WorkbenchSessionStore:
 __all__ = [
     "ActionItemNotFound", "ActionItemOut", "ActionItemPending", "ActionItemResolved",
     "ARTIFACT_MAX_BYTES", "ARTIFACT_VIDEO_PROMPT",
+    "Asset", "AssetTooLarge",
     "ArtifactInfo", "ArtifactNotFound", "ArtifactTooLarge", "BriefOut",
     "EVENT_TYPES", "EVENTS_FILENAME", "Event", "EventDraft", "EventLog",
     "IdempotencyConflict", "IdempotencyRegistry", "InvalidEventPayload",
     "JobNotFound", "JobNotRunning",
     "JobSummary", "RefOut", "SessionBusy", "SessionCompleted", "SessionDetail",
     "SessionLegacy", "SessionNotFound", "SessionPage", "SessionSummary",
-    "SESSION_STATUSES", "UnknownEventType", "VideoOutputOut", "WorkbenchError",
+    "SESSION_STATUSES", "StorageUnavailable", "UnknownEventType",
+    "UnsupportedMediaType", "UploadInvalid", "VideoOutputOut", "WorkbenchError",
     "WorkbenchSessionStore",
 ]

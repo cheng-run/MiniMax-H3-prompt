@@ -11,6 +11,7 @@
 | `workbench_store.py` | 会话仓库：`workbench.v1` 快照、原子写、每会话线程锁、`mutate`、事件日志 `EventLog`、幂等登记表、产物登记 |
 | `api/jobs.py` | `JobRunner`：每会话 asyncio 锁、`to_thread` 跑 LangGraph、节点边界取消、`active-job.json`、启动对账、阶段 1/2 执行 |
 | `api/routes/sessions.py` | `/api/v1` 全部会话端点；**路由顺序即契约**：`{session_id:path}` 会吞斜杠，`/jobs`、`/events`、`/action-items` 必须注册在详情路由之前 |
+| `api/routes/assets.py` | 上传素材的收与列（`POST/GET /sessions/{id}/assets`）；整只路由器在 `create_app` 里排在 `sessions` 之前，顺序不靠人记 |
 | `api/auth.py` | 本地访问控制：Host/Origin 白名单、每进程启动令牌、`LocalAccessMiddleware`（纯 ASGI，最外层） |
 | `api/routes/auth.py` | `GET /api/v1/auth/token`：返回令牌并下发 `wb_session` Cookie |
 | `api/app.py` | 工厂、lifespan（启动对账）、注入 `sessions_root` / `runtime_config` / `local_access` |
@@ -30,6 +31,10 @@
 - 启动对账只把 `running` 收成 `interrupted`，**不自动续跑**。
 - 阶段 2 中断后再 `advance`：按 `stage1_review` 的决议事实续跑阶段 2（`_resume_step`），不回人工闸门。
 - 产物 content 只服务文本、上限 1 MiB；视频只有元数据、没有内容端点（媒体字节归 D3-3）。
+- **上传素材**（D3-2）是 `<会话目录>/assets/<sha256 前 16 位>.<嗅探扩展名>` 加一份
+  `.json` 边车（显示名、类型、字节、首次创建时间），清单靠目录现扫 + 命名规则——
+  `.tmp-*` 不是素材，列表看不见，只在启动时删；同内容不写第二份。上传**不改会话
+  状态、不发事件**，残片由启动清理收拾（`store.cleanup_assets`）。
 
 ## 本地鉴权（D3-1，ADR 0033）
 

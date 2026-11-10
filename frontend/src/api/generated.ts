@@ -154,6 +154,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{session_id}/assets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Assets
+         * @description 会话的素材清单：与详情里的 ``assets`` 同一份来源（目录现扫，无登记表）。
+         */
+        get: operations["list_assets_api_v1_sessions__session_id__assets_get"];
+        put?: never;
+        /**
+         * Upload Asset
+         * @description 收一份素材：边写边判超限、按字节定类型、按内容哈希去重（#222 §5）。
+         *
+         *     上传**不改会话状态、不产生事件**（D3-AC13）：素材是不可变的旁挂资源，与运行中的
+         *     任务并行安全。
+         */
+        post: operations["upload_asset_api_v1_sessions__session_id__assets_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{session_id}/events": {
         parameters: {
             query?: never;
@@ -279,6 +306,23 @@ export interface components {
         ArtifactInfo: {
             /** Artifact Id */
             artifact_id: string;
+            /** Bytes */
+            bytes: number;
+            /** Created At */
+            created_at: string;
+            /** Kind */
+            kind: string;
+            /** Name */
+            name: string;
+        };
+        /**
+         * Asset
+         * @description 上传素材的对外形状（#222 §9）。``asset_id`` 与 ``artifact_id`` 同形：
+         *     ``<session_id>/<sha256 前 16 位>``——路径参数按 ``{asset_id:path}`` 承接。
+         */
+        Asset: {
+            /** Asset Id */
+            asset_id: string;
             /** Bytes */
             bytes: number;
             /** Created At */
@@ -527,6 +571,8 @@ export interface components {
             action_items?: components["schemas"]["ActionItemOut"][];
             /** Artifacts */
             artifacts?: components["schemas"]["ArtifactInfo"][];
+            /** Assets */
+            assets?: components["schemas"]["Asset"][];
             brief: components["schemas"]["BriefOut"];
             /** Created At */
             created_at: string;
@@ -1264,6 +1310,205 @@ export interface operations {
             };
             /** @description 服务器内部错误（problem+json） */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+        };
+    };
+    list_assets_api_v1_sessions__session_id__assets_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Asset"][];
+                };
+            };
+            /** @description 缺少或无效的工作台访问令牌（problem+json） */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Host/Origin 不是本机回环地址（problem+json） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 资源不存在（problem+json） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 请求参数校验失败（problem+json） */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 服务器内部错误（problem+json） */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+        };
+    };
+    upload_asset_api_v1_sessions__session_id__assets_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": {
+                    /** Format: binary */
+                    file: string;
+                };
+            };
+        };
+        responses: {
+            /** @description 幂等重放：返回第一次写入的素材 */
+            200: {
+                headers: {
+                    /** @description 重放标记；首次上传不返回该头 */
+                    "Idempotency-Replayed"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Asset"];
+                };
+            };
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Asset"];
+                };
+            };
+            /** @description 请求不是可解析的 multipart 表单，或缺 file 字段（problem+json） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 缺少或无效的工作台访问令牌（problem+json） */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Host/Origin 不是本机回环地址（problem+json） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 资源不存在（problem+json） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 历史会话只读，或幂等键已用于另一份内容（problem+json） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 超过该类型上限，已中止写入（problem+json） */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 魔数不在白名单，或声明的扩展名与内容不符（problem+json） */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 请求参数校验失败（problem+json） */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 服务器内部错误（problem+json） */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 磁盘写入失败（problem+json） */
+            507: {
                 headers: {
                     [name: string]: unknown;
                 };

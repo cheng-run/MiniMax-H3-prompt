@@ -10,6 +10,13 @@
 
 ### 新增
 
+- **工作台素材上传（D3-2 / #224）**：`POST /api/v1/sessions/{id}/assets` 收单文件上传，
+  `GET …/assets` 与会话详情里的 `assets` 列出。类型按**字节**嗅探（PNG/JPEG/WebP 图片
+  ≤20 MiB、MP4/WebM 视频 ≤512 MiB、WAV/MP3 音频 ≤64 MiB），落盘扩展名由内容决定，
+  声明的扩展名与字节矛盾回 415；同容器不同格式（Matroska / QuickTime / HEIC）也回
+  415。标识是内容哈希前 16 位，同内容重复上传只存一份，同一 `Idempotency-Key` 重发
+  返回同一素材且不重复写盘。超限边写边中止并删残片，历史会话回 409，崩溃残留的
+  `.tmp-*` 在启动时清掉。上传不改会话状态、不产生事件。
 - **工作台本地鉴权（D3-1 / #223）**：`/api/v1` 除健康检查与引导端点外都要凭据——
   请求头 `X-Workbench-Token` 或 `wb_session` Cookie（`SameSite=Strict`）。令牌每进程
   随机、重启失效，经 `GET /api/v1/auth/token` 取得；Host/Origin 必须是本机回环

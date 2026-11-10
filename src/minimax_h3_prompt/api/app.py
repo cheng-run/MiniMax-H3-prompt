@@ -17,6 +17,7 @@ from . import SERVICE_NAME
 from .auth import attach_local_access
 from .jobs import JobRunner
 from .problems import apply_problem_media_type_openapi, install_problem_handlers
+from .routes.assets import router as assets_router
 from .routes.auth import router as auth_router
 from .routes.health import router as health_router
 from .routes.sessions import router as sessions_router
@@ -66,6 +67,9 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        # 启动清理（D3-2）：删崩溃残留的素材临时文件、给孤儿正本补边车。放在对账之前
+        # 是因为它是纯文件清理，不依赖任何会话状态。
+        await asyncio.to_thread(store.cleanup_assets)
         # 启动对账（spec §6）：上一个进程留下的 running 会话在这里收成 interrupted。
         # 文件扫描是阻塞的，放进线程池，别拖住事件循环的第一次心跳。
         await asyncio.to_thread(runner.reconcile)
@@ -82,6 +86,10 @@ def create_app(
     install_problem_handlers(app)
     app.include_router(health_router)
     app.include_router(auth_router)
+    # 顺序是契约（#222 §9）：``{session_id:path}`` 会吞掉斜杠，``/sessions/{id}/assets``
+    # 必须先于 ``GET /sessions/{session_id:path}`` 注册，否则详情路由会把 ``assets``
+    # 当作会话标识的一部分。assets 路由器整只排在 sessions 之前，这条顺序不靠人记。
+    app.include_router(assets_router)
     app.include_router(sessions_router)
     if include_test_routes:
         from .routes.validation_probe import router as probe_router
