@@ -20,7 +20,14 @@ from pydantic import BaseModel, Field
 
 from ...brief_parser import Brief, RefItem
 from ...injection_card import VideoOutputParams
+from ...user_revisions import (
+    LAYER_ART,
+    LAYER_CHARACTER,
+    LAYER_FRAME,
+    LAYER_STORY,
+)
 from ...workbench_store import (
+    ActionItemOut,
     EventLog,
     JobSummary,
     SessionDetail,
@@ -75,6 +82,49 @@ class SessionCreate(BaseModel):
     canvases: dict[str, tuple[int, int]] = Field(default_factory=dict)
     video_output: VideoOutputIn | None = None
     refs: list[RefIn] = Field(default_factory=list)
+
+
+class RevisionIn(BaseModel):
+    layer: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+
+
+class ActionItemResolve(BaseModel):
+    """决议载荷（spec §7）：``approve`` 或 ``revise`` + 若干条（层次, 文字）。"""
+
+    decision: Literal["approve", "revise"]
+    revisions: list[RevisionIn] = Field(default_factory=list)
+
+
+# 层次归一表（spec §7 的中文别名 + 向导屏幕标签 → 内部四档）。内部取值只住
+# ``user_revisions.LAYER_*``，这里不重抄——重抄一份，改档位名时路由会静默收下旧词。
+_LAYER_ALIASES: dict[str, str] = {
+    "frame": LAYER_FRAME,
+    "画面": LAYER_FRAME,
+    "只改画面": LAYER_FRAME,
+    "character": LAYER_CHARACTER,
+    "人物": LAYER_CHARACTER,
+    "人物设定": LAYER_CHARACTER,
+    "art": LAYER_ART,
+    "美术": LAYER_ART,
+    "美术场景": LAYER_ART,
+    "美术场景道具": LAYER_ART,
+    "story": LAYER_STORY,
+    "剧情": LAYER_STORY,
+    "剧情分镜": LAYER_STORY,
+    # spec §7 把最上游那一档写作「全部」；它重跑整条设定链（从编剧起），
+    # 内部就是 story 层。两个词都收，不新增第五档。
+    "全部": LAYER_STORY,
+}
+
+
+def _normalize_layer(raw: str) -> str:
+    key = raw.strip()
+    value = _LAYER_ALIASES.get(key) or _LAYER_ALIASES.get(key.lower())
+    if value is None:
+        raise HTTPException(422, f"不认识的修订层次：{raw!r}；"
+                                 "可用：画面 / 人物设定 / 美术场景 / 全部（或内部四档名）。")
+    return value
 
 
 def _store(request: Request) -> WorkbenchSessionStore:
@@ -332,6 +382,75 @@ async def stream_events(
         media_type="text/event-stream",
         headers=headers,
     )
+
+
+_ACTION_ITEM_RESPONSES = {
+    **_SESSION_ERROR_RESPONSES,
+    404: {"model": ProblemDetail, "description": "待办不存在（problem+json）"},
+    409: {"model": ProblemDetail, "description": "会话/待办状态冲突（problem+json）"},
+}
+
+
+@router.get(
+    "/sessions/{session_id:path}/action-items",
+    response_model=list[ActionItemOut],
+    responses=_SESSION_ERROR_RESPONSES,
+)
+def list_action_items(session_id: str, request: Request) -> list[ActionItemOut]:
+    """会话的全部待办（含已决议的）：创建与决议成对可查，前端不必自己攒。"""
+    return _store(request).get_session(session_id).action_items
+
+
+@router.post(
+    "/sessions/{session_id:path}/action-items/{item_id}/resolve",
+    status_code=202,
+    response_model=JobSummary,
+    responses={
+        202: {
+            "model": JobSummary,
+            "description": "决议已受理，重跑在后台执行（异步）",
+            "headers": {
+                "Idempotency-Replayed": {
+                    "description": "重放标记；首次决议不返回该头",
+                    "schema": {"type": "string"},
+                },
+            },
+        },
+        **_ACTION_ITEM_RESPONSES,
+    },
+)
+async def resolve_action_item(
+    session_id: str,
+    item_id: str,
+    payload: ActionItemResolve,
+    request: Request,
+    response: Response,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> JobSummary:
+    """提交人工决定：``approve`` 起阶段 2，``revise`` 从声明层次重跑阶段 1。
+
+    状态判定与「决议 + 起任务」的原子性都在 ``JobRunner.resolve`` 的会话临界区里，
+    这里只把请求体归一成内部词汇，不先查一遍状态（两处判据会在并发下各说各话）。
+    """
+    revisions: list[dict[str, str]] = []
+    if payload.decision == "approve":
+        if payload.revisions:
+            raise HTTPException(422, "approve 不接受 revisions：通过就是通过。")
+    else:
+        if not payload.revisions:
+            raise HTTPException(422, "revise 至少要给一条修订。")
+        for revision in payload.revisions:
+            text = revision.text.strip()
+            if not text:
+                raise HTTPException(422, "修订内容不能为空。")
+            revisions.append(
+                {"layer": _normalize_layer(revision.layer), "text": text})
+    job, replayed = await _runner(request).resolve(
+        session_id, item_id, decision=payload.decision, revisions=revisions,
+        idempotency_key=idempotency_key or None)
+    if replayed:
+        response.headers["Idempotency-Replayed"] = "true"
+    return job
 
 
 @router.get(

@@ -97,6 +97,18 @@ class ActionItemPending(WorkbenchError):
     code = "action_item_pending"
 
 
+class ActionItemNotFound(WorkbenchError):
+    """待办不存在，或不属于 URL 里那个会话（两种情况不回不同码，避免泄漏他会话的 id）。"""
+
+    status_code = 404
+    code = "action_item_not_found"
+
+
+class ActionItemResolved(WorkbenchError):
+    status_code = 409
+    code = "action_item_resolved"
+
+
 class IdempotencyConflict(WorkbenchError):
     status_code = 409
     code = "idempotency_conflict"
@@ -832,16 +844,20 @@ class WorkbenchSessionStore:
         jobs: Sequence[dict[str, Any]] | None = None,
         action_items: Sequence[dict[str, Any]] | None = None,
         last_event_seq: int | None = None,
+        brief: Brief | None = None,
+        variant_downgraded: str | None = None,
     ) -> SessionState:
         """以现有快照为底，覆盖调用方点名要改的字段。"""
         return SessionState(
             directory=directory,
-            brief=session.brief,
+            brief=session.brief if brief is None else brief,
             stage_state=(
                 dict(stage_state) if stage_state is not None
                 else dict(session.stage_state)),
             status=session.status if status is None else status,
-            variant_downgraded=session.variant_downgraded,
+            variant_downgraded=(
+                session.variant_downgraded if variant_downgraded is None
+                else variant_downgraded),
             frame_images=session.frame_images,
             created_at=session.created_at,
             updated_at=session.updated_at,
@@ -925,6 +941,9 @@ class WorkbenchSessionStore:
         为什么需要回调而不是先 ``get_session`` 再 ``update``：调用方（执行器的进度写与
         取消请求）来自不同线程，两次文件读之间别人可能已经写过。把读也放进临界区，
         「找 job → 改字段 → 写回」才是原子的（#217 复审：取消标记曾被下一次进度写盖掉）。
+        可覆盖的字段是 ``status`` / ``stage_state`` / ``jobs`` / ``action_items`` /
+        ``brief`` / ``variant_downgraded``（#219 起阶段 2 收尾要把生效变体与降级事实
+        一起写回，绕开会话锁用 ``update_session_file`` 会把并发写盖掉）。
 
         ``events`` 是这次改动要**一起**落盘的事件（#218）：事件先写、快照后写，且两者
         在同一把锁内——序号分配与状态转移因此不会被别的写者插进来。``mutator`` 返回空
@@ -948,6 +967,8 @@ class WorkbenchSessionStore:
                 stage_state=changes.get("stage_state"),
                 jobs=changes.get("jobs"),
                 action_items=changes.get("action_items"),
+                brief=changes.get("brief"),
+                variant_downgraded=changes.get("variant_downgraded"),
                 last_event_seq=(
                     appended[-1].seq if appended else session.last_event_seq),
             ).save()
@@ -1009,7 +1030,8 @@ class WorkbenchSessionStore:
 
 
 __all__ = [
-    "ActionItemOut", "ActionItemPending", "ArtifactInfo", "BriefOut",
+    "ActionItemNotFound", "ActionItemOut", "ActionItemPending", "ActionItemResolved",
+    "ArtifactInfo", "BriefOut",
     "EVENT_TYPES", "EVENTS_FILENAME", "Event", "EventDraft", "EventLog",
     "IdempotencyConflict", "IdempotencyRegistry", "InvalidEventPayload",
     "JobNotFound", "JobNotRunning",

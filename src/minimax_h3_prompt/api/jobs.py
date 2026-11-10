@@ -30,7 +30,10 @@ from .. import step_machine
 from ..errors import error_code
 from ..session_store import atomic_write_text, load_session
 from ..workbench_store import (
+    ActionItemNotFound,
     ActionItemOut,
+    ActionItemPending,
+    ActionItemResolved,
     EventDraft,
     JobNotFound,
     JobNotRunning,
@@ -46,6 +49,15 @@ JOB_HISTORY_LIMIT = 20
 
 # advance 没有请求体；幂等键绑定的「请求摘要」是一个常量，同 key 重发永远算同一份命令。
 _JOB_FINGERPRINT = hashlib.sha256(b"advance").hexdigest()
+
+
+def _resolve_fingerprint(item_id: str, decision: str,
+                         revisions: list[dict[str, str]]) -> str:
+    """resolve 的请求摘要：待办、决定与修订内容都算进去（同 key 换内容＝冲突）。"""
+    canonical = json.dumps(
+        {"item_id": item_id, "decision": decision, "revisions": revisions},
+        sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class JobCancelled(Exception):
@@ -178,6 +190,102 @@ class JobRunner:
                     fingerprint=_JOB_FINGERPRINT, response=_job_dict(job))
             return job, False
 
+    async def resolve(
+        self, session_id: str, item_id: str, *, decision: str,
+        revisions: list[dict[str, str]] | None = None,
+        idempotency_key: str | None = None,
+    ) -> tuple[JobSummary, bool]:
+        """在人工闸门上提交决定；返回 ``(job, 是否幂等重放)``（#219）。
+
+        决定本身（待办转 resolved、修订进累积清单、会话写回 running）在**存储层会话锁内**
+        一次落盘，事件与快照不分家；真正的重跑在后台任务里。``revise`` 的修订也在这次
+        落盘里写进 ``user_revisions``——先记下用户说过的话，再花几分钟重跑；中途崩了
+        也只是「没落地」，不会变成「系统没听见」。
+        """
+        lock = self._locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            payload = _resolve_fingerprint(item_id, decision, list(revisions or []))
+            registry = None
+            if idempotency_key:
+                registry = self.store.session_registry(session_id)
+                cached = await asyncio.to_thread(
+                    registry.replay, idempotency_key, fingerprint=payload)
+                if cached is not None:
+                    return JobSummary.model_validate(cached), True
+
+            job = JobSummary(
+                job_id=uuid.uuid4().hex, kind="advance", status="running",
+                started_at=_now())
+            # 记录下来的修订条目（带轮次）要立刻带给后台任务：稍后按它标「已落地」，
+            # 重新按 (round, layer, text) 反查会把轮次对齐规则又抄一遍。
+            entries: list[dict[str, Any]] = []
+
+            def _decide(current: Any) -> dict[str, Any]:
+                # 会话状态先判：不在闸门上时，任何待办 id 都不该被「决议」——先答
+                # action_item_pending 才能让调用方知道该去等/去推进，而不是去翻待办表。
+                if current.status != step_machine.STATUS_AWAITING_HUMAN:
+                    raise ActionItemPending(
+                        f"会话不在人工待办上（当前 {current.status}），不能提交决定。")
+                target = next(
+                    (item for item in current.action_items
+                     if item.item_id == item_id), None)
+                if target is None:
+                    # 不属于该会话与不存在回同一码：不回不同答案以免泄漏他会话的 id。
+                    raise ActionItemNotFound(f"待办不存在：{item_id}")
+                if target.status != "pending":
+                    raise ActionItemResolved(
+                        f"待办已决议（{target.decision or target.status}），不能重复提交。")
+                now = _now()
+                items = [
+                    (item.model_copy(update={
+                        "status": "resolved", "decision": decision,
+                        "resolved_at": now}).model_dump(mode="json")
+                     if item.item_id == item_id
+                     else item.model_dump(mode="json"))
+                    for item in current.action_items
+                ]
+                changes: dict[str, Any] = {
+                    "status": step_machine.STATUS_RUNNING,
+                    "jobs": _upsert_job(current.jobs, _job_dict(job)),
+                    "action_items": items,
+                }
+                if decision == step_machine.DECISION_REVISE:
+                    # 累积语义只住 user_revisions.py（begin_round + record_user_revision）；
+                    # 这里不另造轮次号，也不改清单形状。
+                    from ..user_revisions import record_user_revision
+
+                    session = load_session(self.store.session_directory(session_id))
+                    if session is None:
+                        raise RuntimeError(f"会话文件读不到：{session_id}")
+                    stage_state = dict(session.stage_state)
+                    for revision in revisions or []:
+                        entries.append(record_user_revision(
+                            stage_state, layer=revision["layer"],
+                            text=revision["text"]))
+                    changes["stage_state"] = stage_state
+                return changes
+
+            await asyncio.to_thread(
+                self.store.mutate, session_id, _decide, events=[
+                    EventDraft("job.started", {"kind": job.kind},
+                               job_id=job.job_id),
+                    EventDraft("action_item.resolved",
+                               {"item_id": item_id, "decision": decision},
+                               job_id=job.job_id),
+                ])
+            self._started_at[job.job_id] = job.started_at
+            await asyncio.to_thread(self._write_active_job, session_id, job.job_id, "")
+            event = threading.Event()
+            self._cancel_events[job.job_id] = event
+            self._tasks[job.job_id] = asyncio.create_task(
+                self._run_decision(
+                    session_id, job.job_id, event, decision, entries))
+            if idempotency_key and registry is not None:
+                await asyncio.to_thread(
+                    registry.record, idempotency_key,
+                    fingerprint=payload, response=_job_dict(job))
+            return job, False
+
     def get_job(self, session_id: str, job_id: str) -> JobSummary:
         detail = self.store.get_session(session_id)
         job = _find_job(detail.jobs, job_id)
@@ -208,13 +316,45 @@ class JobRunner:
             await asyncio.to_thread(
                 self._finish_succeeded, session_id, job_id, final_state)
         finally:
-            self._cancel_events.pop(job_id, None)
-            self._tasks.pop(job_id, None)
-            self._started_at.pop(job_id, None)
-            try:
-                await asyncio.to_thread(self._remove_active_job, session_id, job_id)
-            except Exception:  # noqa: BLE001 - 清理失败不该盖掉任务终态
-                logger.warning("清理在跑标记失败：%s / %s", session_id, job_id)
+            await asyncio.to_thread(self._cleanup, session_id, job_id)
+
+    def _cleanup(self, session_id: str, job_id: str) -> None:
+        self._cancel_events.pop(job_id, None)
+        self._tasks.pop(job_id, None)
+        self._started_at.pop(job_id, None)
+        try:
+            self._remove_active_job(session_id, job_id)
+        except Exception:  # noqa: BLE001 - 清理失败不该盖掉任务终态
+            logger.warning("清理在跑标记失败：%s / %s", session_id, job_id)
+
+    async def _run_decision(self, session_id: str, job_id: str,
+                            cancel_event: threading.Event, decision: str,
+                            entries: list[dict[str, Any]]) -> None:
+        """决议的后台执行：approve → 阶段 2；revise → 从声明层次重跑阶段 1。"""
+        try:
+            if decision == step_machine.DECISION_APPROVE:
+                result = await asyncio.to_thread(
+                    self._execute_stage2, session_id, job_id, cancel_event)
+            else:
+                result = await asyncio.to_thread(
+                    self._execute_revise, session_id, job_id, cancel_event, entries)
+        except JobCancelled as exc:
+            await asyncio.to_thread(
+                self._finish_cancelled, session_id, job_id, exc.node)
+        except Exception as exc:  # noqa: BLE001 - 任务失败要落成 job 状态
+            logger.exception("执行决议失败：%s / %s", session_id, job_id)
+            await asyncio.to_thread(
+                self._finish_failed, session_id, job_id, error_code(exc), str(exc))
+        else:
+            if decision == step_machine.DECISION_APPROVE:
+                await asyncio.to_thread(
+                    self._finish_stage2, session_id, job_id, result)
+            else:
+                # 修订跑完回到**同一个人工闸门**：新待办、状态 awaiting_human。
+                await asyncio.to_thread(
+                    self._finish_succeeded, session_id, job_id, result["state"])
+        finally:
+            await asyncio.to_thread(self._cleanup, session_id, job_id)
 
     def _execute_stage1(self, session_id: str, job_id: str,
                         cancel_event: threading.Event) -> dict[str, Any]:
@@ -298,6 +438,199 @@ class JobRunner:
                 (final_state.get("_progress") or {}).get("last_completed_node", "")))
         return final_state
 
+    def _execute_stage2(self, session_id: str, job_id: str,
+                        cancel_event: threading.Event) -> dict[str, Any]:
+        """线程里跑的阶段 2（approve 之后）。
+
+        无首尾帧时的**自动降级**与向导同源（``resolve_effective_variant``）：D2 的
+        帧图归 D3，所以这里永远按「没有帧」降级，并把降级事实记进会话
+        （``variant_downgraded``）。``video-prompt.md`` 与向导同目录同名，写完才算成功。
+        """
+        from ..graph.pipeline import _STAGE2_CHAIN, run_stage2
+        from ..stage2_checkpoint import load_checkpoint
+        from ..ui.wizard import resolve_effective_variant
+
+        directory = self.store.session_directory(session_id)
+        session = load_session(directory)
+        if session is None:
+            raise RuntimeError(f"会话文件读不到：{session_id}")
+        state = dict(session.stage_state)
+        brief = session.brief
+        original = brief.variant
+        effective = resolve_effective_variant(original, False, False)
+        downgraded = ""
+        if effective != original:
+            brief.variant = effective
+            downgraded = f"{original}→{effective}"
+        # 没有交回关键帧：读图结果就是空清单（向导在没有帧时同样写空列表）。
+        state["fl2va_frame_descriptions"] = []
+        # 有阶段 2 断点时组装已被跳过，那时不会有节点回调——先报 started 会留下
+        # 一条「开始了却永远没结束」的假事件。
+        if load_checkpoint(directory) is None:
+            self._emit_progress(session_id, job_id, _STAGE2_CHAIN[0], "started",
+                                stage=step_machine.STEP_STAGE2)
+
+        def on_node(node_name: str) -> None:
+            self._emit_progress(session_id, job_id, node_name, "done",
+                                stage=step_machine.STEP_STAGE2)
+            if cancel_event.is_set():
+                raise JobCancelled(node_name)
+
+        final_state, prompt = run_stage2(
+            state, brief, self.config, on_node=on_node,
+            checkpoint_dir=directory)
+        (directory / "video-prompt.md").write_text(prompt, encoding="utf-8")
+        return {"state": dict(final_state), "brief": brief,
+                "variant_downgraded": downgraded}
+
+    def _execute_revise(self, session_id: str, job_id: str,
+                        cancel_event: threading.Event,
+                        entries: list[dict[str, Any]]) -> dict[str, Any]:
+        """线程里跑的修订重跑：设定级按层次截断重跑阶段 1，画面级重出关键帧提示词。
+
+        多条修订的执行顺序＝**链上最上游的层次先跑，画面级最后**：设定级改动会换掉
+        画面级节点的输入，反过来先跑画面级等于拿旧设定出词。
+        """
+        from ..graph.pipeline import _STAGE1_CHAIN
+        from ..user_revisions import (
+            LAYER_FRAME,
+            LAYER_SPECS,
+            SETTING_REVISION_KEY,
+            active_revisions,
+            log_frame_round,
+            mark_revision_applied,
+        )
+
+        directory = self.store.session_directory(session_id)
+        session = load_session(directory)
+        if session is None:
+            raise RuntimeError(f"会话文件读不到：{session_id}")
+        brief = session.brief
+        state = dict(session.stage_state)
+        chain = list(_STAGE1_CHAIN)
+        setting_entries = [entry for entry in entries if entry["layer"] in LAYER_SPECS]
+        setting_entries.sort(key=lambda entry: chain.index(
+            LAYER_SPECS[entry["layer"]].resume_from))
+        frame_entries = [entry for entry in entries if entry["layer"] == LAYER_FRAME]
+
+        for entry in setting_entries:
+            spec = LAYER_SPECS[entry["layer"]]
+            initial_state = dict(state)
+            # 本轮这条修订经独立入参键进重跑（唯一读者 user_revisions.setting_revision_block）
+            initial_state[SETTING_REVISION_KEY] = {
+                "layer": spec.value, "text": entry["text"]}
+            state = self._rerun_stage1(
+                session_id, job_id, cancel_event, brief, initial_state, spec.resume_from)
+            # 入参块与断点元数据都不是产物，不许顺着 state 流到下一次重跑或阶段 2。
+            state.pop(SETTING_REVISION_KEY, None)
+            state.pop("_progress", None)
+            # 先标已落地再落盘：清单与台账记的必须是同一个事实（重跑失败时走不到这里）。
+            mark_revision_applied(state, entry)
+            self._save_revision_state(session_id, state)
+            log_frame_round(
+                directory, round_index=int(entry["round"]), layer=spec.value,
+                feedback_this_round=entry["text"],
+                active_revisions=active_revisions(state),
+                bundle=state.get("fl2va_prompt_bundle"),
+                base_used=False)  # 设定级重跑不上基线（它改的就是设定产物本身）
+
+        if frame_entries:
+            state = self._rerun_frame_prompts(
+                session_id, job_id, cancel_event, brief, state, frame_entries)
+            self._save_revision_state(session_id, state)
+
+        state.pop("_progress", None)
+        return {"state": state, "brief": brief}
+
+    def _save_revision_state(self, session_id: str,
+                             state: dict[str, Any]) -> None:
+        """把一次重跑后的 state 落盘（会话仍在 running）：已落地标记与累积清单不能丢。"""
+        self.store.mutate(session_id, lambda _detail: {
+            "status": step_machine.STATUS_RUNNING, "stage_state": state})
+
+    def _rerun_stage1(self, session_id: str, job_id: str,
+                      cancel_event: threading.Event, brief: Any,
+                      initial_state: dict[str, Any],
+                      start_node: str) -> dict[str, Any]:
+        """从 ``start_node`` 截断重跑阶段 1（复用 ``run_stage1(resume_from_node=...)``）。"""
+        from ..graph.pipeline import _STAGE1_CHAIN, run_stage1
+
+        steps = list(_STAGE1_CHAIN)[
+            list(_STAGE1_CHAIN).index(start_node):]
+
+        def on_step_done(node_name: str, current_state: dict) -> None:
+            if node_name in steps:
+                progress_state = dict(current_state)
+                progress_state["_progress"] = {"last_completed_node": node_name}
+                self._save_progress(
+                    session_id, job_id, progress_state, node_name)
+                self._emit_progress(session_id, job_id, node_name, "done")
+            if cancel_event.is_set():
+                raise JobCancelled(node_name)
+
+        # 只报起点开始、随后按真实回调逐个报完成：中间有些节点在本路线不出产物、
+        # 回调根本不会来，替它们编 started 会留下一条永远不结束的假事件。
+        self._emit_progress(session_id, job_id, steps[0], "started")
+        return dict(run_stage1(
+            brief, self.config, initial_state=initial_state,
+            resume_from_node=start_node, on_step_done=on_step_done)[0])
+
+    def _rerun_frame_prompts(self, session_id: str, job_id: str,
+                             cancel_event: threading.Event, brief: Any,
+                             state: dict[str, Any],
+                             entries: list[dict[str, Any]]) -> dict[str, Any]:
+        """画面级修订：按向导既有语义重出 ``fl2va_frame_prompts``（基线块注入）。
+
+        节点从 state 读累积清单（``render_revision_block(pending_revisions(...))``），
+        所以这里只负责补上**修订基线**这个独立入参键——与 ``_user_revision_loop``
+        同一条接线。撤销块留空：决议接口这一版不承载撤销（清单的撤走走向导）。
+        """
+        from ..graph.nodes import make_nodes
+        from ..ui.wizard import _build_role_agents_on_demand
+        from ..user_revisions import (
+            FRAME_BASELINE_KEY,
+            FRAME_REVOKED_KEY,
+            LAYER_FRAME,
+            active_revisions,
+            log_frame_round,
+            render_baseline_block,
+        )
+
+        directory = self.store.session_directory(session_id)
+        model, agents = _build_role_agents_on_demand(brief)
+        nodes = make_nodes(agents, model, brief, self.config)
+        updated = dict(state)
+        updated["brief"] = brief
+        baseline = render_baseline_block(state.get("fl2va_prompt_bundle"))
+        if baseline:
+            updated[FRAME_BASELINE_KEY] = baseline
+        else:
+            updated.pop(FRAME_BASELINE_KEY, None)
+        updated.pop(FRAME_REVOKED_KEY, None)
+
+        self._emit_progress(
+            session_id, job_id, step_machine.FRAME_PROMPT_NODE, "started")
+        update = nodes[step_machine.FRAME_PROMPT_NODE](updated)
+        # 台账的 base_used 取「节点真的拿到了基线」，不重判渲染结果（同向导接线）。
+        base_used = FRAME_BASELINE_KEY in updated
+        if isinstance(update, dict):
+            updated.update(update)
+        # 基线是本轮入参、不是产物：跑完即摘，不许顺着 state 流到阶段 2。
+        updated.pop(FRAME_BASELINE_KEY, None)
+        self._emit_progress(
+            session_id, job_id, step_machine.FRAME_PROMPT_NODE, "done")
+        if cancel_event.is_set():
+            raise JobCancelled(step_machine.FRAME_PROMPT_NODE)
+
+        for entry in entries:
+            log_frame_round(
+                directory, round_index=int(entry["round"]), layer=LAYER_FRAME,
+                feedback_this_round=entry["text"],
+                active_revisions=active_revisions(updated),
+                bundle=updated.get("fl2va_prompt_bundle"),
+                base_used=base_used)
+        return updated
+
     # ------------------------------------------------------------------
     # 落盘
     # ------------------------------------------------------------------
@@ -330,12 +663,12 @@ class JobRunner:
         self._write_active_job(session_id, job_id, node)
 
     def _emit_progress(self, session_id: str, job_id: str, node: str,
-                       status: str) -> None:
+                       status: str, *,
+                       stage: str = step_machine.STEP_STAGE1) -> None:
         """没有状态变化的进度（节点开始）：只追加事件，不动快照字段。"""
         self.store.record_events(session_id, [
             EventDraft("job.progress",
-                       {"stage": step_machine.STEP_STAGE1, "node": node,
-                        "status": status},
+                       {"stage": stage, "node": node, "status": status},
                        job_id=job_id)])
 
     def _finish_succeeded(self, session_id: str, job_id: str,
@@ -367,6 +700,26 @@ class JobRunner:
                        job_id=job_id),
             EventDraft("action_item.created",
                        {"item_id": item.item_id, "kind": item.kind},
+                       job_id=job_id),
+        ])
+
+    def _finish_stage2(self, session_id: str, job_id: str,
+                       result: dict[str, Any]) -> None:
+        """阶段 2 收尾：会话 completed，降级事实与生效变体一起落盘（D2-AC7 的前半）。"""
+        def _apply(detail: Any) -> dict[str, Any]:
+            job = self._job_or_running(job_id, detail).model_copy(
+                update={"status": "succeeded", "finished_at": _now()})
+            return {
+                "status": step_machine.STATUS_COMPLETED,
+                "stage_state": result["state"],
+                "jobs": _upsert_job(detail.jobs, _job_dict(job)),
+                "brief": result["brief"],
+                "variant_downgraded": result["variant_downgraded"],
+            }
+
+        self.store.mutate(session_id, _apply, events=[
+            EventDraft("job.succeeded",
+                       {"next": step_machine.STATUS_COMPLETED},
                        job_id=job_id),
         ])
 

@@ -45,6 +45,31 @@
         "title": "ActionItemOut",
         "type": "object"
       },
+      "ActionItemResolve": {
+        "description": "决议载荷（spec §7）：``approve`` 或 ``revise`` + 若干条（层次, 文字）。",
+        "properties": {
+          "decision": {
+            "enum": [
+              "approve",
+              "revise"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "revisions": {
+            "items": {
+              "$ref": "#/components/schemas/RevisionIn"
+            },
+            "title": "Revisions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "decision"
+        ],
+        "title": "ActionItemResolve",
+        "type": "object"
+      },
       "ArtifactInfo": {
         "properties": {
           "artifact_id": {
@@ -388,6 +413,26 @@
           "picture"
         ],
         "title": "RefOut",
+        "type": "object"
+      },
+      "RevisionIn": {
+        "properties": {
+          "layer": {
+            "minLength": 1,
+            "title": "Layer",
+            "type": "string"
+          },
+          "text": {
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "layer",
+          "text"
+        ],
+        "title": "RevisionIn",
         "type": "object"
       },
       "SessionCreate": {
@@ -1035,6 +1080,199 @@
           }
         },
         "summary": "Get Session",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session_id}/action-items": {
+      "get": {
+        "description": "会话的全部待办（含已决议的）：创建与决议成对可查，前端不必自己攒。",
+        "operationId": "list_action_items_api_v1_sessions__session_id__action_items_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ActionItemOut"
+                  },
+                  "title": "Response List Action Items Api V1 Sessions  Session Id  Action Items Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "资源不存在（problem+json）"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "会话状态冲突（problem+json）"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "请求参数校验失败（problem+json）"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "服务器内部错误（problem+json）"
+          }
+        },
+        "summary": "List Action Items",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session_id}/action-items/{item_id}/resolve": {
+      "post": {
+        "description": "提交人工决定：``approve`` 起阶段 2，``revise`` 从声明层次重跑阶段 1。\n\n状态判定与「决议 + 起任务」的原子性都在 ``JobRunner.resolve`` 的会话临界区里，\n这里只把请求体归一成内部词汇，不先查一遍状态（两处判据会在并发下各说各话）。",
+        "operationId": "resolve_action_item_api_v1_sessions__session_id__action_items__item_id__resolve_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "item_id",
+            "required": true,
+            "schema": {
+              "title": "Item Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ActionItemResolve"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobSummary"
+                }
+              }
+            },
+            "description": "决议已受理，重跑在后台执行（异步）",
+            "headers": {
+              "Idempotency-Replayed": {
+                "description": "重放标记；首次决议不返回该头",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "待办不存在（problem+json）"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "会话/待办状态冲突（problem+json）"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "请求参数校验失败（problem+json）"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "服务器内部错误（problem+json）"
+          }
+        },
+        "summary": "Resolve Action Item",
         "tags": [
           "sessions"
         ]

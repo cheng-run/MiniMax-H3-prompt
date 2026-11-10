@@ -51,6 +51,49 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{session_id}/action-items": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Action Items
+         * @description 会话的全部待办（含已决议的）：创建与决议成对可查，前端不必自己攒。
+         */
+        get: operations["list_action_items_api_v1_sessions__session_id__action_items_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{session_id}/action-items/{item_id}/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resolve Action Item
+         * @description 提交人工决定：``approve`` 起阶段 2，``revise`` 从声明层次重跑阶段 1。
+         *
+         *     状态判定与「决议 + 起任务」的原子性都在 ``JobRunner.resolve`` 的会话临界区里，
+         *     这里只把请求体归一成内部词汇，不先查一遍状态（两处判据会在并发下各说各话）。
+         */
+        post: operations["resolve_action_item_api_v1_sessions__session_id__action_items__item_id__resolve_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{session_id}/events": {
         parameters: {
             query?: never;
@@ -158,6 +201,19 @@ export interface components {
             resolved_at: string;
             /** Status */
             status: string;
+        };
+        /**
+         * ActionItemResolve
+         * @description 决议载荷（spec §7）：``approve`` 或 ``revise`` + 若干条（层次, 文字）。
+         */
+        ActionItemResolve: {
+            /**
+             * Decision
+             * @enum {string}
+             */
+            decision: "approve" | "revise";
+            /** Revisions */
+            revisions?: components["schemas"]["RevisionIn"][];
         };
         /** ArtifactInfo */
         ArtifactInfo: {
@@ -332,6 +388,13 @@ export interface components {
             path: string;
             /** Picture */
             picture: number;
+        };
+        /** RevisionIn */
+        RevisionIn: {
+            /** Layer */
+            layer: string;
+            /** Text */
+            text: string;
         };
         /**
          * SessionCreate
@@ -691,6 +754,131 @@ export interface operations {
                 };
             };
             /** @description 会话状态冲突（problem+json） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 请求参数校验失败（problem+json） */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 服务器内部错误（problem+json） */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+        };
+    };
+    list_action_items_api_v1_sessions__session_id__action_items_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActionItemOut"][];
+                };
+            };
+            /** @description 资源不存在（problem+json） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 会话状态冲突（problem+json） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 请求参数校验失败（problem+json） */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 服务器内部错误（problem+json） */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+        };
+    };
+    resolve_action_item_api_v1_sessions__session_id__action_items__item_id__resolve_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                session_id: string;
+                item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ActionItemResolve"];
+            };
+        };
+        responses: {
+            /** @description 决议已受理，重跑在后台执行（异步） */
+            202: {
+                headers: {
+                    /** @description 重放标记；首次决议不返回该头 */
+                    "Idempotency-Replayed"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobSummary"];
+                };
+            };
+            /** @description 待办不存在（problem+json） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 会话/待办状态冲突（problem+json） */
             409: {
                 headers: {
                     [name: string]: unknown;
