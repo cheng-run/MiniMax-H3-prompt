@@ -15,7 +15,7 @@ import re
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Callable, Literal, cast
 
 from pydantic import BaseModel, Field
 
@@ -23,6 +23,7 @@ from .brief_parser import Brief
 from .session_store import (
     SESSION_FILENAME,
     WORKBENCH_SCHEMA_VERSION,
+    SessionState,
     atomic_write_text,
     load_session,
     save_session,
@@ -98,6 +99,16 @@ class IdempotencyConflict(WorkbenchError):
     code = "idempotency_conflict"
 
 
+class JobNotFound(WorkbenchError):
+    status_code = 404
+    code = "job_not_found"
+
+
+class JobNotRunning(WorkbenchError):
+    status_code = 409
+    code = "job_not_running"
+
+
 class RefOut(BaseModel):
     picture: int
     name: str = ""
@@ -134,6 +145,8 @@ class JobSummary(BaseModel):
     finished_at: str = ""
     error_code: str | None = None
     cancelled_at_node: str | None = None
+    # 取消是协作式的：请求后只打标记，job 要等当前节点跑完才进 cancelled。
+    cancel_requested: bool = False
 
 
 class ActionItemOut(BaseModel):
@@ -309,8 +322,19 @@ class WorkbenchSessionStore:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
         # 建会话涉及「分配 GEN 号 + 写文件 + 记幂等」三步，进程内串行避免两发请求
-        # 同时看到同一个空目录、都挑 GEN001。作业级互斥归 #217。
+        # 同时看到同一个空目录、都挑 GEN001。
         self._create_lock = threading.Lock()
+        # 每会话一把进程内互斥锁，覆盖「读快照 → 改字段 → 整份写回」。执行器的进度写
+        # （worker 线程）与取消请求（请求线程）会并发落到同一个会话文件；没有这把锁，
+        # 先读到快照的一方会把另一方刚写的字段覆盖回旧值（#217 复审）。它是
+        # ``threading.Lock`` 而不是 ``asyncio.Lock``：调用方在 ``asyncio.to_thread``
+        # 的线程里，跨线程加锁只能靠线程原语。
+        self._locks_guard = threading.Lock()
+        self._session_locks: dict[str, threading.Lock] = {}
+
+    def _lock_for(self, session_id: str) -> threading.Lock:
+        with self._locks_guard:
+            return self._session_locks.setdefault(session_id, threading.Lock())
 
     def _resolve(self, session_id: str) -> Path:
         """把 ``session_id`` 解析成会话目录；越界、绝对路径、``..`` 一律 404。"""
@@ -395,16 +419,19 @@ class WorkbenchSessionStore:
             directory = slug_dir / generation
             directory.mkdir(parents=True, exist_ok=False)
             session_id = f"{slug_dir.name}/{generation}"
-            save_session(
-                directory, brief, {},
-                status="created",
-                session_id=session_id,
-            )
-            detail = self.get_session(session_id)
-            if idempotency_key:
-                registry.record(
-                    idempotency_key, fingerprint=fingerprint,
-                    response=detail.model_dump(mode="json"))
+            # 与 ``update`` 共用同一把会话锁：建完立刻就有读者/写者时（幂等重放、
+            # 紧跟着的详情查询），不会看到「文件已写、幂等表还没记」的中间态。
+            with self._lock_for(session_id):
+                save_session(
+                    directory, brief, {},
+                    status="created",
+                    session_id=session_id,
+                )
+                detail = self.get_session(session_id)
+                if idempotency_key:
+                    registry.record(
+                        idempotency_key, fingerprint=fingerprint,
+                        response=detail.model_dump(mode="json"))
             return detail, False
 
     def get_session(self, session_id: str) -> SessionDetail:
@@ -471,6 +498,92 @@ class WorkbenchSessionStore:
         if detail.status == "awaiting_human":
             raise ActionItemPending("会话停在人工待办上，请先提交决定。")
 
+    def session_directory(self, session_id: str) -> Path:
+        """会话目录（执行器要在旁边写 ``active-job.json``）。"""
+        return self._resolve(session_id)
+
+    def session_directories(self) -> list[Path]:
+        """登记根下所有会话目录；单个坏文件由调用方自己决定怎么跳过。"""
+        if not self.root.is_dir():
+            return []
+        return sorted(path.parent for path in self.root.glob(f"**/{SESSION_FILENAME}"))
+
+    def mutate(
+        self,
+        session_id: str,
+        mutator: Callable[[SessionDetail], dict[str, Any] | None],
+    ) -> SessionDetail:
+        """在会话锁内读-改-写：``mutator`` 拿到**当前**详情，返回要覆盖的字段。
+
+        为什么需要回调而不是先 ``get_session`` 再 ``update``：调用方（执行器的进度写与
+        取消请求）来自不同线程，两次文件读之间别人可能已经写过。把读也放进临界区，
+        「找 job → 改字段 → 写回」才是原子的（#217 复审：取消标记曾被下一次进度写盖掉）。
+
+        ``mutator`` 返回空 dict / None 时不写文件（不白抬 revision）；返回值是写后详情。
+        """
+        lock = self._lock_for(session_id)
+        with lock:
+            detail = self.get_session(session_id)
+            changes = mutator(detail) or {}
+            if not changes:
+                return detail
+            directory, session, derived, legacy = self._load(session_id)
+            if legacy:
+                raise SessionLegacy("历史会话（legacy）只读，不能改写。")
+            status = changes.get("status")
+            stage_state = changes.get("stage_state")
+            jobs = changes.get("jobs")
+            action_items = changes.get("action_items")
+            state = SessionState(
+                directory=directory,
+                brief=session.brief,
+                stage_state=(
+                    dict(stage_state) if stage_state is not None
+                    else dict(session.stage_state)),
+                status=session.status if status is None else status,
+                variant_downgraded=session.variant_downgraded,
+                frame_images=session.frame_images,
+                created_at=session.created_at,
+                updated_at=session.updated_at,
+                schema_version=session.schema_version,
+                session_id=derived,
+                revision=session.revision,
+                last_event_seq=session.last_event_seq,
+                jobs=tuple(jobs) if jobs is not None else session.jobs,
+                action_items=(
+                    tuple(action_items) if action_items is not None
+                    else session.action_items),
+            )
+            state.save()
+            return self.get_session(session_id)
+
+    def update(
+        self,
+        session_id: str,
+        *,
+        status: str | None = None,
+        stage_state: dict[str, Any] | None = None,
+        jobs: list[dict[str, Any]] | None = None,
+        action_items: list[dict[str, Any]] | None = None,
+    ) -> SessionDetail:
+        """补写会话快照的若干字段（``mutate`` 的固定字段版），其余键原样保留。
+
+        为什么绕开 ``save_session``：执行器要在**不重建**会话对象的前提下推进
+        （``variant_downgraded`` / ``frame_images`` 等键必须原样留在文件里）；重新构造
+        一份缺省值的 ``SessionState`` 会把它们静默抹掉。``revision`` 由 ``save`` 按
+        文件现值 +1，与建会话走同一口径。整段读-改-写在会话锁内完成，不会丢并发更新。
+        """
+        changes: dict[str, Any] = {}
+        if status is not None:
+            changes["status"] = status
+        if stage_state is not None:
+            changes["stage_state"] = stage_state
+        if jobs is not None:
+            changes["jobs"] = jobs
+        if action_items is not None:
+            changes["action_items"] = action_items
+        return self.mutate(session_id, lambda _detail: changes)
+
     def session_registry(self, session_id: str) -> IdempotencyRegistry:
         """会话级幂等登记表（#217 起复用；建会话用根目录的那份）。"""
         directory = self._resolve(session_id)
@@ -479,8 +592,8 @@ class WorkbenchSessionStore:
 
 __all__ = [
     "ActionItemOut", "ActionItemPending", "ArtifactInfo", "BriefOut",
-    "IdempotencyConflict", "IdempotencyRegistry", "JobSummary", "RefOut",
-    "SessionBusy", "SessionCompleted", "SessionDetail", "SessionLegacy",
-    "SessionNotFound", "SessionPage", "SessionSummary", "SESSION_STATUSES",
-    "VideoOutputOut", "WorkbenchError", "WorkbenchSessionStore",
+    "IdempotencyConflict", "IdempotencyRegistry", "JobNotFound", "JobNotRunning",
+    "JobSummary", "RefOut", "SessionBusy", "SessionCompleted", "SessionDetail",
+    "SessionLegacy", "SessionNotFound", "SessionPage", "SessionSummary",
+    "SESSION_STATUSES", "VideoOutputOut", "WorkbenchError", "WorkbenchSessionStore",
 ]

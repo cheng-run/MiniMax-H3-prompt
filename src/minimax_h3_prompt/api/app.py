@@ -5,12 +5,16 @@
 """
 from __future__ import annotations
 
+import asyncio
 import importlib.metadata
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 
 from . import SERVICE_NAME
+from .jobs import JobRunner
 from .problems import apply_problem_media_type_openapi, install_problem_handlers
 from .routes.health import router as health_router
 from .routes.sessions import router as sessions_router
@@ -41,7 +45,7 @@ def _resolve_version() -> str:
 
 def create_app(
     *, include_test_routes: bool = False, dist_dir: Path | None = None,
-    sessions_root: Path | None = None,
+    sessions_root: Path | None = None, runtime_config: Any = None,
 ) -> FastAPI:
     """构造 FastAPI 应用。
 
@@ -49,14 +53,27 @@ def create_app(
     生产入口与 OpenAPI 导出都用默认 ``False``，探针不进入契约。
     ``dist_dir`` 默认指向仓库的 ``frontend/dist``；测试可注入临时目录。
     ``sessions_root`` 默认取项目配置；测试注入 ``tmp_path``，绝不碰真实会话目录。
+    ``runtime_config`` 是执行阶段 1 用的配置对象（轮数、质检开关）；测试注入确定性
+    桩配置，生产走项目 ``config``。它不影响 HTTP 契约，故不进 OpenAPI。
     """
     from ..workbench_store import WorkbenchSessionStore
 
-    app = FastAPI(title="MiniMax H3 Prompt API")
+    store = WorkbenchSessionStore(
+        sessions_root if sessions_root is not None else _default_sessions_root())
+    runner = JobRunner(store, runtime_config)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # 启动对账（spec §6）：上一个进程留下的 running 会话在这里收成 interrupted。
+        # 文件扫描是阻塞的，放进线程池，别拖住事件循环的第一次心跳。
+        await asyncio.to_thread(runner.reconcile)
+        yield
+
+    app = FastAPI(title="MiniMax H3 Prompt API", lifespan=lifespan)
     # 版本在启动阶段解析并落在 app.state：健康接口读它，而非每次请求都查元数据。
     app.state.version = _resolve_version()
-    app.state.session_store = WorkbenchSessionStore(
-        sessions_root if sessions_root is not None else _default_sessions_root())
+    app.state.session_store = store
+    app.state.job_runner = runner
     install_problem_handlers(app)
     app.include_router(health_router)
     app.include_router(sessions_router)

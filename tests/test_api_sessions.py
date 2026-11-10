@@ -145,15 +145,6 @@ def test_legacy_session_jobs_returns_problem_409(tmp_path):
     assert "legacy" in body["detail"].lower() or "历史" in body["detail"]
 
 
-def test_workbench_session_jobs_is_a_placeholder_until_217(tmp_path):
-    client = _client(tmp_path)
-    created = client.post("/api/v1/sessions", json=_brief_body()).json()
-
-    resp = client.post(f"/api/v1/sessions/{created['session_id']}/jobs")
-
-    _assert_problem(resp, 501, "job_not_implemented")
-
-
 def test_create_rejects_non_base_routes_and_bad_video_output(tmp_path):
     client = _client(tmp_path)
 
@@ -181,10 +172,14 @@ def test_contract_declares_sessions_and_problem_responses():
     assert "SessionPage" in schema["components"]["schemas"]
 
     jobs = paths["/api/v1/sessions/{session_id}/jobs"]["post"]["responses"]
+    assert "202" in jobs
     assert "409" in jobs
     assert "application/problem+json" in jobs["409"]["content"]
-    assert "501" in jobs
-    assert "application/problem+json" in jobs["501"]["content"]
+    job_path = "/api/v1/sessions/{session_id}/jobs/{job_id}"
+    assert "get" in paths[job_path]
+    cancel_path = job_path + "/cancel"
+    assert "post" in paths[cancel_path]
+    assert "JobSummary" in schema["components"]["schemas"]
 
     create_responses = paths["/api/v1/sessions"]["post"]["responses"]
     for code in ("200", "201", "409", "422", "500"):

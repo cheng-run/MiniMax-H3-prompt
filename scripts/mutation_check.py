@@ -448,6 +448,49 @@ MUTATIONS: tuple[Mutation, ...] = (
         "关掉这条判据，t2v 段词里会重新出现 Picture N（指一张不存在的图），"
         "贴给导演台即污染执行（#201）",
     ),
+    Mutation(
+        "cancel_ignored_at_node_boundary",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "            if cancel_event.is_set():\n"
+        "                raise JobCancelled(node_name)",
+        "            if False and cancel_event.is_set():\n"
+        "                raise JobCancelled(node_name)",
+        ("tests/test_api_jobs.py::"
+         "test_cancel_stops_after_the_current_node_and_advance_resumes",),
+        "取消标记不在节点边界生效＝点了取消仍跑到闸门，job 记成功（#217 / D2-AC8）",
+    ),
+    Mutation(
+        "startup_reconcile_off",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "            if isinstance(pid, int) and pid != os.getpid() and _pid_alive(pid):\n"
+        "                # 另一个还活着的服务进程在持有这个会话：不动它，避免双写。\n"
+        "                continue",
+        "            if True:\n"
+        "                continue",
+        ("tests/test_api_jobs.py::"
+         "test_startup_reconciliation_marks_interrupted_and_advance_resumes",),
+        "关掉启动对账＝强杀后会话永远停在 running，再也不能推进（#217 / D2-AC9）",
+    ),
+    Mutation(
+        "single_writer_gate_off",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "                self.store.ensure_can_advance(current)",
+        "                pass  # self.store.ensure_can_advance(current)",
+        ("tests/test_api_jobs.py::"
+         "test_concurrent_advance_is_rejected_with_session_busy",),
+        "去掉单写入者闸门＝并发 advance 各自起一个 job，同一会话被两个任务同时写（#217 / D2-AC3）",
+    ),
+    Mutation(
+        "session_lock_off",
+        "src/minimax_h3_prompt/workbench_store.py",
+        "        lock = self._lock_for(session_id)\n"
+        "        with lock:",
+        "        lock = self._lock_for(session_id)\n"
+        "        if True:",
+        ("tests/test_workbench_store.py::"
+         "test_concurrent_updates_do_not_lose_each_others_fields",),
+        "去掉会话锁＝进度写与取消写互相覆盖、revision 丢更新（#217 复审）",
+    ),
 )
 
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,10 @@ from .kinds import ASSET_MANIFEST_KEYS, ASSET_PROMPT_KEYS
 from .observability import COST_TABLE_KEY, token_meter
 
 SESSION_FILENAME = "session-state.json"
+# Windows 上 ``os.replace`` 遇到「读者还开着目标文件」会短暂 WinError 5；重试窗口
+# 取 10 × 20ms：远大于一次 ``read_text``，又短到不会让长任务落盘明显变慢。
+_REPLACE_ATTEMPTS = 10
+_REPLACE_RETRY_SECONDS = 0.02
 # D2（#215）起新会话文件是 workbench.v1；旧的 wizard_session.v1 只读兼容、不迁移。
 WORKBENCH_SCHEMA_VERSION = "workbench.v1"
 LEGACY_SCHEMA_VERSION = "wizard_session.v1"
@@ -216,6 +221,12 @@ def atomic_write_text(target: Path, text: str) -> None:
     会话文件是崩溃恢复的唯一真源（D2-AC2）；裸 ``write_text`` 会先截断旧文件，
     写入途中失败就同时失去新旧两份。临时文件与目标同目录，``os.replace`` 才是
     同一文件系统内的原子替换。
+
+    为什么 Windows 上要重试（D2 / #217）：读者（查询接口、列表扫描）可能正打开着
+    目标文件，而 Windows 的 ``MoveFileEx`` 需要目标可删除，读者只要占着句柄就会
+    ``PermissionError: WinError 5``。这不是数据损坏，重试几百毫秒即可；不重试的话
+    长任务推进期间一次普通查询就能把整次落盘打挂（2026-11-09 全量实测失败）。
+    非 Windows 与重试耗尽仍按原样抛出——不吞真正的权限错误。
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(
@@ -226,7 +237,14 @@ def atomic_write_text(target: Path, text: str) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp_path, target)
+        for attempt in range(_REPLACE_ATTEMPTS):
+            try:
+                os.replace(temp_path, target)
+                break
+            except PermissionError:
+                if os.name != "nt" or attempt == _REPLACE_ATTEMPTS - 1:
+                    raise
+                time.sleep(_REPLACE_RETRY_SECONDS)
     except BaseException:
         # 替换失败时旧文件仍在；临时文件必须清掉，否则每次失败都在会话目录留垃圾。
         try:

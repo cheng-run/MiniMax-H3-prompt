@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -199,3 +200,56 @@ def test_session_id_mismatch_is_loud(tmp_path):
     with pytest.raises(ValueError, match="session_id"):
         store.get_session("a/GEN001")
 
+
+
+def test_concurrent_updates_do_not_lose_each_others_fields(tmp_path):
+    """执行器的进度写与取消请求来自不同线程：读-改-写必须整段互斥（#217 复审）。
+
+    两个线程各写 100 次、只碰各自的字段。没有会话锁时，两边会读到同一份 revision
+    再各自 +1，200 次成功写入只抬不到 200（丢更新）；同时先读的一方会把对方刚写的
+    字段覆盖回旧值。这里同时钉住「字段都在」与「revision 等于成功写入次数」。
+    """
+    store = _store(tmp_path)
+    detail, _ = store.create(_brief(), fingerprint="body-1")
+    session_id = detail.session_id
+    initial_revision = detail.revision
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def write_jobs() -> None:
+        try:
+            barrier.wait()
+            for index in range(100):
+                store.update(session_id, jobs=[{
+                    "job_id": f"job-{index}", "kind": "advance",
+                    "status": "running", "started_at": "",
+                    "finished_at": "", "error_code": None,
+                    "cancelled_at_node": None, "cancel_requested": False,
+                }])
+        except BaseException as exc:  # noqa: BLE001 - 线程里的异常要带回主线程
+            errors.append(exc)
+
+    def write_stage_state() -> None:
+        try:
+            barrier.wait()
+            for index in range(100):
+                # 只用白名单里的键（``script``）：会话保存会按白名单过滤，
+                # 自造键写不进文件，那样测的就不是锁而是过滤器。
+                store.update(session_id, stage_state={"script": f"第{index}稿"})
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=write_jobs),
+               threading.Thread(target=write_stage_state)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert not errors, errors
+
+    final = store.get_session(session_id)
+    assert final.jobs[-1].job_id == "job-99"
+    raw = json.loads(
+        (tmp_path / session_id / SESSION_FILENAME).read_text(encoding="utf-8"))
+    assert raw["stage_state"]["script"] == "第99稿"
+    assert final.revision == initial_revision + 200

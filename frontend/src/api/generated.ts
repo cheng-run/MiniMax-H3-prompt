@@ -62,9 +62,49 @@ export interface paths {
         put?: never;
         /**
          * Start Job
-         * @description 推进会话的占位入口（#217 实现真正的执行）。
+         * @description 起一次 ``advance``：202 返回任务对象，执行在后台任务里。
+         *
+         *     闸门与单写入者判定在 ``JobRunner.advance`` 的会话临界区里完成；这里不再判一遍，
+         *     否则「先查后写」的两处判据会在并发下各说各话（D2-AC3）。
          */
         post: operations["start_job_api_v1_sessions__session_id__jobs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{session_id}/jobs/{job_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Job */
+        get: operations["get_job_api_v1_sessions__session_id__jobs__job_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{session_id}/jobs/{job_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cancel Job
+         * @description 请求取消：只打标记，任务在当前节点跑完后才停（**不承诺立即停止**）。
+         */
+        post: operations["cancel_job_api_v1_sessions__session_id__jobs__job_id__cancel_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -163,6 +203,11 @@ export interface components {
         };
         /** JobSummary */
         JobSummary: {
+            /**
+             * Cancel Requested
+             * @default false
+             */
+            cancel_requested: boolean;
             /** Cancelled At Node */
             cancelled_at_node?: string | null;
             /** Error Code */
@@ -654,7 +699,9 @@ export interface operations {
     start_job_api_v1_sessions__session_id__jobs_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
             path: {
                 session_id: string;
             };
@@ -662,16 +709,18 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
+            /** @description 任务已受理（异步执行） */
             202: {
                 headers: {
+                    /** @description 重放标记；首次起任务不返回该头 */
+                    "Idempotency-Replayed"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["JobSummary"];
                 };
             };
-            /** @description 资源不存在（problem+json） */
+            /** @description 任务不存在（problem+json） */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -680,7 +729,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["ProblemDetail"];
                 };
             };
-            /** @description 会话状态冲突（problem+json） */
+            /** @description 会话/任务状态冲突（problem+json） */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -707,8 +756,117 @@ export interface operations {
                     "application/problem+json": components["schemas"]["ProblemDetail"];
                 };
             };
-            /** @description 执行任务尚未实现（problem+json） */
-            501: {
+        };
+    };
+    get_job_api_v1_sessions__session_id__jobs__job_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobSummary"];
+                };
+            };
+            /** @description 任务不存在（problem+json） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 会话/任务状态冲突（problem+json） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 请求参数校验失败（problem+json） */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 服务器内部错误（problem+json） */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+        };
+    };
+    cancel_job_api_v1_sessions__session_id__jobs__job_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobSummary"];
+                };
+            };
+            /** @description 任务不存在（problem+json） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 会话/任务状态冲突（problem+json） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 请求参数校验失败（problem+json） */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 服务器内部错误（problem+json） */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };

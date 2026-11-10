@@ -1,8 +1,9 @@
-"""工作台会话 API：建、列、详情（D2 spec §7 的前三行）。
+"""工作台会话 API：建、列、详情；执行任务的起、查、取消（D2 §7 / #215、#217）。
 
-本票只做「看得到会话」；起任务、事件流、待办决议与产物内容分别归 #217–#220。
-``POST .../jobs`` 在本票只保留闸门与占位响应——legacy 的 409 `session_legacy`
-是 D2-AC12 的验收面，必须在契约里就位，不能等 #217 才出现。
+本票之前的 501 占位已被真正的执行入口替换（#217）；事件流、待办决议与产物内容
+分别归 #218–#220。路由顺序是契约的一部分：``{session_id:path}`` 会吞掉斜杠，
+所以 ``/jobs`` 与 ``/jobs/{job_id}`` 必须注册在 ``GET /sessions/{session_id:path}``
+**之前**，否则详情路由会把它们当会话标识。
 """
 from __future__ import annotations
 
@@ -20,7 +21,6 @@ from ...workbench_store import (
     SessionDetail,
     SessionPage,
     WorkbenchSessionStore,
-    WorkbenchError,
 )
 from ..problems import COMMON_ERROR_RESPONSES, ProblemDetail
 
@@ -68,6 +68,10 @@ class SessionCreate(BaseModel):
 
 def _store(request: Request) -> WorkbenchSessionStore:
     return request.app.state.session_store
+
+
+def _runner(request: Request):
+    return request.app.state.job_runner
 
 
 def _brief_from_payload(payload: SessionCreate) -> Brief:
@@ -159,11 +163,11 @@ def list_sessions(
         raise HTTPException(422, "cursor 无效：无法解析分页游标。") from exc
 
 
-class JobNotImplemented(WorkbenchError):
-    """占位错误：执行任务归 #217；本票只保证闸门与错误码先进契约。"""
-
-    status_code = 501
-    code = "job_not_implemented"
+_JOB_RESPONSES = {
+    **_SESSION_ERROR_RESPONSES,
+    404: {"model": ProblemDetail, "description": "任务不存在（problem+json）"},
+    409: {"model": ProblemDetail, "description": "会话/任务状态冲突（problem+json）"},
+}
 
 
 @router.post(
@@ -171,17 +175,55 @@ class JobNotImplemented(WorkbenchError):
     status_code=202,
     response_model=JobSummary,
     responses={
-        501: {"model": ProblemDetail, "description": "执行任务尚未实现（problem+json）"},
-        **_SESSION_ERROR_RESPONSES,
+        202: {
+            "model": JobSummary,
+            "description": "任务已受理（异步执行）",
+            "headers": {
+                "Idempotency-Replayed": {
+                    "description": "重放标记；首次起任务不返回该头",
+                    "schema": {"type": "string"},
+                },
+            },
+        },
+        **_JOB_RESPONSES,
     },
 )
-def start_job(session_id: str, request: Request) -> JobSummary:
-    """推进会话的占位入口（#217 实现真正的执行）。"""
-    store = _store(request)
-    detail = store.get_session(session_id)
-    # 闸门顺序即语义：legacy 只读优先于一切状态判断（D2-AC12）。
-    store.ensure_can_advance(detail)
-    raise JobNotImplemented("执行任务由 #217 实现。")
+async def start_job(
+    session_id: str,
+    request: Request,
+    response: Response,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> JobSummary:
+    """起一次 ``advance``：202 返回任务对象，执行在后台任务里。
+
+    闸门与单写入者判定在 ``JobRunner.advance`` 的会话临界区里完成；这里不再判一遍，
+    否则「先查后写」的两处判据会在并发下各说各话（D2-AC3）。
+    """
+    job, replayed = await _runner(request).advance(
+        session_id, idempotency_key=idempotency_key or None)
+    if replayed:
+        response.headers["Idempotency-Replayed"] = "true"
+    return job
+
+
+@router.get(
+    "/sessions/{session_id:path}/jobs/{job_id}",
+    response_model=JobSummary,
+    responses=_JOB_RESPONSES,
+)
+def get_job(session_id: str, job_id: str, request: Request) -> JobSummary:
+    return _runner(request).get_job(session_id, job_id)
+
+
+@router.post(
+    "/sessions/{session_id:path}/jobs/{job_id}/cancel",
+    status_code=202,
+    response_model=JobSummary,
+    responses=_JOB_RESPONSES,
+)
+async def cancel_job(session_id: str, job_id: str, request: Request) -> JobSummary:
+    """请求取消：只打标记，任务在当前节点跑完后才停（**不承诺立即停止**）。"""
+    return await _runner(request).cancel(session_id, job_id)
 
 
 @router.get(
