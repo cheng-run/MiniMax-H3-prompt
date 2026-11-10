@@ -20,6 +20,7 @@ from .problems import apply_problem_media_type_openapi, install_problem_handlers
 from .routes.assets import router as assets_router
 from .routes.auth import router as auth_router
 from .routes.health import router as health_router
+from .routes.media import router as media_router
 from .routes.sessions import router as sessions_router
 from .spa import DEFAULT_DIST, install_spa
 
@@ -90,6 +91,8 @@ def create_app(
     # 必须先于 ``GET /sessions/{session_id:path}`` 注册，否则详情路由会把 ``assets``
     # 当作会话标识的一部分。assets 路由器整只排在 sessions 之前，这条顺序不靠人记。
     app.include_router(assets_router)
+    # 媒体读取（D3-3）：``{asset_id:path}`` 同样自带会话标识里的斜杠，理由同上。
+    app.include_router(media_router)
     app.include_router(sessions_router)
     if include_test_routes:
         from .routes.validation_probe import router as probe_router

@@ -12,6 +12,8 @@
 | `api/jobs.py` | `JobRunner`：每会话 asyncio 锁、`to_thread` 跑 LangGraph、节点边界取消、`active-job.json`、启动对账、阶段 1/2 执行 |
 | `api/routes/sessions.py` | `/api/v1` 全部会话端点；**路由顺序即契约**：`{session_id:path}` 会吞斜杠，`/jobs`、`/events`、`/action-items` 必须注册在详情路由之前 |
 | `api/routes/assets.py` | 上传素材的收与列（`POST/GET /sessions/{id}/assets`）；整只路由器在 `create_app` 里排在 `sessions` 之前，顺序不靠人记 |
+| `api/routes/media.py` | 素材字节读取（`GET/HEAD /media/{asset_id:path}`）；同样排在 `sessions` 之前 |
+| `api/media.py` | 单段 Range 解析、416 与字节流响应；素材与成片的 content 端点**共用这一份** |
 | `api/auth.py` | 本地访问控制：Host/Origin 白名单、每进程启动令牌、`LocalAccessMiddleware`（纯 ASGI，最外层） |
 | `api/routes/auth.py` | `GET /api/v1/auth/token`：返回令牌并下发 `wb_session` Cookie |
 | `api/app.py` | 工厂、lifespan（启动对账）、注入 `sessions_root` / `runtime_config` / `local_access` |
@@ -30,7 +32,17 @@
 - 取消是协作式：只在节点边界生效，job 记 `cancelled_at_node`；**不要承诺立即停止**。
 - 启动对账只把 `running` 收成 `interrupted`，**不自动续跑**。
 - 阶段 2 中断后再 `advance`：按 `stage1_review` 的决议事实续跑阶段 2（`_resume_step`），不回人工闸门。
-- 产物 content 只服务文本、上限 1 MiB；视频只有元数据、没有内容端点（媒体字节归 D3-3）。
+- 产物 content **按登记表的形态分支**（#225）：文本三件套是纯文本 + 1 MiB 上限（超出 413），
+  成片 `final.mp4` 给字节 + 单段 Range；两者都答 `HEAD`（同头、无体）。哪几个名字能读
+  由 `workbench_store` 的登记表派生，端点里不抄第二份白名单。
+- **媒体读取**（#225 / D3-3）：`GET` 与 `HEAD` 分开注册——HEAD 的**成功**响应在契约里
+  不声明响应体（错误响应两条路径同形，都是 problem+json）；
+  固定带 `Accept-Ranges: bytes`、`ETag`、`Last-Modified`、`Content-Length`、`Content-Type`
+  与 `Content-Disposition: inline; filename*=UTF-8''…`。Range 只支持**单段**
+  （`a-b` / `a-` / `-n`）：越界、语法非法、多段一律 416 problem+json，并带
+  `Content-Range: bytes */<len>`；`Range` 的单位不是 `bytes` 时按 RFC 忽略、回整份。
+  素材标识只认 `<会话标识>/<16 位内容哈希>`（无扩展名，见 §5.4），扩展名是落盘形态。
+  成片的 `ETag` 取 `mtime_ns-大小`：为一次请求去哈希几百 MiB 不值（素材侧才是内容哈希）。
 - **上传素材**（D3-2）是 `<会话目录>/assets/<sha256 前 16 位>.<嗅探扩展名>` 加一份
   `.json` 边车（显示名、类型、字节、首次创建时间），清单靠目录现扫 + 命名规则——
   `.tmp-*` 不是素材，列表看不见，只在启动时删；同内容不写第二份。上传**不改会话

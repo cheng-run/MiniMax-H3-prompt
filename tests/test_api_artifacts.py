@@ -169,29 +169,39 @@ def test_text_artifact_over_one_mib_is_413(workbench):
     assert len(at_limit.text) == limit
 
 
-def test_video_artifact_is_metadata_only(workbench):
-    """视频类在 D2 只有元数据：清单里有它，内容端点不服务它（那是 D3 的能力）。"""
+def test_video_artifact_is_listed_and_readable(workbench):
+    """成片（#225 起）走 content 端点给字节 + Range；清单里的元数据照旧。"""
     app, _model, root = workbench
+    payload = bytes(range(256)) * 8
     with workbench_client(app) as client:
         session_id = _run_to_completed(client)
-        (root / Path(session_id) / "final.mp4").write_bytes(b"\x00" * 2048)
+        (root / Path(session_id) / "final.mp4").write_bytes(payload)
 
         listed = client.get(f"/api/v1/sessions/{session_id}/artifacts")
         detail = client.get(f"/api/v1/sessions/{session_id}")
         content = client.get(
             f"/api/v1/artifacts/{session_id}/final.mp4/content")
+        chunk = client.get(
+            f"/api/v1/artifacts/{session_id}/final.mp4/content",
+            headers={"Range": "bytes=8-15"})
 
     assert listed.status_code == 200, listed.text
     by_name = {item["name"]: item for item in listed.json()}
     assert set(by_name) == {"video-prompt.md", "final.mp4"}
     assert by_name["final.mp4"]["kind"] == "video"
-    assert by_name["final.mp4"]["bytes"] == 2048
+    assert by_name["final.mp4"]["bytes"] == len(payload)
     assert by_name["final.mp4"]["artifact_id"] == f"{session_id}/final.mp4"
     assert set(by_name) == {item["name"] for item in detail.json()["artifacts"]}
 
-    assert content.status_code == 404
-    assert content.headers["content-type"].startswith("application/problem+json")
-    assert content.json()["code"] == "artifact_not_found"
+    assert content.status_code == 200
+    assert content.headers["content-type"] == "video/mp4"
+    assert content.headers["accept-ranges"] == "bytes"
+    assert content.headers["etag"]
+    assert content.headers["last-modified"]
+    assert content.content == payload
+    assert chunk.status_code == 206
+    assert chunk.headers["content-range"] == f"bytes 8-15/{len(payload)}"
+    assert chunk.content == payload[8:16]
 
 
 # ---------------------------------------------------------------------------
@@ -290,8 +300,18 @@ def test_contract_declares_artifact_content_and_its_413(workbench):
     assert "/api/v1/sessions/{session_id}/artifacts" in paths
     content_path = "/api/v1/artifacts/{artifact_id}/content"
     assert content_path in paths
+    # GET 与 HEAD 成对：#222 §7 让成片走 §6.2 的 Range 矩阵，那一格里就有 HEAD。
+    assert {"get", "head"} <= set(paths[content_path])
     responses = paths[content_path]["get"]["responses"]
     assert "200" in responses and "404" in responses and "413" in responses
+    assert "206" in responses
+    # 形态由登记表派生：三个文本产物是 text/plain，成片是 video/mp4。
     assert "text/plain" in responses["200"]["content"]
+    assert "video/mp4" in responses["200"]["content"]
+    assert "video/mp4" in responses["206"]["content"]
+    # 媒体响应头与媒体端点同一份声明（含 Content-Length）：一处有一处没有就是两套口径。
+    for header in ("Accept-Ranges", "ETag", "Last-Modified", "Content-Length"):
+        assert header in responses["206"]["headers"], header
     assert "application/problem+json" in responses["413"]["content"]
     assert "application/problem+json" in responses["404"]["content"]
+    assert "application/problem+json" in responses["416"]["content"]

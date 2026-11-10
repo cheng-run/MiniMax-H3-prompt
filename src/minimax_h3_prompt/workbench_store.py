@@ -56,19 +56,23 @@ _LEGACY_STATUS = {
     "director_segments_running": "interrupted",
 }
 
-# 产物登记范围（D2 spec §10）：文本产物登记元数据并服务内容；视频类只登记元数据，
-# 字节与 Range 归 D3。
+# 产物登记范围（D2 spec §10、D3 #222 §7）：两张表各管一种响应形态——文本产物
+# 走纯文本（1 MiB 上限），媒体产物走字节 + 单段 Range。分成两张表是为了让「某个
+# 名字按哪种形态读」由登记范围派生，而不是在读取端点再抄一份白名单。
 _ARTIFACT_KINDS = {
     "video-prompt.md": "video_prompt",
     "summary-zh.md": "summary_markdown",
     "summary-zh.json": "summary_json",
 }
-# 视频类在 D2 只登记元数据：不给字节、不给 Range（那是 D3 的媒体能力）。单独一张表
-# 是为了让「哪些名字能读内容」由登记范围派生，而不是在读取端点再抄一份白名单。
-_METADATA_ONLY_ARTIFACTS = {
-    "final.mp4": "video",
+# 媒体产物：名字 → Content-Type。目前只有成片；列表里的 kind 仍是 ``video``。
+ARTIFACT_MEDIA_TYPES = {
+    "final.mp4": "video/mp4",
 }
-_KNOWN_ARTIFACTS = {**_ARTIFACT_KINDS, **_METADATA_ONLY_ARTIFACTS}
+# 「哪些名字算产物」的唯一来源：清单扫描、登记守卫、内容读取都从它派生。
+_KNOWN_ARTIFACTS = {
+    **_ARTIFACT_KINDS,
+    **{name: "video" for name in ARTIFACT_MEDIA_TYPES},
+}
 
 # 文本内容读取的上限（spec §10）：1 MiB，超出回 413 artifact_too_large。
 ARTIFACT_MAX_BYTES = 1024 * 1024
@@ -113,6 +117,23 @@ _ASSET_FORMATS: dict[str, tuple[str, str]] = {
     "mp3": ("audio", "mp3"),
 }
 
+# 规范化格式 → Content-Type。媒体读取端点与它自己的契约共用这一张表：端点按磁盘上
+# 的扩展名给 Content-Type，契约里列出的可选类型也从这里派生，两处不会各说各话。
+_FORMAT_MEDIA_TYPES: dict[str, str] = {
+    "png": "image/png",
+    "jpeg": "image/jpeg",
+    "webp": "image/webp",
+    "mp4": "video/mp4",
+    "webm": "video/webm",
+    "wav": "audio/wav",
+    "mp3": "audio/mpeg",
+}
+# 扩展名 → Content-Type：从 ``_ASSET_FORMATS`` **现算**，不给新扩展名留一条静默漏判
+# 的路（加了扩展名却忘了媒体类型，这里当场 KeyError）。
+ASSET_MEDIA_TYPES: dict[str, str] = {
+    ext: _FORMAT_MEDIA_TYPES[fmt] for ext, (_kind, fmt) in _ASSET_FORMATS.items()
+}
+
 # ISO 基础媒体文件（MP4）的 major brand 白名单（``ftyp`` 盒第 8–12 字节）。
 # 只认 ``ftyp`` 盒子不够：QuickTime（``qt  ``）、HEIC（``heic``/``mif1``）与 MP4 用
 # 同一个盒子结构，前者不在 §5.2 白名单里、后者根本是图片——只判盒子会让它们以
@@ -122,10 +143,18 @@ _MP4_BRANDS = frozenset({
     b"mp41", b"mp42", b"M4V ", b"M4A ", b"avc1", b"dash", b"MSNV", b"f4v ",
 })
 
+# 素材标识里的内容哈希前缀长度（#222 §5.4）。两条正则与 ``store_asset`` 截前缀都从
+# 它派生——字面重抄三份的话，改宽度会静默漏改一处。
+ASSET_HASH_CHARS = 16
+
 # 素材文件名形如 ``<sha256 前 16 位>.<已知扩展名>``。``.tmp-*`` 不匹配这个形状；
 # 边车 ``<hash>.json`` 形状上匹配，但扩展名不在 ``_ASSET_FORMATS`` 里，同样落选——
 # 「残片/边车不出现在列表里」由这两条判据共同保证，不需要额外的排除清单。
-_ASSET_NAME_RE = re.compile(r"^(?P<hash>[0-9a-f]{16})\.(?P<ext>[a-z0-9]+)$")
+_ASSET_NAME_RE = re.compile(
+    rf"^(?P<hash>[0-9a-f]{{{ASSET_HASH_CHARS}}})\.(?P<ext>[a-z0-9]+)$")
+# 素材标识的第二段：只有内容哈希前缀、没有扩展名（#222 §5.4）。扩展名是落盘形态，
+# 不是标识的一部分——客户端拿列表里的 ``asset_id`` 就能拼出媒体 URL。
+_ASSET_ID_RE = re.compile(rf"^[0-9a-f]{{{ASSET_HASH_CHARS}}}$")
 
 _GEN_RE = re.compile(r"^GEN(\d+)$")
 _IDEMPOTENCY_CAPACITY = 50
@@ -191,7 +220,7 @@ class JobNotRunning(WorkbenchError):
 
 
 class ArtifactNotFound(WorkbenchError):
-    """产物不存在、标识越界，或该产物在 D2 不提供内容（视频类只登记元数据）。
+    """产物不存在、标识越界，或名字不在登记范围内。
 
     这几种情况不回不同码：越界与不存在若能区分，就等于泄漏登记根之外是否真有文件。
     """
@@ -230,6 +259,16 @@ class UnsupportedMediaType(WorkbenchError):
 class AssetTooLarge(WorkbenchError):
     status_code = 413
     code = "asset_too_large"
+
+
+class AssetNotFound(WorkbenchError):
+    """素材不存在、标识越界，或不是素材命名形态（#222 §8 / §10）。
+
+    三种情况同码：能区分「越界」与「不存在」就等于泄漏登记根之外是否真有文件。
+    """
+
+    status_code = 404
+    code = "asset_not_found"
 
 
 class StorageUnavailable(WorkbenchError):
@@ -624,6 +663,23 @@ class ArtifactInfo(BaseModel):
     created_at: str
 
 
+@dataclass(frozen=True)
+class MediaResource:
+    """一份可读字节的磁盘文件及其缓存标识（#222 §6.1）。
+
+    ``etag`` 由各来源自己给：素材的文件名**就是**内容哈希，成片则用「mtime+大小」
+    ——为一次请求去哈希几百 MiB 的成片是拿磁盘换一个不会变的字符串。
+    """
+
+    path: Path
+    media_type: str
+    size: int
+    mtime: float
+    etag: str
+    # 显示名（进 ``Content-Disposition``）；素材取边车里的名字，产物就是文件名。
+    filename: str = ""
+
+
 class Asset(BaseModel):
     """上传素材的对外形状（#222 §9）。``asset_id`` 与 ``artifact_id`` 同形：
     ``<session_id>/<sha256 前 16 位>``——路径参数按 ``{asset_id:path}`` 承接。"""
@@ -767,6 +823,18 @@ def _is_within(path: Path, root: Path) -> bool:
     return True
 
 
+def _split_artifact_id(artifact_id: str) -> tuple[str, str]:
+    """``<会话标识>/<文件名>`` → 两段；缺会话段或文件名一律 404。
+
+    会话标识本身可以含斜杠，所以按**最后一个**斜杠切；越界与不存在的判定在各自的
+    ``_resolve`` / ``_artifact_path`` 里，不在这里替它们下结论。
+    """
+    session_id, _, name = artifact_id.rpartition("/")
+    if not session_id or not name:
+        raise ArtifactNotFound(f"产物标识必须形如 <会话标识>/<文件名>：{artifact_id}")
+    return session_id, name
+
+
 def _unlink_quietly(path: Path) -> None:
     """删临时文件；已经不在就当成功。清理路径不该因为「本来就没有」再失败一次。"""
     try:
@@ -896,22 +964,35 @@ def _asset_default_name(hash16: str, ext: str) -> str:
     return f"asset-{hash16}.{ext}"
 
 
+def _resolved_asset_file(path: Path, root: Path) -> tuple[Path, re.Match[str]] | None:
+    """素材正本 → ``(解析后的路径, 名字匹配)``；残片、边车与根外落点返回 ``None``。
+
+    列表扫描与媒体读取共用这一份判定：两处各写一遍时，改「什么算素材」只会改到一处
+    （``.tmp-*`` 与边车靠的是同一个命名正则）。
+    """
+    match = _ASSET_NAME_RE.match(path.name)
+    if match is None:
+        return None
+    if match.group("ext") not in _ASSET_FORMATS:
+        return None
+    resolved = path.resolve()
+    if not resolved.is_file() or not _is_within(resolved, root):
+        return None
+    return resolved, match
+
+
 def _asset_from_path(session_id: str, path: Path, root: Path) -> Asset | None:
     """把一个磁盘文件解释成素材；不是素材形态（临时文件、边车、未知扩展名）返回 None。
 
     ``bytes`` 与 ``kind`` 一律从磁盘取：边车只是**显示名与首次创建时间**的载体，
     它坏了或被改过都不该让列表里的字节数说谎。
     """
-    match = _ASSET_NAME_RE.match(path.name)
-    if match is None:
+    found = _resolved_asset_file(path, root)
+    if found is None:
         return None
+    resolved, match = found
     ext = match.group("ext")
-    known = _ASSET_FORMATS.get(ext)
-    if known is None:
-        return None
-    resolved = path.resolve()
-    if not resolved.is_file() or not _is_within(resolved, root):
-        return None
+    known = _ASSET_FORMATS[ext]
     hash16 = match.group("hash")
     stat = resolved.stat()
     kind = known[0]
@@ -1268,11 +1349,11 @@ class WorkbenchSessionStore:
     def read_artifact_text(self, artifact_id: str) -> tuple[ArtifactInfo, str]:
         """文本产物全文；``artifact_id`` = ``<session_id>/<文件名>``（spec §7 / §10）。
 
-        视频类与越界标识共用 404：能区分「不存在」与「越界」就等于泄漏登记根之外
+        媒体类与越界标识共用 404：能区分「不存在」与「越界」就等于泄漏登记根之外
         是否真有文件（spec §12）。
         """
-        session_id, _, name = artifact_id.rpartition("/")
-        if not session_id or name not in _ARTIFACT_KINDS:
+        session_id, name = _split_artifact_id(artifact_id)
+        if name not in _ARTIFACT_KINDS:
             raise ArtifactNotFound(f"没有可读的文本产物：{artifact_id}")
         try:
             directory = self.session_directory(session_id)
@@ -1288,6 +1369,43 @@ class WorkbenchSessionStore:
                 f"文本产物 {artifact_id} 有 {size} 字节，超过 "
                 f"{ARTIFACT_MAX_BYTES} 字节上限。")
         return _artifact_info(session_id, name, path), path.read_text(encoding="utf-8")
+
+    def is_media_artifact(self, artifact_id: str) -> bool:
+        """该名字按**媒体**形态读吗（False ⇒ 纯文本 + 1 MiB 上限）。
+
+        形态由登记表派生（文本表与媒体表各一张），端点不再抄第二份白名单
+        （#222 §7）。名字不在任何一张表里就 404，与读内容同码。
+        """
+        _session_id, name = _split_artifact_id(artifact_id)
+        if name in ARTIFACT_MEDIA_TYPES:
+            return True
+        if name in _ARTIFACT_KINDS:
+            return False
+        raise ArtifactNotFound(f"没有可读的产物：{artifact_id}")
+
+    def resolve_artifact_media(self, artifact_id: str) -> MediaResource:
+        """媒体产物的可读字节（#222 §7）：与素材共用同一套 Range 口径。"""
+        session_id, name = _split_artifact_id(artifact_id)
+        media_type = ARTIFACT_MEDIA_TYPES.get(name)
+        if media_type is None:
+            raise ArtifactNotFound(f"没有可读的媒体产物：{artifact_id}")
+        try:
+            directory = self.session_directory(session_id)
+        except SessionNotFound as exc:
+            raise ArtifactNotFound(f"产物不存在：{artifact_id}") from exc
+        path = self._artifact_path(directory, name)
+        if path is None:
+            raise ArtifactNotFound(f"产物不存在：{artifact_id}")
+        stat = path.stat()
+        return MediaResource(
+            path=path,
+            media_type=media_type,
+            size=stat.st_size,
+            mtime=stat.st_mtime,
+            # 不哈希成片：一次请求读几百 MiB 换个缓存标识不值，mtime+大小够本机用。
+            etag=f"{stat.st_mtime_ns:x}-{stat.st_size:x}",
+            filename=name,
+        )
 
     def _artifact_path(self, directory: Path, name: str) -> Path | None:
         """解析成真实文件并确认仍在登记根之下；符号链接逃逸返回 ``None``。
@@ -1314,6 +1432,42 @@ class WorkbenchSessionStore:
         """会话的素材清单（目录现扫）；会话不存在与产物清单同口径，一律 404。"""
         directory, _session, derived, _legacy = self._load(session_id)
         return _assets_of(derived, directory, self.root.resolve())
+
+    def resolve_asset_media(self, asset_id: str) -> MediaResource:
+        """把 ``<会话标识>/<16 位内容哈希>`` 解析成可读字节的素材文件。
+
+        ``asset_id`` 只认 §5.4 的形态（哈希前缀、无扩展名）：扩展名由磁盘上的文件
+        决定，客户端拼 URL 时不该猜它。非素材命名形态、根外落点、符号链接逃逸与
+        不存在的素材一律 ``asset_not_found``（#222 §8，与产物读取同一取舍）。
+        """
+        session_id, _, hash16 = asset_id.rpartition("/")
+        if not session_id or _ASSET_ID_RE.match(hash16) is None:
+            raise AssetNotFound("素材标识必须形如 <会话标识>/<16 位内容哈希>。")
+        try:
+            directory, _session, derived, _legacy = self._load(session_id)
+        except SessionNotFound as exc:
+            raise AssetNotFound(f"素材不存在：{asset_id}") from exc
+        root = self.root.resolve()
+        assets_dir = directory / ASSETS_DIRNAME
+        # 前缀碰撞时同一哈希可能对应多个扩展名文件；按名字排序取第一个，结果稳定。
+        for candidate in sorted(assets_dir.glob(f"{hash16}.*")):
+            found = _resolved_asset_file(candidate, root)
+            if found is None:
+                continue  # 边车（.json）、临时文件与根外落点都落选
+            resolved, match = found
+            asset = _asset_from_path(derived, resolved, root)
+            if asset is None:
+                continue
+            stat = resolved.stat()
+            return MediaResource(
+                path=resolved,
+                media_type=ASSET_MEDIA_TYPES[match.group("ext")],
+                size=stat.st_size,
+                mtime=stat.st_mtime,
+                etag=match.group("hash"),
+                filename=asset.name,
+            )
+        raise AssetNotFound(f"素材不存在：{asset_id}")
 
     def store_asset(
         self,
@@ -1389,7 +1543,7 @@ class WorkbenchSessionStore:
             raise
 
         hash_full = digest.hexdigest()
-        hash16 = hash_full[:16]
+        hash16 = hash_full[:ASSET_HASH_CHARS]
         target = assets_dir / f"{hash16}.{ext}"
         registry = self.session_registry(session_id)
         with self._lock_for(session_id):

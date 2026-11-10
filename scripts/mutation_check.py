@@ -61,6 +61,22 @@ MUTATIONS: tuple[Mutation, ...] = (
         "文本读取上限失守＝大产物把内存与响应体一起拖爆，413 专用码永不出现",
     ),
     Mutation(
+        "range_end_not_clamped",
+        "src/minimax_h3_prompt/api/media.py",
+        "    return start, min(end, size - 1)",
+        "    return start, end",
+        ("tests/test_api_media.py::test_single_range_forms_return_206",),
+        "结束位置不截到文件尾＝Content-Range 与 Content-Length 声称的字节数多于实际发出的",
+    ),
+    Mutation(
+        "range_416_without_content_range",
+        "src/minimax_h3_prompt/api/media.py",
+        '    response.headers["Content-Range"] = f"bytes */{size}"',
+        '    response.headers["X-File-Size"] = f"bytes */{size}"',
+        ("tests/test_api_media.py::test_unsatisfiable_or_malformed_ranges_are_416",),
+        "416 少了 Content-Range: bytes */len＝客户端拿不到文件多大，没法重新挑范围",
+    ),
+    Mutation(
         "continuity_cut_true",
         "src/minimax_h3_prompt/director/pack.py",
         '        "refVideos": [],\n        "continuityFromPrev": segment.guided,\n'

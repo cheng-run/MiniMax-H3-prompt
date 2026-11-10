@@ -12,7 +12,7 @@ import hashlib
 import json
 import time
 from collections.abc import AsyncIterator
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
 from fastapi.responses import PlainTextResponse, StreamingResponse
@@ -27,6 +27,7 @@ from ...user_revisions import (
     LAYER_STORY,
 )
 from ...workbench_store import (
+    ARTIFACT_MEDIA_TYPES,
     ActionItemOut,
     ArtifactInfo,
     EventLog,
@@ -34,6 +35,12 @@ from ...workbench_store import (
     SessionDetail,
     SessionPage,
     WorkbenchSessionStore,
+)
+from ..media import (
+    MEDIA_RESPONSE_HEADERS,
+    RANGE_RESPONSE_HEADERS,
+    binary_content,
+    build_media_response,
 )
 from ..problems import AUTH_ERROR_RESPONSES, COMMON_ERROR_RESPONSES, ProblemDetail
 
@@ -407,30 +414,91 @@ def list_artifacts(session_id: str, request: Request) -> list[ArtifactInfo]:
 _ARTIFACT_RESPONSES = {
     **_SESSION_ERROR_RESPONSES,
     404: {"model": ProblemDetail,
-          "description": "产物不存在、标识越界，或该产物不提供内容（problem+json）"},
+          "description": "产物不存在、标识越界，或该名字不在登记范围内（problem+json）"},
     413: {"model": ProblemDetail, "description": "文本产物超过 1 MiB（problem+json）"},
+    416: {"model": ProblemDetail,
+          "description": "媒体产物的 Range 越界、语法非法或多段（problem+json）；"
+                         "带 Content-Range: bytes */<len>"},
 }
+
+# 契约里的 200 形态同样由登记表派生（#222 §7）：文本表给 text/plain，媒体表给各自的
+# Content-Type。端点里只按形态分支，不在这里另抄一份「哪些名字能读」。
+_ARTIFACT_CONTENT = {
+    "text/plain": {"schema": {"type": "string"}},
+    **binary_content(ARTIFACT_MEDIA_TYPES.values()),
+}
+
+# GET 与 HEAD 的差别只在**成功**响应有没有体（HEAD 按定义没有）；错误两条路径同形，
+# 都是 problem+json，所以共用 ``_ARTIFACT_RESPONSES``。
+_ARTIFACT_GET_RESPONSES: dict[int | str, dict[str, Any]] = {
+    200: {
+        "description": "文本产物全文（UTF-8，1 MiB 上限）或媒体产物的整份字节。",
+        "content": _ARTIFACT_CONTENT,
+        "headers": MEDIA_RESPONSE_HEADERS,
+    },
+    206: {
+        "description": "媒体产物的单段字节范围（Range: bytes=…）。",
+        "content": binary_content(ARTIFACT_MEDIA_TYPES.values()),
+        "headers": RANGE_RESPONSE_HEADERS,
+    },
+    **_ARTIFACT_RESPONSES,
+}
+_ARTIFACT_HEAD_RESPONSES: dict[int | str, dict[str, Any]] = {
+    200: {"description": "与 GET 同头、无体。", "headers": MEDIA_RESPONSE_HEADERS},
+    206: {"description": "媒体产物的字节范围，与 GET 同头、无体。",
+          "headers": RANGE_RESPONSE_HEADERS},
+    **_ARTIFACT_RESPONSES,
+}
+
+
+def _artifact_content_response(artifact_id: str, request: Request) -> Response:
+    """按登记形态回产物字节；文本与媒体共用同一个入口，HEAD 由调用方声明。"""
+    store = _store(request)
+    head = request.method == "HEAD"
+    if not store.is_media_artifact(artifact_id):
+        _info, text = store.read_artifact_text(artifact_id)
+        if head:
+            # HEAD 与 GET 同头、无体：长度按 GET 会给的 UTF-8 字节数报。
+            return Response(
+                status_code=200,
+                headers={
+                    "Content-Type": "text/plain; charset=utf-8",
+                    "Content-Length": str(len(text.encode("utf-8"))),
+                },
+            )
+        return PlainTextResponse(text, media_type="text/plain; charset=utf-8")
+    return build_media_response(
+        store.resolve_artifact_media(artifact_id),
+        request.headers.get("range"),
+        request_path=request.url.path,
+        head=head,
+    )
 
 
 @router.get(
     "/artifacts/{artifact_id:path}/content",
-    response_class=PlainTextResponse,
-    responses={
-        200: {
-            "description": "文本产物全文（UTF-8）；视频类在 D2 不提供内容。",
-            "content": {"text/plain": {"schema": {"type": "string"}}},
-        },
-        **_ARTIFACT_RESPONSES,
-    },
+    response_class=Response,
+    responses=_ARTIFACT_GET_RESPONSES,
 )
-def get_artifact_content(artifact_id: str, request: Request) -> PlainTextResponse:
-    """读文本产物全文（spec §10）。
+def get_artifact_content(artifact_id: str, request: Request) -> Response:
+    """按登记形态读产物（spec §10、#222 §7）。
 
-    ``artifact_id`` 是 ``<session_id>/<文件名>``：会话标识本身含斜杠，所以 ``:path``
-    沿用会话路由的口径，最后一段才是文件名。越界与不存在一律 404 ``artifact_not_found``。
+    文本产物回纯文本（1 MiB 上限），媒体产物回字节并支持单段 Range——形态来自
+    ``workbench_store`` 的登记表，这里不认文件名。``artifact_id`` 是
+    ``<session_id>/<文件名>``：会话标识本身含斜杠，所以 ``:path`` 沿用会话路由的
+    口径，最后一段才是文件名。越界与不存在一律 404 ``artifact_not_found``。
     """
-    _info, text = _store(request).read_artifact_text(artifact_id)
-    return PlainTextResponse(text, media_type="text/plain; charset=utf-8")
+    return _artifact_content_response(artifact_id, request)
+
+
+@router.head(
+    "/artifacts/{artifact_id:path}/content",
+    response_class=Response,
+    responses=_ARTIFACT_HEAD_RESPONSES,
+)
+def head_artifact_content(artifact_id: str, request: Request) -> Response:
+    """探测产物：与 GET 同头、无体（#222 §6.2 的 HEAD 一格同样适用于成片）。"""
+    return _artifact_content_response(artifact_id, request)
 
 
 @router.get(

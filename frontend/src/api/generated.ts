@@ -8,17 +8,23 @@ export interface paths {
         };
         /**
          * Get Artifact Content
-         * @description 读文本产物全文（spec §10）。
+         * @description 按登记形态读产物（spec §10、#222 §7）。
          *
-         *     ``artifact_id`` 是 ``<session_id>/<文件名>``：会话标识本身含斜杠，所以 ``:path``
-         *     沿用会话路由的口径，最后一段才是文件名。越界与不存在一律 404 ``artifact_not_found``。
+         *     文本产物回纯文本（1 MiB 上限），媒体产物回字节并支持单段 Range——形态来自
+         *     ``workbench_store`` 的登记表，这里不认文件名。``artifact_id`` 是
+         *     ``<session_id>/<文件名>``：会话标识本身含斜杠，所以 ``:path`` 沿用会话路由的
+         *     口径，最后一段才是文件名。越界与不存在一律 404 ``artifact_not_found``。
          */
         get: operations["get_artifact_content_api_v1_artifacts__artifact_id__content_get"];
         put?: never;
         post?: never;
         delete?: never;
         options?: never;
-        head?: never;
+        /**
+         * Head Artifact Content
+         * @description 探测产物：与 GET 同头、无体（#222 §6.2 的 HEAD 一格同样适用于成片）。
+         */
+        head: operations["head_artifact_content_api_v1_artifacts__artifact_id__content_head"];
         patch?: never;
         trace?: never;
     };
@@ -53,6 +59,30 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/media/{asset_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Media
+         * @description 读素材字节；``Range`` 只支持单段（#222 §6.2）。
+         */
+        get: operations["get_media_api_v1_media__asset_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        /**
+         * Head Media
+         * @description 探测素材：头与 GET 一致、无体；供播放器决定要不要发 Range。
+         */
+        head: operations["head_media_api_v1_media__asset_id__head"];
         patch?: never;
         trace?: never;
     };
@@ -670,13 +700,45 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description 文本产物全文（UTF-8）；视频类在 D2 不提供内容。 */
+            /** @description 文本产物全文（UTF-8，1 MiB 上限）或媒体产物的整份字节。 */
             200: {
                 headers: {
+                    /** @description 恒为 bytes（单段） */
+                    "Accept-Ranges"?: string;
+                    /** @description inline；显示名按 RFC 5987 编码 */
+                    "Content-Disposition"?: string;
+                    /** @description 本次响应的字节数（HEAD 时为 GET 会给的字节数） */
+                    "Content-Length"?: number;
+                    /** @description 缓存标识（素材即内容哈希） */
+                    ETag?: string;
+                    /** @description 文件修改时间（HTTP-date） */
+                    "Last-Modified"?: string;
                     [name: string]: unknown;
                 };
                 content: {
                     "text/plain": string;
+                    "video/mp4": string;
+                };
+            };
+            /** @description 媒体产物的单段字节范围（Range: bytes=…）。 */
+            206: {
+                headers: {
+                    /** @description 恒为 bytes（单段） */
+                    "Accept-Ranges"?: string;
+                    /** @description inline；显示名按 RFC 5987 编码 */
+                    "Content-Disposition"?: string;
+                    /** @description 本次响应的字节数（HEAD 时为 GET 会给的字节数） */
+                    "Content-Length"?: number;
+                    /** @description bytes <start>-<end>/<len> */
+                    "Content-Range"?: string;
+                    /** @description 缓存标识（素材即内容哈希） */
+                    ETag?: string;
+                    /** @description 文件修改时间（HTTP-date） */
+                    "Last-Modified"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "video/mp4": string;
                 };
             };
             /** @description 缺少或无效的工作台访问令牌（problem+json） */
@@ -697,7 +759,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["ProblemDetail"];
                 };
             };
-            /** @description 产物不存在、标识越界，或该产物不提供内容（problem+json） */
+            /** @description 产物不存在、标识越界，或该名字不在登记范围内（problem+json） */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -717,6 +779,136 @@ export interface operations {
             };
             /** @description 文本产物超过 1 MiB（problem+json） */
             413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 媒体产物的 Range 越界、语法非法或多段（problem+json）；带 Content-Range: bytes *\/<len> */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 请求参数校验失败（problem+json） */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 服务器内部错误（problem+json） */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+        };
+    };
+    head_artifact_content_api_v1_artifacts__artifact_id__content_head: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                artifact_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 与 GET 同头、无体。 */
+            200: {
+                headers: {
+                    /** @description 恒为 bytes（单段） */
+                    "Accept-Ranges"?: string;
+                    /** @description inline；显示名按 RFC 5987 编码 */
+                    "Content-Disposition"?: string;
+                    /** @description 本次响应的字节数（HEAD 时为 GET 会给的字节数） */
+                    "Content-Length"?: number;
+                    /** @description 缓存标识（素材即内容哈希） */
+                    ETag?: string;
+                    /** @description 文件修改时间（HTTP-date） */
+                    "Last-Modified"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 媒体产物的字节范围，与 GET 同头、无体。 */
+            206: {
+                headers: {
+                    /** @description 恒为 bytes（单段） */
+                    "Accept-Ranges"?: string;
+                    /** @description inline；显示名按 RFC 5987 编码 */
+                    "Content-Disposition"?: string;
+                    /** @description 本次响应的字节数（HEAD 时为 GET 会给的字节数） */
+                    "Content-Length"?: number;
+                    /** @description bytes <start>-<end>/<len> */
+                    "Content-Range"?: string;
+                    /** @description 缓存标识（素材即内容哈希） */
+                    ETag?: string;
+                    /** @description 文件修改时间（HTTP-date） */
+                    "Last-Modified"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 缺少或无效的工作台访问令牌（problem+json） */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Host/Origin 不是本机回环地址（problem+json） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 产物不存在、标识越界，或该名字不在登记范围内（problem+json） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 会话状态冲突（problem+json） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 文本产物超过 1 MiB（problem+json） */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 媒体产物的 Range 越界、语法非法或多段（problem+json）；带 Content-Range: bytes *\/<len> */
+            416: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -811,6 +1003,228 @@ export interface operations {
             };
             /** @description 资源不存在（problem+json） */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 请求参数校验失败（problem+json） */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 服务器内部错误（problem+json） */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+        };
+    };
+    get_media_api_v1_media__asset_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                asset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 整份字节；Content-Type 由素材的实际格式决定。 */
+            200: {
+                headers: {
+                    /** @description 恒为 bytes（单段） */
+                    "Accept-Ranges"?: string;
+                    /** @description inline；显示名按 RFC 5987 编码 */
+                    "Content-Disposition"?: string;
+                    /** @description 本次响应的字节数（HEAD 时为 GET 会给的字节数） */
+                    "Content-Length"?: number;
+                    /** @description 缓存标识（素材即内容哈希） */
+                    ETag?: string;
+                    /** @description 文件修改时间（HTTP-date） */
+                    "Last-Modified"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "audio/mpeg": string;
+                    "audio/wav": string;
+                    "image/jpeg": string;
+                    "image/png": string;
+                    "image/webp": string;
+                    "video/mp4": string;
+                    "video/webm": string;
+                };
+            };
+            /** @description 单段字节范围（Range: bytes=…）。 */
+            206: {
+                headers: {
+                    /** @description 恒为 bytes（单段） */
+                    "Accept-Ranges"?: string;
+                    /** @description inline；显示名按 RFC 5987 编码 */
+                    "Content-Disposition"?: string;
+                    /** @description 本次响应的字节数（HEAD 时为 GET 会给的字节数） */
+                    "Content-Length"?: number;
+                    /** @description bytes <start>-<end>/<len> */
+                    "Content-Range"?: string;
+                    /** @description 缓存标识（素材即内容哈希） */
+                    ETag?: string;
+                    /** @description 文件修改时间（HTTP-date） */
+                    "Last-Modified"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "audio/mpeg": string;
+                    "audio/wav": string;
+                    "image/jpeg": string;
+                    "image/png": string;
+                    "image/webp": string;
+                    "video/mp4": string;
+                    "video/webm": string;
+                };
+            };
+            /** @description 缺少或无效的工作台访问令牌（problem+json） */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Host/Origin 不是本机回环地址（problem+json） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 素材不存在、标识越界，或不是素材命名形态（problem+json） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Range 越界、语法非法或多段（problem+json）；带 Content-Range: bytes *\/<len> */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 请求参数校验失败（problem+json） */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 服务器内部错误（problem+json） */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+        };
+    };
+    head_media_api_v1_media__asset_id__head: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                asset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 与 GET 同头、无体。 */
+            200: {
+                headers: {
+                    /** @description 恒为 bytes（单段） */
+                    "Accept-Ranges"?: string;
+                    /** @description inline；显示名按 RFC 5987 编码 */
+                    "Content-Disposition"?: string;
+                    /** @description 本次响应的字节数（HEAD 时为 GET 会给的字节数） */
+                    "Content-Length"?: number;
+                    /** @description 缓存标识（素材即内容哈希） */
+                    ETag?: string;
+                    /** @description 文件修改时间（HTTP-date） */
+                    "Last-Modified"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 与 GET 同头、无体。 */
+            206: {
+                headers: {
+                    /** @description 恒为 bytes（单段） */
+                    "Accept-Ranges"?: string;
+                    /** @description inline；显示名按 RFC 5987 编码 */
+                    "Content-Disposition"?: string;
+                    /** @description 本次响应的字节数（HEAD 时为 GET 会给的字节数） */
+                    "Content-Length"?: number;
+                    /** @description bytes <start>-<end>/<len> */
+                    "Content-Range"?: string;
+                    /** @description 缓存标识（素材即内容哈希） */
+                    ETag?: string;
+                    /** @description 文件修改时间（HTTP-date） */
+                    "Last-Modified"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 缺少或无效的工作台访问令牌（problem+json） */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Host/Origin 不是本机回环地址（problem+json） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 素材不存在、标识越界，或不是素材命名形态（problem+json） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Range 越界、语法非法或多段（problem+json）；带 Content-Range: bytes *\/<len> */
+            416: {
                 headers: {
                     [name: string]: unknown;
                 };
