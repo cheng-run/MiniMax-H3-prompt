@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
+from workbench_client import workbench_client
 
 
 def _test_client() -> TestClient:
@@ -14,7 +15,8 @@ def _test_client() -> TestClient:
 
     # raise_server_exceptions=False：让未处理异常走到我们注册的 500 problem 处理器，
     # 而不是被 TestClient 直接重抛——否则测不到真实响应体。
-    return TestClient(create_app(include_test_routes=True), raise_server_exceptions=False)
+    return workbench_client(
+        create_app(include_test_routes=True), raise_server_exceptions=False)
 
 
 def _assert_is_problem(resp) -> dict:

@@ -13,12 +13,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from fastapi.testclient import TestClient
 
 from minimax_h3_prompt import model_factory
 from minimax_h3_prompt.api.app import create_app
 from minimax_h3_prompt.graph import pipeline
 from minimax_h3_prompt.session_store import SESSION_FILENAME
+from workbench_client import workbench_client
 from workbench_deterministic import DeterministicChatModel
 
 RUNTIME = SimpleNamespace(
@@ -80,7 +80,7 @@ def _read_session(root: Path, session_id: str) -> dict:
 
 def test_advance_runs_real_stage1_to_the_human_gate(workbench):
     app, model, root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session = _create_session(client)
 
         started = client.post(f"/api/v1/sessions/{session['session_id']}/jobs")
@@ -123,7 +123,7 @@ def test_advance_runs_real_stage1_to_the_human_gate(workbench):
 def test_concurrent_advance_is_rejected_with_session_busy(workbench):
     app, model, _root = workbench
     model.gate_role = "producer"
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session = _create_session(client)
         first = client.post(f"/api/v1/sessions/{session['session_id']}/jobs")
         assert first.status_code == 202
@@ -148,7 +148,7 @@ def test_same_idempotency_key_replays_the_first_job_without_rerunning(workbench)
     app, model, root = workbench
     model.gate_role = "producer"
     headers = {"Idempotency-Key": "advance-1"}
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session = _create_session(client)
         first = client.post(f"/api/v1/sessions/{session['session_id']}/jobs", headers=headers)
         assert first.status_code == 202
@@ -174,7 +174,7 @@ def test_same_idempotency_key_replays_the_first_job_without_rerunning(workbench)
 def test_cancel_stops_after_the_current_node_and_advance_resumes(workbench):
     app, model, root = workbench
     model.gate_role = "producer"
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session = _create_session(client)
         started = client.post(f"/api/v1/sessions/{session['session_id']}/jobs").json()
         assert model.entered.wait(10)
@@ -207,7 +207,7 @@ def test_cancel_stops_after_the_current_node_and_advance_resumes(workbench):
 
 def test_cancel_on_a_finished_job_is_a_conflict(workbench):
     app, _model, _root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session = _create_session(client)
         started = client.post(f"/api/v1/sessions/{session['session_id']}/jobs").json()
         _wait_job(client, session["session_id"], started["job_id"])
@@ -220,7 +220,7 @@ def test_cancel_on_a_finished_job_is_a_conflict(workbench):
 
 def test_unknown_job_is_problem_404(workbench):
     app, _model, _root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session = _create_session(client)
 
         resp = client.get(_job_url(session["session_id"], "nope"))
@@ -260,13 +260,13 @@ def test_startup_reconciliation_marks_interrupted_and_advance_resumes(workbench)
     _app, model, root = workbench
     # 先建会话目录：用一次性 app（不跑 lifespan 也行，建会话只走存储层）。
     bootstrap = create_app(sessions_root=root, runtime_config=RUNTIME)
-    with TestClient(bootstrap) as client:
+    with workbench_client(bootstrap) as client:
         session = _create_session(client)
     _make_running_session(root, session["session_id"], job_id="dead-job")
     model.calls.clear()
 
     app = create_app(sessions_root=root, runtime_config=RUNTIME)
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         detail = client.get(f"/api/v1/sessions/{session['session_id']}").json()
 
         assert detail["status"] == "interrupted"
@@ -293,13 +293,13 @@ def test_reconcile_also_clears_a_stale_marker_of_this_process(workbench):
     """
     _app, _model, root = workbench
     bootstrap = create_app(sessions_root=root, runtime_config=RUNTIME)
-    with TestClient(bootstrap) as client:
+    with workbench_client(bootstrap) as client:
         session = _create_session(client)
     _make_running_session(root, session["session_id"], job_id="stale-job",
                           pid=os.getpid())
 
     app = create_app(sessions_root=root, runtime_config=RUNTIME)
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         detail = client.get(f"/api/v1/sessions/{session['session_id']}").json()
 
         assert detail["status"] == "interrupted"
@@ -314,7 +314,7 @@ def test_reconcile_also_clears_a_stale_marker_of_this_process(workbench):
 def test_queries_stay_responsive_while_the_job_runs(workbench):
     app, model, _root = workbench
     model.gate_role = "producer"
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session = _create_session(client)
         started = client.post(f"/api/v1/sessions/{session['session_id']}/jobs").json()
         assert model.entered.wait(10)
@@ -339,7 +339,7 @@ def test_advance_after_stage2_interruption_runs_stage2_not_stage1(workbench):
     链已耗尽 → 只会挂一条新的 stage1_review，阶段 2 永远走不到。
     """
     app, _model, root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session = _create_session(client)
         sid = session["session_id"]
         job = client.post(f"/api/v1/sessions/{sid}/jobs").json()

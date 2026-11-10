@@ -27,6 +27,7 @@ from minimax_h3_prompt.workbench_store import (
     EventDraft,
     EventLog,
 )
+from workbench_client import workbench_client
 from workbench_deterministic import DeterministicChatModel
 
 RUNTIME = SimpleNamespace(roundtable_max_rounds=1, common_sense_qa=False)
@@ -163,7 +164,7 @@ def _enough(count: int) -> Until:
 
 def test_create_emits_session_created(workbench):
     app, _model, root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session = _create_session(client)
 
     events = _events(root, session["session_id"])
@@ -178,7 +179,7 @@ def test_create_emits_session_created(workbench):
 def test_replayed_create_does_not_append_a_second_event(workbench):
     app, _model, root = workbench
     headers = {"Idempotency-Key": "create-1"}
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         first = client.post("/api/v1/sessions", json=_brief_body(), headers=headers)
         second = client.post("/api/v1/sessions", json=_brief_body(), headers=headers)
 
@@ -188,7 +189,7 @@ def test_replayed_create_does_not_append_a_second_event(workbench):
 
 def test_stage1_job_emits_the_documented_events(workbench):
     app, _model, root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session = _create_session(client)
         started = client.post(f"/api/v1/sessions/{session['session_id']}/jobs").json()
         _wait_job(client, session["session_id"], started["job_id"])
@@ -237,7 +238,7 @@ def test_stage1_job_emits_the_documented_events(workbench):
 def test_cancelled_job_emits_the_node_it_stopped_after(workbench):
     app, model, root = workbench
     model.gate_role = "producer"
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session = _create_session(client)
         started = client.post(f"/api/v1/sessions/{session['session_id']}/jobs").json()
         assert model.entered.wait(10)
@@ -260,7 +261,7 @@ def test_failed_job_emits_code_and_detail(workbench, monkeypatch):
         raise ModelOutputError("分镜节点吐了坏 JSON")
 
     monkeypatch.setattr(pipeline, "run_stage1", _boom)
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session = _create_session(client)
         started = client.post(f"/api/v1/sessions/{session['session_id']}/jobs").json()
         _wait_job(client, session["session_id"], started["job_id"])
@@ -295,11 +296,11 @@ def _make_running_session(root: Path, session_id: str, *, job_id: str,
 
 def test_startup_reconciliation_emits_job_interrupted(workbench):
     _app, _model, root = workbench
-    with TestClient(create_app(sessions_root=root, runtime_config=RUNTIME)) as client:
+    with workbench_client(create_app(sessions_root=root, runtime_config=RUNTIME)) as client:
         session = _create_session(client)
     _make_running_session(root, session["session_id"], job_id="dead-job")
 
-    with TestClient(create_app(sessions_root=root, runtime_config=RUNTIME)) as client:
+    with workbench_client(create_app(sessions_root=root, runtime_config=RUNTIME)) as client:
         detail = client.get(f"/api/v1/sessions/{session['session_id']}").json()
 
     assert detail["status"] == "interrupted"
@@ -316,7 +317,7 @@ def test_startup_reconciliation_emits_job_interrupted(workbench):
 
 def test_sse_frames_carry_id_type_and_json_data(workbench):
     app, _model, root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session = _create_session(client)
         frames, _comments, headers = _collect(
             client, _events_url(session["session_id"]), until=_enough(1))
@@ -331,7 +332,7 @@ def test_sse_frames_carry_id_type_and_json_data(workbench):
 
 def test_sse_replays_only_events_after_last_event_id(workbench):
     app, _model, root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session = _create_session(client)
         started = client.post(f"/api/v1/sessions/{session['session_id']}/jobs").json()
         _wait_job(client, session["session_id"], started["job_id"])
@@ -348,7 +349,7 @@ def test_sse_replays_only_events_after_last_event_id(workbench):
 def test_sse_accepts_last_event_id_as_a_query_parameter(workbench):
     """浏览器 ``EventSource`` 不能自定义请求头，查询参数是重连时的第二选择。"""
     app, _model, _root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session = _create_session(client)
         frames, _comments, _headers = _collect(
             client, _events_url(session["session_id"]) + "?last_event_id=0",
@@ -359,7 +360,7 @@ def test_sse_accepts_last_event_id_as_a_query_parameter(workbench):
 
 def test_bad_last_event_id_is_a_problem_422(workbench):
     app, _model, _root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session = _create_session(client)
         # 请求头只能是 ASCII，非法值就用字母（中文在客户端编码阶段就会炸，测不到服务端）。
         resp = client.get(_events_url(session["session_id"]),
@@ -372,7 +373,7 @@ def test_bad_last_event_id_is_a_problem_422(workbench):
 def test_sse_signals_resync_when_last_event_id_is_beyond_the_tail(workbench):
     """事件文件被清掉/换了机器：补不上缺口必须给前端一个明确信号（spec §8）。"""
     app, _model, _root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session = _create_session(client)
         frames, comments, headers = _collect(
             client, _events_url(session["session_id"]),
@@ -388,7 +389,7 @@ def test_sse_signals_resync_when_last_event_id_is_beyond_the_tail(workbench):
 def test_sse_heartbeat_is_a_comment_line(workbench, monkeypatch):
     monkeypatch.setattr(sessions_route, "SSE_HEARTBEAT_SECONDS", 0.05)
     app, _model, _root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session = _create_session(client)
         _frames, comments, _headers = _collect(
             client, _events_url(session["session_id"]),
@@ -399,7 +400,7 @@ def test_sse_heartbeat_is_a_comment_line(workbench, monkeypatch):
 
 def test_two_subscribers_of_the_same_session_both_get_every_event(workbench):
     app, _model, root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session = _create_session(client)
         started = client.post(f"/api/v1/sessions/{session['session_id']}/jobs").json()
         _wait_job(client, session["session_id"], started["job_id"])
@@ -423,7 +424,7 @@ def test_sse_streams_while_a_long_job_is_running(workbench, monkeypatch):
     monkeypatch.setattr(sessions_route, "SSE_HEARTBEAT_SECONDS", 0.05)
     app, model, _root = workbench
     model.gate_role = "producer"
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session = _create_session(client)
         started = client.post(f"/api/v1/sessions/{session['session_id']}/jobs").json()
         assert model.entered.wait(10)
@@ -445,7 +446,7 @@ def test_sse_streams_while_a_long_job_is_running(workbench, monkeypatch):
 
 def test_events_of_an_unknown_session_is_problem_404(workbench):
     app, _model, _root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         resp = client.get(_events_url("不存在/GEN001"))
 
     assert resp.status_code == 404
@@ -478,11 +479,11 @@ def _append_without_snapshot(root: Path, session_id: str) -> None:
 
 def test_stale_snapshot_is_repaired_from_the_event_log(workbench):
     app, _model, root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session = _create_session(client)
     _append_without_snapshot(root, session["session_id"])
 
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         detail = client.get(f"/api/v1/sessions/{session['session_id']}").json()
 
     assert detail["status"] == "awaiting_human"
@@ -498,7 +499,7 @@ def test_stale_snapshot_is_repaired_from_the_event_log(workbench):
 
 def test_replaying_the_same_events_twice_does_not_duplicate_anything(workbench):
     app, _model, root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session = _create_session(client)
     directory = root / Path(session["session_id"])
     _append_without_snapshot(root, session["session_id"])
@@ -508,7 +509,7 @@ def test_replaying_the_same_events_twice_does_not_duplicate_anything(workbench):
                    {"artifact_id": f"{session['session_id']}/video-prompt.md",
                     "kind": "video_prompt", "name": "video-prompt.md"})])
 
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         first = client.get(f"/api/v1/sessions/{session['session_id']}").json()
         second = client.get(f"/api/v1/sessions/{session['session_id']}").json()
 

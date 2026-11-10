@@ -1,7 +1,7 @@
 """本地服务启动入口：``python -m minimax_h3_prompt.api``。
 
-只绑定 ``127.0.0.1:8000``——D1 不做 Origin/Host 校验与启动令牌，因此绝不能监听
-外网地址。Origin/Host 校验归 D3。
+只绑定 ``127.0.0.1:8000``——本地鉴权另有 Host/Origin 白名单与启动令牌（``api/auth.py``，
+D3-1），但「只绑回环」是第一层：这一行改错，后面两层全白搭。
 """
 from __future__ import annotations
 

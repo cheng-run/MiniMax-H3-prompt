@@ -10,12 +10,13 @@ import importlib.metadata
 
 import pytest
 from fastapi.testclient import TestClient
+from workbench_client import workbench_client
 
 
 def _client() -> TestClient:
     from minimax_h3_prompt.api.app import create_app
 
-    return TestClient(create_app())
+    return workbench_client(create_app())
 
 
 def test_health_returns_resource_with_no_store_header() -> None:

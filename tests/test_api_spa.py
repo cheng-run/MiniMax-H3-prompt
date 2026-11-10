@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from workbench_client import workbench_client
 
 _INDEX = "<!doctype html><html><body><div id='app'>SPA-SHELL</div></body></html>"
 
@@ -25,7 +26,7 @@ def dist(tmp_path: Path) -> Path:
 def _client(dist_dir: Path) -> TestClient:
     from minimax_h3_prompt.api.app import create_app
 
-    return TestClient(create_app(dist_dir=dist_dir))
+    return workbench_client(create_app(dist_dir=dist_dir))
 
 
 def test_api_route_still_works(dist: Path) -> None:

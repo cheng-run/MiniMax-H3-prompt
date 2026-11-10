@@ -25,6 +25,7 @@ PROBLEM_CONTENT_TYPE = "application/problem+json"
 
 # 常见状态码的中文短标题；未登记的退回 HTTP 标准短语。
 _TITLE_BY_STATUS = {
+    401: "需要访问凭据",
     403: "禁止访问",
     404: "资源不存在",
     405: "方法不允许",
@@ -80,6 +81,34 @@ def _title_for(status: int) -> str:
         return "请求错误"
 
 
+def build_problem_response(
+    status: int,
+    detail: str,
+    path: str,
+    *,
+    code: str | None = None,
+    errors: list[ProblemFieldError] | None = None,
+) -> JSONResponse:
+    """按 RFC 9457 构造 problem+json。
+
+    单独暴露给**中间件**用：访问控制在路由外层，拿不到异常处理器，也没有 Request
+    （只有 ASGI scope）。它只需要路径来做 ``instance``，所以这里收路径而不是 Request。
+    """
+    problem = ProblemDetail(
+        title=_title_for(status),
+        status=status,
+        detail=detail,
+        instance=path,
+        code=code,
+        errors=errors,
+    )
+    return JSONResponse(
+        status_code=status,
+        content=problem.model_dump(exclude_none=True),
+        media_type=PROBLEM_CONTENT_TYPE,
+    )
+
+
 def _problem_response(
     status: int,
     detail: str,
@@ -89,19 +118,8 @@ def _problem_response(
 ) -> JSONResponse:
     """统一构造 ProblemDetail 响应：title/instance 由状态码与请求路径派生，避免三条
     失败路径各拼一遍样板（改字段时只改这一处）。"""
-    problem = ProblemDetail(
-        title=_title_for(status),
-        status=status,
-        detail=detail,
-        instance=request.url.path,
-        code=code,
-        errors=errors,
-    )
-    return JSONResponse(
-        status_code=status,
-        content=problem.model_dump(exclude_none=True),
-        media_type=PROBLEM_CONTENT_TYPE,
-    )
+    return build_problem_response(
+        status, detail, request.url.path, code=code, errors=errors)
 
 
 def install_problem_handlers(app: FastAPI) -> None:

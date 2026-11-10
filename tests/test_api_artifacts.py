@@ -17,6 +17,7 @@ from minimax_h3_prompt import model_factory
 from minimax_h3_prompt.api.app import create_app
 from minimax_h3_prompt.graph import pipeline
 from minimax_h3_prompt.workbench_store import EVENTS_FILENAME
+from workbench_client import workbench_client
 from workbench_deterministic import DEFAULT_REPLIES, DeterministicChatModel
 
 RUNTIME = SimpleNamespace(
@@ -100,7 +101,7 @@ def _wait_job(client: TestClient, session_id: str, job_id: str,
 
 def test_completed_session_registers_video_prompt_and_content_matches_disk(workbench):
     app, _model, root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session_id = _run_to_completed(client)
 
         detail = client.get(f"/api/v1/sessions/{session_id}").json()
@@ -122,7 +123,7 @@ def test_completed_session_registers_video_prompt_and_content_matches_disk(workb
 
 def test_artifact_created_event_is_recorded_with_the_registered_id(workbench):
     app, _model, root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session_id = _run_to_completed(client)
         detail = client.get(f"/api/v1/sessions/{session_id}").json()
 
@@ -149,7 +150,7 @@ def test_text_artifact_over_one_mib_is_413(workbench):
     """上限是 spec §10 的 1 MiB；边界值按字面取，不跟实现常量走。"""
     app, _model, root = workbench
     limit = 1024 * 1024
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session_id = _run_to_completed(client)
         path = root / Path(session_id) / "video-prompt.md"
 
@@ -171,7 +172,7 @@ def test_text_artifact_over_one_mib_is_413(workbench):
 def test_video_artifact_is_metadata_only(workbench):
     """视频类在 D2 只有元数据：清单里有它，内容端点不服务它（那是 D3 的能力）。"""
     app, _model, root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session_id = _run_to_completed(client)
         (root / Path(session_id) / "final.mp4").write_bytes(b"\x00" * 2048)
 
@@ -212,7 +213,7 @@ def test_escaping_and_unknown_artifact_ids_are_problem_404(workbench, artifact_i
     outside = root.parent / "secret"
     outside.mkdir(parents=True)
     (outside / "video-prompt.md").write_text("根外机密", encoding="utf-8")
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session = client.post("/api/v1/sessions", json=_brief_body()).json()
         target = artifact_id.format(session=session["session_id"])
         # 点号要百分号编码：客户端（httpx）会在发请求前把字面 ``..`` 规范化掉，
@@ -230,7 +231,7 @@ def test_artifact_symlinked_outside_the_root_is_404(workbench):
     app, _model, root = workbench
     outside = root.parent / "secret.md"
     outside.write_text("根外机密", encoding="utf-8")
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session = client.post("/api/v1/sessions", json=_brief_body()).json()
         session_id = session["session_id"]
         link = root / Path(session_id) / "video-prompt.md"
@@ -255,7 +256,7 @@ def test_artifact_symlinked_outside_the_root_is_404(workbench):
 
 def test_summary_artifacts_are_listed_and_readable(workbench):
     app, _model, root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session = client.post("/api/v1/sessions", json=_brief_body()).json()
         session_id = session["session_id"]
         directory = root / Path(session_id)

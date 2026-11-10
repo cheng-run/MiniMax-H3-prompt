@@ -1,6 +1,7 @@
 # 工作台会话与 Headless API（D2）
 
-> 入口：`python -m minimax_h3_prompt.api`（只绑 `127.0.0.1:8000`）。spec #214，ADR 0032。
+> 入口：`python -m minimax_h3_prompt.api`（只绑 `127.0.0.1:8000`）。spec #214，ADR 0032；
+> 本地鉴权见 #222 §4 与 ADR 0033。
 > 这张表是导航与不变量，不是教程；实现细节以代码注释为准。
 
 ## 模块地图
@@ -9,12 +10,14 @@
 |---|---|
 | `workbench_store.py` | 会话仓库：`workbench.v1` 快照、原子写、每会话线程锁、`mutate`、事件日志 `EventLog`、幂等登记表、产物登记 |
 | `api/jobs.py` | `JobRunner`：每会话 asyncio 锁、`to_thread` 跑 LangGraph、节点边界取消、`active-job.json`、启动对账、阶段 1/2 执行 |
-| `api/routes/sessions.py` | `/api/v1` 全部端点；**路由顺序即契约**：`{session_id:path}` 会吞斜杠，`/jobs`、`/events`、`/action-items` 必须注册在详情路由之前 |
-| `api/app.py` | 工厂、lifespan（启动对账）、注入 `sessions_root` / `runtime_config` |
-| `api/problems.py` | RFC 9457 problem+json；所有错误都走这里 |
+| `api/routes/sessions.py` | `/api/v1` 全部会话端点；**路由顺序即契约**：`{session_id:path}` 会吞斜杠，`/jobs`、`/events`、`/action-items` 必须注册在详情路由之前 |
+| `api/auth.py` | 本地访问控制：Host/Origin 白名单、每进程启动令牌、`LocalAccessMiddleware`（纯 ASGI，最外层） |
+| `api/routes/auth.py` | `GET /api/v1/auth/token`：返回令牌并下发 `wb_session` Cookie |
+| `api/app.py` | 工厂、lifespan（启动对账）、注入 `sessions_root` / `runtime_config` / `local_access` |
+| `api/problems.py` | RFC 9457 problem+json；所有错误都走这里（中间件用 `build_problem_response`） |
 | `step_machine.py` | 状态/触发/闸门的单一声明；续跑起点；`resolve` 的 approve/revise 去向 |
 | `session_store.py` | 快照文件读写、`atomic_write_text`、向导续接状态与 `RESUMABLE_STATUSES` |
-| `scripts/accept_d2.py` | 真实 HTTP 验收驱动器（手动，不进 CI） |
+| `scripts/accept_d2.py` | 真实 HTTP 验收驱动器（手动，不进 CI；启动时先取令牌） |
 
 ## 不变量（改这些之前先读）
 
@@ -26,7 +29,26 @@
 - 取消是协作式：只在节点边界生效，job 记 `cancelled_at_node`；**不要承诺立即停止**。
 - 启动对账只把 `running` 收成 `interrupted`，**不自动续跑**。
 - 阶段 2 中断后再 `advance`：按 `stage1_review` 的决议事实续跑阶段 2（`_resume_step`），不回人工闸门。
-- 产物 content 只服务文本、上限 1 MiB；视频只有元数据、没有内容端点。
+- 产物 content 只服务文本、上限 1 MiB；视频只有元数据、没有内容端点（媒体字节归 D3-3）。
+
+## 本地鉴权（D3-1，ADR 0033）
+
+| 规则 | 位置 | 不变量 |
+|---|---|---|
+| Host | `api/auth.py` | 主机名 ∈ `127.0.0.1` / `localhost` / `[::1]`，**端口不限**；否则 403 `host_forbidden` |
+| Origin | 同上 | 带 Origin 时主机名同样须回环，否则 403 `origin_forbidden`；无 Origin 放行 |
+| 凭据 | 同上 | `X-Workbench-Token` 头**或** `wb_session` Cookie，任一有效即通过；否则 401 `auth_required` |
+| 豁免面 | `LocalAccessPolicy.is_exempt` | 闭合三处：`/api/v1/health`、`/api/v1/auth/token`、不在 `/api` 下的一切 |
+
+- **令牌每进程随机、只存内存**（`create_app` 生成，`app.state.local_access`）。重启即换；
+  测试里每个 app 各一份。
+- **凭据绝不进证据**：URL、access log、错误体、`output/accept-*/` 报告里都不许出现。
+  验收驱动器取令牌时只记状态码，不记响应体。
+- **中间件在路由外层**：错误响应必须用 `problems.build_problem_response` 自己构造，
+  抛 `HTTPException` 只会变成 500（异常处理器在它内层）。
+- **测试入口统一用 `tests/workbench_client.py`**：`TestClient` 默认 base_url 是
+  `http://testserver`，会被 Host 校验当成非回环；令牌又随 app 生成，手拼必漏。
+- 新增任何「不走 `/api`」的端点等于自动豁免——加之前先想清楚它是不是该在豁免面上。
 
 ## 契约链
 

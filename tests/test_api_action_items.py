@@ -19,6 +19,7 @@ from minimax_h3_prompt.api.app import create_app
 from minimax_h3_prompt.graph import pipeline
 from minimax_h3_prompt.session_store import SESSION_FILENAME
 from minimax_h3_prompt.workbench_store import EVENTS_FILENAME
+from workbench_client import workbench_client
 from workbench_deterministic import DEFAULT_REPLIES, DeterministicChatModel
 
 # 阶段 2 也要跑：``max_qa_iterations=0`` 关掉质检精修轮，只验组装与落盘。
@@ -121,7 +122,7 @@ def _state(root: Path, session_id: str) -> dict:
 
 def test_action_items_lists_the_pending_review(workbench):
     app, _model, _root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         detail, item = _advance_to_gate(client)
 
         resp = client.get(
@@ -136,7 +137,7 @@ def test_action_items_lists_the_pending_review(workbench):
 
 def test_action_items_of_an_unknown_session_is_problem_404(workbench):
     app, _model, _root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         resp = client.get("/api/v1/sessions/不存在/GEN001/action-items")
 
     assert resp.status_code == 404
@@ -150,7 +151,7 @@ def test_action_items_of_an_unknown_session_is_problem_404(workbench):
 
 def test_resolve_approve_runs_stage2_to_completed(workbench):
     app, model, root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         detail, item = _advance_to_gate(client)
         session_id = detail["session_id"]
 
@@ -193,7 +194,7 @@ def test_resolve_approve_runs_stage2_to_completed(workbench):
 
 def test_resolve_on_a_session_not_awaiting_human_is_conflict(workbench):
     app, _model, _root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         session = _create_session(client)
 
         resp = _resolve(client, session["session_id"], "whatever",
@@ -206,7 +207,7 @@ def test_resolve_on_a_session_not_awaiting_human_is_conflict(workbench):
 
 def test_resolve_unknown_item_is_problem_404(workbench):
     app, _model, _root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         detail, _item = _advance_to_gate(client)
 
         resp = _resolve(client, detail["session_id"], "nope", {"decision": "approve"})
@@ -217,7 +218,7 @@ def test_resolve_unknown_item_is_problem_404(workbench):
 
 def test_resolve_item_of_another_session_is_problem_404(workbench):
     app, _model, _root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         _first, foreign = _advance_to_gate(client)
         second, _item = _advance_to_gate(client, plot="另一个主题")
 
@@ -230,7 +231,7 @@ def test_resolve_item_of_another_session_is_problem_404(workbench):
 
 def test_resolving_an_already_resolved_item_is_conflict(workbench):
     app, _model, _root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         detail, item = _advance_to_gate(client)
         session_id = detail["session_id"]
         # 走 revise：会话跑完会回到同一个闸门，旧待办保持已决议——这正是「拿旧 id
@@ -254,7 +255,7 @@ def test_resolving_an_already_resolved_item_is_conflict(workbench):
 def test_resolve_revise_creates_a_new_pending_item(workbench):
     app, model, root = workbench
     model.replies["frame_prompt_engineer"] = json.dumps(FRAME_BUNDLE, ensure_ascii=False)
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         detail, item = _advance_to_gate(client)
         session_id = detail["session_id"]
 
@@ -299,7 +300,7 @@ def test_resolve_revise_creates_a_new_pending_item(workbench):
 
 def test_resolve_revise_setting_layer_reruns_that_layer_and_marks_applied(workbench):
     app, model, root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         detail, item = _advance_to_gate(client)
         session_id = detail["session_id"]
         before = model.calls.count("character_designer")
@@ -324,7 +325,7 @@ def test_resolve_revise_setting_layer_reruns_that_layer_and_marks_applied(workbe
 
 def test_revisions_accumulate_across_rounds(workbench):
     app, _model, root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         detail, first_item = _advance_to_gate(client)
         session_id = detail["session_id"]
 
@@ -359,7 +360,7 @@ def test_same_idempotency_key_replays_the_first_resolve_without_rerunning(workbe
     # 闸门停在阶段 2 的第一次模型调用上，给第二次决议留出「任务还在跑」的窗口。
     model.gate_role = "unknown"
     headers = {"Idempotency-Key": "resolve-approve-1"}
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         detail, item = _advance_to_gate(client)
         session_id = detail["session_id"]
 
@@ -386,7 +387,7 @@ def test_same_idempotency_key_replays_the_first_resolve_without_rerunning(workbe
 
 def test_revise_without_revisions_is_rejected(workbench):
     app, _model, _root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         detail, item = _advance_to_gate(client)
 
         resp = _resolve(client, detail["session_id"], item["item_id"],
@@ -398,7 +399,7 @@ def test_revise_without_revisions_is_rejected(workbench):
 
 def test_unknown_layer_is_rejected(workbench):
     app, _model, _root = workbench
-    with TestClient(app) as client:
+    with workbench_client(app) as client:
         detail, item = _advance_to_gate(client)
 
         resp = _resolve(client, detail["session_id"], item["item_id"], {

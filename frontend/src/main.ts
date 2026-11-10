@@ -3,9 +3,15 @@ import { createPinia } from 'pinia'
 import { createApp } from 'vue'
 
 import App from './app/App.vue'
+import { ensureSessionToken } from './api/client'
 import { router } from './router'
 import './styles/reset.css'
 import './styles/tokens.css'
+
+// 页面一启动就取启动令牌：引导端点同时下发 wb_session Cookie，`<video>` / `<img>`
+// 由浏览器自己发请求、挂不上自定义头，只能靠这个 Cookie（D3-1 / ADR 0033）。
+// 失败不阻塞渲染：令牌不进模块缓存，第一次 API 调用会自动重试。
+void ensureSessionToken().catch(() => {})
 
 const app = createApp(App)
 

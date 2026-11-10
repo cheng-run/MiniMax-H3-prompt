@@ -10,12 +10,13 @@ from urllib.parse import quote
 
 from fastapi.testclient import TestClient
 from minimax_h3_prompt.session_store import LEGACY_SCHEMA_VERSION, SESSION_FILENAME
+from workbench_client import workbench_client
 
 
 def _client(tmp_path: Path) -> TestClient:
     from minimax_h3_prompt.api.app import create_app
 
-    return TestClient(create_app(sessions_root=tmp_path))
+    return workbench_client(create_app(sessions_root=tmp_path))
 
 
 def _brief_body(plot: str = "雨夜旧信") -> dict:

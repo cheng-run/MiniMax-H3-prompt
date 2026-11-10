@@ -436,9 +436,37 @@ def _concurrent_advance(acc: Acceptor, path: str,
         return [future.result() for future in futures]
 
 
+def _bootstrap_credential(acc: Acceptor) -> None:
+    """取启动令牌并挂到客户端默认头上（D3-1 起所有 /api/* 都要凭据）。
+
+    **不走 ``acc.request``**：那会把响应体（含令牌）原样写进报告。令牌是真凭据，
+    证据目录要能被随手拷走，凭据一旦进报告就等于泄露。
+    """
+    started = time.monotonic()
+    response = acc.client.get("/api/v1/auth/token")
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    acc.record("取启动令牌", "GET", "/api/v1/auth/token",
+               status=response.status_code, elapsed_ms=elapsed_ms,
+               note="响应体不入报告（含令牌）")
+    if response.status_code != 200:
+        raise StepError("取启动令牌", f"期望 HTTP 200，实际 {response.status_code}",
+                        response.text)
+    try:
+        token = response.json().get("token")
+    except ValueError as exc:
+        raise StepError("取启动令牌", "响应不是 JSON", response.text) from exc
+    if not isinstance(token, str) or not token:
+        raise StepError("取启动令牌", "响应里没有 token", response.text)
+    acc.client.headers["X-Workbench-Token"] = token
+    print("[凭据] 已取到启动令牌并挂到后续请求", flush=True)
+
+
 def _run_flow(acc: Acceptor) -> None:
     settings = acc.settings
     run_id = settings.run_id
+
+    # --- 凭据先行：健康检查是豁免面，但后面的每个 /api/* 都要（D3-1） --------
+    _bootstrap_credential(acc)
 
     # --- 健康检查与监听范围（AC18 的可自动部分） ---------------------------
     health = acc.request("健康检查", "GET", "/api/v1/health")

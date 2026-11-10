@@ -1,4 +1,5 @@
 import createClient from 'openapi-fetch'
+import type { Middleware } from 'openapi-fetch'
 
 import type { components, paths } from './generated'
 
@@ -6,6 +7,7 @@ import type { components, paths } from './generated'
 export type Health = components['schemas']['HealthResponse']
 export type ProblemDetail = components['schemas']['ProblemDetail']
 export type ProblemFieldError = components['schemas']['ProblemFieldError']
+export type AuthToken = components['schemas']['AuthTokenResponse']
 
 /**
  * 统一 API 错误。组件只处理这一种错误，不各自识别 FastAPI 默认的 ``detail``。
@@ -57,7 +59,61 @@ const errorHandlingFetch: typeof fetch = async (input, init) => {
 // base——生产构建 MODE 不是 'test'，baseUrl 仍为空。
 const baseUrl = import.meta.env.MODE === 'test' ? 'http://localhost' : ''
 
+// 启动令牌（D3-1）：每进程一份，只存在服务端内存里；页面打开后取一次，缓存在模块内。
+// 它挡的是跨站页面，不是本机进程（ADR 0033）——所以这里不做「保密」，只做「自动带上」。
+let sessionToken: string | null = null
+let tokenInFlight: Promise<string> | null = null
+
+async function fetchSessionToken(): Promise<string> {
+  // 引导端点走裸 fetch：它自己不需要令牌，走 errorHandlingFetch 只会绕回来。
+  const response = await fetch(`${baseUrl}/api/v1/auth/token`, { cache: 'no-store' })
+  if (!response.ok) {
+    throw new ApiError(response.status, await readProblem(response))
+  }
+  const body = (await response.json()) as Partial<AuthToken>
+  if (typeof body.token !== 'string' || body.token.length === 0) {
+    throw new ApiError(0, null)
+  }
+  return body.token
+}
+
+/**
+ * 取（或复用）本页面的启动令牌。并发调用共享同一次请求。
+ * 失败**不缓存**：服务重启后令牌会换，下一次调用应重新取。
+ */
+export function ensureSessionToken(): Promise<string> {
+  if (sessionToken !== null) {
+    return Promise.resolve(sessionToken)
+  }
+  if (tokenInFlight === null) {
+    tokenInFlight = fetchSessionToken()
+      .then((token) => {
+        sessionToken = token
+        return token
+      })
+      .finally(() => {
+        tokenInFlight = null
+      })
+  }
+  return tokenInFlight
+}
+
+/** 清掉模块内缓存；用例用它模拟「新页面」或「服务重启」，生产代码不调用。 */
+export function resetSessionToken(): void {
+  sessionToken = null
+  tokenInFlight = null
+}
+
+// 所有 API 调用自动带凭据（fetch / SSE 走请求头；媒体元素靠引导端点下发的 Cookie）。
+const attachToken: Middleware = {
+  async onRequest({ request }) {
+    request.headers.set('X-Workbench-Token', await ensureSessionToken())
+  },
+}
+
 export const apiClient = createClient<paths>({ baseUrl, fetch: errorHandlingFetch })
+// 本仓锁的 openapi-fetch 0.13 不接受构造参数里的 middleware，只能事后注册。
+apiClient.use(attachToken)
 
 export async function getHealth(): Promise<Health> {
   const { data } = await apiClient.GET('/api/v1/health')

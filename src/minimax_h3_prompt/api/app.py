@@ -14,8 +14,10 @@ from typing import Any
 from fastapi import FastAPI
 
 from . import SERVICE_NAME
+from .auth import attach_local_access
 from .jobs import JobRunner
 from .problems import apply_problem_media_type_openapi, install_problem_handlers
+from .routes.auth import router as auth_router
 from .routes.health import router as health_router
 from .routes.sessions import router as sessions_router
 from .spa import DEFAULT_DIST, install_spa
@@ -74,8 +76,12 @@ def create_app(
     app.state.version = _resolve_version()
     app.state.session_store = store
     app.state.job_runner = runner
+    # 本地访问控制（D3-1）：每进程随机令牌 + Host/Origin 白名单。中间件在最外层，
+    # 静态兜底与 /api/* 都要先过它；豁免面由 ``LocalAccessPolicy.is_exempt`` 收窄。
+    attach_local_access(app)
     install_problem_handlers(app)
     app.include_router(health_router)
+    app.include_router(auth_router)
     app.include_router(sessions_router)
     if include_test_routes:
         from .routes.validation_probe import router as probe_router

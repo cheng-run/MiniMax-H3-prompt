@@ -152,6 +152,14 @@ class FakeServer:
         path = unquote(request.url.path)
         method = request.method
         key = request.headers.get("Idempotency-Key")
+        if path == "/api/v1/auth/token" and method == "GET":
+            # 假服务也照 D3-1 的口径：引导端点免凭据，下发令牌与 Cookie。
+            return _json({"token": "fake-token"}, 200, {
+                "set-cookie": "wb_session=fake-token; Path=/api/v1; HttpOnly; SameSite=strict"})
+        # 豁免面之外一律要凭据：驱动器漏挂令牌时，这里会先红而不是一路绿到报告。
+        if path.startswith("/api/") and path != "/api/v1/health" \
+                and request.headers.get("X-Workbench-Token") != "fake-token":
+            return _problem(401, "auth_required")
         if path == "/api/v1/health" and method == "GET":
             return _json({"status": "ok", "service": "mini", "version": "0.0.1"})
         if path == "/api/v1/sessions" and method == "POST":
@@ -240,6 +248,10 @@ def test_acceptance_writes_report_and_ticks_automated_acs(tmp_path):
 
     assert (settings.out_dir / "video-prompt.md").read_text(encoding="utf-8") == PROMPT
     assert (settings.out_dir / "events.jsonl").is_file()
+    # 凭据绝不进证据：令牌出现在报告里就等于验收目录被随手拷走时一起泄露。
+    report_text = (settings.out_dir / "report.json").read_text(encoding="utf-8")
+    assert "fake-token" not in report_text
+    assert any(step["step"] == "取启动令牌" for step in report["steps"])
     markdown = (settings.out_dir / "report.md").read_text(encoding="utf-8")
     assert "D2-AC1" in markdown and "✅" in markdown and "⏳" in markdown
 

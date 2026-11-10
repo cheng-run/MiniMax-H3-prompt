@@ -499,6 +499,30 @@ MUTATIONS: tuple[Mutation, ...] = (
          "test_concurrent_updates_do_not_lose_each_others_fields",),
         "去掉会话锁＝进度写与取消写互相覆盖、revision 丢更新（#217 复审）",
     ),
+    Mutation(
+        "auth_host_check_off",
+        "src/minimax_h3_prompt/api/auth.py",
+        "        if host is None or _host_header_hostname(host) not in LOOPBACK_HOSTNAMES:",
+        "        if False:",
+        ("tests/test_api_auth.py::test_non_loopback_host_is_forbidden",),
+        "去掉 Host 校验＝跨站页面换一个 Host 头就能读本机响应（#223 / D3-AC1）",
+    ),
+    Mutation(
+        "auth_origin_check_off",
+        "src/minimax_h3_prompt/api/auth.py",
+        "        if origin is not None and _origin_hostname(origin) not in LOOPBACK_HOSTNAMES:",
+        "        if False:",
+        ("tests/test_api_auth.py::test_cross_site_origin_is_forbidden",),
+        "去掉 Origin 校验＝同机其它 origin 的脚本可以带凭据打进来（#223 / D3-AC1）",
+    ),
+    Mutation(
+        "auth_token_compare_off",
+        "src/minimax_h3_prompt/api/auth.py",
+        "    return isinstance(presented, str) and hmac.compare_digest(presented, expected)",
+        "    return True",
+        ("tests/test_api_auth.py::test_wrong_header_credential_is_rejected",),
+        "不比令牌＝任何字符串都能通过，启动令牌变成装饰（#223 / D3-AC2）",
+    ),
 )
 
 
