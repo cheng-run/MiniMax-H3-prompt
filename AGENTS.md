@@ -18,6 +18,7 @@ Issues 活在 GitHub Issues（github.com/cheng-run/MiniMax-H3-prompt），用 `g
 
 单上下文：根 `CONTEXT.md`（术语表）+ `docs/adr/`（架构决策）。见 `docs/agents/domain.md`。
 前端工程（技术栈、版本矩阵、本地坑、跑前后端与关端口）见 `docs/agents/frontend.md`。
+工作台会话与 Headless API（模块地图、事件/写入/产物不变量、契约链）见 `docs/agents/workbench.md`。
 导演台路线另有实现与插件契约：`docs/design/2026-10-29-导演台路线实现设计.md`、`docs/research/2026-10-29-director-插件原生格式.md`；2026-10-31 的陪跑证据改造（#112–#114）见同目录的 `2026-10-31-director-fl2v-video-evidence-*.md`。
 
 ## 产物落点（新产物写哪，2026-10-21 起）
@@ -70,6 +71,8 @@ spec 与票住 issue 是因为 `/to-spec`、`/to-tickets` 按 `docs/agents/issue
 
 - **派发前先对票**：见 `docs/agents/engineering-cadence.md` 的「并行拆票前的对票」。手工按文件簇分组会漏票（2026-11-03 实测 12 票漏了 #150），**集合差非空不许开工**。
 - **实现简报必须带「越权假设」条**：规格没写的取舍不自行决定；必须选时记为「越权假设」单列到报告，由协调会话裁定（2026-11-03：画布未选定继承 Z-Image 越出 spec D／US25，靠 Spec 轴复审才抓回）。简报还要交代**真实会话证据的位置**：`output/sessions/` 与 `output/accept-*` 只在主树（gitignore），工作树不复制；需要实跑对照时由协调会话执行，或给主树绝对路径。
+
+- **实现简报要求代理边做边提交**：每完成一个可验证切片就提交一次；被中断（用户主动打断或会话异常）时，未提交改动会留在工作树里、甚至丢失（2026-11-10 实测 #217/#218 各被打断一次，靠中途追加「先提交」才保住进度）。
 
 - **它收尾停在集成分支上，不落 main、不 push**（第 8 步只「resolve each ticket」并报告分支）。本仓接手：集成分支按**票**拆回主分支提交（一票一次），全量绿后**交用户真实验收**；用户说验收通过后再 push。**本节的「按票拆回 main」就是合 main 的时机**（覆盖工作流段「验收通过后才合 main」的表述）；push 仍然只在验收通过后做。
 - **它第 2 步的探索笔记默认存到仓库外**（原文 "a directory outside the repo"）。本仓文档一律落仓——这一步要指定写进 `docs/research/`。

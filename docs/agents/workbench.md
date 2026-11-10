@@ -1,0 +1,41 @@
+# 工作台会话与 Headless API（D2）
+
+> 入口：`python -m minimax_h3_prompt.api`（只绑 `127.0.0.1:8000`）。spec #214，ADR 0032。
+> 这张表是导航与不变量，不是教程；实现细节以代码注释为准。
+
+## 模块地图
+
+| 模块 | 职责 |
+|---|---|
+| `workbench_store.py` | 会话仓库：`workbench.v1` 快照、原子写、每会话线程锁、`mutate`、事件日志 `EventLog`、幂等登记表、产物登记 |
+| `api/jobs.py` | `JobRunner`：每会话 asyncio 锁、`to_thread` 跑 LangGraph、节点边界取消、`active-job.json`、启动对账、阶段 1/2 执行 |
+| `api/routes/sessions.py` | `/api/v1` 全部端点；**路由顺序即契约**：`{session_id:path}` 会吞斜杠，`/jobs`、`/events`、`/action-items` 必须注册在详情路由之前 |
+| `api/app.py` | 工厂、lifespan（启动对账）、注入 `sessions_root` / `runtime_config` |
+| `api/problems.py` | RFC 9457 problem+json；所有错误都走这里 |
+| `step_machine.py` | 状态/触发/闸门的单一声明；续跑起点；`resolve` 的 approve/revise 去向 |
+| `session_store.py` | 快照文件读写、`atomic_write_text`、向导续接状态与 `RESUMABLE_STATUSES` |
+| `scripts/accept_d2.py` | 真实 HTTP 验收驱动器（手动，不进 CI） |
+
+## 不变量（改这些之前先读）
+
+- 事件类型是**十种闭合集合**；加字段可以，改语义不行。`seq` 会话内从 1 严格单调，只在会话锁内分配。
+- **先写事件、后写快照**；快照 `last_event_seq` 落后时按 `seq > last_event_seq` 重放，重放幂等。
+- 每会话**单写入者**：任何「读 → 改 → 写」都走 `WorkbenchSessionStore.mutate`（锁在存储层，别在调用方自己拼）。
+- `session_id` = `sessions_root` 下的相对路径；`_resolve` 拒绝绝对路径、`..` 与根外路径。
+- legacy（`wizard_session.v1` 或无 `session_id`）只读：可列/可查/可列产物，起 job 回 409 `session_legacy`。
+- 取消是协作式：只在节点边界生效，job 记 `cancelled_at_node`；**不要承诺立即停止**。
+- 启动对账只把 `running` 收成 `interrupted`，**不自动续跑**。
+- 阶段 2 中断后再 `advance`：按 `stage1_review` 的决议事实续跑阶段 2（`_resume_step`），不回人工闸门。
+- 产物 content 只服务文本、上限 1 MiB；视频只有元数据、没有内容端点。
+
+## 契约链
+
+`FastAPI` → `scripts/export_openapi.py` → `contracts/openapi.json` →
+`frontend/scripts/generate-api.mjs` → `frontend/src/api/generated.ts`。
+`scripts/check.sh full` 会重导并 `git diff --exit-code`（`fast` 在改动 api/契约时同样跑）；CI 同口径。
+
+## 验收
+
+真实跑：主树、`python -m minimax_h3_prompt.api` 另开终端，再跑 `scripts/accept_d2.py`
+（证据清单见其 docstring）。确定性全链路在 `tests/test_api_*.py` 与
+`tests/workbench_deterministic.py`。

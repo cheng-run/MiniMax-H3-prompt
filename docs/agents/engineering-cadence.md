@@ -70,6 +70,25 @@ printf '%s\n' 145 146 147 148 149 150 151 152 153 154 155 156 | sort -n > /tmp/a
 comm -23 /tmp/all-tickets /tmp/assigned-tickets   # 必须为空
 ```
 
+## 集成分支按票拆回 main（/implement-spec 收尾）
+
+集成分支上的提交是「按票陆续合入」的形状（一票可能有多条：实现 + 复审修复），
+而 main 要求**一票一次**。拆法是按票分组重放，不是把集成分支整条 ff 过去：
+
+1. `git log --graph --oneline <base>..<integration>` 先认一遍：**跳过合并提交**
+   （工作树分支并进来的那个 `Merge branch ...`）；它带进来的另一票改动，在那一票
+   自己的分组里重放。
+2. `git switch main`，按票的依赖顺序逐组 `git cherry-pick -n <该票的提交...>`，
+   再一次性 `git commit -m "type(scope): 摘要（#N）"`。
+3. 复审修复若落在集成分支末尾（时间上晚于后面的票），仍归到它修的票：作为该票的
+   第二提交（`fix(...): ...（#N）`）放在组内，不要改挂到别的票上。
+4. 收尾必须内容保真：`git diff --stat <integration> main` **为空**。不为空说明漏了
+   提交或解冲突时改坏了内容——停下，不要 push。
+5. main 上再跑 `scripts/check.sh full` 与 `scripts/check.sh clean`；绿后 push。
+   删分支时注意：`git branch --merged main` 只覆盖真祖先，cherry-pick 出来的分支
+   不是祖先；先用 `git merge-base --is-ancestor <branch> <integration>` 确认它的
+   历史已包含在集成分支里，再 `-D`。
+
 ## ADR 的写法与引用
 
 2026-11-02（#143 整顿）定下的三条，**新写或改 ADR 时一律遵守**：

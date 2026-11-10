@@ -62,6 +62,12 @@
 
 ### 工程化
 
+- 本地守卫补齐：`scripts/check.sh full` 现在也跑前端 lint/typecheck 与 **契约漂移**
+  （重新导出 OpenAPI / 生成 TS 后 `git diff --exit-code`），不再只有 CI 才咬；
+  前端依赖目录不完整时按「未安装」跳过，不再误报成代码坏了。
+- `scripts/worktree.sh` 新增 `link-frontend` / `unlink-frontend`：工作树借用主树
+  前端依赖只能走目录联接，摘除只能走 `unlink-frontend`（`rm -rf` 联接会穿透清空
+  主树依赖，2026-11-10 实测）。
 - `base` 短视频的推进顺序抽成 `src/minimax_h3_prompt/step_machine.py` 的单一声明，
   向导只消费不重写；服务端执行与验收走同一台步骤机。新增确定性模型桩（真 LangGraph、
   真节点、调用计数）与 `scripts/accept_d2.py` 手动验收驱动器（真实 HTTP，不进 CI）。
