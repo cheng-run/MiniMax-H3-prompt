@@ -21,7 +21,8 @@ from minimax_h3_prompt.graph import pipeline
 from minimax_h3_prompt.session_store import SESSION_FILENAME
 from workbench_deterministic import DeterministicChatModel
 
-RUNTIME = SimpleNamespace(roundtable_max_rounds=1, common_sense_qa=False)
+RUNTIME = SimpleNamespace(
+    roundtable_max_rounds=1, common_sense_qa=False, max_qa_iterations=1)
 
 
 def _brief_body(plot: str = "雨夜旧信") -> dict:
@@ -329,3 +330,33 @@ def test_queries_stay_responsive_while_the_job_runs(workbench):
         assert elapsed < 2.0, f"长任务运行期间查询被拖住：{elapsed:.2f}s"
         model.release.set()
         _wait_job(client, session["session_id"], started["job_id"])
+
+
+def test_advance_after_stage2_interruption_runs_stage2_not_stage1(workbench):
+    """中断在阶段 2 的会话再 advance：必须续跑阶段 2，不能重开人工闸门。
+
+    #221 真实跑实测：阶段 2 被网关卡住后强杀，重启再 advance 若一律从阶段 1 进入，
+    链已耗尽 → 只会挂一条新的 stage1_review，阶段 2 永远走不到。
+    """
+    app, _model, root = workbench
+    with TestClient(app) as client:
+        session = _create_session(client)
+        sid = session["session_id"]
+        job = client.post(f"/api/v1/sessions/{sid}/jobs").json()
+        _wait_job(client, sid, job["job_id"])
+        path = root / Path(sid) / SESSION_FILENAME
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        # 模拟「approve 之后、阶段 2 途中被强杀」：待办已决议、会话 interrupted。
+        for entry in raw["action_items"]:
+            entry["status"] = "resolved"
+            entry["decision"] = "approve"
+        raw["status"] = "interrupted"
+        path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+
+        resumed = client.post(f"/api/v1/sessions/{sid}/jobs").json()
+        done = _wait_job(client, sid, resumed["job_id"])
+
+        assert done["status"] == "succeeded"
+        detail = client.get(f"/api/v1/sessions/{sid}").json()
+        assert detail["status"] == "completed", "中断在阶段 2 的 advance 不该回到人工闸门"
+        assert (root / Path(sid) / "video-prompt.md").is_file()

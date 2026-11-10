@@ -303,9 +303,17 @@ class JobRunner:
 
     async def _run(self, session_id: str, job_id: str,
                    cancel_event: threading.Event) -> None:
+        # 续跑落点由**已完成到哪**决定，不能一律从阶段 1 重进：#221 真实跑在阶段 2
+        # 被网关卡住后强杀，重启再 advance 若回到阶段 1，只会重新开一个人工闸门
+        # （阶段 1 已跑完、链已耗尽），阶段 2 永远走不到。
+        step = await asyncio.to_thread(self._resume_step, session_id)
         try:
-            final_state = await asyncio.to_thread(
-                self._execute_stage1, session_id, job_id, cancel_event)
+            if step == step_machine.STEP_STAGE2:
+                result = await asyncio.to_thread(
+                    self._execute_stage2, session_id, job_id, cancel_event)
+            else:
+                result = await asyncio.to_thread(
+                    self._execute_stage1, session_id, job_id, cancel_event)
         except JobCancelled as exc:
             await asyncio.to_thread(
                 self._finish_cancelled, session_id, job_id, exc.node)
@@ -314,10 +322,43 @@ class JobRunner:
             await asyncio.to_thread(
                 self._finish_failed, session_id, job_id, error_code(exc), str(exc))
         else:
-            await asyncio.to_thread(
-                self._finish_succeeded, session_id, job_id, final_state)
+            if step == step_machine.STEP_STAGE2:
+                await asyncio.to_thread(
+                    self._finish_stage2, session_id, job_id, result)
+            else:
+                await asyncio.to_thread(
+                    self._finish_succeeded, session_id, job_id, result)
         finally:
             await asyncio.to_thread(self._cleanup, session_id, job_id)
+
+    def _resume_step(self, session_id: str) -> str:
+        """下次 advance 该跑阶段 1 还是阶段 2：看**已落盘的事实**，不看内存。
+
+        判据两条同时成立才进阶段 2：阶段 1 已过闸门（存在 stage1_review 待办）、
+        最新待办已被 approve 决议；有未决的新待办（revise 跑完会挂新待办）仍属阶段 1。
+        """
+        directory = self.store.session_directory(session_id)
+        session = load_session(directory)
+        if session is None:
+            return step_machine.STEP_STAGE1
+        pending = any(
+            str(item.get("kind")) == step_machine.ACTION_STAGE1_REVIEW
+            and str(item.get("status")) == "pending"
+            for item in session.action_items)
+        # 「阶段 1 已完成」看**待办存在**，不看 `_progress`：阶段 1 收尾时会用最终
+        # state 覆写快照，而最终 state 里没有 `_progress`（那是续跑元数据）——拿它判
+        # 会得出「没跑过」，把一个阶段 2 中断的会话重新拖回阶段 1 从头跑。
+        reviewed = any(
+            str(item.get("kind")) == step_machine.ACTION_STAGE1_REVIEW
+            for item in session.action_items)
+        approved = any(
+            str(item.get("kind")) == step_machine.ACTION_STAGE1_REVIEW
+            and str(item.get("status")) == "resolved"
+            and str(item.get("decision")) == step_machine.DECISION_APPROVE
+            for item in session.action_items)
+        if reviewed and approved and not pending:
+            return step_machine.STEP_STAGE2
+        return step_machine.STEP_STAGE1
 
     def _cleanup(self, session_id: str, job_id: str) -> None:
         self._cancel_events.pop(job_id, None)
