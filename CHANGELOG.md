@@ -10,6 +10,13 @@
 
 ### 新增
 
+- **工作台媒体读取（D3-3 / #225，验收 D3-4 / #226）**：素材与成片可按字节读取——
+  `GET/HEAD /api/v1/media/{asset_id}` 只服务会话登记根，固定带 `Accept-Ranges`、
+  `ETag`、`Last-Modified` 与 `Content-Disposition`，支持单段 Range（`a-b` / `a-` /
+  `-n`）；越界、语法非法与多段一律 416。成片 `final.mp4` 走原有 content 端点给出
+  字节与同一套 Range，三个文本产物维持纯文本 + 1 MiB 上限。浏览器里 `<video>` /
+  `<img>` 用 `wb_session` Cookie 播放，URL 不带凭据；真实浏览器上传、播放与 seek
+  出现 206 由 Playwright 覆盖。
 - **工作台素材上传（D3-2 / #224）**：`POST /api/v1/sessions/{id}/assets` 收单文件上传，
   `GET …/assets` 与会话详情里的 `assets` 列出。类型按**字节**嗅探（PNG/JPEG/WebP 图片
   ≤20 MiB、MP4/WebM 视频 ≤512 MiB、WAV/MP3 音频 ≤64 MiB），落盘扩展名由内容决定，

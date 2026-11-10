@@ -21,6 +21,7 @@
 | `step_machine.py` | 状态/触发/闸门的单一声明；续跑起点；`resolve` 的 approve/revise 去向 |
 | `session_store.py` | 快照文件读写、`atomic_write_text`、向导续接状态与 `RESUMABLE_STATUSES` |
 | `scripts/accept_d2.py` | 真实 HTTP 验收驱动器（手动，不进 CI；启动时先取令牌） |
+| `scripts/accept_d3.py` | 媒体与素材的真实验收驱动器（手动；真实照片上传 + 真实 `final.mp4` 的 Range 与字节核对，报告落 `output/accept-d3/`） |
 
 ## 不变量（改这些之前先读）
 
@@ -48,7 +49,12 @@
   `.tmp-*` 不是素材，列表看不见，只在启动时删；同内容不写第二份。上传**不改会话
   状态、不发事件**，残片由启动清理收拾（`store.cleanup_assets`）。
 
-## 本地鉴权（D3-1，ADR 0033）
+## 媒体与鉴权（D3，ADR 0033）
+
+媒体读取（素材 `GET/HEAD /media/{asset_id:path}` 与成片
+`GET/HEAD /artifacts/{artifact_id:path}/content`）和本地鉴权共用一套边界：只服务
+`sessions_root`，凭据「请求头或 Cookie」二选一。素材的标识是 `<会话标识>/<16 位
+内容哈希>`（无扩展名），成片走登记表里的已知文件名；两者都按单段 Range 语义处理。
 
 | 规则 | 位置 | 不变量 |
 |---|---|---|
@@ -56,6 +62,8 @@
 | Origin | 同上 | 带 Origin 时主机名同样须回环，否则 403 `origin_forbidden`；无 Origin 放行 |
 | 凭据 | 同上 | `X-Workbench-Token` 头**或** `wb_session` Cookie，任一有效即通过；否则 401 `auth_required` |
 | 豁免面 | `auth.is_exempt` | 闭合三处：`GET /api/v1/health`、`GET /api/v1/auth/token`（仅 GET/HEAD）、不在 `/api` 下的一切 |
+| 媒体根 | `workbench_store` | 只解析 `sessions_root` 之下；`asset_id` 拆出的会话必须已通过 `_resolve`，文件名必须是 `<16 位十六进制>.<已知扩展名>`；不接 `D:\素材库`、不直服 ComfyUI 输出 |
+| Range | `api/media.py` | 单段 `a-b` / `a-` / `-n`；越界、语法非法、多段一律 416 + `Content-Range: bytes */<len>`；素材与成片共用这一份 |
 
 - **令牌每进程随机、只存内存**（`create_app` 生成，`app.state.local_access`）。重启即换；
   测试里每个 app 各一份。
@@ -76,5 +84,8 @@
 ## 验收
 
 真实跑：主树、`python -m minimax_h3_prompt.api` 另开终端，再跑 `scripts/accept_d2.py`
-（证据清单见其 docstring）。确定性全链路在 `tests/test_api_*.py` 与
-`tests/workbench_deterministic.py`。
+（会话生命周期）与 `scripts/accept_d3.py`（真实素材上传 + 真实成片 Range）。浏览器侧
+由 `frontend/e2e/media.spec.ts` 覆盖上传与 `<video>` seek 206（CI 用入库的
+`tests/fixtures/tiny.webm`；真实照片/成片那条由 `ACCEPT_D3_PHOTO` / `ACCEPT_D3_ARTIFACT`
+门控（`ACCEPT_D3_REPORT` 可把浏览器侧事实另存一份 JSON），手动跑）。确定性全链路在
+`tests/test_api_*.py` 与 `tests/workbench_deterministic.py`。

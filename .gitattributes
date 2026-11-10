@@ -27,3 +27,6 @@ scripts/hooks/* text eol=lf
 *.html text eol=lf
 *.css text eol=lf
 *.mjs text eol=lf
+
+# 二进制夹具（D3-4 / #226）：真实 WebM 是 <video> 的判据，不能被换行处理碰。
+*.webm binary
