@@ -539,6 +539,14 @@ MUTATIONS: tuple[Mutation, ...] = (
         ("tests/test_api_auth.py::test_health_endpoint_is_exempt",),
         "豁免面失守＝健康检查被令牌挡住，排障入口先于业务不可用（#223 / D3-AC2）",
     ),
+    Mutation(
+        "own_module_pointer_scan_off",
+        "tests/test_doc_pointer_shape.py",
+        '    return re.compile(r"(?:" + "|".join(map(re.escape, names)) + r")\\.py:\\d+")',
+        '    return re.compile(r"(?!)")',
+        ("tests/test_doc_pointer_shape.py::test_own_module_scan_recognises_only_own_modules",),
+        "本仓模块名的扫描式退化成永不命中＝活文档里的行号指针一路绿（#224 复审实测）",
+    ),
 )
 
 

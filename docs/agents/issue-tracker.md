@@ -6,6 +6,7 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 
 - **Create an issue**: `gh issue create --title "..." --body "..."`. Use a heredoc for multi-line bodies.
 - **Read an issue**: `gh issue view <number> --comments`, filtering comments by `jq` and also fetching labels.
+- **Read a long spec by section, not by line count**: list the headings first (`gh issue view <n> --json body --jq .body | grep -n '^## '`), read each section by its own range, then count off the headings you covered against that list. Slicing by line count (`head -120`, then `sed -n '120,400p'`) leaves whatever sits on the seam unread by either command, and nothing reports the gap — on 2026-11-10 a spec's §5.2 table row for `audio` landed exactly between two such slices, the implementation shipped two of the three asset kinds, and only the review pass caught it.
 - **List issues**: `gh issue list --state open --json number,title,body,labels,comments --jq '[.[] | {number, title, body, labels: [.labels[].name], comments: [.comments[].body]}]'` with appropriate `--label` and `--state` filters.
 - **Large `--json` output**: piping `gh ... --json ...` straight into another program can truncate at the tool's output limit and hand you invalid JSON (observed 2026-11-09: a ~74 KB issue list broke `json.load`). Redirect to a file first (`gh issue list ... > issues.json`) then read the file.
 - **Comment on an issue**: `gh issue comment <number> --body "..."`
