@@ -8,14 +8,38 @@
 
 ```bash
 scripts/check.sh fast       # 提交前：结构守卫 + 改动文件 lint + 秒级用例
-scripts/check.sh full       # 推送前：全量测试 + docstring 守卫 + lint
+                            #   + 改动 src/契约/前端生成链时自动查契约漂移
+                            #   + 前端有改动时跑 eslint/vue-tsc
+scripts/check.sh full       # 交验收/推送前：全量测试 + docstring 守卫 + lint + mypy
+                            #   + 前端 + 契约漂移
 scripts/check.sh lint       # 全量 src 的 ruff（装了才跑）
 scripts/check.sh mutate     # 守卫变异检验（无额外依赖，约 5 秒）
 scripts/check.sh types      # mypy 全仓（装了才跑）
 scripts/check.sh coverage   # 分支覆盖度量（装了才跑，不设门槛）
-scripts/check.sh clean      # 干净环境（无 .env）跑全量，模拟 CI 的干净检出
+scripts/check.sh frontend   # 强制跑 eslint + vue-tsc（依赖不完整时跳过并提示）
+scripts/check.sh clean      # 干净环境（无 .env）跑全量 + 契约漂移，模拟 CI
+scripts/check.sh worktree   # 工作树生命周期冒烟（add/remove）
 scripts/check.sh rehash     # 打印关键帧角色提示词的 sha256，供更新基线
 ```
+
+- **判据是最后一行**：`[check] <档位>: PASS` / `FAIL（退出码 N）`。管道随便接，
+  `| tail -3` 也不会把红显示成绿（脚本自己保证，不用记 `PIPESTATUS`）。
+- **契约漂移**：重新导出 `contracts/openapi.json`（装了前端依赖再生成
+  `frontend/src/api/generated.ts`），有 diff 即红。CI 跑同一套（`.github/workflows/ci.yml`）。
+- **前端守卫的「装了」判据是 `node_modules/.bin/eslint` 与 `.bin/vue-tsc`**，不是目录
+  存在——空/半装目录按「未安装」跳过，不误报成代码坏了（2026-11-10 实测）。
+- **工作树借用前端依赖**只能走 `scripts/worktree.sh link-frontend NN` /
+  `unlink-frontend NN`（目录联接）；`remove` 删树前会先安全摘联接。`rm -rf` 联接会
+  穿透清空主树依赖（2026-11-10 实测）。
+- `PYTHONPATH` 由脚本自己指向**本树**的 `src`，工作树里跑也是测工作树。
+- 单条用例超时 300 秒（`pyproject.toml`），卡死时以「哪个用例超时」收场；要
+  `pytest-timeout` 才生效（安装由用户执行）。
+- 结构守卫：`scripts/check_docstring_shape.py`（docstring 不许写成 f-string）、
+  `tests/test_adr_guard.py`（`ADR NNNN` 必须指向真实文件；每份 ADR 有且只有一行状态
+  行）、`scripts/check_commit_msg.sh`（提交信息格式）。`scripts/ac_trace.py` 只做
+  追溯、不是门禁。
+- 新机器跑一次 `scripts/bootstrap-dev.sh` 装回 `pre-commit` / `commit-msg` 钩子
+  （`.git/hooks/` 不随 clone 走）。
 
 CI（`.github/workflows/ci.yml`）跑的是同一套：docstring 守卫 → ruff（`src tests`）→
 mypy → 全量测试 → 变异检验。**CI 与本机同源**，否则「本机绿」又会变回唯一证据。
@@ -36,14 +60,19 @@ mypy → 全量测试 → 变异检验。**CI 与本机同源**，否则「本�
    整个步骤以崩溃收场。工作流已设 `PYTHONIOENCODING: utf-8`，新脚本入口也自己
    `sys.stdout.reconfigure(encoding="utf-8")` 兜一道。
 
-## 三条「装了才有」的工具
+## 装了才跑的工具
 
 安装一律由用户执行（全局规则：下载由用户本人做）：
 
 ```bash
-uv add --dev mypy      # 先只查叶子模块，配置见 pyproject [tool.mypy]
-uv add --dev coverage  # 只度量、不设 fail_under，见 pyproject [tool.coverage.*]
+uv add --dev ruff             # 改动文件的 lint；check.sh 用 "$PY" -m ruff，不走 PATH
+uv add --dev mypy             # 全仓类型；配置见 pyproject [tool.mypy]
+uv add --dev coverage         # 只度量、不设 fail_under，见 pyproject [tool.coverage.*]
+uv add --dev pytest-timeout   # 单条用例 300 秒超时；未装时 check.sh 会提示
+cd frontend && npx pnpm@11.7.0 install   # eslint / vue-tsc / 契约 TS 生成
 ```
+
+缺装时守卫按「跳过并提示」处理，不会把缺依赖误报成代码坏了。
 
 - **mypy**：2026-11-02 分六批从 4 个叶子模块推到**全仓 72 个文件零错误**，`files`
   现在就是整个包（白名单会漏掉新增文件）。推进纪律保留：一次一批、修到绿再加下一批；

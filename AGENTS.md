@@ -50,24 +50,15 @@ spec 与票住 issue 是因为 `/to-spec`、`/to-tickets` 按 `docs/agents/issue
 ## 守卫（2026-11-02 起入库）
 
 `tests/`、`scripts/`、`docs/` 与 `AGENTS.md` 自 2026-11-02 起恢复入库（体检 P0-1）：干净检出即可跑测试与结构守卫，CI 与本机跑同一套命令。`.git/hooks/` 仍是每台机器自己的目录、不随 clone 走——新机器跑一次 `scripts/bootstrap-dev.sh` 装回；钩子本体在 `scripts/hooks/`，已被跟踪。
-- `scripts/check.sh fast|full`：快档结构守卫（出网守卫、f-string docstring）＋改动文件的 lint ＋测试；`.git/hooks/pre-commit` 调快档。`full` 另跑 mypy 与全量测试；`clean` 把本机 `.env` 从测试里摘掉、模拟 CI 的干净检出（推送前跑它，2026-11-02 CI 首跑红了三条本地看不见的）。**判据是最后一行**：`[check] <档位>: PASS` / `FAIL（退出码 N）`——管道随便接，`| tail -3` 也不会把红显示成绿（2026-11-08 起由脚本自己保证，不用再记 `PIPESTATUS`）。
-  它自己把本树 `src` 放进 `PYTHONPATH`，工作树里跑也是测工作树（2026-11-08 #199 实测：此前工作树里跑会静默测主树）。
-- `scripts/check_docstring_shape.py`：AST 守卫，docstring 写成 f-string 即报红（ruff 的 F 规则不抓，全量测试也不报）。
-- `scripts/check_commit_msg.sh`：提交信息格式 `type(scope): 摘要（#N）`（无 issue 的 retro 用 `（retro YYYY-MM-DD）`）；`.git/hooks/commit-msg` 调用它。
-- `scripts/worktree.sh add|harvest|remove NN`：建树自动复制 `tests/`、`scripts/`、`docs/` 并留一份 tests 基线快照；`harvest` 把工作树里的测试改动回灌主树（主树已分叉就报冲突、不覆盖）；删树先自动 harvest。
-- `scripts/bootstrap-dev.sh`：新本机装回 `pre-commit` / `commit-msg` 钩子并检查 `tests/`、`scripts/` 是否就位。
-- lint：`ruff` 在 `[dependency-groups].dev` 里、装在 `.venv`；`scripts/check.sh` 用 `"$PY" -m ruff`（不走 PATH）。缺装时 fast 会跳过并提示，安装由用户执行：`uv add --dev ruff`。
-- `scripts/check.sh mutate`：守卫变异检验（`scripts/mutation_check.py`），把关键实现改坏、跑指定用例、还原；用例必须红。**新加守卫就往 `MUTATIONS` 补一条**——没有变异检验的守卫不算守卫。
-- `scripts/check.sh types|coverage`：mypy（先只查叶子模块）与分支覆盖度量，两个都**装了才跑**，安装由用户执行（`uv add --dev mypy` / `uv add --dev coverage`）。
-- `scripts/check.sh frontend`：前端守卫（`eslint .` + `vue-tsc --noEmit`），**装了 `frontend/node_modules` 才跑**，缺依赖像 ruff 一样提示跳过（安装由用户：`cd frontend && npx pnpm@11.7.0 install`）。`fast` 档在「前端有改动」时自动带上它、无改动跳过，不拖慢纯 Python 提交。此前前端只在 CI 有 lint/typecheck，本地提交坏 TS 不会红（retro 2026-11-09）。
-- 单条用例超时 300 秒（`pyproject.toml` 的 `timeout`）：卡死时以「哪个用例超时」收场，而不是把机器拖到换页。要 `pytest-timeout` 才生效，未装时 `check.sh` 会提示；安装由用户执行：`uv add --dev pytest-timeout`（2026-11-08 实测一条卡死的全量吃到 24 GB 工作集 / 95 GB 私有提交）。
-- `scripts/ac_trace.py`：按注释/docstring 里的 `#NNN` 汇总 issue → 代码 → 测试；用来发现「只有代码、没有测试」的票。不是门禁。
-- `tests/test_adr_guard.py`（fast 档）：① 注释/docstring/文档里的 `ADR NNNN` 必须指向真实文件（外部 ADR 写 `ADR-NNNN`，连字符形式不核对）；② 27 份 ADR 必须有且只有一行合规状态行。ADR 写法与索引口径见 `docs/agents/engineering-cadence.md`；索引用 `scripts/adr_index.py` 现生成，不落静态清单。
-- 工程化常态（检查档位、发布管理、追溯口径）见 `docs/agents/engineering-cadence.md`；变更记录见根 `CHANGELOG.md`。
+- **时机**：提交前 `scripts/check.sh fast`；交验收/推送前 `full` + `clean`（`clean` 把本机 `.env` 从测试里摘掉，模拟 CI 的干净检出）。
+- **判据是最后一行**：`[check] <档位>: PASS` / `FAIL（退出码 N）`——管道随便接，`| tail -3` 也不会把红显示成绿（2026-11-08 起由脚本自己保证，不用再记 `PIPESTATUS`）。
+- **提交信息格式**：`type(scope): 摘要（#N）`；无 issue 的 retro 用 `（retro YYYY-MM-DD）`。
+- **新加守卫必须补一条变异**（`scripts/mutation_check.py` 的 `MUTATIONS`）：没有变异检验的守卫不算守卫。
+- 各档位做什么、依赖缺装、契约/前端/工作树的命令细节见 `docs/agents/engineering-cadence.md`；变更记录见根 `CHANGELOG.md`。
 
 ## `/implement-spec`（2026-10-21 起）
 
-用它即视为**用户要求并行**——它会为每张票自己开工作树 + 实现子代理，不必再手动 `git worktree add`（这也是「票据工作流」里「协调会话不代开实现代理」的例外：`/implement-spec` 自身即为用户明确要求）。它与本仓规则有五处接缝：
+用它即视为**用户要求并行**——它会为每张票自己开工作树 + 实现子代理，不必再手动 `git worktree add`（这也是「票据工作流」里「协调会话不代开实现代理」的例外：`/implement-spec` 自身即为用户明确要求）。它与本仓规则有六处接缝：
 
 - **派发前先对票**：见 `docs/agents/engineering-cadence.md` 的「并行拆票前的对票」。手工按文件簇分组会漏票（2026-11-03 实测 12 票漏了 #150），**集合差非空不许开工**。
 - **实现简报必须带「越权假设」条**：规格没写的取舍不自行决定；必须选时记为「越权假设」单列到报告，由协调会话裁定（2026-11-03：画布未选定继承 Z-Image 越出 spec D／US25，靠 Spec 轴复审才抓回）。简报还要交代**真实会话证据的位置**：`output/sessions/` 与 `output/accept-*` 只在主树（gitignore），工作树不复制；需要实跑对照时由协调会话执行，或给主树绝对路径。
