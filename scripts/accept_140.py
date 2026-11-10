@@ -11,8 +11,13 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
-sys.stdout.reconfigure(encoding="utf-8")
+# 标准流类型在 mypy 眼里是 TextIO（没有 reconfigure）：用 getattr 探测，非 TTY 也能跑。
+for _stream in (sys.stdout, sys.stderr):
+    _reconfigure = getattr(_stream, "reconfigure", None)
+    if _reconfigure is not None:
+        _reconfigure(encoding="utf-8")
 
 ROOT = Path(__file__).resolve().parents[1]
 SESSION = ROOT / "output/sessions/一段刑警侦探从街区下车到案发现场的视频-932d9e28/GEN001/director"
@@ -25,11 +30,11 @@ def main() -> int:
 
     OUT.mkdir(parents=True, exist_ok=True)
     model = load_frame_image_model()
-    rows = []
+    rows: list[dict[str, Any]] = []
     lines = [
         "# #140 尾帧存量复核（四份 tailframe）",
         "",
-        f"- 校验器：`director.tailframe.validate_tailframe_prompt(text, segment_prompt=…)`",
+        "- 校验器：`director.tailframe.validate_tailframe_prompt(text, segment_prompt=…)`",
         f"- 默认模型档：`{model}`（`load_frame_image_model()`）",
         f"- 会话：`{SESSION.relative_to(ROOT).as_posix()}`",
         "",

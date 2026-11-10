@@ -88,9 +88,12 @@ lint_changed() {
   local files
   # tests/ 也查：2026-11-02 扩到全仓时，tests 里还躺着 34 条（含一条 F821
   # 「赋值前引用」）。只查 src 等于把一半代码排除在机械检查之外。
-  files=$(git diff --name-only --diff-filter=ACMR HEAD -- 'src' 'tests' | grep -E '\.py$' || true)
+  # scripts/ 也查（retro 2026-11-10）：#226 里 accept_d3.py 带着 F541 进了提交，
+  # 因为验收驱动器不在任何 lint 范围；只查改动文件，历史告警（accept_140、
+  # measure_seam_motion 各一条）不会一次性刷屏。
+  files=$(git diff --name-only --diff-filter=ACMR HEAD -- 'src' 'tests' 'scripts' | grep -E '\.py$' || true)
   if [ -z "$files" ]; then
-    echo "[check] lint: 没有改动的 src/tests 下的 .py，跳过"
+    echo "[check] lint: 没有改动的 src/tests/scripts 下的 .py，跳过"
     return 0
   fi
   echo "[check] lint: ruff check（改动文件）"
@@ -115,6 +118,16 @@ run_types() {
   fi
   echo "[check] types: mypy（全仓）"
   "$PY" -m mypy
+  # scripts/ 走「改动的文件」（retro 2026-11-10）：验收驱动器原先完全在 mypy 之外，
+  # #226 里 accept_d3.py 的 arg-type 错误只能靠复审手跑才发现。历史脚本还有存量
+  # 错误，所以只查改动过的，不把整目录并进配置。
+  local script_files
+  script_files=$(git diff --name-only --diff-filter=ACMR HEAD -- 'scripts' | grep -E '\.py$' || true)
+  if [ -n "$script_files" ]; then
+    echo "[check] types: mypy（改动的 scripts）"
+    # shellcheck disable=SC2086 - 文件名按行拆分是刻意的（路径不含空格是本仓约定）
+    "$PY" -m mypy $script_files
+  fi
 }
 
 # 前端守卫（retro 2026-11-09）：前端原先只在 CI 有 lint/typecheck，本地提交坏 TS 不会红。
@@ -134,7 +147,8 @@ run_frontend_guard() {
   # "No such file or directory"——把「依赖没装」误报成代码坏了（2026-11-10 实测）。
   if [ ! -e "$frontend/node_modules/.bin/eslint" ] \
       || [ ! -e "$frontend/node_modules/.bin/vue-tsc" ] \
-      || [ ! -e "$frontend/node_modules/.bin/prettier" ]; then
+      || [ ! -e "$frontend/node_modules/.bin/prettier" ] \
+      || [ ! -e "$frontend/node_modules/.bin/tsc" ]; then
     echo "[check] frontend: 跳过（前端依赖未安装或不完整：cd frontend && npx pnpm@11.7.0 install）"
     return 0
   fi
@@ -142,12 +156,15 @@ run_frontend_guard() {
     echo "[check] frontend: 没有前端改动，跳过"
     return 0
   fi
-  echo "[check] frontend: eslint + prettier --check + vue-tsc"
+  echo "[check] frontend: eslint + prettier --check + vue-tsc + e2e 类型"
   ( cd "$frontend" && ./node_modules/.bin/eslint . )
   # 与 CI 的 `pnpm run format:check` 同一条命令（`.prettierignore` 已排除 generated.ts
   # 与构建产物）。
   ( cd "$frontend" && ./node_modules/.bin/prettier --check . )
   ( cd "$frontend" && ./node_modules/.bin/vue-tsc --noEmit )
+  # e2e 不在主 tsconfig 的 include 里（配置/规格文件的类型由 Playwright 转译，不做
+  # 类型检查）：retro 2026-11-10 补独立 tsconfig.e2e.json，别让 e2e 成为类型盲区。
+  ( cd "$frontend" && ./node_modules/.bin/tsc --noEmit -p tsconfig.e2e.json )
 }
 
 # 契约守卫（retro 2026-11-10）：OpenAPI 与前端生成类型的 drift 原先只在 CI 有，
@@ -256,8 +273,8 @@ case "$MODE" in
       echo "[check] lint: ruff 未安装，跳过（安装由用户执行：uv add --dev ruff）"
       exit 0
     fi
-    echo "[check] lint: ruff check src tests"
-    "$PY" -m ruff check src tests
+    echo "[check] lint: ruff check src tests scripts"
+    "$PY" -m ruff check src tests scripts
     ;;
   clean)
     # 干净环境（retro 2026-11-02）：把本机 .env 从测试里摘掉，模拟 CI 的干净检出。

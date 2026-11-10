@@ -27,6 +27,12 @@ ADR_DIR = ROOT / "docs" / "adr"
 _REF = re.compile(r"ADR[ ](\d{4})|adr/(\d{4})")
 # 状态行：日期 + 「复核」+ 冒号后有内容。
 _STATUS = re.compile(r"^> \*\*状态（(\d{4}-\d{2}-\d{2}) 复核）\*\*：\S")
+# 历史 ADR 里还有「追加」「当日」「更新」三种已入正文的标注形态（标签后可带说明）；
+# 除此以外的标签（如「验收」）一律红。
+_STATUS_VALID = re.compile(
+    r"^> \*\*状态（(\d{4}-\d{2}-\d{2}) (?:复核|追加|当日|更新)[^）]*）\*\*：\S")
+# 任何以「状态（」开头的行都必须是上述合规形态；只匹配到它才知道谁写坏了。
+_STATUS_LIKE = re.compile(r"^> \*\*状态（")
 
 _SCAN_SUFFIXES = {".py", ".md"}
 _SKIP_DIRS = {".git", ".venv", "__pycache__", "output", "worktree", "node_modules"}
@@ -105,17 +111,59 @@ def test_every_referenced_adr_exists():
         "这些引用指向不存在的 ADR：\n  " + "\n  ".join(dangling[:20]))
 
 
+def _status_offender(path: Path) -> str | None:
+    """一份 ADR 的状态行问题；没有就返回 None。
+
+    两种都要咬：**合规行数 ≠ 1**，以及**任何** ``> **状态（`` 开头的行格式不对。
+    只数合规行会放行畸形状态（2026-11-10 #226 实测：写成「状态（…验收）」照样绿）。
+    ``> **状态追加（`` 是仓规允许的追加形态，不参与格式核对。
+    """
+    lines = path.read_text(encoding="utf-8").splitlines()
+    # 只看标题之后的头 10 行：状态行是文首那一行，不是正文里的引用
+    head = lines[1:11]
+    matched = [line for line in head if _STATUS.match(line)]
+    malformed = [line for line in head
+                 if _STATUS_LIKE.match(line) and not _STATUS_VALID.match(line)]
+    if len(matched) != 1:
+        return f"{path.name}（找到 {len(matched)} 行状态）"
+    if malformed:
+        return f"{path.name}（状态行格式不合规：{malformed[0][:60]}）"
+    return None
+
+
 def test_every_adr_has_a_well_formed_status_line():
-    offenders: list[str] = []
-    for path in sorted(ADR_DIR.glob("*.md")):
-        lines = path.read_text(encoding="utf-8").splitlines()
-        # 只看标题之后的头 10 行：状态行是文首那一行，不是正文里的引用
-        head = [line for line in lines[1:11] if _STATUS.match(line)]
-        if len(head) != 1:
-            offenders.append(f"{path.name}（找到 {len(head)} 行状态）")
+    offenders = [offender for path in sorted(ADR_DIR.glob("*.md"))
+                 if (offender := _status_offender(path)) is not None]
     assert not offenders, (
-        "这些 ADR 缺少（或多于一条）合规状态行，格式应为 "
-        "`> **状态（YYYY-MM-DD 复核）**：…`：\n  " + "\n  ".join(offenders))
+        "这些 ADR 缺少、重复或写坏了状态行，格式应为 "
+        "`> **状态（YYYY-MM-DD 复核）**：…`（历史标注允许「追加」「撤除」）：\n  "
+        + "\n  ".join(offenders))
+
+
+def test_a_malformed_status_label_is_rejected(tmp_path):
+    """畸形状态行必须报红，哪怕旁边已经有一行合规的（#226 的静默形态）。"""
+    good = tmp_path / "0001-good.md"
+    good.write_text(
+        "# 标题\n\n> **状态（2026-11-10 复核）**：生效。\n", encoding="utf-8")
+    assert _status_offender(good) is None
+
+    malformed = tmp_path / "0002-malformed.md"
+    malformed.write_text(
+        "# 标题\n\n> **状态（2026-11-10 复核）**：生效。\n"
+        "> **状态（2026-11-10 验收）**：追加。\n", encoding="utf-8")
+    assert _status_offender(malformed) is not None
+
+    appended = tmp_path / "0003-appended.md"
+    appended.write_text(
+        "# 标题\n\n> **状态（2026-11-10 复核）**：生效。\n"
+        "> **状态追加（2026-11-10，issue #1）：补充。\n", encoding="utf-8")
+    assert _status_offender(appended) is None
+
+    legacy = tmp_path / "0004-legacy.md"
+    legacy.write_text(
+        "# 标题\n\n> **状态（2026-11-10 复核）**：生效。\n"
+        "> **状态（2026-10-27 追加，取代原判决）**：历史标注。\n", encoding="utf-8")
+    assert _status_offender(legacy) is None
 
 
 def test_the_adr_directory_is_not_empty():

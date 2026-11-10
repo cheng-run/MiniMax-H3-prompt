@@ -25,9 +25,11 @@ PW_CHANNEL=chrome npx --no-install playwright test   # 本机免下载 chromium 
 ```
 
 纯 Python 提交不跑前端：`scripts/check.sh frontend` 单独跑
-`eslint + prettier --check + vue-tsc`，`scripts/check.sh fast` 只在「前端有改动」时
+`eslint + prettier --check + vue-tsc + e2e 类型`，`scripts/check.sh fast` 只在「前端有改动」时
 自动带上它（见 AGENTS.md）。Prettier 那一步与 CI 的 `format:check` 同一条命令
-（2026-11-10 #225 retro 补：CI 有、本地没有，main 因此红过好几次）。
+（2026-11-10 #225 retro 补：CI 有、本地没有，main 因此红过好几次）。e2e 的类型
+走独立的 `tsconfig.e2e.json`（主 tsconfig 只 include `src/`），Playwright 只转译不查类型，
+不补这一层 e2e 就是类型盲区（retro 2026-11-10）。
 
 ## 坑（都实测踩过）
 

@@ -10,13 +10,13 @@
 scripts/check.sh fast       # 提交前：结构守卫 + 改动文件 lint + 秒级用例
                             #   + 改动 src/契约/前端生成链时自动查契约漂移
                             #   + 前端有改动时跑 eslint/vue-tsc
-scripts/check.sh full       # 交验收/推送前：全量测试 + docstring 守卫 + lint + mypy
-                            #   + 前端（eslint/prettier/vue-tsc）+ 契约漂移 + 变异检验
-scripts/check.sh lint       # 全量 src 的 ruff（装了才跑）
+scripts/check.sh full       # 交验收/推送前：全量测试 + docstring 守卫 + lint + mypy（含改动的 scripts）
+                            #   + 前端（eslint/prettier/vue-tsc + e2e 类型）+ 契约漂移 + 变异检验
+scripts/check.sh lint       # 全量 src/tests/scripts 的 ruff（装了才跑）
 scripts/check.sh mutate     # 守卫变异检验（无额外依赖，约 2 分钟；full 已含）
 scripts/check.sh types      # mypy 全仓（装了才跑）
 scripts/check.sh coverage   # 分支覆盖度量（装了才跑，不设门槛）
-scripts/check.sh frontend   # 强制跑 eslint + prettier --check + vue-tsc（依赖不完整时跳过并提示）
+scripts/check.sh frontend   # 强制跑 eslint + prettier --check + vue-tsc + e2e 类型（依赖不完整时跳过并提示）
 scripts/check.sh clean      # 干净环境（无 .env）跑全量 + 契约漂移，模拟 CI
 scripts/check.sh worktree   # 工作树生命周期冒烟（add/remove）
 scripts/check.sh rehash     # 打印关键帧角色提示词的 sha256，供更新基线
@@ -52,7 +52,7 @@ scripts/check.sh rehash     # 打印关键帧角色提示词的 sha256，供更�
 - 新机器跑一次 `scripts/bootstrap-dev.sh` 装回 `pre-commit` / `commit-msg` 钩子
   （`.git/hooks/` 不随 clone 走）。
 
-CI（`.github/workflows/ci.yml`）跑的是同一套：docstring 守卫 → ruff（`src tests`）→
+CI（`.github/workflows/ci.yml`）跑的是同一套：docstring 守卫 → ruff（`src tests scripts`）→
 mypy → 全量测试 → 变异检验。**CI 与本机同源**，否则「本机绿」又会变回唯一证据。
 
 ### 改工作流时的两条约定
@@ -135,7 +135,7 @@ comm -23 /tmp/all-tickets /tmp/assigned-tickets   # 必须为空
 
 | 约定 | 判据 | 守卫 |
 |---|---|---|
-| 状态行 | 标题下第一段必须是 `> **状态（YYYY-MM-DD 复核）**：…`；**只追加、不覆写**（旧行保留，标「已被下一条取代」） | `tests/test_adr_guard.py` |
+| 状态行 | 标题下第一段必须是 `> **状态（YYYY-MM-DD 复核）**：…`；**只追加、不覆写**（旧行保留，标「已被下一条取代」）；**每一行** `> **状态（` 都必须是合规标签（复核 / 追加 / 当日 / 更新），其它标签直接红（2026-11-10 #226 实测：只数合规行会放行「状态（…验收）」） | `tests/test_adr_guard.py` |
 | 引用写法 | 本仓引用写 `ADR 0019`（空格）或 `docs/adr/0019`；**外部项目的 ADR 写 `ADR-0006`（连字符）**，不参与本仓核对 | 同上 |
 | 索引 | **不落静态清单**，需要时 `uv run python scripts/adr_index.py [--status]` 从状态行现生成 | — |
 

@@ -571,6 +571,14 @@ MUTATIONS: tuple[Mutation, ...] = (
         ("tests/test_doc_pointer_shape.py::test_own_module_scan_recognises_only_own_modules",),
         "本仓模块名的扫描式退化成永不命中＝活文档里的行号指针一路绿（#224 复审实测）",
     ),
+    Mutation(
+        "adr_malformed_status_unchecked",
+        "tests/test_adr_guard.py",
+        "                 if _STATUS_LIKE.match(line) and not _STATUS_VALID.match(line)]",
+        "                 if False and _STATUS_LIKE.match(line) and not _STATUS_VALID.match(line)]",
+        ("tests/test_adr_guard.py::test_a_malformed_status_label_is_rejected",),
+        "只数合规行、不拒绝畸形状态行＝「状态（…验收）」静默放行（#226 实测）",
+    ),
 )
 
 

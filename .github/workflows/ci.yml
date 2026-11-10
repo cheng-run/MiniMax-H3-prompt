@@ -52,7 +52,7 @@ jobs:
 
       - name: lint（ruff）
         # tests/ 一起查：测试里也有未定义名、未使用导入这类机械错误。
-        run: uv run python -m ruff check src tests
+        run: uv run python -m ruff check src tests scripts
 
       # 类型检查：2026-11-02 起全仓零错误。不进 CI 的守卫等于没有——
       # 之前 mypy 只在 check.sh 里，推送后没人再检查它。
@@ -121,6 +121,12 @@ jobs:
       - name: 类型检查（vue-tsc）
         working-directory: frontend
         run: pnpm run typecheck
+
+      # e2e 不在主 tsconfig 的 include 里（retro 2026-11-10）：Playwright 只转译不查类型，
+      # 这里用独立的 tsconfig.e2e.json 补上。
+      - name: 类型检查（e2e）
+        working-directory: frontend
+        run: pnpm run typecheck:e2e
 
       - name: 单测 + 组件测试 + 覆盖率门禁
         working-directory: frontend
