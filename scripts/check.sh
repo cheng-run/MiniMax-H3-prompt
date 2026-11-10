@@ -12,7 +12,7 @@
 # 用法：
 #   scripts/check.sh          # 快档（默认）：结构守卫 + 改动文件的 lint
 #   scripts/check.sh fast
-#   scripts/check.sh full     # 全量测试 + 改动文件的 lint
+#   scripts/check.sh full     # 全量测试 + 前端/契约守卫（交验收、推送前跑）
 #   scripts/check.sh lint     # 全量 src 的 ruff（装了才跑）
 #   scripts/check.sh mutate   # 守卫变异检验（不需要额外依赖）
 #   scripts/check.sh types    # mypy（装了才跑；先只查叶子模块）
@@ -121,8 +121,12 @@ run_frontend_guard() {
   local root frontend
   root=$(git rev-parse --show-toplevel)
   frontend="$root/frontend"
-  if [ ! -d "$frontend/node_modules" ]; then
-    echo "[check] frontend: 跳过（未装前端依赖：cd frontend && npx pnpm@11.7.0 install）"
+  # 判据是**可执行入口**而不是目录存在：目录联接被误删后会留下一个空的
+  # `node_modules`，`-d` 仍为真，守卫会跑进 `./node_modules/.bin/eslint` 并报
+  # "No such file or directory"——把「依赖没装」误报成代码坏了（2026-11-10 实测）。
+  if [ ! -e "$frontend/node_modules/.bin/eslint" ] \
+      || [ ! -e "$frontend/node_modules/.bin/vue-tsc" ]; then
+    echo "[check] frontend: 跳过（前端依赖未安装或不完整：cd frontend && npx pnpm@11.7.0 install）"
     return 0
   fi
   if [ "$force" != true ] && [ -z "$(git status --porcelain -- frontend)" ]; then
@@ -134,6 +138,34 @@ run_frontend_guard() {
   ( cd "$frontend" && ./node_modules/.bin/vue-tsc --noEmit )
 }
 
+# 契约守卫（retro 2026-11-10）：OpenAPI 与前端生成类型的 drift 原先只在 CI 有，
+# D2 验收时还要手跑两条命令才拿得到 AC14 的证据。这里把同一套判据搬进本地：
+# Python 导出必须零 diff；装了前端依赖再生成 TS 并 diff。生成失败/漂移都算红——
+# 契约是类型链的源头，看着绿而实际分叉比直接报错更贵。
+run_contract_guard() {
+  local root frontend
+  root=$(git rev-parse --show-toplevel)
+  frontend="$root/frontend"
+  echo "[check] contracts: 重新导出 OpenAPI 并检查 drift"
+  "$PY" "$root/scripts/export_openapi.py"
+  if ! git -C "$root" diff --exit-code -- contracts/openapi.json >/dev/null 2>&1; then
+    echo "[check] contracts: contracts/openapi.json 与代码漂移（重新导出后有 diff）：" >&2
+    git -C "$root" diff --stat -- contracts/openapi.json >&2
+    return 1
+  fi
+  if ! command -v node >/dev/null 2>&1 \
+      || [ ! -e "$frontend/node_modules/openapi-typescript" ]; then
+    echo "[check] contracts: 跳过 TS 生成（node 或前端依赖未就绪）"
+    return 0
+  fi
+  ( cd "$frontend" && node scripts/generate-api.mjs >/dev/null )
+  if ! git -C "$root" diff --exit-code -- frontend/src/api/generated.ts >/dev/null 2>&1; then
+    echo "[check] contracts: frontend/src/api/generated.ts 漂移（重新生成后有 diff）：" >&2
+    git -C "$root" diff --stat -- frontend/src/api/generated.ts >&2
+    return 1
+  fi
+}
+
 run_fast() {
   echo "[check] fast: ${#FAST_TESTS[@]} 个结构守卫文件"
   report_timeout_guard
@@ -141,6 +173,11 @@ run_fast() {
   run_docstring_guard
   lint_changed
   run_frontend_guard false
+  # 只有改了契约相关路径才跑：每次提交都导出会把快档拖慢，而契约漂移只可能由
+  # src/契约/生成链的改动引入（整个 src 都算：路由的 schema 也可能来自 store 模型）。
+  if [ -n "$(git status --porcelain -- src/minimax_h3_prompt contracts frontend/src/api frontend/scripts 2>/dev/null)" ]; then
+    run_contract_guard
+  fi
 }
 
 # 基线哈希重算（retro 2026-11-03）：`tests/test_base_prompt_bytes.py` 的常量在并行
@@ -173,6 +210,10 @@ case "$MODE" in
     run_docstring_guard
     lint_changed
     run_types
+    # full 是交验收/推送前的最后一关：前端与契约漂移必须在这里一起看到，不能留着
+    # 等 CI 才红（2026-11-10 实测：full 绿而 CI 的前端/契约 job 红）。
+    run_frontend_guard true
+    run_contract_guard
     ;;
   frontend)
     run_frontend_guard true
@@ -192,6 +233,7 @@ case "$MODE" in
     report_timeout_guard
     H3_TEST_NO_ENV=1 "$PY" -m pytest -q
     run_docstring_guard
+    run_contract_guard
     ;;
   mutate)
     # 变异检验（体检 P6）：守卫测试必须真的会咬人。不需要额外依赖。

@@ -26,11 +26,37 @@ usage() {
   scripts/worktree.sh harvest NN
       把工作树里改过的测试文件回灌主树：主树仍是基线版本才覆盖；
       主树与工作树都改过同一文件时列出冲突并退出 1（不猜）。
+  scripts/worktree.sh link-frontend NN
+      给工作树建 frontend/node_modules 的**目录联接**（Windows junction），
+      指向主树依赖。只能用配套的 unlink-frontend 摘掉——rm -rf 联接会穿透
+      清空主树依赖（2026-11-10 实测）。
+  scripts/worktree.sh unlink-frontend NN
+      删除工作树的 frontend/node_modules 目录联接（PowerShell Directory.Delete，
+      只删联接、不动主树）。
   scripts/worktree.sh remove NN [--force]
       默认先自动 harvest，再同步主树最新 tests 副本；删前检查跟踪文件脏改动。
       任一项不满足就拒绝；--force 会打印警告后跳过。
 USAGE
   exit 2
+}
+
+# 目录联接（Windows junction）：给工作树借用主树的前端依赖。创建与删除都必须走这里：
+# rm -rf 联接会穿透删到主树（2026-11-10 实测把主树 node_modules 整份清空），而 Git
+# Bash 的 rmdir 对 junction 报 "Not a directory"。PowerShell 的两个方向都稳；
+# Directory.Delete 对非空真实目录会抛错，正好挡住「误删真实依赖」。
+_link_dir() {
+  local dest source
+  dest=$(cygpath -w "$1")
+  source=$(cygpath -w "$2")
+  powershell.exe -NoProfile -Command \
+    "New-Item -ItemType Junction -Path '$dest' -Target '$source' | Out-Null"
+}
+
+_unlink_dir() {
+  local path
+  path=$(cygpath -w "$1")
+  powershell.exe -NoProfile -Command \
+    "[System.IO.Directory]::Delete('$path')"
 }
 
 # 把工作树里的测试改动回灌主树（tests/ 被 .gitignore 挡住，不随 git merge 回来）。
@@ -161,7 +187,45 @@ case "${1:-}" in
   cd "$target"
   PYTHONPATH="\$(pwd -W)/src" "$PY" -m pytest -q tests/...
 判据：python -c "import minimax_h3_prompt; print(minimax_h3_prompt.__file__)" 必须指向该工作树的 src。
+需要跑前端契约生成/守卫时：scripts/worktree.sh link-frontend $id（收工用 unlink-frontend 摘掉，别 rm -rf）。
 EOF
+    ;;
+  link-frontend)
+    # 工作树没有 node_modules，而契约生成/前端守卫要它。用目录联接而不是复制：
+    # 复制一份依赖既慢又会让 pnpm 的两份状态各说各话。
+    id=${2:-}
+    [ -n "$id" ] || usage
+    target="$MAIN_ROOT/worktree/ticket-$id"
+    source="$MAIN_ROOT/frontend/node_modules"
+    dest="$target/frontend/node_modules"
+    [ -d "$target/frontend" ] || { echo "[错误] 工作树里没有 frontend/：$target" >&2; exit 1; }
+    [ -e "$source/.bin/eslint" ] || {
+      echo "[错误] 主树前端依赖未安装或不完整：$source" >&2
+      echo "  先执行：cd frontend && npx pnpm@11.7.0 install（下载由用户执行）" >&2
+      exit 1
+    }
+    [ -e "$dest" ] && { echo "[错误] 工作树的 frontend/node_modules 已存在：$dest" >&2; exit 1; }
+    command -v powershell.exe >/dev/null 2>&1 || {
+      echo "[错误] link-frontend 需要 Windows PowerShell 建目录联接。" >&2
+      exit 1
+    }
+    _link_dir "$dest" "$source"
+    echo "已建立目录联接：$dest -> $source"
+    echo "  收工前用 scripts/worktree.sh unlink-frontend $id 摘掉；不要 rm -rf 联接。"
+    ;;
+  unlink-frontend)
+    id=${2:-}
+    [ -n "$id" ] || usage
+    dest="$MAIN_ROOT/worktree/ticket-$id/frontend/node_modules"
+    [ -e "$dest" ] || { echo "[跳过] 没有前端依赖联接：$dest"; exit 0; }
+    # 只摘联接：Directory.Delete 对非空真实目录会抛错，正好把「误删真实依赖」挡下来
+    # （2026-11-10 实测：rm -rf 联接会清空主树 node_modules）。
+    if ! _unlink_dir "$dest" 2>/dev/null; then
+      echo "[拒绝] $dest 不是空的目录联接（可能是真实依赖目录，或仍有文件）。" >&2
+      echo "  人工确认后再处理；不要用 rm -rf 删联接。" >&2
+      exit 1
+    fi
+    echo "已摘除目录联接：$dest（主树依赖未动）"
     ;;
   remove)
     id=${2:-}
@@ -244,6 +308,18 @@ EOF
     # 已入库时它们受 git 管，删掉反而制造脏状态，交给 worktree remove 处理。
     if [ "$tests_tracked" -eq 0 ]; then
       rm -rf "$target/tests" "$target/scripts"
+    fi
+    # 前端依赖目录联接必须先用 rmdir 摘掉：`git worktree remove` 与 rm -rf 都可能
+    # 穿透联接删到主树依赖（2026-11-10 实测主树 frontend/node_modules 被整份清空）。
+    if [ -e "$target/frontend/node_modules" ]; then
+      if ! _unlink_dir "$target/frontend/node_modules" 2>/dev/null; then
+        echo "[拒绝] $target/frontend/node_modules 不是空的目录联接（可能是真实依赖）。" >&2
+        echo "  人工确认并删除它后再删树；不要用 rm -rf 删联接。" >&2
+        if [ "$force" -eq 0 ]; then
+          exit 1
+        fi
+        echo "[警告] --force：继续删树，前端依赖目录交给 worktree remove。" >&2
+      fi
     fi
     # 此时跟踪文件已干净、测试副本已同步（或用户明确 --force）：允许清掉忽略文件。
     git -C "$MAIN_ROOT" worktree remove --force "$target"
