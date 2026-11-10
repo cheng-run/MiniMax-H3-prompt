@@ -54,12 +54,24 @@ _LEGACY_STATUS = {
     "director_segments_running": "interrupted",
 }
 
-# 产物登记范围（D2 spec §10）：只认已知文件名的文本产物；视频类留给 D3。
+# 产物登记范围（D2 spec §10）：文本产物登记元数据并服务内容；视频类只登记元数据，
+# 字节与 Range 归 D3。
 _ARTIFACT_KINDS = {
     "video-prompt.md": "video_prompt",
     "summary-zh.md": "summary_markdown",
     "summary-zh.json": "summary_json",
 }
+# 视频类在 D2 只登记元数据：不给字节、不给 Range（那是 D3 的媒体能力）。单独一张表
+# 是为了让「哪些名字能读内容」由登记范围派生，而不是在读取端点再抄一份白名单。
+_METADATA_ONLY_ARTIFACTS = {
+    "final.mp4": "video",
+}
+_KNOWN_ARTIFACTS = {**_ARTIFACT_KINDS, **_METADATA_ONLY_ARTIFACTS}
+
+# 文本内容读取的上限（spec §10）：1 MiB，超出回 413 artifact_too_large。
+ARTIFACT_MAX_BYTES = 1024 * 1024
+# 阶段 2 的交付物名字是契约的一部分：执行器写它、登记它，用例按它找。
+ARTIFACT_VIDEO_PROMPT = "video-prompt.md"
 
 _GEN_RE = re.compile(r"^GEN(\d+)$")
 _IDEMPOTENCY_CAPACITY = 50
@@ -122,6 +134,21 @@ class JobNotFound(WorkbenchError):
 class JobNotRunning(WorkbenchError):
     status_code = 409
     code = "job_not_running"
+
+
+class ArtifactNotFound(WorkbenchError):
+    """产物不存在、标识越界，或该产物在 D2 不提供内容（视频类只登记元数据）。
+
+    这几种情况不回不同码：越界与不存在若能区分，就等于泄漏登记根之外是否真有文件。
+    """
+
+    status_code = 404
+    code = "artifact_not_found"
+
+
+class ArtifactTooLarge(WorkbenchError):
+    status_code = 413
+    code = "artifact_too_large"
 
 
 # ---------------------------------------------------------------------------
@@ -619,22 +646,37 @@ def _brief_out(brief: Brief) -> BriefOut:
     )
 
 
-def _artifacts(session_id: str, directory: Path) -> list[ArtifactInfo]:
-    """会话目录下已知文件名的产物元数据；不读内容（内容读取归 #220）。"""
+def _artifact_info(session_id: str, name: str, path: Path) -> ArtifactInfo:
+    stat = path.stat()
+    return ArtifactInfo(
+        artifact_id=f"{session_id}/{name}",
+        kind=_KNOWN_ARTIFACTS[name],
+        name=name,
+        bytes=stat.st_size,
+        created_at=datetime.fromtimestamp(
+            stat.st_mtime, tz=timezone.utc).isoformat(),
+    )
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _artifacts(session_id: str, directory: Path, root: Path) -> list[ArtifactInfo]:
+    """会话目录下已知文件名的产物元数据；不读内容（内容读取归 #220）。
+
+    解析后不在登记根之下的条目不出现：名字合法不代表落点在根内（符号链接）。
+    """
     found: list[ArtifactInfo] = []
-    for name, kind in sorted(_ARTIFACT_KINDS.items()):
-        path = directory / name
-        if not path.is_file():
+    for name in sorted(_KNOWN_ARTIFACTS):
+        path = (directory / name).resolve()
+        if not path.is_file() or not _is_within(path, root):
             continue
-        stat = path.stat()
-        found.append(ArtifactInfo(
-            artifact_id=f"{session_id}/{name}",
-            kind=kind,
-            name=name,
-            bytes=stat.st_size,
-            created_at=datetime.fromtimestamp(
-                stat.st_mtime, tz=timezone.utc).isoformat(),
-        ))
+        found.append(_artifact_info(session_id, name, path))
     return found
 
 
@@ -808,7 +850,7 @@ class WorkbenchSessionStore:
             current_job=current_job,
             jobs=jobs,
             action_items=action_items,
-            artifacts=_artifacts(derived, directory),
+            artifacts=_artifacts(derived, directory, self.root.resolve()),
         )
 
     def _replay_if_needed(self, session_id: str) -> None:
@@ -923,6 +965,74 @@ class WorkbenchSessionStore:
         """会话目录（执行器要在旁边写 ``active-job.json``）。"""
         return self._resolve(session_id)
 
+    def write_text_artifact(self, session_id: str, name: str, text: str,
+                            *, job_id: str | None = None) -> ArtifactInfo:
+        """写一份文本产物并登记：写盘与发事件只此一处，后来的产出方照这条入口走。
+
+        先落盘再登记——事件说的必须是已经发生的事实，反过来会让订阅者拿到一个
+        还不存在的产物标识。
+        """
+        if name not in _ARTIFACT_KINDS:
+            raise ValueError(f"不是文本产物名：{name!r}；可用：{sorted(_ARTIFACT_KINDS)}")
+        directory = self.session_directory(session_id)
+        atomic_write_text(directory / name, text)
+        return self.register_artifact(session_id, name, job_id=job_id)
+
+    def register_artifact(self, session_id: str, name: str, *,
+                          job_id: str | None = None) -> ArtifactInfo:
+        """产物登记的唯一入口：文件必须已在盘上，这里只发 ``artifact.created``。
+
+        产物清单本身从目录现扫（``_artifacts``），事件是给订阅者的「它出现了」信号；
+        重复产出同名文件是真实的第二次创建，每次都发，不在登记表里去重。
+        """
+        if name not in _KNOWN_ARTIFACTS:
+            raise ArtifactNotFound(f"不是登记范围内的产物名：{name!r}")
+        directory = self.session_directory(session_id)
+        path = self._artifact_path(directory, name)
+        if path is None:
+            raise ArtifactNotFound(f"产物不存在：{session_id}/{name}")
+        info = _artifact_info(session_id, name, path)
+        self.record_events(session_id, [EventDraft(
+            "artifact.created",
+            {"artifact_id": info.artifact_id, "kind": info.kind, "name": info.name},
+            job_id=job_id)])
+        return info
+
+    def read_artifact_text(self, artifact_id: str) -> tuple[ArtifactInfo, str]:
+        """文本产物全文；``artifact_id`` = ``<session_id>/<文件名>``（spec §7 / §10）。
+
+        视频类与越界标识共用 404：能区分「不存在」与「越界」就等于泄漏登记根之外
+        是否真有文件（spec §12）。
+        """
+        session_id, _, name = artifact_id.rpartition("/")
+        if not session_id or name not in _ARTIFACT_KINDS:
+            raise ArtifactNotFound(f"没有可读的文本产物：{artifact_id}")
+        try:
+            directory = self.session_directory(session_id)
+        except SessionNotFound as exc:
+            # 产物端点不回报「会话存在与否」：越界、不存在的会话与不存在的文件同码。
+            raise ArtifactNotFound(f"产物不存在：{artifact_id}") from exc
+        path = self._artifact_path(directory, name)
+        if path is None:
+            raise ArtifactNotFound(f"产物不存在：{artifact_id}")
+        size = path.stat().st_size
+        if size > ARTIFACT_MAX_BYTES:
+            raise ArtifactTooLarge(
+                f"文本产物 {artifact_id} 有 {size} 字节，超过 "
+                f"{ARTIFACT_MAX_BYTES} 字节上限。")
+        return _artifact_info(session_id, name, path), path.read_text(encoding="utf-8")
+
+    def _artifact_path(self, directory: Path, name: str) -> Path | None:
+        """解析成真实文件并确认仍在登记根之下；符号链接逃逸返回 ``None``。
+
+        名字白名单已经排除了 ``/`` 与 ``..``，这里再解析一次是因为**文件本身**可能
+        是指向根外的符号链接——名字合法不代表落点在根内。
+        """
+        path = (directory / name).resolve()
+        if not path.is_file() or not _is_within(path, self.root.resolve()):
+            return None
+        return path
+
     def session_directories(self) -> list[Path]:
         """登记根下所有会话目录；单个坏文件由调用方自己决定怎么跳过。"""
         if not self.root.is_dir():
@@ -1031,7 +1141,8 @@ class WorkbenchSessionStore:
 
 __all__ = [
     "ActionItemNotFound", "ActionItemOut", "ActionItemPending", "ActionItemResolved",
-    "ArtifactInfo", "BriefOut",
+    "ARTIFACT_MAX_BYTES", "ARTIFACT_VIDEO_PROMPT",
+    "ArtifactInfo", "ArtifactNotFound", "ArtifactTooLarge", "BriefOut",
     "EVENT_TYPES", "EVENTS_FILENAME", "Event", "EventDraft", "EventLog",
     "IdempotencyConflict", "IdempotencyRegistry", "InvalidEventPayload",
     "JobNotFound", "JobNotRunning",

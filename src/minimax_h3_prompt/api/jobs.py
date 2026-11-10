@@ -30,6 +30,7 @@ from .. import step_machine
 from ..errors import error_code
 from ..session_store import atomic_write_text, load_session
 from ..workbench_store import (
+    ARTIFACT_VIDEO_PROMPT,
     ActionItemNotFound,
     ActionItemOut,
     ActionItemPending,
@@ -479,7 +480,9 @@ class JobRunner:
         final_state, prompt = run_stage2(
             state, brief, self.config, on_node=on_node,
             checkpoint_dir=directory)
-        (directory / "video-prompt.md").write_text(prompt, encoding="utf-8")
+        # 写盘与登记走同一个入口：清单一处口径（目录现扫）、事件由登记发出（#220）。
+        self.store.write_text_artifact(
+            session_id, ARTIFACT_VIDEO_PROMPT, prompt, job_id=job_id)
         return {"state": dict(final_state), "brief": brief,
                 "variant_downgraded": downgraded}
 

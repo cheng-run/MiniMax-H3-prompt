@@ -53,6 +53,14 @@ MUTATIONS: tuple[Mutation, ...] = (
         "关掉 usage 上报会让成本表记 0 且不报错（2026-10-21 实测）",
     ),
     Mutation(
+        "artifact_size_limit_off",
+        "src/minimax_h3_prompt/workbench_store.py",
+        "ARTIFACT_MAX_BYTES = 1024 * 1024",
+        "ARTIFACT_MAX_BYTES = 64 * 1024 * 1024",
+        ("tests/test_api_artifacts.py::test_text_artifact_over_one_mib_is_413",),
+        "文本读取上限失守＝大产物把内存与响应体一起拖爆，413 专用码永不出现",
+    ),
+    Mutation(
         "continuity_cut_true",
         "src/minimax_h3_prompt/director/pack.py",
         '        "refVideos": [],\n        "continuityFromPrev": segment.guided,\n'

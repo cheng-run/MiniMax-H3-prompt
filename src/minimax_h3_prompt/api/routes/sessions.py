@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator
 from typing import Literal
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from ...brief_parser import Brief, RefItem
@@ -28,6 +28,7 @@ from ...user_revisions import (
 )
 from ...workbench_store import (
     ActionItemOut,
+    ArtifactInfo,
     EventLog,
     JobSummary,
     SessionDetail,
@@ -389,6 +390,45 @@ _ACTION_ITEM_RESPONSES = {
     404: {"model": ProblemDetail, "description": "待办不存在（problem+json）"},
     409: {"model": ProblemDetail, "description": "会话/待办状态冲突（problem+json）"},
 }
+
+
+@router.get(
+    "/sessions/{session_id:path}/artifacts",
+    response_model=list[ArtifactInfo],
+    responses=_SESSION_ERROR_RESPONSES,
+)
+def list_artifacts(session_id: str, request: Request) -> list[ArtifactInfo]:
+    """会话的产物清单：与详情里的 ``artifacts`` 同一份来源（目录现扫）。"""
+    return _store(request).get_session(session_id).artifacts
+
+
+_ARTIFACT_RESPONSES = {
+    **_SESSION_ERROR_RESPONSES,
+    404: {"model": ProblemDetail,
+          "description": "产物不存在、标识越界，或该产物不提供内容（problem+json）"},
+    413: {"model": ProblemDetail, "description": "文本产物超过 1 MiB（problem+json）"},
+}
+
+
+@router.get(
+    "/artifacts/{artifact_id:path}/content",
+    response_class=PlainTextResponse,
+    responses={
+        200: {
+            "description": "文本产物全文（UTF-8）；视频类在 D2 不提供内容。",
+            "content": {"text/plain": {"schema": {"type": "string"}}},
+        },
+        **_ARTIFACT_RESPONSES,
+    },
+)
+def get_artifact_content(artifact_id: str, request: Request) -> PlainTextResponse:
+    """读文本产物全文（spec §10）。
+
+    ``artifact_id`` 是 ``<session_id>/<文件名>``：会话标识本身含斜杠，所以 ``:path``
+    沿用会话路由的口径，最后一段才是文件名。越界与不存在一律 404 ``artifact_not_found``。
+    """
+    _info, text = _store(request).read_artifact_text(artifact_id)
+    return PlainTextResponse(text, media_type="text/plain; charset=utf-8")
 
 
 @router.get(

@@ -29,6 +29,7 @@ _TITLE_BY_STATUS = {
     404: "资源不存在",
     405: "方法不允许",
     409: "资源状态冲突",
+    413: "产物过大",
     422: "请求参数校验失败",
     500: "服务器内部错误",
     501: "功能尚未实现",
@@ -180,12 +181,16 @@ def apply_problem_media_type_openapi(app: FastAPI) -> None:
                     content = response.get("content")
                     if not isinstance(content, dict):
                         continue
-                    json_body = content.get("application/json")
-                    if not isinstance(json_body, dict):
-                        continue
-                    ref = json_body.get("schema", {}).get("$ref", "")
-                    if ref.endswith("/ProblemDetail"):
-                        content[PROBLEM_CONTENT_TYPE] = content.pop("application/json")
+                    # 媒体键可能是 ``application/json``（普通路由），也可能是路由声明的
+                    # 默认响应类型（例如 ``PlainTextResponse`` 路由下的 ``text/plain``）：
+                    # 判据只看内容 schema 是否指向 ProblemDetail，不认键名。
+                    for media_type, body in list(content.items()):
+                        if not isinstance(body, dict):
+                            continue
+                        ref = body.get("schema", {}).get("$ref", "")
+                        if ref.endswith("/ProblemDetail"):
+                            content[PROBLEM_CONTENT_TYPE] = content.pop(media_type)
+                            break
         app.openapi_schema = schema
         return schema
 
