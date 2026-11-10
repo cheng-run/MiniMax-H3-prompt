@@ -49,6 +49,8 @@ from .wizard_display import (
     render_director_segment_briefing as _render_director_segment_briefing,
     update_prompt_text as _update_prompt_text,
 )
+from . import wizard_base
+from .wizard_base import skips_base_frame_loop as _skips_base_frame_loop
 from ..session_store import (
     STATUS_AWAITING_FRAMES,
     STATUS_COMPLETED,
@@ -532,16 +534,6 @@ def _progress_scope(title: str):
         print(f"[完成] 本段用时 {m} 分 {s:02d} 秒。\n", flush=True)
 
 
-def _skips_base_frame_loop(brief: Brief) -> bool:
-    """这条路线是否**不走** base 的人机修改循环（锚在 fl2va 首尾帧提示词上的那一份）。
-
-    新跑收尾与两条续接入口共用这一个判据（issue #41 多参、issue #101 导演台）。四处
-    各写一份「是不是 ref/是不是 director」的代价是：加第三条路线时总有一个入口漏改，
-    表现成那条路线上「重启后忽然要你交帧图」——本仓「改一处漏一处」的老形态。
-    """
-    return brief.is_ref or brief.is_director
-
-
 def run_wizard(config: Config) -> int:
     """无参数主入口：两阶段向导。返回进程退出码。"""
     if not sys.stdin.isatty():
@@ -565,8 +557,11 @@ def run_wizard(config: Config) -> int:
         frames_shown = True  # _phase1_new 收尾已展示生图提示词
     # 续接会话的交互日志也要开在本会话目录的同级（新开会话已在 _session_dir 里开过）。
     interactions.start(interactions.path_for(session.directory))
-    # 阶段 1 完成（或完成了一半）后若断在阶段 1 中途，先从中断节点续跑完阶段 1
+    # 阶段 1 完成（或完成了一半）后若断在阶段 1 中途，先从中断节点续跑完阶段 1。
+    # base 短视频这一支交给步骤机驱动（起点与闸门都由它声明）；其余路线沿用原链。
     if session.status == STATUS_STAGE1_RUNNING:
+        if wizard_base.is_base_short_form(session.brief):
+            return wizard_base.drive(sys.modules[__name__], config, session, frames_shown=False)
         session = _resume_stage1(config, session)
         if session is None:
             return 1
@@ -588,23 +583,22 @@ def run_wizard(config: Config) -> int:
     # 掉进阶段 2 的收图提问——累积清单看不到、意见提不了，而这条路径正是「重启后清单仍然
     # 非空」的真实现场（用户在首帧循环里提过意见、还没提交帧图就退出）。
     if session.status == STATUS_AWAITING_FRAMES and not frames_shown:
+        # base 短视频：闸门与后续阶段 2 由步骤机领着走（这里正是「闸门还没过」那一格）。
+        if wizard_base.is_base_short_form(session.brief):
+            return wizard_base.drive(sys.modules[__name__], config, session, frames_shown=False)
         session = _resume_awaiting_frames(config, session)
         if session is None:
             return 1
         # 帧路线在修改循环首步展示过；多参路线不再在这里展示（issue #50：素材循环
         # 逐张出词，出站节奏由 `_asset_loop` 管），这个标志只管帧路线的补展示。
         frames_shown = True
-    # 导演台路线（issue #101/#102）：**必须**早于下面 base 的分支——否则第三条路线会
-    # 被静默塞进首尾帧链的阶段 2（收帧图、写 fl2va 正文），比直接报错更难发现。
-    # #102 起这里做最小接线：段规划 → 写 ``GENxxx/director/plan.json`` → 出站段表；
-    # 打包与逐段陪跑仍等 #104–#108。
-    if session.brief.is_director:
-        return _run_director_flow(session)
-    # 阶段 1 完成后直接进入阶段 2（生图很快，无需暂停等人工确认）。
-    # 多参路线（issue #41）走直出：不收帧图、不进桥接链，≤15 秒一份 ref 六段式。
-    if session.brief.mode == "ref":
-        return _phase2_ref_finish(config, session)
-    return _phase2_collect_and_finish(config, session, show_frame_prompts=not frames_shown)
+    # base 路线：短视频由步骤机驱动（阶段 1 已过、闸门已过 → 阶段 2 → 交付）；
+    # 长片接下来是分段陪跑，属 D6–D8 的范围，仍走原分派。
+    if wizard_base.is_base_short_form(session.brief):
+        return wizard_base.drive(sys.modules[__name__], config, session,
+                                 frames_shown=frames_shown)
+    return wizard_base.finish_non_base(sys.modules[__name__], config, session,
+                                       frames_shown=frames_shown)
 
 
 def _ask_director_pack_settings(session: SessionState) -> None:
@@ -1773,23 +1767,30 @@ def _offer_resume(config: Config) -> SessionState | None:
 
 def _resume_stage1(config: Config, session: SessionState) -> SessionState | None:
     """阶段 1 中断续跑：从上次最后一个完成节点的下一阶段继续。"""
+    from ..graph.pipeline import _STAGE1_CHAIN
+    from ..step_machine import (
+        RESUME_EXHAUSTED,
+        RESUME_NO_CHECKPOINT,
+        RESUME_UNKNOWN_NODE,
+        stage1_resume,
+    )
+
     progress = session.stage_state.get("_progress") or {}
     last_node = str(progress.get("last_completed_node", ""))
-    if not last_node:
+    # 起点判定只在步骤机里算一份：向导与后续执行器共用它，才不会各算一次、慢慢算出
+    # 不同的落点（本仓「同一个契约两处口径」的老形态）。
+    resume = stage1_resume(_STAGE1_CHAIN, last_node)
+    if resume.reason == RESUME_NO_CHECKPOINT:
         print("[提示] 会话没有记录阶段 1 断点位置，从头开始跑。")
         # 直接走阶段 1 全新跑法
         return _phase1_new(config)
-
-    # 阶段 1 链中下一个节点
-    from ..graph.pipeline import _STAGE1_CHAIN
-    if last_node not in _STAGE1_CHAIN:
+    if resume.reason == RESUME_UNKNOWN_NODE:
         print(f"[提示] 上次完成节点 {last_node} 不在阶段 1 链里，从头开始。")
         return _phase1_new(config)
-    next_index = _STAGE1_CHAIN.index(last_node) + 1
     brief = session.brief
     generation_dir = session.directory
     model = agents = None
-    if next_index >= len(_STAGE1_CHAIN):
+    if resume.reason == RESUME_EXHAUSTED:
         # 节点已全部跑完、只是状态还停在 running，就不重跑图：这种现场来自 `_save_progress`
         # 在**最后一个节点**完成时就把窗口推到了链路尽头，而它之后还有常识质检循环
         # （`common_sense_qa: true`，最多 2 轮 LLM，好几分钟）——在那期间中断就落在这一格。
@@ -1798,7 +1799,7 @@ def _resume_stage1(config: Config, session: SessionState) -> SessionState | None
         state = dict(session.stage_state)
         print("[续接] 阶段 1 的节点已全部完成（只差收尾没落盘），直接进入生图提示词确认。")
     else:
-        resume_node = _STAGE1_CHAIN[next_index]
+        resume_node = resume.node
         print(f"[续接] 上次跑到「{last_node}」，从「{resume_node}」继续阶段 1……")
         initial_state = dict(session.stage_state)
         with _progress_scope(f"[阶段 1·续接] 从「{resume_node}」继续……"):
