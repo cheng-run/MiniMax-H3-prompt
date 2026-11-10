@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,6 +31,7 @@ from ..errors import error_code
 from ..session_store import atomic_write_text, load_session
 from ..workbench_store import (
     ActionItemOut,
+    EventDraft,
     JobNotFound,
     JobNotRunning,
     JobSummary,
@@ -160,7 +162,10 @@ class JobRunner:
                     "jobs": _upsert_job(current.jobs, _job_dict(job)),
                 }
 
-            await asyncio.to_thread(self.store.mutate, session_id, _start)
+            await asyncio.to_thread(
+                self.store.mutate, session_id, _start,
+                events=[EventDraft("job.started", {"kind": job.kind},
+                                   job_id=job.job_id)])
             self._started_at[job.job_id] = job.started_at
             await asyncio.to_thread(self._write_active_job, session_id, job.job_id, "")
             event = threading.Event()
@@ -198,7 +203,7 @@ class JobRunner:
         except Exception as exc:  # noqa: BLE001 - 任务失败要落成 job 状态，不能让后台任务静默死掉
             logger.exception("执行任务失败：%s / %s", session_id, job_id)
             await asyncio.to_thread(
-                self._finish_failed, session_id, job_id, error_code(exc))
+                self._finish_failed, session_id, job_id, error_code(exc), str(exc))
         else:
             await asyncio.to_thread(
                 self._finish_succeeded, session_id, job_id, final_state)
@@ -229,19 +234,63 @@ class JobRunner:
         skip = (planned.reason == step_machine.RESUME_EXHAUSTED
                 and not getattr(self.config, "common_sense_qa", False))
 
+        # 本次真正会跑的节点：续跑时从断点之后开始，起点与 ``run_stage1`` 的算法同源。
+        chain = list(_STAGE1_CHAIN)
+        if resume_from is not None:
+            chain = chain[chain.index(resume_from):]
+        # 进度事件的节拍器：节点开始时发 started、完成时发 done。起点取自链而不是
+        # 「上一个回调的节点名」：基础路线的 ``parallel_image_prompts`` 不产出资产图
+        # 提示词，``graph.stream`` 里那一格是空的、回调根本不会来——只看回调会让
+        # started/done 错位，所以「图前进」本身也算上一个节点跑完的证据。
+        cursor = {"next": 0}
+        open_node: dict[str, Any] = {"index": None, "started_at": 0.0}
+
+        def _close_open_node() -> None:
+            index = open_node["index"]
+            if index is None:
+                return
+            open_node["index"] = None
+            self._emit_progress(session_id, job_id, chain[index], "done")
+
+        def _emit_node_started(index: int) -> None:
+            if index >= len(chain):
+                return
+            _close_open_node()
+            open_node["index"] = index
+            open_node["started_at"] = time.monotonic()
+            cursor["next"] = index + 1
+            self._emit_progress(session_id, job_id, chain[index], "started")
+
         def on_step_done(node_name: str, current_state: dict) -> None:
+            node_index = chain.index(node_name) if node_name in chain else None
+            if node_index is not None and open_node["index"] != node_index:
+                # 中间那些节点没有产出、因而没有回调；图只会向前走，所以它们确实跑完了。
+                # 先收掉它们，再补报当前节点的开始，事件流里的 started/done 才成对。
+                _close_open_node()
+                _emit_node_started(node_index)
+            elapsed_ms = (
+                int((time.monotonic() - open_node["started_at"]) * 1000)
+                if open_node["index"] is not None else None)
+            open_node["index"] = None
             progress_state = dict(current_state)
             progress_state["_progress"] = {"last_completed_node": node_name}
-            self._save_progress(session_id, job_id, progress_state, node_name)
+            self._save_progress(session_id, job_id, progress_state, node_name,
+                                elapsed_ms=elapsed_ms)
+            # 先看取消再报下一节点开始：取消后那个节点根本不会跑，先发 started
+            # 会让界面显示一个从未执行过的节点（文案必须诚实）。
             if cancel_event.is_set():
                 raise JobCancelled(node_name)
+            _emit_node_started(
+                node_index + 1 if node_index is not None else cursor["next"])
 
         if skip:
             final_state = state
         else:
+            _emit_node_started(0)
             final_state = dict(run_stage1(
                 session.brief, self.config, initial_state=state,
                 resume_from_node=resume_from, on_step_done=on_step_done)[0])
+            _close_open_node()
 
         # 最后一个节点跑完到收尾之间到达的取消请求也在这里生效。
         if cancel_event.is_set():
@@ -258,7 +307,8 @@ class JobRunner:
         return job or JobSummary(job_id=job_id, status="running")
 
     def _save_progress(self, session_id: str, job_id: str,
-                       stage_state: dict[str, Any], node: str) -> None:
+                       stage_state: dict[str, Any], node: str, *,
+                       elapsed_ms: int | None = None) -> None:
         def _apply(detail: Any) -> dict[str, Any]:
             job = self._job_or_running(job_id, detail)
             return {
@@ -267,10 +317,26 @@ class JobRunner:
                 "jobs": _upsert_job(detail.jobs, _job_dict(job)),
             }
 
+        payload: dict[str, Any] = {
+            "stage": step_machine.STEP_STAGE1, "node": node, "status": "done"}
+        if elapsed_ms is not None:
+            payload["elapsed_ms"] = elapsed_ms
         # 读与写在存储层会话锁内完成：取消请求可能刚把 job 标成 cancel_requested，
-        # 先读后写会把那个标记覆盖回旧值（#217 复审）。
-        self.store.mutate(session_id, _apply)
+        # 先读后写会把那个标记覆盖回旧值（#217 复审）。事件与快照同一把锁、先事件后
+        # 快照，序号与状态转移因此不会分家（#218）。
+        self.store.mutate(
+            session_id, _apply,
+            events=[EventDraft("job.progress", payload, job_id=job_id)])
         self._write_active_job(session_id, job_id, node)
+
+    def _emit_progress(self, session_id: str, job_id: str, node: str,
+                       status: str) -> None:
+        """没有状态变化的进度（节点开始）：只追加事件，不动快照字段。"""
+        self.store.record_events(session_id, [
+            EventDraft("job.progress",
+                       {"stage": step_machine.STEP_STAGE1, "node": node,
+                        "status": status},
+                       job_id=job_id)])
 
     def _finish_succeeded(self, session_id: str, job_id: str,
                           stage_state: dict[str, Any]) -> None:
@@ -295,7 +361,14 @@ class JobRunner:
                 "action_items": items,
             }
 
-        self.store.mutate(session_id, _apply)
+        self.store.mutate(session_id, _apply, events=[
+            EventDraft("job.succeeded",
+                       {"next": step_machine.STATUS_AWAITING_HUMAN},
+                       job_id=job_id),
+            EventDraft("action_item.created",
+                       {"item_id": item.item_id, "kind": item.kind},
+                       job_id=job_id),
+        ])
 
     def _finish_cancelled(self, session_id: str, job_id: str, node: str) -> None:
         def _apply(detail: Any) -> dict[str, Any]:
@@ -308,19 +381,23 @@ class JobRunner:
                 "jobs": _upsert_job(detail.jobs, _job_dict(job)),
             }
 
-        self.store.mutate(session_id, _apply)
+        self.store.mutate(session_id, _apply, events=[
+            EventDraft("job.cancelled", {"at_node": node or ""}, job_id=job_id)])
 
-    def _finish_failed(self, session_id: str, job_id: str, code: str) -> None:
-        def _apply(detail: Any) -> dict[str, Any]:
-            job = self._job_or_running(job_id, detail).model_copy(
+    def _finish_failed(self, session_id: str, job_id: str, code: str,
+                       detail: str) -> None:
+        def _apply(current: Any) -> dict[str, Any]:
+            job = self._job_or_running(job_id, current).model_copy(
                 update={"status": "failed", "finished_at": _now(),
                         "error_code": code})
             return {
                 "status": step_machine.STATUS_FAILED,
-                "jobs": _upsert_job(detail.jobs, _job_dict(job)),
+                "jobs": _upsert_job(current.jobs, _job_dict(job)),
             }
 
-        self.store.mutate(session_id, _apply)
+        self.store.mutate(session_id, _apply, events=[
+            EventDraft("job.failed", {"code": code, "detail": detail},
+                       job_id=job_id)])
 
     def _request_cancel(self, session_id: str, job_id: str) -> JobSummary:
         holder: dict[str, JobSummary] = {}
@@ -407,7 +484,16 @@ class JobRunner:
                         jobs.append(_job_dict(item))
                     return {"status": step_machine.STATUS_INTERRUPTED, "jobs": jobs}
 
-                self.store.mutate(session_id, _mark)
+                # 事件按快照里「正在跑」的任务逐个记（对账发生在启动时，读到的
+                # 快照就是唯一事实）；一个都没有时记一条不带 job_id 的，重放时按
+                # 「所有 running」收口。_mark 判定无事可做时这些事件不会落盘。
+                interrupted_events = [
+                    EventDraft("job.interrupted", {},
+                               job_id=str(item.get("job_id") or "") or None)
+                    for item in session.jobs
+                    if item.get("status") == "running"
+                ] or [EventDraft("job.interrupted", {})]
+                self.store.mutate(session_id, _mark, events=interrupted_events)
             except (ValueError, OSError) as exc:
                 logger.warning("对账失败：%s（%s）", session_id, exc)
                 continue

@@ -51,6 +51,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{session_id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Stream Events
+         * @description 订阅会话事件流。
+         *
+         *     **快照优先**（spec §8）：先 ``GET /api/v1/sessions/{session_id}`` 拿快照，再订阅
+         *     本流；补不上缺口时按响应头的 ``X-Resync-Required`` 重取快照。
+         */
+        get: operations["stream_events_api_v1_sessions__session_id__events_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{session_id}/jobs": {
         parameters: {
             query?: never;
@@ -677,6 +700,70 @@ export interface operations {
                 };
             };
             /** @description 请求参数校验失败（problem+json） */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 服务器内部错误（problem+json） */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+        };
+    };
+    stream_events_api_v1_sessions__session_id__events_get: {
+        parameters: {
+            query?: {
+                last_event_id?: string | null;
+            };
+            header?: {
+                "Last-Event-ID"?: string | null;
+            };
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 事件流（SSE）。快照优先：先 GET 详情拿快照，再订阅本流；断线重连带 Last-Event-ID（或 ?last_event_id=）补发序号更大的事件；序号超出事件流尾号时响应头带 X-Resync-Required: true，要求客户端重取快照。每 15 秒一条心跳注释行；同一会话允许多条并发订阅。 */
+            200: {
+                headers: {
+                    /** @description 缺口补不上，需要重新 GET 详情拿快照 */
+                    "X-Resync-Required"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": string;
+                };
+            };
+            /** @description 资源不存在（problem+json） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 会话状态冲突（problem+json） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Last-Event-ID 不是事件序号（problem+json） */
             422: {
                 headers: {
                     [name: string]: unknown;

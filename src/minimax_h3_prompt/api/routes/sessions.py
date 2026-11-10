@@ -1,22 +1,27 @@
-"""工作台会话 API：建、列、详情；执行任务的起、查、取消（D2 §7 / #215、#217）。
+"""工作台会话 API：建、列、详情；执行任务的起、查、取消；事件流 SSE（D2 §7、§8）。
 
-本票之前的 501 占位已被真正的执行入口替换（#217）；事件流、待办决议与产物内容
-分别归 #218–#220。路由顺序是契约的一部分：``{session_id:path}`` 会吞掉斜杠，
-所以 ``/jobs`` 与 ``/jobs/{job_id}`` 必须注册在 ``GET /sessions/{session_id:path}``
-**之前**，否则详情路由会把它们当会话标识。
+本票之前的 501 占位已被真正的执行入口替换（#217）；事件流归 #218，待办决议与产物
+内容分别归 #219/#220。路由顺序是契约的一部分：``{session_id:path}`` 会吞掉斜杠，
+所以 ``/jobs``、``/jobs/{job_id}`` 与 ``/events`` 必须注册在
+``GET /sessions/{session_id:path}`` **之前**，否则详情路由会把它们当会话标识。
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import time
+from collections.abc import AsyncIterator
 from typing import Literal
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ...brief_parser import Brief, RefItem
 from ...injection_card import VideoOutputParams
 from ...workbench_store import (
+    EventLog,
     JobSummary,
     SessionDetail,
     SessionPage,
@@ -25,6 +30,12 @@ from ...workbench_store import (
 from ..problems import COMMON_ERROR_RESPONSES, ProblemDetail
 
 router = APIRouter(prefix="/api/v1", tags=["sessions"])
+
+# 心跳间隔是 spec §8 的 15 秒。写成模块常量而不是字面量 sleep(15)，用例才能把它
+# 调小去验证「空闲时真的会发心跳」——否则那条断言要么等 15 秒，要么只能删掉。
+SSE_HEARTBEAT_SECONDS = 15.0
+# 轮询事件文件的间隔；循环里还会按心跳把它进一步拆细（见 ``_event_stream``）。
+SSE_POLL_SECONDS = 0.5
 
 # 409/501 只在会话路由上有意义；仍然让契约声明 problem+json（D2-AC13）。
 _SESSION_ERROR_RESPONSES = {
@@ -224,6 +235,103 @@ def get_job(session_id: str, job_id: str, request: Request) -> JobSummary:
 async def cancel_job(session_id: str, job_id: str, request: Request) -> JobSummary:
     """请求取消：只打标记，任务在当前节点跑完后才停（**不承诺立即停止**）。"""
     return await _runner(request).cancel(session_id, job_id)
+
+
+_EVENTS_RESPONSES = {
+    **_SESSION_ERROR_RESPONSES,
+    422: {"model": ProblemDetail, "description": "Last-Event-ID 不是事件序号（problem+json）"},
+}
+
+
+def _parse_cursor(header_value: str | None, query_value: str | None) -> int:
+    """补发起点：头优先，查询参数兜底（浏览器 ``EventSource`` 不能自定义请求头）。"""
+    raw = header_value if header_value not in (None, "") else query_value
+    if raw in (None, ""):
+        return 0
+    try:
+        cursor = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, "Last-Event-ID 必须是事件序号（非负整数）。") from exc
+    if cursor < 0:
+        raise HTTPException(422, "Last-Event-ID 必须是事件序号（非负整数）。")
+    return cursor
+
+
+async def _event_stream(log: EventLog, cursor: int, tail: int) -> AsyncIterator[str]:
+    """从 ``cursor`` 之后补发，然后持续跟读；空闲时发心跳注释行。
+
+    读文件走 ``asyncio.to_thread``：长任务本身也在线程池里跑，事件循环必须一直是空的，
+    否则详情查询与别的订阅会被拖着（spec §6）。
+    """
+    if cursor > tail:
+        # 缺口补不上（事件文件被清掉、换了机器）：注释行给人看，
+        # ``X-Resync-Required`` 响应头给程序看——注释行浏览器拿不到，光有它等于没信号。
+        yield ": resync required：事件序号超出事件流尾号，请重新 GET 详情拿快照\n\n"
+    last = cursor
+    last_ping = time.monotonic()
+    while True:
+        events = await asyncio.to_thread(log.read, after_seq=last)
+        for event in events:
+            yield event.sse_frame()
+            last = event.seq
+        now = time.monotonic()
+        if events:
+            last_ping = now
+            continue
+        heartbeat = SSE_HEARTBEAT_SECONDS
+        if now - last_ping >= heartbeat:
+            yield ": heartbeat\n\n"
+            last_ping = now
+        # 睡眠不超过半个心跳：否则心跳会被一次长轮询推后，最坏晚一整个轮询间隔。
+        await asyncio.sleep(max(0.01, min(SSE_POLL_SECONDS, heartbeat / 2)))
+
+
+@router.get(
+    "/sessions/{session_id:path}/events",
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "description": (
+                "事件流（SSE）。快照优先：先 GET 详情拿快照，再订阅本流；断线重连带 "
+                "Last-Event-ID（或 ?last_event_id=）补发序号更大的事件；序号超出事件流"
+                "尾号时响应头带 X-Resync-Required: true，要求客户端重取快照。"
+                "每 15 秒一条心跳注释行；同一会话允许多条并发订阅。"),
+            "content": {"text/event-stream": {"schema": {"type": "string"}}},
+            "headers": {
+                "X-Resync-Required": {
+                    "description": "缺口补不上，需要重新 GET 详情拿快照",
+                    "schema": {"type": "string"},
+                },
+            },
+        },
+        **_EVENTS_RESPONSES,
+    },
+)
+async def stream_events(
+    session_id: str,
+    request: Request,
+    last_event_id_header: str | None = Header(default=None, alias="Last-Event-ID"),
+    last_event_id: str | None = Query(default=None),
+) -> StreamingResponse:
+    """订阅会话事件流。
+
+    **快照优先**（spec §8）：先 ``GET /api/v1/sessions/{session_id}`` 拿快照，再订阅
+    本流；补不上缺口时按响应头的 ``X-Resync-Required`` 重取快照。
+    """
+    cursor = _parse_cursor(last_event_id_header, last_event_id)
+    store = _store(request)
+    # 顺带取详情：会话不存在要在这里就 404——流一旦开始，状态码已经发出去了。
+    detail = await asyncio.to_thread(store.get_session, session_id)
+    log = EventLog(store.session_directory(session_id), detail.session_id)
+    tail = await asyncio.to_thread(log.last_seq)
+    headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    if cursor > tail:
+        headers["X-Resync-Required"] = "true"
+    return StreamingResponse(
+        _event_stream(log, cursor, tail),
+        media_type="text/event-stream",
+        headers=headers,
+    )
 
 
 @router.get(

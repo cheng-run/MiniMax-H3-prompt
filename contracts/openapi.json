@@ -1040,6 +1040,119 @@
         ]
       }
     },
+    "/api/v1/sessions/{session_id}/events": {
+      "get": {
+        "description": "订阅会话事件流。\n\n**快照优先**（spec §8）：先 ``GET /api/v1/sessions/{session_id}`` 拿快照，再订阅\n本流；补不上缺口时按响应头的 ``X-Resync-Required`` 重取快照。",
+        "operationId": "stream_events_api_v1_sessions__session_id__events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "last_event_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Last Event Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Last-Event-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Last-Event-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "事件流（SSE）。快照优先：先 GET 详情拿快照，再订阅本流；断线重连带 Last-Event-ID（或 ?last_event_id=）补发序号更大的事件；序号超出事件流尾号时响应头带 X-Resync-Required: true，要求客户端重取快照。每 15 秒一条心跳注释行；同一会话允许多条并发订阅。",
+            "headers": {
+              "X-Resync-Required": {
+                "description": "缺口补不上，需要重新 GET 详情拿快照",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "资源不存在（problem+json）"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "会话状态冲突（problem+json）"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "Last-Event-ID 不是事件序号（problem+json）"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "服务器内部错误（problem+json）"
+          }
+        },
+        "summary": "Stream Events",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
     "/api/v1/sessions/{session_id}/jobs": {
       "post": {
         "description": "起一次 ``advance``：202 返回任务对象，执行在后台任务里。\n\n闸门与单写入者判定在 ``JobRunner.advance`` 的会话临界区里完成；这里不再判一遍，\n否则「先查后写」的两处判据会在并发下各说各话（D2-AC3）。",
