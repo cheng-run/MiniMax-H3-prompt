@@ -10,6 +10,13 @@
 
 ### 新增
 
+- **工作台会话与 Headless API（D2 / #214）**：`base` 短视频的生命周期抽成可查询、
+  可恢复、可取消的服务端状态机，对外是 `127.0.0.1:8000` 上的 `/api/v1`——建/列/查
+  会话、起任务与协作式取消、启动对账、会话级事件流（JSONL + SSE，支持
+  `Last-Event-ID` 补发）、人工待办 `stage1_review` 的 approve/revise、产物清单与
+  文本 content（1 MiB 上限）。会话文件升到 `workbench.v1` 并改为原子写；16 个历史
+  会话保持只读（legacy，起任务回 409）。向导的 `base` 短视频分支改由同一台步骤机
+  驱动，用户可见行为不变。
 - 向导的每次提问与回答写进**交互日志**（#171）：会话目录同级的 `interactions.jsonl`
   追加写，一行一条 `{ts, event, flow, question, answer, answer_len}`，问答可事后
   `grep`（例如「同角色的其他母版是不是同一张脸？」与用户的回答不再靠人回忆）。
@@ -55,6 +62,9 @@
 
 ### 工程化
 
+- `base` 短视频的推进顺序抽成 `src/minimax_h3_prompt/step_machine.py` 的单一声明，
+  向导只消费不重写；服务端执行与验收走同一台步骤机。新增确定性模型桩（真 LangGraph、
+  真节点、调用计数）与 `scripts/accept_d2.py` 手动验收驱动器（真实 HTTP，不进 CI）。
 - `scripts/worktree.sh` 修两处并行实施缺陷：建树不再产生 `docs/docs/` 嵌套副本；
   删树不再刷新已入库的 `tests/`（#157）。
 - `tests/`、`docs/`、`scripts/`、`AGENTS.md` 重新入库，加 GitHub Actions CI
