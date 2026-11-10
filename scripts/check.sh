@@ -12,7 +12,7 @@
 # 用法：
 #   scripts/check.sh          # 快档（默认）：结构守卫 + 改动文件的 lint
 #   scripts/check.sh fast
-#   scripts/check.sh full     # 全量测试 + 前端/契约守卫（交验收、推送前跑）
+#   scripts/check.sh full     # 全量测试 + 前端/契约守卫 + 变异检验（交验收、推送前跑）
 #   scripts/check.sh lint     # 全量 src 的 ruff（装了才跑）
 #   scripts/check.sh mutate   # 守卫变异检验（不需要额外依赖）
 #   scripts/check.sh types    # mypy（装了才跑；先只查叶子模块）
@@ -120,6 +120,10 @@ run_types() {
 # 前端守卫（retro 2026-11-09）：前端原先只在 CI 有 lint/typecheck，本地提交坏 TS 不会红。
 # 装了依赖才跑（未装像 ruff 一样提示跳过）；fast 档只在「前端有改动」时触发，其余提交
 # 不被拖慢。用 frontend/node_modules/.bin 直调，绕开 npx pnpm 解析错版本（实测会去拉 12.x）。
+#
+# Prettier --check 是 2026-11-10 #225 retro 补的：CI 的 frontend-quality 一直有
+# `format:check`，本地没有——main 因此红了好几次而没人看见。它与 eslint 不同：
+# 只判格式，秒级，所以放在同一档。
 run_frontend_guard() {
   local force=${1:-false}
   local root frontend
@@ -129,7 +133,8 @@ run_frontend_guard() {
   # `node_modules`，`-d` 仍为真，守卫会跑进 `./node_modules/.bin/eslint` 并报
   # "No such file or directory"——把「依赖没装」误报成代码坏了（2026-11-10 实测）。
   if [ ! -e "$frontend/node_modules/.bin/eslint" ] \
-      || [ ! -e "$frontend/node_modules/.bin/vue-tsc" ]; then
+      || [ ! -e "$frontend/node_modules/.bin/vue-tsc" ] \
+      || [ ! -e "$frontend/node_modules/.bin/prettier" ]; then
     echo "[check] frontend: 跳过（前端依赖未安装或不完整：cd frontend && npx pnpm@11.7.0 install）"
     return 0
   fi
@@ -137,8 +142,11 @@ run_frontend_guard() {
     echo "[check] frontend: 没有前端改动，跳过"
     return 0
   fi
-  echo "[check] frontend: eslint + vue-tsc"
+  echo "[check] frontend: eslint + prettier --check + vue-tsc"
   ( cd "$frontend" && ./node_modules/.bin/eslint . )
+  # 与 CI 的 `pnpm run format:check` 同一条命令（`.prettierignore` 已排除 generated.ts
+  # 与构建产物）。
+  ( cd "$frontend" && ./node_modules/.bin/prettier --check . )
   ( cd "$frontend" && ./node_modules/.bin/vue-tsc --noEmit )
 }
 
@@ -179,6 +187,14 @@ run_contract_guard() {
     return 1
   fi
   rm -f "$generated"
+}
+
+# 守卫变异检验（2026-11-10 #225 retro）：CI 的 check job 一直跑它，本地 `full` 没跑。
+# 后果实测：main 上 `cancel_ignored_at_node_boundary` 的锚点从 #219 起出现 3 次，
+# 变异静默失效、CI 连红数次，本地毫无感知。它慢（约 2 分钟），所以只进 full。
+run_mutations() {
+  echo "[check] mutate: 守卫变异检验"
+  "$PY" scripts/mutation_check.py
 }
 
 run_fast() {
@@ -229,6 +245,8 @@ case "$MODE" in
     # 等 CI 才红（2026-11-10 实测：full 绿而 CI 的前端/契约 job 红）。
     run_frontend_guard true
     run_contract_guard
+    # 变异放最后：它最慢，前面的红先停，不白等两分钟。
+    run_mutations
     ;;
   frontend)
     run_frontend_guard true

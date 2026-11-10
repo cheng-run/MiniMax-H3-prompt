@@ -50,7 +50,8 @@ spec 与票住 issue 是因为 `/to-spec`、`/to-tickets` 按 `docs/agents/issue
 ## 守卫（2026-11-02 起入库）
 
 `tests/`、`scripts/`、`docs/` 与 `AGENTS.md` 自 2026-11-02 起恢复入库（体检 P0-1）：干净检出即可跑测试与结构守卫，CI 与本机跑同一套命令。`.git/hooks/` 仍是每台机器自己的目录、不随 clone 走——新机器跑一次 `scripts/bootstrap-dev.sh` 装回；钩子本体在 `scripts/hooks/`，已被跟踪。
-- **时机**：提交前 `scripts/check.sh fast`；交验收/推送前 `full` + `clean`（`clean` 把本机 `.env` 从测试里摘掉，模拟 CI 的干净检出）。
+- **时机**：提交前 `scripts/check.sh fast`；交验收/推送前 `full` + `clean`（`clean` 把本机 `.env` 从测试里摘掉，模拟 CI 的干净检出；`full` 已含变异检验）。
+- **跑动顺序**：实现 → **复审 → 全量**。复审还可能改代码时先别跑全量，那一轮会被作废；`/implement` 的步骤串默认把全量排在复审之前，本仓不照做（2026-11-10 #225：上一次 retro 只把这条写进 cadence，57 分钟后仍白跑 129 秒——规则要住在这里）。
 - **判据是最后一行**：`[check] <档位>: PASS` / `FAIL（退出码 N）`——管道随便接，`| tail -3` 也不会把红显示成绿（2026-11-08 起由脚本自己保证，不用再记 `PIPESTATUS`）。
 - **提交信息格式**：`type(scope): 摘要（#N）`；无 issue 的 retro 用 `（retro YYYY-MM-DD）`。
 - **新加守卫必须补一条变异**（`scripts/mutation_check.py` 的 `MUTATIONS`）：没有变异检验的守卫不算守卫。

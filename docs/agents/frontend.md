@@ -24,8 +24,10 @@ npx --no-install vitest run --coverage
 PW_CHANNEL=chrome npx --no-install playwright test   # 本机免下载 chromium 跑 E2E
 ```
 
-纯 Python 提交不跑前端：`scripts/check.sh frontend` 单独跑 `eslint + vue-tsc`，
-`scripts/check.sh fast` 只在「前端有改动」时自动带上它（见 AGENTS.md）。
+纯 Python 提交不跑前端：`scripts/check.sh frontend` 单独跑
+`eslint + prettier --check + vue-tsc`，`scripts/check.sh fast` 只在「前端有改动」时
+自动带上它（见 AGENTS.md）。Prettier 那一步与 CI 的 `format:check` 同一条命令
+（2026-11-10 #225 retro 补：CI 有、本地没有，main 因此红过好几次）。
 
 ## 坑（都实测踩过）
 
@@ -34,6 +36,11 @@ PW_CHANNEL=chrome npx --no-install playwright test   # 本机免下载 chromium 
 - **jsdom 两处不模拟真实浏览器**：① 不解析相对 URL（`fetch('/api/...')` 在 Node 下报 URL 解析错）——所以 `client.ts` 仅在 `import.meta.env.MODE === 'test'` 给 `baseUrl='http://localhost'`，生产恒为空（同源）；② 不实现 button 的「Enter→click」默认行为——键盘切换用 Playwright E2E 的真实按键验证，组件测试只断言原生 `button` 且 `tabIndex===0`。
 - **覆盖率 `include` 必须排除 `*.spec.ts`**：测试文件「跑了就 100% 行覆盖」，混进去等于拿测试自身凑数（`vitest.config.ts` 的 `exclude` 已含 `src/**/*.spec.ts`）。
 - **契约媒体类型**：错误响应运行时是 `application/problem+json`，FastAPI 的 `responses={model:...}` 默认却生成 `application/json`——`api/problems.py` 的 `apply_problem_media_type_openapi` 在 app 层改写成 problem+json，使 `/openapi.json` 与入库 `contracts/openapi.json` 同口径。
+- **Windows 检出的 `.vue`/`.html` 曾是 CRLF，Prettier 判 LF 必红**：`.gitattributes`
+  原先只声明了 `*.ts`/`*.css`/`*.mjs`，`core.autocrlf=true` 下 `.vue`/`.html` 检出成
+  CRLF——`prettier --check` 在这 10 个文件上必报，`git status` 还会把它们报成改动而
+  `git diff` 为空（2026-11-10 #225 retro 实测）。现已补 `*.vue`/`*.html` 的 `eol=lf`；
+  老工作区要 `git add --renormalize .` 或重新检出才会换成 LF。
 - **`openapi-fetch` 0.13 的中间件只能事后注册**：`createClient({ middleware: [...] })` 不报错也不生效（被当作 fetch 选项透传），必须 `client.use(middleware)`。2026-11-10 #223 实测：中间件写好、用例照红，翻 `node_modules/openapi-fetch/dist/index.js` 才定位。
 
 ## 本地跑前后端 + 关服务（Windows）

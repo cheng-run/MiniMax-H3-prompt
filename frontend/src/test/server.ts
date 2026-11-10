@@ -9,4 +9,3 @@ const tokenHandler = http.get('http://localhost/api/v1/auth/token', () =>
 
 // MSW 服务器：默认只放行引导端点，其余请求由测试用 server.use(...) 逐条注入。
 export const server = setupServer(tokenHandler)
-

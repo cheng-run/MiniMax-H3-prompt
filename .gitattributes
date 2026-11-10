@@ -18,6 +18,12 @@ scripts/hooks/* text eol=lf
 
 # 前端源码统一 LF（D1，#205）：生成的 generated.ts 与 CI（Linux）必须逐字节一致，
 # 否则 drift check 会被 CRLF 差异假红。
+# `*.vue` / `*.html` 是 2026-11-10 #225 retro 补的：只声明 `*.ts` 时，Windows
+# （core.autocrlf=true）检出的 .vue/.html 是 CRLF，而 Prettier 默认按 LF 判——
+# `prettier --check` 在这些文件上必红（本地），`git status` 还会把它们报成改动
+# 而 `git diff` 为空。CI（Linux）看不见这一层，所以只有本机会撞。
 *.ts text eol=lf
+*.vue text eol=lf
+*.html text eol=lf
 *.css text eol=lf
 *.mjs text eol=lf

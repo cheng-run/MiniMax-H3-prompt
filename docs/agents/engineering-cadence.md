@@ -11,12 +11,12 @@ scripts/check.sh fast       # 提交前：结构守卫 + 改动文件 lint + 秒
                             #   + 改动 src/契约/前端生成链时自动查契约漂移
                             #   + 前端有改动时跑 eslint/vue-tsc
 scripts/check.sh full       # 交验收/推送前：全量测试 + docstring 守卫 + lint + mypy
-                            #   + 前端 + 契约漂移
+                            #   + 前端（eslint/prettier/vue-tsc）+ 契约漂移 + 变异检验
 scripts/check.sh lint       # 全量 src 的 ruff（装了才跑）
-scripts/check.sh mutate     # 守卫变异检验（无额外依赖，约 5 秒）
+scripts/check.sh mutate     # 守卫变异检验（无额外依赖，约 2 分钟；full 已含）
 scripts/check.sh types      # mypy 全仓（装了才跑）
 scripts/check.sh coverage   # 分支覆盖度量（装了才跑，不设门槛）
-scripts/check.sh frontend   # 强制跑 eslint + vue-tsc（依赖不完整时跳过并提示）
+scripts/check.sh frontend   # 强制跑 eslint + prettier --check + vue-tsc（依赖不完整时跳过并提示）
 scripts/check.sh clean      # 干净环境（无 .env）跑全量 + 契约漂移，模拟 CI
 scripts/check.sh worktree   # 工作树生命周期冒烟（add/remove）
 scripts/check.sh rehash     # 打印关键帧角色提示词的 sha256，供更新基线
@@ -24,11 +24,10 @@ scripts/check.sh rehash     # 打印关键帧角色提示词的 sha256，供更�
 
 - **判据是最后一行**：`[check] <档位>: PASS` / `FAIL（退出码 N）`。管道随便接，
   `| tail -3` 也不会把红显示成绿（脚本自己保证，不用记 `PIPESTATUS`）。
-- **跑动时机**：提交前 `fast`；**复审修完**再跑 `full` + `clean`。复审还可能改代码时
-  先别跑这一对——一轮全量约 2 分钟，复审一改就作废（2026-11-10 #223 实测白跑一轮）。
-  **与 `/implement` 的默认顺序冲突时以本节为准**：那个 skill 的步骤串是「实现 → 全量 →
-  复审 → 提交」，本仓是「实现 → 复审 → 全量 → 提交」。#224 照 skill 默认走了一遍，
-  第一次全量在两分钟后被复审作废（同日第二次白跑）。
+- **跑动时机**（规则本身住 AGENTS.md「守卫」节，这里只记来由）：一轮全量约 2 分钟，
+  复审一改就作废。2026-11-10 连踩两次：`/implement` 的步骤串是「实现 → 全量 → 复审」，
+  #224 照它跑了一遍；#225 又白跑 129 秒——上一版把规则只写在本节，实现代理读的是
+  AGENTS.md 与 skill，根本没到这一页。**规则要放在决策点读得到的文件里，细节才放这里。**
 - **派发复审时让 Spec 轴按小节核对**：要求它先列出规格的小节表，逐节标「做了／缺／
   超出」。2026-11-10 #224 漏掉一整行需求（`audio` 素材），是实现者按行数分片读票面
   造成的，靠 Spec 轴自己重取全文才抓到——复核规格不能让实现者的读法说了算。
@@ -170,6 +169,6 @@ docstring（tokenize + ast），不看普通字符串，因此提示词正文里
 | 变更记录 | `CHANGELOG.md`（Keep a Changelog 形状）。**按「用户能感知的行为」写**，不抄提交列表 |
 | 打标签 | `git tag -a vX.Y.Z -m "…"`，只在用户说「可以发布」之后；推送标签同样等验收 |
 | 回滚目标 | 上一个 tag。README 里不写回滚步骤——`git checkout <上一个 tag>` 就是全部 |
-| 发布前必过 | `scripts/check.sh full` + `scripts/check.sh mutate`；全绿只是前提，不是发布决定 |
+| 发布前必过 | `scripts/check.sh full`（已含变异检验）+ `scripts/check.sh clean`；全绿只是前提，不是发布决定 |
 
 用户验收前不 push、不打 tag：这是全局 `~/.claude/AGENTS.md` 的验收门，本文件不覆盖它。

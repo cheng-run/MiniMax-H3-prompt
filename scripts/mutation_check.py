@@ -13,15 +13,17 @@ uv run python scripts/mutation_check.py --only ffmpeg_shell
 
 约束：
 
-- 只改**工作区里干净且已被 git 跟踪**的文件（``git status --porcelain`` 有改动就拒绝，
-  未跟踪的文件也拒绝——还原走 ``git checkout --``，未跟踪路径回不去）；
+- 还原用**字节**写回（原文 ``read_bytes`` → ``write_bytes``），不走 ``git checkout``：
+  脏工作区与未跟踪文件都能跑（``check.sh full`` 现在会跑它），未提交的改动不受影响；
 - 每条变异都声明 ``old`` 在文件里**恰好出现一次**（多处出现说明锚点选错了，
-  会用错地方）；
-- 无论用例结果如何都还原（``finally``），还原后再核对文件与原文逐字相同。
+  会用错地方）；锚点会随重构复制而失效——失效时报「出现 N 次」，就是这条变异
+  已经不再守任何东西的信号；
+- 无论用例结果如何都还原（``finally``），还原后逐字节核对与原文相同。
 """
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import subprocess
 import sys
@@ -475,8 +477,14 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "cancel_ignored_at_node_boundary",
         "src/minimax_h3_prompt/api/jobs.py",
+        # 锚点必须带上下文：这三行（12 空格缩进的 if + raise）在 #219 之后被复制进
+        # 阶段 2 的回调，裸锚点当场变成「出现 3 次」，变异静默失效（2026-11-10 实测）。
+        "            # 先看取消再报下一节点开始：取消后那个节点根本不会跑，先发 started\n"
+        "            # 会让界面显示一个从未执行过的节点（文案必须诚实）。\n"
         "            if cancel_event.is_set():\n"
         "                raise JobCancelled(node_name)",
+        "            # 先看取消再报下一节点开始：取消后那个节点根本不会跑，先发 started\n"
+        "            # 会让界面显示一个从未执行过的节点（文案必须诚实）。\n"
         "            if False and cancel_event.is_set():\n"
         "                raise JobCancelled(node_name)",
         ("tests/test_api_jobs.py::"
@@ -566,28 +574,16 @@ MUTATIONS: tuple[Mutation, ...] = (
 )
 
 
-def _git_clean(path: Path) -> bool:
-    """内容层面干净才许变异（``git status`` 会把「只有 mtime 变了」也算脏）。
-
-    上一次变异把文件写回原样后 mtime 变了、内容没变，用 ``status`` 判就会误报脏；
-    ``git diff --quiet`` 比的是内容，正好是我们要的判据（工作区 vs 索引、索引 vs HEAD）。
-    """
-    rel = str(path.relative_to(ROOT))
-    for extra in ([], ["--cached"]):
-        result = subprocess.run(
-            ["git", "diff", "--quiet", *extra, "--", rel],
-            cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if result.returncode != 0:
-            return False
-    return True
-
-
 def _run_tests(nodes: tuple[str, ...]) -> int:
     # PYTHONPATH 必须显式指向本次变异的那棵树的 ``src``：工作树里没有自己的 .venv，
     # 继承来的包路径指向主树，变异打在 A 树、用例读的却是 B 树——用例照绿，变异被
     # 报成「存活（守卫是摆设）」（2026-11-08 #199 复审实测）。主树里两者同一份，
     # 这一句不改变任何结果。
     env = dict(os.environ)
+    # 变异期间不许写 .pyc：写下的缓存对应**改坏**的源码，而还原与变异常在同一秒内
+    # 完成，Python 按「mtime（秒级）+ 大小」判有效，会把变异版字节码当成最新
+    # （2026-11-10 #225 retro：`check.sh clean` 因此红了 9 条无关用例）。
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     src = str(ROOT / "src")
     env["PYTHONPATH"] = src + (os.pathsep + env["PYTHONPATH"]
                                if env.get("PYTHONPATH") else "")
@@ -597,43 +593,41 @@ def _run_tests(nodes: tuple[str, ...]) -> int:
         errors="replace", env=env).returncode
 
 
-def _tracked(path: Path) -> bool:
-    """必须是 git 已跟踪的文件：还原走 ``git checkout --``，未跟踪路径 checkout 会失败，
-    文件就留在被改坏的状态（2026-11-10 retro：新守卫常写在刚创建、还没提交的文件里）。
+def _drop_bytecode(path: Path) -> None:
+    """删掉该模块的 .pyc：它可能是**变异期间**写下的那份缓存。
+
+    双保险的第二道（第一道是 ``_run_tests`` 的 ``PYTHONDONTWRITEBYTECODE``）：历史
+    上跑过的变异可能已经在盘上留下改坏版缓存，只靠不再写新的清不掉。
     """
-    rel = str(path.relative_to(ROOT))
-    return subprocess.run(
-        ["git", "ls-files", "--error-unmatch", "--", rel],
-        cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
-        errors="replace").returncode == 0
+    Path(importlib.util.cache_from_source(str(path))).unlink(missing_ok=True)
 
 
 def check(mutation: Mutation) -> tuple[bool, str]:
-    """应用变异、跑到红、还原。返回 (是否被杀死, 说明)。"""
+    """应用变异、跑到红、还原。返回 (是否被杀死, 说明)。
+
+    还原是**字节级**的：把 ``read_bytes`` 拿到的原文用 ``write_bytes`` 写回。这样
+    它不再依赖 ``git checkout --``，脏工作区与未跟踪文件都能跑（``check.sh full``
+    现在会跑它）；也不做文本写回——CRLF 文件经文本写回会与索引不一致，``git status``
+    变脏、``git switch`` 被拦（2026-11-02 实测）。
+    """
     path = ROOT / mutation.path
-    original = path.read_text(encoding="utf-8")
-    occurrences = original.count(mutation.old)
+    raw = path.read_bytes()
+    original = raw.decode("utf-8")
+    # 与 ``read_text`` 的通用换行同口径：锚点一律按 LF 写，CRLF 文件也能命中。
+    normalized = original.replace("\r\n", "\n")
+    occurrences = normalized.count(mutation.old)
     if occurrences != 1:
         return False, f"锚点在 {mutation.path} 出现 {occurrences} 次（要求恰好 1 次）"
-    if not _tracked(path):
-        return False, (f"{mutation.path} 未被 git 跟踪：还原靠 git checkout，未跟踪文件"
-                       "改坏后回不去；先 git add / 提交再跑变异")
-    if not _git_clean(path):
-        return False, f"{mutation.path} 工作区不干净，拒绝变异"
-
-    mutated = original.replace(mutation.old, mutation.new, 1)
+    mutated = normalized.replace(mutation.old, mutation.new, 1)
+    if "\r\n" in original:
+        mutated = mutated.replace("\n", "\r\n")
     try:
-        path.write_text(mutated, encoding="utf-8")
+        path.write_bytes(mutated.encode("utf-8"))
         code = _run_tests(mutation.tests)
     finally:
-        # 用 git 还原，不用文本写回：CRLF 文件写回后与索引不一致，`git status` 会
-        # 变脏、`git switch` 被拦（2026-11-02 合并 governance 分支时实测，
-        # 只能先 git checkout 五个文件才切得动）。git checkout 是字节级还原。
-        subprocess.run(
-            ["git", "checkout", "--", str(path.relative_to(ROOT))],
-            cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace")
-    restored = path.read_text(encoding="utf-8")
-    if restored != original:
+        path.write_bytes(raw)
+        _drop_bytecode(path)
+    if path.read_bytes() != raw:
         return False, f"还原失败：{mutation.path} 与原文不一致，请手动 git checkout"
     return code != 0, "用例变红（杀死）" if code != 0 else "用例仍然全绿（守卫是摆设）"
 
