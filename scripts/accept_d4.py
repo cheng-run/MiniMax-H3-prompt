@@ -94,6 +94,16 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _normalize_newlines(text: str) -> str:
+    """把换行归一成 LF 再比较。
+
+    Windows 剪贴板会把换行规范成 CRLF（2026-11-11 实测 13/13 行都是 CRLF），而
+    下载落盘与会话产物是 LF：正文逐字相同，只是换行形态不同。不归一就会把
+    「复制正确」误判成「两份正文不一致」。
+    """
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _expect(condition: bool, message: str) -> None:
     if not condition:
         raise AcceptanceError(message)
@@ -345,6 +355,31 @@ def run_real(args: argparse.Namespace, report: Report, image: Path) -> None:
 
                 report.run("上传真实图片作首/尾帧并跑完真实阶段 2", upload_frames)
 
+                # 证据在完成态立刻采集，不等后面的交付步：交付步失败时，报告仍要能
+                # 说清「真实阶段 2 与读图确实发生过」，而不是只剩一行异常。
+                detail = _session_detail(client, base_url, token, session_id)
+                artifacts = detail.get("artifacts") or []
+                artifact = next(
+                    (item for item in artifacts
+                     if item.get("name") == "video-prompt.md"), None,
+                )
+                _expect(artifact is not None, "会话快照里没有 video-prompt.md 产物")
+                artifact_id = str(artifact.get("artifact_id") or "")
+                artifact_path = sessions_root / artifact_id
+                report.facts["artifact"] = {
+                    "artifact_id": artifact_id,
+                    "path": str(artifact_path),
+                    "exists": artifact_path.is_file(),
+                    "bytes": artifact.get("bytes"),
+                }
+                _expect(artifact_path.is_file(), "产物登记路径在磁盘上不存在")
+                _expect(detail.get("status") == "completed",
+                        f"会话终态不是 completed：{detail.get('status')}")
+                # 帧证据只在提交了帧的路径断言：首/尾描述非空、frame_images 指向的
+                # 素材文件仍在盘上——这是「读图真的发生过」的会话侧物证。
+                report.facts["frame_read_evidence"] = _frame_read_evidence(
+                    sessions_root, session_id)
+
                 def deliver() -> str:
                     page.get_by_role("tab", name="产物").click()
                     # 判据不依赖正文语言：真实阶段 2 的提示词是英文 H3 格式，桩产出的
@@ -372,40 +407,18 @@ def run_real(args: argparse.Namespace, report: Report, image: Path) -> None:
                             "下载的产物落盘为空")
                     downloaded = saved.read_text(encoding="utf-8")
                     _expect(
-                        downloaded.strip() == clipboard.strip(),
+                        _normalize_newlines(downloaded).strip()
+                        == _normalize_newlines(clipboard).strip(),
                         "剪贴板正文与下载落盘正文不一致",
                     )
                     (out_dir / "final-prompt-clipboard.md").write_text(
-                        clipboard + "\n", encoding="utf-8")
+                        _normalize_newlines(clipboard) + "\n", encoding="utf-8")
                     return (
                         f"复制 {len(clipboard)} 字符；下载 {saved.stat().st_size} 字节；"
                         "两份正文一致"
                     )
 
                 report.run("打开产物分区：复制并下载最终提示词", deliver)
-
-                detail = _session_detail(client, base_url, token, session_id)
-                artifacts = detail.get("artifacts") or []
-                artifact = next(
-                    (item for item in artifacts
-                     if item.get("name") == "video-prompt.md"), None,
-                )
-                _expect(artifact is not None, "会话快照里没有 video-prompt.md 产物")
-                artifact_id = str(artifact.get("artifact_id") or "")
-                artifact_path = sessions_root / artifact_id
-                report.facts["artifact"] = {
-                    "artifact_id": artifact_id,
-                    "path": str(artifact_path),
-                    "exists": artifact_path.is_file(),
-                    "bytes": artifact.get("bytes"),
-                }
-                _expect(artifact_path.is_file(), "产物登记路径在磁盘上不存在")
-                _expect(detail.get("status") == "completed",
-                        f"会话终态不是 completed：{detail.get('status')}")
-                # 帧证据只在提交了帧的路径断言：首/尾描述非空、frame_images 指向的
-                # 素材文件仍在盘上——这是「读图真的发生过」的会话侧物证。
-                report.facts["frame_read_evidence"] = _frame_read_evidence(
-                    sessions_root, session_id)
 
                 context.close()
             finally:
