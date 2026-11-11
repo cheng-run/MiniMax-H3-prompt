@@ -8,7 +8,7 @@ import { RouterLink } from 'vue-router'
 
   <header class="app-header">
     <nav class="app-nav" aria-label="主导航">
-      <RouterLink to="/">首页</RouterLink>
+      <RouterLink to="/">会话</RouterLink>
       <RouterLink to="/diagnostics">诊断</RouterLink>
     </nav>
   </header>

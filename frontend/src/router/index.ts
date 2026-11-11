@@ -1,12 +1,17 @@
 import { createRouter, createWebHistory, type RouterHistory, type RouteRecordRaw } from 'vue-router'
 
-import HomeView from '@/app/HomeView.vue'
 import NotFoundView from '@/app/NotFoundView.vue'
+import SessionDetailView from '@/features/sessions/SessionDetailView.vue'
+import SessionsListView from '@/features/sessions/SessionsListView.vue'
 
 // createWebHistory：真实路径（非 hash），与 FastAPI 的 SPA fallback 配套——深链刷新
 // 由服务端回退 index.html，前端路由再接管。
+//
+// 会话标识本身含斜杠（`<slug>/GEN001`），所以详情路由用自定义正则 `:id(.*)` 承接
+// 整段路径，否则 `/sessions/a/B` 会匹配不上（被 catch-all 当成 404）。
 const routes: RouteRecordRaw[] = [
-  { path: '/', name: 'home', component: HomeView },
+  { path: '/', name: 'sessions', component: SessionsListView },
+  { path: '/sessions/:id(.*)', name: 'session-detail', component: SessionDetailView },
   {
     path: '/diagnostics',
     name: 'diagnostics',

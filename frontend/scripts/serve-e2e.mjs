@@ -14,7 +14,13 @@ const python = resolve(repoRoot, '.venv', isWin ? 'Scripts/python.exe' : 'bin/py
 const child = spawn(python, ['-m', 'minimax_h3_prompt.api'], {
   cwd: repoRoot,
   stdio: 'inherit',
-  env: { ...process.env, PYTHONPATH: resolve(repoRoot, 'src') },
+  env: {
+    ...process.env,
+    PYTHONPATH: resolve(repoRoot, 'src'),
+    // 所有 E2E 共用这个 webServer：注入确定性桩管线，让 D4-3 的「创建即起跑」不用真实
+    // 模型即可跑完整闭环。既有 spec 不起 job，因此这个开关对它们无副作用。
+    MINIMAX_FAKE_PIPELINE: '1',
+  },
 })
 
 for (const sig of ['SIGINT', 'SIGTERM']) {

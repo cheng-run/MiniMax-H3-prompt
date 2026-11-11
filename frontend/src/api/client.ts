@@ -8,6 +8,12 @@ export type Health = components['schemas']['HealthResponse']
 export type ProblemDetail = components['schemas']['ProblemDetail']
 export type ProblemFieldError = components['schemas']['ProblemFieldError']
 export type AuthToken = components['schemas']['AuthTokenResponse']
+// 会话资源（D4-3）：列表/详情/创建/起任务全部走生成契约，组件不手写模型。
+export type SessionSummary = components['schemas']['SessionSummary']
+export type SessionDetail = components['schemas']['SessionDetail']
+export type SessionPage = components['schemas']['SessionPage']
+export type SessionCreate = components['schemas']['SessionCreate']
+export type JobSummary = components['schemas']['JobSummary']
 
 /**
  * 统一 API 错误。组件只处理这一种错误，不各自识别 FastAPI 默认的 ``detail``。
@@ -119,6 +125,79 @@ apiClient.use(attachToken)
 
 export async function getHealth(): Promise<Health> {
   const { data } = await apiClient.GET('/api/v1/health')
+  if (data === undefined) {
+    throw new ApiError(0, null)
+  }
+  return data
+}
+
+/** 会话列表分页参数（服务端默认 limit=50，上限 200）。 */
+export interface ListSessionsParams {
+  limit?: number
+  cursor?: string | null
+}
+
+/**
+ * 取一页会话。分页游标由服务端下发的不透明串持有，前端只原样回传。
+ *
+ * 只把有值的键放进查询串：不传参数时不应出现 `?limit=undefined`（服务端会 422）。
+ */
+export async function listSessions(params: ListSessionsParams = {}): Promise<SessionPage> {
+  const query: { limit?: number; cursor?: string } = {}
+  if (params.limit !== undefined) {
+    query.limit = params.limit
+  }
+  if (params.cursor !== undefined && params.cursor !== null) {
+    query.cursor = params.cursor
+  }
+  const { data } = await apiClient.GET('/api/v1/sessions', { params: { query } })
+  if (data === undefined) {
+    throw new ApiError(0, null)
+  }
+  return data
+}
+
+/**
+ * 建会话。`idempotencyKey` 必传：同一个键配同一个请求体只会建出一条会话（防双击）。
+ */
+export async function createSession(
+  body: SessionCreate,
+  idempotencyKey: string,
+): Promise<SessionDetail> {
+  const { data } = await apiClient.POST('/api/v1/sessions', {
+    body,
+    params: { header: { 'Idempotency-Key': idempotencyKey } },
+  })
+  if (data === undefined) {
+    throw new ApiError(0, null)
+  }
+  return data
+}
+
+/** 取会话快照：工作台唯一的数据源（spec §6.1），刷新即重拉。 */
+export async function getSession(sessionId: string): Promise<SessionDetail> {
+  const { data } = await apiClient.GET('/api/v1/sessions/{session_id}', {
+    params: { path: { session_id: sessionId } },
+  })
+  if (data === undefined) {
+    throw new ApiError(0, null)
+  }
+  return data
+}
+
+/**
+ * 起一次 `advance` 任务。幂等键挡住重复点击产生的第二条任务；重复提交同键只会重放。
+ */
+export async function startSessionJob(
+  sessionId: string,
+  idempotencyKey: string,
+): Promise<JobSummary> {
+  const { data } = await apiClient.POST('/api/v1/sessions/{session_id}/jobs', {
+    params: {
+      path: { session_id: sessionId },
+      header: { 'Idempotency-Key': idempotencyKey },
+    },
+  })
   if (data === undefined) {
     throw new ApiError(0, null)
   }
