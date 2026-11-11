@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import time
@@ -25,6 +26,14 @@ RUNTIME = SimpleNamespace(
     roundtable_max_rounds=1, common_sense_qa=False, max_qa_iterations=0)
 
 ENV = "MINIMAX_FAKE_PIPELINE"
+
+# 两张 1x1 PNG（内容不同，避免被素材去重成同一个）。
+PNG_FIRST = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+    "+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+PNG_LAST = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8"
+    "z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
 
 
 def _brief_body(variant: str = "FL2VA") -> dict:
@@ -75,7 +84,7 @@ def test_fake_pipeline_is_off_by_default(workbench, monkeypatch):
 
 def test_fake_pipeline_runs_both_stages_without_building_any_model(
         workbench, monkeypatch):
-    """开桩后 FL2VA 全闭环：阶段 1 出 4 个产物、阶段 2 出提示词，全程不建模型。"""
+    """开桩后 FL2VA 全闭环：阶段 1 出 4 个产物、交帧后阶段 2 出提示词，全程不建模型。"""
     monkeypatch.setenv(ENV, "1")
     root, _model = workbench
 
@@ -106,7 +115,26 @@ def test_fake_pipeline_runs_both_stages_without_building_any_model(
             f"/api/v1/sessions/{session_id}/action-items/{item['item_id']}/resolve",
             json={"decision": "approve"})
         assert approved.status_code == 202, approved.text
-        _wait_job(client, session_id, approved.json()["job_id"])
+        # FL2VA 通过审查后不直接跑阶段 2：先挂帧提交待办。
+        assert approved.json() is None
+        frame_item = [entry for entry in client.get(
+            f"/api/v1/sessions/{session_id}").json()["action_items"]
+            if entry["status"] == "pending"][0]
+        assert frame_item["kind"] == "frame_submission"
+
+        assets = {}
+        for role, data in (("first", PNG_FIRST), ("last", PNG_LAST)):
+            uploaded = client.post(
+                f"/api/v1/sessions/{session_id}/assets",
+                files={"file": (f"{role}.png", data, "image/png")})
+            assert uploaded.status_code == 201, uploaded.text
+            assets[role] = uploaded.json()["asset_id"]
+        submitted = client.post(
+            f"/api/v1/sessions/{session_id}/action-items/"
+            f"{frame_item['item_id']}/resolve",
+            json={"frames": assets})
+        assert submitted.status_code == 202, submitted.text
+        _wait_job(client, session_id, submitted.json()["job_id"])
 
         final = client.get(f"/api/v1/sessions/{session_id}").json()
         prompt = client.get(
@@ -114,7 +142,7 @@ def test_fake_pipeline_runs_both_stages_without_building_any_model(
 
     assert final["status"] == "completed"
     assert prompt.status_code == 200 and "桩管线" in prompt.text
-    # 桩读图：帧链会话的阶段 2 拿固定画面描述，不去打视觉模型。
+    # 桩读图读的是用户提交的帧位：首尾都交了，两条描述都在。
     state = json.loads(
         (root / Path(session_id) / SESSION_FILENAME).read_text(encoding="utf-8"))
     roles = {entry["role"] for entry in state["stage_state"]["fl2va_frame_descriptions"]}

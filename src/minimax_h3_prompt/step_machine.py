@@ -52,9 +52,16 @@ ADVANCEABLE_STATUSES = (
 # 人工待办与步骤（spec §4.3）
 # ---------------------------------------------------------------------------
 ACTION_STAGE1_REVIEW = "stage1_review"
+# 第二个人工待办（D4 spec §9）：帧链会话通过审查后先收关键帧，再进阶段 2。
+# 它不是新事件类型——仍走既有的 ``action_item.created``（十种闭合不变）。
+ACTION_FRAME_SUBMISSION = "frame_submission"
 
 STEP_STAGE1 = "stage1"
 STEP_STAGE2 = "stage2"
+
+# 需要人工提交关键帧的变体。只有帧链（FL2VA）走第二道待办；T2VA 通过即进阶段 2，
+# I2VA/L2VA 是降级产物、不是创建时可选的变体。集中在这里，落盘与判定不各写一份。
+FRAME_CHAIN_VARIANTS = frozenset({"FL2VA"})
 
 # 触发词：合法转移表的键。裸字符串会被打错字且无处对账，按本仓 ``STATUS_*`` 的口径走常量。
 TRIGGER_ADVANCE = "advance"
@@ -103,6 +110,9 @@ FRAME_PROMPT_NODE = "fl2va_frame_prompts"
 # 人工决定（spec §7 的 resolve 载荷）。
 DECISION_APPROVE = "approve"
 DECISION_REVISE = "revise"
+# 帧提交不是接口上的 ``decision`` 取值（请求体里靠 ``frames`` 分型），但决议事件与
+# 待办回显需要一个词说明「这条待办是被交帧决议掉的」——落成同一套内部词汇。
+DECISION_SUBMIT_FRAMES = "submit_frames"
 
 
 class InvalidTransition(ValueError):
@@ -167,6 +177,15 @@ class Action:
 
 def can_advance(status: str) -> bool:
     return status in ADVANCEABLE_STATUSES
+
+
+def needs_frame_submission(variant: str) -> bool:
+    """这个变体通过审查后是否要先收关键帧（D4 spec §9 的分叉判据）。
+
+    未知变体按非帧链处理：D4 的创建表单只给 T2VA/FL2VA 两档，把拼写错误默默当成
+    帧链会让一个笔误多出一道待办。
+    """
+    return str(variant).upper() in FRAME_CHAIN_VARIANTS
 
 
 def next_status(status: str, trigger: str) -> str:
@@ -243,12 +262,15 @@ def resolve(status: str, decision: str, *, layer: str = "") -> Decision:
 
 
 __all__ = [
+    "ACTION_FRAME_SUBMISSION",
     "ACTION_STAGE1_REVIEW",
     "ADVANCEABLE_STATUSES",
     "Action",
     "DECISION_APPROVE",
     "DECISION_REVISE",
+    "DECISION_SUBMIT_FRAMES",
     "Decision",
+    "FRAME_CHAIN_VARIANTS",
     "Facts",
     "FRAME_PROMPT_NODE",
     "InvalidTransition",
@@ -280,6 +302,7 @@ __all__ = [
     "TRIGGER_STAGE2_DONE",
     "TRIGGERS",
     "can_advance",
+    "needs_frame_submission",
     "next_action",
     "next_status",
     "resolve",

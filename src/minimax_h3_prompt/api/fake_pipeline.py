@@ -110,17 +110,23 @@ def stage1_state(brief: Any, previous: dict[str, Any] | None = None) -> dict[str
     return state
 
 
-def frame_descriptions(brief: Any, variant: str | None = None) -> list[dict[str, Any]]:
-    """假读图：按变体要的帧位给固定描述，形状与 ``FrameAudit.to_dict()`` 一致。
+def frame_descriptions(
+    brief: Any, variant: str, roles: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    """假读图：只给**用户真的提交了、且有效变体要的**帧位，形状与
+    ``FrameAudit.to_dict()`` 一致。
 
-    D4-2 起帧提交就位后，这里换成「桩读用户提交的帧」；在此之前它证明的是
-    「阶段 2 的锚定来自读图结果这件事不依赖视觉模型」。
+    D4-2 起它读的是用户提交的帧位（``first``/``last`` 由调用方从会话里取出）；
+    桩不替用户脑补一帧——那会让「双空＝显式跳过」在 E2E 里看起来像交过帧。
     """
+    slots = {role: picture for picture, role in _frame_roles(variant)}
     descriptions: list[dict[str, Any]] = []
-    for picture, role in _frame_roles(variant or brief.variant):
+    for role in roles:
+        if role not in slots:
+            continue
         label = "开场" if role == "first" else "收束"
         descriptions.append({
-            "picture": picture,
+            "picture": slots[role],
             "role": role,
             "path": f"fake://{role}.png",
             "description": (
@@ -130,10 +136,11 @@ def frame_descriptions(brief: Any, variant: str | None = None) -> list[dict[str,
     return descriptions
 
 
-def stage2_state(state: dict[str, Any], brief: Any) -> tuple[dict[str, Any], str]:
-    """固定阶段 2：注入假读图结果、给一份固定视频提示词；返回 ``(state, prompt)``。"""
+def stage2_state(state: dict[str, Any], brief: Any,
+                 descriptions: list[dict[str, Any]]) -> tuple[dict[str, Any], str]:
+    """固定阶段 2：注入**调用方给的**读图结果、给一份固定视频提示词。"""
     updated = dict(state)
-    updated["fl2va_frame_descriptions"] = frame_descriptions(brief)
+    updated["fl2va_frame_descriptions"] = descriptions
     prompt = "\n".join([
         "# H3 视频提示词（桩管线）",
         "",

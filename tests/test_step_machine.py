@@ -185,3 +185,34 @@ def test_frame_prompt_node_is_on_the_stage1_chain():
 @pytest.mark.parametrize("layer", sorted(LAYER_SPECS))
 def test_setting_layer_starts_are_on_the_stage1_chain(layer):
     assert LAYER_SPECS[layer].resume_from in CHAIN
+
+
+# ---------------------------------------------------------------------------
+# D4-2：帧提交待办（spec §9）
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("variant", ["FL2VA", "fl2va", "Fl2va"])
+def test_frame_chain_variant_requires_a_frame_submission_gate(variant):
+    assert m.needs_frame_submission(variant)
+
+
+@pytest.mark.parametrize("variant", ["T2VA", "I2VA", "L2VA", "", "FL2V", " FL2VA "])
+def test_other_variants_go_straight_to_stage2(variant):
+    """非帧链不凭空多出一道待办；拼写错误也不该被当成帧链。"""
+    assert not m.needs_frame_submission(variant)
+
+
+def test_frame_submission_is_a_second_human_action_item_not_a_new_event_type():
+    """第二个人工待办改的是 kind，不是事件类型：十种闭合由 EVENT_TYPES 守着。"""
+    from minimax_h3_prompt.workbench_store import EVENT_TYPES
+
+    assert m.ACTION_FRAME_SUBMISSION == "frame_submission"
+    assert m.ACTION_FRAME_SUBMISSION != m.ACTION_STAGE1_REVIEW
+    assert len(EVENT_TYPES) == 10
+    assert "frame_submission" not in EVENT_TYPES
+
+
+def test_submit_frames_is_an_internal_decision_value():
+    """帧提交不是接口上的 decision 取值，但它要能被决议事件记住。"""
+    assert m.DECISION_SUBMIT_FRAMES not in (m.DECISION_APPROVE, m.DECISION_REVISE)
+    assert m.DECISION_SUBMIT_FRAMES == "submit_frames"

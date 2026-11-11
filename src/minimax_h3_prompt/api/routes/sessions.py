@@ -31,6 +31,7 @@ from ...workbench_store import (
     ActionItemOut,
     ArtifactInfo,
     EventLog,
+    FrameInvalid,
     JobSummary,
     SessionDetail,
     SessionPage,
@@ -128,11 +129,28 @@ class RevisionIn(BaseModel):
     text: str = Field(min_length=1)
 
 
-class ActionItemResolve(BaseModel):
-    """决议载荷（spec §7）：``approve`` 或 ``revise`` + 若干条（层次, 文字）。"""
+class FrameSelection(BaseModel):
+    """帧槽选择（D4 spec §9）：首/尾各绑本会话一个 D3 素材，都可留空。
 
-    decision: Literal["approve", "revise"]
+    两个字段都是 ``asset_id``（``<会话标识>/<16 位内容哈希>``），不是路径；服务端
+    负责归属与存在性校验。首尾都空＝显式跳过（降级为纯文字），不是「没带载荷」。
+    """
+
+    first: str | None = None
+    last: str | None = None
+
+
+class ActionItemResolve(BaseModel):
+    """决议载荷（spec §7 / D4 §9）：审查待办收 ``approve``/``revise``，帧待办收 ``frames``。
+
+    ``decision`` 自 D4-2 起可省略：第二个人工待办（``frame_submission``）没有
+    approve/revise 语义，它只收帧槽。kind 与载荷的错配由服务端判成 422
+    ``frame_invalid``（不是 pydantic 的通用 422）。
+    """
+
+    decision: Literal["approve", "revise"] | None = None
     revisions: list[RevisionIn] = Field(default_factory=list)
+    frames: FrameSelection | None = None
 
 
 # 层次归一表（spec §7 的中文别名 + 向导屏幕标签 → 内部四档）。内部取值只住
@@ -544,11 +562,14 @@ def list_action_items(session_id: str, request: Request) -> list[ActionItemOut]:
 @router.post(
     "/sessions/{session_id:path}/action-items/{item_id}/resolve",
     status_code=202,
-    response_model=JobSummary,
+    response_model=JobSummary | None,
     responses={
         202: {
-            "model": JobSummary,
-            "description": "决议已受理，重跑在后台执行（异步）",
+            # 202 的响应体形状由返回类型注解派生（``JobSummary | None``）；这里只补
+            # 语义说明与幂等头，别再写一份 ``model``——两份会拼出重复的 anyOf。
+            "description": (
+                "决议已受理，重跑在后台执行（异步）。帧链通过审查不启动任务"
+                "（等待帧提交），此时响应体为 null。"),
             "headers": {
                 "Idempotency-Replayed": {
                     "description": "重放标记；首次决议不返回该头",
@@ -566,8 +587,11 @@ async def resolve_action_item(
     request: Request,
     response: Response,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-) -> JobSummary:
+) -> JobSummary | None:
     """提交人工决定：``approve`` 起阶段 2，``revise`` 从声明层次重跑阶段 1。
+
+    第二个人工待办（``frame_submission``）复用同一个端点、靠 body 分型（D4 §9）：
+    带 ``frames`` 即帧提交；kind 与载荷错配一律 422 ``frame_invalid``。
 
     状态判定与「决议 + 起任务」的原子性都在 ``JobRunner.resolve`` 的会话临界区里，
     这里只把请求体归一成内部词汇，不先查一遍状态（两处判据会在并发下各说各话）。
@@ -576,7 +600,7 @@ async def resolve_action_item(
     if payload.decision == "approve":
         if payload.revisions:
             raise HTTPException(422, "approve 不接受 revisions：通过就是通过。")
-    else:
+    elif payload.decision == "revise":
         if not payload.revisions:
             raise HTTPException(422, "revise 至少要给一条修订。")
         for revision in payload.revisions:
@@ -585,9 +609,29 @@ async def resolve_action_item(
                 raise HTTPException(422, "修订内容不能为空。")
             revisions.append(
                 {"layer": _normalize_layer(revision.layer), "text": text})
+    if payload.decision is None and payload.revisions:
+        # 帧提交没有修订语义；没有 decision 时若不点名拦下，这条会被静默忽略。
+        raise FrameInvalid("帧提交不接受 revisions。")
+    # 两套载荷互斥（D4 §9）：decision 属于审查待办，frames 属于帧提交待办。
+    # 这一层先拦「同时给了两套」——哪个待办都不接受这种请求，不必等锁内判 kind。
+    if payload.decision is not None and payload.frames is not None:
+        raise FrameInvalid(
+            "decision 与 frames 不能同时提交：审查待办不帧提交，帧待办不 approve/revise。")
+    if payload.decision is None and payload.frames is None:
+        raise HTTPException(422, "resolve 需要 decision（approve/revise）或 frames。")
+    frames: dict[str, str] | None = None
+    if payload.frames is not None:
+        # 空串与省略同义（前端清空槽位时两种形态都可能出现）；双空字典保留下来，
+        # 它是「显式跳过」的载荷，不是「没带载荷」。
+        frames = {
+            role: value.strip()
+            for role, value in (("first", payload.frames.first),
+                                ("last", payload.frames.last))
+            if value is not None
+        }
     job, replayed = await _runner(request).resolve(
         session_id, item_id, decision=payload.decision, revisions=revisions,
-        idempotency_key=idempotency_key or None)
+        frames=frames, idempotency_key=idempotency_key or None)
     if replayed:
         response.headers["Idempotency-Replayed"] = "true"
     return job

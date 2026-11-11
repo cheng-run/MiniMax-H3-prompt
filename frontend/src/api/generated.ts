@@ -154,6 +154,9 @@ export interface paths {
          * Resolve Action Item
          * @description 提交人工决定：``approve`` 起阶段 2，``revise`` 从声明层次重跑阶段 1。
          *
+         *     第二个人工待办（``frame_submission``）复用同一个端点、靠 body 分型（D4 §9）：
+         *     带 ``frames`` 即帧提交；kind 与载荷错配一律 422 ``frame_invalid``。
+         *
          *     状态判定与「决议 + 起任务」的原子性都在 ``JobRunner.resolve`` 的会话临界区里，
          *     这里只把请求体归一成内部词汇，不先查一遍状态（两处判据会在并发下各说各话）。
          */
@@ -323,14 +326,16 @@ export interface components {
         };
         /**
          * ActionItemResolve
-         * @description 决议载荷（spec §7）：``approve`` 或 ``revise`` + 若干条（层次, 文字）。
+         * @description 决议载荷（spec §7 / D4 §9）：审查待办收 ``approve``/``revise``，帧待办收 ``frames``。
+         *
+         *     ``decision`` 自 D4-2 起可省略：第二个人工待办（``frame_submission``）没有
+         *     approve/revise 语义，它只收帧槽。kind 与载荷的错配由服务端判成 422
+         *     ``frame_invalid``（不是 pydantic 的通用 422）。
          */
         ActionItemResolve: {
-            /**
-             * Decision
-             * @enum {string}
-             */
-            decision: "approve" | "revise";
+            /** Decision */
+            decision?: ("approve" | "revise") | null;
+            frames?: components["schemas"]["FrameSelection"] | null;
             /** Revisions */
             revisions?: components["schemas"]["RevisionIn"][];
         };
@@ -408,6 +413,19 @@ export interface components {
             /** Variant */
             variant: string;
             video_output?: components["schemas"]["VideoOutputOut"] | null;
+        };
+        /**
+         * FrameSelection
+         * @description 帧槽选择（D4 spec §9）：首/尾各绑本会话一个 D3 素材，都可留空。
+         *
+         *     两个字段都是 ``asset_id``（``<会话标识>/<16 位内容哈希>``），不是路径；服务端
+         *     负责归属与存在性校验。首尾都空＝显式跳过（降级为纯文字），不是「没带载荷」。
+         */
+        FrameSelection: {
+            /** First */
+            first?: string | null;
+            /** Last */
+            last?: string | null;
         };
         /**
          * HealthResponse
@@ -1605,7 +1623,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description 决议已受理，重跑在后台执行（异步） */
+            /** @description 决议已受理，重跑在后台执行（异步）。帧链通过审查不启动任务（等待帧提交），此时响应体为 null。 */
             202: {
                 headers: {
                     /** @description 重放标记；首次决议不返回该头 */
@@ -1613,7 +1631,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["JobSummary"];
+                    "application/json": components["schemas"]["JobSummary"] | null;
                 };
             };
             /** @description 缺少或无效的工作台访问令牌（problem+json） */

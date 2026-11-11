@@ -93,6 +93,12 @@ RESUMABLE_STATUSES = (
 # 入参**而不是产物：前者每轮由当时那一版产物现渲染，持久化它等于把一份陈旧的基线喂给
 # 续接后的自动质检循环（那是对当前产物重算的替换语义）；后者只在这一次截断重跑里有效，
 # 留下来会让续接后任何一次重跑都重新回灌同一条设定要求。两者都跑完即摘。
+
+# 帧提交在「决议」与「阶段 2 任务」之间的交接键（D4 §9）。它必须**持久化**：
+# 决议落盘后进程如果崩在任务起跑之前，续跑要靠它知道用户交了哪一对素材，而不是
+# 静默降级成纯文字。任务把帧记录写进 ``frame_images`` 后即从 state 里摘掉。
+FRAME_SUBMISSION_KEY = "_frame_submission"
+
 _STATE_KEYS = (
     "production_plan", "director_brief", "creative_lock", "script",
     "character_design", "background_design", "prop_design", "art_design",
@@ -120,6 +126,8 @@ _STATE_KEYS = (
     # `director/aspect_flow.py` 的 `FILM_SIZE_CONFIRM_KEY`，这里逐字同步；
     # 不同步的后果是保存时静默丢掉它，续跑后同一件事反复问。
     "film_size_confirm",
+    # 帧提交交接键（D4 §9）：决议写入、阶段 2 任务读后即摘。
+    FRAME_SUBMISSION_KEY,
     # **故意不在**这里的：`director_mode`（导演台选定的生成模式，issue #101）。它是
     # ``mode``/``variant`` 的同族——路线级选择只住 brief 一份，`run_stage1` 每次从 brief
     # 现取进图 state。落一份进白名单就等于同一契约两处口径：brief 与 stage_state 一旦
@@ -167,6 +175,9 @@ PERSISTED_OUTSIDE_GRAPH: dict[str, str] = {
     "film_size_confirm": (
         "尺寸差一档的确认：director/aspect_flow.py 的 FILM_SIZE_CONFIRM_KEY"
         "（逐段贴回与最终交付共用；任一边数值变化即作废重问）"),
+    FRAME_SUBMISSION_KEY: (
+        "帧提交交接键：api/jobs.py 在决议时写入、阶段 2 任务读后摘掉"
+        "（只在两次落盘之间有效，不参与 StateGraph 搬运）"),
 }
 
 # 资产图提示词三键（父 spec #77 / issue #80）：只属于多参路线。键名从 `graph/state.py`

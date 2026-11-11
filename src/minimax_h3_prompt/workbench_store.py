@@ -283,6 +283,17 @@ class AssetNotFound(WorkbenchError):
     code = "asset_not_found"
 
 
+class FrameInvalid(WorkbenchError):
+    """帧槽引用无效（D4 spec §9 / §12）。
+
+    与素材读取的 404 分开：这里回 422 且**不区分**「不存在」与「非本会话」——
+    帧提交是写操作，回 404 会让人拿错误码去探测别人会话里有哪些素材。
+    """
+
+    status_code = 422
+    code = "frame_invalid"
+
+
 class StorageUnavailable(WorkbenchError):
     """素材落盘失败（磁盘满、只读目录）。请求本身没错，是这台机器的存储不行。"""
 
@@ -316,7 +327,12 @@ _PROGRESS_STAGES = frozenset({step_machine.STEP_STAGE1, step_machine.STEP_STAGE2
 _PROGRESS_STATUSES = frozenset({"started", "done"})
 _SUCCEEDED_NEXT = frozenset(
     {step_machine.STATUS_AWAITING_HUMAN, step_machine.STATUS_COMPLETED})
-_DECISIONS = frozenset({step_machine.DECISION_APPROVE, step_machine.DECISION_REVISE})
+_DECISIONS = frozenset({
+    step_machine.DECISION_APPROVE,
+    step_machine.DECISION_REVISE,
+    # 帧提交决议（D4 §9）：事件类型不变，只是同一事件多一个合法的 decision 取值。
+    step_machine.DECISION_SUBMIT_FRAMES,
+})
 
 
 class UnknownEventType(ValueError):
@@ -1512,6 +1528,27 @@ class WorkbenchSessionStore:
             )
         raise AssetNotFound(f"素材不存在：{asset_id}")
 
+    def resolve_frame_asset(self, session_id: str, asset_id: str) -> Path:
+        """把帧槽里的 ``asset_id`` 解析成本会话 ``assets/`` 下的图片文件（D4 spec §9）。
+
+        与 ``resolve_asset_media`` 的分工：那个服务**读字节**（404 语义、标识里自带
+        会话），这个服务**写决议**（422 语义、必须正是 URL 里那个会话、必须是图片）。
+        「什么算素材」仍只判定一次（``_resolved_asset_file`` 那条路），这里只叠加
+        会话归属与类型，不另写一份命名规则。
+        """
+        prefix, _, _hash16 = asset_id.rpartition("/")
+        if prefix != session_id:
+            raise FrameInvalid(f"帧槽引用的素材不属于本会话：{asset_id}")
+        try:
+            resource = self.resolve_asset_media(asset_id)
+        except WorkbenchError as exc:
+            # 不存在与不可读同码：能区分就等于给了一个探测别人会话素材的 oracle。
+            raise FrameInvalid(f"帧槽引用的素材不存在：{asset_id}") from exc
+        if not resource.media_type.startswith("image/"):
+            raise FrameInvalid(
+                f"帧槽只接受图片素材（收到 {resource.media_type}）：{asset_id}")
+        return resource.path
+
     def store_asset(
         self,
         session_id: str,
@@ -1772,6 +1809,7 @@ __all__ = [
     "Asset", "AssetTooLarge",
     "ArtifactInfo", "ArtifactNotFound", "ArtifactTooLarge", "BriefOut",
     "EVENT_TYPES", "EVENTS_FILENAME", "Event", "EventDraft", "EventLog",
+    "FrameInvalid",
     "IdempotencyConflict", "IdempotencyRegistry", "InvalidEventPayload",
     "JobNotFound", "JobNotRunning",
     "JobSummary", "RefOut", "RevisionOut", "SessionBusy", "SessionCompleted", "SessionDetail",

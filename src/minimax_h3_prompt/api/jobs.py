@@ -28,7 +28,7 @@ from typing import Any
 
 from .. import step_machine
 from ..errors import error_code
-from ..session_store import atomic_write_text, load_session
+from ..session_store import FRAME_SUBMISSION_KEY, atomic_write_text, load_session
 from ..workbench_store import (
     ARTIFACT_FIRST_FRAME_PROMPT,
     ARTIFACT_LAST_FRAME_PROMPT,
@@ -40,6 +40,7 @@ from ..workbench_store import (
     ActionItemPending,
     ActionItemResolved,
     EventDraft,
+    FrameInvalid,
     JobNotFound,
     JobNotRunning,
     JobSummary,
@@ -57,13 +58,23 @@ JOB_HISTORY_LIMIT = 20
 _JOB_FINGERPRINT = hashlib.sha256(b"advance").hexdigest()
 
 
-def _resolve_fingerprint(item_id: str, decision: str,
-                         revisions: list[dict[str, str]]) -> str:
-    """resolve 的请求摘要：待办、决定与修订内容都算进去（同 key 换内容＝冲突）。"""
+def _resolve_fingerprint(item_id: str, decision: str | None,
+                         revisions: list[dict[str, str]],
+                         frames: dict[str, str] | None) -> str:
+    """resolve 的请求摘要：待办、决定、修订内容与帧槽都算进去（同 key 换内容＝冲突）。"""
     canonical = json.dumps(
-        {"item_id": item_id, "decision": decision, "revisions": revisions},
+        {"item_id": item_id, "decision": decision, "revisions": revisions,
+         "frames": frames or {}},
         sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+# resolve 的三个去向。待办 kind 与 brief 建好后不再改写，所以先在锁外读一次决定
+# 「要不要起任务」是安全的；「待办是否仍 pending」仍由 _decide 在存储层锁内判定。
+# 帧选择在决议时落进 ``session_store.FRAME_SUBMISSION_KEY``（为什么要先落盘见那里）。
+_BRANCH_REVIEW = "review"
+_BRANCH_FRAME_GATE = "frame_gate"
+_BRANCH_FRAMES = "frames"
 
 
 class JobCancelled(Exception):
@@ -202,31 +213,46 @@ class JobRunner:
             return job, False
 
     async def resolve(
-        self, session_id: str, item_id: str, *, decision: str,
+        self, session_id: str, item_id: str, *, decision: str | None,
         revisions: list[dict[str, str]] | None = None,
+        frames: dict[str, str] | None = None,
         idempotency_key: str | None = None,
-    ) -> tuple[JobSummary, bool]:
-        """在人工闸门上提交决定；返回 ``(job, 是否幂等重放)``（#219）。
+    ) -> tuple[JobSummary | None, bool]:
+        """在人工待办上提交决定；返回 ``(job, 是否幂等重放)``（#219 / D4 §9）。
 
-        决定本身（待办转 resolved、修订进累积清单、会话写回 running）在**存储层会话锁内**
+        决定本身（待办转 resolved、修订进累积清单、帧选择与状态）在**存储层会话锁内**
         一次落盘，事件与快照不分家；真正的重跑在后台任务里。``revise`` 的修订也在这次
         落盘里写进 ``user_revisions``——先记下用户说过的话，再花几分钟重跑；中途崩了
         也只是「没落地」，不会变成「系统没听见」。
+
+        帧链通过审查（``frame_gate``）是唯一**不起任务**的去向：它只把人推进到第二道
+        待办，返回 ``job=None``。这不是「没有发生任何事」——待办与事件都已落盘，只是
+        没有可等待的执行。
         """
         lock = self._locks.setdefault(session_id, asyncio.Lock())
         async with lock:
-            payload = _resolve_fingerprint(item_id, decision, list(revisions or []))
+            payload = _resolve_fingerprint(
+                item_id, decision, list(revisions or []), frames)
             registry = None
             if idempotency_key:
                 registry = self.store.session_registry(session_id)
                 cached = await asyncio.to_thread(
                     registry.replay, idempotency_key, fingerprint=payload)
                 if cached is not None:
-                    return JobSummary.model_validate(cached), True
+                    return (
+                        JobSummary.model_validate(cached) if cached else None, True)
 
-            job = JobSummary(
+            branch = await asyncio.to_thread(
+                self._resolve_branch, session_id, item_id, decision, frames)
+            frame_gate = branch == _BRANCH_FRAME_GATE
+            # 帧链通过审查不产生任务；其余去向照旧。``job`` 为 None 时下面所有
+            # 与任务相关的落盘都跳过——契约里那一段的 202 是「已受理、无执行」。
+            job = None if frame_gate else JobSummary(
                 job_id=uuid.uuid4().hex, kind="advance", status="running",
                 started_at=_now())
+            # 新待办的 id 先生成：``action_item.created`` 事件要和决议在**同一次**
+            # 落盘里写出，不能等 _decide 返回后再补一条事件。
+            created_item_id = uuid.uuid4().hex
             # 记录下来的修订条目（带轮次）要立刻带给后台任务：稍后按它标「已落地」，
             # 重新按 (round, layer, text) 反查会把轮次对齐规则又抄一遍。
             entries: list[dict[str, Any]] = []
@@ -241,6 +267,8 @@ class JobRunner:
             # 进事件的是一份扁平副本。
             event_revisions = [
                 revision.model_dump(mode="json") for revision in recorded_revisions]
+
+            holder: dict[str, Any] = {}
 
             def _decide(current: Any) -> dict[str, Any]:
                 # 会话状态先判：不在闸门上时，任何待办 id 都不该被「决议」——先答
@@ -258,29 +286,90 @@ class JobRunner:
                     raise ActionItemResolved(
                         f"待办已决议（{target.decision or target.status}），不能重复提交。")
                 now = _now()
+                stage_state: dict[str, Any] | None = None
+                new_item: ActionItemOut | None = None
+                resolved_frames: dict[str, str] = {}
+                if target.kind == step_machine.ACTION_STAGE1_REVIEW:
+                    # kind 与载荷强校验（D4 §9）：审查待办只认 approve/revise，
+                    # 带了 frames 就是发错了端点之外的语义。
+                    if decision not in (
+                            step_machine.DECISION_APPROVE,
+                            step_machine.DECISION_REVISE):
+                        raise FrameInvalid(
+                            "stage1_review 待办需要 approve 或 revise。")
+                    if frames is not None:
+                        raise FrameInvalid(
+                            "stage1_review 待办不接受 frames：帧槽只用于 frame_submission。")
+                    recorded_decision = decision
+                    if (decision == step_machine.DECISION_APPROVE
+                            and step_machine.needs_frame_submission(
+                                current.brief.variant)):
+                        new_item = ActionItemOut(
+                            item_id=created_item_id,
+                            kind=step_machine.ACTION_FRAME_SUBMISSION,
+                            status="pending", created_at=now)
+                elif target.kind == step_machine.ACTION_FRAME_SUBMISSION:
+                    if decision is not None:
+                        raise FrameInvalid(
+                            "frame_submission 待办不接受 approve/revise；请提交 frames。")
+                    if frames is None:
+                        raise FrameInvalid(
+                            "frame_submission 待办必须带 frames（首尾槽都空表示显式跳过）。")
+                    if revisions:
+                        raise FrameInvalid("帧提交不接受 revisions。")
+                    for role in ("first", "last"):
+                        asset_id = str(frames.get(role) or "").strip()
+                        if asset_id:
+                            # 归属、存在性、类型都在这里判；错误一律 422 frame_invalid。
+                            resolved_frames[role] = str(
+                                self.store.resolve_frame_asset(session_id, asset_id))
+                    holder["frames"] = resolved_frames
+                    recorded_decision = step_machine.DECISION_SUBMIT_FRAMES
+                    # 帧选择随决议一起落进 stage_state：慢速读图在任务里，崩溃在
+                    # 两者之间时续跑仍知道用户交了哪一对素材（而不是静默降级）。
+                    session = load_session(self.store.session_directory(session_id))
+                    if session is None:
+                        raise RuntimeError(f"会话文件读不到：{session_id}")
+                    stage_state = dict(session.stage_state)
+                    stage_state[FRAME_SUBMISSION_KEY] = dict(resolved_frames)
+                else:
+                    raise FrameInvalid(f"不认识的人工待办类型：{target.kind}")
+                holder["decision"] = recorded_decision
+
                 items = [
                     (item.model_copy(update={
-                        "status": "resolved", "decision": decision,
+                        "status": "resolved", "decision": recorded_decision,
                         "resolved_at": now,
                         "revisions": recorded_revisions}).model_dump(mode="json")
                      if item.item_id == item_id
                      else item.model_dump(mode="json"))
                     for item in current.action_items
                 ]
-                changes: dict[str, Any] = {
-                    "status": step_machine.STATUS_RUNNING,
-                    "jobs": _upsert_job(current.jobs, _job_dict(job)),
-                    "action_items": items,
-                }
+                if new_item is not None:
+                    items.append(new_item.model_dump(mode="json"))
+                changes: dict[str, Any] = {"action_items": items}
+                if new_item is not None:
+                    # 帧链通过审查：会话停在原地等第二道待办，不写成 running。
+                    changes["status"] = step_machine.STATUS_AWAITING_HUMAN
+                else:
+                    changes["status"] = step_machine.STATUS_RUNNING
+                    if job is None:
+                        # 只有帧闸门分支不建任务，而它走的是上面那条 if。
+                        raise RuntimeError("内部不一致：非帧闸门分支没有任务")
+                    changes["jobs"] = _upsert_job(
+                        current.jobs, _job_dict(job))
+                if stage_state is not None:
+                    changes["stage_state"] = stage_state
                 if decision == step_machine.DECISION_REVISE:
                     # 累积语义只住 user_revisions.py（begin_round + record_user_revision）；
                     # 这里不另造轮次号，也不改清单形状。
                     from ..user_revisions import record_user_revision
 
-                    session = load_session(self.store.session_directory(session_id))
-                    if session is None:
-                        raise RuntimeError(f"会话文件读不到：{session_id}")
-                    stage_state = dict(session.stage_state)
+                    if stage_state is None:
+                        session = load_session(self.store.session_directory(session_id))
+                        if session is None:
+                            raise RuntimeError(f"会话文件读不到：{session_id}")
+                        stage_state = dict(session.stage_state)
                     for revision in revisions or []:
                         entries.append(record_user_revision(
                             stage_state, layer=revision["layer"],
@@ -288,27 +377,77 @@ class JobRunner:
                     changes["stage_state"] = stage_state
                 return changes
 
+            resolved_payload: dict[str, Any] = {
+                "item_id": item_id,
+                "decision": (step_machine.DECISION_SUBMIT_FRAMES
+                             if branch == _BRANCH_FRAMES else decision),
+                "revisions": event_revisions,
+            }
+            if frames is not None:
+                # 帧槽载荷是用户输入的一部分（D4 §9）：重放与排障要看出用户当时
+                # 选了哪两个素材。审查待办没有这一项，就不写空对象进事件。
+                resolved_payload["frames"] = dict(frames)
+            events = [
+                EventDraft("action_item.resolved", resolved_payload,
+                           job_id=job.job_id if job else None),
+            ]
+            if job is not None:
+                events.insert(0, EventDraft(
+                    "job.started", {"kind": job.kind}, job_id=job.job_id))
+            if frame_gate:
+                events.append(EventDraft(
+                    "action_item.created",
+                    {"item_id": created_item_id,
+                     "kind": step_machine.ACTION_FRAME_SUBMISSION},
+                    job_id=None))
+
             await asyncio.to_thread(
-                self.store.mutate, session_id, _decide, events=[
-                    EventDraft("job.started", {"kind": job.kind},
-                               job_id=job.job_id),
-                    EventDraft("action_item.resolved",
-                               {"item_id": item_id, "decision": decision,
-                                "revisions": event_revisions},
-                               job_id=job.job_id),
-                ])
+                self.store.mutate, session_id, _decide, events=events)
+            if job is None:
+                if idempotency_key and registry is not None:
+                    await asyncio.to_thread(
+                        registry.record, idempotency_key,
+                        fingerprint=payload, response={})
+                return None, False
             self._started_at[job.job_id] = job.started_at
             await asyncio.to_thread(self._write_active_job, session_id, job.job_id, "")
             event = threading.Event()
             self._cancel_events[job.job_id] = event
             self._tasks[job.job_id] = asyncio.create_task(
                 self._run_decision(
-                    session_id, job.job_id, event, decision, entries))
+                    session_id, job.job_id, event, holder["decision"], entries))
             if idempotency_key and registry is not None:
                 await asyncio.to_thread(
                     registry.record, idempotency_key,
                     fingerprint=payload, response=_job_dict(job))
             return job, False
+
+    def _resolve_branch(self, session_id: str, item_id: str,
+                        decision: str | None,
+                        frames: dict[str, str] | None) -> str:
+        """这次 resolve 走向哪条分支（只读预判；真正的判定在 ``_decide`` 里）。
+
+        预判只依赖两个**建好后不再改写**的事实：待办 kind 与会话变体。所以先在锁外
+        读一次不会与并发决议打架；待办是否仍 pending 由锁内的 ``_decide`` 兜底。
+        """
+        directory = self.store.session_directory(session_id)
+        session = load_session(directory)
+        if session is None:
+            return _BRANCH_REVIEW
+        target = next(
+            (item for item in session.action_items
+             if str(item.get("item_id")) == item_id), None)
+        if target is None:
+            return _BRANCH_REVIEW
+        kind = str(target.get("kind"))
+        if kind == step_machine.ACTION_FRAME_SUBMISSION:
+            return _BRANCH_FRAMES
+        if (kind == step_machine.ACTION_STAGE1_REVIEW
+                and decision == step_machine.DECISION_APPROVE
+                and step_machine.needs_frame_submission(session.brief.variant)):
+            return _BRANCH_FRAME_GATE
+        return _BRANCH_REVIEW
+
 
     def get_job(self, session_id: str, job_id: str) -> JobSummary:
         detail = self.store.get_session(session_id)
@@ -395,9 +534,13 @@ class JobRunner:
     async def _run_decision(self, session_id: str, job_id: str,
                             cancel_event: threading.Event, decision: str,
                             entries: list[dict[str, Any]]) -> None:
-        """决议的后台执行：approve → 阶段 2；revise → 从声明层次重跑阶段 1。"""
+        """决议的后台执行：approve → 阶段 2；revise → 重跑阶段 1；交帧 → 阶段 2。
+
+        帧链通过审查不走到这里（那条分支没有任务，见 ``resolve`` 的 ``frame_gate``）。
+        """
         try:
-            if decision == step_machine.DECISION_APPROVE:
+            if decision in (step_machine.DECISION_APPROVE,
+                            step_machine.DECISION_SUBMIT_FRAMES):
                 result = await asyncio.to_thread(
                     self._execute_stage2, session_id, job_id, cancel_event)
             else:
@@ -411,7 +554,8 @@ class JobRunner:
             await asyncio.to_thread(
                 self._finish_failed, session_id, job_id, error_code(exc), str(exc))
         else:
-            if decision == step_machine.DECISION_APPROVE:
+            if decision in (step_machine.DECISION_APPROVE,
+                            step_machine.DECISION_SUBMIT_FRAMES):
                 await asyncio.to_thread(
                     self._finish_stage2, session_id, job_id, result)
             else:
@@ -560,18 +704,69 @@ class JobRunner:
                 self.store.write_text_artifact(
                     session_id, name, rendered, job_id=job_id)
 
+    def _stage2_frame_paths(self, state: dict[str, Any]) -> dict[str, str]:
+        """阶段 2 要用哪两张帧图：先看本次提交的交接键，再看已入库的帧记录。
+
+        两条来源读同一个形状（``role → 文件路径``）：交接键是「用户刚交的」，
+        ``frame_images`` 是「已经落盘、续跑时沿用的」。文件不在了就当作没交——
+        读图会显式报错的地方已经由审计自己处理，这里只负责给路径。
+        """
+        pending = state.get(FRAME_SUBMISSION_KEY)
+        if isinstance(pending, dict):
+            return {str(role): str(path) for role, path in pending.items()
+                    if str(path or "").strip()}
+        paths: dict[str, str] = {}
+        for row in state.get("frame_images") or []:
+            if not isinstance(row, dict):
+                continue
+            role = str(row.get("role") or "")
+            if role not in ("first", "last"):
+                continue
+            for key in ("target", "source"):
+                raw = str(row.get(key) or "")
+                if raw and Path(raw).is_file():
+                    paths[role] = raw
+                    break
+        return paths
+
+    @staticmethod
+    def _frame_records(paths: dict[str, str]) -> list[dict[str, Any]]:
+        """与向导 ``_store_frame`` 同形的帧记录——只是 ``target`` 就是素材正本。
+
+        D4 §9 明确「帧直接引用素材文件、不复制第二份」，所以 source/target 指向同
+        一个 ``assets/`` 下的文件；sha256 仍现算，续跑判「同一张图」时口径不变。
+        """
+        records: list[dict[str, Any]] = []
+        for role, raw in paths.items():
+            path = Path(raw)
+            records.append({
+                "role": role,
+                "source": str(path),
+                "target": str(path),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            })
+        return records
+
+    def _save_stage2_state(self, session_id: str, state: dict[str, Any]) -> None:
+        """任务进行中的 state 落盘（会话仍在 running）：帧记录先于慢速读图写下去。"""
+        self.store.mutate(session_id, lambda _detail: {
+            "status": step_machine.STATUS_RUNNING, "stage_state": state})
+
     def _execute_stage2(self, session_id: str, job_id: str,
                         cancel_event: threading.Event) -> dict[str, Any]:
-        """线程里跑的阶段 2（approve 之后）。
+        """线程里跑的阶段 2（approve / 交帧之后）。
 
-        无首尾帧时的**自动降级**与向导同源（``resolve_effective_variant``）：D2 的
-        帧图归 D3，所以这里永远按「没有帧」降级，并把降级事实记进会话
-        （``variant_downgraded``）。``video-prompt.md`` 与向导同目录同名，写完才算成功。
+        有帧则先读图再组装（D4 §9）：读图是慢速视觉调用，放在任务里，请求在 202
+        就返回了。没有帧时的**自动降级**与向导同源（``resolve_effective_variant``），
+        并把降级事实记进会话（``variant_downgraded``）——降级不静默。
+        ``video-prompt.md`` 与向导同目录同名，写完才算成功。
         """
         if self.fake_pipeline:
             return self._execute_stage2_fake(session_id, job_id, cancel_event)
+        from ..brief_parser import RefItem
         from ..graph.pipeline import _STAGE2_CHAIN, run_stage2
         from ..stage2_checkpoint import load_checkpoint
+        from ..tools.frame_auditor import audit_frame_images, required_frames
         from ..ui.wizard import resolve_effective_variant
 
         directory = self.store.session_directory(session_id)
@@ -581,13 +776,51 @@ class JobRunner:
         state = dict(session.stage_state)
         brief = session.brief
         original = brief.variant
-        effective = resolve_effective_variant(original, False, False)
+        paths = self._stage2_frame_paths(state)
+        have_first, have_last = "first" in paths, "last" in paths
+        effective = resolve_effective_variant(original, have_first, have_last)
         downgraded = ""
         if effective != original:
             brief.variant = effective
             downgraded = f"{original}→{effective}"
-        # 没有交回关键帧：读图结果就是空清单（向导在没有帧时同样写空列表）。
-        state["fl2va_frame_descriptions"] = []
+            # 降级照向导记录、不静默：会话字段写回之外，日志也要能看出这件事发生过。
+            logger.info("阶段 2 按提交的帧位降级（%s）：%s / %s",
+                        downgraded, session_id, job_id)
+
+        descriptions: list[dict[str, Any]] = []
+        if have_first or have_last:
+            records = self._frame_records(paths)
+            # 记录先落盘、读图在后（与向导同一条理由）：慢速调用中断时帧路径已经
+            # 在盘上，续跑不用重新交；交接键在同一把锁里收掉，不留两份事实。
+            state["frame_images"] = records
+            state.pop(FRAME_SUBMISSION_KEY, None)
+            self._save_stage2_state(session_id, state)
+            slots = {role: picture for picture, role in required_frames(effective)}
+            # 有效变体不要的帧（例如请求 I2VA 却多交了尾帧）不送读图：与向导
+            # 「按 required_frames(effective) 取」一致。
+            refs = [
+                RefItem(picture=slots[role],
+                        name="首帧" if role == "first" else "尾帧",
+                        description="", path=paths[role])
+                for role in ("first", "last")
+                if role in slots and role in paths
+            ]
+            roles: list[str] = [role for role in ("first", "last")
+                                if role in slots and role in paths]
+            if refs:
+                # 续跑时上一轮的读图结果仍然成立（帧图提交后不再更换）：不重付一次
+                # 视觉调用。新一轮提交则一定重读。
+                reused = self._reusable_descriptions(state, roles, paths)
+                if reused is None:
+                    audits = audit_frame_images(refs, effective)
+                    descriptions = [audit.to_dict() for audit in audits]
+                    if cancel_event.is_set():
+                        raise JobCancelled("frame_audit")
+                else:
+                    descriptions = reused
+        else:
+            state.pop(FRAME_SUBMISSION_KEY, None)
+        state["fl2va_frame_descriptions"] = descriptions
         # 有阶段 2 断点时组装已被跳过，那时不会有节点回调——先报 started 会留下
         # 一条「开始了却永远没结束」的假事件。
         if load_checkpoint(directory) is None:
@@ -609,14 +842,42 @@ class JobRunner:
         return {"state": dict(final_state), "brief": brief,
                 "variant_downgraded": downgraded}
 
+    @staticmethod
+    def _reusable_descriptions(
+        state: dict[str, Any], roles: list[str],
+        paths: dict[str, str],
+    ) -> list[dict[str, Any]] | None:
+        """上一次读图结果还能不能用：同一批帧图（路径重合）且描述非空才复用。
+
+        判据不重算 sha 再比对——阶段 2 的帧图在提交后没有更换路径，路径就是那份
+        事实；描述为空（上次没读成功）则重读。
+        """
+        previous = {
+            str(row.get("role")): row
+            for row in state.get("fl2va_frame_descriptions") or []
+            if isinstance(row, dict)
+        }
+        if not previous:
+            return None
+        out: list[dict[str, Any]] = []
+        for role in roles:
+            row = previous.get(role)
+            if row is None or not str(row.get("description") or "").strip():
+                return None
+            if Path(str(row.get("path") or "")) != Path(paths.get(role, "")):
+                return None
+            out.append(dict(row))
+        return out
+
     def _execute_stage2_fake(self, session_id: str, job_id: str,
                              cancel_event: threading.Event) -> dict[str, Any]:
-        """桩阶段 2：假读图 + 固定提示词，产物仍走真实落盘入口。
+        """桩阶段 2：假读用户提交的帧，仍走真实的落盘与降级判定。
 
-        桩管线模拟「用户已按变体交回帧图」，所以帧位齐全会话不降级；真实路径的
-        降级逻辑（无帧即降级）只在 ``_execute_stage2`` 里，这里不复制一份判据。
+        与真实路径共用 ``_stage2_frame_paths`` 与 ``resolve_effective_variant``：
+        桩只把「读图」这一步换成固定文案，帧位来自用户提交的素材（双空＝不读）。
         """
         from ..graph.pipeline import _STAGE2_CHAIN
+        from ..tools.frame_auditor import required_frames
         from ..ui.wizard import resolve_effective_variant
         from .fake_pipeline import frame_descriptions, stage2_state
 
@@ -625,15 +886,24 @@ class JobRunner:
         if session is None:
             raise RuntimeError(f"会话文件读不到：{session_id}")
         brief = session.brief
-        descriptions = frame_descriptions(brief)
-        roles = {entry["role"] for entry in descriptions}
+        state = dict(session.stage_state)
+        paths = self._stage2_frame_paths(state)
+        if paths:
+            state["frame_images"] = self._frame_records(paths)
+        state.pop(FRAME_SUBMISSION_KEY, None)
         original = brief.variant
         effective = resolve_effective_variant(
-            original, "first" in roles, "last" in roles)
+            original, "first" in paths, "last" in paths)
         downgraded = ""
         if effective != original:
             brief.variant = effective
             downgraded = f"{original}→{effective}"
+            logger.info("阶段 2 按提交的帧位降级（%s）：%s / %s",
+                        downgraded, session_id, job_id)
+        # 只描述有效变体要的帧位：多交的槽不进读图结果（与真实路径的筛选同源）。
+        needed = [role for _picture, role in required_frames(effective)]
+        descriptions = frame_descriptions(
+            brief, effective, tuple(role for role in needed if role in paths))
         for name in _STAGE2_CHAIN:
             self._emit_progress(session_id, job_id, name, "started",
                                 stage=step_machine.STEP_STAGE2)
@@ -641,9 +911,7 @@ class JobRunner:
                 raise JobCancelled(name)
             self._emit_progress(session_id, job_id, name, "done",
                                 stage=step_machine.STEP_STAGE2)
-        updated, prompt = stage2_state(dict(session.stage_state), brief)
-        # 桩读图结果按原变体的帧位给（降级时也别丢：真实路径的读图发生在降级判定之前）。
-        updated["fl2va_frame_descriptions"] = descriptions
+        updated, prompt = stage2_state(state, brief, descriptions)
         self.store.write_text_artifact(
             session_id, ARTIFACT_VIDEO_PROMPT, prompt, job_id=job_id)
         return {"state": updated, "brief": brief,
