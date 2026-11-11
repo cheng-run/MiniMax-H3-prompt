@@ -292,10 +292,87 @@ def test_resolve_revise_creates_a_new_pending_item(workbench):
         resolutions = [event for event in events
                        if event["type"] == "action_item.resolved"]
         assert resolutions[-1]["payload"] == {
-            "item_id": item["item_id"], "decision": "revise"}
+            "item_id": item["item_id"], "decision": "revise",
+            # D4 起决议事件带着当时的修订载荷：快照落后时要靠它补回历史。
+            "revisions": [{"layer": "frame", "text": "把雨改成雪"}]}
         succeeded = [event for event in events
                      if event["type"] == "job.succeeded"][-1]
         assert succeeded["payload"]["next"] == "awaiting_human"
+
+
+def test_resolved_item_echoes_the_revisions_it_was_resolved_with(workbench):
+    """D4 spec §7：决议时收到什么回显什么——层次按内部四档归一，顺序按提交顺序。
+
+    历史从**待办列表**重建，不 dump ``user_revisions``：本用例只读详情里的待办，
+    不碰 state。
+    """
+    app, _model, root = workbench
+    with workbench_client(app) as client:
+        detail, item = _advance_to_gate(client)
+        session_id = detail["session_id"]
+
+        started = _resolve(client, session_id, item["item_id"], {
+            "decision": "revise",
+            "revisions": [
+                {"layer": "画面", "text": "把雨改成雪"},
+                {"layer": "人物设定", "text": "改成短发，穿深色外套"},
+            ],
+        })
+        assert started.status_code == 202, started.text
+        _wait_job(client, session_id, started.json()["job_id"])
+
+        final = client.get(f"/api/v1/sessions/{session_id}").json()
+
+    resolved = [entry for entry in final["action_items"]
+                if entry["item_id"] == item["item_id"]][0]
+    assert resolved["revisions"] == [
+        {"layer": "frame", "text": "把雨改成雪"},
+        {"layer": "character", "text": "改成短发，穿深色外套"},
+    ]
+    pending = [entry for entry in final["action_items"]
+               if entry["status"] == "pending"][0]
+    assert pending["revisions"] == []
+
+
+def test_revisions_survive_snapshot_replay_from_the_event_log(workbench):
+    """快照落后事件流时，修订历史由事件重放补回——不在快照里也不丢。"""
+    app, _model, root = workbench
+    with workbench_client(app) as client:
+        detail, item = _advance_to_gate(client)
+        session_id = detail["session_id"]
+        started = _resolve(client, session_id, item["item_id"], {
+            "decision": "revise",
+            "revisions": [{"layer": "剧情", "text": "改成雨夜重逢"}],
+        })
+        _wait_job(client, session_id, started.json()["job_id"])
+
+        # 手工制造「事件已写、快照没跟上」：抹掉快照里的修订，把尾号退到决议事件之前。
+        snapshot = _state(root, session_id)
+        resolved_event = [event for event in _events(root, session_id)
+                          if event["type"] == "action_item.resolved"][-1]
+        snapshot["last_event_seq"] = resolved_event["seq"] - 1
+        for entry in snapshot["action_items"]:
+            entry.pop("revisions", None)
+        (root / Path(session_id) / SESSION_FILENAME).write_text(
+            json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+
+        replayed = client.get(f"/api/v1/sessions/{session_id}").json()
+
+    target = [entry for entry in replayed["action_items"]
+              if entry["item_id"] == item["item_id"]][0]
+    assert target["revisions"] == [{"layer": "story", "text": "改成雨夜重逢"}]
+
+
+def test_stage_state_never_crosses_the_api_boundary(workbench):
+    """D4 spec §7 的裁定：可审的是产物与待办，``stage_state`` 不是 API。"""
+    app, _model, _root = workbench
+    with workbench_client(app) as client:
+        detail, _item = _advance_to_gate(client)
+        session_id = detail["session_id"]
+        listed = client.get(f"/api/v1/sessions/{session_id}/action-items").json()
+
+    assert "stage_state" not in detail
+    assert all("stage_state" not in entry for entry in listed)
 
 
 def test_resolve_revise_setting_layer_reruns_that_layer_and_marks_applied(workbench):

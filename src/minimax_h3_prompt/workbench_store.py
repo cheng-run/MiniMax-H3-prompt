@@ -59,8 +59,22 @@ _LEGACY_STATUS = {
 # 产物登记范围（D2 spec §10、D3 #222 §7）：两张表各管一种响应形态——文本产物
 # 走纯文本（1 MiB 上限），媒体产物走字节 + 单段 Range。分成两张表是为了让「某个
 # 名字按哪种形态读」由登记范围派生，而不是在读取端点再抄一份白名单。
+# 产物名字是契约的一部分：登记表、执行器写盘与用例都从这些常量取，不各写一份字面量
+# （「守卫形态要从常量派生」——字面重抄在改名时会静默指到旧名字）。
+ARTIFACT_VIDEO_PROMPT = "video-prompt.md"
+# 阶段 1 的中间产物（D4 spec §7）：剧本与分镜表每次阶段 1 完成都落；首/尾帧词只有
+# 帧链会话（bundle 里真有那一帧）才落，两个文件同 kind ``frame_prompt``。
+ARTIFACT_SCRIPT = "script.md"
+ARTIFACT_SHOT_TABLE = "shot-table.md"
+ARTIFACT_FIRST_FRAME_PROMPT = "first-frame-prompt.md"
+ARTIFACT_LAST_FRAME_PROMPT = "last-frame-prompt.md"
+
 _ARTIFACT_KINDS = {
-    "video-prompt.md": "video_prompt",
+    ARTIFACT_VIDEO_PROMPT: "video_prompt",
+    ARTIFACT_SCRIPT: "script",
+    ARTIFACT_SHOT_TABLE: "shot_table",
+    ARTIFACT_FIRST_FRAME_PROMPT: "frame_prompt",
+    ARTIFACT_LAST_FRAME_PROMPT: "frame_prompt",
     "summary-zh.md": "summary_markdown",
     "summary-zh.json": "summary_json",
 }
@@ -76,8 +90,6 @@ _KNOWN_ARTIFACTS = {
 
 # 文本内容读取的上限（spec §10）：1 MiB，超出回 413 artifact_too_large。
 ARTIFACT_MAX_BYTES = 1024 * 1024
-# 阶段 2 的交付物名字是契约的一部分：执行器写它、登记它，用例按它找。
-ARTIFACT_VIDEO_PROMPT = "video-prompt.md"
 
 # ---------------------------------------------------------------------------
 # 上传素材（D3-2，#222 §5）
@@ -353,6 +365,18 @@ def _validate_action_item_created(payload: dict[str, Any]) -> None:
 def _validate_action_item_resolved(payload: dict[str, Any]) -> None:
     _require_str(payload, "item_id")
     _require_choice(payload, "decision", _DECISIONS)
+    # 修订载荷是可选的加字段（D4 spec §7）：写了就必须是 [{layer, text}, …]，
+    # 否则重放时 ``ActionItemOut`` 会拿半截字典去建模型并在**读详情**时报错。
+    revisions = payload.get("revisions")
+    if revisions is None:
+        return
+    if not isinstance(revisions, list):
+        raise InvalidEventPayload(f"事件的 revisions 必须是列表：{revisions!r}")
+    for entry in revisions:
+        if not isinstance(entry, dict):
+            raise InvalidEventPayload(f"修订条目必须是字典：{entry!r}")
+        _require_str(entry, "layer")
+        _require_str(entry, "text")
 
 
 def _validate_artifact_created(payload: dict[str, Any]) -> None:
@@ -597,11 +621,17 @@ def _replay_snapshot(
                     "resolved_at": "", "decision": None,
                 })
         elif event.type == "action_item.resolved":
+            revisions = payload.get("revisions")
             for item in action_items:
                 if item.get("item_id") == payload["item_id"]:
                     item.update({"status": "resolved",
                                  "decision": payload["decision"],
-                                 "resolved_at": event.at})
+                                 "resolved_at": event.at,
+                                 # 修订历史只从这条事件补（D4 spec §7）：快照落后时
+                                 # 也要能回显用户当时说了什么。
+                                 "revisions": (
+                                     [dict(entry) for entry in revisions]
+                                     if isinstance(revisions, list) else [])})
         # artifact.created：产物清单从目录现扫（_artifacts），没有快照字段要补。
     return status, jobs, action_items
 
@@ -646,6 +676,17 @@ class JobSummary(BaseModel):
     cancel_requested: bool = False
 
 
+class RevisionOut(BaseModel):
+    """一条用户修订的对外回显：内部四档层次 + 意见原文（D4 spec §7）。
+
+    历史从**待办列表**重建（决议事件带着当时的载荷），与 ``stage_state.user_revisions``
+    是两本账：前者是「用户在这张闸门上说过什么」，后者带轮次与落地标记、只给重跑用。
+    """
+
+    layer: str
+    text: str
+
+
 class ActionItemOut(BaseModel):
     item_id: str
     kind: str
@@ -653,6 +694,8 @@ class ActionItemOut(BaseModel):
     created_at: str = ""
     resolved_at: str = ""
     decision: str | None = None
+    # 决议时提交的「层次 + 意见」，按提交顺序原样回显；未决议与 approve 是空表。
+    revisions: list[RevisionOut] = Field(default_factory=list)
 
 
 class ArtifactInfo(BaseModel):
@@ -1723,13 +1766,15 @@ class WorkbenchSessionStore:
 
 __all__ = [
     "ActionItemNotFound", "ActionItemOut", "ActionItemPending", "ActionItemResolved",
-    "ARTIFACT_MAX_BYTES", "ARTIFACT_VIDEO_PROMPT",
+    "ARTIFACT_FIRST_FRAME_PROMPT", "ARTIFACT_LAST_FRAME_PROMPT",
+    "ARTIFACT_MAX_BYTES", "ARTIFACT_SCRIPT", "ARTIFACT_SHOT_TABLE",
+    "ARTIFACT_VIDEO_PROMPT",
     "Asset", "AssetTooLarge",
     "ArtifactInfo", "ArtifactNotFound", "ArtifactTooLarge", "BriefOut",
     "EVENT_TYPES", "EVENTS_FILENAME", "Event", "EventDraft", "EventLog",
     "IdempotencyConflict", "IdempotencyRegistry", "InvalidEventPayload",
     "JobNotFound", "JobNotRunning",
-    "JobSummary", "RefOut", "SessionBusy", "SessionCompleted", "SessionDetail",
+    "JobSummary", "RefOut", "RevisionOut", "SessionBusy", "SessionCompleted", "SessionDetail",
     "SessionLegacy", "SessionNotFound", "SessionPage", "SessionSummary",
     "SESSION_STATUSES", "StorageUnavailable", "UnknownEventType",
     "UnsupportedMediaType", "UploadInvalid", "VideoOutputOut", "WorkbenchError",

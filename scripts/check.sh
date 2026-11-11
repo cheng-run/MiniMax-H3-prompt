@@ -176,12 +176,18 @@ run_frontend_guard() {
 # `git diff --exit-code` 必然红，把「未提交」误报成「漂移」，白跑一轮全量。
 # 「提交后的文件是否与代码一致」由 CI 的 git diff --exit-code 负责（ci.yml 已有）。
 run_contract_guard() {
-  local root frontend exported generated
+  local root frontend git_dir exported generated
   root=$(git rev-parse --show-toplevel)
   frontend="$root/frontend"
-  # 临时文件放 .git/：不在工作区，不会被别的守卫或 git status 看见。
-  exported="$root/.git/contract-check.$$.json"
-  generated="$root/.git/generated-check.$$.ts"
+  # 临时文件放 git 目录：不在工作区，不会被别的守卫或 git status 看见。
+  # 取 ``--absolute-git-dir`` 而不是 ``$root/.git``：工作树里的 ``.git`` 是
+  # **一个文件**（指向主仓 gitdir 的链接），在它下面 mkdir 会直接 FileExistsError。
+  # 也不能用 ``--git-dir``：主树里它返回相对的 ``.git``，而下面两个消费者
+  # （python 导出 / frontend 下的 node 生成器）工作目录不同，相对路径会各自解析到
+  # 错误位置（2026-11-11 #228 复审实测：主树契约守卫报 frontend/.git/... 不存在）。
+  git_dir=$(git rev-parse --absolute-git-dir)
+  exported="$git_dir/contract-check.$$.json"
+  generated="$git_dir/generated-check.$$.ts"
   echo "[check] contracts: 重新导出 OpenAPI 并与工作区文件比对"
   "$PY" "$root/scripts/export_openapi.py" --out "$exported"
   if ! cmp -s "$exported" "$root/contracts/openapi.json"; then

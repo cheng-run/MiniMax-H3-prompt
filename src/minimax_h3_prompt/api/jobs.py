@@ -30,6 +30,10 @@ from .. import step_machine
 from ..errors import error_code
 from ..session_store import atomic_write_text, load_session
 from ..workbench_store import (
+    ARTIFACT_FIRST_FRAME_PROMPT,
+    ARTIFACT_LAST_FRAME_PROMPT,
+    ARTIFACT_SCRIPT,
+    ARTIFACT_SHOT_TABLE,
     ARTIFACT_VIDEO_PROMPT,
     ActionItemNotFound,
     ActionItemOut,
@@ -39,6 +43,7 @@ from ..workbench_store import (
     JobNotFound,
     JobNotRunning,
     JobSummary,
+    RevisionOut,
     WorkbenchSessionStore,
 )
 
@@ -122,9 +127,14 @@ def _read_json(path: Path) -> Any:
 class JobRunner:
     """一个进程一份；按 ``session_id`` 串行化命令，按 ``job_id`` 管取消标记。"""
 
-    def __init__(self, store: WorkbenchSessionStore, config: Any = None) -> None:
+    def __init__(self, store: WorkbenchSessionStore, config: Any = None, *,
+                 fake_pipeline: bool = False) -> None:
         self.store = store
         self._config = config
+        # 桩管线开关（D4 spec §11）：只由 ``create_app`` 从环境变量读出后传进来，
+        # 没有任何请求能改它。为真时阶段 1/2 与修订都走 ``fake_pipeline`` 的固定产出，
+        # 真实路径一行不碰。
+        self.fake_pipeline = fake_pipeline
         self._locks: dict[str, asyncio.Lock] = {}
         self._cancel_events: dict[str, threading.Event] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
@@ -220,6 +230,17 @@ class JobRunner:
             # 记录下来的修订条目（带轮次）要立刻带给后台任务：稍后按它标「已落地」，
             # 重新按 (round, layer, text) 反查会把轮次对齐规则又抄一遍。
             entries: list[dict[str, Any]] = []
+            # 决议时收到什么就原样留在待办上（D4 spec §7）：读详情的人要看的是
+            # 「用户当时说了什么」，而不是事后由累积账反推的一份。事件也带同一份，
+            # 快照落后时重放才能补回修订历史。
+            recorded_revisions = [
+                RevisionOut(layer=str(entry["layer"]), text=str(entry["text"]))
+                for entry in revisions or []
+            ]
+            # 事件 payload 必须是纯 JSON（EventLog 直接 json.dumps）：模型对象留在这里，
+            # 进事件的是一份扁平副本。
+            event_revisions = [
+                revision.model_dump(mode="json") for revision in recorded_revisions]
 
             def _decide(current: Any) -> dict[str, Any]:
                 # 会话状态先判：不在闸门上时，任何待办 id 都不该被「决议」——先答
@@ -240,7 +261,8 @@ class JobRunner:
                 items = [
                     (item.model_copy(update={
                         "status": "resolved", "decision": decision,
-                        "resolved_at": now}).model_dump(mode="json")
+                        "resolved_at": now,
+                        "revisions": recorded_revisions}).model_dump(mode="json")
                      if item.item_id == item_id
                      else item.model_dump(mode="json"))
                     for item in current.action_items
@@ -271,7 +293,8 @@ class JobRunner:
                     EventDraft("job.started", {"kind": job.kind},
                                job_id=job.job_id),
                     EventDraft("action_item.resolved",
-                               {"item_id": item_id, "decision": decision},
+                               {"item_id": item_id, "decision": decision,
+                                "revisions": event_revisions},
                                job_id=job.job_id),
                 ])
             self._started_at[job.job_id] = job.started_at
@@ -401,6 +424,8 @@ class JobRunner:
     def _execute_stage1(self, session_id: str, job_id: str,
                         cancel_event: threading.Event) -> dict[str, Any]:
         """线程里跑的阶段 1；节点边界同时是取消检查点与增量落盘点。"""
+        if self.fake_pipeline:
+            return self._execute_stage1_fake(session_id, job_id, cancel_event)
         from ..graph.pipeline import _STAGE1_CHAIN, run_stage1
 
         directory = self.store.session_directory(session_id)
@@ -478,7 +503,62 @@ class JobRunner:
         if cancel_event.is_set():
             raise JobCancelled(str(
                 (final_state.get("_progress") or {}).get("last_completed_node", "")))
+        self._write_stage1_artifacts(session_id, job_id, final_state)
         return final_state
+
+    def _execute_stage1_fake(self, session_id: str, job_id: str,
+                             cancel_event: threading.Event) -> dict[str, Any]:
+        """桩阶段 1：按真实链的节点名发进度事件，状态由 ``fake_pipeline`` 固定给出。
+
+        进度事件照真实路径成对发（started/done）——浏览器 E2E 要验证「当前节点」
+        真的在动；节点名取自 ``_STAGE1_CHAIN``，不另写一份名字清单。
+        """
+        from ..graph.pipeline import _STAGE1_CHAIN
+        from .fake_pipeline import stage1_state
+
+        directory = self.store.session_directory(session_id)
+        session = load_session(directory)
+        if session is None:
+            raise RuntimeError(f"会话文件读不到：{session_id}")
+        for name in _STAGE1_CHAIN:
+            self._emit_progress(session_id, job_id, name, "started")
+            if cancel_event.is_set():
+                raise JobCancelled(name)
+            self._emit_progress(session_id, job_id, name, "done")
+        final_state = stage1_state(session.brief, dict(session.stage_state))
+        self._write_stage1_artifacts(session_id, job_id, final_state)
+        return final_state
+
+    def _write_stage1_artifacts(self, session_id: str, job_id: str,
+                                state: dict[str, Any]) -> None:
+        """把阶段 1 的中间产物落成可看可复制的产物（D4 spec §7）。
+
+        只写非空正文：空文件既不是「能审的东西」，还会让清单里多一条点开是空白的
+        产物。帧词按 bundle 里**真有的行**写（渲染器对空帧返回空串），所以 T2VA 是
+        两件、帧链会话才有首/尾帧词；不做 variant 白名单的第二次判定——bundle 自己
+        就是那份事实。
+
+        写盘与登记统一走 ``store.write_text_artifact``：先落盘再发 ``artifact.created``，
+        订阅者拿到标识时文件已经在。
+        """
+        for name, key in ((ARTIFACT_SCRIPT, "script"),
+                          (ARTIFACT_SHOT_TABLE, "shot_table")):
+            text = str(state.get(key) or "")
+            if text.strip():
+                self.store.write_text_artifact(session_id, name, text, job_id=job_id)
+        bundle = state.get("fl2va_prompt_bundle")
+        if not isinstance(bundle, dict):
+            return
+        from ..generation import FL2VAPromptBundle
+        from ..ui.wizard import render_fl2va_frame_markdown_from_bundle
+
+        parsed = FL2VAPromptBundle.from_dict(bundle)
+        for frame, name in (("first", ARTIFACT_FIRST_FRAME_PROMPT),
+                            ("last", ARTIFACT_LAST_FRAME_PROMPT)):
+            rendered = render_fl2va_frame_markdown_from_bundle(parsed, frame)
+            if rendered.strip():
+                self.store.write_text_artifact(
+                    session_id, name, rendered, job_id=job_id)
 
     def _execute_stage2(self, session_id: str, job_id: str,
                         cancel_event: threading.Event) -> dict[str, Any]:
@@ -488,6 +568,8 @@ class JobRunner:
         帧图归 D3，所以这里永远按「没有帧」降级，并把降级事实记进会话
         （``variant_downgraded``）。``video-prompt.md`` 与向导同目录同名，写完才算成功。
         """
+        if self.fake_pipeline:
+            return self._execute_stage2_fake(session_id, job_id, cancel_event)
         from ..graph.pipeline import _STAGE2_CHAIN, run_stage2
         from ..stage2_checkpoint import load_checkpoint
         from ..ui.wizard import resolve_effective_variant
@@ -527,6 +609,46 @@ class JobRunner:
         return {"state": dict(final_state), "brief": brief,
                 "variant_downgraded": downgraded}
 
+    def _execute_stage2_fake(self, session_id: str, job_id: str,
+                             cancel_event: threading.Event) -> dict[str, Any]:
+        """桩阶段 2：假读图 + 固定提示词，产物仍走真实落盘入口。
+
+        桩管线模拟「用户已按变体交回帧图」，所以帧位齐全会话不降级；真实路径的
+        降级逻辑（无帧即降级）只在 ``_execute_stage2`` 里，这里不复制一份判据。
+        """
+        from ..graph.pipeline import _STAGE2_CHAIN
+        from ..ui.wizard import resolve_effective_variant
+        from .fake_pipeline import frame_descriptions, stage2_state
+
+        directory = self.store.session_directory(session_id)
+        session = load_session(directory)
+        if session is None:
+            raise RuntimeError(f"会话文件读不到：{session_id}")
+        brief = session.brief
+        descriptions = frame_descriptions(brief)
+        roles = {entry["role"] for entry in descriptions}
+        original = brief.variant
+        effective = resolve_effective_variant(
+            original, "first" in roles, "last" in roles)
+        downgraded = ""
+        if effective != original:
+            brief.variant = effective
+            downgraded = f"{original}→{effective}"
+        for name in _STAGE2_CHAIN:
+            self._emit_progress(session_id, job_id, name, "started",
+                                stage=step_machine.STEP_STAGE2)
+            if cancel_event.is_set():
+                raise JobCancelled(name)
+            self._emit_progress(session_id, job_id, name, "done",
+                                stage=step_machine.STEP_STAGE2)
+        updated, prompt = stage2_state(dict(session.stage_state), brief)
+        # 桩读图结果按原变体的帧位给（降级时也别丢：真实路径的读图发生在降级判定之前）。
+        updated["fl2va_frame_descriptions"] = descriptions
+        self.store.write_text_artifact(
+            session_id, ARTIFACT_VIDEO_PROMPT, prompt, job_id=job_id)
+        return {"state": updated, "brief": brief,
+                "variant_downgraded": downgraded}
+
     def _execute_revise(self, session_id: str, job_id: str,
                         cancel_event: threading.Event,
                         entries: list[dict[str, Any]]) -> dict[str, Any]:
@@ -535,6 +657,8 @@ class JobRunner:
         多条修订的执行顺序＝**链上最上游的层次先跑，画面级最后**：设定级改动会换掉
         画面级节点的输入，反过来先跑画面级等于拿旧设定出词。
         """
+        if self.fake_pipeline:
+            return self._execute_revise_fake(session_id, job_id, cancel_event)
         from ..graph.pipeline import _STAGE1_CHAIN
         from ..user_revisions import (
             LAYER_FRAME,
@@ -584,7 +708,32 @@ class JobRunner:
             self._save_revision_state(session_id, state)
 
         state.pop("_progress", None)
+        # 每轮修订重跑完成都把审查面刷新一遍（spec §7 / §14 风险表）：审查看到的
+        # 必须是这一稿，而不是上一轮意见之前的旧稿。
+        self._write_stage1_artifacts(session_id, job_id, state)
         return {"state": state, "brief": brief}
+
+    def _execute_revise_fake(self, session_id: str, job_id: str,
+                             cancel_event: threading.Event) -> dict[str, Any]:
+        """桩修订：把本轮意见拼进固定稿并刷新产物，不区分层次。
+
+        内容是假的不等于形状是假的：state 里仍带累积修订（``_decide`` 已写入），
+        产物仍走同一个落盘入口——浏览器 E2E 要验的是「重跑后看到新稿」。
+        """
+        from ..graph.pipeline import _STAGE1_CHAIN
+        from .fake_pipeline import stage1_state
+
+        directory = self.store.session_directory(session_id)
+        session = load_session(directory)
+        if session is None:
+            raise RuntimeError(f"会话文件读不到：{session_id}")
+        self._emit_progress(session_id, job_id, _STAGE1_CHAIN[0], "started")
+        if cancel_event.is_set():
+            raise JobCancelled(_STAGE1_CHAIN[0])
+        state = stage1_state(session.brief, dict(session.stage_state))
+        self._emit_progress(session_id, job_id, _STAGE1_CHAIN[-1], "done")
+        self._write_stage1_artifacts(session_id, job_id, state)
+        return {"state": state, "brief": session.brief}
 
     def _save_revision_state(self, session_id: str,
                              state: dict[str, Any]) -> None:

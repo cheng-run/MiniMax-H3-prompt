@@ -579,6 +579,49 @@ MUTATIONS: tuple[Mutation, ...] = (
         ("tests/test_adr_guard.py::test_a_malformed_status_label_is_rejected",),
         "只数合规行、不拒绝畸形状态行＝「状态（…验收）」静默放行（#226 实测）",
     ),
+    Mutation(
+        "duration_scope_unchecked",
+        "src/minimax_h3_prompt/api/routes/sessions.py",
+        "    _validate_duration(payload.duration)\n",
+        "    pass  # 变异：跳过时长校验\n",
+        ("tests/test_api_sessions.py::test_create_session_rejects_duration_out_of_scope",),
+        "不校验时长＝短表单收下 30 秒与 0 秒，duration_out_of_scope 永不出现（#228 / D4-AC1）",
+    ),
+    Mutation(
+        "stage1_artifacts_not_written",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "        self._write_stage1_artifacts(session_id, job_id, final_state)\n"
+        "        return final_state\n"
+        "\n"
+        "    def _execute_stage1_fake",
+        "        return final_state\n"
+        "\n"
+        "    def _execute_stage1_fake",
+        ("tests/test_api_stage1_artifacts.py"
+         "::test_text_route_writes_script_and_shot_table_artifacts",),
+        "阶段 1 收尾不落产物＝审查面只剩 stage_state，用户没有任何可看可复制的东西"
+        "（#228 / D4-AC7）",
+    ),
+    Mutation(
+        "resolved_revisions_not_echoed",
+        "src/minimax_h3_prompt/api/jobs.py",
+        '                        "resolved_at": now,\n'
+        '                        "revisions": recorded_revisions}).model_dump(mode="json")',
+        '                        "resolved_at": now}).model_dump(mode="json")',
+        ("tests/test_api_action_items.py"
+         "::test_resolved_item_echoes_the_revisions_it_was_resolved_with",),
+        "待办不记决议载荷＝修订历史被静默丢掉，用户看不到自己上一轮说过什么"
+        "（#228 / D4-AC8）",
+    ),
+    Mutation(
+        "fake_switch_ignored",
+        "src/minimax_h3_prompt/api/app.py",
+        "    fake = fake_pipeline_enabled()\n",
+        "    fake = False\n",
+        ("tests/test_api_fake_pipeline.py"
+         "::test_fake_pipeline_runs_both_stages_without_building_any_model",),
+        "环境变量开着也照跑真实管线＝CI 的 E2E 会去打真实模型（#228 / D4-AC15 前提）",
+    ),
 )
 
 

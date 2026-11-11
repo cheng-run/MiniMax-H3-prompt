@@ -42,7 +42,12 @@ from ..media import (
     binary_content,
     build_media_response,
 )
-from ..problems import AUTH_ERROR_RESPONSES, COMMON_ERROR_RESPONSES, ProblemDetail
+from ..problems import (
+    AUTH_ERROR_RESPONSES,
+    COMMON_ERROR_RESPONSES,
+    ProblemDetail,
+    ProblemError,
+)
 
 # 401/403 来自最外层的访问控制（api/auth.py），对所有会话路由都成立；豁免的健康检查
 # 与引导端点不在此路由器下，所以它们不会在契约里多出这两个分支。
@@ -67,6 +72,28 @@ class VideoOutputIn(BaseModel):
     multiple: int
 
 
+# D4 spec §5：V1 只支持 4–10 秒短视频，两端都限。范围写在常量里而不是塞进
+# ``Field(ge=, le=)``：pydantic 的校验失败走通用 422（没有 ``code``），前端只能
+# 靠解析文案分支；这个范围是一条**产品规则**，要有自己的稳定错误码。
+DURATION_MIN_SECONDS = 4.0
+DURATION_MAX_SECONDS = 10.0
+
+
+class DurationOutOfScope(ProblemError):
+    """时长越界。文案点名 D6：长片是那张票的范围，用户要知道界限去哪看。"""
+
+    status_code = 422
+    code = "duration_out_of_scope"
+
+
+def _validate_duration(duration: float) -> None:
+    if DURATION_MIN_SECONDS <= duration <= DURATION_MAX_SECONDS:
+        return
+    raise DurationOutOfScope(
+        f"V1 只支持 {DURATION_MIN_SECONDS:g}–{DURATION_MAX_SECONDS:g} 秒的短视频，"
+        f"长片归 D6；收到的 duration={duration:g}。")
+
+
 class RefIn(BaseModel):
     picture: int = 1
     name: str = ""
@@ -83,7 +110,9 @@ class SessionCreate(BaseModel):
 
     mode: Literal["base"] = "base"
     variant: str = "T2VA"
-    duration: float = Field(default=4.0, gt=0)
+    # 范围校验在 ``_validate_duration`` 里做（为的是拿到专用错误码）；这里不再写
+    # ``gt=0``——pydantic 先拒会把 0/负数拦成没有 code 的通用 422。
+    duration: float = 4.0
     style: str = "Cinematic"
     language: str = "Chinese"
     plot: str = Field(min_length=1)
@@ -207,6 +236,7 @@ def create_session(
     response: Response,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> SessionDetail:
+    _validate_duration(payload.duration)
     detail, replayed = _store(request).create(
         _brief_from_payload(payload),
         idempotency_key=idempotency_key or None,

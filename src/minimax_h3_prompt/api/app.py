@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.metadata
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from fastapi import FastAPI
 
 from . import SERVICE_NAME
 from .auth import attach_local_access
+from .fake_pipeline import FAKE_PIPELINE_ENV, fake_pipeline_enabled
 from .jobs import JobRunner
 from .problems import apply_problem_media_type_openapi, install_problem_handlers
 from .routes.assets import router as assets_router
@@ -23,6 +25,8 @@ from .routes.health import router as health_router
 from .routes.media import router as media_router
 from .routes.sessions import router as sessions_router
 from .spa import DEFAULT_DIST, install_spa
+
+logger = logging.getLogger(__name__)
 
 
 def _default_sessions_root() -> Path:
@@ -64,10 +68,22 @@ def create_app(
 
     store = WorkbenchSessionStore(
         sessions_root if sessions_root is not None else _default_sessions_root())
-    runner = JobRunner(store, runtime_config)
+    # 桩开关只从环境变量读（D4 spec §11）：默认关、无 HTTP 入口。真正的工作在
+    # ``JobRunner`` 里，这里只负责把决定传下去并在启动时把它说清楚。
+    fake = fake_pipeline_enabled()
+    runner = JobRunner(store, runtime_config, fake_pipeline=fake)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        # 启动日志明示（spec §11）：桩管线开着时，用户必须能从日志知道「这次不起
+        # 真实模型」。写在 lifespan 而不是工厂里：uvicorn 的日志配置在 serve 时才生效，
+        # 工厂里打的 warning 会被静默吃掉（本机实测）。
+        if fake:
+            logger.warning(
+                "[桩管线] %s 已开启：阶段 1/2 与修订跑确定性假产出（不建任何模型）；"
+                "仅供 Playwright CI 与本地调试，真实运行请关掉它。", FAKE_PIPELINE_ENV)
+        else:
+            logger.info("[管线] 真实阶段 1/2（%s 未开启）。", FAKE_PIPELINE_ENV)
         # 启动清理（D3-2）：删崩溃残留的素材临时文件、给孤儿正本补边车。放在对账之前
         # 是因为它是纯文件清理，不依赖任何会话状态。
         await asyncio.to_thread(store.cleanup_assets)

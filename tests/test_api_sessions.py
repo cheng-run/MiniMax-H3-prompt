@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from urllib.parse import quote
 
+import pytest
 from fastapi.testclient import TestClient
 from minimax_h3_prompt.session_store import LEGACY_SCHEMA_VERSION, SESSION_FILENAME
 from workbench_client import workbench_client
@@ -158,6 +159,33 @@ def test_create_rejects_non_base_routes_and_bad_video_output(tmp_path):
     })
     assert bad_output.status_code == 422
     assert bad_output.headers["content-type"].startswith("application/problem+json")
+
+
+# ---------------------------------------------------------------------------
+# 时长范围（D4 spec §5 / 本票 D4-AC1 的服务端一半）
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("duration", [3.9, 10.1, 0, 30])
+def test_create_session_rejects_duration_out_of_scope(tmp_path, duration):
+    """越界两端都回 422 + 专用码；文案必须点名「长片归 D6」，否则用户不知道
+    为什么短表单不收它、也不知道该去哪找长片。"""
+    client = _client(tmp_path)
+
+    resp = client.post("/api/v1/sessions", json={**_brief_body(), "duration": duration})
+
+    body = _assert_problem(resp, 422, "duration_out_of_scope")
+    assert "D6" in body["detail"]
+    assert not list(tmp_path.glob("*/GEN*")), "越界请求不该建出会话目录"
+
+
+@pytest.mark.parametrize("duration", [4, 10])
+def test_create_session_accepts_duration_at_the_bounds(tmp_path, duration):
+    client = _client(tmp_path)
+
+    resp = client.post("/api/v1/sessions", json={**_brief_body(), "duration": duration})
+
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["brief"]["duration"] == duration
 
 
 def test_contract_declares_sessions_and_problem_responses():

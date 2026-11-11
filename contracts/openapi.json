@@ -32,6 +32,13 @@
             "title": "Resolved At",
             "type": "string"
           },
+          "revisions": {
+            "items": {
+              "$ref": "#/components/schemas/RevisionOut"
+            },
+            "title": "Revisions",
+            "type": "array"
+          },
           "status": {
             "title": "Status",
             "type": "string"
@@ -483,6 +490,25 @@
         "title": "RevisionIn",
         "type": "object"
       },
+      "RevisionOut": {
+        "description": "一条用户修订的对外回显：内部四档层次 + 意见原文（D4 spec §7）。\n\n历史从**待办列表**重建（决议事件带着当时的载荷），与 ``stage_state.user_revisions``\n是两本账：前者是「用户在这张闸门上说过什么」，后者带轮次与落地标记、只给重跑用。",
+        "properties": {
+          "layer": {
+            "title": "Layer",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "layer",
+          "text"
+        ],
+        "title": "RevisionOut",
+        "type": "object"
+      },
       "SessionCreate": {
         "description": "建会话的 brief 一次性给全（spec §7）。\n\nD2 只做 ``base`` 短视频，所以 ``mode`` 是单值字面量；扩大路线由后续票改契约，\n不在这里留一个「看起来支持」的自由字符串。",
         "properties": {
@@ -515,7 +541,6 @@
           },
           "duration": {
             "default": 4.0,
-            "exclusiveMinimum": 0.0,
             "title": "Duration",
             "type": "number"
           },

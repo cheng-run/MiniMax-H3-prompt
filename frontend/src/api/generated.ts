@@ -316,6 +316,8 @@ export interface components {
              * @default
              */
             resolved_at: string;
+            /** Revisions */
+            revisions?: components["schemas"]["RevisionOut"][];
             /** Status */
             status: string;
         };
@@ -533,6 +535,19 @@ export interface components {
         };
         /** RevisionIn */
         RevisionIn: {
+            /** Layer */
+            layer: string;
+            /** Text */
+            text: string;
+        };
+        /**
+         * RevisionOut
+         * @description 一条用户修订的对外回显：内部四档层次 + 意见原文（D4 spec §7）。
+         *
+         *     历史从**待办列表**重建（决议事件带着当时的载荷），与 ``stage_state.user_revisions``
+         *     是两本账：前者是「用户在这张闸门上说过什么」，后者带轮次与落地标记、只给重跑用。
+         */
+        RevisionOut: {
             /** Layer */
             layer: string;
             /** Text */

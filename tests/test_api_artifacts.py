@@ -131,11 +131,15 @@ def test_artifact_created_event_is_recorded_with_the_registered_id(workbench):
         encoding="utf-8").splitlines()
     events = [json.loads(line) for line in lines if line.strip()]
     created = [event for event in events if event["type"] == "artifact.created"]
+    video_prompt = [event for event in created
+                    if event["payload"]["name"] == "video-prompt.md"]
 
-    assert len(created) == 1
-    assert created[0]["session_id"] == session_id
-    assert created[0]["seq"] <= detail["last_event_seq"]
-    assert created[0]["payload"] == {
+    # D4 起阶段 1 也会登记中间产物（script.md 等），所以这里不数总数，
+    # 只钉住阶段 2 交付物那一条。
+    assert len(video_prompt) == 1
+    assert video_prompt[0]["session_id"] == session_id
+    assert video_prompt[0]["seq"] <= detail["last_event_seq"]
+    assert video_prompt[0]["payload"] == {
         "artifact_id": f"{session_id}/video-prompt.md",
         "kind": "video_prompt",
         "name": "video-prompt.md",
@@ -187,7 +191,8 @@ def test_video_artifact_is_listed_and_readable(workbench):
 
     assert listed.status_code == 200, listed.text
     by_name = {item["name"]: item for item in listed.json()}
-    assert set(by_name) == {"video-prompt.md", "final.mp4"}
+    # 阶段 1 的中间产物也在清单里（D4）；这里只钉住阶段 2 交付物与成片两条。
+    assert {"video-prompt.md", "final.mp4"} <= set(by_name)
     assert by_name["final.mp4"]["kind"] == "video"
     assert by_name["final.mp4"]["bytes"] == len(payload)
     assert by_name["final.mp4"]["artifact_id"] == f"{session_id}/final.mp4"
