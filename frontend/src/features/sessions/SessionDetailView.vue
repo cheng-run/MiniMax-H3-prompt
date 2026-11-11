@@ -13,6 +13,7 @@ import { useUiStore, type WorkbenchTab } from '@/stores/ui'
 import AssetsTab from './AssetsTab.vue'
 import FrameSubmissionCard from './FrameSubmissionCard.vue'
 import { newIdempotencyKey } from './keys'
+import ReviewTab from './ReviewTab.vue'
 import { statusLabel, statusTone } from './status'
 import { SESSION_STREAM_FETCH, useSessionStream } from './useSessionStream'
 
@@ -281,7 +282,7 @@ const errorMessage = computed(() =>
         </dl>
       </section>
 
-      <!-- 审查与待办（完整交互归 #232；本票只接帧提交卡） -->
+      <!-- 审查与待办：审查卡（#232）与帧提交卡（#233）共用本分区 -->
       <section
         v-else-if="ui.workbenchTab === 'review'"
         id="workbench-panel-review"
@@ -297,12 +298,12 @@ const errorMessage = computed(() =>
           :artifacts="data.artifacts ?? []"
           @submitted="invalidateSnapshot"
         />
-        <p v-if="!data.action_items?.length" class="muted">暂无待办。</p>
-        <ul v-else class="raw-list">
-          <li v-for="item in data.action_items" :key="item.item_id">
-            {{ item.kind }} · {{ item.status }}
-          </li>
-        </ul>
+        <ReviewTab
+          :session-id="sessionId"
+          :action-items="data.action_items ?? []"
+          :artifacts="data.artifacts ?? []"
+          @resolved="invalidateSnapshot()"
+        />
       </section>
 
       <!-- 素材（完整交互归 #233） -->

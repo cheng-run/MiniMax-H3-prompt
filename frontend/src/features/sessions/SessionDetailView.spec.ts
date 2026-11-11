@@ -76,7 +76,7 @@ describe('SessionDetailView 四分区（页内 tab）', () => {
             action_items: [
               {
                 item_id: 'item-1',
-                kind: 'stage1_approval',
+                kind: 'stage1_review',
                 status: 'pending',
                 created_at: '2026-11-11T00:00:00Z',
                 resolved_at: '',
@@ -103,6 +103,8 @@ describe('SessionDetailView 四分区（页内 tab）', () => {
           }),
         ),
       ),
+      // 审查分区按文件读正文（content 端点）；产物标识带斜杠，用正则承接。
+      http.get(/\/api\/v1\/artifacts\/.+\/content$/, () => HttpResponse.text('雨夜旧信·剧本')),
     )
     const stream = makeStreamFetch()
     const { wrapper, router } = await mountDetail(stream)
@@ -113,8 +115,10 @@ describe('SessionDetailView 四分区（页内 tab）', () => {
     expect(wrapper.text()).toContain('剧情')
 
     await tabs[1].trigger('click')
-    expect(wrapper.find('[role="tabpanel"]').text()).toContain('stage1_approval')
-    expect(wrapper.text()).not.toContain('剧情')
+    await settle()
+    expect(wrapper.find('[role="tabpanel"]').text()).toContain('雨夜旧信·剧本')
+    expect(wrapper.findAll('button').some((b) => b.text() === '通过')).toBe(true)
+    expect(wrapper.find('#workbench-panel-overview').exists()).toBe(false)
 
     await tabs[2].trigger('click')
     expect(wrapper.find('[role="tabpanel"]').text()).toContain('photo.png')
@@ -277,5 +281,84 @@ describe('SessionDetailView 深链快照', () => {
 
     expect(wrapper.find('[role="alert"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('恢复')
+  })
+})
+
+describe('SessionDetailView 审查与修订回路（#232）', () => {
+  it('提交意见后重拉快照：新待办回到同一闸门，历史累积且产物刷新', async () => {
+    const resolveUrl = 'http://localhost/api/v1/sessions/sess-1/action-items/item-1/resolve'
+    let content = '# 分场剧本（第 1 稿）'
+    const detailFor = (actionItems: NonNullable<ReturnType<typeof makeDetail>['action_items']>) =>
+      makeDetail({
+        status: 'awaiting_human',
+        action_items: actionItems,
+        artifacts: [
+          {
+            artifact_id: 'sess-1/script.md',
+            name: 'script.md',
+            kind: 'text',
+            bytes: 20,
+            created_at: '2026-11-11T00:00:00Z',
+          },
+        ],
+      })
+    let detail = detailFor([
+      {
+        item_id: 'item-1',
+        kind: 'stage1_review',
+        status: 'pending',
+        created_at: '2026-11-11T00:00:00Z',
+        resolved_at: '',
+      },
+    ])
+    const bodies: unknown[] = []
+    server.use(
+      http.get(detailUrl, () => HttpResponse.json(detail)),
+      http.get(/\/api\/v1\/artifacts\/.+\/content$/, () => HttpResponse.text(content)),
+      http.post(resolveUrl, async ({ request }) => {
+        bodies.push(await request.json())
+        // 重跑完成（这里直接给最终快照）：旧待办已决议并带修订，新待办的 item_id 不同。
+        content = '# 分场剧本（第 2 稿）'
+        detail = detailFor([
+          {
+            item_id: 'item-1',
+            kind: 'stage1_review',
+            status: 'resolved',
+            decision: 'revise',
+            created_at: '2026-11-11T00:00:00Z',
+            resolved_at: '2026-11-11T00:00:30Z',
+            revisions: [{ layer: 'character', text: '服装改成米色风衣' }],
+          },
+          {
+            item_id: 'item-2',
+            kind: 'stage1_review',
+            status: 'pending',
+            created_at: '2026-11-11T00:01:00Z',
+            resolved_at: '',
+          },
+        ])
+        return HttpResponse.json(null, { status: 202 })
+      }),
+    )
+
+    const { wrapper } = await mountDetail(makeStreamFetch())
+    await wrapper.findAll('[role="tab"]')[1]!.trigger('click')
+    await settle()
+    expect(wrapper.text()).toContain('第 1 稿')
+
+    await wrapper.find('select[name="revision-layer"]').setValue('人物设定')
+    await wrapper.find('textarea[name="revision-text"]').setValue('服装改成米色风衣')
+    await wrapper.find('form').trigger('submit')
+    await settle()
+    await settle()
+
+    expect(bodies).toHaveLength(1)
+    // 新待办回同一闸门（仍可「通过」），历史里能看到刚提的那条，产物已是新一稿。
+    expect(wrapper.findAll('button').some((b) => b.text() === '通过')).toBe(true)
+    expect(wrapper.text()).toContain('修订历史')
+    expect(wrapper.text()).toContain('人物设定')
+    expect(wrapper.text()).toContain('服装改成米色风衣')
+    expect(wrapper.text()).toContain('第 2 稿')
+    expect(wrapper.text()).not.toContain('第 1 稿')
   })
 })

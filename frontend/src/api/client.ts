@@ -14,11 +14,12 @@ export type SessionDetail = components['schemas']['SessionDetail']
 export type SessionPage = components['schemas']['SessionPage']
 export type SessionCreate = components['schemas']['SessionCreate']
 export type JobSummary = components['schemas']['JobSummary']
-// 素材与人工待办（D4-6）：形状仍取自契约，组件不手写第二份。
-export type Asset = components['schemas']['Asset']
-export type ArtifactInfo = components['schemas']['ArtifactInfo']
+// 审查面（D4-5）与素材（D4-6）：形状都从契约导出，组件不手写模型。
 export type ActionItemOut = components['schemas']['ActionItemOut']
+export type ArtifactInfo = components['schemas']['ArtifactInfo']
 export type ActionItemResolve = components['schemas']['ActionItemResolve']
+export type RevisionIn = components['schemas']['RevisionIn']
+export type Asset = components['schemas']['Asset']
 
 /**
  * 统一 API 错误。组件只处理这一种错误，不各自识别 FastAPI 默认的 ``detail``。
@@ -271,29 +272,11 @@ export async function uploadSessionAsset(sessionId: string, file: File): Promise
 }
 
 /**
- * 决议一个人工待办（D4 spec §7 / §9）。审查待办收 `decision`，帧待办收 `frames`；
- * 帧链通过审查不启动任务，此时响应体为 null（不是错误）。
+ * 读文本产物全文（D4 spec §7）。端点按产物形态分流：文本走 ``text/plain``（1 MiB 上限），
+ * 媒体走字节 + Range；审查面只读文本，所以这里显式要 ``text``——生成客户端默认按
+ * JSON 解析，纯文本会被当成坏 JSON 直接抛错。
  */
-export async function resolveActionItem(
-  sessionId: string,
-  itemId: string,
-  body: ActionItemResolve,
-): Promise<JobSummary | null> {
-  const { data } = await apiClient.POST(
-    '/api/v1/sessions/{session_id}/action-items/{item_id}/resolve',
-    {
-      params: { path: { session_id: sessionId, item_id: itemId } },
-      body,
-    },
-  )
-  return data ?? null
-}
-
-/**
- * 读文本产物的全文（阶段 1 的帧提示词等）。媒体产物不能被当文本解析，
- * 这里只服务 `text/plain` 形态；`parseAs: 'text'` 让 openapi-fetch 跳过 JSON 解析。
- */
-export async function getArtifactText(artifactId: string): Promise<string> {
+export async function getArtifactContent(artifactId: string): Promise<string> {
   const { data } = await apiClient.GET('/api/v1/artifacts/{artifact_id}/content', {
     params: { path: { artifact_id: artifactId } },
     parseAs: 'text',
@@ -302,4 +285,27 @@ export async function getArtifactText(artifactId: string): Promise<string> {
     throw new ApiError(0, null)
   }
   return data
+}
+/**
+ * 提交人工决定（D4 spec §8 / §9）。审查待办收 `decision`，帧待办收 `frames`；
+ * 帧链通过审查时服务端不建任务，202 的响应体因此可能是 `null`（不是错误）。
+ * 幂等键可选：审查卡带键挡双击，帧提交卡自身已禁用重复提交。
+ */
+export async function resolveActionItem(
+  sessionId: string,
+  itemId: string,
+  body: ActionItemResolve,
+  idempotencyKey?: string,
+): Promise<JobSummary | null> {
+  const { data } = await apiClient.POST(
+    '/api/v1/sessions/{session_id}/action-items/{item_id}/resolve',
+    {
+      params: {
+        path: { session_id: sessionId, item_id: itemId },
+        ...(idempotencyKey ? { header: { 'Idempotency-Key': idempotencyKey } } : {}),
+      },
+      body,
+    },
+  )
+  return data ?? null
 }

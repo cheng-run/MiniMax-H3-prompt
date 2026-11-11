@@ -3,7 +3,7 @@ import { computed, ref, watch } from 'vue'
 
 import {
   ApiError,
-  getArtifactText,
+  getArtifactContent,
   resolveActionItem,
   type ActionItemOut,
   type ArtifactInfo,
@@ -57,7 +57,7 @@ async function readPrompt(artifact: ArtifactInfo | null): Promise<string | null>
     return null
   }
   try {
-    return await getArtifactText(artifact.artifact_id)
+    return await getArtifactContent(artifact.artifact_id)
   } catch {
     // 读不到提示词不阻断提交：帧槽本身仍可用，缺的只是参考文案。
     return null
