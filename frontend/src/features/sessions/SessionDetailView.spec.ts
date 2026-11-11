@@ -362,3 +362,55 @@ describe('SessionDetailView 审查与修订回路（#232）', () => {
     expect(wrapper.text()).not.toContain('第 1 稿')
   })
 })
+
+// D4-7（#234）：产物分区接进工作台。完成态（阶段 2 成功）直接给出交付文本，
+// 没有「交付确认」第二道闸门（D4 spec §10 / Q7）。
+describe('SessionDetailView 产物分区', () => {
+  it('完成态展示交付文本：可复制、可下载，且无交付确认闸门', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({
+            status: 'completed',
+            artifacts: [
+              {
+                artifact_id: 'sess-1/video-prompt.md',
+                name: 'video-prompt.md',
+                kind: 'video_prompt',
+                bytes: 120,
+                created_at: '2026-11-11T00:00:00Z',
+              },
+              {
+                artifact_id: 'sess-1/summary-zh.md',
+                name: 'summary-zh.md',
+                kind: 'summary_markdown',
+                bytes: 60,
+                created_at: '2026-11-11T00:00:00Z',
+              },
+            ],
+          }),
+        ),
+      ),
+      http.get(/\/api\/v1\/artifacts\/.+\/content$/, ({ request }) => {
+        const id = decodeURIComponent(new URL(request.url).pathname.split('/').at(-2) ?? '')
+        return HttpResponse.text(id.endsWith('video-prompt.md') ? '# 最终提示词正文' : '摘要正文')
+      }),
+    )
+
+    const { wrapper } = await mountDetail(makeStreamFetch())
+    await wrapper.findAll('[role="tab"]')[3]!.trigger('click')
+    await settle()
+
+    expect(wrapper.text()).toContain('已完成')
+    expect(wrapper.text()).toContain('# 最终提示词正文')
+    expect(wrapper.text()).toContain('摘要正文')
+
+    expect(wrapper.find('[data-copy="video-prompt.md"]').exists()).toBe(true)
+    expect(wrapper.get('[data-download="video-prompt.md"]').attributes('href')).toBe(
+      'http://localhost/api/v1/artifacts/sess-1/video-prompt.md/content',
+    )
+
+    // 无交付确认：完成即终态，界面上不存在「确认交付／交付确认」按钮。
+    expect(wrapper.findAll('button').some((b) => /确认交付|交付确认/.test(b.text()))).toBe(false)
+  })
+})

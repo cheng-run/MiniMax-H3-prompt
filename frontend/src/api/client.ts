@@ -250,6 +250,17 @@ export function assetMediaUrl(assetId: string): string {
 }
 
 /**
+ * 产物的下载地址（D4 spec §10）：下载 = content 端点原样落盘。
+ *
+ * `<a download>` 由浏览器自己发请求，挂不上自定义头，只能靠 `/auth/token` 顺带下发的
+ * `wb_session` Cookie（与素材媒体同一份约定，ADR 0033）；URL 里也不放凭据。
+ * 产物标识同样带会话斜杠，逐段编码后保留路径分隔（端点参数是 `{artifact_id:path}`）。
+ */
+export function artifactContentUrl(artifactId: string): string {
+  return `${baseUrl}/api/v1/artifacts/${encodeSessionPath(artifactId)}/content`
+}
+
+/**
  * 上传一份素材（复用 D3 端点，D4-AC13）。
  *
  * 走裸 fetch 而不是 `apiClient.POST`：生成的 multipart 类型把 `file` 声明成字符串

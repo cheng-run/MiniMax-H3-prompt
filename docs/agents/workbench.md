@@ -1,6 +1,6 @@
-# 工作台会话与 Headless API（D2）
+# 工作台会话与 Headless API（D2–D4）
 
-> 入口：`python -m minimax_h3_prompt.api`（只绑 `127.0.0.1:8000`）。spec #214，ADR 0032；
+> 入口：`python -m minimax_h3_prompt.api`（只绑 `127.0.0.1:8000`）。spec #214 / #227，ADR 0032、0033、0034；
 > 本地鉴权见 #222 §4 与 ADR 0033。
 > 这张表是导航与不变量，不是教程；实现细节以代码注释为准。
 
@@ -18,14 +18,24 @@
 | `api/routes/auth.py` | `GET /api/v1/auth/token`：返回令牌并下发 `wb_session` Cookie |
 | `api/app.py` | 工厂、lifespan（启动对账）、注入 `sessions_root` / `runtime_config` / `local_access` |
 | `api/problems.py` | RFC 9457 problem+json；所有错误都走这里（中间件用 `build_problem_response`） |
-| `step_machine.py` | 状态/触发/闸门的单一声明；续跑起点；`resolve` 的 approve/revise 去向 |
+| `step_machine.py` | 状态/触发/闸门的单一声明；续跑起点；`resolve` 的 approve/revise 去向与 approve 按变体分叉 |
 | `session_store.py` | 快照文件读写、`atomic_write_text`、向导续接状态与 `RESUMABLE_STATUSES` |
+| `api/fake_pipeline.py` | 确定性桩管线：固定阶段 1/2 与假读图，**只认环境变量 `MINIMAX_FAKE_PIPELINE`**（默认关、无 HTTP 入口），真实/桩互斥 |
+| `frontend/src/features/sessions/` | 工作台四分区：`SessionDetailView`（壳/SSE/运行控制）、`ReviewTab`（审查与修订）、`AssetsTab` + `FrameSubmissionCard`（素材与帧提交）、`ArtifactsTab`（产物查看/复制/下载/通用媒体播放） |
+| `frontend/src/api/client.ts` | 生成契约的类型出口与唯一 API 门面：令牌注入、媒体/产物 URL、错误归一成 `ApiError` |
 | `scripts/accept_d2.py` | 真实 HTTP 验收驱动器（手动，不进 CI；启动时先取令牌） |
 | `scripts/accept_d3.py` | 媒体与素材的真实验收驱动器（手动；真实照片上传 + 真实 `final.mp4` 的 Range 与字节核对，报告落 `output/accept-d3/`） |
+| `scripts/accept_d4.py` | D4 真实浏览器验收驱动器（手动；Playwright + 真实 LLM 走审查/修订/帧提交/阶段 2/复制，报告落 `output/accept-d4/`） |
 
 ## 不变量（改这些之前先读）
 
 - 事件类型是**十种闭合集合**；加字段可以，改语义不行。`seq` 会话内从 1 严格单调，只在会话锁内分配。
+  **D4 之后仍然闭合**：帧提交复用 `action_item.created`，approve 按变体分叉也不新增类型。
+- **`stage_state` 不出 API**（D4）：阶段 1 的中间产物落成登记表里的产物，前端经 content 端点读正文；
+  快照、待办载荷与错误体都不带 state 内部键。revise 重跑原地更新文件，产物清单是「显示哪些文件」的唯一事实。
+- **产物分区不按变体判断**：登记表里有哪几件就显示哪几件（T2VA 两件、帧链多两帧词）；
+  复制/下载都走 content 端点（下载是 `<a download>` + Cookie），媒体按 `kind` 通用渲染，
+  不按文件名特判成片。阶段 2 成功即 `completed`，**没有交付确认闸门**（ADR 0034）。
 - **先写事件、后写快照**；快照 `last_event_seq` 落后时按 `seq > last_event_seq` 重放，重放幂等。
 - 每会话**单写入者**：任何「读 → 改 → 写」都走 `WorkbenchSessionStore.mutate`（锁在存储层，别在调用方自己拼）。
 - `session_id` = `sessions_root` 下的相对路径；`_resolve` 拒绝绝对路径、`..` 与根外路径。
@@ -81,6 +91,18 @@
 `frontend/scripts/generate-api.mjs` → `frontend/src/api/generated.ts`。
 `scripts/check.sh full` 会重导并 `git diff --exit-code`（`fast` 在改动 api/契约时同样跑）；CI 同口径。
 
+## 桩管线（D4）
+
+`MINIMAX_FAKE_PIPELINE=1` 让 `JobRunner` 用固定阶段 1/2 与假读图跑完整个闭环，**不建任何模型**。
+它是 Playwright CI 与本地调试的开关：
+
+- 只认这一个环境变量（`api/fake_pipeline.py` 的 `fake_pipeline_enabled`），默认关，没有任何 API 入口；
+  启动日志会明确打印「桩管线已开启」。
+- 真实与桩是**互斥的执行分支**（`JobRunner.fake_pipeline` 为真时根本不调 `run_stage1` / `run_stage2`），
+  不是真实路径里换一段回复。桩产出的状态与产物仍走真实落盘路径，浏览器看到的形状一致。
+- `frontend/scripts/serve-e2e.mjs` 在 `playwright test` 的 webServer 里注入它；真实验收
+  （`scripts/accept_d4.py`）必须对着**没有这个变量**的服务跑。驱动器的 `--self-check` 会拦住两种误标。
+
 ## 验收
 
 真实跑：主树、`python -m minimax_h3_prompt.api` 另开终端，再跑 `scripts/accept_d2.py`
@@ -89,3 +111,8 @@
 `tests/fixtures/tiny.webm`；真实照片/成片那条由 `ACCEPT_D3_PHOTO` / `ACCEPT_D3_ARTIFACT`
 门控（`ACCEPT_D3_REPORT` 可把浏览器侧事实另存一份 JSON），手动跑）。确定性全链路在
 `tests/test_api_*.py` 与 `tests/workbench_deterministic.py`。
+
+D4 的浏览器闭环：CI 由 `frontend/e2e/delivery.spec.ts`（T2VA 直通 + FL2VA 帧提交，桩管线）
+与 `sessions.spec.ts`（SSE 重连）覆盖；真实 LLM 不进 CI，由 `scripts/accept_d4.py` 手动跑
+（Playwright + 真实审查/修订 + 真实图片帧 + 真实读图，报告落 `output/accept-d4/`）。
+证据评论里**不出现令牌**。

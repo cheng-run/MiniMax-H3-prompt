@@ -11,6 +11,7 @@ import StatusBadge from '@/components/ui/StatusBadge.vue'
 import { useUiStore, type WorkbenchTab } from '@/stores/ui'
 
 import AssetsTab from './AssetsTab.vue'
+import ArtifactsTab from './ArtifactsTab.vue'
 import FrameSubmissionCard from './FrameSubmissionCard.vue'
 import { newIdempotencyKey } from './keys'
 import ReviewTab from './ReviewTab.vue'
@@ -18,8 +19,8 @@ import { statusLabel, statusTone } from './status'
 import { SESSION_STREAM_FETCH, useSessionStream } from './useSessionStream'
 
 // 工作台单页（D4 spec §4）：四分区是页内 tab、不进 URL，刷新回概览。
-// 本票只交壳与分区切换、实时失效订阅与运行控制；审查/素材/产物的完整交互由
-// #232 / #233 / #234 补，这里按快照原始呈现。
+// 壳与分区切换、实时失效订阅与运行控制（#231）；审查与修订（#232）；
+// 素材与帧提交（#233）；产物与交付（#234）。
 //
 // 会话标识本身含斜杠（`<slug>/GEN001`），路由参数用 `:id(.*)` 承接；这里把它原样
 // 交给生成客户端，URL 编码由 openapi-fetch 负责。
@@ -321,7 +322,7 @@ const errorMessage = computed(() =>
         />
       </section>
 
-      <!-- 产物（完整交互归 #234） -->
+      <!-- 产物（D4-7）：中间产物与交付文本可看/复制/下载；媒体通用播放 -->
       <section
         v-else
         id="workbench-panel-artifacts"
@@ -329,12 +330,7 @@ const errorMessage = computed(() =>
         aria-labelledby="workbench-tab-artifacts"
         class="panel"
       >
-        <p v-if="!data.artifacts?.length" class="muted">暂无产物。</p>
-        <ul v-else class="raw-list">
-          <li v-for="artifact in data.artifacts" :key="artifact.artifact_id">
-            {{ artifact.name }}（{{ artifact.bytes }} 字节）
-          </li>
-        </ul>
+        <ArtifactsTab :session-id="data.session_id" :artifacts="data.artifacts ?? []" />
       </section>
     </template>
   </section>
@@ -400,9 +396,5 @@ const errorMessage = computed(() =>
   grid-template-columns: max-content 1fr;
   gap: var(--space-2) var(--space-3);
   margin-top: var(--space-4);
-}
-.raw-list {
-  margin: 0;
-  padding-left: var(--space-4);
 }
 </style>

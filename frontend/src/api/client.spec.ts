@@ -5,6 +5,7 @@ import { server } from '@/test/server'
 
 import {
   ApiError,
+  artifactContentUrl,
   createSession,
   getHealth,
   getSession,
@@ -295,5 +296,17 @@ describe('api client 会话资源', () => {
     expect(method).toBe('POST')
     expect(idempotencyKey).toBe('job-key-1')
     expect(job.job_id).toBe('job-1')
+  })
+
+  // 产物下载（D4-7）：下载走 content 端点原样落盘，`<a download>` 由浏览器自己发
+  // 请求、只带 Cookie——所以 URL 必须与其它媒体同源约定，且**不带凭据**（ADR 0033）。
+  // 产物标识含会话斜杠：逐段编码后仍保留路径分隔（与 {artifact_id:path} 一致）。
+  it('artifactContentUrl 指向 content 端点并保留会话路径分隔', () => {
+    expect(artifactContentUrl('sess-1/video-prompt.md')).toBe(
+      'http://localhost/api/v1/artifacts/sess-1/video-prompt.md/content',
+    )
+    expect(artifactContentUrl('主题 摘要/GEN001/summary-zh.md')).toBe(
+      'http://localhost/api/v1/artifacts/%E4%B8%BB%E9%A2%98%20%E6%91%98%E8%A6%81/GEN001/summary-zh.md/content',
+    )
   })
 })
