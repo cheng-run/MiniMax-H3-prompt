@@ -10,6 +10,8 @@ import LoadingState from '@/components/ui/LoadingState.vue'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
 import { useUiStore, type WorkbenchTab } from '@/stores/ui'
 
+import AssetsTab from './AssetsTab.vue'
+import FrameSubmissionCard from './FrameSubmissionCard.vue'
 import { newIdempotencyKey } from './keys'
 import { statusLabel, statusTone } from './status'
 import { SESSION_STREAM_FETCH, useSessionStream } from './useSessionStream'
@@ -116,6 +118,13 @@ function onTabKeydown(event: KeyboardEvent): void {
 }
 
 const status = computed(() => data.value?.status)
+// 帧提交卡只在 frame_submission 待办仍 pending 时出现；决议后由快照移除。
+const pendingFrameItem = computed(
+  () =>
+    data.value?.action_items?.find(
+      (item) => item.kind === 'frame_submission' && item.status === 'pending',
+    ) ?? null,
+)
 const isCreated = computed(() => status.value === 'created')
 const canRetry = computed(
   () => status.value === 'failed' || status.value === 'cancelled' || status.value === 'interrupted',
@@ -272,7 +281,7 @@ const errorMessage = computed(() =>
         </dl>
       </section>
 
-      <!-- 审查与待办（完整交互归 #232） -->
+      <!-- 审查与待办（完整交互归 #232；本票只接帧提交卡） -->
       <section
         v-else-if="ui.workbenchTab === 'review'"
         id="workbench-panel-review"
@@ -280,6 +289,14 @@ const errorMessage = computed(() =>
         aria-labelledby="workbench-tab-review"
         class="panel"
       >
+        <FrameSubmissionCard
+          v-if="pendingFrameItem"
+          :session-id="data.session_id"
+          :item="pendingFrameItem"
+          :assets="data.assets ?? []"
+          :artifacts="data.artifacts ?? []"
+          @submitted="invalidateSnapshot"
+        />
         <p v-if="!data.action_items?.length" class="muted">暂无待办。</p>
         <ul v-else class="raw-list">
           <li v-for="item in data.action_items" :key="item.item_id">
@@ -296,12 +313,11 @@ const errorMessage = computed(() =>
         aria-labelledby="workbench-tab-assets"
         class="panel"
       >
-        <p v-if="!data.assets?.length" class="muted">暂无素材。</p>
-        <ul v-else class="raw-list">
-          <li v-for="asset in data.assets" :key="asset.asset_id">
-            {{ asset.name }}（{{ asset.bytes }} 字节）
-          </li>
-        </ul>
+        <AssetsTab
+          :session-id="data.session_id"
+          :assets="data.assets ?? []"
+          @refresh="invalidateSnapshot"
+        />
       </section>
 
       <!-- 产物（完整交互归 #234） -->

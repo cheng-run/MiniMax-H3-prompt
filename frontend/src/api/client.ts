@@ -14,6 +14,11 @@ export type SessionDetail = components['schemas']['SessionDetail']
 export type SessionPage = components['schemas']['SessionPage']
 export type SessionCreate = components['schemas']['SessionCreate']
 export type JobSummary = components['schemas']['JobSummary']
+// 素材与人工待办（D4-6）：形状仍取自契约，组件不手写第二份。
+export type Asset = components['schemas']['Asset']
+export type ArtifactInfo = components['schemas']['ArtifactInfo']
+export type ActionItemOut = components['schemas']['ActionItemOut']
+export type ActionItemResolve = components['schemas']['ActionItemResolve']
 
 /**
  * 统一 API 错误。组件只处理这一种错误，不各自识别 FastAPI 默认的 ``detail``。
@@ -222,6 +227,76 @@ export async function startSessionJob(
 export async function cancelSessionJob(sessionId: string, jobId: string): Promise<JobSummary> {
   const { data } = await apiClient.POST('/api/v1/sessions/{session_id}/jobs/{job_id}/cancel', {
     params: { path: { session_id: sessionId, job_id: jobId } },
+  })
+  if (data === undefined) {
+    throw new ApiError(0, null)
+  }
+  return data
+}
+
+/** 会话标识本身含斜杠（`<slug>/GEN001`）：逐段编码后仍保留路径分隔。 */
+function encodeSessionPath(identifier: string): string {
+  return identifier.split('/').map(encodeURIComponent).join('/')
+}
+
+/**
+ * 素材的媒体地址（D3 §4.5）：`<img>` / `<video>` / `<audio>` 由浏览器自己发请求，
+ * 挂不上自定义头，只认 `/auth/token` 顺带下发的 `wb_session` Cookie。
+ * 凭据不进 URL；URL 与测试 base 跟其余端点共用同一份约定。
+ */
+export function assetMediaUrl(assetId: string): string {
+  return `${baseUrl}/api/v1/media/${encodeSessionPath(assetId)}`
+}
+
+/**
+ * 上传一份素材（复用 D3 端点，D4-AC13）。
+ *
+ * 走裸 fetch 而不是 `apiClient.POST`：生成的 multipart 类型把 `file` 声明成字符串
+ * （format: binary），真正要发的是 `FormData`；用 openapi-fetch 得靠一个占位 body
+ * 加 bodySerializer 绕过类型。这里复用同一份错误拦截与令牌注入，返回形状仍由契约
+ * 类型约束。
+ */
+export async function uploadSessionAsset(sessionId: string, file: File): Promise<Asset> {
+  const form = new FormData()
+  form.append('file', file)
+  const response = await errorHandlingFetch(
+    `${baseUrl}/api/v1/sessions/${encodeSessionPath(sessionId)}/assets`,
+    {
+      method: 'POST',
+      headers: { 'X-Workbench-Token': await ensureSessionToken() },
+      body: form,
+    },
+  )
+  return (await response.json()) as Asset
+}
+
+/**
+ * 决议一个人工待办（D4 spec §7 / §9）。审查待办收 `decision`，帧待办收 `frames`；
+ * 帧链通过审查不启动任务，此时响应体为 null（不是错误）。
+ */
+export async function resolveActionItem(
+  sessionId: string,
+  itemId: string,
+  body: ActionItemResolve,
+): Promise<JobSummary | null> {
+  const { data } = await apiClient.POST(
+    '/api/v1/sessions/{session_id}/action-items/{item_id}/resolve',
+    {
+      params: { path: { session_id: sessionId, item_id: itemId } },
+      body,
+    },
+  )
+  return data ?? null
+}
+
+/**
+ * 读文本产物的全文（阶段 1 的帧提示词等）。媒体产物不能被当文本解析，
+ * 这里只服务 `text/plain` 形态；`parseAs: 'text'` 让 openapi-fetch 跳过 JSON 解析。
+ */
+export async function getArtifactText(artifactId: string): Promise<string> {
+  const { data } = await apiClient.GET('/api/v1/artifacts/{artifact_id}/content', {
+    params: { path: { artifact_id: artifactId } },
+    parseAs: 'text',
   })
   if (data === undefined) {
     throw new ApiError(0, null)
