@@ -1,62 +1,183 @@
 <script setup lang="ts">
-import { useQuery } from '@tanstack/vue-query'
-import { computed, ref } from 'vue'
+import { useQuery, useQueryClient } from '@tanstack/vue-query'
+import { computed, inject, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 
-import { ApiError, getSession, startSessionJob } from '@/api/client'
+import { ApiError, cancelSessionJob, getSession, startSessionJob } from '@/api/client'
 import Button from '@/components/ui/Button.vue'
 import ErrorNotice from '@/components/ui/ErrorNotice.vue'
 import LoadingState from '@/components/ui/LoadingState.vue'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
+import { useUiStore, type WorkbenchTab } from '@/stores/ui'
 
 import { newIdempotencyKey } from './keys'
 import { statusLabel, statusTone } from './status'
+import { SESSION_STREAM_FETCH, useSessionStream } from './useSessionStream'
 
-// 工作台最小详情页（D4-3）：只做「深链可刷新恢复 + 会话快照原始呈现」。
-// 四分区、SSE 与审查交互归 #231，不在这里提前铺开。
+// 工作台单页（D4 spec §4）：四分区是页内 tab、不进 URL，刷新回概览。
+// 本票只交壳与分区切换、实时失效订阅与运行控制；审查/素材/产物的完整交互由
+// #232 / #233 / #234 补，这里按快照原始呈现。
 //
 // 会话标识本身含斜杠（`<slug>/GEN001`），路由参数用 `:id(.*)` 承接；这里把它原样
 // 交给生成客户端，URL 编码由 openapi-fetch 负责。
 const route = useRoute()
+const ui = useUiStore()
+const queryClient = useQueryClient()
+
 const sessionId = computed(() => {
   const id = route.params.id
   return Array.isArray(id) ? (id[0] ?? '') : (id ?? '')
 })
 
 // 快照是唯一数据源（spec §6.1）：刷新即重拉，不做事件投影。
-const { data, isPending, isError, error, refetch } = useQuery({
+const { data, isPending, isError, error } = useQuery({
   queryKey: computed(() => ['session', sessionId.value]),
   queryFn: () => getSession(sessionId.value),
   enabled: computed(() => sessionId.value.length > 0),
   retry: false,
 })
 
-// created 兜底（spec §5）：创建与起跑是两个请求，中间失败或浏览器挂掉时会话停在
-// created——这个按钮让用户不刷新也能把它推起来。
-const starting = ref(false)
-const startError = ref<string | null>(null)
+const TABS: { id: WorkbenchTab; label: string }[] = [
+  { id: 'overview', label: '概览与进度' },
+  { id: 'review', label: '审查与待办' },
+  { id: 'assets', label: '素材' },
+  { id: 'artifacts', label: '产物' },
+]
 
-async function start(): Promise<void> {
-  if (starting.value || !sessionId.value) {
+// 事件流只作失效信号：事件、断线重同步都走同一个口——重拉详情与列表两处快照。
+// 详情 query 是活动查询，失效后会立刻重拉；列表不活动时只是标记过期。
+const streamFetch = inject(SESSION_STREAM_FETCH, undefined)
+const {
+  connection,
+  currentNode,
+  start: startStream,
+  stop: stopStream,
+} = useSessionStream({
+  sessionId: () => sessionId.value,
+  snapshotCursor: () => data.value?.last_event_seq ?? null,
+  onInvalidate: async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['session', sessionId.value] }),
+      queryClient.invalidateQueries({ queryKey: ['sessions'] }),
+    ])
+  },
+  fetchImpl: streamFetch,
+})
+
+// 快照优先（spec §6.2）：第一次拿到详情之后才订阅，补发起点用快照的 last_event_seq。
+let streamArmed = false
+function armStream(): void {
+  if (streamArmed || !data.value) {
     return
   }
-  starting.value = true
-  startError.value = null
+  streamArmed = true
+  startStream()
+}
+watch(data, armStream, { immediate: true })
+
+// 同组件承接不同会话（路由参数变化）时：断掉旧订阅、清掉旧节点、分区回概览。
+// 不在这里立刻重置订阅：此时 data 可能还是上一个会话的快照，等新快照落地后
+// data 的 watch 再按**新会话**的 last_event_seq 起订阅。
+watch(sessionId, () => {
+  streamArmed = false
+  stopStream()
+  currentNode.value = null
+  ui.selectWorkbenchTab('overview')
+})
+
+function selectTab(tab: WorkbenchTab): void {
+  ui.selectWorkbenchTab(tab)
+}
+
+// 键盘切换沿用 WAI-ARIA tabs 的 roving tabindex：方向键/Home/End 换分区并移焦点。
+// jsdom 不实现 Enter→click，所以真实按键由 Playwright 验证（frontend.md 的坑）。
+function onTabKeydown(event: KeyboardEvent): void {
+  const keys = ['ArrowLeft', 'ArrowRight', 'Home', 'End']
+  if (!keys.includes(event.key)) {
+    return
+  }
+  event.preventDefault()
+  const index = TABS.findIndex((tab) => tab.id === ui.workbenchTab)
+  let next = index
+  if (event.key === 'ArrowRight') {
+    next = (index + 1) % TABS.length
+  } else if (event.key === 'ArrowLeft') {
+    next = (index - 1 + TABS.length) % TABS.length
+  } else if (event.key === 'Home') {
+    next = 0
+  } else if (event.key === 'End') {
+    next = TABS.length - 1
+  }
+  ui.selectWorkbenchTab(TABS[next]!.id)
+  const buttons = (
+    event.currentTarget as HTMLElement
+  ).parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')
+  buttons?.[next]?.focus()
+}
+
+const status = computed(() => data.value?.status)
+const isCreated = computed(() => status.value === 'created')
+const canRetry = computed(
+  () => status.value === 'failed' || status.value === 'cancelled' || status.value === 'interrupted',
+)
+// 当前节点只是「最后一条进度信号」：快照里没有节点字段，断线后暂时没有它也不影响
+// 业务状态（业务状态永远来自快照）。
+const runningNode = computed(() => (status.value === 'running' ? currentNode.value : null))
+const cancelRequested = computed(() => data.value?.current_job?.cancel_requested === true)
+const canCancel = computed(
+  () => status.value === 'running' && Boolean(data.value?.current_job?.job_id),
+)
+
+const busy = ref(false)
+const runError = ref<string | null>(null)
+
+function errorMessageOf(err: unknown, fallback: string): string {
+  return err instanceof ApiError ? (err.problem?.detail ?? err.message) : fallback
+}
+
+async function invalidateSnapshot(): Promise<void> {
+  await queryClient.invalidateQueries({ queryKey: ['session', sessionId.value] })
+  await queryClient.invalidateQueries({ queryKey: ['sessions'] })
+}
+
+// created 兜底 / 失败重试都是同一个动作：再 POST 一次 /jobs（ADVANCEABLE_STATUSES）。
+async function runJob(): Promise<void> {
+  if (busy.value || !sessionId.value) {
+    return
+  }
+  busy.value = true
+  runError.value = null
   try {
     await startSessionJob(sessionId.value, newIdempotencyKey())
-    await refetch()
+    await invalidateSnapshot()
   } catch (err) {
-    startError.value =
-      err instanceof ApiError ? (err.problem?.detail ?? err.message) : '起跑失败，请稍后重试。'
+    runError.value = errorMessageOf(err, '起跑失败，请稍后重试。')
   } finally {
-    starting.value = false
+    busy.value = false
+  }
+}
+
+// 取消是协作式：只登记请求，任务在当前节点跑完后才停（ADR 0032）。
+async function cancelRun(): Promise<void> {
+  const jobId = data.value?.current_job?.job_id
+  if (busy.value || !jobId) {
+    return
+  }
+  busy.value = true
+  runError.value = null
+  try {
+    await cancelSessionJob(sessionId.value, jobId)
+    await invalidateSnapshot()
+  } catch (err) {
+    runError.value = errorMessageOf(err, '取消失败，请稍后重试。')
+  } finally {
+    busy.value = false
   }
 }
 
 const errorMessage = computed(() =>
   error.value instanceof ApiError ? error.value.message : '加载失败，请稍后重试。',
 )
-const isCreated = computed(() => data.value?.status === 'created')
 </script>
 
 <template>
@@ -66,7 +187,7 @@ const isCreated = computed(() => data.value?.status === 'created')
     <LoadingState v-if="isPending" />
 
     <ErrorNotice v-else-if="isError" :message="errorMessage">
-      <Button @click="refetch()">重试</Button>
+      <Button @click="invalidateSnapshot()">重试</Button>
     </ErrorNotice>
 
     <template v-else-if="data">
@@ -76,13 +197,57 @@ const isCreated = computed(() => data.value?.status === 'created')
         <span class="meta">{{ data.session_id }}</span>
       </p>
 
-      <ErrorNotice v-if="startError" :message="startError" />
-      <p v-if="isCreated">
-        <Button :disabled="starting" @click="start">{{ starting ? '正在开始…' : '开始' }}</Button>
-      </p>
+      <div class="tabs" role="tablist" aria-label="工作台分区">
+        <button
+          v-for="tab in TABS"
+          :id="`workbench-tab-${tab.id}`"
+          :key="tab.id"
+          type="button"
+          role="tab"
+          class="tab"
+          :class="{ 'tab--active': ui.workbenchTab === tab.id }"
+          :aria-selected="ui.workbenchTab === tab.id"
+          :aria-controls="`workbench-panel-${tab.id}`"
+          :tabindex="ui.workbenchTab === tab.id ? 0 : -1"
+          @click="selectTab(tab.id)"
+          @keydown="onTabKeydown"
+        >
+          {{ tab.label }}
+        </button>
+      </div>
 
-      <section>
-        <h2>概览</h2>
+      <!-- 概览与进度 -->
+      <section
+        v-if="ui.workbenchTab === 'overview'"
+        id="workbench-panel-overview"
+        role="tabpanel"
+        aria-labelledby="workbench-tab-overview"
+        class="panel"
+      >
+        <ErrorNotice v-if="runError" :message="runError" />
+
+        <p v-if="connection === 'reconnecting'" role="status" class="muted">
+          实时连接中断，正在重连…
+        </p>
+
+        <div v-if="status === 'running'" class="run-controls">
+          <p role="status" class="run-node">
+            正在执行：<strong>{{ runningNode ?? '等待进度…' }}</strong>
+          </p>
+          <p v-if="cancelRequested" class="muted">已请求取消，当前步骤结束后停止。</p>
+          <Button v-else-if="canCancel" variant="secondary" :disabled="busy" @click="cancelRun">
+            {{ busy ? '正在请求取消…' : '取消' }}
+          </Button>
+        </div>
+
+        <p v-else-if="isCreated" class="run-controls">
+          <Button :disabled="busy" @click="runJob">{{ busy ? '正在开始…' : '开始' }}</Button>
+        </p>
+
+        <p v-else-if="canRetry" class="run-controls">
+          <Button :disabled="busy" @click="runJob">{{ busy ? '正在重试…' : '重试' }}</Button>
+        </p>
+
         <dl class="facts">
           <dt>剧情</dt>
           <dd>{{ data.plot }}</dd>
@@ -107,32 +272,50 @@ const isCreated = computed(() => data.value?.status === 'created')
         </dl>
       </section>
 
-      <section>
-        <h2>待办</h2>
+      <!-- 审查与待办（完整交互归 #232） -->
+      <section
+        v-else-if="ui.workbenchTab === 'review'"
+        id="workbench-panel-review"
+        role="tabpanel"
+        aria-labelledby="workbench-tab-review"
+        class="panel"
+      >
         <p v-if="!data.action_items?.length" class="muted">暂无待办。</p>
-        <ul v-else>
+        <ul v-else class="raw-list">
           <li v-for="item in data.action_items" :key="item.item_id">
             {{ item.kind }} · {{ item.status }}
           </li>
         </ul>
       </section>
 
-      <section>
-        <h2>产物</h2>
-        <p v-if="!data.artifacts?.length" class="muted">暂无产物。</p>
-        <ul v-else>
-          <li v-for="artifact in data.artifacts" :key="artifact.artifact_id">
-            {{ artifact.name }}（{{ artifact.bytes }} 字节）
+      <!-- 素材（完整交互归 #233） -->
+      <section
+        v-else-if="ui.workbenchTab === 'assets'"
+        id="workbench-panel-assets"
+        role="tabpanel"
+        aria-labelledby="workbench-tab-assets"
+        class="panel"
+      >
+        <p v-if="!data.assets?.length" class="muted">暂无素材。</p>
+        <ul v-else class="raw-list">
+          <li v-for="asset in data.assets" :key="asset.asset_id">
+            {{ asset.name }}（{{ asset.bytes }} 字节）
           </li>
         </ul>
       </section>
 
-      <section>
-        <h2>素材</h2>
-        <p v-if="!data.assets?.length" class="muted">暂无素材。</p>
-        <ul v-else>
-          <li v-for="asset in data.assets" :key="asset.asset_id">
-            {{ asset.name }}（{{ asset.bytes }} 字节）
+      <!-- 产物（完整交互归 #234） -->
+      <section
+        v-else
+        id="workbench-panel-artifacts"
+        role="tabpanel"
+        aria-labelledby="workbench-tab-artifacts"
+        class="panel"
+      >
+        <p v-if="!data.artifacts?.length" class="muted">暂无产物。</p>
+        <ul v-else class="raw-list">
+          <li v-for="artifact in data.artifacts" :key="artifact.artifact_id">
+            {{ artifact.name }}（{{ artifact.bytes }} 字节）
           </li>
         </ul>
       </section>
@@ -156,6 +339,42 @@ const isCreated = computed(() => data.value?.status === 'created')
   color: var(--color-text-muted);
   font-size: 0.875rem;
 }
+.tabs {
+  display: flex;
+  gap: var(--space-1);
+  margin-top: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+.tab {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  background: transparent;
+  color: var(--color-text);
+  font: inherit;
+  cursor: pointer;
+}
+.tab--active {
+  background: var(--color-surface);
+  border-color: var(--color-border);
+  font-weight: 600;
+}
+.tab:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+.panel {
+  padding-top: var(--space-4);
+}
+.run-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+.run-node {
+  margin: 0;
+}
 .muted {
   color: var(--color-text-muted);
 }
@@ -163,8 +382,10 @@ const isCreated = computed(() => data.value?.status === 'created')
   display: grid;
   grid-template-columns: max-content 1fr;
   gap: var(--space-2) var(--space-3);
-}
-section {
   margin-top: var(--space-4);
+}
+.raw-list {
+  margin: 0;
+  padding-left: var(--space-4);
 }
 </style>

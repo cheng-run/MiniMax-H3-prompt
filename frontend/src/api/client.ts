@@ -174,6 +174,17 @@ export async function createSession(
   return data
 }
 
+/**
+ * 会话事件的流地址（D4 spec §6.2）。事件流不走生成客户端（它只管 JSON 请求/响应），
+ * 但同源前缀与测试 base 必须与 API 客户端同一份约定，所以 URL 在这里拼。
+ *
+ * 会话标识含斜杠（`<slug>/GEN001`），逐段编码后仍保留路径分隔——与 `:path` 参数一致。
+ */
+export function sessionEventsUrl(sessionId: string): string {
+  const encoded = sessionId.split('/').map(encodeURIComponent).join('/')
+  return `${baseUrl}/api/v1/sessions/${encoded}/events`
+}
+
 /** 取会话快照：工作台唯一的数据源（spec §6.1），刷新即重拉。 */
 export async function getSession(sessionId: string): Promise<SessionDetail> {
   const { data } = await apiClient.GET('/api/v1/sessions/{session_id}', {
@@ -197,6 +208,20 @@ export async function startSessionJob(
       path: { session_id: sessionId },
       header: { 'Idempotency-Key': idempotencyKey },
     },
+  })
+  if (data === undefined) {
+    throw new ApiError(0, null)
+  }
+  return data
+}
+
+/**
+ * 请求取消（D4 spec §6.3）：**协作式**——接口 202 只表示「已登记」，任务要在当前
+ * 节点跑完后才停。界面文案不许承诺立即停止（ADR 0032）。
+ */
+export async function cancelSessionJob(sessionId: string, jobId: string): Promise<JobSummary> {
+  const { data } = await apiClient.POST('/api/v1/sessions/{session_id}/jobs/{job_id}/cancel', {
+    params: { path: { session_id: sessionId, job_id: jobId } },
   })
   if (data === undefined) {
     throw new ApiError(0, null)

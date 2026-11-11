@@ -1,6 +1,6 @@
-import { flushPromises } from '@vue/test-utils'
+import { enableAutoUnmount, flushPromises } from '@vue/test-utils'
 import { http, HttpResponse } from 'msw'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { resetSessionToken } from '@/api/client'
 import { mountWithPlugins } from '@/test/mount'
@@ -8,101 +8,243 @@ import { makeDetail, makeJob } from '@/test/sessionFixtures'
 import { server } from '@/test/server'
 
 import SessionDetailView from './SessionDetailView.vue'
+import { SESSION_STREAM_FETCH } from './useSessionStream'
 
 const detailUrl = 'http://localhost/api/v1/sessions/sess-1'
 const jobsUrl = 'http://localhost/api/v1/sessions/sess-1/jobs'
+const cancelUrl = 'http://localhost/api/v1/sessions/sess-1/jobs/job-1/cancel'
 
-async function settle() {
+// 用例结束统一卸载：订阅器随卸载 stop，否则 500ms 的合并窗口计时器会跨用例触发重拉。
+enableAutoUnmount(afterEach)
+
+async function settle(): Promise<void> {
   await flushPromises()
-  await new Promise((resolve) => setTimeout(resolve, 0))
+  await new Promise((resolve) => setTimeout(resolve, 10))
   await flushPromises()
+}
+
+interface StreamHandle {
+  fetchImpl: typeof fetch
+  push(text: string): void
+  close(): void
+}
+
+// 可控事件流：工作台只在生产代码里用全局 fetch，测试经 provide 注入这一份。
+function makeStreamFetch(): StreamHandle {
+  let controller!: ReadableStreamDefaultController<Uint8Array>
+  const body = new ReadableStream<Uint8Array>({
+    start(c) {
+      controller = c
+    },
+  })
+  const fetchImpl = (async () =>
+    new Response(body, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    })) as typeof fetch
+  return {
+    fetchImpl,
+    push(text: string) {
+      controller.enqueue(new TextEncoder().encode(text))
+    },
+    close() {
+      controller.close()
+    },
+  }
+}
+
+async function mountDetail(stream: StreamHandle) {
+  const mounted = mountWithPlugins(SessionDetailView, {
+    withRouter: true,
+    provide: { [SESSION_STREAM_FETCH]: stream.fetchImpl },
+  })
+  await mounted.router!.push('/sessions/sess-1')
+  await mounted.router!.isReady()
+  await settle()
+  return mounted
 }
 
 beforeEach(() => resetSessionToken())
 
-describe('SessionDetailView 深链快照', () => {
-  it('直接打开深链（刷新恢复）先 GET 详情并呈现 brief/状态/待办/产物/素材', async () => {
-    const detail = makeDetail({
-      status: 'awaiting_human',
-      plot: '雨夜旧信',
-      action_items: [
-        {
-          item_id: 'item-1',
-          kind: 'stage1_approval',
-          status: 'pending',
-          created_at: '2026-11-11T00:00:00Z',
-          resolved_at: '',
-        },
-      ],
-      artifacts: [
-        {
-          artifact_id: 'sess-1/script.md',
-          name: 'script.md',
-          kind: 'text',
-          bytes: 42,
-          created_at: '2026-11-11T00:00:00Z',
-        },
-      ],
-      assets: [
-        {
-          asset_id: 'sess-1/abc123',
-          name: 'photo.png',
-          kind: 'image',
-          bytes: 1024,
-          created_at: '2026-11-11T00:00:00Z',
-        },
-      ],
-    })
-    server.use(http.get(detailUrl, () => HttpResponse.json(detail)))
+describe('SessionDetailView 四分区（页内 tab）', () => {
+  it('四个分区默认概览，切换不改变 URL，刷新（重挂载）回概览', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({
+            status: 'awaiting_human',
+            action_items: [
+              {
+                item_id: 'item-1',
+                kind: 'stage1_approval',
+                status: 'pending',
+                created_at: '2026-11-11T00:00:00Z',
+                resolved_at: '',
+              },
+            ],
+            artifacts: [
+              {
+                artifact_id: 'sess-1/script.md',
+                name: 'script.md',
+                kind: 'text',
+                bytes: 42,
+                created_at: '2026-11-11T00:00:00Z',
+              },
+            ],
+            assets: [
+              {
+                asset_id: 'sess-1/abc123',
+                name: 'photo.png',
+                kind: 'image',
+                bytes: 1024,
+                created_at: '2026-11-11T00:00:00Z',
+              },
+            ],
+          }),
+        ),
+      ),
+    )
+    const stream = makeStreamFetch()
+    const { wrapper, router } = await mountDetail(stream)
 
-    const { wrapper, router } = mountWithPlugins(SessionDetailView, { withRouter: true })
-    await router!.push('/sessions/sess-1')
-    await router!.isReady()
+    const tabs = wrapper.findAll('[role="tab"]')
+    expect(tabs.map((tab) => tab.text())).toEqual(['概览与进度', '审查与待办', '素材', '产物'])
+    expect(tabs[0].attributes('aria-selected')).toBe('true')
+    expect(wrapper.text()).toContain('剧情')
+
+    await tabs[1].trigger('click')
+    expect(wrapper.find('[role="tabpanel"]').text()).toContain('stage1_approval')
+    expect(wrapper.text()).not.toContain('剧情')
+
+    await tabs[2].trigger('click')
+    expect(wrapper.find('[role="tabpanel"]').text()).toContain('photo.png')
+
+    await tabs[3].trigger('click')
+    expect(wrapper.find('[role="tabpanel"]').text()).toContain('script.md')
+
+    // 分区是页内状态：切了三个分区，URL 仍是原始深链。
+    expect(router!.currentRoute.value.fullPath).toBe('/sessions/sess-1')
+
+    // 刷新 = 新的 Pinia，分区选择不落盘，回到概览。
+    const again = await mountDetail(makeStreamFetch())
+    expect(again.wrapper.findAll('[role="tab"]')[0].attributes('aria-selected')).toBe('true')
+  })
+
+  it('切换会话：分区回概览，按新会话重拉快照', async () => {
+    server.use(
+      http.get(detailUrl, () => HttpResponse.json(makeDetail({ plot: '第一个会话' }))),
+      http.get('http://localhost/api/v1/sessions/sess-2', () =>
+        HttpResponse.json(makeDetail({ session_id: 'sess-2', plot: '第二个会话' })),
+      ),
+    )
+    const { wrapper, router } = await mountDetail(makeStreamFetch())
+
+    await wrapper.findAll('[role="tab"]')[1]!.trigger('click')
+    expect(wrapper.findAll('[role="tab"]')[1]!.attributes('aria-selected')).toBe('true')
+
+    await router!.push('/sessions/sess-2')
     await settle()
+
+    expect(wrapper.find('h1').text()).toContain('第二个会话')
+    expect(wrapper.findAll('[role="tab"]')[0]!.attributes('aria-selected')).toBe('true')
+  })
+})
+
+describe('SessionDetailView 运行控制（spec §6.3）', () => {
+  it('运行中显示 job.progress 的当前节点；取消是协作式并重拉快照', async () => {
+    let detail = makeDetail({ status: 'running', current_job: makeJob() })
+    let cancels = 0
+    server.use(
+      http.get(detailUrl, () => HttpResponse.json(detail)),
+      http.post(cancelUrl, () => {
+        cancels += 1
+        detail = makeDetail({
+          status: 'running',
+          current_job: makeJob({ cancel_requested: true }),
+        })
+        return HttpResponse.json(makeJob({ cancel_requested: true }), { status: 202 })
+      }),
+    )
+    const stream = makeStreamFetch()
+    const { wrapper } = await mountDetail(stream)
+
+    stream.push(
+      'id: 4\nevent: job.progress\ndata: {"stage":"stage1","node":"storyboard","status":"started"}\n\n',
+    )
+    await settle()
+    expect(wrapper.text()).toContain('storyboard')
+
+    const cancel = wrapper.findAll('button').find((b) => b.text() === '取消')!
+    expect(cancel).toBeTruthy()
+    await cancel.trigger('click')
+    await settle()
+
+    expect(cancels).toBe(1)
+    // 文案不许承诺立即停止：取消是节点边界生效（ADR 0032）。
+    expect(wrapper.text()).toContain('当前步骤结束后停止')
+    expect(wrapper.findAll('button').some((b) => b.text() === '取消')).toBe(false)
+  })
+
+  it('失败/取消/中断的会话显示「重试」，点击即再 POST /jobs 并回到运行态', async () => {
+    let detail = makeDetail({ status: 'failed' })
+    let starts = 0
+    server.use(
+      http.get(detailUrl, () => HttpResponse.json(detail)),
+      http.post(jobsUrl, () => {
+        starts += 1
+        detail = makeDetail({ status: 'running', current_job: makeJob() })
+        return HttpResponse.json(makeJob(), { status: 202 })
+      }),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    const retry = wrapper.findAll('button').find((b) => b.text() === '重试')!
+    expect(retry).toBeTruthy()
+    await retry.trigger('click')
+    await settle()
+
+    expect(starts).toBe(1)
+    expect(wrapper.text()).toContain('运行中')
+  })
+
+  it('已创建显示「开始」兜底；完成/等待人工没有运行按钮', async () => {
+    server.use(http.get(detailUrl, () => HttpResponse.json(makeDetail({ status: 'created' }))))
+    const created = await mountDetail(makeStreamFetch())
+    expect(created.wrapper.findAll('button').some((b) => b.text() === '开始')).toBe(true)
+
+    const states = ['completed', 'awaiting_human'] as const
+    for (const status of states) {
+      server.use(http.get(detailUrl, () => HttpResponse.json(makeDetail({ status }))))
+      const { wrapper } = await mountDetail(makeStreamFetch())
+      for (const label of ['开始', '重试', '取消']) {
+        expect(wrapper.findAll('button').some((b) => b.text() === label)).toBe(false)
+      }
+    }
+  })
+
+  it('实时连接断开时给出可见提示（状态不靠事件投影，重连由订阅器自行完成）', async () => {
+    server.use(http.get(detailUrl, () => HttpResponse.json(makeDetail({ status: 'running' }))))
+    const stream = makeStreamFetch()
+    const { wrapper } = await mountDetail(stream)
+    stream.close()
+    await settle()
+
+    expect(wrapper.text()).toContain('正在重连')
+  })
+})
+
+describe('SessionDetailView 深链快照', () => {
+  it('直接打开深链（刷新恢复）先 GET 详情并呈现 brief/状态', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(makeDetail({ status: 'awaiting_human', plot: '雨夜旧信' })),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
 
     expect(wrapper.text()).toContain('雨夜旧信')
     expect(wrapper.text()).toContain('等待人工')
     expect(wrapper.text()).toContain('5') // brief.duration
-    expect(wrapper.text()).toContain('stage1_approval') // 待办原始呈现
-    expect(wrapper.text()).toContain('script.md') // 产物
-    expect(wrapper.text()).toContain('photo.png') // 素材
-  })
-
-  it('created 状态显示「开始」兜底，点击即起跑并重拉为运行中', async () => {
-    let gets = 0
-    server.use(
-      http.get(detailUrl, () => {
-        gets += 1
-        return HttpResponse.json(makeDetail({ status: gets === 1 ? 'created' : 'running' }))
-      }),
-      http.post(jobsUrl, () => HttpResponse.json(makeJob(), { status: 202 })),
-    )
-
-    const { wrapper, router } = mountWithPlugins(SessionDetailView, { withRouter: true })
-    await router!.push('/sessions/sess-1')
-    await router!.isReady()
-    await settle()
-
-    expect(wrapper.text()).toContain('已创建')
-    const start = wrapper.findAll('button').find((b) => b.text().includes('开始'))!
-    expect(start).toBeTruthy()
-
-    await start.trigger('click')
-    await settle()
-
-    expect(gets).toBeGreaterThanOrEqual(2)
-    expect(wrapper.text()).toContain('运行中')
-  })
-
-  it('非 created 状态不显示「开始」按钮', async () => {
-    server.use(http.get(detailUrl, () => HttpResponse.json(makeDetail({ status: 'running' }))))
-
-    const { wrapper, router } = mountWithPlugins(SessionDetailView, { withRouter: true })
-    await router!.push('/sessions/sess-1')
-    await router!.isReady()
-    await settle()
-
-    expect(wrapper.findAll('button').some((b) => b.text().includes('开始'))).toBe(false)
   })
 
   it('加载失败显示 role=alert 并可重试', async () => {
@@ -126,10 +268,7 @@ describe('SessionDetailView 深链快照', () => {
       }),
     )
 
-    const { wrapper, router } = mountWithPlugins(SessionDetailView, { withRouter: true })
-    await router!.push('/sessions/sess-1')
-    await router!.isReady()
-    await settle()
+    const { wrapper } = await mountDetail(makeStreamFetch())
 
     expect(wrapper.find('[role="alert"]').exists()).toBe(true)
     const retry = wrapper.findAll('button').find((b) => b.text().includes('重试'))!
