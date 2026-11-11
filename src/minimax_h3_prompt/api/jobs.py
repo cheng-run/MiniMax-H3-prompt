@@ -29,11 +29,14 @@ from typing import Any
 from .. import step_machine
 from ..errors import error_code
 from ..session_store import FRAME_SUBMISSION_KEY, atomic_write_text, load_session
+from ..summary import PromptSummary, render_summary_zh
 from ..workbench_store import (
     ARTIFACT_FIRST_FRAME_PROMPT,
     ARTIFACT_LAST_FRAME_PROMPT,
     ARTIFACT_SCRIPT,
     ARTIFACT_SHOT_TABLE,
+    ARTIFACT_SUMMARY_JSON,
+    ARTIFACT_SUMMARY_MARKDOWN,
     ARTIFACT_VIDEO_PROMPT,
     ActionItemNotFound,
     ActionItemOut,
@@ -839,8 +842,46 @@ class JobRunner:
         # 写盘与登记走同一个入口：清单一处口径（目录现扫）、事件由登记发出（#220）。
         self.store.write_text_artifact(
             session_id, ARTIFACT_VIDEO_PROMPT, prompt, job_id=job_id)
+        self._summarize_stage2_prompt(session_id, job_id, prompt, cancel_event)
         return {"state": dict(final_state), "brief": brief,
                 "variant_downgraded": downgraded}
+
+    def _summarize_stage2_prompt(self, session_id: str, job_id: str, prompt: str,
+                                 cancel_event: threading.Event) -> None:
+        """阶段 2 的中文摘要两件（D4 spec §10 / AC14）。
+
+        与向导同一条路、同一份格式（``summary.summarize_prompt_zh`` → JSON + 渲染）；
+        ``video-prompt.md`` 已经写完，摘要只是展示层的增强：模型/解析失败一律只记
+        日志并返回，不让一次已经成功的阶段 2 变成失败（向导同款降级）。
+        """
+        from ..model_factory import build_chat_model
+        from ..summary import summarize_prompt_zh
+
+        try:
+            summary = summarize_prompt_zh(prompt, build_chat_model())
+        except Exception as exc:  # noqa: BLE001 - 摘要失败不阻塞交付
+            logger.warning("阶段 2 中文摘要生成失败：%s / %s（%s: %s）",
+                           session_id, job_id, type(exc).__name__, exc)
+            return
+        if summary is None:
+            logger.warning("阶段 2 中文摘要不可用（模型未返回可用摘要）：%s / %s",
+                           session_id, job_id)
+            return
+        # 摘要是一次慢速模型调用：调用后仍按「当前步骤结束才停」的取消语义收尾。
+        if cancel_event.is_set():
+            raise JobCancelled("summary")
+        self._write_summary_artifacts(session_id, job_id, summary)
+
+    def _write_summary_artifacts(self, session_id: str, job_id: str,
+                                 summary: PromptSummary) -> None:
+        """落盘摘要两件：JSON 与向导 ``_load_or_make_summary`` 同形，Markdown 同一渲染。"""
+        payload = {"overall": summary.overall, "shots": summary.shots}
+        self.store.write_text_artifact(
+            session_id, ARTIFACT_SUMMARY_MARKDOWN,
+            render_summary_zh(summary) + "\n", job_id=job_id)
+        self.store.write_text_artifact(
+            session_id, ARTIFACT_SUMMARY_JSON,
+            json.dumps(payload, ensure_ascii=False, indent=2), job_id=job_id)
 
     @staticmethod
     def _reusable_descriptions(
@@ -879,7 +920,7 @@ class JobRunner:
         from ..graph.pipeline import _STAGE2_CHAIN
         from ..tools.frame_auditor import required_frames
         from ..ui.wizard import resolve_effective_variant
-        from .fake_pipeline import frame_descriptions, stage2_state
+        from .fake_pipeline import frame_descriptions, stage2_state, stage2_summary
 
         directory = self.store.session_directory(session_id)
         session = load_session(directory)
@@ -914,6 +955,8 @@ class JobRunner:
         updated, prompt = stage2_state(state, brief, descriptions)
         self.store.write_text_artifact(
             session_id, ARTIFACT_VIDEO_PROMPT, prompt, job_id=job_id)
+        # 桩模式同样落三件：桩不建模型，摘要正文固定，渲染与落盘仍是真实路径那份。
+        self._write_summary_artifacts(session_id, job_id, stage2_summary(brief))
         return {"state": updated, "brief": brief,
                 "variant_downgraded": downgraded}
 

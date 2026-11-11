@@ -7,6 +7,7 @@ import Button from '@/components/ui/Button.vue'
 import ErrorNotice from '@/components/ui/ErrorNotice.vue'
 
 import { newIdempotencyKey } from './keys'
+import { artifactGroup, artifactLabel, sortArtifacts } from './artifactKinds'
 import { REVIEW_LAYERS, revisionLayerLabel } from './reviewLayers'
 
 // 「审查与待办」分区（D4 spec §8）：把阶段 1 的中间产物摊开给用户审，再收一个决定。
@@ -24,13 +25,13 @@ const props = defineProps<{
 
 const emit = defineEmits<{ resolved: [] }>()
 
-// 阶段 1 的最小可用集（spec §7）：顺序＝审查阅读顺序。名字与后端产物登记表同名。
-const REVIEW_FILES: { name: string; label: string }[] = [
-  { name: 'script.md', label: '剧本' },
-  { name: 'shot-table.md', label: '分镜表' },
-  { name: 'first-frame-prompt.md', label: '首帧提示词' },
-  { name: 'last-frame-prompt.md', label: '尾帧提示词' },
-]
+// 阶段 1 的中间产物按 kind 派生（`artifactKinds`）：T2VA 只有剧本与分镜表，
+// 帧链才会多出两帧词。前端不抄文件名白名单，登记表改名后这里自动跟上。
+interface ReviewFile {
+  name: string
+  label: string
+  artifact: ArtifactInfo
+}
 
 interface FileState {
   loading: boolean
@@ -40,14 +41,15 @@ interface FileState {
 
 const fileStates = reactive<Record<string, FileState>>({})
 
-// 只显示清单里真实存在的那几件：T2VA 只有前两件，帧链才会多出两帧词。
-const reviewFiles = computed(() => {
-  const present = new Set(props.artifacts.map((artifact) => artifact.name))
-  return REVIEW_FILES.filter((file) => present.has(file.name)).map((file) => ({
-    ...file,
-    artifact: props.artifacts.find((artifact) => artifact.name === file.name)!,
-  }))
-})
+const reviewFiles = computed<ReviewFile[]>(() =>
+  sortArtifacts(props.artifacts.filter((item) => artifactGroup(item) === 'intermediate')).map(
+    (artifact) => ({
+      name: artifact.name,
+      label: artifactLabel(artifact),
+      artifact,
+    }),
+  ),
+)
 
 // 待审查的闸门：只认 `stage1_review` 的 pending。帧提交待办属于素材分区（#233）。
 const pendingReview = computed(

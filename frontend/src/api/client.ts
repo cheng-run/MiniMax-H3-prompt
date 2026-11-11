@@ -187,7 +187,7 @@ export async function createSession(
  * 会话标识含斜杠（`<slug>/GEN001`），逐段编码后仍保留路径分隔——与 `:path` 参数一致。
  */
 export function sessionEventsUrl(sessionId: string): string {
-  const encoded = sessionId.split('/').map(encodeURIComponent).join('/')
+  const encoded = encodeSessionPath(sessionId)
   return `${baseUrl}/api/v1/sessions/${encoded}/events`
 }
 

@@ -12,13 +12,16 @@ import {
 import Button from '@/components/ui/Button.vue'
 import ErrorNotice from '@/components/ui/ErrorNotice.vue'
 
+import { FRAME_PROMPT_FILES } from './artifactKinds'
+
 // 帧提交卡（D4 spec §9）：审查通过后出现的第二个人工待办。首/尾槽各绑**本会话**
 // 一个图片素材，可留空；双空提交是「显式跳过」，必须先让用户看见会降级为纯文字。
 //
 // 提交只发 resolve；之后阶段 2 的进度由工作台的实时通道（SSE 失效信号）推着走，
 // 这里不轮询。
-const FIRST_FRAME_PROMPT = 'first-frame-prompt.md'
-const LAST_FRAME_PROMPT = 'last-frame-prompt.md'
+//
+// 两个文件名是**角色绑定**（不是显示白名单）：首/尾帧词在登记表里同 kind，
+// 文件名是唯一能区分槽位的标识，映射住在 `artifactKinds` 一处。
 
 const props = defineProps<{
   sessionId: string
@@ -66,8 +69,8 @@ async function readPrompt(artifact: ArtifactInfo | null): Promise<string | null>
 
 async function loadPrompts(): Promise<void> {
   const [first, last] = await Promise.all([
-    readPrompt(promptArtifact(FIRST_FRAME_PROMPT)),
-    readPrompt(promptArtifact(LAST_FRAME_PROMPT)),
+    readPrompt(promptArtifact(FRAME_PROMPT_FILES.first)),
+    readPrompt(promptArtifact(FRAME_PROMPT_FILES.last)),
   ])
   firstPrompt.value = first
   lastPrompt.value = last

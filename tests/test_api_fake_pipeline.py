@@ -139,9 +139,19 @@ def test_fake_pipeline_runs_both_stages_without_building_any_model(
         final = client.get(f"/api/v1/sessions/{session_id}").json()
         prompt = client.get(
             f"/api/v1/artifacts/{session_id}/video-prompt.md/content")
+        summary_md = client.get(
+            f"/api/v1/artifacts/{session_id}/summary-zh.md/content")
+        summary_json = client.get(
+            f"/api/v1/artifacts/{session_id}/summary-zh.json/content")
 
     assert final["status"] == "completed"
     assert prompt.status_code == 200 and "桩管线" in prompt.text
+    # D4-AC14 的交付三件套在桩上同样成立：摘要两件与提示词一起登记、正文可读。
+    names = {item["name"] for item in final["artifacts"]}
+    assert {"video-prompt.md", "summary-zh.md", "summary-zh.json"} <= names
+    assert summary_md.status_code == 200 and "桩管线摘要" in summary_md.text
+    assert summary_json.status_code == 200
+    assert json.loads(summary_json.text)["overall"].startswith("《雨夜旧信》")
     # 桩读图读的是用户提交的帧位：首尾都交了，两条描述都在。
     state = json.loads(
         (root / Path(session_id) / SESSION_FILENAME).read_text(encoding="utf-8"))

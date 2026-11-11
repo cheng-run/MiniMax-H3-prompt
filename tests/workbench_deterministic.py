@@ -58,6 +58,12 @@ DEFAULT_REPLIES: dict[str, str] = {
     "roundtable_speaker": "同意当前方案，按情节节拍推进。",
     # 主持人回复不能以「继续」开头，否则圆桌会再开一轮——桩要让测试线性可数。
     "roundtable_moderator": "锁定决策：写实雨夜短视频，四秒，单场景。",
+    # 阶段 2 的中文摘要（summary.summarize_prompt_zh 要求 JSON）：合法摘要才会落
+    # summary-zh.json/md，让「三件套」在真实路径用例里可断言。
+    "summary": (
+        '{"overall": "雨夜街口的短片：人物撑伞走过积水，停在旧楼门口收伞回望。",'
+        ' "shots": [{"shot": 1, "visual": "雨夜街口撑伞行走", "audio": "雨声与脚步声"}]}'
+    ),
 }
 
 
@@ -72,6 +78,12 @@ def role_of(messages: List[BaseMessage]) -> str:
         return "roundtable_moderator"
     if "你正参与圆桌讨论" in system:
         return "roundtable_speaker"
+    # 摘要直调走 ``llm.invoke(<字符串>)``，指令落在 HumanMessage 里、没有 system
+    # 消息；不单列会让它落进 ``unknown``，把「prompt_engineer 只跑了一次」这类
+    # 计数断言污染成「看起来多调了一次」。
+    if any("你是中文视频内容解说员" in str(message.content)
+           for message in messages):
+        return "summary"
     first_line = system.splitlines()[0] if system else ""
     for heading, role in _ROLE_HEADINGS:
         if first_line.startswith(heading):

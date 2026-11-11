@@ -86,7 +86,7 @@ describe('SessionDetailView 四分区（页内 tab）', () => {
               {
                 artifact_id: 'sess-1/script.md',
                 name: 'script.md',
-                kind: 'text',
+                kind: 'script',
                 bytes: 42,
                 created_at: '2026-11-11T00:00:00Z',
               },
@@ -296,7 +296,7 @@ describe('SessionDetailView 审查与修订回路（#232）', () => {
           {
             artifact_id: 'sess-1/script.md',
             name: 'script.md',
-            kind: 'text',
+            kind: 'script',
             bytes: 20,
             created_at: '2026-11-11T00:00:00Z',
           },

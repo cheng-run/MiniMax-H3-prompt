@@ -118,6 +118,22 @@ describe('产物分区', () => {
     expect(wrapper.text()).toContain('已开始下载')
   })
 
+  it('按 kind 分组：登记表换了文件名也照常显示，不抄文件名白名单', async () => {
+    server.use(
+      http.get(/\/api\/v1\/artifacts\/.+\/content$/, () => HttpResponse.text('换名后的剧本正文')),
+    )
+    const { wrapper } = await mountTab([
+      makeArtifact('draft-notes.md', 'script'),
+      makeArtifact('summary-final.md', 'summary_markdown'),
+    ])
+
+    await vi.waitFor(() => {
+      expect(wrapper.text()).toContain('换名后的剧本正文')
+    })
+    expect(wrapper.get('[data-group="intermediate"]').text()).toContain('剧本')
+    expect(wrapper.get('[data-group="deliverable"]').text()).toContain('中文摘要')
+  })
+
   it('媒体产物通用播放：按 kind 渲染 video，不按文件名特判', async () => {
     const { wrapper } = await mountTab([...ARTIFACTS, makeArtifact('any-name.mov', 'video')])
     await flushPromises()

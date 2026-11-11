@@ -192,6 +192,78 @@ def test_resolve_approve_runs_stage2_to_completed(workbench):
         assert succeeded["payload"]["next"] == "completed"
 
 
+def test_stage2_writes_the_summary_artifacts_beside_the_prompt(workbench, monkeypatch):
+    """D4-AC14：阶段 2 的交付三件套。
+
+    摘要走 ``summary.summarize_prompt_zh``（向导同一条路）：模型调用换成固定返回值，
+    这里验的是**阶段 2 真的产出了两件摘要并登记**，正文经 content 端点可读。
+    """
+    from minimax_h3_prompt import summary as summary_module
+    from minimax_h3_prompt.summary import PromptSummary
+
+    app, _model, _root = workbench
+    calls: list[str] = []
+
+    def fake_summary(prompt: str, _llm) -> PromptSummary:
+        calls.append(prompt)
+        return PromptSummary(
+            overall="雨夜街口的收束：人物收伞回望。",
+            shots=[{"shot": 1, "visual": "雨夜街口", "audio": "雨声"}],
+        )
+
+    monkeypatch.setattr(summary_module, "summarize_prompt_zh", fake_summary)
+    with workbench_client(app) as client:
+        detail, item = _advance_to_gate(client)
+        session_id = detail["session_id"]
+        started = _resolve(client, session_id, item["item_id"], {"decision": "approve"})
+        assert started.status_code == 202, started.text
+        done = _wait_job(client, session_id, started.json()["job_id"])
+        assert done["status"] == "succeeded"
+
+        final = client.get(f"/api/v1/sessions/{session_id}").json()
+        names = {entry["name"] for entry in final["artifacts"]}
+        markdown = client.get(
+            f"/api/v1/artifacts/{session_id}/summary-zh.md/content")
+        payload = client.get(
+            f"/api/v1/artifacts/{session_id}/summary-zh.json/content")
+
+    # 摘要的输入是真实提示词，不是空串。
+    assert calls and calls[0].strip()
+    assert {"video-prompt.md", "summary-zh.md", "summary-zh.json"} <= names
+    assert markdown.status_code == 200
+    assert "雨夜街口的收束" in markdown.text
+    assert payload.status_code == 200
+    assert json.loads(payload.text) == {
+        "overall": "雨夜街口的收束：人物收伞回望。",
+        "shots": [{"shot": 1, "visual": "雨夜街口", "audio": "雨声"}],
+    }
+
+
+def test_stage2_survives_a_summary_failure(workbench, monkeypatch):
+    """摘要失败只降级，不让阶段 2 的 job 失败（与向导同口径）。"""
+    from minimax_h3_prompt import summary as summary_module
+
+    app, _model, _root = workbench
+    monkeypatch.setattr(
+        summary_module, "summarize_prompt_zh", lambda _prompt, _llm: None)
+    with workbench_client(app) as client:
+        detail, item = _advance_to_gate(client)
+        session_id = detail["session_id"]
+        started = _resolve(client, session_id, item["item_id"], {"decision": "approve"})
+        done = _wait_job(client, session_id, started.json()["job_id"])
+
+        final = client.get(f"/api/v1/sessions/{session_id}").json()
+        prompt = client.get(
+            f"/api/v1/artifacts/{session_id}/video-prompt.md/content")
+
+    assert done["status"] == "succeeded"
+    assert final["status"] == "completed"
+    assert prompt.status_code == 200
+    names = {entry["name"] for entry in final["artifacts"]}
+    assert "video-prompt.md" in names
+    assert not {"summary-zh.md", "summary-zh.json"} & names
+
+
 def test_resolve_on_a_session_not_awaiting_human_is_conflict(workbench):
     app, _model, _root = workbench
     with workbench_client(app) as client:

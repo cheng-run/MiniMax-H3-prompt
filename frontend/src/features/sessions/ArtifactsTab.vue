@@ -3,13 +3,15 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 
 import { artifactContentUrl, getArtifactContent, type ArtifactInfo } from '@/api/client'
 
+import { artifactGroup, artifactLabel, sortArtifacts, type ArtifactGroup } from './artifactKinds'
+
 // 「产物」分区（D4 spec §10）：阶段 1 的中间产物与阶段 2 的交付文本都在这里看。
 // 正文经 content 端点读，不在快照里塞（stage_state 不出 API，spec §7）。
 //
-// 产物清单本身就是「该显示哪些文件」的事实：T2VA 与帧链的中间产物数量不同，
-// 前端不再按变体判断一遍。下载 = content 端点原样落盘；复制 = 剪贴板。
-// 媒体产物按 kind 通用渲染（`<video>` / `<audio>`），**不按文件名特判**成片——
-// 登记表里将来多一种成片不需要改这里。
+// 产物清单本身就是「该显示哪些文件」的事实：分组与标签按契约里的 ``kind`` 派生
+// （``artifactKinds``），前端不再抄一份文件名白名单——登记表改名后这里自动跟上。
+// 下载 = content 端点原样落盘；复制 = 剪贴板。媒体产物按 kind 通用渲染
+// （`<video>` / `<audio>`），**不按文件名特判**成片。
 const props = defineProps<{
   sessionId: string
   artifacts: ArtifactInfo[]
@@ -19,38 +21,27 @@ interface FileEntry {
   name: string
   label: string
   primary?: boolean
+  artifact: ArtifactInfo
 }
-
-// 顺序＝阅读顺序。中间产物在前（阶段 1 看过的东西），交付文本在后。
-const INTERMEDIATE_FILES: FileEntry[] = [
-  { name: 'script.md', label: '剧本' },
-  { name: 'shot-table.md', label: '分镜表' },
-  { name: 'first-frame-prompt.md', label: '首帧提示词' },
-  { name: 'last-frame-prompt.md', label: '尾帧提示词' },
-]
-const DELIVERABLE_FILES: FileEntry[] = [
-  { name: 'video-prompt.md', label: '最终提示词', primary: true },
-  { name: 'summary-zh.md', label: '中文摘要' },
-  { name: 'summary-zh.json', label: '摘要数据（JSON）' },
-]
-const TEXT_FILES = [...INTERMEDIATE_FILES, ...DELIVERABLE_FILES]
-
-// 媒体按 kind 认，不按名字认；登记表新增成片类型时这里自动跟上。
-const MEDIA_KINDS = new Set(['video', 'audio'])
 
 const byName = computed(() => new Map(props.artifacts.map((item) => [item.name, item])))
 
-function present(entries: FileEntry[]): (FileEntry & { artifact: ArtifactInfo })[] {
-  return entries.flatMap((entry) => {
-    const artifact = byName.value.get(entry.name)
-    return artifact ? [{ ...entry, artifact }] : []
-  })
+function grouped(group: ArtifactGroup): FileEntry[] {
+  return sortArtifacts(props.artifacts.filter((item) => artifactGroup(item) === group)).map(
+    (artifact) => ({
+      name: artifact.name,
+      label: artifactLabel(artifact),
+      primary: artifact.kind === 'video_prompt',
+      artifact,
+    }),
+  )
 }
 
-const intermediateFiles = computed(() => present(INTERMEDIATE_FILES))
-const deliverableFiles = computed(() => present(DELIVERABLE_FILES))
+const intermediateFiles = computed(() => grouped('intermediate'))
+const deliverableFiles = computed(() => grouped('deliverable'))
+// 媒体不需要标签：保留原样的 ArtifactInfo，模板按 kind 通用渲染。
 const mediaArtifacts = computed(() =>
-  props.artifacts.filter((artifact) => MEDIA_KINDS.has(artifact.kind)),
+  sortArtifacts(props.artifacts.filter((item) => artifactGroup(item) === 'media')),
 )
 
 interface FileState {
@@ -67,8 +58,9 @@ let loadGeneration = 0
 
 async function loadTexts(): Promise<void> {
   const generation = ++loadGeneration
+  const textFiles = [...intermediateFiles.value, ...deliverableFiles.value]
   await Promise.all(
-    TEXT_FILES.map(async ({ name }) => {
+    textFiles.map(async ({ name }) => {
       const artifact = byName.value.get(name)
       if (!artifact) {
         return

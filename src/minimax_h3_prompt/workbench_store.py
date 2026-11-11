@@ -68,6 +68,9 @@ ARTIFACT_SCRIPT = "script.md"
 ARTIFACT_SHOT_TABLE = "shot-table.md"
 ARTIFACT_FIRST_FRAME_PROMPT = "first-frame-prompt.md"
 ARTIFACT_LAST_FRAME_PROMPT = "last-frame-prompt.md"
+# 阶段 2 的中文摘要两件：``video-prompt.md`` 的展示层提炼（向导与工作台共用同一格式）。
+ARTIFACT_SUMMARY_MARKDOWN = "summary-zh.md"
+ARTIFACT_SUMMARY_JSON = "summary-zh.json"
 
 _ARTIFACT_KINDS = {
     ARTIFACT_VIDEO_PROMPT: "video_prompt",
@@ -75,8 +78,8 @@ _ARTIFACT_KINDS = {
     ARTIFACT_SHOT_TABLE: "shot_table",
     ARTIFACT_FIRST_FRAME_PROMPT: "frame_prompt",
     ARTIFACT_LAST_FRAME_PROMPT: "frame_prompt",
-    "summary-zh.md": "summary_markdown",
-    "summary-zh.json": "summary_json",
+    ARTIFACT_SUMMARY_MARKDOWN: "summary_markdown",
+    ARTIFACT_SUMMARY_JSON: "summary_json",
 }
 # 媒体产物：名字 → Content-Type。目前只有成片；列表里的 kind 仍是 ``video``。
 ARTIFACT_MEDIA_TYPES = {
@@ -1805,6 +1808,7 @@ __all__ = [
     "ActionItemNotFound", "ActionItemOut", "ActionItemPending", "ActionItemResolved",
     "ARTIFACT_FIRST_FRAME_PROMPT", "ARTIFACT_LAST_FRAME_PROMPT",
     "ARTIFACT_MAX_BYTES", "ARTIFACT_SCRIPT", "ARTIFACT_SHOT_TABLE",
+    "ARTIFACT_SUMMARY_JSON", "ARTIFACT_SUMMARY_MARKDOWN",
     "ARTIFACT_VIDEO_PROMPT",
     "Asset", "AssetTooLarge",
     "ArtifactInfo", "ArtifactNotFound", "ArtifactTooLarge", "BriefOut",

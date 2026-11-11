@@ -21,11 +21,11 @@ async function settle(): Promise<void> {
   await flushPromises()
 }
 
-function makeArtifact(name: string): ArtifactInfo {
+function makeArtifact(name: string, kind: string): ArtifactInfo {
   return {
     artifact_id: `sess-1/${name}`,
     name,
-    kind: 'text',
+    kind,
     bytes: 10,
     created_at: '2026-11-11T00:00:00Z',
   }
@@ -85,10 +85,10 @@ describe('ReviewTab 中间产物与修订历史（D4-AC8）', () => {
     const wrapper = mountReview(
       [pendingReview(), resolvedReview()],
       [
-        makeArtifact('script.md'),
-        makeArtifact('shot-table.md'),
-        makeArtifact('first-frame-prompt.md'),
-        makeArtifact('last-frame-prompt.md'),
+        makeArtifact('script.md', 'script'),
+        makeArtifact('shot-table.md', 'shot_table'),
+        makeArtifact('first-frame-prompt.md', 'frame_prompt'),
+        makeArtifact('last-frame-prompt.md', 'frame_prompt'),
       ],
     )
     await settle()
@@ -116,7 +116,7 @@ describe('ReviewTab 中间产物与修订历史（D4-AC8）', () => {
     })
     const wrapper = mountReview(
       [pendingReview()],
-      [makeArtifact('script.md'), makeArtifact('shot-table.md')],
+      [makeArtifact('script.md', 'script'), makeArtifact('shot-table.md', 'shot_table')],
     )
     await settle()
 
@@ -124,6 +124,15 @@ describe('ReviewTab 中间产物与修订历史（D4-AC8）', () => {
     expect(text).toContain('纯文字剧本')
     expect(text).not.toContain('first-frame-prompt.md')
     expect(text).not.toContain('last-frame-prompt.md')
+  })
+
+  it('按 kind 认中间产物：登记表换了文件名也照常显示', async () => {
+    serveArtifactTexts({ 'draft-notes.md': '换名后的剧本正文' })
+    const wrapper = mountReview([pendingReview()], [makeArtifact('draft-notes.md', 'script')])
+    await settle()
+
+    expect(wrapper.text()).toContain('换名后的剧本正文')
+    expect(wrapper.text()).toContain('剧本')
   })
 })
 
@@ -137,7 +146,7 @@ describe('ReviewTab 通过与提意见（D4-AC9）', () => {
         return HttpResponse.json(null, { status: 202 })
       }),
     )
-    const wrapper = mountReview([pendingReview()], [makeArtifact('script.md')])
+    const wrapper = mountReview([pendingReview()], [makeArtifact('script.md', 'script')])
     await settle()
 
     const approve = wrapper.findAll('button').find((b) => b.text() === '通过')!
@@ -159,7 +168,7 @@ describe('ReviewTab 通过与提意见（D4-AC9）', () => {
         return HttpResponse.json(null, { status: 202 })
       }),
     )
-    const wrapper = mountReview([pendingReview()], [makeArtifact('script.md')])
+    const wrapper = mountReview([pendingReview()], [makeArtifact('script.md', 'script')])
     await settle()
 
     // jsdom 不实现「submit 按钮点击 → 表单提交」的默认动作（与 Enter→click 同类），
@@ -207,7 +216,7 @@ describe('ReviewTab 通过与提意见（D4-AC9）', () => {
         ),
       ),
     )
-    const wrapper = mountReview([pendingReview()], [makeArtifact('script.md')])
+    const wrapper = mountReview([pendingReview()], [makeArtifact('script.md', 'script')])
     await settle()
 
     const approve = wrapper.findAll('button').find((b) => b.text() === '通过')!

@@ -155,10 +155,26 @@ def stage2_state(state: dict[str, Any], brief: Any,
     return updated, prompt
 
 
+def stage2_summary(brief: Any) -> Any:
+    """桩阶段 2 的固定中文摘要：整体一句、无分镜条目。
+
+    桩不与真实模型抢道：这里直接造 ``PromptSummary`` 而不建模型——桩模式下
+    ``build_chat_model`` 本来就是「一调就抛」。渲染与落盘仍走真实路径的同一份代码。
+    """
+    from ..summary import PromptSummary
+
+    return PromptSummary(
+        overall=(f"《{brief.plot}》的桩管线摘要：雨夜街口的短视频，"
+                 "两镜推进到人物收伞回望（固定文案，非模型产出）。"),
+        shots=[],
+    )
+
+
 __all__ = [
     "FAKE_PIPELINE_ENV",
     "fake_pipeline_enabled",
     "frame_descriptions",
     "stage1_state",
     "stage2_state",
+    "stage2_summary",
 ]

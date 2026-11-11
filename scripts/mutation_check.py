@@ -63,6 +63,17 @@ MUTATIONS: tuple[Mutation, ...] = (
         "文本读取上限失守＝大产物把内存与响应体一起拖爆，413 专用码永不出现",
     ),
     Mutation(
+        "session_detail_leaks_stage_state",
+        "src/minimax_h3_prompt/workbench_store.py",
+        "    artifacts: list[ArtifactInfo] = Field(default_factory=list)\n"
+        "    # 素材是目录现扫的结果，与产物同款（#222 §5.3）：不进快照、不占会话状态写入。\n",
+        "    artifacts: list[ArtifactInfo] = Field(default_factory=list)\n"
+        "    stage_state: dict[str, Any] = Field(default_factory=dict)\n"
+        "    # 素材是目录现扫的结果，与产物同款（#222 §5.3）：不进快照、不占会话状态写入。\n",
+        ("tests/test_api_action_items.py::test_stage_state_never_crosses_the_api_boundary",),
+        "详情快照把 stage_state 带出去＝内部 state 键变成对外契约，产物白名单与 1 MiB 边界一起失效",
+    ),
+    Mutation(
         "range_end_not_clamped",
         "src/minimax_h3_prompt/api/media.py",
         "    return start, min(end, size - 1)",

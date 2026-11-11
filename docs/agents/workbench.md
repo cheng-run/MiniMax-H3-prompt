@@ -43,9 +43,10 @@
 - 取消是协作式：只在节点边界生效，job 记 `cancelled_at_node`；**不要承诺立即停止**。
 - 启动对账只把 `running` 收成 `interrupted`，**不自动续跑**。
 - 阶段 2 中断后再 `advance`：按 `stage1_review` 的决议事实续跑阶段 2（`_resume_step`），不回人工闸门。
-- 产物 content **按登记表的形态分支**（#225）：文本三件套是纯文本 + 1 MiB 上限（超出 413），
-  成片 `final.mp4` 给字节 + 单段 Range；两者都答 `HEAD`（同头、无体）。哪几个名字能读
-  由 `workbench_store` 的登记表派生，端点里不抄第二份白名单。
+- 产物 content **按登记表的形态分支**（#225）：文本产物（登记表现有 7 件，名字由
+  登记表派生）共用纯文本 + 1 MiB 上限（超出 413）；成片 `final.mp4` 给字节 + 单段
+  Range；两者都答 `HEAD`（同头、无体）。哪几个名字能读由 `workbench_store` 的登记表
+  派生，端点里不抄第二份白名单。
 - **媒体读取**（#225 / D3-3）：`GET` 与 `HEAD` 分开注册——HEAD 的**成功**响应在契约里
   不声明响应体（错误响应两条路径同形，都是 problem+json）；
   固定带 `Accept-Ranges: bytes`、`ETag`、`Last-Modified`、`Content-Length`、`Content-Type`
@@ -101,7 +102,9 @@
 - 真实与桩是**互斥的执行分支**（`JobRunner.fake_pipeline` 为真时根本不调 `run_stage1` / `run_stage2`），
   不是真实路径里换一段回复。桩产出的状态与产物仍走真实落盘路径，浏览器看到的形状一致。
 - `frontend/scripts/serve-e2e.mjs` 在 `playwright test` 的 webServer 里注入它；真实验收
-  （`scripts/accept_d4.py`）必须对着**没有这个变量**的服务跑。驱动器的 `--self-check` 会拦住两种误标。
+  （`scripts/accept_d4.py`）必须对着**没有这个变量**的服务跑。驱动器的 `--self-check`
+  会把 `--fake` 与本进程开着该变量两种误标判成 FAIL，并以非零退出码收场——桩模式
+  不允许「自检通过」。
 
 ## 验收
 
@@ -115,4 +118,5 @@
 D4 的浏览器闭环：CI 由 `frontend/e2e/delivery.spec.ts`（T2VA 直通 + FL2VA 帧提交，桩管线）
 与 `sessions.spec.ts`（SSE 重连）覆盖；真实 LLM 不进 CI，由 `scripts/accept_d4.py` 手动跑
 （Playwright + 真实审查/修订 + 真实图片帧 + 真实读图，报告落 `output/accept-d4/`）。
-证据评论里**不出现令牌**。
+完成态还会读会话文件核对帧证据（首/尾读图描述非空、`frame_images[].target` 的文件存在），
+不以「页面显示已完成」代替「读图真的发生过」。证据评论里**不出现令牌**。

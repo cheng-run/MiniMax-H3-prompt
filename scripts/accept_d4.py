@@ -38,7 +38,9 @@
 4. 每一步的耗时、截图路径与结果。
 5. 产物：``video-prompt.md`` 的 artifact_id、落盘路径、字节数，以及复制/下载
    两份正文的一致性核对。
-6. D4-AC14 / D4-AC16 结论；其余 AC 指向 CI 的用例（报告里逐条标出来）。
+6. D4-AC14 / D4-AC16 结论；帧读图证据（会话文件里的首/尾描述非空、
+   ``frame_images[].target`` 指向的 ``assets/`` 文件存在）；其余 AC 指向 CI 的用例
+   （报告里逐条标出来）。
 """
 from __future__ import annotations
 
@@ -65,6 +67,11 @@ DEFAULT_REVISION = "结局收束更克制：人物停在旧楼门口，抬手关
 REVISION_LAYER = "剧情分镜"
 IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
 PLAYWRIGHT_INSTALL_HINT = "uv add --dev playwright && uv run playwright install chromium"
+# 会话快照文件名从包里的唯一声明派生；脚本被单独拷走时退回同值字面量（自检不依赖包）。
+try:  # pragma: no cover - 分支只在无包环境走到
+    from minimax_h3_prompt.session_store import SESSION_FILENAME as SESSION_SNAPSHOT
+except Exception:  # noqa: BLE001
+    SESSION_SNAPSHOT = "session-state.json"
 
 
 class AcceptanceError(RuntimeError):
@@ -160,6 +167,41 @@ def _session_detail(
     )
     _expect(response.status_code == 200, f"取会话快照返回 {response.status_code}")
     return response.json()
+
+
+def _frame_read_evidence(sessions_root: Path, session_id: str) -> dict[str, Any]:
+    """完成态核对「帧真的进了读图」：会话文件里的描述与帧图路径。
+
+    只在提交了帧的路径上断言（D4 的 FL2VA 闭环总是交首/尾两张图）。判据落在
+    会话快照的真实字段上——浏览器页面看起来「完成了」不代表读图发生过。
+    """
+    snapshot = sessions_root / session_id / SESSION_SNAPSHOT
+    _expect(snapshot.is_file(), f"会话文件不存在：{snapshot}")
+    raw = json.loads(snapshot.read_text(encoding="utf-8"))
+    state = raw.get("stage_state") or {}
+    descriptions = [
+        entry for entry in state.get("fl2va_frame_descriptions") or []
+        if isinstance(entry, dict)
+    ]
+    by_role = {str(entry.get("role")): entry for entry in descriptions}
+    summary: dict[str, str] = {}
+    for role in ("first", "last"):
+        entry = by_role.get(role)
+        _expect(entry is not None, f"读图结果缺少 {role} 帧")
+        text = str(entry.get("description") or "").strip()
+        _expect(bool(text), f"{role} 帧的读图描述为空")
+        summary[role] = text[:120]
+    images = [
+        entry for entry in state.get("frame_images") or []
+        if isinstance(entry, dict)
+    ]
+    targets: list[str] = []
+    for entry in images:
+        target = Path(str(entry.get("target") or ""))
+        _expect(target.is_file(), f"帧图路径不存在：{target}")
+        targets.append(str(target))
+    _expect(bool(targets), "会话里没有 frame_images")
+    return {"descriptions": summary, "frame_images": targets}
 
 
 def _shot(page: Any, out_dir: Path, name: str, facts: dict[str, Any]) -> str:
@@ -305,21 +347,21 @@ def run_real(args: argparse.Namespace, report: Report, image: Path) -> None:
 
                 def deliver() -> str:
                     page.get_by_role("tab", name="产物").click()
-                    page.get_by_role("heading", name="交付文本").wait_for(
-                        state="visible", timeout=timeout_ms)
+                    # 判据不依赖正文语言：真实阶段 2 的提示词是英文 H3 格式，桩产出的
+                    # 中文标题只是夹具。分组与复制按钮才是两侧共有的结构。
                     deliverable = page.locator('[data-group="deliverable"]')
-                    deliverable.get_by_text("H3 视频提示词", exact=False).first.wait_for(
+                    deliverable.get_by_role("heading", name="交付文本").wait_for(
                         state="visible", timeout=timeout_ms)
+                    copy_button = deliverable.locator('[data-copy="video-prompt.md"]')
+                    copy_button.wait_for(state="visible", timeout=timeout_ms)
                     _shot(page, out_dir, "07-delivery", report.facts)
 
-                    copy_button = page.locator('[data-copy="video-prompt.md"]')
-                    copy_button.wait_for(state="visible", timeout=timeout_ms)
                     copy_button.click()
                     page.get_by_text("已复制", exact=True).first.wait_for(
                         state="visible", timeout=30_000)
                     clipboard = page.evaluate("navigator.clipboard.readText()")
-                    _expect(isinstance(clipboard, str) and len(clipboard.strip()) > 0,
-                            "剪贴板里没有最终提示词")
+                    _expect(isinstance(clipboard, str) and len(clipboard.strip()) > 100,
+                            "剪贴板里的最终提示词为空或过短")
 
                     with page.expect_download(timeout=timeout_ms) as download_info:
                         page.locator('[data-download="video-prompt.md"]').click()
@@ -360,6 +402,10 @@ def run_real(args: argparse.Namespace, report: Report, image: Path) -> None:
                 _expect(artifact_path.is_file(), "产物登记路径在磁盘上不存在")
                 _expect(detail.get("status") == "completed",
                         f"会话终态不是 completed：{detail.get('status')}")
+                # 帧证据只在提交了帧的路径断言：首/尾描述非空、frame_images 指向的
+                # 素材文件仍在盘上——这是「读图真的发生过」的会话侧物证。
+                report.facts["frame_read_evidence"] = _frame_read_evidence(
+                    sessions_root, session_id)
 
                 context.close()
             finally:
@@ -421,8 +467,9 @@ def self_check(args: argparse.Namespace) -> int:
     ok = True
     for name, passed, note in checks:
         print(f"[self-check] {'PASS' if passed else 'FAIL'}  {name}：{note}")
-        # 桩模式标记不影响自检通过：它只是明确「这轮不是真实证据」。
-        if not passed and name != "真实模型模式":
+        # 真实模型模式也参与退出码：桩模式自检通过等于把「非真实证据」放行，
+        # 真实验收的前置检查必须在这里失败。
+        if not passed:
             ok = False
     return 0 if ok else 2
 
@@ -437,6 +484,9 @@ def _write_report(report: Report, out_dir: Path) -> None:
     screenshots = "\n".join(f"- `{path}`" for path in facts.get("screenshots", []))
     artifact = facts.get("artifact") or {}
     image = facts.get("image") or {}
+    frame_evidence = facts.get("frame_read_evidence") or {}
+    frame_descriptions = frame_evidence.get("descriptions") or {}
+    frame_images = frame_evidence.get("frame_images") or []
     lines = [
         "# D4 真实验收证据（#234 / 父 spec #227）",
         "",
@@ -463,6 +513,13 @@ def _write_report(report: Report, out_dir: Path) -> None:
         f"- 落盘路径：`{artifact.get('path', '')}`（{artifact.get('bytes', '')} 字节）",
         f"- 复制/下载副本：`{out_dir / 'final-prompt-clipboard.md'}` / "
         f"`{out_dir / 'video-prompt.md'}`",
+        "",
+        "## 帧读图证据（会话文件）",
+        "",
+        f"- 首帧描述：{frame_descriptions.get('first', '（缺）')}",
+        f"- 尾帧描述：{frame_descriptions.get('last', '（缺）')}",
+        "- 帧图：",
+        *([f"  - `{path}`" for path in frame_images] or ["  （无）"]),
         "",
         "## 截图",
         "",
