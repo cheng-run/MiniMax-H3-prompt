@@ -15,9 +15,10 @@
         --image output/accept-d3/xxx/photo.jpg \\
         --sessions-root output/sessions
 
-依赖 Playwright for Python（**安装由用户本人执行**，本仓不把它写进 lock）::
+依赖 Playwright for Python（已在 `pyproject.toml` 的 dev 依赖里；浏览器二进制不随
+`uv sync` 下载，新机器还要装一次）::
 
-    uv add --dev playwright
+    uv sync
     uv run playwright install chromium          # 或设 PW_CHANNEL=chrome 复用系统 Chrome
 
 ``--self-check`` 只查环境与结构（图片、可写目录、Playwright 是否可导入、服务
@@ -66,7 +67,7 @@ DEFAULT_PLOT = "雨夜街口，一位撑黑伞的女性走过积水，霓虹在�
 DEFAULT_REVISION = "结局收束更克制：人物停在旧楼门口，抬手关掉门廊的灯，不要回头。"
 REVISION_LAYER = "剧情分镜"
 IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
-PLAYWRIGHT_INSTALL_HINT = "uv add --dev playwright && uv run playwright install chromium"
+PLAYWRIGHT_INSTALL_HINT = "uv sync && uv run playwright install chromium（或设 PW_CHANNEL=chrome）"
 # 会话快照文件名从包里的唯一声明派生；脚本被单独拷走时退回同值字面量（自检不依赖包）。
 try:  # pragma: no cover - 分支只在无包环境走到
     from minimax_h3_prompt.session_store import SESSION_FILENAME as SESSION_SNAPSHOT
@@ -617,7 +618,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         image = Path(args.image).resolve() if args.image else find_real_image(ROOT)
         _expect(image is not None and image.is_file(),
-                f"找不到真实图片；用 --image 指定（安装提示：{PLAYWRIGHT_INSTALL_HINT}）")
+                "找不到真实图片；用 --image 指定一张真实照片（不要用测试夹具）")
         _expect(importlib.util.find_spec("playwright") is not None,
                 f"Playwright for Python 未安装：{PLAYWRIGHT_INSTALL_HINT}")
         run_real(args, report, image)

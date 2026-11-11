@@ -31,6 +31,7 @@ dev = [
     "coverage>=7.17.0",
     "httpx>=0.28.1",
     "mypy>=2.4.1",
+    "playwright>=1.65.0",
     "pytest>=9.1.1",
     "pytest-timeout>=2.4.0",
     "ruff>=0.17.3",
