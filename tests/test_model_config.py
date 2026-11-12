@@ -215,6 +215,9 @@ def test_missing_key_message_comes_from_one_builder(monkeypatch):
         return "共享文案"
 
     monkeypatch.setattr(config_module, "missing_api_key_message", fake_builder)
+    # 本机 `.env` 可能真有这把 key，用例必须自己清掉环境，否则在开发机上「不抛」
+    # 而在干净检出（check.sh clean）上抛——同一用例两副面孔（2026-11-12 实测）。
+    monkeypatch.delenv(settings.api_key_env, raising=False)
 
     with pytest.raises(ValueError) as from_config:
         config_module.Config.resolve_api_key(config_module.config, settings)
