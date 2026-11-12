@@ -709,6 +709,42 @@ MUTATIONS: tuple[Mutation, ...] = (
         ("tests/test_api_diagnostics.py::test_bundle_never_contains_secret_values",),
         "诊断包脱敏失效＝导出即泄密，假 key 自检这条硬条当场失守（#239 / spec §8.2）",
     ),
+    # D5-6（#241）打包流水线：这四处漏了 PyInstaller 都不报错，只会「静默少东西」。
+    Mutation(
+        "exe_package_data_dropped",
+        "scripts/build_exe.py",
+        'PACKAGE_DATA_DIRS: tuple[str, ...] = ("prompts", "knowledge", "references")',
+        'PACKAGE_DATA_DIRS: tuple[str, ...] = ("knowledge", "references")',
+        ("tests/test_build_exe.py::test_pyinstaller_args_shape",),
+        "漏收包内资源＝冻结后 prompts/knowledge 读不到，白屏或升版即挂（#241）",
+    ),
+    Mutation(
+        "exe_own_dist_info_dropped",
+        "scripts/build_exe.py",
+        'METADATA_PACKAGES: tuple[str, ...] = (\n'
+        '    "minimax-h3-prompt", "pywebview", "pythonnet", "clr-loader",\n)',
+        'METADATA_PACKAGES: tuple[str, ...] = (\n'
+        '    "pywebview", "pythonnet", "clr-loader",\n)',
+        ("tests/test_build_exe.py::test_pyinstaller_args_shape",),
+        "漏自己的 dist-info＝_resolve_version 抛 PackageNotFoundError，EXE 起不来（#241）",
+    ),
+    Mutation(
+        "exe_output_dir_named_dist",
+        "scripts/build_exe.py",
+        "    return str(Path(args.build_root) / DIST_NAME)\n",
+        '    return str(Path(args.build_root) / "dist")\n',
+        ("tests/test_build_exe.py::test_pyinstaller_args_shape",),
+        "输出目录叫 dist＝与 frontend/dist 互相覆盖（spec §9 的改名裁定）",
+    ),
+    Mutation(
+        "exe_ffmpeg_dropped",
+        "scripts/build_exe.py",
+        '        "--add-binary",\n'
+        '        f"{ffmpeg_path}{os.pathsep}imageio_ffmpeg/binaries",\n',
+        "        #（变异：漏收 ffmpeg 二进制）\n",
+        ("tests/test_build_exe.py::test_pyinstaller_args_shape",),
+        "漏 ffmpeg＝冻结后接缝审计/拼接全挂，而构建不会报错（spec §9）",
+    ),
 )
 
 

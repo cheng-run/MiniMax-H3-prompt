@@ -194,3 +194,61 @@ jobs:
           name: playwright-report
           path: frontend/playwright-report
           retention-days: 7
+
+  # EXE 打包流水线（D5-6 / #241，spec #235 §9 / D5-AC13）：真实交付形态的构建 +
+  # 冻结自检 + artifact。PyInstaller 要打 langchain/langgraph/deepagents 全家桶，
+  # 时间给足；**失败必须让构建变红**——不加 continue-on-error，artifact 只在自检
+  # 通过后才上传。
+  exe-build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: "3.14"
+          enable-cache: true
+
+      - name: 安装 Python 依赖（严格按 uv.lock）
+        run: uv sync --frozen
+
+      - uses: pnpm/action-setup@v4.4.0
+        with:
+          # 从 frontend/package.json 的 packageManager 读取 pnpm 版本，避免第二处硬编码。
+          package_json_file: frontend/package.json
+
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version-file: frontend/.node-version
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: 安装前端依赖（frozen lockfile）
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      # 一条命令：前端构建 → PyInstaller（onedir）→ 目录 + 同名 zip。
+      - name: 构建 EXE 与 zip
+        run: uv run python scripts/build_exe.py
+
+      # 冻结后自检：冻结环境、ffmpeg、桩管线阶段 1/2（退出码即判据）。
+      # 交付形态是 --windowed，没有控制台，所以报告落文件再由下一步打出来。
+      - name: 冻结产物自检
+        run: build-exe/MiniMax-H3-prompt/MiniMax-H3-prompt.exe --self-check --data-root build-exe/selfcheck-data
+
+      - name: 输出自检报告
+        if: always()
+        run: |
+          if (Test-Path build-exe/selfcheck-data/selfcheck.log) {
+            Get-Content -Encoding utf8 build-exe/selfcheck-data/selfcheck.log
+          }
+
+      - uses: actions/upload-artifact@v4.6.2
+        with:
+          name: MiniMax-H3-prompt-exe
+          path: build-exe/MiniMax-H3-prompt.zip
+          if-no-files-found: error
+          retention-days: 7

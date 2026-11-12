@@ -31,6 +31,27 @@ PW_CHANNEL=chrome npx --no-install playwright test   # 本机免下载 chromium 
 走独立的 `tsconfig.e2e.json`（主 tsconfig 只 include `src/`），Playwright 只转译不查类型，
 不补这一层 e2e 就是类型盲区（retro 2026-11-10）。
 
+### EXE 打包与冻结自检（D5-6 / #241）
+
+一条命令完成「前端构建 → PyInstaller 打包 → 产出 zip」（仓库根、Windows）：
+
+```bash
+uv run python scripts/build_exe.py
+```
+
+产物：`build-exe/MiniMax-H3-prompt/`（onedir）与 `build-exe/MiniMax-H3-prompt.zip`。
+**输出目录不叫 `dist/`**——Vite 的产物就在 `frontend/dist`，同名会互相覆盖（spec #235 §9）。
+
+冻结后自检（交付形态是 `--windowed`，没有控制台，报告落文件；退出码即判据）：
+
+```bash
+build-exe/MiniMax-H3-prompt/MiniMax-H3-prompt.exe --self-check --data-root build-exe/selfcheck-data
+cat build-exe/selfcheck-data/selfcheck.log
+```
+
+自检依次验证：冻结环境与包内资源 → ffmpeg 可执行 → 桩管线阶段 1/2（`MINIMAX_FAKE_PIPELINE=1`，
+全程真实 HTTP）。CI 的 `exe-build` job 跑的就是这两条命令，并把 zip 传成 artifact。
+
 ## 坑（都实测踩过）
 
 - **双 vite 主版本 = 类型灾难**：见上表。修法是把应用侧 vite 降到 `^5.4.0`，**不要**靠 upgrade vitest 硬凑；且 `tsconfig.json` 只 `include` `src/`，让 `vite.config.ts` / `vitest.config.ts` 不参与 `vue-tsc`（跨 vite 副本的类型冲突是假阳性，运行期没问题）。

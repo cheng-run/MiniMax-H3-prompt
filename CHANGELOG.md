@@ -10,6 +10,13 @@
 
 ### 新增
 
+- **EXE 打包流水线（D5-6 / #241）**：`uv run python scripts/build_exe.py` 一条命令完成
+  「前端构建 → PyInstaller（onedir）→ zip」，产物是 `build-exe/MiniMax-H3-prompt/` 与
+  同名 zip（输出目录刻意不叫 `dist/`，不与 `frontend/dist` 互相覆盖）。冻结后可用
+  `<EXE> --self-check` 无人值守验证：冻结环境与包内资源、ffmpeg 可执行、桩管线阶段 1/2
+  （报告落 `<data-root>/selfcheck.log`，退出码即判据）。CI 新增 `windows-latest` 的
+  `exe-build` job，构建或自检失败都会让流水线变红，成功后上传 zip artifact。
+
 - **工作台媒体读取（D3-3 / #225，验收 D3-4 / #226）**：素材与成片可按字节读取——
   `GET/HEAD /api/v1/media/{asset_id}` 只服务会话登记根，固定带 `Accept-Ranges`、
   `ETag`、`Last-Modified` 与 `Content-Disposition`，支持单段 Range（`a-b` / `a-` /
