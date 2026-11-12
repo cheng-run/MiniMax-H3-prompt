@@ -625,6 +625,16 @@ MUTATIONS: tuple[Mutation, ...] = (
         "（#228 / D4-AC8）",
     ),
     Mutation(
+        "frontend_hardcodes_artifact_name",
+        "frontend/src/features/sessions/ArtifactsTab.vue",
+        "const byName = computed(() => new Map(props.artifacts.map((item) => [item.name, item])))\n",
+        "const byName = computed(() => new Map(props.artifacts.map((item) => [item.name, item])))\n"
+        "const _MUTATED_ARTIFACT = 'video-prompt.md'\n",
+        ("tests/test_frontend_artifact_names.py"
+         "::test_frontend_does_not_hardcode_artifact_names",),
+        "组件抄产物文件名＝后端登记表改名后前端静默少显示（ADR 0034；2026-11-12 retro）",
+    ),
+    Mutation(
         "fake_switch_ignored",
         "src/minimax_h3_prompt/api/app.py",
         "    fake = fake_pipeline_enabled()\n",
