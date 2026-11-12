@@ -42,6 +42,11 @@ usage() {
       默认先自动 harvest，再同步主树最新 tests 副本；删前检查跟踪文件脏改动，
       并先摘掉 frontend/node_modules 与 .venv 两处目录联接。
       任一项不满足就拒绝；--force 会打印警告后跳过。
+  scripts/worktree.sh remove-path <绝对路径>
+      删除**自建**工作树（integration-* 等非 ticket-NN 命名）。同样先摘
+      frontend/node_modules 与 .venv 联接、并拒绝顶层还有其它联接的树。
+      永远别绕过本脚本直接 `git worktree remove`（2026-11-12 实测会把主树
+      frontend/node_modules 删空）。
 USAGE
   exit 2
 }
@@ -77,6 +82,34 @@ _unlink_junction_or_refuse() {
     return 1
   fi
   echo "  已摘除联接：$label"
+  return 0
+}
+
+# 顶层还有别的联接就成了未知风险：`git worktree remove` 会顺着它删进目标。
+# 只扫顶层（不递归，避免 Get-ChildItem 跟着联接走），发现即拒绝。
+_refuse_top_level_junctions() {
+  local target=$1 found
+  found=$(powershell.exe -NoProfile -Command \
+    "Get-ChildItem -LiteralPath '$(cygpath -w "$target")' -Force -ErrorAction SilentlyContinue | Where-Object { \$_.Attributes -band [IO.FileAttributes]::ReparsePoint } | Select-Object -ExpandProperty Name" \
+    2>/dev/null | tr -d '\r')
+  [ -z "$found" ] && return 0
+  echo "[拒绝] 工作树顶层还有目录联接，删除会穿透到目标：" >&2
+  printf '  %s\n' $found >&2
+  echo "  先人工确认并在目标侧摘掉这些联接（PowerShell Directory.Delete），再删树。" >&2
+  return 1
+}
+
+# 两处已知依赖联接（frontend/node_modules、.venv）：先摘，摘不掉就拒绝。
+_unlink_worktree_deps() {
+  local target=$1 force=${2:-0} dep
+  for dep in "frontend/node_modules" ".venv"; do
+    if ! _unlink_junction_or_refuse "$target/$dep" "$dep"; then
+      if [ "$force" -eq 0 ]; then
+        return 1
+      fi
+      echo "[警告] --force：继续删树，$dep 交给 worktree remove。" >&2
+    fi
+  done
   return 0
 }
 
@@ -284,6 +317,22 @@ EOF
     fi
     echo "已摘除目录联接：$dest（主树 .venv 未动）"
     ;;
+  remove-path)
+    # 自建工作树（例如 worktree/integration-*）不走 ticket-NN 命名，但删除风险一样：
+    # 必须先摘目录联接。2026-11-12 实测：绕过本脚本直接 `git worktree remove`，
+    # 顺着 frontend/node_modules 联接把主树依赖删空。
+    target=${2:-}
+    [ -n "$target" ] || usage
+    case "$target" in
+      /*|[A-Za-z]:[\\/]*) ;;
+      *) echo "[错误] remove-path 要绝对路径：$target" >&2; exit 2 ;;
+    esac
+    [ -d "$target" ] || { echo "[错误] 没有这个目录：$target" >&2; exit 1; }
+    _unlink_worktree_deps "$target" 0 || exit 1
+    _refuse_top_level_junctions "$target" || exit 1
+    git -C "$MAIN_ROOT" worktree remove --force "$target"
+    echo "已删除工作树：$target"
+    ;;
   remove)
     id=${2:-}
     [ -n "$id" ] || usage
@@ -369,14 +418,13 @@ EOF
     # 目录联接必须先摘掉：`git worktree remove` 与 rm -rf 都可能穿透联接删到主树
     # 依赖（2026-11-10 实测主树 frontend/node_modules 被整份清空）。.venv 同样
     # 可能是指向主树的联接（2026-11-12 实测），一并处理。
-    for dep in "frontend/node_modules" ".venv"; do
-      if ! _unlink_junction_or_refuse "$target/$dep" "$dep"; then
-        if [ "$force" -eq 0 ]; then
-          exit 1
-        fi
-        echo "[警告] --force：继续删树，$dep 交给 worktree remove。" >&2
+    _unlink_worktree_deps "$target" "$force" || exit 1
+    if ! _refuse_top_level_junctions "$target"; then
+      if [ "$force" -eq 0 ]; then
+        exit 1
       fi
-    done
+      echo "[警告] --force：顶层联接仍在，继续删树。" >&2
+    fi
     # 此时跟踪文件已干净、测试副本已同步（或用户明确 --force）：允许清掉忽略文件。
     git -C "$MAIN_ROOT" worktree remove --force "$target"
     rm -rf "$MAIN_ROOT/worktree/.base-$id"

@@ -136,3 +136,52 @@ def test_remove_refuses_a_real_venv_directory(tmp_path):
     assert result.returncode != 0
     assert "不是空的目录联接" in result.stderr
     assert (real / "python.exe").is_file(), "拒绝后不能留下半删状态"
+
+
+def _make_junction(link: Path, target: Path) -> None:
+    subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Command",
+         f"New-Item -ItemType Junction -Path '{link}' -Target '{target}' | Out-Null"],
+        check=True, capture_output=True, text=True)
+
+
+def test_remove_path_unlinks_frontend_junction_in_self_made_tree(tmp_path):
+    """自建工作树走 remove-path 时也要先摘 node_modules 联接（2026-11-12 实测：
+    绕过脚本直接 `git worktree remove`，顺着联接把主树依赖删空）。"""
+    if not shutil.which("powershell.exe"):
+        pytest.skip("remove-path 的联接保护依赖 Windows 目录联接")
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    main_dep = repo / "frontend" / "node_modules" / "marker.txt"
+    main_dep.parent.mkdir(parents=True)
+    main_dep.write_text("keep me\n", encoding="utf-8")
+
+    target = repo / "worktree" / "integration-999"
+    _git(repo, "worktree", "add", str(target), "-b", "integ/999", "main")
+    (target / "frontend").mkdir()
+    _make_junction(target / "frontend" / "node_modules", repo / "frontend" / "node_modules")
+
+    result = _run(repo, "remove-path", str(target))
+    assert result.returncode == 0, result.stderr
+    assert not target.exists(), "自建工作树没删掉"
+    assert main_dep.is_file(), "主树 node_modules 被联接穿透删除"
+
+
+def test_remove_path_refuses_unknown_top_level_junction(tmp_path):
+    """顶层还有别的联接就拒绝：git worktree remove 会顺着它删进目标。"""
+    if not shutil.which("powershell.exe"):
+        pytest.skip("顶层联接检测依赖 PowerShell")
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    outside = repo / "outside"
+    (outside / "keep.txt").parent.mkdir(parents=True)
+    (outside / "keep.txt").write_text("keep\n", encoding="utf-8")
+
+    target = repo / "worktree" / "integration-998"
+    _git(repo, "worktree", "add", str(target), "-b", "integ/998", "main")
+    _make_junction(target / "models", outside)
+
+    result = _run(repo, "remove-path", str(target))
+    assert result.returncode != 0
+    assert "顶层还有目录联接" in result.stderr
+    assert (outside / "keep.txt").is_file(), "拒绝后联接目标不能被删"

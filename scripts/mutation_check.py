@@ -810,6 +810,37 @@ MUTATIONS: tuple[Mutation, ...] = (
         ("tests/test_model_config.py::test_missing_key_message_comes_from_one_builder",),
         "缺 key 文案各拼一份＝改落点只改一处，另一处把用户指到旧路径（#243 复审）",
     ),
+    Mutation(
+        "remove_path_skips_junction_guard",
+        "scripts/worktree.sh",
+        '    _unlink_worktree_deps "$target" 0 || exit 1\n'
+        '    _refuse_top_level_junctions "$target" || exit 1\n',
+        "    : # mutation: 跳过联接守卫\n",
+        ("tests/test_worktree_script.py::test_remove_path_unlinks_frontend_junction_in_self_made_tree",),
+        "自建工作树删前不摘联接＝git worktree remove 穿透删进主树依赖（2026-11-12 实测）",
+    ),
+    Mutation(
+        "tests_do_not_isolate_host_env",
+        "tests/conftest.py",
+        '    allowed = os.getenv("H3_TEST_USE_ENV", "").strip().lower() in {"1", "true", "yes"}\n'
+        "    if allowed:\n"
+        "        yield\n"
+        "        return\n",
+        "    yield\n    return\n",
+        ("tests/test_clean_env.py::test_default_mode_really_removes_the_api_keys",),
+        "测试默认不隔离本机 .env＝同一条用例在开发机绿、干净检出红（2026-11-12 实测）",
+    ),
+    Mutation(
+        "machine_path_sneaks_into_scripts",
+        "scripts/ab_b_arm.py",
+        '    PYTHONPATH="$(pwd -W)/src" <主树>/.venv/Scripts/python.exe \\\n',
+        # 故意拼出本机路径，但**不在源码里写成连续字面量**：否则 test_no_machine_paths
+        # 会咬到这条变异自己的夹具（守卫咬夹具不是守卫咬缺陷）。运行时仍是完整路径。
+        '    PYTHONPATH="$(pwd -W)/src" '
+        + "D:" + "/项目/python/MiniMax-H3-prompt/.venv/Scripts/python.exe \\\n",
+        ("tests/test_no_machine_paths.py::test_no_machine_specific_paths_in_shipped_code",),
+        "随仓脚本写死本机绝对路径＝换机器即错（accept_d5 复审曾抓到同款）",
+    ),
 )
 
 
