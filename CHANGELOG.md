@@ -81,6 +81,14 @@
 
 ### 工程化
 
+- 打包链路 spike（D5-1 / #236）：`scripts/build_spike_exe.py` 一条命令用 PyInstaller
+  产出 `build-exe/spike/H3Spike/`（输出目录不叫 `dist`，避开 Vite 的 `frontend/dist`），
+  `scripts/spike_exe.py` 是能被 CDP 连上、并会自己关窗的最小窗口程序。实测
+  **Python 3.14.3 + pywebview 6.2.1 + pythonnet 3.2.1 + PyInstaller 6.22.3** 三者可用，
+  干净环境（PATH 上无 python）下 EXE 能跑、Playwright 能经 `connect_over_cdp` 读真实窗口；
+  `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 那条开调试端口的路线**不通**，
+  必须设 `webview.settings['REMOTE_DEBUGGING_PORT']`。结论与复现命令见
+  `docs/research/2026-11-12-exe-packaging-spike.md`。
 - 本地守卫补齐：`scripts/check.sh full` 现在也跑前端 lint/typecheck 与 **契约漂移**
   （重新导出 OpenAPI / 生成 TS 后 `git diff --exit-code`），不再只有 CI 才咬；
   前端依赖目录不完整时按「未安装」跳过，不再误报成代码坏了。

@@ -3,6 +3,8 @@ __pycache__/
 *.py[oc]
 build/
 dist/
+# PyInstaller 产物（D5-1 起，输出目录特意不叫 dist/，见 spec #235 §9）
+/build-exe/
 wheels/
 *.egg-info
 

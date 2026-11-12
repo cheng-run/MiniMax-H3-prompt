@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>H3 EXE Spike</title>
+    <style>
+      body {
+        font-family: "Segoe UI", system-ui, sans-serif;
+        margin: 0;
+        display: grid;
+        place-items: center;
+        height: 100vh;
+        background: #101418;
+        color: #e6edf3;
+      }
+      main {
+        text-align: center;
+      }
+      h1 {
+        font-size: 20px;
+        font-weight: 600;
+      }
+      #probe {
+        color: #7ee787;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="title">H3 EXE Spike</h1>
+      <p>这是一个本地页面，由 PyInstaller 打进包里，经 WebView2 加载。</p>
+      <p id="probe">等待脚本探针…</p>
+    </main>
+    <script>
+      // 页内探针：CDP 端断言它，说明「窗口真的执行了本地页面」而不只是标题对。
+      document.getElementById("probe").textContent =
+        "probe-ok " + location.href + " " + navigator.userAgent;
+    </script>
+  </body>
+</html>

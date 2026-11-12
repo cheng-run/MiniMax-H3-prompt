@@ -643,6 +643,31 @@ MUTATIONS: tuple[Mutation, ...] = (
          "::test_fake_pipeline_runs_both_stages_without_building_any_model",),
         "环境变量开着也照跑真实管线＝CI 的 E2E 会去打真实模型（#228 / D4-AC15 前提）",
     ),
+    Mutation(
+        "spike_add_data_dropped",
+        "scripts/build_spike_exe.py",
+        '        f"{SCRIPTS_DIR / PAGE_NAME};.",\n',
+        '        f"{SCRIPTS_DIR / PAGE_NAME}.missing;.",\n',
+        ("tests/test_spike_exe.py::test_pyinstaller_args_shape",),
+        "本地页面不进包＝窗口起来一片空白，而构建照样报 PASS（#236）",
+    ),
+    Mutation(
+        "spike_copy_metadata_dropped",
+        "scripts/build_spike_exe.py",
+        '        "--copy-metadata",\n        "pywebview",\n',
+        "",
+        ("tests/test_spike_exe.py::test_pyinstaller_args_shape",),
+        "dist-info 不进包＝冻结后 importlib.metadata 读不到版本号，EXE 自报「未安装」，"
+        "证据静默断掉（#236 首次构建实测）",
+    ),
+    Mutation(
+        "spike_dist_dir_named_dist",
+        "scripts/build_spike_exe.py",
+        '    return str(Path(args.build_root) / "spike")',
+        '    return str(Path(args.build_root) / "dist")',
+        ("tests/test_spike_exe.py::test_build_output_dir_is_not_named_dist",),
+        "输出目录改回 dist＝和 Vite 的 frontend/dist 同名互相覆盖（spec #235 §9）",
+    ),
 )
 
 
