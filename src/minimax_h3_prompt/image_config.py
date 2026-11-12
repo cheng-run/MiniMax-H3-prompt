@@ -28,13 +28,13 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import yaml
+from . import paths
 from .errors import ConfigError
 
-# 项目根目录：src/minimax_h3_prompt/image_config.py -> [0]=包, [1]=src, [2]=项目根。
-# 不 import config.PROJECT_ROOT：那会连带实例化模型配置（读 agent.yaml + .env），
-# 而本模块只关心这三档分配。
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-IMAGE_CONFIG_PATH = PROJECT_ROOT / "config" / "image.yaml"
+# 配置文件落点由路径模块唯一产出（#237）：开发态仓库 ``config/``，冻结态 ``data/config/``。
+# 不 import ``config``：那会连带实例化模型配置（读 agent.yaml + .env），而本模块只关心
+# 这三档分配。
+IMAGE_CONFIG_PATH = paths.image_config_path()
 
 # 三档资产的键。与 ``generation.KIND_LABELS`` 的键**同一组**（值是那边的中文标签，
 # 由 ``nodes`` 逆映射取键），不另立第二套命名。

@@ -16,13 +16,13 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from . import paths
 from .errors import ConfigError
 
-# 项目根目录：src/minimax_h3_prompt/library_config.py -> [0]=包, [1]=src, [2]=项目根。
-# 不 import config.PROJECT_ROOT：那会连带实例化模型配置（读 agent.yaml + .env），
-# 而本模块只关心库根这一个路径。
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-LIBRARY_CONFIG_PATH = PROJECT_ROOT / "config" / "library.yaml"
+# 配置文件落点由路径模块唯一产出（#237）：开发态仓库 ``config/``，冻结态 ``data/config/``。
+# 不 import ``config``：那会连带实例化模型配置（读 agent.yaml + .env），而本模块只关心
+# 库根这一个路径。
+LIBRARY_CONFIG_PATH = paths.library_config_path()
 
 # 默认库根（spec #84 D1）。仓库在 Windows 上跑，默认值就用用户机器的落点；
 # 别的机器靠 config/library.yaml 覆盖，不改代码。

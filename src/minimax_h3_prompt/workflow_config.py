@@ -22,13 +22,13 @@ from typing import Any, Mapping
 import yaml
 
 from .kinds import KIND_AUDIO, KIND_PICTURE, KIND_VIDEO, KINDS
+from . import paths
 from .errors import ConfigError
 
-# 项目根目录：src/minimax_h3_prompt/workflow_config.py -> parents[0]=包, [1]=src, [2]=根。
-# 不 import config.PROJECT_ROOT：那会连带实例化模型配置（读 agent.yaml + .env），
-# 而本模块的测试只需要槽位数——两本账不互相拖累。
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-WORKFLOW_CONFIG_PATH = PROJECT_ROOT / "config" / "workflow.yaml"
+# 配置文件落点由路径模块唯一产出（#237）：开发态仓库 ``config/``，冻结态 ``data/config/``。
+# 不 import ``config``：那会连带实例化模型配置（读 agent.yaml + .env），而本模块的测试
+# 只需要槽位数——两本账不互相拖累。
+WORKFLOW_CONFIG_PATH = paths.workflow_config_path()
 
 # 登记工作流是 V2 的 **9 图槽**版本（issue #86 / spec #84 D5）：9 是官方 API 的单次请求
 # 上限（≤9 图 + ≤3 视频 + ≤3 音频、总文件 ≤12），不是节点 UI 上限。24 槽 V3 从一开始

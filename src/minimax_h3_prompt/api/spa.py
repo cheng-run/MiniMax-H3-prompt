@@ -18,8 +18,11 @@ from fastapi.responses import FileResponse, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.staticfiles import StaticFiles
 
-# 仓库根 = src/minimax_h3_prompt/api/spa.py 的 parents[3]。
-DEFAULT_DIST = Path(__file__).resolve().parents[3] / "frontend" / "dist"
+from .. import paths
+
+# 前端构建产物目录：由路径模块唯一产出（开发态仓库内 ``frontend/dist``，冻结态解包目录下
+# 的同一相对路径，见 ``paths.frontend_dist_dir``）。别再在这里写 ``parents[N]``。
+DEFAULT_DIST = paths.frontend_dist_dir()
 
 _BUILD_HINT = "前端构建产物不存在，请先在 frontend/ 目录执行 pnpm build。"
 

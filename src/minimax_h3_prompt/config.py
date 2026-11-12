@@ -10,11 +10,17 @@ from typing import Any
 import yaml
 from dotenv import load_dotenv
 
+from . import paths
 from .errors import ConfigError
 
-# 项目根目录：src/minimax_h3_prompt/config.py -> parents[0]=包, [1]=src, [2]=项目根
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CONFIG_PATH = PROJECT_ROOT / "config" / "agent.yaml"
+# 路径一律由 ``paths`` 唯一产出（#237 / spec #235 §6）：它是轻量模块，不读 YAML/.env，
+# 因此在这里 import 不会引出循环依赖。
+#
+# ``PROJECT_ROOT`` 保留的是**只读资源根**的旧名字：开发态 = 仓库根，冻结态 = EXE 解包
+# 目录。目前只有 ``.env`` 还在按它解析；冻结态那个位置没有 ``.env``（密钥改落
+# ``%APPDATA%`` 是 D5-3 / #238 的事，本票不动密钥落位）。
+PROJECT_ROOT = paths.resource_root()
+CONFIG_PATH = paths.config_path()
 
 # 执行段（Segment）拆分约束：段时长必须为整数秒。**首尾帧链规划保守档 4–10**
 # （ADR 0012；节点网格实测 4–15，工作流 62 未复核前规划不放宽——旧注释
@@ -190,9 +196,10 @@ class Config:
         # 向导每次提问时都从这个对象读，所以改 YAML 重启即生效，不存在第二处硬编码默认值。
         self.max_clarification_rounds: int = int(pipeline.get("max_clarification_rounds", 3))
         self.roundtable_max_rounds: int = int(pipeline.get("roundtable_max_rounds", 2))
-        self.output_path: Path = PROJECT_ROOT / pipeline.get("output_path", "output/final_prompt.txt")
+        self.output_path: Path = paths.data_path(
+            pipeline.get("output_path", "output/final_prompt.txt"))
         self.save_stages: bool = bool(pipeline.get("save_stages", True))
-        self.stages_path: Path = PROJECT_ROOT / pipeline.get("stages_path", "output/stages")
+        self.stages_path: Path = paths.data_path(pipeline.get("stages_path", "output/stages"))
         # 生图提示词 / 视频提示词的日常常识 QA（每代一次 LLM 审核；可关以省成本）。
         self.common_sense_qa: bool = bool(pipeline.get("common_sense_qa", True))
 
@@ -202,8 +209,9 @@ class Config:
 
         self.default_style: str = defaults.get("style", "Cinematic")
         self.default_language: str = defaults.get("language", "Chinese")
-        # 会话根目录：两阶段向导的会话落盘与关键帧暂存位置（项目内，不再依赖外部资产库）。
-        self.sessions_root: Path = PROJECT_ROOT / defaults.get("sessions_root", "output/sessions")
+        # 会话根目录：两阶段向导的会话落盘与关键帧暂存位置。冻结态固定 ``data/sessions``、
+        # 开发态 ``output/sessions``——两条口径与理由写在 ``paths.sessions_root`` 里。
+        self.sessions_root: Path = paths.sessions_root(defaults.get("sessions_root"))
         # 旧字段保留作为最低优先级的模型名 fallback。
         self.model_override: str = (self.raw.get("model") or "").strip()
 
