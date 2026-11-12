@@ -9,6 +9,11 @@
 「其余端点不变」——这是**用户 2026-11-12 明确裁定的例外**（spec §7 要求概览页显示
 密钥文件的绝对路径与格式，又不新增端点，只能从健康接口读）。四个字段**只读**，
 ``missing_keys`` 只给变量名、绝不含密钥值（spec §7 脱敏红线）。
+
+**``base_url``** 同样是加法扩展（#237，spec #235 §5.2 / D5-AC2：实际地址要在概览页
+可得）。值只从 ``app.state.base_url`` 读——它由启动入口在服务就绪后写入，是实际
+端口的单一来源；这里**不自己拼端口**，否则就有第二处口径（``--port 0`` 时内核分配
+的端口只有入口知道）。
 """
 from __future__ import annotations
 
@@ -25,7 +30,8 @@ router = APIRouter(prefix="/api/v1", tags=["health"])
 
 
 class HealthResponse(BaseModel):
-    """健康状态资源。字段约定见 D1 spec §7.1；后四个见 #238 的裁定说明。"""
+    """健康状态资源。字段约定见 D1 spec §7.1；``data_root``–``missing_keys`` 见 #238，
+    ``base_url`` 见 #237。"""
 
     status: Literal["ok"]
     service: str
@@ -38,6 +44,9 @@ class HealthResponse(BaseModel):
     env_path: str
     # 当前缺失的密钥**变量名**（只有名字）。空列表 = 两档模型都能解析出 key。
     missing_keys: list[str]
+    # 实际监听地址（``http://127.0.0.1:<实际端口>/``），入口写入 ``app.state.base_url``。
+    # **空串 = 未知**（测试直接 ``create_app()``、或没按入口启动），界面据此不显示。
+    base_url: str
 
 
 @router.get("/health", response_model=HealthResponse, responses=COMMON_ERROR_RESPONSES)
@@ -57,4 +66,7 @@ def get_health(request: Request, response: Response) -> HealthResponse:
         config_path=str(paths.config_path()),
         env_path=str(paths.env_file_path()),
         missing_keys=runtime_config.missing_api_keys(),
+        # 只读入口落下的事实：没有这个属性（直接 create_app 的测试/嵌入用法）就是空串，
+        # 不抛错也不回落成自己算的端口——那会造出第二处端口口径。
+        base_url=getattr(request.app.state, "base_url", ""),
     )

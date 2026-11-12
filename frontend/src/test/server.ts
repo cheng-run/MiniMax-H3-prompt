@@ -13,7 +13,8 @@ const emptySessionsHandler = http.get('http://localhost/api/v1/sessions', () =>
   HttpResponse.json({ items: [] }),
 )
 
-// 健康资源（D5-3 / #238 起概览页也读它：missing_keys 非空就显示配密钥提示）。
+// 健康资源（D5-3 / #238 起概览页也读它：missing_keys 非空就显示配密钥提示；
+// #237 起还读 base_url 显示本地地址，空串 = 未知，默认桩按「未知」给）。
 // 默认桩是「密钥齐全」形态；缺密钥的用例自己 server.use 覆盖。
 const healthHandler = http.get('http://localhost/api/v1/health', () =>
   HttpResponse.json({
@@ -24,6 +25,7 @@ const healthHandler = http.get('http://localhost/api/v1/health', () =>
     config_path: 'D:/app/data/config/agent.yaml',
     env_path: 'C:/Users/tester/AppData/Roaming/MiniMax-H3-prompt/.env',
     missing_keys: [],
+    base_url: '',
   }),
 )
 

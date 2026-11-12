@@ -282,8 +282,12 @@
         "type": "object"
       },
       "HealthResponse": {
-        "description": "健康状态资源。字段约定见 D1 spec §7.1；后四个见 #238 的裁定说明。",
+        "description": "健康状态资源。字段约定见 D1 spec §7.1；``data_root``–``missing_keys`` 见 #238，\n``base_url`` 见 #237。",
         "properties": {
+          "base_url": {
+            "title": "Base Url",
+            "type": "string"
+          },
           "config_path": {
             "title": "Config Path",
             "type": "string"
@@ -324,7 +328,8 @@
           "data_root",
           "config_path",
           "env_path",
-          "missing_keys"
+          "missing_keys",
+          "base_url"
         ],
         "title": "HealthResponse",
         "type": "object"

@@ -160,6 +160,50 @@ def test_auto_port_is_not_probed_for_availability() -> None:
     entry.ensure_port_available(entry.HOST, 0)  # 不抛即通过
 
 
+# -------------------------------------------------------- 环境变量覆盖（spec §5.2）
+
+def test_env_port_is_used_when_cli_is_absent(monkeypatch) -> None:
+    monkeypatch.setenv(entry.PORT_ENV, "9123")
+    assert entry.resolve_port(None) == 9123
+
+
+def test_cli_port_beats_env(monkeypatch) -> None:
+    """优先级：命令行 > 环境变量 > 形态默认。"""
+    monkeypatch.setenv(entry.PORT_ENV, "9123")
+    assert entry.resolve_port(9999) == 9999
+    assert entry.resolve_port(0) == 0
+
+
+def test_invalid_env_port_names_the_variable_and_the_expected_value(monkeypatch) -> None:
+    monkeypatch.setenv(entry.PORT_ENV, "eighty")
+    with pytest.raises(entry.StartupError) as excinfo:
+        entry.resolve_port(None)
+    message = str(excinfo.value)
+    assert entry.PORT_ENV in message
+    assert "整数" in message
+
+    monkeypatch.setenv(entry.PORT_ENV, "70000")
+    with pytest.raises(entry.StartupError) as excinfo:
+        entry.resolve_port(None)
+    assert entry.PORT_ENV in str(excinfo.value)
+
+
+def test_invalid_env_port_exits_as_startup_failure(monkeypatch, capsys) -> None:
+    monkeypatch.setenv(entry.PORT_ENV, "not-a-port")
+    assert entry.main([]) == entry.EXIT_STARTUP_FAILED
+    assert entry.PORT_ENV in capsys.readouterr().err
+
+
+def test_env_data_root_is_used_when_cli_is_absent(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv(entry.DATA_ROOT_ENV, str(tmp_path / "data"))
+    assert entry.resolve_data_root(None) == str(tmp_path / "data")
+
+
+def test_cli_data_root_beats_env(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv(entry.DATA_ROOT_ENV, str(tmp_path / "from-env"))
+    assert entry.resolve_data_root(str(tmp_path / "from-cli")) == str(tmp_path / "from-cli")
+
+
 # ------------------------------------------------------------------- 真实子进程
 
 def test_child_server_serves_on_a_random_port_and_announces_the_address(tmp_path: Path) -> None:

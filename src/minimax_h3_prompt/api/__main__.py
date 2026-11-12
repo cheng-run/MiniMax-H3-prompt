@@ -9,6 +9,8 @@
    import 之前解析**——``config = Config()`` 是模块级单例，连 ``api.app`` 一被 import 就
    会建出来（``observability`` 在模块顶层 ``from .config import config``），迟到的覆盖
    不会回头改已经算好的路径。所以本模块顶层只 import 轻量的 ``uvicorn`` 与 ``paths``。
+   端口与数据根都可用环境变量覆盖（``H3_PORT`` / ``H3_DATA_ROOT``，spec §5.2），优先级
+   是**命令行 > 环境变量 > 形态默认**；非法 ``H3_PORT`` 给可操作报错，不悄悄退回默认。
 3. **配置骨架**：数据根定了之后、import ``.app`` 之前，把缺失的配置模板从内置资源复制到
    ``<数据根>/config/``（``bootstrap.ensure_config_files``，spec §7）。已存在的不覆盖。
 4. **单实例**：同一数据根起第二个实例时提示后退出（``single_instance``）。
@@ -25,13 +27,14 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import socket
 import sys
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 import uvicorn
 
@@ -43,6 +46,12 @@ HOST = "127.0.0.1"
 DEV_PORT = 8000
 # ``--port 0`` / 冻结态默认：让内核分配一个空闲端口。
 PORT_AUTO = 0
+
+# 环境变量覆盖（spec §5.2「启动参数与环境变量可覆盖」）：优先级为
+# **命令行 > 环境变量 > 形态默认**。带 ``H3_`` 前缀，避免和别的本地服务的 ``PORT``
+# 撞车；冻结形态双击启动时没有命令行，用户只能靠这两个变量改端口/数据根。
+PORT_ENV = "H3_PORT"
+DATA_ROOT_ENV = "H3_DATA_ROOT"
 
 # 启动失败的各档退出码：验收脚本与窗口外壳按它区分「端口被占」「已有实例」「起不来」。
 EXIT_STARTUP_FAILED = 1
@@ -154,23 +163,58 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--port", type=int, default=None,
-        help="监听端口；0 = 自动挑一个空闲端口（默认：开发形态 8000，冻结形态自动）。",
+        help="监听端口；0 = 自动挑一个空闲端口（默认：开发形态 8000，冻结形态自动）。"
+             f"未传时读环境变量 {PORT_ENV}。",
     )
     parser.add_argument(
         "--data-root", default=None,
-        help="可写数据根（会话/产物/日志/配置）；默认：开发形态仓库根，冻结形态 EXE 同级 data/。",
+        help="可写数据根（会话/产物/日志/配置）；默认：开发形态仓库根，冻结形态 EXE 同级 data/。"
+             f"未传时读环境变量 {DATA_ROOT_ENV}。",
     )
     return parser.parse_args(argv)
 
 
 def default_port() -> int:
-    """没给 ``--port`` 时的端口：开发形态 8000，冻结形态自动。"""
+    """没给 ``--port`` 也没设环境变量时的端口：开发形态 8000，冻结形态自动。"""
     return PORT_AUTO if paths.is_frozen() else DEV_PORT
 
 
-def resolve_port(requested: int | None) -> int:
-    """把命令行取值翻成实际要绑的端口；``None`` 走形态默认。"""
-    return default_port() if requested is None else requested
+def _env_text(environ: Mapping[str, str] | None, name: str) -> str:
+    env = os.environ if environ is None else environ
+    return str(env.get(name, "")).strip()
+
+
+def resolve_port(requested: int | None,
+                 environ: Mapping[str, str] | None = None) -> int:
+    """把「命令行 + 环境变量」翻成实际要绑的端口。
+
+    优先级：``--port`` > ``H3_PORT`` > 形态默认。环境变量的**非法值直接报错**而不是
+    悄悄退回默认——用户改端口失败时，最怕的是「看起来生效了、其实没生效」。
+    """
+    if requested is not None:
+        return requested
+    raw = _env_text(environ, PORT_ENV)
+    if not raw:
+        return default_port()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise StartupError(
+            f"{PORT_ENV}={raw!r} 不是整数。请设成 0–65535 之间的整数（0 = 自动挑端口），"
+            f"或删掉这个环境变量用默认值，或用 --port 显式指定。") from exc
+    if not 0 <= value <= 65535:
+        raise StartupError(
+            f"{PORT_ENV}={value} 超出范围（0–65535）。0 = 自动挑一个空闲端口；"
+            f"改成合法值后重试，或删掉这个环境变量用默认值。")
+    return value
+
+
+def resolve_data_root(requested: str | None,
+                      environ: Mapping[str, str] | None = None) -> str | None:
+    """数据根：``--data-root`` > ``H3_DATA_ROOT`` > ``None``（按形态取默认根）。"""
+    if requested is not None and str(requested).strip():
+        return requested
+    return _env_text(environ, DATA_ROOT_ENV) or None
 
 
 def ensure_port_available(host: str, port: int) -> None:
@@ -226,7 +270,8 @@ def start(argv: Sequence[str] | None = None) -> ServerHandle:
     _force_utf8_stdio()
     args = parse_args(argv)
     # 顺序是硬约束：数据根必须在 import ``.app``（连带 config 单例）之前落下。
-    paths.set_data_root(args.data_root)
+    # 取值优先级：``--data-root`` > ``H3_DATA_ROOT`` > 形态默认（spec §5.2）。
+    paths.set_data_root(resolve_data_root(args.data_root))
     # 首次启动补配置骨架（D5-3 / #238）：``config = Config()`` 在 import 期就读 YAML，
     # 所以复制模板必须早于下面那行 ``from .app import create_app``。已存在的文件不覆盖。
     bootstrap.ensure_config_files()

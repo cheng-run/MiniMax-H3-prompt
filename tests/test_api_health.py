@@ -7,6 +7,10 @@
 #238 追加的四个字段（``data_root`` / ``config_path`` / ``env_path`` / ``missing_keys``）
 是用户 2026-11-12 明确裁定的**加法扩展**：spec §13「其余端点不变」在这里让位于
 「概览页要能告诉用户去哪个文件配密钥」。它们只读、**只有键名没有值**。
+
+#237 再加 ``base_url``（spec #235 §5.2 / D5-AC2）：值只从 ``app.state.base_url`` 读，
+入口写它是实际端口的单一来源；直接 ``create_app()`` 的测试没有这个属性，回落成空串
+（= 未知），**不是 500、也不是自己拼的端口**。
 """
 from __future__ import annotations
 
@@ -45,10 +49,12 @@ def test_health_returns_resource_with_no_store_header() -> None:
     assert body["status"] == "ok"
     assert body["service"] == "minimax-h3-prompt"
     assert body["version"] == importlib.metadata.version("minimax-h3-prompt")
-    # 字段集合是闭合的：多一个少一个都要在这里看见（D1 三件 + D5-3 四件）。
+    # 字段集合是闭合的：多一个少一个都要在这里看见（D1 三件 + D5-3 四件 + #237 的
+    # base_url）。
     assert set(body) == {
         "status", "service", "version",
         "data_root", "config_path", "env_path", "missing_keys",
+        "base_url",
     }
     assert isinstance(body["missing_keys"], list)
     assert resp.headers["cache-control"] == "no-store"
@@ -95,6 +101,26 @@ def test_health_never_carries_key_values(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert secret not in resp.text
     assert resp.json()["missing_keys"] == []
+
+
+def test_health_reports_the_actual_base_url_from_app_state() -> None:
+    """启动入口落下的实际地址原样返回（端口不在这里二次拼接）。"""
+    from minimax_h3_prompt.api.app import create_app
+
+    app = create_app()
+    app.state.base_url = "http://127.0.0.1:51234/"
+
+    body = workbench_client(app).get("/api/v1/health").json()
+
+    assert body["base_url"] == "http://127.0.0.1:51234/"
+
+
+def test_health_base_url_is_empty_when_app_was_not_started_by_the_entrypoint() -> None:
+    """直接 ``create_app()`` 的 app 没有这个属性：回落空串（= 未知），不是 500。"""
+    resp = _client().get("/api/v1/health")
+
+    assert resp.status_code == 200
+    assert resp.json()["base_url"] == ""
 
 
 def test_health_version_read_failure_fails_startup(monkeypatch: pytest.MonkeyPatch) -> None:

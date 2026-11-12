@@ -449,9 +449,12 @@ export interface components {
         };
         /**
          * HealthResponse
-         * @description 健康状态资源。字段约定见 D1 spec §7.1；后四个见 #238 的裁定说明。
+         * @description 健康状态资源。字段约定见 D1 spec §7.1；``data_root``–``missing_keys`` 见 #238，
+         *     ``base_url`` 见 #237。
          */
         HealthResponse: {
+            /** Base Url */
+            base_url: string;
             /** Config Path */
             config_path: string;
             /** Data Root */

@@ -73,6 +73,24 @@ async function copyEnvPath(): Promise<void> {
     copyState.value = 'failed'
   }
 }
+
+// 实际地址（#237 / spec #235 §5.2、D5-AC2）：启动入口把 `http://127.0.0.1:<实际端口>/`
+// 写进 app.state.base_url，健康资源原样下发。端口只在入口算一次，界面不再拼。
+// 空串 = 未知（测试直接 create_app、或没按入口启动）——这时整块不显示，不显示假地址。
+const baseUrl = computed(() => health.value?.base_url ?? '')
+
+// 与密钥路径的复制按钮分开存状态：否则点一个按钮会把另一个的文案也改掉。
+const addressCopyState = ref<'idle' | 'copied' | 'failed'>('idle')
+const addressCopyLabel = computed(() => (addressCopyState.value === 'copied' ? '已复制' : '复制'))
+
+async function copyBaseUrl(): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(baseUrl.value)
+    addressCopyState.value = 'copied'
+  } catch {
+    addressCopyState.value = 'failed'
+  }
+}
 </script>
 
 <template>
@@ -83,6 +101,16 @@ async function copyEnvPath(): Promise<void> {
         {{ showForm ? '收起新建' : '新建会话' }}
       </Button>
     </div>
+
+    <section v-if="baseUrl" class="local-address">
+      <p class="local-address__line">
+        本地地址：<code>{{ baseUrl }}</code>
+      </p>
+      <Button variant="secondary" @click="copyBaseUrl">{{ addressCopyLabel }}</Button>
+      <p v-if="addressCopyState === 'failed'" class="local-address__failed">
+        复制失败：请手动选中上面的地址复制。
+      </p>
+    </section>
 
     <section v-if="missingKeys.length > 0" class="config-hint">
       <h2 class="config-hint__title">还没有配置模型密钥</h2>
@@ -146,6 +174,26 @@ async function copyEnvPath(): Promise<void> {
 }
 .sessions__empty {
   color: var(--color-text-muted);
+}
+.local-address {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+.local-address__line,
+.local-address__failed {
+  margin: 0;
+  color: var(--color-text-muted);
+  overflow-wrap: anywhere;
+}
+.local-address__line {
+  flex: 1 1 auto;
 }
 .config-hint {
   display: flex;

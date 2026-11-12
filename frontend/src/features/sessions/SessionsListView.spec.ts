@@ -22,6 +22,8 @@ function healthBody(overrides: Record<string, unknown> = {}) {
     config_path: 'D:/app/data/config/agent.yaml',
     env_path: 'C:/Users/tester/AppData/Roaming/MiniMax-H3-prompt/.env',
     missing_keys: [],
+    // 空串 = 未知（测试直接 create_app / 未按入口启动），与契约的口径一致。
+    base_url: '',
     ...overrides,
   }
 }
@@ -207,5 +209,49 @@ describe('SessionsListView 缺密钥提示（#238）', () => {
     await settle()
 
     expect(wrapper.find('.config-hint').exists()).toBe(false)
+  })
+})
+
+describe('SessionsListView 本地地址（#237 / D5-AC2）', () => {
+  const baseUrl = 'http://127.0.0.1:51234/'
+
+  it('健康资源带实际地址时显示「本地地址」与地址本身', async () => {
+    server.use(http.get(healthUrl, () => HttpResponse.json(healthBody({ base_url: baseUrl }))))
+
+    const { wrapper, router } = mountWithPlugins(SessionsListView, { withRouter: true })
+    await router!.isReady()
+    await settle()
+
+    const block = wrapper.find('.local-address')
+    expect(block.exists()).toBe(true)
+    expect(block.text()).toContain('本地地址')
+    expect(block.text()).toContain(baseUrl)
+  })
+
+  it('「复制」把实际地址写进剪贴板', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    server.use(http.get(healthUrl, () => HttpResponse.json(healthBody({ base_url: baseUrl }))))
+
+    const { wrapper, router } = mountWithPlugins(SessionsListView, { withRouter: true })
+    await router!.isReady()
+    await settle()
+
+    const copy = wrapper.findAll('button').find((b) => b.text().includes('复制'))!
+    await copy.trigger('click')
+    await flushPromises()
+
+    expect(writeText).toHaveBeenCalledWith(baseUrl)
+    expect(wrapper.find('.local-address').text()).toContain('已复制')
+  })
+
+  it('地址未知（空串）时整块不显示', async () => {
+    server.use(http.get(healthUrl, () => HttpResponse.json(healthBody({ base_url: '' }))))
+
+    const { wrapper, router } = mountWithPlugins(SessionsListView, { withRouter: true })
+    await router!.isReady()
+    await settle()
+
+    expect(wrapper.find('.local-address').exists()).toBe(false)
   })
 })

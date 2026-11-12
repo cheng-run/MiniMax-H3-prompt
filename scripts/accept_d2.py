@@ -55,11 +55,12 @@ PROBLEM_CONTENT_TYPE = "application/problem+json"
 
 # 健康资源的字段集合（D2-AC18 用它判「服务没有多暴露字段」）。#238 起是七件：
 # D1 的三件 + D5-3 追加的四件（用户 2026-11-12 裁定的加法扩展，见
-# ``api/routes/health.py``）。**加字段要同步这里**，否则 D2-AC18 会把正常扩展报成
-# 「健康接口多暴露了东西」。
+# ``api/routes/health.py``）；#237 再加 ``base_url``（spec #235 §5.2 / D5-AC2：
+# 实际地址要在概览页可得），共八件。**加字段要同步这里**，否则 D2-AC18 会把正常扩展
+# 报成「健康接口多暴露了东西」。
 HEALTH_FIELDS = frozenset({
     "status", "service", "version",
-    "data_root", "config_path", "env_path", "missing_keys",
+    "data_root", "config_path", "env_path", "missing_keys", "base_url",
 })
 
 # 这些 AC 的证据不来自本驱动器：取消、强杀、SSE 重连、契约漂移、确定性桩、向导
