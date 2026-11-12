@@ -138,18 +138,23 @@ run_types() {
 # Prettier --check 是 2026-11-10 #225 retro 补的：CI 的 frontend-quality 一直有
 # `format:check`，本地没有——main 因此红了好几次而没人看见。它与 eslint 不同：
 # 只判格式，秒级，所以放在同一档。
+frontend_ready() {
+  local frontend=$1
+  # 判据是**可执行入口**而不是目录存在：目录联接被误删后会留下一个空的
+  # `node_modules`，`-d` 仍为真，守卫会跑进 `./node_modules/.bin/eslint` 并报
+  # "No such file or directory"——把「依赖没装」误报成代码坏了（2026-11-10 实测）。
+  [ -e "$frontend/node_modules/.bin/eslint" ] \
+      && [ -e "$frontend/node_modules/.bin/vue-tsc" ] \
+      && [ -e "$frontend/node_modules/.bin/prettier" ] \
+      && [ -e "$frontend/node_modules/.bin/tsc" ]
+}
+
 run_frontend_guard() {
   local force=${1:-false}
   local root frontend
   root=$(git rev-parse --show-toplevel)
   frontend="$root/frontend"
-  # 判据是**可执行入口**而不是目录存在：目录联接被误删后会留下一个空的
-  # `node_modules`，`-d` 仍为真，守卫会跑进 `./node_modules/.bin/eslint` 并报
-  # "No such file or directory"——把「依赖没装」误报成代码坏了（2026-11-10 实测）。
-  if [ ! -e "$frontend/node_modules/.bin/eslint" ] \
-      || [ ! -e "$frontend/node_modules/.bin/vue-tsc" ] \
-      || [ ! -e "$frontend/node_modules/.bin/prettier" ] \
-      || [ ! -e "$frontend/node_modules/.bin/tsc" ]; then
+  if ! frontend_ready "$frontend"; then
     echo "[check] frontend: 跳过（前端依赖未安装或不完整：cd frontend && npx pnpm@11.7.0 install）"
     return 0
   fi
@@ -199,7 +204,8 @@ run_contract_guard() {
   fi
   rm -f "$exported"
   if ! command -v node >/dev/null 2>&1 \
-      || [ ! -e "$frontend/node_modules/openapi-typescript" ]; then
+      || [ ! -e "$frontend/node_modules/openapi-typescript" ] \
+      || ! frontend_ready "$frontend"; then
     echo "[check] contracts: 跳过 TS 生成（node 或前端依赖未就绪）"
     return 0
   fi
@@ -284,8 +290,9 @@ case "$MODE" in
     "$PY" -m ruff check src tests scripts
     ;;
   clean)
-    # 干净环境（retro 2026-11-02）：把本机 .env 从测试里摘掉，模拟 CI 的干净检出。
-    # 推送前跑一次，就能看见「远端会看见而本地看不见」的那类红（首跑 CI 红了三条）。
+    # 干净环境（retro 2026-11-02）。2026-11-12 起测试**默认**就隔离本机 .env，
+    # 这一档因此与 full 等价；保留它是因为推送前的习惯命令与 CI 口径都指向这里，
+    # 也保留 H3_TEST_NO_ENV 这个兼容别名（现在与默认行为相同）。
     echo "[check] clean: 干净环境（无 .env / 无模型环境变量）下跑全量"
     report_timeout_guard
     H3_TEST_NO_ENV=1 "$PY" -m pytest -q

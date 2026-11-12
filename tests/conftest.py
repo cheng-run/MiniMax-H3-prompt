@@ -169,17 +169,20 @@ def no_real_network(request, monkeypatch):
 
 
 @pytest.fixture(scope="session", autouse=True)
-def clean_env_when_requested():
-    """``H3_TEST_NO_ENV=1``：把本机 ``.env`` 从测试里摘掉，模拟 CI 的干净检出。
+def isolate_host_env():
+    """**默认**把本机 ``.env`` 从测试进程里摘掉（2026-11-12 retro）。
 
-    背景（2026-11-02 CI 首跑）：一条用例真建了 LLM 客户端——本机 ``.env`` 有 key
-    能过，干净检出抛「缺失 MINIMAX_API_KEY」。这类失败**本地永远看不见**，只能
-    在推送前主动模拟。入口是 ``scripts/check.sh clean``。
+    背景：原先只有 ``H3_TEST_NO_ENV=1``（``check.sh clean``）才摘，于是同一个用例
+    在本机 ``.env`` 有 key 时绿、在干净检出红——2026-11-12 实测一条缺 key 用例在
+    工作树绿、拆回 main 后全量红，正是这个方向。现在反转为「默认隔离」：有真实
+    环境需求时用 ``H3_TEST_USE_ENV=1`` 显式放行（与 ``no_real_network`` 的
+    opt-in 同形），``H3_TEST_NO_ENV=1`` 保留为兼容别名、效果相同。
 
     做法：停掉 ``load_dotenv`` 并把环境里已加载的模型相关变量摘掉（保存后还原）。
     不碰用户的 ``.env`` 文件本身——只影响本进程。
     """
-    if os.getenv("H3_TEST_NO_ENV", "").strip().lower() not in {"1", "true", "yes"}:
+    allowed = os.getenv("H3_TEST_USE_ENV", "").strip().lower() in {"1", "true", "yes"}
+    if allowed:
         yield
         return
     from minimax_h3_prompt import config as config_module
