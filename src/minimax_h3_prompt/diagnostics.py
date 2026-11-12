@@ -38,10 +38,14 @@ LOGS_PREFIX = "logs/"
 SESSIONS_PREFIX = "sessions/"
 ARTIFACTS_PREFIX = "artifacts/"
 
-# 这些键名按「密钥」处理，值一律 ``<redacted>``。按后缀/全等认，不列死名单：
+# 这些键名按「密钥」处理，值一律 ``<redacted>``。后缀表从 ``logging_setup`` 派生，
+# 不在这里抄第二份（#243 复审：两处口径差了 ``_credential``，日志与诊断包会对不上）。
 # ``api_key_env`` 是**键名**不是密钥值，故意不命中（排障要看它）。
-_SENSITIVE_KEY_NAMES = frozenset({"key", "token", "secret", "password", "credential"})
-_SENSITIVE_KEY_SUFFIXES = ("_key", "_token", "_secret", "_password", "_credential")
+_SENSITIVE_KEY_SUFFIXES: tuple[str, ...] = tuple(
+    suffix.lower() for suffix in logging_setup.SENSITIVE_SUFFIXES)
+# 全等键名（``key`` / ``token`` / …）就是后缀去掉前导下划线——同一份来源，仍不另列。
+_SENSITIVE_KEY_NAMES = frozenset(
+    suffix.lstrip("_") for suffix in _SENSITIVE_KEY_SUFFIXES)
 
 # WebView2 运行时在注册表里的客户端 GUID（微软官方 Evergreen 文档的固定值）。
 _WEBVIEW2_CLIENT_GUID = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"

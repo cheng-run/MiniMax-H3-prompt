@@ -42,7 +42,10 @@ REDACTION_PLACEHOLDER = "<redacted>"
 
 # 哪些环境变量名算「密钥」：按后缀认，不列死名单——换网关（``MINIMAX_API_KEY`` /
 # ``OPENAI_API_KEY`` / 自定义 ``*_TOKEN``）不该回去改这个表。
-SENSITIVE_SUFFIXES: tuple[str, ...] = ("_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD")
+# **这是全仓唯一一份密钥后缀表**：``diagnostics`` 的配置键名匹配与 ``scripts/accept_d5.py``
+# 的验收扫描都从它派生（#243 两轴复审抓出三处各抄一份、还差了 ``_CREDENTIAL`` 一项）。
+SENSITIVE_SUFFIXES: tuple[str, ...] = (
+    "_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_CREDENTIAL")
 
 # 短于此长度的值不做替换：``*_TOKEN=1`` 这类值替换掉会把日志里的普通数字/单词打碎，
 # 而真正的密钥（各家 SDK 的 key/token）都远长于它。

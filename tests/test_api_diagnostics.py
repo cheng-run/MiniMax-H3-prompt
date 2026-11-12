@@ -136,6 +136,29 @@ def test_bundle_never_contains_secret_values(bundle_env, monkeypatch):
         f"logs/app-{date.today():%Y%m%d}.log"]
 
 
+def test_credential_suffix_is_redacted_in_logs_and_bundle(bundle_env, monkeypatch):
+    """``*_CREDENTIAL`` 与 ``*_API_KEY`` 同口径：日志 Filter 与诊断包共用同一份后缀表。
+
+    #243 两轴复审抓出：``accept_d5`` / ``diagnostics`` 与 ``logging_setup`` 三处各抄一份
+    后缀表，其中 ``_credential`` 只有一处有——同一台机器上「日志判过、诊断包没判」。
+    """
+    fake = "cred-fake-0123456789"
+    monkeypatch.setenv("FOO_CREDENTIAL", fake)
+    _app, _root, log_dir, client = bundle_env
+    (log_dir / f"app-{date.today():%Y%m%d}.log").write_text(
+        f"2026-11-12 ERROR 上游 401 credential={fake}\n", encoding="utf-8")
+
+    # 日志脱敏按 secret_values() 取串：它必须认 ``_CREDENTIAL`` 后缀。
+    assert fake in logging_setup.secret_values()
+
+    texts = _read_all(client.get(BUNDLE_PATH).content)
+
+    for name, text in texts.items():
+        assert fake not in text, f"密钥值出现在 {name} 里"
+    assert logging_setup.REDACTION_PLACEHOLDER in texts[
+        f"logs/app-{date.today():%Y%m%d}.log"]
+
+
 def test_bundle_excludes_env_file_and_media(bundle_env, monkeypatch):
     """不含 ``%APPDATA%`` 的 .env、不含素材图片/视频（spec §8.2 的排除面）。"""
     app, root, _log_dir, client = bundle_env
