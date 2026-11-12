@@ -24,7 +24,7 @@
         .venv/Scripts/python.exe scripts/accept_d5.py \\
         --zip worktree/integration-d5/build-exe/MiniMax-H3-prompt.zip \\
         --env-file .env \\
-        --config D:/项目/python/MiniMax-H3-prompt/config/agent.yaml \\
+        --config <你的仓库根>/config/agent.yaml \\
         --image output/issue126-evidence/frames/a1-ref.png \\
         --image-last output/issue126-evidence/frames/sheet-1026.png \\
         --out-dir output/accept-d5/<UTC>
@@ -68,6 +68,15 @@ from urllib.parse import quote, unquote
 import httpx
 
 ROOT = Path(__file__).resolve().parents[1]
+# 脱敏口径只有 ``logging_setup`` 一份（服务端日志、诊断包与验收扫描共用）：脚本自己
+# 再抄后缀表与排序，会出现「脚本判过、服务端日志判不过」的假阴性（#243 两轴复审）。
+# 直接跑脚本时不要求外面已设 ``PYTHONPATH``：把本仓 ``src`` 补到最前面即可。
+_SRC = ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from minimax_h3_prompt.logging_setup import secret_values  # noqa: E402  先补路径再导入
+
 EXE_NAME = "MiniMax-H3-prompt.exe"
 PORTABLE_NAME = "MiniMax-H3-prompt"
 APP_TITLE = "MiniMax H3 Prompt"
@@ -90,7 +99,6 @@ ENV_ALLOWED = (
     "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS",
 )
 SYSTEM_PATH = r"C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem"
-SECRET_ENV_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD")
 STARTUP_RE = re.compile(
     r"\[启动\] 地址=(http://127\.0\.0\.1:(\d+)/)；数据根=(.+?)；形态=([^；\s]+)")
 WINDOW_PORT_RE = re.compile(r"（端口 (\d+)）")
@@ -245,20 +253,6 @@ def parse_env_file(path: Path) -> dict[str, str]:
         if key:
             values[key] = value
     return values
-
-
-def secret_values(env_map: Mapping[str, str]) -> tuple[str, ...]:
-    """``*_API_KEY`` / ``*_TOKEN`` / … 的值，按长度升序去重（长值先替换更安全）。
-
-    短于 6 字符的值不参与：真正的密钥都远长于它，而替换短串会把普通文本打碎
-    （与 ``logging_setup`` 的口径一致）。
-    """
-    found = {
-        value for key, value in env_map.items()
-        if value and len(value) >= 6
-        and key.upper().endswith(SECRET_ENV_SUFFIXES)
-    }
-    return tuple(sorted(found, key=len))
 
 
 def restricted_env(

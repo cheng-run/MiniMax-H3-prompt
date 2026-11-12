@@ -712,7 +712,7 @@ MUTATIONS: tuple[Mutation, ...] = (
     # D5-6（#241）打包流水线：这四处漏了 PyInstaller 都不报错，只会「静默少东西」。
     Mutation(
         "exe_package_data_dropped",
-        "scripts/build_exe.py",
+        "src/minimax_h3_prompt/selfcheck.py",
         'PACKAGE_DATA_DIRS: tuple[str, ...] = ("prompts", "knowledge", "references")',
         'PACKAGE_DATA_DIRS: tuple[str, ...] = ("knowledge", "references")',
         ("tests/test_build_exe.py::test_pyinstaller_args_shape",),
@@ -744,6 +744,71 @@ MUTATIONS: tuple[Mutation, ...] = (
         "        #（变异：漏收 ffmpeg 二进制）\n",
         ("tests/test_build_exe.py::test_pyinstaller_args_shape",),
         "漏 ffmpeg＝冻结后接缝审计/拼接全挂，而构建不会报错（spec §9）",
+    ),
+    # D5 两轴复审（#243）：同一条事实被抄成多份时的守卫——改一处，另一处不许静默过时。
+    Mutation(
+        "accept_d5_secret_values_copied",
+        "scripts/accept_d5.py",
+        "from minimax_h3_prompt.logging_setup import secret_values  # noqa: E402  先补路径再导入",
+        "from minimax_h3_prompt.logging_setup import redact_text as secret_values  # noqa: E402  先补路径再导入",
+        ("tests/test_accept_d5.py::test_secret_values_uses_the_logging_setup_implementation",),
+        "验收脚本自带一份脱敏实现＝脚本判过、服务端日志判不过（#243 复审）",
+    ),
+    Mutation(
+        "credential_suffix_dropped",
+        "src/minimax_h3_prompt/logging_setup.py",
+        '    "_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_CREDENTIAL")\n',
+        '    "_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD")\n',
+        ("tests/test_api_diagnostics.py::test_credential_suffix_is_redacted_in_logs_and_bundle",),
+        "密钥后缀表少了 _CREDENTIAL＝日志与诊断包对同一环境变量一半判一半不判（#243 复审）",
+    ),
+    Mutation(
+        "selfcheck_template_names_copied",
+        "src/minimax_h3_prompt/selfcheck.py",
+        "from .bootstrap import CONFIG_TEMPLATE_NAMES\n",
+        'CONFIG_TEMPLATE_NAMES = ("agent.yaml", "image.yaml", "workflow.yaml", "library.yaml")\n',
+        ("tests/test_selfcheck.py::test_config_template_names_come_from_bootstrap",),
+        "模板清单抄第二份＝bootstrap 加一份模板时自检永远查不到（#243 复审）",
+    ),
+    Mutation(
+        "verify_bundle_ignores_package_data_dirs",
+        "scripts/build_exe.py",
+        '        **{\n'
+        '            f"包内资源 {name}": internal / "minimax_h3_prompt" / name\n'
+        '            for name in PACKAGE_DATA_DIRS\n'
+        '        },\n',
+        '        "角色提示词": internal / "minimax_h3_prompt" / "prompts",\n'
+        '        "领域知识": internal / "minimax_h3_prompt" / "knowledge",\n'
+        '        "参考资料": internal / "minimax_h3_prompt" / "references",\n',
+        ("tests/test_build_exe.py::test_verify_bundle_checks_every_package_data_dir",),
+        "核对项写死三处＝新增资源目录时打包收了但校验不查（#243 复审）",
+    ),
+    Mutation(
+        "env_port_beats_cli",
+        "src/minimax_h3_prompt/api/__main__.py",
+        "    if requested is not None:\n        return requested\n",
+        "    if requested is None:\n        return requested\n",
+        ("tests/test_api_entry.py::test_cli_port_beats_env",),
+        "命令行不再压过 H3_PORT＝显式 `--port` 被环境变量静默盖掉（spec §5.2 的优先级）",
+    ),
+    Mutation(
+        "appdata_dir_not_created",
+        "src/minimax_h3_prompt/bootstrap.py",
+        "        target.mkdir(parents=True, exist_ok=True)\n",
+        "        pass\n",
+        ("tests/test_config_bootstrap.py::test_frozen_start_creates_the_appdata_dir_without_an_env_file",),
+        "不建 %APPDATA% 目录＝缺密钥提示让人复制的路径在干净机器上不存在（#243 复审）",
+    ),
+    Mutation(
+        "missing_key_message_copied",
+        "src/minimax_h3_prompt/model_factory.py",
+        "        raise ConfigError(config_module.missing_api_key_message(\n"
+        '            settings, context=f"LLM_PROVIDER={settings.provider}")) from exc\n',
+        "        raise ConfigError(\n"
+        '            f"缺失 {settings.api_key_env}：请在 {settings.purpose} 中配置"\n'
+        '            f"（LLM_PROVIDER={settings.provider}）。") from exc\n',
+        ("tests/test_model_config.py::test_missing_key_message_comes_from_one_builder",),
+        "缺 key 文案各拼一份＝改落点只改一处，另一处把用户指到旧路径（#243 复审）",
     ),
 )
 

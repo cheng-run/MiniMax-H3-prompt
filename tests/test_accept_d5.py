@@ -56,6 +56,16 @@ def test_parse_env_file_missing_file_is_empty(tmp_path):
     assert accept_d5.parse_env_file(tmp_path / "nope.env") == {}
 
 
+def test_secret_values_uses_the_logging_setup_implementation():
+    """脱敏口径只许一份：本脚本与 ``diagnostics`` 都从 ``logging_setup`` 取（#243）。
+
+    自己再抄一份后缀表，就会出现「脚本判过、服务端日志判不过」的假阴性。
+    """
+    from minimax_h3_prompt import logging_setup
+
+    assert accept_d5.secret_values is logging_setup.secret_values
+
+
 def test_secret_values_only_takes_key_like_names_and_long_values():
     values = accept_d5.secret_values({
         "DASHSCOPE_API_KEY": "sk-abcdef123456",
