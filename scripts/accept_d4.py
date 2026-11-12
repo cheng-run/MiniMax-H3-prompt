@@ -122,16 +122,24 @@ class Report:
             self.failures.append(f"{name}：{note}")
 
     def run(self, name: str, action: Callable[[], str]) -> str:
-        """跑一步并计时；异常原样抛出，但先把失败记进报告。"""
+        """跑一步并计时；异常原样抛出，但先把失败记进报告。
+
+        每步开始就打印（``flush=True``）：真实模型一轮可达几十分钟，输出重定向时
+        块缓冲会让整段静默——2026-11-11 实测跑 20 分钟日志仍是 0 字节，用户没法
+        判断是在跑还是卡住。
+        """
         started = time.monotonic()
+        print(f"[step] 开始：{name}", flush=True)
         try:
             note = action()
         except Exception as exc:  # noqa: BLE001 - 失败也要落进证据
             elapsed = int((time.monotonic() - started) * 1000)
             self.step(name, "failed", elapsed, f"{type(exc).__name__}: {exc}")
+            print(f"[step] 失败：{name}（{elapsed} ms）", flush=True)
             raise
         elapsed = int((time.monotonic() - started) * 1000)
         self.step(name, "ok", elapsed, note)
+        print(f"[step] 成功：{name}（{elapsed} ms）", flush=True)
         return note
 
 
