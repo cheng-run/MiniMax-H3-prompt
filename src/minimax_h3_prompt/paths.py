@@ -23,6 +23,7 @@
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -32,6 +33,11 @@ _DEV_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # 冻结态可写数据根在 EXE 同级的目录名（spec §4 目录树）。
 DATA_DIR_NAME = "data"
+
+# 冻结态用户配置目录名：``%APPDATA%\MiniMax-H3-prompt\``（spec #235 §4/§7 的密钥落点）。
+# 大小写与 spec 原文一致，别改成包名 ``minimax_h3_prompt``——那是 Python 包标识。
+APP_DIR_NAME = "MiniMax-H3-prompt"
+ENV_FILE_NAME = ".env"
 
 # 开发态默认会话根（历史布局）。与冻结态的 ``sessions`` 并列解释见模块 docstring。
 DEV_SESSIONS_RELATIVE = Path("output") / "sessions"
@@ -123,6 +129,26 @@ def config_dir() -> Path:
 def config_path() -> Path:
     """生效的模型配置（``agent.yaml``）。冻结态在 ``data/config/``，首次启动由 D5-3 复制模板。"""
     return config_dir() / "agent.yaml"
+
+
+def env_file_path() -> Path:
+    """密钥文件（``.env``）：冻结态 = ``%APPDATA%\\MiniMax-H3-prompt\\.env``，开发态 = 仓库根 ``.env``。
+
+    **为什么冻结态不落 ``data/``**（spec #235 §4）：作品目录会被用户整个拷走或分享，
+    密钥跟着走等于随作品泄露。开发态保持仓库根 ``.env`` 是**刻意的**——本机开发与
+    既有用例都按历史位置读，改成 APPDATA 会让每台开发机凭空多一份要手工同步的副本
+    （spec #235 §14「开发形态保持现状」）。
+
+    **不受 ``--data-root`` 影响**：数据根挪的是作品与配置，密钥属于「这台机器的人」，
+    不跟着某个数据目录走。
+    """
+    if not is_frozen():
+        return _DEV_REPO_ROOT / ENV_FILE_NAME
+    appdata = os.environ.get("APPDATA", "").strip()
+    # APPDATA 缺失（服务账号、被精简的环境）时回退 Windows 的常规漫游目录；
+    # 绝不回退数据根——那正好是把密钥放回作品目录里。
+    base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+    return base / APP_DIR_NAME / ENV_FILE_NAME
 
 
 def image_config_path() -> Path:

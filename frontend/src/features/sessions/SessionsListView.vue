@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/vue-query'
 import { computed, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 
-import { ApiError, listSessions } from '@/api/client'
+import { ApiError, getHealth, listSessions } from '@/api/client'
 import Button from '@/components/ui/Button.vue'
 import ErrorNotice from '@/components/ui/ErrorNotice.vue'
 import LoadingState from '@/components/ui/LoadingState.vue'
@@ -50,6 +50,29 @@ const showForm = ref(false)
 const errorMessage = computed(() =>
   error.value instanceof ApiError ? error.value.message : '加载失败，请稍后重试。',
 )
+
+// 缺密钥提示（#238 / spec #235 §7）：健康资源里的 missing_keys 非空就显示「去哪个
+// 文件、按什么格式写」。读失败（服务异常）时**整块不出现**——提示是加法，不能因为
+// 它把会话列表带崩或挡住已有的错误态。
+const { data: health } = useQuery({ queryKey: ['health'], queryFn: getHealth, retry: false })
+const missingKeys = computed(() => health.value?.missing_keys ?? [])
+const envPath = computed(() => health.value?.env_path ?? '')
+const configPath = computed(() => health.value?.config_path ?? '')
+
+// 「复制路径」而不是「打开目录」（用户 2026-11-12 裁定）：打开资源管理器要新增端点、
+// 还要处理 file:// 的策略差异；复制路径零依赖，用户自己粘贴到地址栏即可。
+const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
+const copyLabel = computed(() => (copyState.value === 'copied' ? '已复制' : '复制路径'))
+
+async function copyEnvPath(): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(envPath.value)
+    copyState.value = 'copied'
+  } catch {
+    // 剪贴板被拒（非安全上下文、权限策略）时不能静默：告诉用户手动复制。
+    copyState.value = 'failed'
+  }
+}
 </script>
 
 <template>
@@ -60,6 +83,27 @@ const errorMessage = computed(() =>
         {{ showForm ? '收起新建' : '新建会话' }}
       </Button>
     </div>
+
+    <section v-if="missingKeys.length > 0" class="config-hint">
+      <h2 class="config-hint__title">还没有配置模型密钥</h2>
+      <p>本程序从下面这个文件读密钥，把缺的变量写进去（一行一个，值换成你自己的）：</p>
+      <p class="config-hint__path">
+        密钥文件：<code>{{ envPath }}</code>
+      </p>
+      <Button variant="secondary" @click="copyEnvPath">{{ copyLabel }}</Button>
+      <p v-if="copyState === 'failed'" class="config-hint__failed">
+        复制失败：请手动选中上面的路径复制。
+      </p>
+      <ul class="config-hint__keys">
+        <li v-for="key in missingKeys" :key="key">
+          <code>{{ key }}=你的密钥</code>
+        </li>
+      </ul>
+      <p class="config-hint__path">
+        配置文件：<code>{{ configPath }}</code>
+      </p>
+      <p class="config-hint__note">改完配置需重启程序才生效（本程序不热重载配置）。</p>
+    </section>
 
     <SessionCreateForm v-if="showForm" />
 
@@ -102,6 +146,32 @@ const errorMessage = computed(() =>
 }
 .sessions__empty {
   color: var(--color-text-muted);
+}
+.config-hint {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  padding: var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+.config-hint__title {
+  margin: 0;
+  font-size: 1rem;
+}
+.config-hint__path,
+.config-hint__note,
+.config-hint__failed {
+  margin: 0;
+  color: var(--color-text-muted);
+  overflow-wrap: anywhere;
+}
+.config-hint__keys {
+  margin: 0;
+  padding-left: var(--space-4);
 }
 .session-list {
   list-style: none;

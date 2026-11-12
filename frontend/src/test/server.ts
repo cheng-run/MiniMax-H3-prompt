@@ -13,5 +13,20 @@ const emptySessionsHandler = http.get('http://localhost/api/v1/sessions', () =>
   HttpResponse.json({ items: [] }),
 )
 
-// MSW 服务器：默认只放行引导端点与空会话列表，其余请求由测试用 server.use(...) 逐条注入。
-export const server = setupServer(tokenHandler, emptySessionsHandler)
+// 健康资源（D5-3 / #238 起概览页也读它：missing_keys 非空就显示配密钥提示）。
+// 默认桩是「密钥齐全」形态；缺密钥的用例自己 server.use 覆盖。
+const healthHandler = http.get('http://localhost/api/v1/health', () =>
+  HttpResponse.json({
+    status: 'ok',
+    service: 'minimax-h3-prompt',
+    version: '0.1.0',
+    data_root: 'D:/app/data',
+    config_path: 'D:/app/data/config/agent.yaml',
+    env_path: 'C:/Users/tester/AppData/Roaming/MiniMax-H3-prompt/.env',
+    missing_keys: [],
+  }),
+)
+
+// MSW 服务器：默认只放行引导端点、空会话列表与健康资源，其余请求由测试用
+// server.use(...) 逐条注入。
+export const server = setupServer(tokenHandler, emptySessionsHandler, healthHandler)

@@ -17,6 +17,8 @@
 | `api/auth.py` | 本地访问控制：Host/Origin 白名单、每进程启动令牌、`LocalAccessMiddleware`（纯 ASGI，最外层） |
 | `api/routes/auth.py` | `GET /api/v1/auth/token`：返回令牌并下发 `wb_session` Cookie |
 | `api/app.py` | 工厂、lifespan（启动对账）、注入 `sessions_root` / `runtime_config` / `local_access` |
+| `bootstrap.py` | 首次启动把内置配置模板复制进 `<数据根>/config/`（#238）；只由启动入口在 import `api.app` **之前**调用，已存在不覆盖，开发形态是空操作 |
+| `paths.py` | 唯一路径解析口（#237）：只读资源（`_MEIPASS` / 仓库根）与可写数据（`data/` / 仓库根）分行；密钥文件按形态分流（冻结态 `%APPDATA%\MiniMax-H3-prompt\.env`，开发态仓库 `.env`，#238） |
 | `api/problems.py` | RFC 9457 problem+json；所有错误都走这里（中间件用 `build_problem_response`） |
 | `step_machine.py` | 状态/触发/闸门的单一声明；续跑起点；`resolve` 的 approve/revise 去向与 approve 按变体分叉 |
 | `session_store.py` | 快照文件读写、`atomic_write_text`、向导续接状态与 `RESUMABLE_STATUSES` |

@@ -6,6 +6,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
+from . import paths
 from .config import ModelSettings, config
 from .errors import ConfigError
 
@@ -49,8 +50,11 @@ def _require(settings: ModelSettings) -> str:
     try:
         return config.resolve_api_key(settings)
     except ValueError as exc:
+        # 落点按形态算（#238）：冻结后密钥在 ``%APPDATA%\<应用>\.env``，写死「项目根」
+        # 会把用户指到一个不存在的文件上。
         raise ConfigError(
-            f"缺失 {settings.api_key_env}：请在项目根 .env 中配置（LLM_PROVIDER={settings.provider}）"
+            f"缺失 {settings.api_key_env}：请在 {paths.env_file_path()} 中配置"
+            f"（LLM_PROVIDER={settings.provider}）。写好后重启程序生效。"
         ) from exc
 
 

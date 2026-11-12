@@ -429,9 +429,17 @@ export interface components {
         };
         /**
          * HealthResponse
-         * @description 健康状态资源。字段约定见 D1 spec §7.1。
+         * @description 健康状态资源。字段约定见 D1 spec §7.1；后四个见 #238 的裁定说明。
          */
         HealthResponse: {
+            /** Config Path */
+            config_path: string;
+            /** Data Root */
+            data_root: string;
+            /** Env Path */
+            env_path: string;
+            /** Missing Keys */
+            missing_keys: string[];
             /** Service */
             service: string;
             /**

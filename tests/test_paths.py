@@ -172,3 +172,24 @@ def test_config_derives_writable_paths_from_data_root(data_root_override: Path) 
     assert cfg.output_path == paths.data_path(pipeline.get("output_path", "output/final_prompt.txt"))
     assert cfg.stages_path == paths.data_path(pipeline.get("stages_path", "output/stages"))
     assert cfg.sessions_root.parent.parent == data_root_override
+
+
+# --------------------------------------------------------------------- 密钥文件
+
+def test_dev_form_env_file_is_repo_dotenv() -> None:
+    """开发态密钥文件仍是仓库根的 ``.env``：本机开发与既有用例一格不变。"""
+    assert paths.env_file_path() == REPO_ROOT / ".env"
+
+
+def test_frozen_env_file_lives_in_appdata(frozen, monkeypatch, tmp_path: Path) -> None:
+    """冻结态密钥只从 ``%APPDATA%/MiniMax-H3-prompt/.env`` 读（spec #235 §7）。"""
+    appdata = tmp_path / "Roaming"
+    monkeypatch.setenv("APPDATA", str(appdata))
+    assert paths.env_file_path() == appdata / "MiniMax-H3-prompt" / ".env"
+
+
+def test_frozen_env_file_falls_back_without_appdata(frozen, monkeypatch, tmp_path: Path) -> None:
+    """``APPDATA`` 缺失（极少见）时回退用户漫游目录，不抛错、不落数据根。"""
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    assert paths.env_file_path() == tmp_path / "AppData" / "Roaming" / "MiniMax-H3-prompt" / ".env"

@@ -53,6 +53,15 @@ DEFAULT_POLL_SECONDS = 2.0
 SNIPPET_LIMIT = 1200
 PROBLEM_CONTENT_TYPE = "application/problem+json"
 
+# 健康资源的字段集合（D2-AC18 用它判「服务没有多暴露字段」）。#238 起是七件：
+# D1 的三件 + D5-3 追加的四件（用户 2026-11-12 裁定的加法扩展，见
+# ``api/routes/health.py``）。**加字段要同步这里**，否则 D2-AC18 会把正常扩展报成
+# 「健康接口多暴露了东西」。
+HEALTH_FIELDS = frozenset({
+    "status", "service", "version",
+    "data_root", "config_path", "env_path", "missing_keys",
+})
+
 # 这些 AC 的证据不来自本驱动器：取消、强杀、SSE 重连、契约漂移、确定性桩、向导
 # 不变性与 ``--brief`` 快路径都由用例或 CI 提供。报告里如实标出来，不许冒充通过。
 _MANUAL_CHECKS: tuple[tuple[str, str, str], ...] = (
@@ -477,7 +486,7 @@ def _run_flow(acc: Acceptor) -> None:
     health_body = acc.json_of(health, "健康检查")
     if health_body.get("status") != "ok":
         raise StepError("健康检查", f"status 不是 ok：{health_body!r}")
-    extra_keys = set(health_body) - {"status", "service", "version"}
+    extra_keys = set(health_body) - HEALTH_FIELDS
     acc.check(
         "D2-AC18", "服务只绑回环地址（base_url）", is_loopback(settings.base_url) and not extra_keys,
         f"base_url={settings.base_url}（回环={is_loopback(settings.base_url)}）；"

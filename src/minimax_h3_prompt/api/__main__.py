@@ -1,6 +1,6 @@
 """本地服务启动入口：``python -m minimax_h3_prompt.api``。
 
-三件事在这里收口（spec #235 §5）：
+四件事在这里收口（spec #235 §5；第 3 条是 D5-3 / #238 加的）：
 
 1. **端口**：开发形态仍是 8000（Vite 代理写死 ``127.0.0.1:8000``，不能跟着随机）；
    冻结形态默认挑一个空闲端口。``--port N`` 指定，``--port 0`` = 自动；**显式指定被占用
@@ -9,7 +9,9 @@
    import 之前解析**——``config = Config()`` 是模块级单例，连 ``api.app`` 一被 import 就
    会建出来（``observability`` 在模块顶层 ``from .config import config``），迟到的覆盖
    不会回头改已经算好的路径。所以本模块顶层只 import 轻量的 ``uvicorn`` 与 ``paths``。
-3. **单实例**：同一数据根起第二个实例时提示后退出（``single_instance``）。
+3. **配置骨架**：数据根定了之后、import ``.app`` 之前，把缺失的配置模板从内置资源复制到
+   ``<数据根>/config/``（``bootstrap.ensure_config_files``，spec §7）。已存在的不覆盖。
+4. **单实例**：同一数据根起第二个实例时提示后退出（``single_instance``）。
 
 实际绑定的端口不能从 ``uvicorn.run()`` 拿（它不返回监听信息），因此自建
 ``uvicorn.Server`` + ``Config``，启动后从 ``server.servers[0].sockets[0]`` 读端口。
@@ -33,7 +35,7 @@ from typing import Sequence
 
 import uvicorn
 
-from .. import paths
+from .. import bootstrap, paths
 from . import single_instance
 
 HOST = "127.0.0.1"
@@ -206,6 +208,9 @@ def start(argv: Sequence[str] | None = None) -> ServerHandle:
     args = parse_args(argv)
     # 顺序是硬约束：数据根必须在 import ``.app``（连带 config 单例）之前落下。
     paths.set_data_root(args.data_root)
+    # 首次启动补配置骨架（D5-3 / #238）：``config = Config()`` 在 import 期就读 YAML，
+    # 所以复制模板必须早于下面那行 ``from .app import create_app``。已存在的文件不覆盖。
+    bootstrap.ensure_config_files()
     port = resolve_port(args.port)
     ensure_port_available(HOST, port)
 
@@ -255,6 +260,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"[启动失败] {exc}", file=sys.stderr, flush=True)
         return EXIT_ALREADY_RUNNING
     except StartupError as exc:
+        print(f"[启动失败] {exc}", file=sys.stderr, flush=True)
+        return EXIT_STARTUP_FAILED
+    except bootstrap.ConfigBootstrapError as exc:
+        # 配置骨架补不上（模板缺失/目录不可写）：文案已点名文件与目录，直接转述。
         print(f"[启动失败] {exc}", file=sys.stderr, flush=True)
         return EXIT_STARTUP_FAILED
     try:

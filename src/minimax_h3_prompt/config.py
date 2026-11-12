@@ -1,4 +1,4 @@
-"""全局配置：读项目根 `config/agent.yaml` + `.env`。"""
+"""全局配置：读配置目录的 `agent.yaml` + 密钥文件 `.env`（落点由 ``paths`` 按形态定）。"""
 from __future__ import annotations
 
 import difflib
@@ -16,10 +16,9 @@ from .errors import ConfigError
 # 路径一律由 ``paths`` 唯一产出（#237 / spec #235 §6）：它是轻量模块，不读 YAML/.env，
 # 因此在这里 import 不会引出循环依赖。
 #
-# ``PROJECT_ROOT`` 保留的是**只读资源根**的旧名字：开发态 = 仓库根，冻结态 = EXE 解包
-# 目录。目前只有 ``.env`` 还在按它解析；冻结态那个位置没有 ``.env``（密钥改落
-# ``%APPDATA%`` 是 D5-3 / #238 的事，本票不动密钥落位）。
-PROJECT_ROOT = paths.resource_root()
+# 配置与密钥各走各的落点（#238 / spec #235 §7）：``CONFIG_PATH`` 跟着**数据根**走
+# （冻结态 ``data/config/agent.yaml``，首次启动由 ``bootstrap`` 复制模板）；密钥文件
+# 跟着**这台机器的人**走（``paths.env_file_path()``，冻结态在 ``%APPDATA%``）。
 CONFIG_PATH = paths.config_path()
 
 # 执行段（Segment）拆分约束：段时长必须为整数秒。**首尾帧链规划保守档 4–10**
@@ -183,7 +182,10 @@ class Config:
     """应用级配置。字段只读（兼容既有运行时对 save_stages 的测试修改）。"""
 
     def __init__(self) -> None:
-        load_dotenv(PROJECT_ROOT / ".env")
+        # 密钥文件按形态分流（#238 / spec #235 §7）：冻结态 ``%APPDATA%\<应用>\.env``，
+        # 开发态仓库根 ``.env``。**不读** ``data/.env`` / ``data/config/.env``——作品目录
+        # 会被整份拷走，密钥跟着走等于随作品泄露。路径每次现算，别在 import 期缓存成常量。
+        load_dotenv(paths.env_file_path())
 
         self.raw = _load_yaml(CONFIG_PATH)
         validate_schema(self.raw)
@@ -332,15 +334,36 @@ class Config:
         return value
 
     def resolve_api_key(self, settings: ModelSettings) -> str:
-        """从已加载的 `.env` 环境中读取 key；绝不从 YAML 读取 key 值。"""
+        """从已加载的密钥文件环境中读取 key；绝不从 YAML 读取 key 值。"""
+        key = self._lookup_api_key(settings)
+        if not key:
+            raise ConfigError(
+                f"缺失 {settings.api_key_env}：请在 {paths.env_file_path()} 中配置"
+                f"（{settings.purpose}）。写好后重启程序生效。"
+            )
+        return key
+
+    @staticmethod
+    def _lookup_api_key(settings: ModelSettings) -> str:
         key = _env(settings.api_key_env)
         if settings.provider == "anthropic" and not key and settings.api_key_env == "ANTHROPIC_API_KEY":
             key = _env("ANTHROPIC_AUTH_TOKEN")
-        if not key:
-            raise ConfigError(
-                f"缺失 {settings.api_key_env}：请在项目根 .env 中配置（{settings.purpose}）"
-            )
         return key
+
+    def missing_api_keys(self) -> list[str]:
+        """当前环境里缺失的密钥**变量名**（绝不含值），供健康接口与概览页提示用。
+
+        按 ``api_key_env`` 派生而不是抄一份键名清单：``agent.yaml`` 换网关后这里自动
+        跟着变（本仓「守卫形态要从常量派生」的纪律）。主/视觉两档同名时只列一次。
+        """
+        missing: list[str] = []
+        for settings in (self.primary_model, self.vision_model):
+            name = settings.api_key_env
+            if name in missing:
+                continue
+            if not self._lookup_api_key(settings):
+                missing.append(name)
+        return missing
 
 
 config = Config()

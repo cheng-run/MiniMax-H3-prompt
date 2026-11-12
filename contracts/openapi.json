@@ -282,8 +282,27 @@
         "type": "object"
       },
       "HealthResponse": {
-        "description": "健康状态资源。字段约定见 D1 spec §7.1。",
+        "description": "健康状态资源。字段约定见 D1 spec §7.1；后四个见 #238 的裁定说明。",
         "properties": {
+          "config_path": {
+            "title": "Config Path",
+            "type": "string"
+          },
+          "data_root": {
+            "title": "Data Root",
+            "type": "string"
+          },
+          "env_path": {
+            "title": "Env Path",
+            "type": "string"
+          },
+          "missing_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Keys",
+            "type": "array"
+          },
           "service": {
             "title": "Service",
             "type": "string"
@@ -301,7 +320,11 @@
         "required": [
           "status",
           "service",
-          "version"
+          "version",
+          "data_root",
+          "config_path",
+          "env_path",
+          "missing_keys"
         ],
         "title": "HealthResponse",
         "type": "object"

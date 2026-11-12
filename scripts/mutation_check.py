@@ -671,8 +671,8 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "path_root_derivation_reintroduced",
         "src/minimax_h3_prompt/config.py",
-        "PROJECT_ROOT = paths.resource_root()\n",
-        "PROJECT_ROOT = Path(__file__).resolve().parents[2]\n",
+        "CONFIG_PATH = paths.config_path()\n",
+        'CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "agent.yaml"\n',
         ("tests/test_path_root_guard.py::test_source_only_paths_module_derives_roots",),
         "根路径推导重新散落回业务模块＝冻结后静默指向不存在的解包路径，"
         "dist/数据根/配置一起失效且不报错（#237 / spec #235 §6）",
