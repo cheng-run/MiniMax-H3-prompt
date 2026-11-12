@@ -15,6 +15,7 @@ traceback。所以在任何业务 import 之前先把骨架补上。
 from __future__ import annotations
 
 import shutil
+import sys
 from pathlib import Path
 
 from . import paths
@@ -33,6 +34,27 @@ CONFIG_TEMPLATE_NAMES: tuple[str, ...] = (
 
 class ConfigBootstrapError(RuntimeError):
     """内置模板缺失或写盘失败：启动入口据此给可操作提示并以失败码退出。"""
+
+
+def ensure_env_dir() -> Path | None:
+    """冻结形态建好 ``%APPDATA%\\MiniMax-H3-prompt\\``；开发形态返回 ``None`` 且不建。
+
+    只建**目录**，不建也不覆盖 ``.env``——密钥由用户自己写。为什么需要它：缺密钥提示
+    与 README 都让用户「复制这个路径、把变量写进去」，干净机器上目录不存在时那句话
+    指向空气（#243 两轴复审）。
+
+    建不出来只警告、不拦启动：密钥也可以来自进程环境变量，服务照常能跑；拦下来反而
+    让「目录权限」这一件事变成整台机器不能用的理由（同 ``logging_setup`` 的口径）。
+    """
+    if not paths.is_frozen():
+        return None
+    target = paths.env_file_path().parent
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"[警告] 无法创建密钥目录 {target}：{exc}", file=sys.stderr)
+        return None
+    return target
 
 
 def ensure_config_files() -> list[Path]:

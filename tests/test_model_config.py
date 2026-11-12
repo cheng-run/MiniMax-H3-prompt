@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from unittest.mock import Mock
 
+import pytest
+
+from minimax_h3_prompt import config as config_module
 from minimax_h3_prompt import model_factory
 from minimax_h3_prompt.config import ModelSettings
 
@@ -190,3 +193,36 @@ def test_build_vision_fallback_stays_nonstreaming_with_a_long_timeout(monkeypatc
     kwargs = constructor.call_args.kwargs
     assert kwargs["streaming"] is False
     assert kwargs["timeout"] == reference_auditor._FALLBACK_TIMEOUT_SECONDS
+
+
+def test_missing_key_message_comes_from_one_builder(monkeypatch):
+    """缺 key 文案只有一处拼法（#243 复审）：路径按形态算，调用方只给括号里的语境。
+
+    ``config.resolve_api_key`` 与 ``model_factory._require`` 原先各拼一份「缺失 X：请在
+    Y 中配置」——改一处文案另一处就过时。这里把共享函数换成哨兵，两条路径都必须用它。
+    """
+    settings = ModelSettings(
+        provider="deepseek",
+        model="test-model",
+        base_url=None,
+        api_key_env="DEEPSEEK_API_KEY",
+        purpose="主模型",
+    )
+    calls: list[str | None] = []
+
+    def fake_builder(_settings, *, context=None):
+        calls.append(context)
+        return "共享文案"
+
+    monkeypatch.setattr(config_module, "missing_api_key_message", fake_builder)
+
+    with pytest.raises(ValueError) as from_config:
+        config_module.Config.resolve_api_key(config_module.config, settings)
+    with pytest.raises(ValueError) as from_factory:
+        model_factory._require(settings)
+
+    assert str(from_config.value) == "共享文案"
+    assert str(from_factory.value) == "共享文案"
+    # ``_require`` 先经 ``resolve_api_key``（语境=用途），捕获后再补 provider 语境。
+    assert calls[0] is None
+    assert calls[-1] == "LLM_PROVIDER=deepseek"

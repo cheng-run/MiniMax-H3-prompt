@@ -73,6 +73,35 @@ def test_missing_template_raises_actionable_error(tmp_path: Path, monkeypatch) -
     assert str(tmp_path / "data") in message
 
 
+def test_frozen_start_creates_the_appdata_dir_without_an_env_file(
+        monkeypatch, tmp_path: Path) -> None:
+    """冻结形态要建 ``%APPDATA%\\MiniMax-H3-prompt\\``：缺密钥提示与 README 都让人往那里写。
+
+    只建目录、不建 ``.env``（密钥由用户自己写）；开发形态一格不动（#243 复审）。
+    """
+    appdata = tmp_path / "Roaming"
+    monkeypatch.setenv("APPDATA", str(appdata))
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path / "meipass"), raising=False)
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "exe" / "MiniMax-H3-prompt.exe"))
+
+    created = bootstrap.ensure_env_dir()
+
+    target = appdata / "MiniMax-H3-prompt"
+    assert created == target
+    assert target.is_dir()
+    assert not (target / ".env").exists()
+
+
+def test_dev_form_does_not_create_appdata_dir(monkeypatch, tmp_path: Path) -> None:
+    appdata = tmp_path / "Roaming"
+    monkeypatch.setenv("APPDATA", str(appdata))
+    monkeypatch.delattr(sys, "frozen", raising=False)
+
+    assert bootstrap.ensure_env_dir() is None
+    assert not appdata.exists()
+
+
 def test_start_bootstraps_config_then_keeps_user_edits(tmp_path: Path) -> None:
     """真实启动入口：首次起服务后四个配置就位；第二次启动不覆盖改过的那份。
 
@@ -80,11 +109,15 @@ def test_start_bootstraps_config_then_keeps_user_edits(tmp_path: Path) -> None:
     用户解压后第一次双击 EXE 的形态。
     """
     data_root = tmp_path / "data"
+    appdata = tmp_path / "appdata"
     script = "\n".join([
+        "import os",
         "import sys",
         "sys.frozen = True",
         f"sys._MEIPASS = r'{REPO_ROOT}'",
         f"sys.executable = r'{tmp_path / 'exe' / 'MiniMax-H3-prompt.exe'}'",
+        # 密钥目录落在临时 APPDATA：别在跑测试的机器上真建 Roaming 目录。
+        f"os.environ['APPDATA'] = r'{appdata}'",
         "from minimax_h3_prompt.api import __main__ as entry",
         f"handle = entry.start(['--data-root', r'{data_root}', '--port', '0'])",
         "print('STARTED')",
@@ -103,6 +136,10 @@ def test_start_bootstraps_config_then_keeps_user_edits(tmp_path: Path) -> None:
     first = run_start()
     assert first.returncode == 0, first.stdout + first.stderr
     assert "STARTED" in first.stdout
+    # 冻结启动要建好密钥目录（缺 key 提示让人往这里写）；但绝不代建 .env。
+    env_dir = appdata / "MiniMax-H3-prompt"
+    assert env_dir.is_dir(), "冻结启动没有创建 %APPDATA%\\MiniMax-H3-prompt"
+    assert not (env_dir / ".env").exists(), "不该替用户创建 .env"
     for name in bootstrap.CONFIG_TEMPLATE_NAMES:
         target = data_root / "config" / name
         assert target.is_file(), f"首次启动没有生成 {name}"

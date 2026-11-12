@@ -11,6 +11,7 @@ import StatusBadge from '@/components/ui/StatusBadge.vue'
 
 import SessionCreateForm from './SessionCreateForm.vue'
 import { statusLabel, statusTone } from './status'
+import { useClipboardCopy } from './useClipboardCopy'
 
 const PAGE_SIZE = 20
 
@@ -61,17 +62,11 @@ const configPath = computed(() => health.value?.config_path ?? '')
 
 // 「复制路径」而不是「打开目录」（用户 2026-11-12 裁定）：打开资源管理器要新增端点、
 // 还要处理 file:// 的策略差异；复制路径零依赖，用户自己粘贴到地址栏即可。
-const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
-const copyLabel = computed(() => (copyState.value === 'copied' ? '已复制' : '复制路径'))
+// 两处复制共用 useClipboardCopy（每次调用一份独立状态），模板变量名保持原样。
+const { state: copyState, label: copyLabel, copy } = useClipboardCopy('复制路径')
 
-async function copyEnvPath(): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(envPath.value)
-    copyState.value = 'copied'
-  } catch {
-    // 剪贴板被拒（非安全上下文、权限策略）时不能静默：告诉用户手动复制。
-    copyState.value = 'failed'
-  }
+function copyEnvPath(): Promise<void> {
+  return copy(envPath.value)
 }
 
 // 实际地址（#237 / spec #235 §5.2、D5-AC2）：启动入口把 `http://127.0.0.1:<实际端口>/`
@@ -79,17 +74,16 @@ async function copyEnvPath(): Promise<void> {
 // 空串 = 未知（测试直接 create_app、或没按入口启动）——这时整块不显示，不显示假地址。
 const baseUrl = computed(() => health.value?.base_url ?? '')
 
-// 与密钥路径的复制按钮分开存状态：否则点一个按钮会把另一个的文案也改掉。
-const addressCopyState = ref<'idle' | 'copied' | 'failed'>('idle')
-const addressCopyLabel = computed(() => (addressCopyState.value === 'copied' ? '已复制' : '复制'))
+// 与密钥路径的复制按钮分开存状态：useClipboardCopy 每次调用互不影响，点一个按钮
+// 不会把另一个的文案也改掉。
+const {
+  state: addressCopyState,
+  label: addressCopyLabel,
+  copy: copyAddress,
+} = useClipboardCopy('复制')
 
-async function copyBaseUrl(): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(baseUrl.value)
-    addressCopyState.value = 'copied'
-  } catch {
-    addressCopyState.value = 'failed'
-  }
+function copyBaseUrl(): Promise<void> {
+  return copyAddress(baseUrl.value)
 }
 </script>
 

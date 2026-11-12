@@ -275,6 +275,9 @@ def start(argv: Sequence[str] | None = None) -> ServerHandle:
     # 首次启动补配置骨架（D5-3 / #238）：``config = Config()`` 在 import 期就读 YAML，
     # 所以复制模板必须早于下面那行 ``from .app import create_app``。已存在的文件不覆盖。
     bootstrap.ensure_config_files()
+    # 冻结形态顺手建好 ``%APPDATA%\MiniMax-H3-prompt\``：缺密钥提示与 README 都让人往
+    # 那里写 ``.env``，干净机器上目录不存在时那句话指向空气（#243 复审）。不建 ``.env``。
+    bootstrap.ensure_env_dir()
     port = resolve_port(args.port)
     ensure_port_available(HOST, port)
 

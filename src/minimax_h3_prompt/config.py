@@ -62,6 +62,19 @@ def _env(*names: str) -> str:
     return ""
 
 
+def missing_api_key_message(settings: ModelSettings, *, context: str | None = None) -> str:
+    """缺密钥的统一文案：变量名 + 按形态算好的落点 + 「写完重启」。
+
+    ``context`` 是括号里那句语境（用途 / provider），由调用方给；**路径与措辞只有这一处**
+    ——``Config.resolve_api_key`` 与 ``model_factory._require`` 原先各拼一份，改一处文案
+    另一处就过时（#243 两轴复审）。落点按形态算（``paths.env_file_path()``）：冻结后是
+    ``%APPDATA%\\MiniMax-H3-prompt\\.env``，写死「项目根」会把用户指到不存在的文件上。
+    """
+    detail = context or settings.purpose
+    return (f"缺失 {settings.api_key_env}：请在 {paths.env_file_path()} 中配置"
+            f"（{detail}）。写好后重启程序生效。")
+
+
 def _detect_provider() -> str:
     if _env("DEEPSEEK_API_KEY"):
         return "deepseek"
@@ -355,10 +368,7 @@ class Config:
         """从已加载的密钥文件环境中读取 key；绝不从 YAML 读取 key 值。"""
         key = self._lookup_api_key(settings)
         if not key:
-            raise ConfigError(
-                f"缺失 {settings.api_key_env}：请在 {paths.env_file_path()} 中配置"
-                f"（{settings.purpose}）。写好后重启程序生效。"
-            )
+            raise ConfigError(missing_api_key_message(settings))
         return key
 
     @staticmethod
