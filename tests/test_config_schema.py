@@ -11,6 +11,8 @@
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 import yaml
 
@@ -71,3 +73,41 @@ def test_construction_fails_loudly_on_unknown_key(tmp_path, monkeypatch):
 
     with pytest.raises(ConfigError, match="max_qa_iteration"):
         Config()
+
+
+# ---------------------------------------------------------------------------
+# 日志保留天数（#239 / spec #235 §8.1）：默认 7，老配置缺这一节也不许报错。
+# ---------------------------------------------------------------------------
+
+def _config_from_yaml(tmp_path, monkeypatch, text: str) -> Config:
+    yaml_path = tmp_path / "agent.yaml"
+    yaml_path.write_text(text, encoding="utf-8")
+    monkeypatch.setattr(config_module, "CONFIG_PATH", yaml_path)
+    monkeypatch.setattr(config_module, "load_dotenv", lambda *a, **k: None)
+    return Config()
+
+
+def test_logging_section_defaults_to_seven_days(tmp_path, monkeypatch):
+    """老配置没有 ``logging:`` 节 → 取默认 7，不报「未知键」/不崩。"""
+    cfg = _config_from_yaml(tmp_path, monkeypatch, "pipeline:\n  default_duration: 5\n")
+    assert cfg.log_retention_days == 7
+
+
+def test_logging_retention_days_is_read_from_yaml(tmp_path, monkeypatch):
+    cfg = _config_from_yaml(
+        tmp_path, monkeypatch, "logging:\n  retention_days: 3\n")
+    assert cfg.log_retention_days == 3
+
+
+def test_logging_section_rejects_a_typo_key():
+    with pytest.raises(ConfigError, match="retention_day"):
+        validate_schema({"logging": {"retention_day": 7}})
+
+
+@pytest.mark.parametrize("value", [0, -1, "7", True])
+def test_logging_retention_days_must_be_a_positive_int(tmp_path, monkeypatch, value):
+    with pytest.raises(ConfigError, match="retention_days"):
+        _config_from_yaml(
+            tmp_path, monkeypatch,
+            f"logging:\n  retention_days: {json.dumps(value)}\n")
+

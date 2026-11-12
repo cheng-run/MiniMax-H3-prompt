@@ -677,6 +677,38 @@ MUTATIONS: tuple[Mutation, ...] = (
         "根路径推导重新散落回业务模块＝冻结后静默指向不存在的解包路径，"
         "dist/数据根/配置一起失效且不报错（#237 / spec #235 §6）",
     ),
+    Mutation(
+        "log_redaction_off",
+        "src/minimax_h3_prompt/logging_setup.py",
+        "        text = text.replace(value, REDACTION_PLACEHOLDER)\n",
+        "        text = text\n",
+        ("tests/test_logging_setup.py::test_secret_values_are_redacted_before_write",),
+        "脱敏失效＝密钥值原样写进 data/logs/ 并随诊断包外发（#239 / spec §8.1）",
+    ),
+    Mutation(
+        "log_retention_off",
+        "src/minimax_h3_prompt/logging_setup.py",
+        "        if day is None or day >= cutoff:\n            continue\n",
+        "        if day is None:\n            continue\n",
+        ("tests/test_logging_setup.py::test_retention_keeps_last_n_days",),
+        "保留窗口失效＝日志无限增长，N 天配置写了也不生效（#239 / spec §8.1）",
+    ),
+    Mutation(
+        "log_dir_empty_switch_off",
+        "src/minimax_h3_prompt/logging_setup.py",
+        "        return Path(raw).expanduser() if raw else None\n",
+        "        return Path(raw).expanduser() if raw else paths.logs_dir()\n",
+        ("tests/test_logging_setup.py::test_empty_log_dir_env_means_no_file_logging",),
+        "「空串＝不落盘」失效＝全量用例往仓库 logs/ 写文件，干净检出被污染（#239）",
+    ),
+    Mutation(
+        "bundle_redaction_off",
+        "src/minimax_h3_prompt/diagnostics.py",
+        "    archive.writestr(name, logging_setup.redact_text(text, secrets))\n",
+        "    archive.writestr(name, text)\n",
+        ("tests/test_api_diagnostics.py::test_bundle_never_contains_secret_values",),
+        "诊断包脱敏失效＝导出即泄密，假 key 自检这条硬条当场失守（#239 / spec §8.2）",
+    ),
 )
 
 

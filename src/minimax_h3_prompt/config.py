@@ -12,6 +12,9 @@ from dotenv import load_dotenv
 
 from . import paths
 from .errors import ConfigError
+# 日志保留天数的默认值从实现处派生（不是在这里再抄一个 7）：改默认值只改一处，
+# 配置读取与文件清理不会各说各话。
+from .logging_setup import DEFAULT_RETENTION_DAYS
 
 # 路径一律由 ``paths`` 唯一产出（#237 / spec #235 §6）：它是轻量模块，不读 YAML/.env，
 # 因此在这里 import 不会引出循环依赖。
@@ -103,7 +106,8 @@ _DEFAULT_COMFY_OUTPUT_ROOT = "D:/Comfyui/ComfyUI/output"
 # 换了网关、实际没换（2026-10-20 换模型期间反复踩到）。键集合是契约，写错要响。
 # 加新键时同步这里——少加一处，用户写了也不生效，那正是本守卫要消灭的形态。
 # ---------------------------------------------------------------------------
-_KNOWN_TOP = frozenset({"pipeline", "cost", "models", "director", "defaults", "model"})
+_KNOWN_TOP = frozenset({
+    "pipeline", "cost", "models", "director", "defaults", "model", "logging"})
 _KNOWN_SECTIONS: dict[str, frozenset[str]] = {
     "pipeline": frozenset({
         "default_duration", "max_qa_iterations", "max_clarification_rounds",
@@ -117,6 +121,9 @@ _KNOWN_SECTIONS: dict[str, frozenset[str]] = {
     }),
     "defaults": frozenset({"style", "language", "sessions_root"}),
     "models": frozenset({"primary", "vision"}),
+    # 运行日志（#239 / spec #235 §8.1）：只放保留天数；日志目录由 paths 与
+    # ``H3_LOG_DIR`` 决定，不是用户配置项。
+    "logging": frozenset({"retention_days"}),
 }
 _KNOWN_MODEL_FIELDS: dict[str, frozenset[str]] = {
     "primary": frozenset({"provider", "model", "base_url", "api_key_env"}),
@@ -208,6 +215,17 @@ class Config:
         cost = self.raw.get("cost", {}) or {}
         self.price_per_m_input: float = float(cost.get("price_per_m_input", 0.5))
         self.price_per_m_output: float = float(cost.get("price_per_m_output", 1.5))
+
+        # 运行日志保留天数（#239 / spec #235 §8.1）：缺这一节时取默认 7——老配置
+        # 不能因为新加的键就启动失败。类型在这里判死：``retention_days: "7"`` 或
+        # 布尔值会让清理逻辑按字符串/0 天比较，静默删掉全部或一条不删。
+        log_section = self.raw.get("logging", {}) or {}
+        retention = log_section.get("retention_days", DEFAULT_RETENTION_DAYS)
+        if isinstance(retention, bool) or not isinstance(retention, int) or retention < 1:
+            raise ConfigError(
+                "config/agent.yaml 的 logging.retention_days 必须是正整数，"
+                f"实际 {retention!r}")
+        self.log_retention_days: int = retention
 
         self.default_style: str = defaults.get("style", "Cinematic")
         self.default_language: str = defaults.get("language", "Chinese")

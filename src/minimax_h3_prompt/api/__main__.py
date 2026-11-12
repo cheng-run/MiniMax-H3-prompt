@@ -80,11 +80,17 @@ class StartupInfo:
     base_url: str
     data_root: Path
     frozen: bool
+    # 版本号来自 ``app.state.version``（包元数据，唯一来源）；默认空串让只关心地址
+    # 的既有构造保持原样，启动行里也只在有值时追加这一段。
+    version: str = ""
 
     def startup_line(self) -> str:
         """启动日志行（字段名就是验收脚本读的契约，改字段名等于改验收）。"""
         form = "冻结" if self.frozen else "开发"
-        return f"[启动] 地址={self.base_url}；数据根={self.data_root}；形态={form}"
+        line = f"[启动] 地址={self.base_url}；数据根={self.data_root}；形态={form}"
+        if self.version:
+            line += f"；版本={self.version}"
+        return line
 
 
 class ServerHandle:
@@ -198,6 +204,19 @@ def _wait_until_started(server: uvicorn.Server, thread: threading.Thread, port: 
         time.sleep(0.02)
 
 
+def _log_retention_days() -> int:
+    """配置里的日志保留天数（``logging.retention_days``，默认 7）。
+
+    **在 ``create_app`` 之前调用**：``config`` 是模块级单例，这里提前 import 会让它
+    先于应用构造被建出来——数据根已在 :func:`start` 里落好，顺序仍满足「argv 先于
+    业务 import」的硬约束。读配置失败就让异常照常上抛：配置坏到这个程度，服务本身
+    也起不来，吞掉只会把失败现场变模糊。
+    """
+    from ..config import config
+
+    return config.log_retention_days
+
+
 def start(argv: Sequence[str] | None = None) -> ServerHandle:
     """解析 argv → 定数据根 → 起服务，返回带**实际地址**的句柄。
 
@@ -220,11 +239,21 @@ def start(argv: Sequence[str] | None = None) -> ServerHandle:
         raise AlreadyRunningError(lock.message)
 
     try:
+        # 日志落盘（#239 / spec #235 §8.1）：必须在 ``create_app`` 之前——lifespan 的
+        # 启动日志（桩管线提示、对账结果）也要进文件。``H3_LOG_DIR=""`` 时本调用是
+        # 空操作（测试与干净检出不落盘）。
+        from .. import logging_setup
+
+        logging_setup.setup_file_logging(retention_days=_log_retention_days())
+
         from .app import create_app
 
         app = create_app()
-        config = uvicorn.Config(app, host=HOST, port=port, log_level="info")
-        server = uvicorn.Server(config)
+        # ``log_config=None``：不让 uvicorn 装自己那套 handler，否则 uvicorn.access /
+        # uvicorn.error 的日志进不了同一个文件（它们会 propagate 到根 logger）。
+        server_config = uvicorn.Config(
+            app, host=HOST, port=port, log_level="info", log_config=None)
+        server = uvicorn.Server(server_config)
         thread = threading.Thread(target=server.run, name="uvicorn-server", daemon=True)
         thread.start()
         _wait_until_started(server, thread, port)
@@ -236,6 +265,7 @@ def start(argv: Sequence[str] | None = None) -> ServerHandle:
             base_url=f"http://{HOST}:{bound_port}/",
             data_root=paths.data_root(),
             frozen=paths.is_frozen(),
+            version=app.state.version,
         )
         # 单一来源：窗口标题（D5-5）与诊断包（D5-4）都读这两处，不各自重算端口。
         app.state.startup = info

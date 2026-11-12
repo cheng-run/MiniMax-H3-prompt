@@ -14,6 +14,11 @@ import cv2
 import numpy as np
 import pytest
 
+# 运行日志默认**不落盘**（#239 / spec #235 §8.1）：``H3_LOG_DIR=""`` 是显式关闭开关，
+# 全量用例因此不会往仓库 ``logs/`` 里塞文件（干净检出上那些是垃圾）。需要验证真落盘的
+# 用例在自己的 tmp_path 上覆盖这个变量；要临时看真日志就手工 export 一个目录。
+os.environ.setdefault("H3_LOG_DIR", "")
+
 # 本机便利默认值（这台机器上 ComfyUI 的 H3 视频输出目录）。
 # 换机器请设 H3_COMFY_OUTPUT；未设且该目录不存在时，真实素材模块整体 SKIP。
 DEFAULT_COMFY_OUTPUT = Path(

@@ -63,3 +63,8 @@ defaults:
   style: "Cinematic"
   language: "Chinese"
   sessions_root: "output/sessions"   # 两阶段向导会话落盘/关键帧暂存根目录（项目内）
+
+# 运行日志（#239 / spec #235 §8.1）：data/logs/app-YYYYMMDD.log，按日滚动。
+# 保留最近 N 天（含当天）；改这里要重启进程生效。
+logging:
+  retention_days: 7

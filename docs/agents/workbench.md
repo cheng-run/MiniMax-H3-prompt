@@ -14,6 +14,9 @@
 | `api/routes/assets.py` | 上传素材的收与列（`POST/GET /sessions/{id}/assets`）；整只路由器在 `create_app` 里排在 `sessions` 之前，顺序不靠人记 |
 | `api/routes/media.py` | 素材字节读取（`GET/HEAD /media/{asset_id:path}`）；同样排在 `sessions` 之前 |
 | `api/media.py` | 单段 Range 解析、416 与字节流响应；素材与成片的 content 端点**共用这一份** |
+| `diagnostics.py` | 诊断包组装（manifest/环境/脱敏配置/日志窗口/会话/文本产物）；纯文件与字典操作，不依赖 FastAPI |
+| `api/routes/diagnostics.py` | `GET /api/v1/diagnostics/bundle`：唯一新增的 D5 端点，`application/zip` + `attachment`，不在鉴权豁免面上 |
+| `logging_setup.py` | 服务进程日志：`logs/app-YYYYMMDD.log` 按日滚动、保留 N 天（`logging.retention_days`）、写入前按值脱敏 |
 | `api/auth.py` | 本地访问控制：Host/Origin 白名单、每进程启动令牌、`LocalAccessMiddleware`（纯 ASGI，最外层） |
 | `api/routes/auth.py` | `GET /api/v1/auth/token`：返回令牌并下发 `wb_session` Cookie |
 | `api/app.py` | 工厂、lifespan（启动对账）、注入 `sessions_root` / `runtime_config` / `local_access` |

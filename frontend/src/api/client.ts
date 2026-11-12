@@ -261,6 +261,17 @@ export function artifactContentUrl(artifactId: string): string {
 }
 
 /**
+ * 诊断包的下载地址（D5-4 / #239，spec #235 §8.2）。
+ *
+ * 与 `artifactContentUrl` 同一份约定：`<a download>` 由浏览器自己发请求、挂不上自定义
+ * 头，只能靠 `/auth/token` 顺带下发的 `wb_session` Cookie（ADR 0033）；URL 里不放凭据。
+ * 文件名由服务端的 `Content-Disposition` 给（版本 + 生成时刻），前端不自己拼。
+ */
+export function diagnosticsBundleUrl(): string {
+  return `${baseUrl}/api/v1/diagnostics/bundle`
+}
+
+/**
  * 上传一份素材（复用 D3 端点，D4-AC13）。
  *
  * 走裸 fetch 而不是 `apiClient.POST`：生成的 multipart 类型把 `file` 声明成字符串

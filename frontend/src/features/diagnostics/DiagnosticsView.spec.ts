@@ -1,6 +1,6 @@
 import { flushPromises } from '@vue/test-utils'
 import { http, HttpResponse } from 'msw'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { server } from '@/test/server'
 import { mountWithPlugins } from '@/test/mount'
@@ -99,5 +99,71 @@ describe('DiagnosticsView 四态与客户端状态', () => {
 
     expect(wrapper.find('[role="alert"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('minimax-h3-prompt')
+  })
+
+  it('导出诊断包：导出前列出清单，按钮触发带 Cookie 的锚点下载', async () => {
+    server.use(http.get(url, () => HttpResponse.json(okBody)))
+
+    const { wrapper } = mountWithPlugins(DiagnosticsView)
+    await settle()
+
+    // spec #235 §8.2：导出前页面要列出将包含哪些条目（静态文案即可）。
+    const text = wrapper.text()
+    for (const entry of [
+      'manifest.json',
+      'environment.txt',
+      'config.json',
+      'logs/*.log',
+      'session-state.json',
+      'events.jsonl',
+      '*.md',
+    ]) {
+      expect(text).toContain(entry)
+    }
+    // 排除面也要说清楚：用户点下载前就知道包里没有密钥与素材。
+    expect(text).toContain('不含密钥值')
+    expect(text).toContain('素材图片与视频')
+
+    // 下载走 `<a download>` + Cookie：href 指向 bundle 端点，URL 里不放凭据。
+    const anchor = wrapper.find('a[download]')
+    expect(anchor.exists()).toBe(true)
+    expect(anchor.attributes('href')).toBe('http://localhost/api/v1/diagnostics/bundle')
+    expect(anchor.attributes('href')).not.toContain('token')
+
+    // jsdom 不实现真实导航，拦掉原型上的 click，只断言「按钮把下载发起了一次」。
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    try {
+      const exportButton = wrapper.findAll('button').find((b) => b.text().includes('导出诊断包'))!
+      expect(exportButton.element.tagName).toBe('BUTTON')
+      await exportButton.trigger('click')
+      await settle()
+
+      expect(clickSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      clickSpy.mockRestore()
+    }
+  })
+
+  it('服务异常时诊断包入口仍然可用（要导出的正是出问题的现场）', async () => {
+    server.use(
+      http.get(url, () =>
+        HttpResponse.json(
+          {
+            type: 'about:blank',
+            title: '服务器内部错误',
+            status: 500,
+            detail: 'boom',
+            instance: '/api/v1/health',
+          },
+          { status: 500, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+
+    const { wrapper } = mountWithPlugins(DiagnosticsView)
+    await settle()
+
+    expect(wrapper.find('[role="alert"]').exists()).toBe(true)
+    expect(wrapper.find('a[download]').exists()).toBe(true)
   })
 })
