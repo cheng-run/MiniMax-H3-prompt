@@ -16,6 +16,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).parents[1]
 BASH = shutil.which("bash")
 
@@ -39,7 +41,7 @@ def _init_repo(root: Path) -> None:
     (root / "scripts").mkdir()
     (root / "tests").mkdir()
     (root / "docs" / "research").mkdir(parents=True)
-    (root / ".gitignore").write_text("/worktree/\n", encoding="utf-8")
+    (root / ".gitignore").write_text("/worktree/\n.venv/\n", encoding="utf-8")
     (root / "scripts" / "worktree.sh").write_text(
         (REPO / "scripts" / "worktree.sh").read_text(encoding="utf-8"), encoding="utf-8")
     (root / "tests" / "test_dummy.py").write_text(
@@ -96,3 +98,41 @@ def test_remove_refuses_a_user_edited_backfilled_note(tmp_path):
     assert result.returncode != 0
     assert "未提交改动" in result.stderr
     assert note.is_file(), "用户改过的副本不能被静默删除"
+
+
+def test_link_venv_then_remove_keeps_the_main_environment(tmp_path):
+    """`.venv` 联接必须由 remove 摘下：删树不能穿透到主树环境（2026-11-12 实测）。"""
+    if not shutil.which("powershell.exe"):
+        pytest.skip("link-venv 用 Windows 目录联接，非 Windows 环境跳过")
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    stub = repo / ".venv" / "Scripts" / "python.exe"
+    stub.parent.mkdir(parents=True)
+    stub.write_text("stub\n", encoding="utf-8")
+    stub.chmod(0o755)
+
+    assert _run(repo, "add", "903").returncode == 0
+    linked = _run(repo, "link-venv", "903")
+    assert linked.returncode == 0, linked.stderr
+    venv_link = repo / "worktree" / "ticket-903" / ".venv"
+    assert venv_link.exists(), "link-venv 没建出联接"
+
+    result = _run(repo, "remove", "903")
+    assert result.returncode == 0, result.stderr
+    assert not (repo / "worktree" / "ticket-903").exists(), "工作树没删掉"
+    assert stub.is_file(), "主树 .venv 被穿透删除"
+
+
+def test_remove_refuses_a_real_venv_directory(tmp_path):
+    """不是联接的真实 .venv 不能被静默删掉（Directory.Delete 对非空目录抛错）。"""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    assert _run(repo, "add", "904").returncode == 0
+    real = repo / "worktree" / "ticket-904" / ".venv" / "Scripts"
+    real.mkdir(parents=True)
+    (real / "python.exe").write_text("real\n", encoding="utf-8")
+
+    result = _run(repo, "remove", "904")
+    assert result.returncode != 0
+    assert "不是空的目录联接" in result.stderr
+    assert (real / "python.exe").is_file(), "拒绝后不能留下半删状态"

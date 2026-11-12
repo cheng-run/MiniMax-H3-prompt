@@ -33,8 +33,14 @@ usage() {
   scripts/worktree.sh unlink-frontend NN
       删除工作树的 frontend/node_modules 目录联接（PowerShell Directory.Delete，
       只删联接、不动主树）。
+  scripts/worktree.sh link-venv NN
+      给工作树建 .venv 的**目录联接**，指向主树 .venv（跑 Playwright E2E 时
+      serve-e2e.mjs 找的是工作树根的 .venv）。同样只能用 unlink-venv 摘掉。
+  scripts/worktree.sh unlink-venv NN
+      删除工作树的 .venv 目录联接（只删联接、不动主树 .venv）。
   scripts/worktree.sh remove NN [--force]
-      默认先自动 harvest，再同步主树最新 tests 副本；删前检查跟踪文件脏改动。
+      默认先自动 harvest，再同步主树最新 tests 副本；删前检查跟踪文件脏改动，
+      并先摘掉 frontend/node_modules 与 .venv 两处目录联接。
       任一项不满足就拒绝；--force 会打印警告后跳过。
 USAGE
   exit 2
@@ -57,6 +63,21 @@ _unlink_dir() {
   path=$(cygpath -w "$1")
   powershell.exe -NoProfile -Command \
     "[System.IO.Directory]::Delete('$path')"
+}
+
+# 删树前摘掉某处目录联接。不是联接（非空真实目录）时 Directory.Delete 抛错 → 拒绝。
+# 2026-11-12 实测：.venv 也可能是指向主树的联接（跑 E2E 时子代理临时建的），
+# 只摘 node_modules 不够——`git worktree remove` 同样会穿透 .venv 联接。
+_unlink_junction_or_refuse() {
+  local path=$1 label=$2
+  [ -e "$path" ] || return 0
+  if ! _unlink_dir "$path" 2>/dev/null; then
+    echo "[拒绝] $path 不是空的目录联接（可能是真实依赖）。" >&2
+    echo "  人工确认并删除它后再删树；不要用 rm -rf 删联接。" >&2
+    return 1
+  fi
+  echo "  已摘除联接：$label"
+  return 0
 }
 
 # 把工作树里的测试改动回灌主树（tests/ 被 .gitignore 挡住，不随 git merge 回来）。
@@ -188,6 +209,7 @@ case "${1:-}" in
   PYTHONPATH="\$(pwd -W)/src" "$PY" -m pytest -q tests/...
 判据：python -c "import minimax_h3_prompt; print(minimax_h3_prompt.__file__)" 必须指向该工作树的 src。
 需要跑前端契约生成/守卫时：scripts/worktree.sh link-frontend $id（收工用 unlink-frontend 摘掉，别 rm -rf）。
+需要跑 Playwright E2E 时：scripts/worktree.sh link-venv $id（收工用 unlink-venv 摘掉，别 rm -rf）。
 EOF
     ;;
   link-frontend)
@@ -226,6 +248,41 @@ EOF
       exit 1
     fi
     echo "已摘除目录联接：$dest（主树依赖未动）"
+    ;;
+  link-venv)
+    # 工作树没有 .venv，而 frontend/scripts/serve-e2e.mjs 按工作树根找 .venv。
+    # 与 link-frontend 同理：联接而不是复制，删树前必须用 unlink-venv 摘掉。
+    id=${2:-}
+    [ -n "$id" ] || usage
+    target="$MAIN_ROOT/worktree/ticket-$id"
+    source="$MAIN_ROOT/.venv"
+    dest="$target/.venv"
+    [ -d "$target" ] || { echo "[错误] 没有这个工作树：$target" >&2; exit 1; }
+    [ -x "$PY" ] || {
+      echo "[错误] 主树 Python 环境未安装：$source" >&2
+      echo "  先执行：uv sync（下载由用户执行）" >&2
+      exit 1
+    }
+    [ -e "$dest" ] && { echo "[错误] 工作树的 .venv 已存在：$dest" >&2; exit 1; }
+    command -v powershell.exe >/dev/null 2>&1 || {
+      echo "[错误] link-venv 需要 Windows PowerShell 建目录联接。" >&2
+      exit 1
+    }
+    _link_dir "$dest" "$source"
+    echo "已建立目录联接：$dest -> $source"
+    echo "  收工前用 scripts/worktree.sh unlink-venv $id 摘掉；不要 rm -rf 联接。"
+    ;;
+  unlink-venv)
+    id=${2:-}
+    [ -n "$id" ] || usage
+    dest="$MAIN_ROOT/worktree/ticket-$id/.venv"
+    [ -e "$dest" ] || { echo "[跳过] 没有 .venv 联接：$dest"; exit 0; }
+    if ! _unlink_dir "$dest" 2>/dev/null; then
+      echo "[拒绝] $dest 不是空的目录联接（可能是真实环境目录，或仍有文件）。" >&2
+      echo "  人工确认后再处理；不要用 rm -rf 删联接。" >&2
+      exit 1
+    fi
+    echo "已摘除目录联接：$dest（主树 .venv 未动）"
     ;;
   remove)
     id=${2:-}
@@ -309,18 +366,17 @@ EOF
     if [ "$tests_tracked" -eq 0 ]; then
       rm -rf "$target/tests" "$target/scripts"
     fi
-    # 前端依赖目录联接必须先用 rmdir 摘掉：`git worktree remove` 与 rm -rf 都可能
-    # 穿透联接删到主树依赖（2026-11-10 实测主树 frontend/node_modules 被整份清空）。
-    if [ -e "$target/frontend/node_modules" ]; then
-      if ! _unlink_dir "$target/frontend/node_modules" 2>/dev/null; then
-        echo "[拒绝] $target/frontend/node_modules 不是空的目录联接（可能是真实依赖）。" >&2
-        echo "  人工确认并删除它后再删树；不要用 rm -rf 删联接。" >&2
+    # 目录联接必须先摘掉：`git worktree remove` 与 rm -rf 都可能穿透联接删到主树
+    # 依赖（2026-11-10 实测主树 frontend/node_modules 被整份清空）。.venv 同样
+    # 可能是指向主树的联接（2026-11-12 实测），一并处理。
+    for dep in "frontend/node_modules" ".venv"; do
+      if ! _unlink_junction_or_refuse "$target/$dep" "$dep"; then
         if [ "$force" -eq 0 ]; then
           exit 1
         fi
-        echo "[警告] --force：继续删树，前端依赖目录交给 worktree remove。" >&2
+        echo "[警告] --force：继续删树，$dep 交给 worktree remove。" >&2
       fi
-    fi
+    done
     # 此时跟踪文件已干净、测试副本已同步（或用户明确 --force）：允许清掉忽略文件。
     git -C "$MAIN_ROOT" worktree remove --force "$target"
     rm -rf "$MAIN_ROOT/worktree/.base-$id"
