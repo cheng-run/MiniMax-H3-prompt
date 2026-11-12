@@ -16,6 +16,8 @@ import sys
 import tomllib
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BUILD = REPO_ROOT / "scripts" / "build_exe.py"
 
@@ -94,6 +96,43 @@ def test_pyinstaller_args_shape(tmp_path):
 
     assert str(build_exe.ENTRY_SCRIPT) == cmd[-1]
     assert build_exe.ENTRY_SCRIPT.name == "exe_entry.py"
+
+
+def test_package_data_dirs_come_from_the_package_constant():
+    """资源目录清单只有一份（``selfcheck.PACKAGE_DATA_DIRS``）：打包与冻结自检同源。
+
+    #243 复审抓出 ``build_exe.PACKAGE_DATA_DIRS`` 与 ``selfcheck.RESOURCE_DIRS`` 是两份
+    同形字面量——新增一个资源目录时，只改一处就会出现「打包收了、自检不查」。
+    """
+    from minimax_h3_prompt import selfcheck
+
+    assert build_exe.PACKAGE_DATA_DIRS is selfcheck.PACKAGE_DATA_DIRS
+
+
+def test_verify_bundle_checks_every_package_data_dir(tmp_path, monkeypatch):
+    """``verify_bundle`` 从常量派生核对项：新增一个资源目录必须被点名核对。"""
+    dist = tmp_path / "MiniMax-H3-prompt"
+    internal = dist / "_internal"
+    dist.mkdir()
+    (dist / f"{build_exe.DIST_NAME}.exe").write_bytes(b"exe")
+    for relative in ("frontend/dist", "config"):
+        (internal / relative).mkdir(parents=True)
+    (internal / "frontend" / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
+    (internal / "config" / "agent.yaml").write_text("", encoding="utf-8")
+    (internal / "imageio_ffmpeg" / "binaries").mkdir(parents=True)
+    (internal / "imageio_ffmpeg" / "binaries" / "ffmpeg.exe").write_bytes(b"ff")
+    for name in build_exe.PACKAGE_DATA_DIRS:
+        (internal / "minimax_h3_prompt" / name).mkdir(parents=True)
+
+    # 现有清单齐全时通过（否则下面的失败无法归因到新增项）。
+    build_exe.verify_bundle(dist, tmp_path / "ffmpeg.exe")
+
+    monkeypatch.setattr(
+        build_exe, "PACKAGE_DATA_DIRS", (*build_exe.PACKAGE_DATA_DIRS, "new-assets"))
+    with pytest.raises(build_exe.BuildError) as excinfo:
+        build_exe.verify_bundle(dist, tmp_path / "ffmpeg.exe")
+
+    assert "new-assets" in str(excinfo.value)
 
 
 def test_readme_tells_the_user_where_the_key_and_port_live():

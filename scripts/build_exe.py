@@ -27,6 +27,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 
+# 包内资源清单的唯一来源在包内 ``selfcheck``（冻结自检也读它）。脚本自己再抄一份
+# 就会「打包收了、自检不查」或反过来（#243 两轴复审）。``scripts/`` 不是包，直接
+# 跑脚本时把仓库 ``src`` 补进导入路径，别依赖调用者已经设好 ``PYTHONPATH``。
+_SRC = REPO_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from minimax_h3_prompt.selfcheck import PACKAGE_DATA_DIRS  # noqa: E402  先补路径再导入
+
 # 交付目录名与 EXE 名同源（spec §4 的目录树）。
 DIST_NAME = "MiniMax-H3-prompt"
 PRODUCT_NAME = "MiniMax H3 Prompt"
@@ -37,9 +46,9 @@ BUILD_DIR_NAME = "build-exe"
 # 命令行里，入口脚本是这类关注点的唯一落点。
 ENTRY_SCRIPT = SCRIPTS_DIR / "exe_entry.py"
 
-# 包内非 py 资源只有这三处（33 个 md + 2 个 txt）；模块靠 ``Path(__file__).parent``
-# 定位它们，所以数据必须落在**同样的相对路径**，不能拍平。
-PACKAGE_DATA_DIRS: tuple[str, ...] = ("prompts", "knowledge", "references")
+# 包内非 py 资源只有上面 ``PACKAGE_DATA_DIRS`` 那几处（33 个 md + 2 个 txt）；模块靠
+# ``Path(__file__).parent`` 定位它们，所以数据必须落在**同样的相对路径**，不能拍平。
+# 清单本身不在这里定义（见文件顶部的 import）。
 
 # 没装的 GUI 后端：pywebview 会在运行时探测它们，PyInstaller 的钩子却可能把整棵
 # 依赖树拖进来（spec §9「可选后端显式 excludes」）。
@@ -373,9 +382,11 @@ def verify_bundle(dist: Path, ffmpeg_path: Path) -> None:
         "EXE": dist / f"{DIST_NAME}.exe",
         "前端 index.html": internal / "frontend" / "dist" / "index.html",
         "配置模板 agent.yaml": internal / "config" / "agent.yaml",
-        "角色提示词": internal / "minimax_h3_prompt" / "prompts",
-        "领域知识": internal / "minimax_h3_prompt" / "knowledge",
-        "参考资料": internal / "minimax_h3_prompt" / "references",
+        # 从常量派生而不是逐个手写：新增一个资源目录时这里自动跟着核对（#243 复审）。
+        **{
+            f"包内资源 {name}": internal / "minimax_h3_prompt" / name
+            for name in PACKAGE_DATA_DIRS
+        },
         "ffmpeg": internal / "imageio_ffmpeg" / "binaries" / Path(ffmpeg_path).name,
     }
     missing = [name for name, path in required.items() if not path.exists()]

@@ -3,11 +3,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from minimax_h3_prompt import selfcheck
+from minimax_h3_prompt import bootstrap, selfcheck
+
+
+def test_config_template_names_come_from_bootstrap():
+    """模板清单只有一份：自检读 ``bootstrap.CONFIG_TEMPLATE_NAMES``，不复制（#243）。
+
+    ``bootstrap`` 只依赖 ``shutil`` / ``pathlib`` / ``paths``，当初「怕 import 整条链」
+    的理由不成立——而且 ``selfcheck`` 本来就 import 了 ``api.__main__``（它 import bootstrap）。
+    """
+    assert selfcheck.CONFIG_TEMPLATE_NAMES is bootstrap.CONFIG_TEMPLATE_NAMES
 
 
 def _make_bundle(root: Path) -> Path:
-    for relative in selfcheck.RESOURCE_DIRS:
+    for relative in selfcheck.PACKAGE_DATA_DIRS:
         (root / "minimax_h3_prompt" / relative).mkdir(parents=True, exist_ok=True)
     (root / "frontend" / "dist").mkdir(parents=True, exist_ok=True)
     (root / "frontend" / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")

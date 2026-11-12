@@ -31,13 +31,15 @@ from typing import Sequence
 from . import paths
 from .api import __main__ as entry
 from .api.fake_pipeline import FAKE_PIPELINE_ENV
+from .bootstrap import CONFIG_TEMPLATE_NAMES
 
 PACKAGE_NAME = "minimax-h3-prompt"
-# 首次启动必须能复制出来的四份配置（``bootstrap.CONFIG_TEMPLATE_NAMES`` 同源清单的
-# 验收侧副本：selfcheck 不该为了读一个名字去 import 整个 bootstrap 链）。
-CONFIG_TEMPLATE_NAMES = ("agent.yaml", "image.yaml", "workflow.yaml", "library.yaml")
-# 包内非 py 资源（与 build_exe.PACKAGE_DATA_DIRS 同一份事实；两处都随资源清单变化）。
-RESOURCE_DIRS = ("prompts", "knowledge", "references")
+# 首次启动必须能复制出来的四份配置来自 ``bootstrap.CONFIG_TEMPLATE_NAMES``（见顶部
+# import）：它只依赖 ``shutil`` / ``pathlib`` / ``paths``，为读一个名字而复制一份同形
+# 元组才是真风险（#243 复审）。包内非 py 资源的**唯一清单**同理：打包流水线
+# （``scripts/build_exe.py``）与这里的冻结自检都读它，脚本侧原先抄了一份同形字面量，
+# 新增资源目录时必然漏改一处（#243 复审）。
+PACKAGE_DATA_DIRS: tuple[str, ...] = ("prompts", "knowledge", "references")
 
 PIPELINE_TIMEOUT_S = 180.0
 POLL_INTERVAL_S = 0.05
@@ -74,7 +76,7 @@ def static_checks(resource_root: Path | None = None) -> list[tuple[bool, str]]:
     for name in CONFIG_TEMPLATE_NAMES:
         path = root / "config" / name
         checks.append((path.is_file(), f"配置模板：{path}"))
-    for name in RESOURCE_DIRS:
+    for name in PACKAGE_DATA_DIRS:
         path = root / "minimax_h3_prompt" / name
         checks.append((path.is_dir(), f"包内资源：{path}"))
     return checks
