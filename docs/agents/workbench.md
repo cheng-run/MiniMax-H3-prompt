@@ -1,6 +1,7 @@
 # 工作台会话与 Headless API（D2–D4）
 
-> 入口：`python -m minimax_h3_prompt.api`（只绑 `127.0.0.1:8000`）。spec #214 / #227，ADR 0032、0033、0034；
+> 入口：`python -m minimax_h3_prompt.api`（开发形态只绑 `127.0.0.1:8000`）；冻结形态见下文「冻结形态（EXE）」。
+> spec #214 / #227 / #235，ADR 0032、0033、0034、0035；
 > 本地鉴权见 #222 §4 与 ADR 0033。
 > 这张表是导航与不变量，不是教程；实现细节以代码注释为准。
 
@@ -110,6 +111,32 @@
   （`scripts/accept_d4.py`）必须对着**没有这个变量**的服务跑。驱动器的 `--self-check`
   会把 `--fake` 与本进程开着该变量两种误标判成 FAIL，并以非零退出码收场——桩模式
   不允许「自检通过」。
+
+## 冻结形态（EXE）（D5，ADR 0035）
+
+外壳只做三件事：等 `/api/v1/health` 就绪 → 建窗 → 关窗退出（`desktop.py`）；业务一行不改，
+窗口地址与系统浏览器完全相同、**不带令牌**。冻结后只有下面这些位置与开关变了：
+
+| 项 | 开发形态 | 冻结形态 |
+|---|---|---|
+| 启动入口 | `python -m minimax_h3_prompt.api`（或 `-m …desktop` 带窗口） | `MiniMax-H3-prompt.exe`（`scripts/exe_entry.py` 转发到 `desktop.main`；`--self-check` 走 `selfcheck`，不开窗） |
+| 端口 | 固定 `8000`（Vite 代理写死，不能随机） | 默认随机空闲端口；`--port N` 显式、`--port 0` = 自动 |
+| 数据根 | 仓库根 | EXE 同级 `data/`；`--data-root` 可覆盖（argv 必须先于任何业务 import 解析） |
+| 只读资源 | 仓库根 | `sys._MEIPASS`（前端 `dist`、内置配置模板、提示词与知识库） |
+| 会话 / 产物 | `output/sessions`、`output/` | `data/sessions`、`data/output`（**并列**，不叫 `data/output/sessions`） |
+| 配置 | 仓库 `config/` | `data/config/{agent,image,workflow,library}.yaml`，首启从内置模板只补缺 |
+| 密钥 | 仓库 `.env` | `%APPDATA%\MiniMax-H3-prompt\.env`，**不读** `data/` 下的 `.env`，不受 `--data-root` 影响 |
+| 日志 | 同数据根 | `data/logs/app-YYYYMMDD.log`，按日滚动、保留 `logging.retention_days`（默认 7），写前脱敏 |
+| 诊断包 | 同一端点 | `GET /api/v1/diagnostics/bundle`（`application/zip` + attachment，**不在**鉴权豁免面上） |
+
+- **端口的事实只有一个来源**：`StartupInfo`（启动日志、窗口标题 `…（端口 N）`、概览页都读它）。显式端口被占用时**退出码 2 并点名端口**，不静默换；已有实例退出码 3，其余起不来是 1。
+- **单实例按数据根**：命名互斥体名由数据根绝对路径的哈希派生——随机端口让「双击两次」不再像冲突，不拦就会变成两个写入者。
+- **`--data-root` 的时机是硬约束**：配置是 import 期单例，迟到的覆盖不生效；启动入口因此在业务 import 之前解析 argv。
+- **根路径推导只许一处**：新增「项目根 / 资源根 / 数据根」推导走 `paths.py`，结构守卫会咬第二处。
+- **CDP 调试端口**：`--debug-port N` → `webview.settings['REMOTE_DEBUGGING_PORT']`；环境变量 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 那条路**实测不通**（spike 第 6 节）。
+- **WebView2 是运行前提**：缺失或主版本过旧时启动前拦下并给安装指引；版本不可判定只记警告、继续启动。
+- **关窗即退出**：正在跑的任务按既有 `interrupted` 语义收尾，不常驻、无托盘；重启后会话与产物仍在。
+- **构建与自检**命令、`build-exe/` 命名理由见 `docs/agents/frontend.md`，别在这里抄第二份。
 
 ## 验收
 
