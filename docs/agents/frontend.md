@@ -44,6 +44,15 @@ PW_CHANNEL=chrome npx --no-install playwright test   # 本机免下载 chromium 
   `git diff` 为空（2026-11-10 #225 retro 实测）。现已补 `*.vue`/`*.html` 的 `eol=lf`；
   老工作区要 `git add --renormalize .` 或重新检出才会换成 LF。
 - **`openapi-fetch` 0.13 的中间件只能事后注册**：`createClient({ middleware: [...] })` 不报错也不生效（被当作 fetch 选项透传），必须 `client.use(middleware)`。2026-11-10 #223 实测：中间件写好、用例照红，翻 `node_modules/openapi-fetch/dist/index.js` 才定位。
+- **工作树里 vitest 报 `Vitest failed to find the current suite`**：工作树的
+  `frontend/node_modules` 是指向主树的目录联接，`node_modules/.vite` 缓存因此两棵树
+  共用——一个根跑过之后另一个根再用会拿到错的分析结果，全部用例 0 test 失败。清掉
+  `frontend/node_modules/.vite` 再跑即可（缓存会重建；2026-11-11 #232 实测 69 条
+  用例全挂、清缓存后全过）。
+- **工作树跑 Playwright E2E 要借主树 `.venv`**：`frontend/scripts/serve-e2e.mjs` 按
+  工作树根找 `.venv`，用 `scripts/worktree.sh link-venv NN` 建目录联接，收工用
+  `unlink-venv` 摘掉；`remove` 会替你摘，但**不要 `rm -rf` 联接**（与 node_modules
+  同坑）。
 
 ## 本地跑前后端 + 关服务（Windows）
 
