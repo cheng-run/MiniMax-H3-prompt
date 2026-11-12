@@ -6,7 +6,7 @@
 读 A 臂的 plan.json，其余（写段 → 打包 → 逐段陪跑 → 交付）全部走原产线函数。
 
 用法（在工作树里、代码已切到当前 main 之后）：
-    PYTHONPATH="$(pwd -W)/src" D:/项目/python/MiniMax-H3-prompt/.venv/Scripts/python.exe \
+    PYTHONPATH="$(pwd -W)/src" <主树>/.venv/Scripts/python.exe \
         ../../scripts/ab_b_arm.py <A 会话目录> <B 会话目录> --cache-name ab-b
 
 落盘纪律（A → B 只搬「共享输入」）：
@@ -110,7 +110,7 @@ def main() -> int:
         print("[B 臂] 不重规划：直接复用 A 臂的 plan.json（票面要求）")
         return reused
 
-    planning.plan_director_segments = _reuse_plan  # type: ignore[assignment]
+    planning.plan_director_segments = _reuse_plan
 
     from minimax_h3_prompt.session_store import load_session
     from minimax_h3_prompt.ui.wizard import _run_director_flow

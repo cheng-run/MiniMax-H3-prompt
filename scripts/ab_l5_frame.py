@@ -10,7 +10,7 @@
 `fl2va_frame_prompts` 节点，所以两臂的首帧词面对的是同一份剧本与分镜。
 
 用法（在工作树里、代码已切到当前 main 之后）：
-    PYTHONPATH="$(pwd -W)/src" D:/项目/python/MiniMax-H3-prompt/.venv/Scripts/python.exe \
+    PYTHONPATH="$(pwd -W)/src" <主树>/.venv/Scripts/python.exe \
         ../../scripts/ab_l5_frame.py <A 会话目录> [--out <输出.md>]
 """
 

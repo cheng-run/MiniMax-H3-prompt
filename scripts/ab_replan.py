@@ -8,7 +8,7 @@
   写段仍用原分镜表。两臂共用同一份 `plan.json`。
 
 用法（在工作树里、代码仍是 9fbcb6b）：
-    PYTHONPATH="$(pwd -W)/src" D:/项目/python/MiniMax-H3-prompt/.venv/Scripts/python.exe \
+    PYTHONPATH="$(pwd -W)/src" <主树>/.venv/Scripts/python.exe \
         ../../scripts/ab_replan.py <A 会话目录> [--attempts 4]
 
 行为：
@@ -146,7 +146,7 @@ def main() -> int:
             f"{args.attempts} 次规划都不合格（最后一次：{last_error}）；"
             "可以重跑本脚本，或改 DIRECTIVE 后重试")
 
-    planning.plan_director_segments = _plan_three  # type: ignore[assignment]
+    planning.plan_director_segments = _plan_three
 
     from minimax_h3_prompt.ui.wizard import _run_director_flow
 
