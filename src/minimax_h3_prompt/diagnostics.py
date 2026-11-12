@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import io
 import json
-import os
 import platform
 import sys
 import zipfile
@@ -29,6 +28,8 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from . import logging_setup, paths
+# WebView2 版本由 ``winenv`` 读（与 ``desktop`` 的启动前检测同一份实现，见 #243 复审）。
+from .winenv import webview2_version
 from .workbench_store import EVENTS_FILENAME, SESSION_FILENAME, WorkbenchError
 
 MANIFEST_NAME = "manifest.json"
@@ -46,10 +47,6 @@ _SENSITIVE_KEY_SUFFIXES: tuple[str, ...] = tuple(
 # 全等键名（``key`` / ``token`` / …）就是后缀去掉前导下划线——同一份来源，仍不另列。
 _SENSITIVE_KEY_NAMES = frozenset(
     suffix.lstrip("_") for suffix in _SENSITIVE_KEY_SUFFIXES)
-
-# WebView2 运行时在注册表里的客户端 GUID（微软官方 Evergreen 文档的固定值）。
-_WEBVIEW2_CLIENT_GUID = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
-_WEBVIEW2_UNREADABLE = "不可读"
 
 
 def _is_sensitive_key(key: object) -> bool:
@@ -77,30 +74,6 @@ def sanitize_config(raw: Any, *, secrets: Iterable[str] = ()) -> Any:
     if isinstance(raw, str):
         return logging_setup.redact_text(raw, values)
     return raw
-
-
-def webview2_version() -> str:
-    """WebView2 运行时版本；读不到（非 Windows / 未安装 / 注册表被锁）返回「不可读」。
-
-    这是环境信息里唯一需要**读系统**的一项，失败不该让整个诊断包导不出来。
-    """
-    if os.name != "nt":
-        return _WEBVIEW2_UNREADABLE
-    try:
-        import winreg
-    except ImportError:  # pragma: no cover - Windows 上一定有
-        return _WEBVIEW2_UNREADABLE
-    key_path = rf"SOFTWARE\Microsoft\EdgeUpdate\Clients\{_WEBVIEW2_CLIENT_GUID}"
-    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
-        for view in (winreg.KEY_WOW64_32KEY, winreg.KEY_WOW64_64KEY):
-            try:
-                with winreg.OpenKey(hive, key_path, 0, winreg.KEY_READ | view) as handle:
-                    value, _kind = winreg.QueryValueEx(handle, "pv")
-            except OSError:
-                continue
-            if value:
-                return str(value)
-    return _WEBVIEW2_UNREADABLE
 
 
 def environment_text() -> str:

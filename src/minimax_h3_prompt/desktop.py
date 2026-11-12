@@ -26,6 +26,12 @@ from typing import Callable, Literal, MutableMapping, Sequence
 
 from . import bootstrap
 from .api import __main__ as entry
+# WebView2 的版本串与注册表探测点住在 ``winenv``（诊断包读同一份事实）。GUID 在这里
+# 以显式 re-export 保留给用例与排障看。
+from .winenv import (
+    WEBVIEW2_CLIENT_GUID as WEBVIEW2_CLIENT_GUID,
+    read_webview2_version,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -237,25 +243,11 @@ def _message_box(title: str, message: str) -> None:
 
 # --------------------------------------------------------------- WebView2 检测
 
-# WebView2 Runtime 在 EdgeUpdate 的固定客户端 GUID（微软官方检测口径）。
-WEBVIEW2_CLIENT_GUID = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+# 版本串与注册表探测点都住在 ``winenv``（顶部 import）；这里只留「拦不拦」的判定下限。
 # 「过旧」的下限：Evergreen 是滚动升级的，主版本 < 100（2022 年前）意味着运行时被
 # 锁在了好几年前，现代 CSS/JS 特性已经不可靠。**只在这一档拦**；版本串读不懂时按
 # 「不可判定」放行（宁可警告不硬阻断，与 H3 产物帧数表的既有口径一致）。
 MIN_WEBVIEW2_MAJOR = 100
-
-# 注册表探测点（#240 票面）：WOW6432Node 那条是微软文档的 64 位系统标准落点；
-# 另外补「64 位运行时」与「每用户安装（HKCU）」两处，32/64 位视图都试。
-WEBVIEW2_REGISTRY_TARGETS: tuple[tuple[str, str, str], ...] = (
-    ("HKLM", "SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\"
-             f"{WEBVIEW2_CLIENT_GUID}", "64"),
-    ("HKLM", "SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\"
-             f"{WEBVIEW2_CLIENT_GUID}", "32"),
-    ("HKLM", "SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\"
-             f"{WEBVIEW2_CLIENT_GUID}", "64"),
-    ("HKCU", "Software\\Microsoft\\EdgeUpdate\\Clients\\"
-             f"{WEBVIEW2_CLIENT_GUID}", "64"),
-)
 
 
 @dataclass(frozen=True)
@@ -268,41 +260,6 @@ class WebView2Status:
 
     state: Literal["ok", "missing", "outdated", "unknown"]
     version: str = ""
-
-
-def _read_registry_value(hive: str, path: str, view: str) -> str | None:
-    """读 ``pv``；不存在/不可读返回 None（探测不该因为「没装」抛异常）。"""
-    import winreg
-
-    root = winreg.HKEY_LOCAL_MACHINE if hive == "HKLM" else winreg.HKEY_CURRENT_USER
-    view_flag = winreg.KEY_WOW64_32KEY if view == "32" else winreg.KEY_WOW64_64KEY
-    try:
-        with winreg.OpenKey(root, path, 0, winreg.KEY_READ | view_flag) as key:
-            value, _ = winreg.QueryValueEx(key, "pv")
-    except OSError:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
-def read_webview2_version(
-    *,
-    platform: str | None = None,
-    reader: Callable[[str, str, str], str | None] | None = None,
-) -> str | None:
-    """WebView2 Runtime 的版本串；非 Windows 或没装返回 None。
-
-    ``platform`` / ``reader`` 可注入：非 Windows 上不 import ``winreg``（那条 import 会
-    直接失败），用例也不必真去读注册表。
-    """
-    if (platform or sys.platform) != "win32":
-        return None
-    reader = reader or _read_registry_value
-    for hive, path, view in WEBVIEW2_REGISTRY_TARGETS:
-        version = reader(hive, path, view)
-        if version:
-            return version
-    return None
 
 
 def _major_version(text: str) -> int | None:
