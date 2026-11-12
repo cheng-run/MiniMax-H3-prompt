@@ -44,9 +44,16 @@ async function openArtifacts(page: Page): Promise<void> {
   await page.getByRole('tab', { name: '产物' }).click()
   await expect(page.getByRole('heading', { name: '交付文本' })).toBeVisible()
   // 只认交付文本组：中间产物里的分镜表也含 `[Shot 1]`，全局文本匹配会撞两条。
-  await expect(page.locator('[data-group="deliverable"]')).toContainText('H3 视频提示词', {
+  const deliverable = page.locator('[data-group="deliverable"]')
+  await expect(deliverable).toContainText('H3 视频提示词', {
     timeout: 20_000,
   })
+  // 交付「三件套」缺一不可（D4-AC14）：summary 两件曾因阶段 2 不产出而从 CI 漏到
+  // 复审（2026-11-12），这里咬住分组文本与两件的复制按钮。
+  await expect(deliverable).toContainText('中文摘要')
+  await expect(deliverable).toContainText('摘要数据')
+  await expect(page.locator('[data-copy="summary-zh.md"]')).toBeVisible()
+  await expect(page.locator('[data-copy="summary-zh.json"]')).toBeVisible()
 }
 
 /** 复制最终提示词：按钮给出成功反馈，剪贴板里拿到的正是正文。 */
