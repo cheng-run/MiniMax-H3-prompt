@@ -1816,6 +1816,9 @@ class JobRunner:
                 changes["jobs"] = _upsert_job(jobs, _job_dict(next_job))
             else:
                 # 同一件号重开：同类未决旧项先收掉再挂新的（收旧挂新）。
+                # 未通过的这一支一定造了待办；闭包里 mypy 不追 ``if passed`` 的对应
+                # 关系，显式取一次局部值把类型收窄（运行期不可能为空）。
+                assert item is not None
                 items = [
                     existing.model_dump(mode="json")
                     for existing in detail.action_items
@@ -1834,6 +1837,7 @@ class JobRunner:
             events.append(EventDraft(
                 "job.started", {"kind": next_job.kind}, job_id=next_job.job_id))
         else:
+            assert item is not None
             events.append(EventDraft(
                 "action_item.created",
                 {"item_id": item.item_id, "kind": item.kind,
