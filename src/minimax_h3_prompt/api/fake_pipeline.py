@@ -13,7 +13,10 @@ from __future__ import annotations
 import math
 import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ..segment_planner import SegmentPlan
 
 # 开关名是启动日志里要被点名的那一个，调用方从常量取，不重抄字符串。
 FAKE_PIPELINE_ENV = "MINIMAX_FAKE_PIPELINE"
@@ -227,13 +230,14 @@ def _tier_durations(total_s: int) -> list[int] | None:
     return best[total_s]
 
 
-def segment_plan(total_s: int) -> list:
-    """桩分段规划（D6-1）：把总时长拆成 H3 能生成的档位（4/5/6 秒）。
+def segment_plan(total_s: int) -> list[SegmentPlan]:
+    """桩分段规划（D6-1）：把总时长拆成实测帧数表里的档位（4/5/6 秒）。
 
-    真实规划允许 4–10 秒，但 H3 工作流只有 4/5/6 秒档（2026-11-12 用户裁定）：桩若仍按
-    10 秒上限等分，18 秒会拆成 2×9、24 秒拆成 3×8，这些段在真实闸门上只能拿到「无法
-    确证档位」的 warning，CI 就证明不了档位合规。拆不出档位组合的时长（如 7 秒）退回
-    等分，让真实闸门照常判定——桩不假装合规。``shots_in_segment`` 留空：桩不编造分镜归属。
+    真实规划允许 4–10 秒，H3 节点本身支持 4–15 秒整数档；桩只用**实测帧数表**里的档位
+    造件，是为了让 CI 能精确判定档位合规，不是生成能力的上限。桩若仍按 10 秒上限等分，
+    18 秒会拆成 2×9、24 秒拆成 3×8，这些段在真实闸门上只能拿到「无法确证档位」的
+    warning，CI 就证明不了档位合规。拆不出档位组合的时长（如 7 秒）退回等分，让真实
+    闸门照常判定——桩不假装合规。``shots_in_segment`` 留空：桩不编造分镜归属。
     """
     from ..segment_planner import BASE_MAX_SEG_S, SegmentPlan
 
@@ -258,7 +262,9 @@ def segment_plan(total_s: int) -> list:
     return plans
 
 
-def segment_prompt(plan: Any, all_plans: list, state: dict[str, Any]) -> str:
+def segment_prompt(
+    plan: SegmentPlan, all_plans: list[SegmentPlan], state: dict[str, Any],
+) -> str:
     """桩写段（D6 #246）：不建模型，给一段形状合法、可展示的固定提示词。
 
     桩不与真实写段抢道：真实路径 ``write_segment_v2`` 会调模型，桩模式
