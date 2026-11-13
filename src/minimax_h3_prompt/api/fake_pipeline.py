@@ -29,15 +29,20 @@ def fake_pipeline_enabled() -> bool:
 
 
 def segment_video_frames(seconds: float) -> int:
-    """这一段该有多少帧：已知时长档取实测帧数表，档外按帧率折算。
+    """这一段该有多少帧：只认 H3 实测档位（4/5/6 秒），档外直接报错。
 
-    「4s 档 = 107 帧」这类事实只住 ``H3_TIER_FRAMES``；桩造件从它派生，档位一改就跟着改，
-    不会悄悄造出一段过不了真实闸门的视频。
+    桩造件是「用户从 ComfyUI 跑完回交」的替身，而 H3 只有这几档可生成。档外秒数要么是
+    规划错了、要么是测试写错了；静默按帧率折算会造出一段只拿得到「无法确证档位」warning
+    的视频，CI 会误以为档位已被真实闸门验证（那是假绿）。
     """
     from ..tools.preflight import H3_TIER_FRAMES
 
-    return H3_TIER_FRAMES.get(
-        int(round(seconds)), int(round(seconds * H3_VIDEO_FPS)))
+    tier = int(round(seconds))
+    if tier not in H3_TIER_FRAMES or abs(seconds - tier) > 1e-6:
+        raise ValueError(
+            f"桩管线只造 H3 实测档位的视频（{sorted(H3_TIER_FRAMES)} 整秒），"
+            f"收到 {seconds:g} 秒")
+    return H3_TIER_FRAMES[tier]
 
 
 def write_segment_video(path: Path, seconds: float) -> Path:

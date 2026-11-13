@@ -103,6 +103,17 @@ def test_stub_segment_video_passes_the_real_gate(tmp_path):
     assert [issue for issue in issues if issue.severity == "error"] == []
 
 
+def test_stub_segment_video_refuses_unknown_tiers(tmp_path):
+    """档外秒数直接报错、不落文件：桩不静默造一段闸门证不了档位的视频。
+
+    8 秒件在真实闸门上只拿得到 ``segment_video_duration_unknown_tier``（warning），
+    交上去会被当成「通过了档位判定」——桩宁可不造，也不给 CI 这种假绿。
+    """
+    with pytest.raises(ValueError, match="H3 实测档位"):
+        fake_pipeline.write_segment_video(tmp_path / "seg-08.mp4", 8)
+    assert not (tmp_path / "seg-08.mp4").exists()
+
+
 def test_stub_segment_plan_uses_only_h3_tier_lengths():
     """桩规划的每段时长都落在 H3 实测档位（4/5/6），且无缝覆盖总时长。
 
