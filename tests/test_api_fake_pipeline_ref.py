@@ -57,7 +57,7 @@ class _NoModel:
         raise AssertionError("桩管线不许建真实模型")
 
 
-def _wait_until(client, session_id: str, predicate, timeout: float = 60.0) -> dict:
+def _wait_until(client, session_id: str, predicate, timeout: float = 15.0) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         detail = client.get(f"/api/v1/sessions/{session_id}").json()
@@ -67,7 +67,7 @@ def _wait_until(client, session_id: str, predicate, timeout: float = 60.0) -> di
     raise AssertionError(f"详情没有在 {timeout}s 内满足条件：{session_id}")
 
 
-def _wait_job(client, session_id: str, job_id: str, timeout: float = 60.0) -> dict:
+def _wait_job(client, session_id: str, job_id: str, timeout: float = 15.0) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         body = client.get(

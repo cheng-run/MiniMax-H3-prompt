@@ -245,7 +245,9 @@ run_contract_guard() {
 # 变异静默失效、CI 连红数次，本地毫无感知。它慢（约 2 分钟），所以只进 full。
 run_mutations() {
   echo "[check] mutate: 守卫变异检验"
-  "$PY" scripts/mutation_check.py
+  # ``-u``：重定向到文件时 Python 默认块缓冲，等待期只能看到「开始」一行（2026-11-13
+  # 实测：用户问「为什么 10 分钟」时没有任何进度可读）。脚本自己逐条打印耗时。
+  "$PY" -u scripts/mutation_check.py
 }
 
 run_fast() {
@@ -324,7 +326,7 @@ case "$MODE" in
   mutate)
     # 变异检验（体检 P6）：守卫测试必须真的会咬人。不需要额外依赖。
     echo "[check] mutate: 守卫变异检验"
-    "$PY" scripts/mutation_check.py
+    "$PY" -u scripts/mutation_check.py
     ;;
   types)
     run_types

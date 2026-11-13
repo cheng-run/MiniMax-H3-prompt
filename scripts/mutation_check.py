@@ -27,6 +27,7 @@ import importlib.util
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1263,9 +1264,15 @@ def main(argv: list[str] | None = None) -> int:
                     if not any(line.startswith(f"{m.name}：") for line in broken)]
 
     survivors = []
-    for mutation in selected:
+    total = len(selected)
+    for index, mutation in enumerate(selected, start=1):
+        started = time.monotonic()
         killed, note = check(mutation)
-        print(f"[{'杀死' if killed else '存活'}] {mutation.name}: {note}")
+        # 逐条打印序号与耗时（2026-11-13）：115 条串行约 8 分钟，没有进度只能靠
+        # 查进程表猜「卡住还是慢」。
+        print(f"[{index}/{total}] [{'杀死' if killed else '存活'}] "
+              f"{mutation.name}: {note}（{time.monotonic() - started:.1f}s）",
+              flush=True)
         if not killed:
             survivors.append(mutation.name)
 
