@@ -267,3 +267,17 @@ def test_resume_is_exclusive_with_prepare_and_submit(capsys):
         code = accept_d6.main(["--resume", "话题/GEN001", *extra])
         assert code == accept_d6.EXIT_FAILED
         assert "只能选一种模式" in capsys.readouterr().out
+
+
+def test_resume_never_starts_stage1_again():
+    """续跑分支不得再起一次阶段 1：服务端会用 409 拦下，白跑一轮真实等待。
+
+    2026-11-13 实测：续跑成功后残留了一行重复的 ``report.run("起阶段 1…")``，
+    阶段 2 已经跑完却又去起任务，整轮以 409 收场。
+    """
+    import inspect
+
+    source = inspect.getsource(accept_d6.run_prepare)
+
+    assert source.count('report.run("起阶段 1 并等待审查待办"') == 1
+    assert source.count('report.run("建 18 秒会话"') == 1

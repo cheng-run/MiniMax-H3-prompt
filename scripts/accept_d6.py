@@ -1023,8 +1023,6 @@ def run_prepare(
         session_id = report.run("建 18 秒会话", create)
         report.run("起阶段 1 并等待审查待办", stage1)
 
-    report.run("起阶段 1 并等待审查待办", stage1)
-
     def approve() -> str:
         detail = _session_detail(client, base_url, token, session_id)
         item = pending_review_item(detail)
