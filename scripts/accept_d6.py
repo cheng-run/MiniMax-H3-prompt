@@ -79,8 +79,10 @@ EXIT_SELF_CHECK_FAILED = 2
 # 「等用户生成下一段视频」不是失败：prepare 阶段本来就停在这里，submit 阶段也可能
 # 只推进一段就交回用户。单独一档，调用方不必从文案里猜。
 EXIT_WAITING_USER = 3
-# 与本仓 step_machine 的同名状态一致：failed 是「可以点重试」的那种失败。
+# 与本仓 step_machine 的同名状态一致：这两种都是「可以点重试」的失败形态
+# （interrupted 是进程被杀后启动对账落的状态）。
 STATUS_FAILED = "failed"
+STATUS_INTERRUPTED = "interrupted"
 
 
 class AcceptanceError(RuntimeError):
@@ -990,11 +992,11 @@ def run_prepare(
             detail = _session_detail(client, base_url, token, session_id)
             status = str(detail.get("status") or "")
             facts["resume_status"] = status
-            if status == STATUS_FAILED:
+            if status in (STATUS_FAILED, STATUS_INTERRUPTED):
                 job_id = _start_job(client, base_url, token, session_id)
                 _wait_job(client, base_url, token, session_id, job_id,
                           timeout=args.timeout, sessions_root=sessions_root)
-                return "会话处于 failed：重试任务已跑完"
+                return f"会话处于 {status}：重试任务已跑完"
             return f"会话状态 {status}：不重起任务"
 
         report.run("续跑已有会话（不重建、不重跑阶段 1）", resume)
