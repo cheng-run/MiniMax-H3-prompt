@@ -41,29 +41,29 @@ function itemFor(index: number): ActionItemOut | null {
 
 <template>
   <section class="segments" aria-label="分段">
-    <p v-if="!segments.length" class="muted">暂无分段。</p>
+    <p class="progress" role="status">已通过 {{ passedCount }} / 总数 {{ segments.length }}</p>
 
-    <template v-else>
-      <p class="progress" role="status">已通过 {{ passedCount }} / 总数 {{ segments.length }}</p>
+    <p v-if="!segments.length" class="muted" role="status">
+      规划中：分段还没落盘，完成后这里会逐段列出。
+    </p>
 
-      <ol class="segment-list">
-        <li
-          v-for="segment in segments"
-          :key="segment.index"
-          class="segment"
-          :class="{ 'segment--current': segment.index === currentIndex }"
-          :data-segment-index="segment.index"
-        >
-          <SegmentCard
-            :session-id="sessionId"
-            :segment="segment"
-            :item="itemFor(segment.index)"
-            :assets="assets"
-            @refresh="emit('refresh')"
-          />
-        </li>
-      </ol>
-    </template>
+    <ol v-else class="segment-list">
+      <li
+        v-for="segment in segments"
+        :key="segment.index"
+        class="segment"
+        :class="{ 'segment--current': segment.index === currentIndex }"
+        :data-segment-index="segment.index"
+      >
+        <SegmentCard
+          :session-id="sessionId"
+          :segment="segment"
+          :item="itemFor(segment.index)"
+          :assets="assets"
+          @refresh="emit('refresh')"
+        />
+      </li>
+    </ol>
   </section>
 </template>
 

@@ -365,6 +365,8 @@ describe('SessionDetailView 审查与修订回路（#232）', () => {
 
 // D6-1（#244）：长片多一个只读「分段」分区；短视频的四分区不变。
 describe('SessionDetailView 分段分区', () => {
+  // 分段分区的出现判据是会话时长（>10 秒），不是「段列表非空」。
+  const longBrief = { ...makeDetail().brief, duration: 18 }
   const segments = [
     {
       index: 1,
@@ -395,7 +397,7 @@ describe('SessionDetailView 分段分区', () => {
   it('有段列表时出现「分段」，展示只读段表与「已通过 / 总数」', async () => {
     server.use(
       http.get(detailUrl, () =>
-        HttpResponse.json(makeDetail({ status: 'awaiting_human', segments })),
+        HttpResponse.json(makeDetail({ status: 'awaiting_human', brief: longBrief, segments })),
       ),
     )
     const { wrapper } = await mountDetail(makeStreamFetch())
@@ -446,6 +448,7 @@ describe('SessionDetailView 分段分区', () => {
         return HttpResponse.json(
           makeDetail({
             status: 'awaiting_human',
+            brief: longBrief,
             segments: waitingSegments,
             assets: [asset],
             action_items: [item],
@@ -474,6 +477,31 @@ describe('SessionDetailView 分段分区', () => {
 
     // 提交后父组件的失效通道立刻重拉详情；SSE 的事件失效走的是同一个口。
     expect(detailCalls).toBe(2)
+  })
+
+  it('长片但分段规划还没完成时，分区也在并显示「规划中」', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(makeDetail({ status: 'running', brief: longBrief })),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    const tabs = wrapper.findAll('[role="tab"]')
+    expect(tabs.map((tab) => tab.text())).toEqual([
+      '概览与进度',
+      '审查与待办',
+      '分段',
+      '素材',
+      '产物',
+    ])
+
+    await tabs[2]!.trigger('click')
+    await settle()
+
+    const panel = wrapper.find('#workbench-panel-segments')
+    expect(panel.text()).toContain('规划中')
+    expect(panel.text()).toContain('已通过 0 / 总数 0')
   })
 
   it('没有段列表（短视频）时不出现这一格', async () => {

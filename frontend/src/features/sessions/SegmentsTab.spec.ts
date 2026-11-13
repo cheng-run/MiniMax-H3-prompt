@@ -167,10 +167,11 @@ describe('SegmentsTab 分段分区', () => {
     expect(wrapper.find('[data-segment-index="2"]').classes()).toContain('segment--current')
   })
 
-  it('空段表给出提示而不是空分区', () => {
+  it('规划未完成时显示「规划中」占位与 0 / 0 进度，而不是空分区', () => {
     const wrapper = mountTab({ segments: [] })
 
-    expect(wrapper.text()).toContain('暂无分段')
+    expect(wrapper.text()).toContain('规划中')
+    expect(wrapper.text()).toContain('已通过 0 / 总数 0')
     expect(wrapper.find('ol').exists()).toBe(false)
   })
 })

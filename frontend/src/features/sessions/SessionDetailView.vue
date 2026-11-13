@@ -49,11 +49,13 @@ const BASE_TABS: { id: WorkbenchTab; label: string }[] = [
   { id: 'artifacts', label: '产物' },
 ]
 
-// 「分段」分区只在长片且规划已落地时出现（D6 spec §4.2）：短视频的四个分区与
-// 它们的位置都不变，长片在「审查」之后多一格。
+// 「分段」分区只在长片出现（D6 spec §4.2），判据是**会话时长**而不是段列表：
+// 规划还没落盘时长片也要有这一格（显示「规划中」），否则用户不知道去哪看进度。
+// 短视频的四个分区与它们的位置都不变。
+const LONG_FILM_SECONDS = 10
 const tabs = computed(() => {
   const entries = [...BASE_TABS]
-  if ((data.value?.segments?.length ?? 0) > 0) {
+  if ((data.value?.brief.duration ?? 0) > LONG_FILM_SECONDS) {
     entries.splice(2, 0, { id: 'segments', label: '分段' })
   }
   return entries
