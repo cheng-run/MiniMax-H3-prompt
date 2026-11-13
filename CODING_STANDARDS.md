@@ -41,12 +41,14 @@
 | 官方文本只有一个可写源 | ADR 0008 |
 | 契约的**媒体类型**要与运行时同口径（OpenAPI 声明哪种、服务端就返回哪种）；不一致会在生成类型里分叉 | D1 #205：FastAPI `responses={model}` 默认写 `application/json`，`api/problems.py` 改写为 `problem+json` |
 | **边界只做判定**：中间件、头/Cookie 解析这类安全边界对任何输入都落到「放行 / 拒绝」，畸形值不抛异常（它在异常处理器外层，一抛就是 500） | 2026-11-10 #223 复审：非 ASCII 凭据头让 `hmac.compare_digest` 抛 `TypeError`，401 变 500 |
+| **跨 spec 的行为变更以原 spec 为准**：为「统一口径」改另一条已验收路线的错误码/语义，先改对应 spec，不在本 spec 里顺手改 | 2026-11-13 #252 复审：修复代理把 D4 帧槽的 422 `frame_invalid` 改成 404，协调会话回退并保留两套码 |
 
 ## 五、测试
 
 | 判据 | 真源 |
 | --- | --- |
 | 守卫/钉合测试要做**变异检验**：扰动来源必须变红（永不为红＝没有守卫） | auto memory `guard-tests-need-mutation-check`（#56 复审硬条） |
+| 环境类守卫要断言**机制**（fixture 真的跑了 / 标记存在），不能只断言结果——干净检出（无 `.env`、无本机状态）上「结果」恒真，守卫永不为红 | 2026-11-13 #252 实测：`tests_do_not_isolate_host_env` 在无 `.env` 的工作树存活；修法是 fixture 留 `H3_TEST_ENV_ISOLATED` 标记 |
 | 断言钉**静态产物**（表格、提示词文案、清单）时，要实测「改坏即红」——对调两档、删一个字——并把实跑写进报告；咬不住的断言不算守卫 | 2026-11-08 #199 复审：给图表守卫对调两档仍绿、i2v 用例用产线不可达的 5 段表 |
 | 会真建 LLM 客户端的用例一律打桩（暗读 `.env` 真 key 的用例只在本机能过）。**已由 `tests/conftest.py` 的 `no_real_network` 强制：漏打桩即红，确需联网标 `@pytest.mark.allow_network`** | auto memory `h3-ticket-workflow` |
 | 加新环节后要跑**受影响的旧用例文件**并看耗时：接线变更会让旧用例开始走新路真发网络请求（信号＝CPU 时间远低于墙钟） | auto memory `wiring-change-makes-old-tests-hit-network`（#56：80s→145s） |

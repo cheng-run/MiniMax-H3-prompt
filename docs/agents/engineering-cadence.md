@@ -24,6 +24,10 @@ scripts/check.sh rehash     # 打印关键帧角色提示词的 sha256，供更�
 
 - **判据是最后一行**：`[check] <档位>: PASS` / `FAIL（退出码 N）`。管道随便接，
   `| tail -3` 也不会把红显示成绿（脚本自己保证，不用记 `PIPESTATUS`）。
+- **后台跑长检查要重定向到文件**：`| tail` 会等进程结束才吐行，等待期看不到任何
+  进度，判不了「慢」还是「卡住」（2026-11-13 实测：三次 full 都接了 `| tail`，用户
+  问「为什么 10 分钟」时只能去查进程表）。写法：`bash scripts/check.sh full > /tmp/full.log 2>&1`，
+  读 `/tmp/full.log` 的尾部看阶段；上一句只保证判据不被管道伪装，不保证可见性。
 - **pre-commit 扫的是整棵工作区**：结构守卫（ADR 引用、术语表等）会把无关的未提交
   文件一起算进去。主树里躺着一份引用了「尚未落地的 ADR/文档」的草稿时，任何提交都
   会红。改法不是跳过钩子，而是把那一份先 `git stash push -- <路径>`，提交完再
@@ -141,15 +145,21 @@ WebView 里都做不到。这类冲突**不要**在实现里自行挑一边，�
    （工作树分支并进来的那个 `Merge branch ...`）；它带进来的另一票改动，在那一票
    自己的分组里重放。
 2. `git switch main`，按票的依赖顺序逐组 `git cherry-pick -n <该票的提交...>`，
-   再一次性 `git commit -m "type(scope): 摘要（#N）"`。
+   再一次性 `git commit -m "type(scope): 摘要（#N）"`。**手动解冲突并 commit 之后，
+   先 `git cherry-pick --quit` 再继续下一组**——否则下一条 cherry-pick 直接报
+   `cherry-pick is already in progress`（2026-11-13 D7 实测）。
 3. 复审修复若落在集成分支末尾（时间上晚于后面的票），仍归到它修的票：作为该票的
    第二提交（`fix(...): ...（#N）`）放在组内，不要改挂到别的票上。
-4. 收尾必须内容保真：`git diff --stat <integration> main` **为空**。不为空说明漏了
-   提交或解冲突时改坏了内容——停下，不要 push。
+4. 收尾必须内容保真，但**判据只比本 spec 触碰的文件**：先记集成分支的基线提交，
+   `git diff --name-only <基线>..<集成分支>` 得到本 spec 的文件清单，逐文件
+   `git diff <集成分支> main -- <文件>` 应为空。**不要拿整棵
+   `git diff --stat main <集成分支>` 判**——main 在实现期间可能前进（别人合了别的票），
+   那个 diff 永远非空（2026-11-13 D7 实测 main 前进两次）。非空说明漏了提交或解冲突
+   改坏了内容——停下，不要 push。
 5. main 上再跑 `scripts/check.sh full` 与 `scripts/check.sh clean`；绿后 push。
    这是整条 spec 的**唯一一次全量**——集成分支上逐票合并只跑 `fast`（2026-11-12 用户
-   裁定，旧「每合一张票跑全量」已废）。合并/解冲突的兜底是「拆完
-   `git diff --stat main <集成分支>` 为空」＋受影响测试文件。
+   裁定，旧「每合一张票跑全量」已废）。合并/解冲突的兜底是「第 4 条的逐文件比对」
+   ＋跑受影响测试文件。
    删分支时注意：`git branch --merged main` 只覆盖真祖先，cherry-pick 出来的分支
    不是祖先；先用 `git merge-base --is-ancestor <branch> <integration>` 确认它的
    历史已包含在集成分支里，再 `-D`。

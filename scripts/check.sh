@@ -72,6 +72,7 @@ FAST_TESTS=(
   tests/test_config.py
   tests/test_direct_call_coverage.py
   tests/test_network_guard.py
+  tests/test_mutation_anchors.py
   tests/test_script_line_endings.py
   tests/test_adr_guard.py
   tests/test_doc_pointer_shape.py
@@ -137,6 +138,18 @@ run_types() {
     # shellcheck disable=SC2086 - 文件名按行拆分是刻意的（路径不含空格是本仓约定）
     "$PY" -m mypy $script_files
   fi
+}
+
+# 类型守卫进快档（retro 2026-11-13）：#252 七张票逐票 `fast` 全绿，拆回 main 跑
+# `full` 才炸出三处 `ActionItemOut | None`——类型错误在实现切片里本可以当场红。
+# mypy 全仓热缓存约 2.5s，只在 src 有改动时跑，其余提交不被拖慢。
+run_types_if_src_changed() {
+  local files
+  files=$({ git diff --name-only --diff-filter=ACMR HEAD -- 'src'
+            git ls-files --others --exclude-standard -- 'src'; } \
+          | grep -E '\.py$' | sort -u || true)
+  [ -n "$files" ] || return 0
+  run_types
 }
 
 # 前端守卫（retro 2026-11-09）：前端原先只在 CI 有 lint/typecheck，本地提交坏 TS 不会红。
@@ -241,6 +254,7 @@ run_fast() {
   "$PY" -m pytest -q "${FAST_TESTS[@]}"
   run_docstring_guard
   lint_changed
+  run_types_if_src_changed
   run_frontend_guard false
   # 只有改了契约相关路径才跑：每次提交都导出会把快档拖慢，而契约漂移只可能由
   # src/契约/生成链的改动引入（整个 src 都算：路由的 schema 也可能来自 store 模型）。

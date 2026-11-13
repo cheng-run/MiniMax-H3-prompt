@@ -28,6 +28,10 @@
 | `session_store.py` | 快照文件读写、`atomic_write_text`、向导续接状态与 `RESUMABLE_STATUSES` |
 | `api/fake_pipeline.py` | 确定性桩管线：固定阶段 1/2（含 ref 的资产图词与校对结论）、假读图与假段提示词/段判据/段视频造件，**只认环境变量 `MINIMAX_FAKE_PIPELINE`**（默认关、无 HTTP 入口），真实/桩互斥 |
 | `segment_validation.py` | 段交接的两道判据：同步提交自检（段号/技术档，`segment_submission_problems`）与语义判据（尾帧描述 vs `end_hook`，`judge_end_hook`）；读图与模型调用在 `api/jobs.py` |
+| `ref_segments.py` | 多参分段：`prepare_ref_segmentation`（切点/闭包/重编号/段表/顺序卡/四列分镜表）、`RefSegmentJob.write_segment`（单段落盘 + 段级注入卡）、`is_single_segment_route`（≤ `MAX_SEG_S` 即「1 段」） |
+| `segment_refs.py` | 段内参考素材子集：`compute_segment_scope` → `compute_asset_closure` → `demote_consistency_anchors`，结果随段只读回显 |
+| `injection_card.py` | 注入卡渲染（整片 / 段级）：给人照抄的接线清单，只显示用量、不做容量拒绝 |
+| `ref_capacity.py` | 多参容量外部契约 9/3/3/12；`asset_ledger.py` / `asset_loop.py` / `asset_proofread.py` 是 CLI 侧台账、循环与校对实现——工作台复用校对判据，不读 CLI 的 `asset-ledger.json` |
 | `frontend/src/features/sessions/` | 工作台五分区：`SessionDetailView`（壳/SSE/运行控制）、`ReviewTab`（审查与修订）、`AssetsTab` + `FrameSubmissionCard`（素材与帧提交）、`SegmentsTab` + `SegmentCard`（长片分段只读展示、`segment_video` 回交、ref 段内素材只读回显与「换一段」）、`ArtifactsTab`（产物查看/复制/下载/通用媒体播放） |
 | `frontend/src/api/client.ts` | 生成契约的类型出口与唯一 API 门面：令牌注入、媒体/产物 URL、错误归一成 `ApiError` |
 | `scripts/accept_d2.py` | 真实 HTTP 验收驱动器（手动，不进 CI；启动时先取令牌） |

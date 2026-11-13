@@ -1124,6 +1124,15 @@ MUTATIONS: tuple[Mutation, ...] = (
         "静默缺席（#259）",
     ),
     Mutation(
+        "mutation_anchor_drift_detected",
+        "src/minimax_h3_prompt/workbench_store.py",
+        '_ACTION_ITEM_INDEX_KEYS: tuple[str, ...] = ("segment_index", "asset_index")',
+        '_ACTION_ITEM_INDEX_KEYS: tuple[str, ...] = ("segment_index",)',
+        ("tests/test_mutation_anchors.py::test_every_mutation_anchor_is_unique",),
+        "锚点随重构漂走＝这条变异静默变成摆设，只有在 full 里被报成「存活」；"
+        "快档必须当场红（retro 2026-11-13）",
+    ),
+    Mutation(
         "ref_concat_trims_first_frame",
         "src/minimax_h3_prompt/api/jobs.py",
         "        if session.brief.is_ref:\n"
@@ -1137,6 +1146,37 @@ MUTATIONS: tuple[Mutation, ...] = (
         "（#259，D7 §10 复用拼接件但路线口径不同）",
     ),
 )
+
+
+def _anchor_occurrences(mutation: Mutation, root: Path) -> int:
+    """``old`` 在目标文件里出现几次（按变异的换行口径归一）。"""
+    path = root / mutation.path
+    try:
+        if mutation.normalize_newlines:
+            text = path.read_text(encoding="utf-8")
+        else:
+            text = path.read_bytes().decode("utf-8")
+    except OSError:
+        return 0
+    return text.count(mutation.old)
+
+
+def anchor_problems(mutations: tuple[Mutation, ...], *, root: Path = ROOT) -> list[str]:
+    """锚点失效清单：每条变异的 ``old`` 必须在目标文件里**恰好出现一次**。
+
+    为什么要单独判：锚点 0 次（重构把那段代码挪走/改名）与「守卫是摆设」是两件事
+    ——前者说明这条变异已经不再守任何东西，脚本却把它记成「存活」，看起来像守卫
+    不够强，实际是锚点该更新（2026-11-13 #252 实测三条同时漂，其中两条 0 次）。
+    ``fast`` 档由 ``tests/test_mutation_anchors.py`` 守着。
+    """
+    problems: list[str] = []
+    for mutation in mutations:
+        occurrences = _anchor_occurrences(mutation, root)
+        if occurrences != 1:
+            problems.append(
+                f"{mutation.name}：锚点在 {mutation.path} 出现 {occurrences} 次"
+                "（要求恰好 1 次）")
+    return problems
 
 
 def _run_tests(nodes: tuple[str, ...]) -> int:
@@ -1181,7 +1221,7 @@ def check(mutation: Mutation) -> tuple[bool, str]:
     # 与 ``read_text`` 的通用换行同口径：锚点一律按 LF 写，CRLF 文件也能命中。
     # 测行尾的变异显式关掉这一步（见 ``normalize_newlines``）。
     normalized = original.replace("\r\n", "\n") if mutation.normalize_newlines else original
-    occurrences = normalized.count(mutation.old)
+    occurrences = _anchor_occurrences(mutation, ROOT)
     if occurrences != 1:
         return False, f"锚点在 {mutation.path} 出现 {occurrences} 次（要求恰好 1 次）"
     mutated = normalized.replace(mutation.old, mutation.new, 1)
@@ -1212,6 +1252,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"没有名为 {args.only!r} 的变异；可用：{', '.join(m.name for m in MUTATIONS)}")
         return 2
 
+    # 锚点失效是**脚本错误**，不是「守卫是摆设」：两者修法不同（更新锚点 vs 加强
+    # 守卫），混在一个「存活」里会把人引去写更多用例。先单独报出来，且不跑它们。
+    broken = anchor_problems(tuple(selected))
+    if broken:
+        print("锚点失效（变异已经不在守任何东西；更新锚点后再判定守卫）：")
+        for line in broken:
+            print(f"  - {line}")
+        selected = [m for m in selected
+                    if not any(line.startswith(f"{m.name}：") for line in broken)]
+
     survivors = []
     for mutation in selected:
         killed, note = check(mutation)
@@ -1219,6 +1269,8 @@ def main(argv: list[str] | None = None) -> int:
         if not killed:
             survivors.append(mutation.name)
 
+    if broken:
+        return 2
     if survivors:
         print(f"\n{len(survivors)} 条变异没被杀死：{', '.join(survivors)}")
         return 1
