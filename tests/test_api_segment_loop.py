@@ -170,6 +170,8 @@ def test_pass_records_segment_and_writes_next_with_tail_anchor(
     segments = detail["segments"]
     assert segments[0]["status"] == "passed"
     assert segments[0]["video_asset_id"] == asset_id
+    # 通过后不残留上一轮被拒的原因。
+    assert segments[0]["rejection_reason"] == ""
     assert segments[1]["status"] == "waiting_video"
     assert [item["segment_index"] for item in _pending_segment_todos(detail)] == [2]
 
@@ -228,6 +230,11 @@ def test_reject_rebuilds_the_same_segment_todo_without_passing(
     pending = _pending_segment_todos(detail)
     assert [item["segment_index"] for item in pending] == [1]
     assert pending[0]["item_id"] != todo["item_id"]  # 重建，不是复用旧待办
+    # 被拒要有**具体**原因（D6 §5.4）：尾帧实际画面 + 本段末态要求，缺一不可。
+    reason = segments[0]["rejection_reason"]
+    assert "尾帧未达到本段末态" in reason
+    assert "人物还在走动" in reason
+    assert "人物停在门口" in reason
     # 不许越过这一段去写第 2 段。
     assert not (root / Path(session_id) / "segments" / "shot-02.md").exists()
 
@@ -235,6 +242,10 @@ def test_reject_rebuilds_the_same_segment_todo_without_passing(
     types = [event["type"] for event in events]
     assert types.count("action_item.created") >= 2  # 首次挂 + 重建
     assert "job.failed" not in types
+    # 原因也随重建的待办事件发出（事件类型仍闭合，不新增类型）。
+    rebuilt = [event for event in events
+               if event["type"] == "action_item.created"][-1]
+    assert "尾帧未达到本段末态" in rebuilt["payload"].get("reason", "")
 
 
 # ---------------------------------------------------------------------------

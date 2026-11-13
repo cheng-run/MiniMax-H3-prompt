@@ -822,6 +822,8 @@ class SegmentOut(BaseModel):
     # 本段提示词产物与已回交视频素材：D6-2 起才会被填上。
     prompt_artifact_id: str = ""
     video_asset_id: str = ""
+    # 语义闸门拒绝时给用户看的**具体**原因（D6 §5.4）；重交或通过后清空。
+    rejection_reason: str = ""
 
 
 class ArtifactInfo(BaseModel):

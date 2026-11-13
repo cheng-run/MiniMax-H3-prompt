@@ -623,6 +623,11 @@
             "title": "Prompt Artifact Id",
             "type": "string"
           },
+          "rejection_reason": {
+            "default": "",
+            "title": "Rejection Reason",
+            "type": "string"
+          },
           "shots_in_segment": {
             "items": {
               "type": "integer"

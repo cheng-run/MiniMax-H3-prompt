@@ -633,6 +633,11 @@ export interface components {
              * @default
              */
             prompt_artifact_id: string;
+            /**
+             * Rejection Reason
+             * @default
+             */
+            rejection_reason: string;
             /** Shots In Segment */
             shots_in_segment?: number[];
             /** Start S */

@@ -376,6 +376,7 @@ describe('SessionDetailView 分段分区', () => {
       status: 'pending',
       prompt_artifact_id: '',
       video_asset_id: '',
+      rejection_reason: '',
     },
     {
       index: 2,
@@ -387,6 +388,7 @@ describe('SessionDetailView 分段分区', () => {
       status: 'pending',
       prompt_artifact_id: '',
       video_asset_id: '',
+      rejection_reason: '',
     },
   ]
 

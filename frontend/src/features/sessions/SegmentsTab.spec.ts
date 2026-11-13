@@ -21,6 +21,7 @@ function makeSegment(overrides: Partial<SegmentOut> = {}): SegmentOut {
     status: 'pending',
     prompt_artifact_id: '',
     video_asset_id: '',
+    rejection_reason: '',
     ...overrides,
   }
 }
@@ -113,6 +114,25 @@ describe('SegmentsTab 分段分区', () => {
     expect(text).toContain('校验中')
     expect(text).toContain('已通过 1 / 总数 5')
     expect(text).toContain('unknown-status')
+  })
+
+  it('语义闸门拒绝后显示具体原因，并保留重交表单', () => {
+    const wrapper = mountTab({
+      segments: [
+        makeSegment({
+          status: 'waiting_video',
+          rejection_reason: '尾帧未达到本段末态：尾帧画面：人物还在走动｜要求：人物停在门口',
+        }),
+      ],
+      actionItems: [makeItem()],
+    })
+
+    const text = wrapper.text()
+    expect(text).toContain('上次提交未通过')
+    expect(text).toContain('尾帧未达到本段末态')
+    expect(text).toContain('人物停在门口')
+    // 被拒的段仍可重交：待办表单还在。
+    expect(text).toContain('提交本段视频')
   })
 
   it('当前段高亮落在第一个未通过的段上；没有覆盖镜头时显示占位', () => {

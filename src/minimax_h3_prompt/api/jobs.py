@@ -138,6 +138,14 @@ def _job_id_of(job: JobSummary | dict[str, Any]) -> str:
     return str(job.get("job_id", ""))
 
 
+def _segment_rejection_reason(end_hook: str, description: str) -> str:
+    """语义闸门拒绝的可读原因（D6 §5.4）：尾帧实际画面 + 本段要求，缺一则省略。"""
+    frame = description.strip() or "（读图没有给出描述）"
+    hook = end_hook.strip()
+    reason = f"尾帧未达到本段末态：{frame}"
+    return f"{reason}｜要求：{hook}" if hook else reason
+
+
 def _upsert_job(jobs: Any, job: dict[str, Any]) -> list[dict[str, Any]]:
     """按 job_id 覆盖或追加，并只保留最近 ``JOB_HISTORY_LIMIT`` 条。"""
     items = [_job_dict(item) for item in jobs if _job_id_of(item) != job["job_id"]]
@@ -421,6 +429,8 @@ class JobRunner:
                             # 交上视频 → 异步校验排队；落盘后由 job 判三档结局。
                             row["status"] = SEGMENT_STATUS_VALIDATING
                             row["video_asset_id"] = asset_id
+                            # 重新交回＝上一轮拒绝的原因不再适用（D6 §5.4）。
+                            row["rejection_reason"] = ""
                     holder["segments"] = rows
                     recorded_decision = step_machine.DECISION_SUBMIT_VIDEO
                 else:
@@ -1358,6 +1368,8 @@ class JobRunner:
             "number": number,
             "outcome": END_REACHED if reached else END_NOT_REACHED,
             "description": tail_description,
+            # 拒绝原因要带上「本段要求」：收尾处据此给用户可读的原因（D6 §5.4）。
+            "end_hook": plan.end_hook,
         }
 
     def _execute_revise(self, session_id: str, job_id: str,
@@ -1770,6 +1782,8 @@ class JobRunner:
                 for row in rows:
                     if int(row["index"]) == number:
                         row["status"] = SEGMENT_STATUS_PASSED
+                        # 重交成功后不再展示上一轮的原因（D6 §5.4）。
+                        row["rejection_reason"] = ""
                 jobs = _upsert_job(detail.jobs, _job_dict(job))
                 if next_job is not None:
                     jobs = _upsert_job(jobs, _job_dict(next_job))
@@ -1790,6 +1804,9 @@ class JobRunner:
         item = ActionItemOut(
             item_id=uuid.uuid4().hex, kind=step_machine.ACTION_SEGMENT_VIDEO,
             status="pending", created_at=_now(), segment_index=number)
+        # 具体原因随段状态与待办一起给到用户（D6 §5.4「被拒时看到具体原因」）。
+        reason = _segment_rejection_reason(
+            str(result.get("end_hook") or ""), description)
 
         def _reject(detail: Any) -> dict[str, Any]:
             job = self._job_or_running(job_id, detail).model_copy(
@@ -1800,6 +1817,7 @@ class JobRunner:
                     # 被拒的视频不算数：清掉素材 id，回到「等用户换一段视频重交」。
                     row["status"] = SEGMENT_STATUS_WAITING_VIDEO
                     row["video_asset_id"] = ""
+                    row["rejection_reason"] = reason
             items = [
                 existing.model_dump(mode="json")
                 for existing in detail.action_items
@@ -1817,7 +1835,8 @@ class JobRunner:
             EventDraft("job.succeeded",
                        {"next": step_machine.STATUS_AWAITING_HUMAN}, job_id=job_id),
             EventDraft("action_item.created",
-                       {"item_id": item.item_id, "kind": item.kind}, job_id=job_id),
+                       {"item_id": item.item_id, "kind": item.kind,
+                        "reason": reason}, job_id=job_id),
         ])
         return None
 

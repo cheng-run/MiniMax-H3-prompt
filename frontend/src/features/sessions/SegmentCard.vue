@@ -205,6 +205,16 @@ async function submitVideo(): Promise<void> {
       preload="metadata"
     />
 
+    <!-- 语义闸门拒绝后段回到等待交视频（D6 §5.4）：把服务端给的具体原因摆出来，
+         否则用户只看到状态退回、不知道换哪一段。 -->
+    <p
+      v-if="segment.status === 'waiting_video' && segment.rejection_reason"
+      class="segment__rejection"
+      role="alert"
+    >
+      上次提交未通过：{{ segment.rejection_reason }}（请换一段视频重交）
+    </p>
+
     <!-- 第三个人工待办（D6 §8）：本段唯一的 segment_video 待办。提交只发 resolve，
          之后由快照（SSE 失效信号）把段状态推进到 validating/passed。 -->
     <section v-if="item" class="submission" aria-label="提交本段视频">
@@ -270,6 +280,10 @@ async function submitVideo(): Promise<void> {
 .segment__shots,
 .segment__summary {
   margin: 0;
+}
+.segment__rejection {
+  margin: 0;
+  color: var(--color-error-text);
 }
 .prompt {
   display: flex;
