@@ -720,6 +720,28 @@
             "title": "Assets",
             "type": "array"
           },
+          "declared_frames": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Declared Frames"
+          },
+          "end_frame": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Frame"
+          },
           "end_hook": {
             "default": "",
             "title": "End Hook",
@@ -728,6 +750,35 @@
           "end_s": {
             "title": "End S",
             "type": "integer"
+          },
+          "export_frames": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Export Frames"
+          },
+          "give_images": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Give Images",
+            "type": "array"
+          },
+          "guided": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Guided"
           },
           "index": {
             "title": "Index",
@@ -743,12 +794,34 @@
             "title": "Rejection Reason",
             "type": "string"
           },
+          "segment_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Segment Type"
+          },
           "shots_in_segment": {
             "items": {
               "type": "integer"
             },
             "title": "Shots In Segment",
             "type": "array"
+          },
+          "start_frame": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Frame"
           },
           "start_s": {
             "title": "Start S",
@@ -938,6 +1011,13 @@
                 "type": "null"
               }
             ]
+          },
+          "director_notes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Director Notes",
+            "type": "array"
           },
           "jobs": {
             "items": {

@@ -354,6 +354,43 @@ def _tier_durations(total_s: int) -> list[int] | None:
     return best[total_s]
 
 
+def director_plan(mode: str, total_s: float) -> Any:
+    """桩导演台规划（#262）：单段开场，声明帧落在 17k+5 网格上、Σ 导出＝总帧。
+
+    帧网格必须**自洽**才能过 ``read_plan_json`` 的严格读回——桩不造一张读不回来的
+    表，否则续跑用例会在与真实路径不同的地方报错。目标总帧常不可达（96 帧不在网格
+    上），这里取向上吸附后的最近可达值，与真实规划器的落位口径一致。
+    """
+    from ..director.frames import (
+        FPS, DirectorPlan, DirectorSegment, align_frames, give_images_for)
+
+    landed = align_frames(round(float(total_s) * FPS))
+    segment = DirectorSegment(
+        index=1, type="opening", guided=False,
+        start_frame=0, end_frame=landed,
+        declared_frames=landed, export_frames=landed,
+        summary="桩管线导演台单段：雨夜街口开场",
+        end_hook="桩管线：人物停在旧楼门前收起伞，画面落定",
+        give_images=give_images_for("opening", mode),
+    )
+    return DirectorPlan(mode=mode, total_frames=landed, segments=(segment,))
+
+
+def director_segment_prompt(plan: Any, segment: Any) -> str:
+    """桩导演台段词（#262）：三字段外壳齐全的固定正文，不建模型。
+
+    桩不与真实写段抢道（桩模式 ``build_chat_model`` 一调就抛）：落盘仍走工作台
+    执行器那一份真实路径，形状与浏览器看到的完全一致。
+    """
+    return (
+        "integrated_multimodal_description:\n"
+        f"[Shot 1] At 00:00.000, a fixed stub establishing shot for director "
+        f"segment {segment.index}/{len(plan.segments)}.\n\n"
+        "overall_soundscape:\nRain and footsteps (stub).\n\n"
+        "non_diegetic_music:\nLow sustained strings (stub)."
+    )
+
+
 def segment_plan(total_s: int) -> list[SegmentPlan]:
     """桩分段规划（D6-1）：把总时长拆成实测帧数表里的档位（4/5/6 秒）。
 

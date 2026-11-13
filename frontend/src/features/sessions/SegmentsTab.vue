@@ -16,6 +16,9 @@ const props = defineProps<{
   assets: Asset[]
   actionItems: ActionItemOut[]
   artifacts: ArtifactInfo[]
+  // 导演台的总长落位说明（D8 §6.1 / #262）：目标帧不可达时点名「目标 / 实际 / 差」。
+  // 服务端从 director/plan.json 现读派生，base/ref 恒为空表。
+  directorNotes?: string[]
 }>()
 
 const passedCount = computed(
@@ -31,6 +34,8 @@ const currentIndex = computed(() => {
 const emit = defineEmits<{ refresh: [] }>()
 
 const isRef = computed(() => props.mode === 'ref')
+// 可选 prop：既有 base/ref 用例不传它；导演台详情总会传（可能为空表）。
+const notes = computed(() => props.directorNotes ?? [])
 
 // 待办与段按段号配对：每段最多一个 pending 的 segment_video 待办，表单只挂在对应
 // 那一段上；待办属于哪段由服务端给（`segment_index`），前端不按顺序猜。
@@ -55,6 +60,9 @@ function cardFor(index: number): ArtifactInfo | null {
 
 <template>
   <section class="segments" aria-label="分段">
+    <ul v-if="notes.length" class="notes" data-director-notes role="status">
+      <li v-for="(note, index) in notes" :key="index">{{ note }}</li>
+    </ul>
     <p class="progress" role="status">已通过 {{ passedCount }} / 总数 {{ segments.length }}</p>
 
     <p v-if="!segments.length" class="muted" role="status">
@@ -92,6 +100,11 @@ function cardFor(index: number): ArtifactInfo | null {
 .progress {
   margin: 0;
   font-weight: 600;
+}
+.notes {
+  margin: 0;
+  padding-left: 1.25rem;
+  color: var(--color-text-muted);
 }
 .segment-list {
   display: flex;

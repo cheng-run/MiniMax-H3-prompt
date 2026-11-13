@@ -47,6 +47,33 @@ function statusLabel(status: string): string {
   return STATUS_LABELS[status] ?? status
 }
 
+// 导演台的段事实（D8 §6.1 / #262）：段类型与给图清单都是**规划产物的派生值**，
+// 页面上只读展示。没有 ``segment_type`` 的段（base/ref）整块不渲染。
+const SEGMENT_TYPE_LABELS: Record<string, string> = {
+  opening: '开场',
+  continue: '续接',
+  camera_same: '运镜（同机位）',
+  camera_cut: '切镜',
+  ending: '收尾',
+}
+
+const GIVE_IMAGE_LABELS: Record<string, string> = {
+  first: '首帧',
+  end: '尾帧（终点画面）',
+  assets: '本段参考素材',
+}
+
+function segmentTypeLabel(type: string | null | undefined): string {
+  return type ? (SEGMENT_TYPE_LABELS[type] ?? type) : ''
+}
+
+function giveImagesLabel(images: string[] | undefined): string {
+  if (!images || images.length === 0) {
+    return '无（纯文字）'
+  }
+  return images.map((token) => GIVE_IMAGE_LABELS[token] ?? token).join('、')
+}
+
 function shotsLabel(shots: number[] | undefined): string {
   return shots && shots.length > 0 ? shots.map((shot) => `镜头 ${shot}`).join('、') : '—'
 }
@@ -235,6 +262,30 @@ async function submitVideo(): Promise<void> {
       </Button>
     </header>
     <ErrorNotice v-if="reopenError" :message="reopenError" />
+    <!-- 导演台的帧执行契约（#262）：声明帧 → 导出帧两个数都给；引导与给图清单都从
+         段类型派生，界面没有任何修改入口。 -->
+    <dl v-if="segment.segment_type" class="segment__grid" data-director-grid>
+      <div class="segment__grid-item">
+        <dt>段类型</dt>
+        <dd>{{ segmentTypeLabel(segment.segment_type) }}</dd>
+      </div>
+      <div class="segment__grid-item">
+        <dt>段间引导</dt>
+        <dd>{{ segment.guided ? '开' : '关' }}</dd>
+      </div>
+      <div class="segment__grid-item">
+        <dt>声明帧 → 导出帧</dt>
+        <dd>{{ segment.declared_frames }} → {{ segment.export_frames }}</dd>
+      </div>
+      <div class="segment__grid-item">
+        <dt>给图清单</dt>
+        <dd>{{ giveImagesLabel(segment.give_images) }}</dd>
+      </div>
+      <div class="segment__grid-item">
+        <dt>成片帧区间</dt>
+        <dd>{{ segment.start_frame }}–{{ segment.end_frame }}</dd>
+      </div>
+    </dl>
     <p class="segment__shots">覆盖镜头：{{ shotsLabel(segment.shots_in_segment) }}</p>
     <p class="segment__summary">{{ segment.summary }}</p>
 
@@ -360,6 +411,23 @@ async function submitVideo(): Promise<void> {
 .segment__summary,
 .segment__assets {
   margin: 0;
+}
+.segment__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+.segment__grid-item dt {
+  color: var(--color-text-muted);
+  font-size: 0.8125rem;
+}
+.segment__grid-item dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
 }
 .segment__rejection {
   margin: 0;

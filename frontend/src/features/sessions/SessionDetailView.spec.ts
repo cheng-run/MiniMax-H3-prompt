@@ -617,3 +617,61 @@ describe('SessionDetailView 产物分区', () => {
     expect(wrapper.findAll('button').some((b) => /确认交付|交付确认/.test(b.text()))).toBe(false)
   })
 })
+
+// D8-2（#262）：导演台恒有「分段」——段数是规划产物，不看 10 秒阈值。
+describe('SessionDetailView 导演台分段分区（#262）', () => {
+  it('短视频导演台会话也有分段分区，并显示帧网格与总长说明', async () => {
+    const brief = {
+      ...makeDetail().brief,
+      mode: 'director',
+      duration: 4,
+      director_mode: 't2v',
+      director_node_id: 'node-42',
+    }
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({
+            status: 'awaiting_human',
+            mode: 'director',
+            brief,
+            director_notes: ['总帧目标 96 帧，实际落位 90 帧（差 6 帧）：段表按 17k 网格执行'],
+            segments: [
+              {
+                index: 1,
+                start_s: 0,
+                end_s: 3,
+                shots_in_segment: [],
+                summary: '开场：雨夜街口',
+                end_hook: '人物走进门廊',
+                status: 'pending',
+                prompt_artifact_id: 'sess-1/director/segment-01.md',
+                video_asset_id: '',
+                rejection_reason: '',
+                segment_type: 'opening',
+                guided: false,
+                start_frame: 0,
+                end_frame: 90,
+                declared_frames: 90,
+                export_frames: 90,
+                give_images: [],
+              },
+            ],
+          }),
+        ),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    const tabs = wrapper.findAll('[role="tab"]')
+    expect(tabs.map((tab) => tab.text())).toContain('分段')
+
+    const index = tabs.findIndex((tab) => tab.text() === '分段')
+    await tabs[index]!.trigger('click')
+    await settle()
+
+    const panel = wrapper.find('#workbench-panel-segments')
+    expect(panel.text()).toContain('90 → 90')
+    expect(panel.text()).toContain('差 6 帧')
+  })
+})

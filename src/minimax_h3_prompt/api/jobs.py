@@ -23,7 +23,7 @@ import threading
 import time
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -79,6 +79,7 @@ from ..workbench_store import (
     StartImageRequired,
     WorkbenchError,
     WorkbenchSessionStore,
+    director_segment_prompt_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,23 @@ logger = logging.getLogger(__name__)
 ACTIVE_JOB_FILENAME = "active-job.json"
 # 会话文件里保留的 job 摘要条数（spec §5.2：最近 N 条，完整历史在事件流里）。
 JOB_HISTORY_LIMIT = 20
+# 导演台阶段 2 的两件事（spec #253 §5.2 / §8.1-§8.2）：规划与逐段写词。它们仍是
+# ``advance`` 的 job，不单独占 step；节点名只进 ``job.progress``。
+DIRECTOR_PLAN_NODE = "director_plan"
+DIRECTOR_WRITE_NODE = "director_segment_write"
+
+
+def build_chat_model() -> Any:
+    """导演台规划/写段的模型构造口（唯一一处；测试在这一层打桩）。
+
+    为什么不像别处那样在函数里直接 ``from ..model_factory import build_chat_model``：
+    这条路线要连建两次客户端（规划一次、写段一次），接缝放在模块上，用例才能用一个
+    桩同时替掉两处而不碰真实网关。延迟导入的理由与大模型栈入口一致。
+    """
+    from ..model_factory import build_chat_model as factory
+
+    return factory()
+
 
 # 长片分段循环的 job kind 与进度节点名（D6 spec §5.3）。进度事件的 stage 取
 # ``step_machine.STEP_SEGMENTING``，与阶段标签同源。
@@ -328,6 +346,93 @@ def _read_json(path: Path) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+
+
+@dataclass(frozen=True)
+class _DirectorWriteContext:
+    """一次导演台阶段 2 里「规划 → 写段」之间要传的全部入参。
+
+    为什么不用 ``JobRunner`` 的实例属性：runner 是**进程级单实例**、不同会话的 job
+    并行跑，实例属性会把 A 会话的全片尾帧描述/定义块串给 B 会话的写段请求，续跑分支
+    还会继承上一个会话的残留值。上下文只活在一次执行里，显式传参。
+    """
+
+    shot_table: str = ""
+    # r2v 的全片英文定义块；其它模式为 None。
+    sections: Any = None
+    registry: tuple[tuple[int, str], ...] = ()
+    # 全片尾帧（fl2v）与它的读图描述：与段表清单同一份判据，写段请求要带。
+    film_end: bool = False
+    film_end_description: str = ""
+    # 只有**本轮真的做了规划**才有预算；续跑读到 plan.json 时预算文件是规划期的
+    # 产物，不补写、也不从任何残留值补。
+    budget: Any = None
+
+
+def _director_segment_rows(
+    session_id: str, plan: Any, directory: Path,
+    existing: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """导演台段表 → 快照行（D8 §6.1）：帧字段直接来自 ``DirectorSegment``。
+
+    ``start_s`` / ``end_s`` 仍是**向下截断**的整秒（既有类型契约不变），真正的执行
+    契约是帧；两个数都给，读的人不必自己除 24。``guided`` / ``give_images`` **只认
+    规划产物**（``DirectorSegment`` 由类型派生），模型回复里另带的同类字段在
+    ``parse_director_plan`` 那层就已被忽略。
+
+    既有行里的运行态（状态、段词产物、已交视频、拒绝原因）原样保留：重建快照不能
+    把「这一段已经通过了」抹掉——判据是磁盘上的段表 + 快照里的进度两份事实。
+    """
+    from ..director.frames import FPS
+    from ..director.prompts import load_segment_assets, segment_path
+
+    prior = {
+        int(row.get("index") or 0): row
+        for row in existing or ()
+        if isinstance(row, Mapping)
+    }
+    try:
+        assets_by_segment = load_segment_assets(directory)
+    except (OSError, ValueError):
+        # 段内素材表坏了不该让整张段表看不见：段词与帧字段仍可展示，打包期会自己
+        # 报出坏表（那里才是它的消费者）。这里只降级为空子集。
+        assets_by_segment = {}
+    rows: list[dict[str, Any]] = []
+    for segment in plan.segments:
+        previous = prior.get(segment.index, {})
+        prompt_file = segment_path(directory, segment.index)
+        rows.append({
+            "index": segment.index,
+            "start_s": int(segment.start_frame / FPS),
+            "end_s": int(segment.end_frame / FPS),
+            "shots_in_segment": [],
+            "summary": segment.summary,
+            "end_hook": segment.end_hook,
+            "status": str(previous.get("status") or SEGMENT_STATUS_PENDING),
+            "prompt_artifact_id": str(
+                previous.get("prompt_artifact_id")
+                or (f"{session_id}/{director_segment_prompt_name(segment.index)}"
+                    if prompt_file.is_file() else "")),
+            "video_asset_id": str(previous.get("video_asset_id") or ""),
+            "rejection_reason": str(previous.get("rejection_reason") or ""),
+            "assets": [
+                {
+                    "number": int(entry.get("new", 0)),
+                    "name": str(entry.get("name") or ""),
+                    "original_number": int(entry.get("original", 0)),
+                }
+                for entry in assets_by_segment.get(segment.index, ())
+            ],
+            "start_frame": segment.start_frame,
+            "end_frame": segment.end_frame,
+            "declared_frames": segment.declared_frames,
+            "export_frames": segment.export_frames,
+            "segment_type": segment.type,
+            "guided": bool(segment.guided),
+            "give_images": list(segment.give_images),
+        })
+    return rows
+
 
 
 class JobRunner:
@@ -878,9 +983,11 @@ class JobRunner:
             await asyncio.to_thread(self._write_active_job, session_id, job.job_id, "")
             event = threading.Event()
             self._cancel_events[job.job_id] = event
-            if branch in (_BRANCH_SEGMENT_VIDEO, _BRANCH_ASSET_LOOP):
-                # 段校验与素材循环都走通用分派（``_run`` 按持久化事实决定跑哪一步）：
-                # 失败重试也走同一条出口，两处各写一份子步骤判定会长出两套口径。
+            if branch in (_BRANCH_SEGMENT_VIDEO, _BRANCH_ASSET_LOOP,
+                          _BRANCH_DIRECTOR_START_IMAGE):
+                # 段校验、素材循环与导演台开场首帧都走通用分派（``_run`` 按持久化
+                # 事实决定跑哪一步）：交完首帧后的下一步是导演台阶段 2（规划 + 写段），
+                # 不是修订重跑阶段 1。三处各写一份子步骤判定会长出两套口径。
                 coroutine = self._run(session_id, job.job_id, event)
             else:
                 coroutine = self._run_decision(
@@ -1185,7 +1292,13 @@ class JobRunner:
 
         base 只在 >10 秒时进分段（D6 §3，不动）；ref 一律进——≤ 单次生成上限的会话
         走「1 段」直出，它仍是同一个段循环（同一套待办、双闸门与拼接），不是长片。
+
+        导演台**不在这里**：它的阶段 2 只做规划 + 写段，打包与段循环是后面的独立
+        步骤（#263 / #264）。照 base 的时长阈值把它塞进 ``segmenting``，会让还没
+        规划过的会话走 base 的分段规划器——那是另一张段表。
         """
+        if brief.is_director:
+            return False
         return brief.is_ref or step_machine.is_long_form(brief.duration)
 
     def _cleanup(self, session_id: str, job_id: str) -> None:
@@ -1534,6 +1647,13 @@ class JobRunner:
         并把降级事实记进会话（``variant_downgraded``）——降级不静默。
         ``video-prompt.md`` 与向导同目录同名，写完才算成功。
         """
+        # 导演台阶段 2 不是 base/ref 的阶段 2（spec #253 §5.2 / §8）：它只做「按帧
+        # 规划 + 逐段写词」，不跑 ``run_stage2``、不产 ``video-prompt.md``。路线在这里
+        # 分叉，base/ref 的既有分支一字不动。
+        director_session = load_session(self.store.session_directory(session_id))
+        if director_session is not None and director_session.brief.is_director:
+            return self._execute_director_stage2(
+                session_id, job_id, cancel_event, director_session)
         # 整片注入卡是进阶段 2 前的最后一件产物（D7 §9 / #257）：入口只此一处，
         # 写失败即本 job 失败。它不进下面的 state / brief，模型看不到它。
         self._write_film_injection_card(session_id, job_id)
@@ -1622,6 +1742,243 @@ class JobRunner:
         persisted_brief = replace(brief, refs=list(session.brief.refs))
         return {"state": dict(final_state), "brief": persisted_brief,
                 "variant_downgraded": downgraded}
+
+    # ------------------------------------------------------------------
+    # 导演台阶段 2：规划 + 写段（D8 §8.1 / §8.2）
+    # ------------------------------------------------------------------
+
+    def _execute_director_stage2(
+        self, session_id: str, job_id: str,
+        cancel_event: threading.Event, session: Any,
+    ) -> dict[str, Any]:
+        """导演台阶段 2 的线程体：按帧落位 → ``director/plan.json`` → 逐段写词。
+
+        三件事的**判据全在磁盘上**，不在 job 记录里（spec #253 §16）：``plan.json``
+        已在就不重规划；某一段的 ``segment-NN.md`` 已在就不重写。于是中断/重启后的
+        ``advance`` 是幂等的——它只会补缺的那几段，不会把用户已经看过的段词换一版。
+
+        规划失败即 job 失败（没有机械回退，ADR 0026）：调用病与回复不合格都由
+        ``plan_director_segments`` 抛出，这里不降级成别的分段口径。
+        """
+        from ..director.planning import (
+            plan_path, read_plan_json, write_asset_budget, write_plan_json)
+
+        directory = self.store.session_directory(session_id)
+        mode = str(session.brief.director_mode)
+        state = dict(session.stage_state)
+        shot_table = str(state.get("shot_table") or "")
+        if not shot_table.strip():
+            # 没有分镜表就没有可规划的叙事单元（与向导同一道前置闸）：不拿空表让
+            # 模型自由发挥，也不假装成功。
+            raise RuntimeError(
+                "导演台路线：会话里没有分镜表（阶段 1 产物缺失），无法做段规划")
+
+        plan_file = plan_path(directory)
+        context: _DirectorWriteContext | None = None
+        if plan_file.is_file():
+            # 续跑只认**当初定案的那张表**：未知段类型 / 非法帧数 / Σ 导出 ≠ 总帧
+            # 都在 ``read_plan_json`` 里抛，绝不拿错表往下写段。写段入参（定义块/
+            # 尾帧描述）等真要写缺段时按**本会话**重建（见 ``_director_resume_context``）。
+            plan = read_plan_json(plan_file)
+            if plan.mode != mode:
+                raise ValueError(
+                    f"director/plan.json 的模式是 {plan.mode}，与本次会话的 {mode} "
+                    "不一致：不能拿错表续跑")
+        else:
+            plan, context = self._plan_director_project(
+                session_id, job_id, cancel_event, session, state, shot_table, mode,
+                directory)
+            write_plan_json(plan_file, plan)
+            if context.budget is not None:
+                # 预算紧随段表落盘（写段只能在本段预算里选图，#188）；非 r2v 的
+                # ``write_asset_budget`` 本身不写文件。续跑不重写预算——那是规划期
+                # 的产物，重写会用「现在的台账」覆盖「当初定案的那份」。
+                write_asset_budget(directory, context.budget)
+        written = self._write_director_project(
+            session_id, job_id, cancel_event, session, state, mode,
+            directory, plan, context)
+        for item in written:
+            self.store.register_artifact(
+                session_id, director_segment_prompt_name(item.index), job_id=job_id)
+        rows = _director_segment_rows(
+            session_id, plan, directory, list(session.segments))
+        return {
+            "state": state,
+            "brief": session.brief,
+            "variant_downgraded": "",
+            "director": True,
+            "segments": rows,
+        }
+
+    def _plan_director_project(
+        self, session_id: str, job_id: str,
+        cancel_event: threading.Event, session: Any, state: dict[str, Any],
+        shot_table: str, mode: str, directory: Path,
+    ) -> tuple[Any, _DirectorWriteContext]:
+        """跑一次导演台规划，交回段表与**本次执行**的写段上下文（含预算）。"""
+        from ..director.planning import plan_director_segments
+        from ..segment_prompts import frame_anchor_context, render_revision_context
+
+        self._emit_progress(
+            session_id, job_id, DIRECTOR_PLAN_NODE, "started",
+            stage=step_machine.STEP_STAGE2)
+        self._write_active_job(session_id, job_id, DIRECTOR_PLAN_NODE)
+        if self.fake_pipeline:
+            from .fake_pipeline import director_plan
+
+            plan = director_plan(mode, session.brief.duration)
+            # 桩不规划预算：r2v 的素材循环/英文定义块/预算产出属于 #268。
+            context = _DirectorWriteContext(shot_table=shot_table)
+        else:
+            from ..director.pack import film_end_still
+            from ..ui.wizard_director import prepare_film_end_description
+
+            registry: tuple[tuple[int, str], ...] = ()
+            sections = None
+            subject_definitions = ""
+            if mode == "r2v":
+                from ..director import refdefs
+                from ..generation import ref_asset_registry
+
+                registry = tuple(
+                    (item.picture, item.name)
+                    for item in ref_asset_registry(state, session.brief))
+                cached = refdefs.load_ref_sections(directory)
+                if (cached is not None and refdefs.has_sections(cached)
+                        and cached.registry == registry):
+                    sections = cached
+                    subject_definitions = cached.subject_definitions
+                else:
+                    # 定义块与素材循环是 #268 的接线：本票不生成它，也不拿中文
+                    # ``subject_defs`` 冒充英文定义块（那是半份空定义）。
+                    raise RuntimeError(
+                        "导演台 r2v 的全片英文定义块缺失：工作台在 #268 接线 r2v "
+                        "素材循环，本票不做规划与写段")
+            film_end = (mode == "fl2v"
+                        and film_end_still(directory) is not None)
+            ok, description = prepare_film_end_description(directory)
+            if not ok:
+                raise RuntimeError(
+                    "全片尾帧读图失败：没有做段规划、没有写段")
+            result = plan_director_segments(
+                shot_table, session.brief.duration, build_chat_model(),
+                mode=mode,
+                # 与 base 的规划调用同源：真实关键帧画面压过分镜表、修订按优先序注入。
+                frame_context=frame_anchor_context(state),
+                revision_context=render_revision_context(state),
+                film_end_description=description,
+                registry=registry,
+                subject_definitions=subject_definitions,
+            )
+            plan = result.plan
+            context = _DirectorWriteContext(
+                shot_table=shot_table,
+                sections=sections,
+                registry=registry,
+                film_end=film_end,
+                film_end_description=description,
+                budget=result.budget,
+            )
+        if cancel_event.is_set():
+            raise JobCancelled(DIRECTOR_PLAN_NODE)
+        self._emit_progress(
+            session_id, job_id, DIRECTOR_PLAN_NODE, "done",
+            stage=step_machine.STEP_STAGE2)
+        return plan, context
+
+    def _director_resume_context(
+        self, directory: Path, session: Any, mode: str, shot_table: str,
+    ) -> _DirectorWriteContext:
+        """续写缺段时的上下文：**只从本会话的盘上事实**重建，不继承任何别的执行。
+
+        定义块与全片尾帧描述都可能已经在盘上（上一轮或 CLI 产出）：写段请求要与
+        当初规划时看到的一致，所以按本会话目录重新取一份。预算**不取**——续跑没有
+        重新规划，预算文件是规划期的产物，不该被覆盖。
+        """
+        from ..director.pack import film_end_still
+        from ..ui.wizard_director import prepare_film_end_description
+
+        sections = None
+        registry: tuple[tuple[int, str], ...] = ()
+        if mode == "r2v":
+            from ..director import refdefs
+            from ..generation import ref_asset_registry
+
+            registry = tuple(
+                (item.picture, item.name)
+                for item in ref_asset_registry(session.stage_state, session.brief))
+            cached = refdefs.load_ref_sections(directory)
+            if (cached is not None and refdefs.has_sections(cached)
+                    and cached.registry == registry):
+                sections = cached
+        film_end = mode == "fl2v" and film_end_still(directory) is not None
+        ok, description = prepare_film_end_description(directory)
+        if not ok:
+            raise RuntimeError("全片尾帧读图失败：不能续写段词")
+        return _DirectorWriteContext(
+            shot_table=shot_table,
+            sections=sections,
+            registry=registry,
+            film_end=film_end,
+            film_end_description=description,
+        )
+
+    def _write_director_project(
+        self, session_id: str, job_id: str,
+        cancel_event: threading.Event, session: Any, state: dict[str, Any],
+        mode: str, directory: Path, plan: Any,
+        context: _DirectorWriteContext | None,
+    ) -> list[Any]:
+        """写缺的段词（已在盘上的一段都不碰）并交回本轮写出的清单。
+
+        ``context`` 为 ``None`` ＝ 本轮是续跑（没有重新规划）：此时按**本会话**的
+        盘上事实现建上下文，绝不读任何实例级残留。
+        """
+        from ..director.prompts import segment_path, write_director_segments
+
+        missing = [
+            segment for segment in plan.segments
+            if not segment_path(directory, segment.index).is_file()
+        ]
+        if not missing:
+            return []
+        self._emit_progress(
+            session_id, job_id, DIRECTOR_WRITE_NODE, "started",
+            stage=step_machine.STEP_STAGE2)
+        self._write_active_job(session_id, job_id, DIRECTOR_WRITE_NODE)
+        if self.fake_pipeline:
+            from types import SimpleNamespace
+
+            from .fake_pipeline import director_segment_prompt
+
+            written = []
+            for segment in missing:
+                path = segment_path(directory, segment.index)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    director_segment_prompt(plan, segment) + "\n", encoding="utf-8")
+                written.append(SimpleNamespace(index=segment.index, path=path))
+        else:
+            if context is None:
+                context = self._director_resume_context(
+                    directory, session, mode, str(state.get("shot_table") or ""))
+            sections = context.sections
+            written = write_director_segments(
+                plan, llm=build_chat_model(), session_dir=directory,
+                shot_table=context.shot_table,
+                sections=(sections.as_mapping() if sections is not None else None),
+                registry=context.registry,
+                film_end=context.film_end,
+                film_end_description=context.film_end_description,
+                # 续跑只补缺的段：已在盘上的段词是用户已经看过的产物，不重写、不重付。
+                only_missing=True,
+            )
+        if cancel_event.is_set():
+            raise JobCancelled(DIRECTOR_WRITE_NODE)
+        self._emit_progress(
+            session_id, job_id, DIRECTOR_WRITE_NODE, "done",
+            stage=step_machine.STEP_STAGE2)
+        return written
 
     def _summarize_stage2_prompt(self, session_id: str, job_id: str, prompt: str,
                                  cancel_event: threading.Event) -> None:
@@ -2784,12 +3141,18 @@ class JobRunner:
         running」或「已成功却没人接」的中间态。返回新任务给调用方起执行线程。
         """
         next_job: JobSummary | None = None
-        if self._needs_segment_loop(result["brief"]):
+        director = bool(result.get("director"))
+        if not director and self._needs_segment_loop(result["brief"]):
             next_job = JobSummary(
                 job_id=uuid.uuid4().hex, kind=JOB_KIND_SEGMENT, status="running",
                 started_at=_now())
-        next_status = (step_machine.STATUS_RUNNING if next_job is not None
-                       else step_machine.STATUS_COMPLETED)
+        if director:
+            # 导演台阶段 2 的成功不等于交付（打包在 #263、段循环在 #264）：停在
+            # awaiting_human 的过渡态，不写 completed（那会让页面以为片子做完了）。
+            next_status = step_machine.STATUS_AWAITING_HUMAN
+        else:
+            next_status = (step_machine.STATUS_RUNNING if next_job is not None
+                           else step_machine.STATUS_COMPLETED)
 
         def _apply(detail: Any) -> dict[str, Any]:
             job = self._job_or_running(job_id, detail).model_copy(
@@ -2797,13 +3160,18 @@ class JobRunner:
             jobs = _upsert_job(detail.jobs, _job_dict(job))
             if next_job is not None:
                 jobs = _upsert_job(jobs, _job_dict(next_job))
-            return {
+            changes: dict[str, Any] = {
                 "status": next_status,
                 "stage_state": result["state"],
                 "jobs": jobs,
                 "brief": result["brief"],
                 "variant_downgraded": result["variant_downgraded"],
             }
+            if director:
+                # 段表进快照（#262 AC）：字段来自 director/plan.json，运行态从旧行
+                # 保留（重建快照不能把已通过的段抹回 pending）。
+                changes["segments"] = result["segments"]
+            return changes
 
         events = [
             EventDraft("job.succeeded", {"next": next_status}, job_id=job_id),

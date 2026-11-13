@@ -138,6 +138,18 @@ SEGMENT_PROMPT_KIND = "segment_prompt"
 SEGMENTS_DIRNAME = "segments"
 _SEGMENT_PROMPT_FILENAME = r"(?:shot|segment)-\d{2}\.md"
 _SEGMENT_PROMPT_SPEC = ArtifactSpec(SEGMENT_PROMPT_KIND)
+# 导演台段词（D8 §8.2 / #262）：逐段 ``director/segment-NN.md``，与 base/ref 的
+# ``segments/`` 目录并列。它不是 ``segment_prompt``：两条路线的段词同时出现在同一个
+# 会话目录里时，按 kind 就能分开（产物分区与前端能力判据都靠它）。
+DIRECTOR_DIRNAME = "director"
+DIRECTOR_SEGMENT_PROMPT_KIND = "director_segment_prompt"
+_DIRECTOR_SEGMENT_PROMPT_FILENAME = r"segment-\d{2}\.md"
+
+
+def director_segment_prompt_name(position: int) -> str:
+    """第 ``position`` 段（1 起）的导演台段词产物名（与 CLI 落点同名同形）。"""
+    return f"{DIRECTOR_DIRNAME}/segment-{position:02d}.md"
+
 # 资产图词（D7 §7）：素材循环里每件参考素材一份 ``assets/picture-NN.md``，与台账
 # 图片编号同号。改词重出**覆盖**同一份文件——历史靠台账轮次与待办决议表达。
 ASSET_PROMPT_KIND = "asset_prompt"
@@ -159,6 +171,9 @@ _PATTERN_ARTIFACT_SPECS: tuple[tuple[str, str, ArtifactSpec], ...] = (
     (SEGMENTS_DIRNAME, _SEGMENT_PROMPT_FILENAME, _SEGMENT_PROMPT_SPEC),
     (SEGMENTS_DIRNAME, _SEGMENT_INJECTION_CARD_FILENAME, _SEGMENT_INJECTION_CARD_SPEC),
     (ASSETS_DIRNAME, _ASSET_PROMPT_FILENAME, _ASSET_PROMPT_SPEC),
+    # 导演台段词（#262）：``director/plan.json`` 不在这条模式里，所以它不是产物。
+    (DIRECTOR_DIRNAME, _DIRECTOR_SEGMENT_PROMPT_FILENAME,
+     ArtifactSpec(DIRECTOR_SEGMENT_PROMPT_KIND)),
 )
 
 
@@ -1083,6 +1098,17 @@ class SegmentOut(BaseModel):
     rejection_reason: str = ""
     # 段内参考素材子集（D7 §10 / #258）：只有 ref 有，base 是空表；只读回显。
     assets: list[SegmentAssetOut] = Field(default_factory=list)
+    # 导演台的帧执行契约（D8 §6.1）：**只加可选字段**，不另开第二套段模型。
+    # base/ref 全部留空，前端按 ``segment_type`` 有没有值决定渲不渲染这一行。
+    # ``start_frame`` / ``end_frame`` 是成片坐标（累计导出帧），``start_s`` /
+    # ``end_s`` 仍是它们的向下截断——两套坐标同时给出，读的人不用自己除 24。
+    start_frame: int | None = None
+    end_frame: int | None = None
+    declared_frames: int | None = None
+    export_frames: int | None = None
+    segment_type: str | None = None
+    guided: bool | None = None
+    give_images: list[str] = Field(default_factory=list)
 
 
 class ArtifactInfo(BaseModel):
@@ -1150,6 +1176,10 @@ class SessionDetail(SessionSummary):
     assets: list[Asset] = Field(default_factory=list)
     # 长片的段列表（D6 spec §11）：来自快照字段，≤10 秒的会话是空表。
     segments: list[SegmentOut] = Field(default_factory=list)
+    # 导演台的总长落位说明（D8 §6.1 / #262）：目标帧不可达时写「目标 / 实际 / 差」。
+    # 由 ``director/plan.json`` 现读派生，不是会话状态里的一份副本（ADR 0025 的说明
+    # 不落盘——读回的表不该带上一轮的措辞）；非导演台会话恒为空表。
+    director_notes: list[str] = Field(default_factory=list)
     # 快照 state 的内部副本（D6 §5.4）：只给 ``mutate`` 的 mutator 在会话锁内读，
     # 让「读 state → 改 → 写回」不再绕开单写入者。用 PrivateAttr 而不是字段：
     # 它不进 JSON Schema、不跨 API 边界（D4 §7 的裁定，mutation
@@ -1357,6 +1387,32 @@ def _brief_out(brief: Brief,
                      number=int(entry["number"]), asset_id=str(entry["asset_id"]))
               for entry in _ledger_order(ledger)],
     )
+
+
+def _director_notes(directory: Path, duration: float) -> list[str]:
+    """导演台总长落位说明（#262）：目标帧与段表实际落位不一致时点名差几帧。
+
+    读的是盘上的 ``director/plan.json``，与续跑/写段同一个严格读回口；坏表在这里
+    只降级成「没有说明」（详情端点不该因一张坏表 500，真正的拦阻由执行器做）。
+    目标帧从 brief 时长现算——``plan.json`` 的 ``total_frames`` 是**落位后**的实际值
+    （ADR 0025），不是目标。
+    """
+    from .director.frames import FPS, length_note
+    from .director.planning import plan_path, read_plan_json
+
+    path = plan_path(directory)
+    if not path.is_file():
+        return []
+    try:
+        plan = read_plan_json(path)
+    except ValueError:
+        return []
+    target = round(float(duration) * FPS)
+    # 文案与规划器同一份（``director.frames.length_note``）：这里只数无引导段数。
+    note = length_note(
+        target, plan.total_frames,
+        sum(1 for segment in plan.segments if not segment.guided))
+    return [note] if note else []
 
 
 def _artifact_info(session_id: str, name: str, path: Path) -> ArtifactInfo:
@@ -1783,6 +1839,9 @@ class WorkbenchSessionStore:
             artifacts=_artifacts(derived, directory, self.root.resolve()),
             assets=_assets_of(derived, directory, self.root.resolve()),
             segments=[SegmentOut.model_validate(item) for item in session.segments],
+            director_notes=(
+                _director_notes(directory, session.brief.duration)
+                if session.brief.is_director else []),
         )
         detail._stage_state = dict(session.stage_state)
         detail._asset_ledger = [dict(entry) for entry in session.asset_ledger]

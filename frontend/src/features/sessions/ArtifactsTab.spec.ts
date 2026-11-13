@@ -231,3 +231,15 @@ describe('产物分区', () => {
     expect(wrapper.text()).toContain('暂无产物')
   })
 })
+
+// D8-2（#262）：导演台段词是交付文本，按 kind 自动进产物分区，不需要前端抄文件名。
+describe('ArtifactsTab 导演台段词（#262）', () => {
+  it('director_segment_prompt 归到交付文本并显示中文标签', async () => {
+    const { wrapper } = await mountTab([
+      makeArtifact('director/segment-01.md', 'director_segment_prompt'),
+    ])
+
+    expect(wrapper.text()).toContain('导演台段词')
+    expect(wrapper.text()).toContain('director/segment-01.md')
+  })
+})

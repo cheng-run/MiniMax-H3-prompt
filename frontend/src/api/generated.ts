@@ -716,6 +716,10 @@ export interface components {
         SegmentOut: {
             /** Assets */
             assets?: components["schemas"]["SegmentAssetOut"][];
+            /** Declared Frames */
+            declared_frames?: number | null;
+            /** End Frame */
+            end_frame?: number | null;
             /**
              * End Hook
              * @default
@@ -723,6 +727,12 @@ export interface components {
             end_hook: string;
             /** End S */
             end_s: number;
+            /** Export Frames */
+            export_frames?: number | null;
+            /** Give Images */
+            give_images?: string[];
+            /** Guided */
+            guided?: boolean | null;
             /** Index */
             index: number;
             /**
@@ -735,8 +745,12 @@ export interface components {
              * @default
              */
             rejection_reason: string;
+            /** Segment Type */
+            segment_type?: string | null;
             /** Shots In Segment */
             shots_in_segment?: number[];
+            /** Start Frame */
+            start_frame?: number | null;
             /** Start S */
             start_s: number;
             /**
@@ -836,6 +850,8 @@ export interface components {
             /** Created At */
             created_at: string;
             current_job?: components["schemas"]["JobSummary"] | null;
+            /** Director Notes */
+            director_notes?: string[];
             /** Jobs */
             jobs?: components["schemas"]["JobSummary"][];
             /** Last Event Seq */

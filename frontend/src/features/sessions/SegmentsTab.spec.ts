@@ -63,6 +63,7 @@ function mountTab(
     assets?: Asset[]
     actionItems?: ActionItemOut[]
     artifacts?: ArtifactInfo[]
+    directorNotes?: string[]
   } = {},
 ) {
   return mount(SegmentsTab, {
@@ -563,5 +564,63 @@ describe('SegmentsTab 段级注入卡（#257）', () => {
 
     await settle()
     expect(wrapper.find('[data-injection-card]').exists()).toBe(false)
+  })
+})
+
+describe('SegmentsTab 导演台段表（#262）', () => {
+  function directorSegment(overrides: Partial<SegmentOut> = {}): SegmentOut {
+    return makeSegment({
+      segment_type: 'opening',
+      guided: false,
+      start_frame: 0,
+      end_frame: 90,
+      declared_frames: 90,
+      export_frames: 90,
+      give_images: [],
+      ...overrides,
+    })
+  }
+
+  it('按帧显示段类型、引导、声明帧 → 导出帧与给图清单', () => {
+    const wrapper = mountTab({
+      mode: 'director',
+      directorNotes: ['总帧目标 96 帧，实际落位 90 帧（差 6 帧）：段表按 17k 网格执行'],
+      segments: [directorSegment()],
+    })
+
+    const grid = wrapper.find('[data-director-grid]')
+    expect(grid.exists()).toBe(true)
+    expect(grid.text()).toContain('开场')
+    expect(grid.text()).toContain('关')
+    expect(grid.text()).toContain('90 → 90')
+    expect(grid.text()).toContain('无（纯文字）')
+    expect(grid.text()).toContain('0–90')
+    // 总长说明进页面：目标 / 实际 / 差几帧。
+    expect(wrapper.find('[data-director-notes]').text()).toContain('差 6 帧')
+    // 导演台没有「换一段」（那是 D8-5 的级联；本票不开这条边）。
+    expect(wrapper.findAll('button').some((button) => button.text().includes('换一段'))).toBe(false)
+  })
+
+  it('r2v 段内素材子集只读回显重编号后的 Picture 号与语义名', () => {
+    const wrapper = mountTab({
+      mode: 'director',
+      segments: [
+        directorSegment({
+          give_images: ['assets'],
+          assets: [
+            { number: 1, name: '黑伞', original_number: 3 },
+            { number: 2, name: '旧信', original_number: 5 },
+          ],
+        }),
+      ],
+    })
+
+    const row = wrapper.find('[data-segment-assets]')
+    expect(row.exists()).toBe(true)
+    expect(row.text()).toContain('Picture 1 黑伞')
+    expect(row.text()).toContain('Picture 2 旧信')
+    // 没有手改入口：子集是系统算的，逐段手填等于把闭包算法搬到前端。
+    expect(wrapper.find('input[type="text"]').exists()).toBe(false)
+    expect(wrapper.find('textarea').exists()).toBe(false)
   })
 })

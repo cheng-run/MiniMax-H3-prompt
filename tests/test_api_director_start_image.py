@@ -368,7 +368,10 @@ def test_start_image_files_are_not_artifacts(fake_app):
         _wait_job(client, session_id, accepted.json()["job_id"])
 
         names = {row["name"] for row in _detail(client, session_id)["artifacts"]}
-        assert not any(name.startswith("director/") for name in names)
+        # 首帧图落 ``director/assets``（打包落点），不是产物；交图后接着跑的是导演台
+        # 阶段 2（#262），它写的 ``director/segment-NN.md`` 才是登记进产物的那一件。
+        assert not any(name.startswith("director/assets/") for name in names)
+        assert "director/segment-01.md" in names
         assert json.loads(
             (root / Path(session_id) / SESSION_FILENAME).read_text(encoding="utf-8")
         )["brief"]["director_mode"] == "i2v"

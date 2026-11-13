@@ -51,14 +51,19 @@ const BASE_TABS: { id: WorkbenchTab; label: string }[] = [
   { id: 'artifacts', label: '产物' },
 ]
 
-// 「分段」分区（D6 spec §4.2 / D7 §5.4）：判据是**路线或时长**，不是段列表。
-// base 只在 >10 秒出现（规划还没落盘的长片也要有这一格，显示「规划中」）；ref 一律
-// 走段循环——≤ 单次生成上限的会话是「1 段」直出，仍在这格交段视频，不是长片。
-// 短视频（base）的四个分区与它们的位置都不变。
+// 「分段」分区（D6 spec §4.2 / D7 §5.4 / D8 §6.1）：判据是**路线或时长**，不是段
+// 列表。导演台**恒有**这一格（这条路线永远有段表，哪怕只有一段；段数是规划产物，
+// 不看 10 秒阈值）；base 只在 >10 秒出现（规划还没落盘的长片也要有这一格，显示
+// 「规划中」）；ref 一律走段循环。短视频（base）的四个分区与它们的位置都不变。
 const LONG_FILM_SECONDS = 10
 const tabs = computed(() => {
   const entries = [...BASE_TABS]
-  if (data.value?.mode === 'ref' || (data.value?.brief.duration ?? 0) > LONG_FILM_SECONDS) {
+  const mode = data.value?.mode
+  if (
+    mode === 'director' ||
+    mode === 'ref' ||
+    (data.value?.brief.duration ?? 0) > LONG_FILM_SECONDS
+  ) {
     entries.splice(2, 0, { id: 'segments', label: '分段' })
   }
   return entries
@@ -379,6 +384,7 @@ const errorMessage = computed(() =>
           :assets="data.assets ?? []"
           :action-items="data.action_items ?? []"
           :artifacts="data.artifacts ?? []"
+          :director-notes="data.director_notes ?? []"
           @refresh="invalidateSnapshot"
         />
       </section>

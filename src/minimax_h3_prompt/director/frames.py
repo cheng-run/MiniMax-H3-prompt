@@ -386,6 +386,26 @@ def _export_of(segment_type: str, declared_frames: int) -> int:
     return export_frames_for_declared(declared_frames, guided=is_guided(segment_type))
 
 
+def length_note(target_frames: int, total_frames: int, unguided: int) -> str | None:
+    """目标总帧不可达时的说明：**唯一文案**，规划器与详情页都调它。
+
+    两处各写一段「目标 / 实际 / 差几帧」的句子，改一处漏一处就会让用户在页面上看到
+    与规划时不同的解释（本仓「同一契约两处口径」已咬过两次）。返回 ``None`` ＝ 目标
+    就是实际落位，没有说明可写。
+
+    ``unguided`` 是**无引导段数**：可达总量恒 ≡ ``GRID_OFFSET × unguided (mod 17)``，
+    这句话解释了「为什么取不到目标」，不能省成一句「取了最近值」。
+    """
+    if total_frames == target_frames:
+        return None
+    return (
+        f"总帧目标 {target_frames} 帧，实际落位 {total_frames} 帧"
+        f"（差 {abs(target_frames - total_frames)} 帧）："
+        f"声明帧全部落在 {GRID_STEP}k+{GRID_OFFSET} 网格上，{unguided} 段无引导时"
+        f"可达总量恒 ≡ {(GRID_OFFSET * unguided) % GRID_STEP} (mod {GRID_STEP})"
+        "，目标值不可达，取最近可达值（ADR 0025）")
+
+
 def land_exports(types: Sequence[str], raw_frames: Sequence[int],
                  target_frames: int, *, mode: str) -> tuple[list[int], str | None]:
     """把每段声明帧落到 17k+5 网格，并让导出合计尽量逼近 ``target_frames``（AC1/AC4）。
@@ -493,12 +513,8 @@ def land_exports(types: Sequence[str], raw_frames: Sequence[int],
 
     if total == target_frames:
         return exports, None
-    note = (
-        f"总帧目标 {target_frames} 帧，实际落位 {total} 帧（差 {abs(target_frames - total)} 帧）："
-        f"声明帧全部落在 {GRID_STEP}k+{GRID_OFFSET} 网格上，{len(unguided)} 段无引导时"
-        f"可达总量恒 ≡ {(GRID_OFFSET * len(unguided)) % GRID_STEP} (mod {GRID_STEP})"
-        "，目标值不可达，取最近可达值（ADR 0025）")
-    return exports, note
+    # 文案只住 ``length_note``：详情页的总长说明调的是同一个函数。
+    return exports, length_note(target_frames, total, len(unguided))
 
 
 @dataclass(frozen=True)

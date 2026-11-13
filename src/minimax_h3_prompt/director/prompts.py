@@ -1142,7 +1142,8 @@ def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
                             sections=None,
                             registry: Iterable[Sequence] = (),
                             film_end: bool = False,
-                            film_end_description: str = "") -> list[WrittenSegment]:
+                            film_end_description: str = "",
+                            only_missing: bool = False) -> list[WrittenSegment]:
     """逐段写并落盘 ``GENxxx/director/segment-NN.md``（1 起）。
 
     出错就**停下并点名段号**：调用失败（``RuntimeError``）与模式不可写（``ValueError``）
@@ -1163,6 +1164,9 @@ def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
     段内素材预算（``asset-budget.json``，#186 落盘）从盘上读：本段实际子集必须是它的
     **子集**（#188）。超出的图作为一条 ``DIRECTOR_BUDGET_VIOLATION`` 进有界重写，用尽
     仍超就走下面的硬失败。少于预算不阻断；没有预算文件的旧会话不校验（#189 出声）。
+
+    ``only_missing`` 只服务工作台的续跑（#262）：已在盘上的段词是用户已经看过的产物，
+    不重写、也不重付一次模型调用；跳过时仍把盘上正文当作「上一段定稿」喂给跨段守卫。
     """
     _require_write_mode(plan.mode)
     global_sections = _sections_mapping(sections)
@@ -1177,6 +1181,14 @@ def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
     registry_rows = tuple(registry)
     written: list[WrittenSegment] = []
     for segment in plan.segments:
+        path = segment_path(session_dir, segment.index)
+        if only_missing and path.is_file():
+            # 已落盘的段原样算进 ``written``：下一段的跨段首镜守卫要比的是盘上
+            # **定稿正文**，跳过后留一个空洞会让守卫静默失效。
+            written.append(WrittenSegment(
+                index=segment.index, type=segment.type, path=path,
+                text=path.read_text(encoding="utf-8"), issues=()))
+            continue
         # 子集裁剪在**有界重写循环里**（``_write_validated``）：超过每段 9 张时把
         # 「本段素材太多」当一条校验错误回灌，让模型自己取舍后再写一遍；三次仍超才停。
         # 裁完再校验、再落盘——盘上的段文件与段内素材表永远同一版。

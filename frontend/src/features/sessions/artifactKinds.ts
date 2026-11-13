@@ -26,6 +26,9 @@ const INTERMEDIATE_KINDS = new Set([
 const DELIVERABLE_KINDS = new Set([
   'video_prompt',
   'segment_prompt',
+  // 导演台段词（D8 §8.2 / #262）：逐段 ``director/segment-NN.md``。与 base/ref 的
+  // ``segment_prompt`` 分开一个 kind：同一条会话目录里两种段词不会互相冒充。
+  'director_segment_prompt',
   'injection_card',
   'concat_order_card',
   'summary_markdown',
@@ -63,6 +66,7 @@ const KIND_ORDER = [
   'concat_order_card',
   'video_prompt',
   'segment_prompt',
+  'director_segment_prompt',
   'summary_markdown',
   'summary_json',
   'video',
@@ -86,6 +90,7 @@ const KIND_LABELS: Record<string, string> = {
   concat_order_card: '拼接顺序卡',
   video_prompt: '最终提示词',
   segment_prompt: '段提示词',
+  director_segment_prompt: '导演台段词',
   summary_markdown: '中文摘要',
   summary_json: '摘要数据（JSON）',
 }
