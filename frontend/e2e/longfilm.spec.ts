@@ -4,8 +4,8 @@ import { fileURLToPath } from 'node:url'
 
 import { expect, test } from '@playwright/test'
 
-// D6-7（#250）：长片路径的浏览器证据。24 秒 → 3 段，走「建会话 → 审查通过 →
-// 段列表 → 交第 1 段 → 段进度前进」。
+// D6-7（#250）：长片路径的浏览器证据。18 秒 → 3 段 × 6 秒（H3 只有 4/5/6 秒档），
+// 走「建会话 → 审查通过 → 段列表 → 交第 1 段 → 段进度前进」。
 //
 // 真实浏览器 + 真实 FastAPI + 确定性桩管线（serve-e2e.mjs 注入 MINIMAX_FAKE_PIPELINE=1）。
 // 要交的 mp4 由桩管线自己用 ffmpeg 现造（不在这份 spec 里另写一套造件逻辑），这样
@@ -18,7 +18,7 @@ const python = resolve(
   process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python',
 )
 
-const PLOT = 'E2E 24 秒长片分段闭环'
+const PLOT = 'E2E 18 秒长片分段闭环'
 
 /** 让桩管线现造一段本段时长的合规 mp4（帧数/尺寸从仓内常量派生）。 */
 function writeStubSegmentVideo(out: string, seconds: number): void {
@@ -33,16 +33,16 @@ function writeStubSegmentVideo(out: string, seconds: number): void {
   })
 }
 
-test('长片 24 秒：建会话 → 段列表 → 交第 1 段 → 段进度前进', async ({ page }, testInfo) => {
-  // 第一段 8 秒（24 ÷ 3）；造件一次约 0.2s，放在用例开头，失败点更靠近浏览器。
+test('长片 18 秒：建会话 → 段列表 → 交第 1 段 → 段进度前进', async ({ page }, testInfo) => {
+  // 第一段 6 秒（18 ÷ 3，H3 的 6 秒档 = 158 帧）；造件一次约 0.2s。
   const segmentVideo = testInfo.outputPath('segment-01.mp4')
-  writeStubSegmentVideo(segmentVideo, 8)
+  writeStubSegmentVideo(segmentVideo, 6)
 
   await page.goto('/')
   await page.getByRole('button', { name: '新建会话' }).click()
   await page.locator('textarea[name="plot"]').fill(PLOT)
   await page.locator('select[name="variant"]').selectOption('T2VA')
-  await page.locator('input[name="duration"]').fill('24')
+  await page.locator('input[name="duration"]').fill('18')
   await page.getByRole('button', { name: '创建并开始' }).click()
   await expect(page).toHaveURL(/\/sessions\/.+/)
   await expect(page.getByText('等待人工').first()).toBeVisible({ timeout: 20_000 })
