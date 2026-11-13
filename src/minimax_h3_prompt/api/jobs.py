@@ -1781,14 +1781,15 @@ class JobRunner:
         number = int(result["number"])
         passed = bool(result["passed"])
         reason = str(result["reason"])
-        # 下一个任务的 kind 由「这一件定稿之后的台账」决定。台账在这次锁内的样子
-        # 只能是这一份：同一会话同时只有一个 job，resolve 在 running 时被拒。判据与
-        # 写入共用 ``_settle_asset``／``_asset_step_of``，不另写一份转移规则。
+        # 下一个任务的 kind 由「这一件定稿之后的台账」决定。这里按磁盘快照先算一次，
+        # 只为选路（继续写词 / 转阶段 2）；``_apply`` 里会按 mutate 的快照**再算一次**
+        # 作为真正写盘的台账——锁内那次才是权威值。两次都调 ``_settle_asset``，规则
+        # 单源，不另写一份转移规则（同一会话同时只有一个 job，resolve 在 running 时被拒）。
         session = load_session(self.store.session_directory(session_id))
         if session is None:
             raise RuntimeError(f"会话文件读不到：{session_id}")
         settled = _settle_asset(session.asset_ledger, number, passed)
-        step, _cc = _asset_step_of(settled)
+        step, _ = _asset_step_of(settled)
         next_job: JobSummary | None = None
         item: ActionItemOut | None = None
         if passed:

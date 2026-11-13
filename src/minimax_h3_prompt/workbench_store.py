@@ -421,8 +421,10 @@ class AssetRequired(WorkbenchError):
 
 
 class AssetNameInvalid(WorkbenchError):
-    """ref 上传的语义名缺失、超长或会话内重复（D7 §4.2）。
+    """ref 登记的语义名超长、会话内重复，或 base 会话带了语义名（D7 §4.2）。
 
+    缺失**不**是触发条件：带 ``name`` 才算登记，不带就是普通素材（素材图与段视频
+    回交走这条）。「必填」是前端上传框的界面规则，不是 API 规则。
     spec §13 的错误码表没给「语义名」单独一码（票面把这一条留给实现定），这里用
     ``asset_name_invalid``：它只描述「这个名字不能用」，与容量、类型、不存在分开。
     """
@@ -490,7 +492,8 @@ class FrameInvalid(WorkbenchError):
     """帧槽引用无效（D4 spec §9 / §12）。
 
     与素材读取的 404 分开：这里回 422 且**不区分**「不存在」与「非本会话」——
-    帧提交是写操作，回 404 会让人拿错误码去探测别人会话里有哪些素材。
+    帧提交是写操作，回 404 会让人拿错误码去探测别人会话里有哪些素材。D7 §13 的
+    ``asset_not_found`` 只覆盖 ref 素材循环（§6.3），不改这条已验收的路线契约。
     """
 
     status_code = 422
@@ -512,6 +515,7 @@ class SegmentVideoInvalid(WorkbenchError):
 class AssetImageInvalid(WorkbenchError):
     """素材图回交无效（D7 spec §6.3）：件号不符、素材非本会话、非图片、载荷错配。
 
+    本会话里**不存在**的那一件不归这个码，按 §13 回 404 ``asset_not_found``。
     错误码 ``asset_image_invalid`` 是票面留给实现定的一格（spec §13 没单列）。它与
     ``frame_invalid`` 分开，是因为前端的出路不同：帧槽填错要重选槽位，素材图不合格
     要重新生成一张再交。
@@ -607,21 +611,30 @@ def _validate_failed(payload: dict[str, Any]) -> None:
     _require_str(payload, "detail")
 
 
+# 待办载荷里「在等第几段 / 第几件 / 为什么被拒」的键（D7-1 / spec §14）：校验与重放
+# 共用这一份。各抄一份字面量时，将来加键漏一处不会报错——重放读不到就等于没写，
+# 恢复后的待办静默少一项（「守卫形态要从常量派生」）。
+_ACTION_ITEM_INDEX_KEYS: tuple[str, ...] = ("segment_index", "asset_index")
+_ACTION_ITEM_REASON_KEY = "reason"
+_ACTION_ITEM_PAYLOAD_KEYS: tuple[str, ...] = (
+    *_ACTION_ITEM_INDEX_KEYS, _ACTION_ITEM_REASON_KEY)
+
+
 def _validate_action_item_created(payload: dict[str, Any]) -> None:
     _require_str(payload, "item_id")
     _require_str(payload, "kind")
     # 待办载荷（D7-1 / spec §14）：段号与素材件号是「在等第几段 / 第几件」的唯一
     # 依据，出现时必须是 1 起的整数（``type is int`` 挡掉 ``True == 1``）。不出现
     # 是允许的——旧会话的事件只有 item_id + kind，仍要能重放（AC4）。
-    for key in ("segment_index", "asset_index"):
+    for key in _ACTION_ITEM_INDEX_KEYS:
         value = payload.get(key)
         if value is not None and (type(value) is not int or value < 1):
             raise InvalidEventPayload(
                 f"事件 payload 的 {key!r} 必须是 ≥1 的整数：{value!r}")
-    reason = payload.get("reason")
+    reason = payload.get(_ACTION_ITEM_REASON_KEY)
     if reason is not None and not isinstance(reason, str):
         raise InvalidEventPayload(
-            f"事件 payload 的 'reason' 必须是字符串：{reason!r}")
+            f"事件 payload 的 {_ACTION_ITEM_REASON_KEY!r} 必须是字符串：{reason!r}")
 
 
 def _validate_action_item_resolved(payload: dict[str, Any]) -> None:
@@ -884,8 +897,8 @@ def _replay_snapshot(
                 }
                 # 决议所需的载荷随事件走（D7-1 / spec §14）：段号/件号/被拒原因在
                 # 快照补齐后仍要说得出「在等第几段 / 第几件」。旧会话没有这些键，
-                # 保持缺省而不是补一个看似有值的零。
-                for key in ("segment_index", "asset_index", "reason"):
+                # 保持缺省而不是补一个看似有值的零。键表与校验共用一份常量。
+                for key in _ACTION_ITEM_PAYLOAD_KEYS:
                     if key in payload:
                         created[key] = payload[key]
                 action_items.append(created)
@@ -2022,27 +2035,44 @@ class WorkbenchSessionStore:
         「什么算素材」仍只判定一次（``_resolved_asset_file`` 那条路），这里只叠加
         会话归属与类型，不另写一份命名规则。
         """
-        return self._resolve_owned_image(session_id, asset_id, FrameInvalid, "帧槽")
+        return self._resolve_owned_image(
+            session_id, asset_id, FrameInvalid, "帧槽",
+            missing_is_not_found=False)
 
     def resolve_image_asset(self, session_id: str, asset_id: str) -> Path:
         """把素材循环交回的 ``asset_id`` 解析成本会话的图片文件（D7 spec §6.3）。
 
         与 ``resolve_frame_asset`` 同一个判据、不同的错误码：素材图不合格的出路是
-        「重新生成一张再交」，与帧槽填错不是一回事，前端要分得开。
+        「重新生成一张再交」，与帧槽填错不是一回事，前端要分得开；本会话里**不存在**
+        的那一件也归 404 ``asset_not_found``（D7 §13）。
         """
         return self._resolve_owned_image(
-            session_id, asset_id, AssetImageInvalid, "素材图")
+            session_id, asset_id, AssetImageInvalid, "素材图",
+            missing_is_not_found=True)
 
     def _resolve_owned_image(self, session_id: str, asset_id: str,
-                             error: type[WorkbenchError], what: str) -> Path:
-        """归属 + 类型两道的单一声明：两个图片写入口共用，不各写一遍。"""
+                             error: type[WorkbenchError], what: str, *,
+                             missing_is_not_found: bool) -> Path:
+        """归属 + 类型两道的单一声明：两个图片写入口共用，不各写一遍。
+
+        「本会话里没有这一件」的码**按路线不同**（``missing_is_not_found``）：
+        D4 spec §12 的帧槽是已验收的 422 ``frame_invalid``，D7 spec §13 的素材循环
+        是 404 ``asset_not_found``。两边都是各自 spec 的原文，这里故意不折中成同一
+        行为——改其中一边要先改对应的 spec，再改这个开关。
+
+        「前缀不属于本会话」两侧一致回 ``error``（422）：能区分就等于给了一个探测
+        别人会话素材的 oracle。
+        """
         prefix, _, _hash16 = asset_id.rpartition("/")
         if prefix != session_id:
             raise error(f"{what}引用的素材不属于本会话：{asset_id}")
         try:
             resource = self.resolve_asset_media(asset_id)
+        except AssetNotFound:
+            if missing_is_not_found:
+                raise
+            raise error(f"{what}引用的素材不存在：{asset_id}") from None
         except WorkbenchError as exc:
-            # 不存在与不可读同码：能区分就等于给了一个探测别人会话素材的 oracle。
             raise error(f"{what}引用的素材不存在：{asset_id}") from exc
         if not resource.media_type.startswith("image/"):
             raise error(f"{what}只接受图片素材（收到 {resource.media_type}）：{asset_id}")

@@ -1,7 +1,7 @@
-# 工作台会话与 Headless API（D2–D6）
+# 工作台会话与 Headless API（D2–D7）
 
 > 入口：`python -m minimax_h3_prompt.api`（开发形态只绑 `127.0.0.1:8000`）；冻结形态见下文「冻结形态（EXE）」。
-> spec #214 / #227 / #235 / #243，ADR 0032、0033、0034、0035、0036；
+> spec #214 / #227 / #235 / #243 / #252，ADR 0032、0033、0034、0035、0036、0037；
 > 本地鉴权见 #222 §4 与 ADR 0033。
 > 这张表是导航与不变量，不是教程；实现细节以代码注释为准。
 
@@ -65,11 +65,14 @@
   `detail`，补齐后 `advance` 续拼，已通过段不重收。拼接口径是**路线属性**：base 裁
   第 2..N 段首帧（帧链段间共享首帧），ref 走 `STREAM_COPY_FIRST`（多参段彼此独立，
   裁首帧只会吃掉用户交的帧）。
-- 产物 content **按登记表的形态分支**（#225）：文本产物（登记表＝11 件固定名 + 四条
+- 产物 content **按登记表的形态分支**（#225）：文本产物（登记表＝10 件文本固定名
+  `video-prompt.md` / `script.md` / `shot-table.md` / 两个帧提示词 / 两份摘要 /
+  `injection-card.md` / `segments/order-card.md` / `segments/ref-shot-table.md`，
+  D4 §7 / D7 §9 / §11，加四条
   模式 `segments/shot-NN.md` 与 `segments/segment-NN.md` → kind `segment_prompt`、
   `assets/picture-NN.md` → kind `asset_prompt`、`segments/injection-card-NN.md` → kind
   `segment_injection_card`，D6 §7 / D7 §7 / D7 §9 / D7 §10）共用纯文本 + 1 MiB 上限
-  （超出 413）；成片 `final.mp4` 给字节 + 单段
+  （超出 413）；成片 `final.mp4`（第 11 件固定名，媒体形态）给字节 + 单段
   Range；两者都答 `HEAD`（同头、无体）。「算不算产物」「按什么形态读」「清单从哪来」
   三个判断只有一个入口 `workbench_store.artifact_spec`，端点与清单都不抄第二份白名单。
 - **注入卡是只读产物、绝不进模型载荷**（D7 §9 / #257）：整片卡 `injection-card.md`

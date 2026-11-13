@@ -453,14 +453,16 @@ def _check_segment_capacity(scopes: list[SegmentAssetScope], *,
     ``film_media`` 让**别的台账来源**（工作台的 ``SessionState.asset_ledger``，它不住
     ``out_dir`` 里的 CLI 台账文件）复用同一条判据，而不是各自抄一份 9/3/3/12。
     """
-    items = (list(film_media) if film_media is not None
-             else [ReferenceItem(entry.kind, entry.number, entry.name)
-                   for entry in load_asset_ledger(out_dir).entries
-                   if entry.kind != KIND_PICTURE])
+    # 整片的视频/音频（每一次请求都带全）；与下面按段重编号的图片分开命名——
+    # 同一个 `items` 先后指两种东西会让「这段超的是图还是视频」读错。
+    film_media_items = (list(film_media) if film_media is not None
+                        else [ReferenceItem(entry.kind, entry.number, entry.name)
+                              for entry in load_asset_ledger(out_dir).entries
+                              if entry.kind != KIND_PICTURE])
     for position, scope in enumerate(scopes, 1):
         pictures = [ReferenceItem(KIND_PICTURE, item.new_picture, item.name)
                     for item in scope.pictures]
-        check_reference_capacity(pictures + items,
+        check_reference_capacity(pictures + film_media_items,
                                  where=f"第 {position} 段接线卡")
 
 

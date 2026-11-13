@@ -16,6 +16,9 @@
 """
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 
 from minimax_h3_prompt.asset_ledger import (
@@ -162,3 +165,31 @@ def test_film_gate_still_rejects_too_many_audios_on_a_multi_segment_film():
 def test_empty_ledger_passes():
     """空台账不是超限（没交素材的多参会话照样能出卡）。"""
     check_reference_capacity([])
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+FRONTEND_CAPACITY = (
+    REPO_ROOT / "frontend" / "src" / "features" / "sessions" / "refCapacity.ts")
+
+
+def test_frontend_capacity_constants_match_the_python_contract():
+    """前端手抄的 9/3/3/12 必须与 ``ref_capacity`` 常量一致（外部契约，改时同步前端）。
+
+    这组数字取自官方单次请求上限，跨语言没有可 import 的常量，前端按原值镜像一份
+    只负责「即时红」。改 Python 侧却忘了改前端时**不会报错**：超限会在界面上按错的
+    档位判——要么放行第 10 张图，要么把合法的 12 文件提前判红。这条用例把它变成
+    会响的判据；`refCapacity.ts` 的注释已写明「改那边必须同时改这里」。
+    """
+    source = FRONTEND_CAPACITY.read_text(encoding="utf-8")
+    block = re.search(r"REF_CAPACITY\s*=\s*\{(?P<body>.*?)\}", source, re.S)
+    assert block is not None, "refCapacity.ts 里找不到 REF_CAPACITY 字面量"
+    mirrored = {
+        key: int(number)
+        for key, number in re.findall(r"(\w+):\s*(\d+)", block.group("body"))
+    }
+    assert mirrored == {
+        "picture": MAX_PICTURES,
+        "video": MAX_VIDEOS,
+        "audio": MAX_AUDIOS,
+        "files": MAX_FILES,
+    }

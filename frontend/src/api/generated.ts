@@ -2075,7 +2075,7 @@ export interface operations {
                 "multipart/form-data": {
                     /** Format: binary */
                     file: string;
-                    /** @description 参考素材的语义名；ref 会话必填且会话内唯一，base 会话忽略。 */
+                    /** @description 参考素材的语义名；带上即登记进台账（会话内唯一，起跑后不允许再登记），不带则按普通素材上传。 */
                     name?: string;
                 };
             };

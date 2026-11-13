@@ -181,6 +181,51 @@ describe('产物分区', () => {
     expect(wrapper.find('[contenteditable="true"]').exists()).toBe(false)
   })
 
+  it('ref 三件只读产物各有分组：资产图词、多参分镜表、拼接顺序卡都不静默消失', async () => {
+    // D7 §11 / §19：登记表新增三类 kind 后，分组表漏登记 → `artifactGroup` 返回 null，
+    // 整件产物从产物分区消失（用户拿不到资产图词、分镜表与拼接顺序卡）。
+    server.use(
+      http.get(/\/api\/v1\/artifacts\/.+\/content$/, () => HttpResponse.text('只读产物正文')),
+    )
+    const { wrapper } = await mountTab([
+      makeArtifact('assets/picture-01.md', 'asset_prompt'),
+      makeArtifact('segments/ref-shot-table.md', 'ref_shot_table'),
+      makeArtifact('segments/order-card.md', 'concat_order_card'),
+    ])
+
+    await vi.waitFor(() => {
+      expect(wrapper.findAll('pre.file-text')).toHaveLength(3)
+    })
+    expect(wrapper.get('[data-group="intermediate"]').text()).toContain('资产图词')
+    expect(wrapper.get('[data-group="intermediate"]').text()).toContain('多参分镜表')
+    // 拼接顺序卡是交付前必须照做的清单，与注入卡同类，归交付文本（见 artifactKinds 注释）。
+    expect(wrapper.get('[data-group="deliverable"]').text()).toContain('拼接顺序卡')
+  })
+
+  it('阅读顺序把 ref 两件插在阶段 1 相邻位置：分镜表 → 多参分镜表 → 帧词 → 资产图词', async () => {
+    server.use(http.get(/\/api\/v1\/artifacts\/.+\/content$/, () => HttpResponse.text('正文')))
+    // 故意打乱传入顺序：排序必须由 kind 顺序决定，不是「传入的先后」。
+    const { wrapper } = await mountTab([
+      makeArtifact('assets/picture-01.md', 'asset_prompt'),
+      makeArtifact('first-frame-prompt.md', 'frame_prompt'),
+      makeArtifact('segments/ref-shot-table.md', 'ref_shot_table'),
+      makeArtifact('shot-table.md', 'shot_table'),
+    ])
+
+    await vi.waitFor(() => {
+      expect(wrapper.findAll('pre.file-text')).toHaveLength(4)
+    })
+    const names = wrapper
+      .findAll('[data-group="intermediate"] article .file-name')
+      .map((node) => node.text())
+    expect(names).toEqual([
+      'shot-table.md',
+      'segments/ref-shot-table.md',
+      'first-frame-prompt.md',
+      'assets/picture-01.md',
+    ])
+  })
+
   it('没有产物时显示空态', async () => {
     const { wrapper } = await mountTab([])
     expect(wrapper.text()).toContain('暂无产物')

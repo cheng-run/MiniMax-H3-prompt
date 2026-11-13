@@ -13,6 +13,7 @@ import type { RefOut } from '@/api/client'
 import Button from '@/components/ui/Button.vue'
 import ErrorNotice from '@/components/ui/ErrorNotice.vue'
 
+import { assetPromptName } from './artifactKinds'
 import { newIdempotencyKey } from './keys'
 import { useClipboardCopy } from './useClipboardCopy'
 
@@ -39,7 +40,7 @@ const semanticName = computed(
 // 严格串行：当前件之前的编号必然已定稿（不通过时重开的还是同一个件号）。
 const settled = computed(() => pictureRefs.value.filter((ref) => ref.number < number.value))
 
-const artifactName = computed(() => `assets/picture-${String(number.value).padStart(2, '0')}.md`)
+const artifactName = computed(() => assetPromptName(number.value))
 const promptArtifact = computed(
   () => props.artifacts.find((artifact) => artifact.name === artifactName.value) ?? null,
 )

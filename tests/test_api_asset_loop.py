@@ -534,6 +534,24 @@ def test_asset_image_accepts_only_this_sessions_image(harness):
     assert ok.status_code == 202, ok.text
 
 
+def test_unknown_asset_in_this_session_is_404_asset_not_found(harness):
+    """本会话前缀但素材不存在 → 404 ``asset_not_found``（spec §13）。
+
+    与「外会话素材」分成两条口径：前缀就是本会话，请求方本来就能读到这份素材清单，
+    区分「不存在」不会泄漏别人会话里有什么；能探测别人才该被挡住（上一条用例仍 422
+    ``asset_image_invalid``）。「还没交上来」与「交错了类型」出路不同——前者要重新
+    上传，后者要换一张图，前端靠错误码分得开。
+    """
+    body = _to_first_card(harness)
+    item = [entry for entry in body["action_items"]
+            if entry["kind"] == "asset_image" and entry["status"] == "pending"][0]
+
+    ghost = f"{harness.session_id}/0123456789abcdef"
+    _assert_problem(harness.submit_image(item, ghost), 404, "asset_not_found")
+    # 404 没有把待办决议掉：用户仍能在同一位置重交。
+    assert [entry["item_id"] for entry in harness.pending("asset_image")] == [item["item_id"]]
+
+
 # ---------------------------------------------------------------------------
 # 恢复：只读台账就能重建「在等第几件」（spec §14）
 # ---------------------------------------------------------------------------

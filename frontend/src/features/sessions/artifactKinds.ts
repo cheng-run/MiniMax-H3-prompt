@@ -7,15 +7,27 @@ import type { ArtifactInfo } from '@/api/client'
 // 按名字枚举的旧写法会在改名后静默少显示一件。
 export type ArtifactGroup = 'intermediate' | 'deliverable' | 'media'
 
-const INTERMEDIATE_KINDS = new Set(['script', 'shot_table', 'frame_prompt'])
+// `asset_prompt` 是素材循环逐件写出的资产图词、`ref_shot_table` 是多参四列分镜表
+// （D7 §7 / §11）：两件都是阶段 1 之后、交付之前的中间产物，漏登记会让它们整件
+// 从产物分区消失（用户拿不到要复制的词与段内素材编号的对照表）。
+const INTERMEDIATE_KINDS = new Set([
+  'script',
+  'shot_table',
+  'ref_shot_table',
+  'frame_prompt',
+  'asset_prompt',
+])
 // `segment_prompt` 是逐段写出来的提示词（D6 §7）：用户要拿单段去跑，跟最终提示词
 // 一样是可拿走的成品，所以归交付文本；漏登记会让它整件从界面上消失。
 // `injection_card` 是整片接线清单（D7 §9 / #257）：素材循环结束后自动产出，用户照卡
 // 进 ComfyUI 接线——同样放进交付文本，只读可复制。
+// `concat_order_card` 是拼接顺序卡（D7 §11）：交付前必须照它确认段序，性质与注入卡
+// 相同（给人照做的只读清单），所以也放交付文本，而不是跟着段词住中间产物。
 const DELIVERABLE_KINDS = new Set([
   'video_prompt',
   'segment_prompt',
   'injection_card',
+  'concat_order_card',
   'summary_markdown',
   'summary_json',
 ])
@@ -44,8 +56,11 @@ export function artifactGroup(artifact: ArtifactInfo): ArtifactGroup | null {
 const KIND_ORDER = [
   'script',
   'shot_table',
+  'ref_shot_table',
   'frame_prompt',
+  'asset_prompt',
   'injection_card',
+  'concat_order_card',
   'video_prompt',
   'segment_prompt',
   'summary_markdown',
@@ -64,8 +79,11 @@ export function sortArtifacts(artifacts: ArtifactInfo[]): ArtifactInfo[] {
 const KIND_LABELS: Record<string, string> = {
   script: '剧本',
   shot_table: '分镜表',
+  ref_shot_table: '多参分镜表',
   frame_prompt: '帧提示词',
+  asset_prompt: '资产图词',
   injection_card: '注入卡',
+  concat_order_card: '拼接顺序卡',
   video_prompt: '最终提示词',
   segment_prompt: '段提示词',
   summary_markdown: '中文摘要',
@@ -78,6 +96,14 @@ const KIND_LABELS: Record<string, string> = {
  */
 export function segmentInjectionCardName(position: number): string {
   return `segments/injection-card-${String(position).padStart(2, '0')}.md`
+}
+
+/**
+ * 资产图词（D7 §7）：与后端登记表同一形状 `assets/picture-NN.md`，件号两位。
+ * 素材卡与产物分区都从这一处取名——组件里再拼一份，登记表改名时它会静默少取一件。
+ */
+export function assetPromptName(number: number): string {
+  return `assets/picture-${String(number).padStart(2, '0')}.md`
 }
 
 /**

@@ -283,7 +283,8 @@ export function diagnosticsBundleUrl(): string {
  * 加 bodySerializer 绕过类型。这里复用同一份错误拦截与令牌注入，返回形状仍由契约
  * 类型约束。
  *
- * `name` 是 ref 会话必填的语义名；base 会话（帧提交）不传，服务端忽略它。
+ * `name` 带上即登记参考素材（会话内唯一、起跑后拒绝）；不传则按普通素材上传
+ * （素材图与段视频回交走这条）。
  */
 export async function uploadSessionAsset(
   sessionId: string,
