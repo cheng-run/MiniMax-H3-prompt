@@ -7,6 +7,11 @@
 *.sh text eol=lf
 scripts/hooks/* text eol=lf
 
+# Windows 批处理反过来必须 CRLF：LF-only 的 .cmd 会被 cmd.exe 从中间劈开执行
+# （2026-11-13 实测：`cd /d "%~dp0"` 报 `dp0" is not recognized`）。
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
 # 其余文本文件统一 LF，避免同一份文档在不同机器上来回改行尾。
 *.py text eol=lf
 *.md text eol=lf

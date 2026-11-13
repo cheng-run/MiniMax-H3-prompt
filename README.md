@@ -38,7 +38,9 @@ bash scripts/check.sh full                # 另跑 mypy 与全量测试
 bash scripts/check.sh clean               # 模拟干净检出（摘掉本机 .env）
 ```
 
-项目唯一启动入口是 [launch.py](launch.py)，包内 `main()` 只由它调用；不再提供 `uv run minimax-h3-prompt` 或 `python -m minimax_h3_prompt`。
+项目唯一**命令行**启动入口是 [launch.py](launch.py)，包内 `main()` 只由它调用；不再提供 `uv run minimax-h3-prompt` 或 `python -m minimax_h3_prompt`。
+
+**工作台网页**（Vue + FastAPI 同源）一键启动：Windows 双击根目录 `start_web.cmd`，或 `uv run python scripts/start_web.py`。缺前端产物会先构建，服务起来后自动开浏览器；已在跑就直接打开页面。
 
 ## 三条路线怎么走
 
