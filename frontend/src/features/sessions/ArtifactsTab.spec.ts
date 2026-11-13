@@ -162,6 +162,25 @@ describe('产物分区', () => {
     expect(wrapper.find('[data-copy="segments/shot-01.md"]').exists()).toBe(true)
   })
 
+  it('整片注入卡（injection_card）进交付文本，只读可复制、没有编辑入口', async () => {
+    // D7-4（#257）：卡是产物分区里的一件参考文本，随流程自动产出——页面上没有
+    // 「生成卡片」按钮，也不提供编辑控件。
+    server.use(
+      http.get(/\/api\/v1\/artifacts\/.+\/content$/, () =>
+        HttpResponse.text('# 注入卡\n| ref_image_0 | 橘猫 |'),
+      ),
+    )
+    const { wrapper } = await mountTab([makeArtifact('injection-card.md', 'injection_card')])
+
+    await vi.waitFor(() => {
+      expect(wrapper.text()).toContain('ref_image_0')
+    })
+    expect(wrapper.get('[data-group="deliverable"]').text()).toContain('注入卡')
+    expect(wrapper.find('[data-copy="injection-card.md"]').exists()).toBe(true)
+    expect(wrapper.find('textarea').exists()).toBe(false)
+    expect(wrapper.find('[contenteditable="true"]').exists()).toBe(false)
+  })
+
   it('没有产物时显示空态', async () => {
     const { wrapper } = await mountTab([])
     expect(wrapper.text()).toContain('暂无产物')

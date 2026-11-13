@@ -10,15 +10,24 @@ export type ArtifactGroup = 'intermediate' | 'deliverable' | 'media'
 const INTERMEDIATE_KINDS = new Set(['script', 'shot_table', 'frame_prompt'])
 // `segment_prompt` 是逐段写出来的提示词（D6 §7）：用户要拿单段去跑，跟最终提示词
 // 一样是可拿走的成品，所以归交付文本；漏登记会让它整件从界面上消失。
+// `injection_card` 是整片接线清单（D7 §9 / #257）：素材循环结束后自动产出，用户照卡
+// 进 ComfyUI 接线——同样放进交付文本，只读可复制。
 const DELIVERABLE_KINDS = new Set([
   'video_prompt',
   'segment_prompt',
+  'injection_card',
   'summary_markdown',
   'summary_json',
 ])
 const MEDIA_KINDS = new Set(['video', 'audio'])
+// 段级注入卡只住「分段」分区、与段词同屏（D7 §9）：它不属于产物分区的任何一组，
+// 这是**有意**不显示，不是漏登记。
+const SEGMENT_LOCAL_KINDS = new Set(['segment_injection_card'])
 
 export function artifactGroup(artifact: ArtifactInfo): ArtifactGroup | null {
+  if (SEGMENT_LOCAL_KINDS.has(artifact.kind)) {
+    return null
+  }
   if (INTERMEDIATE_KINDS.has(artifact.kind)) {
     return 'intermediate'
   }
@@ -36,6 +45,7 @@ const KIND_ORDER = [
   'script',
   'shot_table',
   'frame_prompt',
+  'injection_card',
   'video_prompt',
   'segment_prompt',
   'summary_markdown',
@@ -55,10 +65,19 @@ const KIND_LABELS: Record<string, string> = {
   script: '剧本',
   shot_table: '分镜表',
   frame_prompt: '帧提示词',
+  injection_card: '注入卡',
   video_prompt: '最终提示词',
   segment_prompt: '段提示词',
   summary_markdown: '中文摘要',
   summary_json: '摘要数据（JSON）',
+}
+
+/**
+ * 段级注入卡的产物名（D7 §9 / #257）：与后端 `segment_injection_card_name` 同形，
+ * 段号两位。分段分区按它到产物清单里取本段的卡——名字拼在组件里等于第二份契约。
+ */
+export function segmentInjectionCardName(position: number): string {
+  return `segments/injection-card-${String(position).padStart(2, '0')}.md`
 }
 
 /**

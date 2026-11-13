@@ -336,7 +336,8 @@ def _missing_slots(entries: tuple[AssetRecord, ...],
 
 def render_injection_card(ledger: AssetLedger, params: VideoOutputParams,
                           notes: tuple[str, ...] = (),
-                          settings: WorkflowSettings | None = None) -> str:
+                          settings: WorkflowSettings | None = None, *,
+                          session_dir: str | Path | None = None) -> str:
     """注入卡全文（纯文本，AC1/AC2/AC3）：接线表 + 三元组 + 登记工作流名 + 附注。
 
     卡是给人照抄的对照清单，**不是可执行载荷**——槽位与正本文件名只住在这里，
@@ -344,6 +345,11 @@ def render_injection_card(ledger: AssetLedger, params: VideoOutputParams,
     错位/接空」的坑在附注里说破（绝不静默）。``notes`` 是画布推导的说破行（issue #49
     比例回退/面积夹档），跟在三元组块下——推导替用户做的非常规选择要留底。
     ``settings`` 为空时读生效的工作流配置（登记名与槽位数同出一源，issue #65）。
+
+    ``session_dir`` 只给**没有素材库根**的台账当正本根的兜底（工作台会话的素材就
+    住 ``<会话目录>/assets/`` 里）：台账带 ``library_root`` 时解析口照旧取库根。
+    缺省为空＝CLI 行为一字不变（旧台账给相对路径）。别把会话目录塞进
+    ``library_root`` 冒充素材库——那会让「这本账的库根」变成一句假话。
 
     **卡面只显示用量、不做容量拒绝**（issue #86）：整片卡在 >15 秒路线上是素材库存
     清单，不是一次请求——把整片图数当请求量判，会把「24 张素材、每段 ≤9」的片子整片
@@ -375,11 +381,12 @@ def render_injection_card(ledger: AssetLedger, params: VideoOutputParams,
         else:
             slot_cell = slot_name(entry.kind, entry.number, active)
         # 正本位置走统一解析口（issue #85）：新台账给库内绝对路径，用户照卡找得到文件；
-        # 旧台账没有库根，解析口原样返回相对路径（旧卡面一字不变）
+        # 旧台账没有库根，解析口原样返回相对路径（旧卡面一字不变）。工作台的会话素材
+        # 住会话目录里，由调用方给 ``session_dir`` 当兜底根。
         lines.append(
             f"| {slot_cell} | {entry.name} "
             f"| {KIND_LABELS[entry.kind]} | {format_tag(entry.kind, entry.number)} "
-            f"| {resolve_asset_path(ledger, entry)} |")
+            f"| {resolve_asset_path(ledger, entry, session_dir=session_dir)} |")
     if not ledger.entries:
         lines.append("| （无登记素材） | | | | |")
     lines += [

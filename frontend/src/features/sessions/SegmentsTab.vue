@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
-import type { ActionItemOut, Asset, SegmentOut } from '@/api/client'
+import type { ActionItemOut, ArtifactInfo, Asset, SegmentOut } from '@/api/client'
 
+import { segmentInjectionCardName } from './artifactKinds'
 import SegmentCard from './SegmentCard.vue'
 
 // 「分段」分区（D6 spec §4.2）：规划结果**只读**——不提供编辑、合并/拆分，也没有
@@ -12,6 +13,7 @@ const props = defineProps<{
   segments: SegmentOut[]
   assets: Asset[]
   actionItems: ActionItemOut[]
+  artifacts: ArtifactInfo[]
 }>()
 
 const passedCount = computed(
@@ -37,6 +39,14 @@ const pendingItem = computed(
 function itemFor(index: number): ActionItemOut | null {
   return pendingItem.value?.segment_index === index ? pendingItem.value : null
 }
+
+// 段级注入卡按「产物在不在」显示（D7 §9）：段循环没跑到该段就没有这份文件，
+// 组件不做空卡，也不在快照里另记一份状态。
+const artifactsByName = computed(() => new Map(props.artifacts.map((item) => [item.name, item])))
+
+function cardFor(index: number): ArtifactInfo | null {
+  return artifactsByName.value.get(segmentInjectionCardName(index)) ?? null
+}
 </script>
 
 <template>
@@ -60,6 +70,7 @@ function itemFor(index: number): ActionItemOut | null {
           :segment="segment"
           :item="itemFor(segment.index)"
           :assets="assets"
+          :card-artifact="cardFor(segment.index)"
           @refresh="emit('refresh')"
         />
       </li>

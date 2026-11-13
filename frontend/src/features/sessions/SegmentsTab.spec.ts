@@ -2,7 +2,13 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { http, HttpResponse } from 'msw'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { resetSessionToken, type ActionItemOut, type Asset, type SegmentOut } from '@/api/client'
+import {
+  resetSessionToken,
+  type ActionItemOut,
+  type ArtifactInfo,
+  type Asset,
+  type SegmentOut,
+} from '@/api/client'
 import { server } from '@/test/server'
 
 import SegmentsTab from './SegmentsTab.vue'
@@ -39,11 +45,22 @@ function makeItem(overrides: Partial<ActionItemOut> = {}): ActionItemOut {
   }
 }
 
+function makeArtifact(name: string, kind: string): ArtifactInfo {
+  return {
+    artifact_id: `sess-1/${name}`,
+    name,
+    kind,
+    bytes: 128,
+    created_at: '2026-11-11T00:00:00Z',
+  }
+}
+
 function mountTab(
   overrides: {
     segments?: SegmentOut[]
     assets?: Asset[]
     actionItems?: ActionItemOut[]
+    artifacts?: ArtifactInfo[]
   } = {},
 ) {
   return mount(SegmentsTab, {
@@ -52,6 +69,7 @@ function mountTab(
       segments: [makeSegment()],
       assets: [],
       actionItems: [],
+      artifacts: [],
       ...overrides,
     },
   })
@@ -392,5 +410,42 @@ describe('SegmentsTab 段视频回交', () => {
     expect(bodies).toHaveLength(2)
     expect(bodies[1]).toEqual({ video_asset_id: mp4Asset2.asset_id })
     expect(wrapper.text()).toContain('已提交，正在校验')
+  })
+})
+
+describe('SegmentsTab 段级注入卡（#257）', () => {
+  it('有卡的段把卡面与段词同屏显示，只读、没有编辑入口', async () => {
+    server.use(
+      http.get(/\/api\/v1\/artifacts\/.+\/content$/, ({ request }) => {
+        const path = new URL(request.url).pathname
+        return HttpResponse.text(
+          path.includes('injection-card')
+            ? '# 第 1 段接线卡\n| ref_image_0 | 橘猫 |'
+            : '第 1 段提示词：雨夜街口。',
+        )
+      }),
+    )
+    const wrapper = mountTab({
+      segments: [makeSegment({ prompt_artifact_id: 'sess-1/segments/segment-01.md' })],
+      artifacts: [makeArtifact('segments/injection-card-01.md', 'segment_injection_card')],
+    })
+
+    await settle()
+    expect(wrapper.text()).toContain('第 1 段接线卡')
+    expect(wrapper.text()).toContain('ref_image_0')
+    // 只读：卡面不是可编辑控件，也没有「保存/生成卡片」之类的按钮。
+    expect(wrapper.find('textarea').exists()).toBe(false)
+    expect(wrapper.find('[contenteditable="true"]').exists()).toBe(false)
+    expect(wrapper.findAll('button').some((button) => button.text().includes('生成'))).toBe(false)
+  })
+
+  it('没有该段卡的段不显示卡块（按段号取产物，不做空卡）', async () => {
+    const wrapper = mountTab({
+      segments: [makeSegment()],
+      artifacts: [makeArtifact('segments/injection-card-02.md', 'segment_injection_card')],
+    })
+
+    await settle()
+    expect(wrapper.find('[data-injection-card]').exists()).toBe(false)
   })
 })

@@ -1048,6 +1048,35 @@ MUTATIONS: tuple[Mutation, ...] = (
         "台账不喂给管线＝brief.refs 恒空，阶段 1 按不存在的参考素材写词、"
         "出词那一步按语义名对不上号（#256，spec §5.3）",
     ),
+    Mutation(
+        "film_injection_card_never_written",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "        self._write_film_injection_card(session_id, job_id)\n"
+        "        if self.fake_pipeline:",
+        "        if self.fake_pipeline:",
+        ("tests/test_api_injection_card.py::"
+         "test_film_card_is_written_between_the_asset_loop_and_stage2",),
+        "整片卡漏产出＝素材循环结束到阶段 2 之间少一件产物，用户进 ComfyUI 时"
+        "没有接线清单且不报错（#257，spec §9）",
+    ),
+    Mutation(
+        "film_injection_card_paths_not_anchored",
+        "src/minimax_h3_prompt/injection_card.py",
+        "resolve_asset_path(ledger, entry, session_dir=session_dir)",
+        "resolve_asset_path(ledger, entry)",
+        ("tests/test_api_injection_card.py::"
+         "test_film_card_is_written_between_the_asset_loop_and_stage2",),
+        "卡上只写相对路径＝工作台会话的素材在会话目录里，用户照卡找不到正本（#257）",
+    ),
+    Mutation(
+        "segment_injection_card_pattern_off",
+        "src/minimax_h3_prompt/workbench_store.py",
+        '_SEGMENT_INJECTION_CARD_FILENAME = r"injection-card-\\d{2}\\.md"',
+        '_SEGMENT_INJECTION_CARD_FILENAME = r"injection-card-\\d{3}\\.md"',
+        ("tests/test_api_injection_card.py::"
+         "test_segment_card_writer_persists_and_registers_the_exact_text",),
+        "段级卡模式失效＝写入口落盘后产物清单看不到、content 端点也读不出（#257）",
+    ),
 )
 
 

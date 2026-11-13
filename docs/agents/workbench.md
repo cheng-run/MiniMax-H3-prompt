@@ -63,12 +63,20 @@
   已通过段与视频素材构造。成功产出 `final.mp4` 并转 `completed`（**没有交付确认闸门**）；
   缺段则 `failed`，`assemble_film` 的 reason（已点名第几段）原样进 `job.failed` 的
   `detail`，补齐后 `advance` 续拼，已通过段不重收。
-- 产物 content **按登记表的形态分支**（#225）：文本产物（登记表＝7 件固定名 + 两条
+- 产物 content **按登记表的形态分支**（#225）：文本产物（登记表＝8 件固定名 + 三条
   模式 `segments/shot-NN.md` → kind `segment_prompt`、`assets/picture-NN.md` →
-  kind `asset_prompt`，D6 §7 / D7 §7）共用纯文本 + 1 MiB 上限
+  kind `asset_prompt`、`segments/injection-card-NN.md` → kind
+  `segment_injection_card`，D6 §7 / D7 §7 / D7 §9）共用纯文本 + 1 MiB 上限
   （超出 413）；成片 `final.mp4` 给字节 + 单段
   Range；两者都答 `HEAD`（同头、无体）。「算不算产物」「按什么形态读」「清单从哪来」
   三个判断只有一个入口 `workbench_store.artifact_spec`，端点与清单都不抄第二份白名单。
+- **注入卡是只读产物、绝不进模型载荷**（D7 §9 / #257）：整片卡 `injection-card.md`
+  （kind `injection_card`）在素材循环全部定稿之后、阶段 2 开始之前由
+  `JobRunner._write_film_injection_card` 自动产出（入口只有 `_execute_stage2` 一处，
+  不单独占 step；写失败即 job 失败）。段级卡走唯一入口
+  `JobRunner._write_segment_injection_card`（接线在 #258），落 `segments/injection-card-NN.md`
+  → kind `segment_injection_card`，在分段分区与段词同屏；没有该文件就没有卡块。
+  卡面只显示用量、不做容量拒绝（闸门仍只有 §8 的两处）；页面没有编辑入口，重跑直接重算。
 - **媒体读取**（#225 / D3-3）：`GET` 与 `HEAD` 分开注册——HEAD 的**成功**响应在契约里
   不声明响应体（错误响应两条路径同形，都是 problem+json）；
   固定带 `Accept-Ranges: bytes`、`ETag`、`Last-Modified`、`Content-Length`、`Content-Type`

@@ -95,6 +95,9 @@ ARTIFACT_SUMMARY_MARKDOWN = "summary-zh.md"
 ARTIFACT_SUMMARY_JSON = "summary-zh.json"
 # 成片（D6 §9）：拼接成功后登记，仍是既有 ``video`` kind 与 ``video/mp4`` 媒体类型。
 ARTIFACT_FINAL_FILM = "final.mp4"
+# 整片注入卡（D7 §9 / #257）：进阶段 2 前的最后一件产物，只读接线清单。槽位名与
+# 正本文件名只住在卡上——它是**给人照抄的**，绝不进任何一段的模型载荷。
+ARTIFACT_INJECTION_CARD = "injection-card.md"
 
 
 @dataclass(frozen=True)
@@ -116,6 +119,8 @@ _FIXED_ARTIFACT_SPECS: dict[str, ArtifactSpec] = {
     ARTIFACT_SUMMARY_JSON: ArtifactSpec("summary_json"),
     # 媒体产物：名字 → Content-Type。目前只有成片；列表里的 kind 仍是 ``video``。
     ARTIFACT_FINAL_FILM: ArtifactSpec("video", "video/mp4"),
+    # 注入卡是纯文本接线清单（1 MiB 上限与其余文本产物同一条口径）。
+    ARTIFACT_INJECTION_CARD: ArtifactSpec("injection_card"),
 }
 
 # 模式产物（D6 §7）：每段一份 ``segments/shot-NN.md``。序号两位、与 CLI 的
@@ -130,6 +135,11 @@ _SEGMENT_PROMPT_SPEC = ArtifactSpec(SEGMENT_PROMPT_KIND)
 ASSET_PROMPT_KIND = "asset_prompt"
 _ASSET_PROMPT_FILENAME = r"picture-\d{2}\.md"
 _ASSET_PROMPT_SPEC = ArtifactSpec(ASSET_PROMPT_KIND)
+# 段级注入卡（D7 §9 / #257）：每段一份 ``segments/injection-card-NN.md``，与段词同号。
+# 段循环没跑到该段时没有这份文件——页面按产物存在与否显示，不做空卡。
+SEGMENT_INJECTION_CARD_KIND = "segment_injection_card"
+_SEGMENT_INJECTION_CARD_FILENAME = r"injection-card-\d{2}\.md"
+_SEGMENT_INJECTION_CARD_SPEC = ArtifactSpec(SEGMENT_INJECTION_CARD_KIND)
 # 目录名与文件名模式分开存：解析（名字 → 规格）与扫描（去哪个目录找）都从这一份
 # 取；写死在两处时，改一处就会让「清单里有、读取说没有」。
 #
@@ -139,8 +149,18 @@ _ASSET_PROMPT_SPEC = ArtifactSpec(ASSET_PROMPT_KIND)
 ASSETS_DIRNAME = "assets"
 _PATTERN_ARTIFACT_SPECS: tuple[tuple[str, str, ArtifactSpec], ...] = (
     (SEGMENTS_DIRNAME, _SEGMENT_PROMPT_FILENAME, _SEGMENT_PROMPT_SPEC),
+    (SEGMENTS_DIRNAME, _SEGMENT_INJECTION_CARD_FILENAME, _SEGMENT_INJECTION_CARD_SPEC),
     (ASSETS_DIRNAME, _ASSET_PROMPT_FILENAME, _ASSET_PROMPT_SPEC),
 )
+
+
+def segment_injection_card_name(position: int) -> str:
+    """第 ``position`` 段（1 起）的段级注入卡产物名（与 CLI 落点同名同形）。
+
+    写入口与用例都从这一处取名：「算不算产物」的模式与「写到哪个名字」各写一遍
+    时，改一处就会让产物清单里没有刚写的卡。
+    """
+    return f"{SEGMENTS_DIRNAME}/injection-card-{position:02d}.md"
 
 
 def artifact_spec(name: str) -> ArtifactSpec | None:
@@ -2386,7 +2406,8 @@ __all__ = [
     "ARTIFACT_FINAL_FILM", "ARTIFACT_FIRST_FRAME_PROMPT", "ARTIFACT_LAST_FRAME_PROMPT",
     "ARTIFACT_MAX_BYTES", "ARTIFACT_SCRIPT", "ARTIFACT_SHOT_TABLE",
     "ARTIFACT_SUMMARY_JSON", "ARTIFACT_SUMMARY_MARKDOWN",
-    "ARTIFACT_VIDEO_PROMPT",
+    "ARTIFACT_VIDEO_PROMPT", "ARTIFACT_INJECTION_CARD",
+    "SEGMENT_INJECTION_CARD_KIND", "segment_injection_card_name",
     "Asset", "AssetTooLarge",
     "AssetDuplicate", "AssetImageInvalid", "AssetLocked", "AssetNameInvalid",
     "AssetRequired",

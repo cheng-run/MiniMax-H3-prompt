@@ -359,6 +359,7 @@ const errorMessage = computed(() =>
           :segments="data.segments ?? []"
           :assets="data.assets ?? []"
           :action-items="data.action_items ?? []"
+          :artifacts="data.artifacts ?? []"
           @refresh="invalidateSnapshot"
         />
       </section>

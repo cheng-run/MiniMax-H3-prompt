@@ -26,7 +26,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # 只用于段级注入卡写入口的签名，运行时按鸭子类型调用
+    from ..ref_segments import RefSegmentJob
 
 from .. import step_machine
 from ..errors import error_code
@@ -1164,6 +1167,82 @@ class JobRunner:
         self.store.mutate(session_id, lambda _detail: {
             "status": step_machine.STATUS_RUNNING, "stage_state": state})
 
+    def _write_segment_injection_card(self, session_id: str, position: int,
+                                      ref_job: "RefSegmentJob", *,
+                                      job_id: str | None = None) -> Any:
+        """段级注入卡的**唯一写入口**（D7 §9 / #257）：落盘并登记产物。
+
+        文本取自 ``RefSegmentJob.segment_asset_card``——与终端打印的是同一份，不
+        另渲染一遍（两处渲染就是「卡上写 A、屏上打 B」）。**接线在 #258**：写段词
+        成功时由段循环调用它，本票只把入口做成可调用、有单测的形状。
+        段循环还没跑到该段时这个方法根本不会被调用——页面按「产物在不在」显示，
+        不做空卡。旧 plan（无段内子集映射）返回空串，那一路接线看整片卡。
+        """
+        from ..workbench_store import segment_injection_card_name
+
+        text = ref_job.segment_asset_card(position)
+        if not text:
+            return None
+        return self.store.write_text_artifact(
+            session_id, segment_injection_card_name(position), text, job_id=job_id)
+
+    def _write_film_injection_card(self, session_id: str, job_id: str) -> None:
+        """素材循环全部定稿之后、阶段 2 开始之前写整片注入卡（D7 §9 / #257）。
+
+        只在「ref 会话 + 台账全部定稿」时产出：阶段 1 通过也会走到阶段 2 的入口，
+        那时素材循环还没跑，卡上的台账会是空的。写盘很快，同步做即可——它是进
+        阶段 2 前的最后一件产物，但**不单独占一个 step**（spec §5.2）。写失败就让
+        这个 job 失败并点名，绝不静默漏卡。
+
+        卡面**只读**：工作台没有手改入口，所以重跑直接覆盖；CLI 的
+        ``write_injection_card`` 相反（已存在不覆盖），那边的手改才是出口。
+        卡的内容绝不进 state / brief / 提示词——它是给人照抄的，不是可执行载荷。
+        """
+        from ..asset_ledger import AssetLedger
+        from ..injection_card import render_injection_card, resolve_video_output
+        from ..workbench_store import ARTIFACT_INJECTION_CARD
+
+        directory = self.store.session_directory(session_id)
+        session = load_session(directory)
+        if session is None:
+            raise RuntimeError(f"会话文件读不到：{session_id}")
+        if not session.brief.is_ref:
+            return
+        if _asset_step_of(session.asset_ledger)[0] != ASSET_STEP_DONE:
+            return
+        derivation = resolve_video_output(
+            session.brief.video_output, session.brief.canvases)
+        ledger = AssetLedger(entries=tuple(
+            self._card_record(entry, directory) for entry in session.asset_ledger))
+        text = render_injection_card(
+            ledger, derivation.params, notes=derivation.notes,
+            session_dir=directory)
+        self.store.write_text_artifact(
+            session_id, ARTIFACT_INJECTION_CARD, text, job_id=job_id)
+
+    def _card_record(self, entry: Mapping[str, Any], directory: Path) -> Any:
+        """会话台账条目 → 注入卡的 ``AssetRecord``：``path`` 取盘上正本的相对路径。
+
+        会话台账只记 ``asset_id``（``<会话标识>/<16 位哈希>``、无扩展名），卡上却要
+        写「照抄就能找到的文件」。扩展名从盘上的实际文件解析（走素材读取的同一个
+        解析口），不按嗅探规则另编一个——文件名就是内容哈希，编错就指向不存在的文件。
+        """
+        from ..asset_ledger import AssetRecord
+
+        asset_id = str(entry.get("asset_id") or "")
+        number = int(entry["number"])
+        name = str(entry.get("name") or "")
+        try:
+            resource = self.store.resolve_asset_media(asset_id)
+            relative = resource.path.resolve().relative_to(
+                directory.resolve()).as_posix()
+        except Exception as exc:  # noqa: BLE001 - 台账与盘上事实对不上，点名这一件
+            raise RuntimeError(
+                f"注入卡找不到第 {number} 件素材（{name}）的正本：{asset_id}") from exc
+        return AssetRecord(
+            name=name, kind=str(entry["kind"]), number=number,
+            path=relative, sha256=str(entry["sha256"]))
+
     def _execute_stage2(self, session_id: str, job_id: str,
                         cancel_event: threading.Event) -> dict[str, Any]:
         """线程里跑的阶段 2（approve / 交帧之后）。
@@ -1173,6 +1252,9 @@ class JobRunner:
         并把降级事实记进会话（``variant_downgraded``）——降级不静默。
         ``video-prompt.md`` 与向导同目录同名，写完才算成功。
         """
+        # 整片注入卡是进阶段 2 前的最后一件产物（D7 §9 / #257）：入口只此一处，
+        # 写失败即本 job 失败。它不进下面的 state / brief，模型看不到它。
+        self._write_film_injection_card(session_id, job_id)
         if self.fake_pipeline:
             return self._execute_stage2_fake(session_id, job_id, cancel_event)
         from ..brief_parser import RefItem

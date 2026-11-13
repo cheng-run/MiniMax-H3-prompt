@@ -8,6 +8,7 @@ import {
   resolveActionItem,
   uploadSessionAsset,
   type ActionItemOut,
+  type ArtifactInfo,
   type Asset,
   type SegmentOut,
 } from '@/api/client'
@@ -25,6 +26,8 @@ const props = defineProps<{
   segment: SegmentOut
   item: ActionItemOut | null
   assets: Asset[]
+  // 本段的段级注入卡（D7 §9 / #257）：产物清单里有它才传，没有就不显示卡块。
+  cardArtifact: ArtifactInfo | null
 }>()
 
 const emit = defineEmits<{ refresh: [] }>()
@@ -75,6 +78,31 @@ async function copyPrompt(): Promise<void> {
   }
   await copy.copy(promptText.value)
 }
+
+// 段级注入卡与段词同屏（D7 §9）：卡是给人照抄的接线清单，进入这一段就自动读回，
+// 不藏在按钮后面；只读展示，没有编辑控件。
+const cardText = ref<string | null>(null)
+const cardError = ref<string | null>(null)
+
+async function loadCard(): Promise<void> {
+  const artifact = props.cardArtifact
+  cardText.value = null
+  cardError.value = null
+  if (!artifact) {
+    return
+  }
+  try {
+    cardText.value = await getArtifactContent(artifact.artifact_id)
+  } catch {
+    cardError.value = '注入卡读取失败。'
+  }
+}
+
+watch(
+  () => props.cardArtifact?.artifact_id,
+  () => void loadCard(),
+  { immediate: true },
+)
 
 // 已选素材来自两处：父组件快照里的本会话素材，以及刚上传成功、快照还没刷回来的
 // 那一份。合并去重后只留 mp4——服务端按嗅探到的 media_type 硬判容器，前端能拿到的
@@ -174,6 +202,14 @@ async function submitVideo(): Promise<void> {
     </header>
     <p class="segment__shots">覆盖镜头：{{ shotsLabel(segment.shots_in_segment) }}</p>
     <p class="segment__summary">{{ segment.summary }}</p>
+
+    <!-- 段级注入卡（D7 §9 / #257）：与本段段词同屏、只读；没有这份产物就没有这一块。 -->
+    <section v-if="cardArtifact" class="injection-card" data-injection-card aria-label="本段注入卡">
+      <h3>本段注入卡</h3>
+      <p v-if="cardError" class="file-error">{{ cardError }}</p>
+      <pre v-else-if="cardText !== null" class="prompt__text">{{ cardText }}</pre>
+      <p v-else role="status" class="muted">加载中…</p>
+    </section>
 
     <div v-if="segment.prompt_artifact_id" class="prompt">
       <button type="button" class="toggle" @click="togglePrompt">
@@ -284,6 +320,15 @@ async function submitVideo(): Promise<void> {
 .segment__rejection {
   margin: 0;
   color: var(--color-error-text);
+}
+.injection-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.injection-card h3 {
+  margin: 0;
+  font-size: 0.95rem;
 }
 .prompt {
   display: flex;
