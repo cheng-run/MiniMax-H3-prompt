@@ -53,7 +53,11 @@ def harness(tmp_path, monkeypatch):
             "card_on_disk": (
                 root / Path(state.session_id) / "injection-card.md").is_file(),
         })
-        return dict(stage_state), "最终提示词：雨夜旧信的一段视频正文。"
+        # 与真实 run_stage2 同一份契约：state 里带 final_prompt（#258 起 ref 阶段 2
+        # 之后按它接段循环；只交提示词不回填 state，续跑会不停重跑阶段 2）。
+        updated = dict(stage_state)
+        updated["final_prompt"] = "最终提示词：雨夜旧信的一段视频正文。"
+        return updated, "最终提示词：雨夜旧信的一段视频正文。"
 
     monkeypatch.setattr(pipeline, "run_stage2", fake_stage2)
     rewrite = _RewriteStub()
@@ -100,10 +104,22 @@ def _artifact(detail: dict, name: str) -> dict:
     return next(item for item in detail["artifacts"] if item["name"] == name)
 
 
+def _wait_for_stage2_and_card(harness) -> dict:
+    """等阶段 2 开跑且整片卡已在产物清单里。
+
+    #258 起 ref 阶段 2 成功后会接段循环，不再直接 `completed`——等 `completed` 会
+    永远等不到。本文件要的是「卡在阶段 2 之前落盘」这条时序，与段循环无关。
+    """
+    return harness.wait_until(
+        lambda snapshot: bool(harness.stage2_calls)
+        and any(entry["name"] == "injection-card.md"
+                for entry in snapshot["artifacts"]))
+
+
 def test_film_card_is_written_between_the_asset_loop_and_stage2(harness):
     """全部定稿 → 整片卡落成产物 → 阶段 2 才开跑；卡面含台账名、用量与官方上限。"""
     _complete_asset_loop(harness)
-    body = harness.wait_until(lambda snapshot: snapshot["status"] == "completed")
+    body = _wait_for_stage2_and_card(harness)
 
     card = _artifact(body, "injection-card.md")
     assert card["kind"] == "injection_card"
@@ -123,7 +139,7 @@ def test_film_card_is_written_between_the_asset_loop_and_stage2(harness):
 def test_film_card_never_reaches_the_stage2_payload(harness):
     """卡是给人照抄的接线清单：槽位名与素材文件名不许出现在阶段 2 的出站载荷里。"""
     _complete_asset_loop(harness)
-    harness.wait_until(lambda snapshot: snapshot["status"] == "completed")
+    _wait_for_stage2_and_card(harness)
 
     call = harness.stage2_calls[0]
     payload = json.dumps(
@@ -144,7 +160,9 @@ def test_film_card_still_renders_when_the_ledger_exceeds_one_request(harness):
     条事实），再调卡的写入口——第 10 件也要列出来，并标「无对应槽位」。
     """
     _complete_asset_loop(harness)
-    harness.wait_until(lambda snapshot: snapshot["status"] == "completed")
+    _wait_for_stage2_and_card(harness)
+    # #258 起阶段 2 之后还有段循环；改会话文件前先等后台写手停下，别与它对着写。
+    harness.wait_until(lambda state: state["status"] != "running")
     directory = harness.root / Path(harness.session_id)
     extra = directory / ASSETS_DIRNAME / "0123456789abcdef.png"
     extra.write_bytes(_png(55))

@@ -28,6 +28,7 @@ function makeSegment(overrides: Partial<SegmentOut> = {}): SegmentOut {
     prompt_artifact_id: '',
     video_asset_id: '',
     rejection_reason: '',
+    assets: [],
     ...overrides,
   }
 }
@@ -57,6 +58,7 @@ function makeArtifact(name: string, kind: string): ArtifactInfo {
 
 function mountTab(
   overrides: {
+    mode?: string
     segments?: SegmentOut[]
     assets?: Asset[]
     actionItems?: ActionItemOut[]
@@ -66,6 +68,7 @@ function mountTab(
   return mount(SegmentsTab, {
     props: {
       sessionId: 'sess-1',
+      mode: 'base',
       segments: [makeSegment()],
       assets: [],
       actionItems: [],
@@ -195,6 +198,118 @@ describe('SegmentsTab 分段分区', () => {
   })
 })
 
+describe('SegmentsTab 段内参考素材（#258）', () => {
+  it('ref 段显示本段只读参考素材：段内重编号 Picture 号 + 语义名', () => {
+    const wrapper = mountTab({
+      segments: [
+        makeSegment({
+          assets: [
+            { number: 1, name: '橘猫', original_number: 2 },
+            { number: 2, name: '台灯', original_number: 5 },
+          ],
+        }),
+      ],
+    })
+
+    const text = wrapper.text()
+    expect(text).toContain('本段参考素材')
+    expect(text).toContain('Picture 1 橘猫')
+    expect(text).toContain('Picture 2 台灯')
+    // 只读：子集由系统算，界面没有任何手改入口。
+    expect(wrapper.find('[data-segment-assets] input').exists()).toBe(false)
+    expect(wrapper.find('[data-segment-assets] select').exists()).toBe(false)
+  })
+
+  it('没有段内子集的段（base）不显示这一行', () => {
+    const wrapper = mountTab({ segments: [makeSegment({ assets: [] })] })
+
+    expect(wrapper.find('[data-segment-assets]').exists()).toBe(false)
+  })
+})
+
+describe('SegmentsTab 换一段（#258）', () => {
+  function hasReopenButton(wrapper: ReturnType<typeof mountTab>): boolean {
+    return wrapper.findAll('button').some((button) => button.text() === '换一段')
+  }
+
+  it('ref 的已通过段显示「换一段」', () => {
+    const wrapper = mountTab({
+      mode: 'ref',
+      segments: [makeSegment({ status: 'passed' })],
+    })
+
+    expect(hasReopenButton(wrapper)).toBe(true)
+  })
+
+  it('base 的已通过段不显示「换一段」', () => {
+    const wrapper = mountTab({
+      mode: 'base',
+      segments: [makeSegment({ status: 'passed' })],
+    })
+
+    expect(hasReopenButton(wrapper)).toBe(false)
+  })
+
+  it('ref 未通过的段不显示「换一段」', () => {
+    const wrapper = mountTab({
+      mode: 'ref',
+      segments: [makeSegment({ status: 'waiting_video' })],
+    })
+
+    expect(hasReopenButton(wrapper)).toBe(false)
+  })
+
+  it('点「换一段」发 reopen 请求（带幂等键）并通知父组件刷新', async () => {
+    const headers: (string | null)[] = []
+    server.use(
+      http.post(reopenUrl, ({ request }) => {
+        headers.push(request.headers.get('Idempotency-Key'))
+        return HttpResponse.json(makeItem({ status: 'pending', segment_index: 1 }))
+      }),
+    )
+
+    const wrapper = mountTab({
+      mode: 'ref',
+      segments: [makeSegment({ status: 'passed' })],
+    })
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '换一段')!
+      .trigger('click')
+    await settle()
+
+    expect(headers).toHaveLength(1)
+    expect(headers[0]).toBeTruthy()
+    expect(wrapper.emitted('refresh')).toHaveLength(1)
+  })
+
+  it('reopen 被拒时原样呈现服务端原因', async () => {
+    const detail = '会话有任务在跑，等它停下再换段。'
+    server.use(
+      http.post(reopenUrl, () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: '冲突', status: 409, detail },
+          { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+
+    const wrapper = mountTab({
+      mode: 'ref',
+      segments: [makeSegment({ status: 'passed' })],
+    })
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '换一段')!
+      .trigger('click')
+    await settle()
+
+    expect(wrapper.text()).toContain(detail)
+    // 失败后按钮仍可用：状态没变，用户可以再点一次。
+    expect(hasReopenButton(wrapper)).toBe(true)
+  })
+})
+
 describe('SegmentsTab 段提示词与已交视频', () => {
   it('提示词可查看、可复制，已通过段的视频可在页内播放', async () => {
     server.use(
@@ -282,6 +397,7 @@ const imageAsset: Asset = {
 }
 
 const resolveUrl = 'http://localhost/api/v1/sessions/sess-1/action-items/item-seg-1/resolve'
+const reopenUrl = 'http://localhost/api/v1/sessions/sess-1/segments/1/reopen'
 const uploadUrl = 'http://localhost/api/v1/sessions/sess-1/assets'
 
 describe('SegmentsTab 段视频回交', () => {

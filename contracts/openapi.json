@@ -615,9 +615,40 @@
         "title": "RevisionOut",
         "type": "object"
       },
+      "SegmentAssetOut": {
+        "description": "本段实际要喂进 ComfyUI 的那几张参考图（D7 §10 / #258）。\n\n``number`` 是**段内重编号**后的 Picture 号（从 1 连续，段词正文里引用的就是它），\n``original_number`` 是整片台账原号（溯源用）。界面**只读**：段内子集由系统算，\n没有任何手改入口——逐段手填等于把闭包算法搬到前端。",
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "number": {
+            "title": "Number",
+            "type": "integer"
+          },
+          "original_number": {
+            "default": 0,
+            "title": "Original Number",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "number",
+          "name"
+        ],
+        "title": "SegmentAssetOut",
+        "type": "object"
+      },
       "SegmentOut": {
         "description": "长片的一个执行段（D6 spec §11）：规划完成后进会话快照，详情一次取到。\n\n``index`` 是**1 起**的执行段号（与 ``segments/shot-NN.md`` 同号）；段状态在\n快照里，不靠 job 历史表达（``JOB_HISTORY_LIMIT`` 对 15 段偏紧）。",
         "properties": {
+          "assets": {
+            "items": {
+              "$ref": "#/components/schemas/SegmentAssetOut"
+            },
+            "title": "Assets",
+            "type": "array"
+          },
           "end_hook": {
             "default": "",
             "title": "End Hook",
@@ -3470,6 +3501,132 @@
           }
         },
         "summary": "Cancel Job",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session_id}/segments/{index}/reopen": {
+      "post": {
+        "description": "把一条**已通过**的 ref 段打回等待交视频（D7 §5.5 / #258）。\n\nspec §12 原本写「不新增端点」，用户 2026-11-13 裁定新增这条段级端点。换段只换\n视频：段词与段内参考素材子集不动，重交后重过双闸门。base 会话回 409\n``segment_resubmit_unsupported``（中间段换掉会断掉下一段的帧锚，ADR 0023）；\n未通过的段回 409 ``segment_not_passed``。\n\n状态判定与落盘在 ``JobRunner.reopen_segment`` 的会话临界区里完成，这里不先查\n一遍状态——两处判据会在并发下各说各话。",
+        "operationId": "reopen_segment_api_v1_sessions__session_id__segments__index__reopen_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "title": "Index",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionItemOut"
+                }
+              }
+            },
+            "description": "段已回到等待交视频，返回新挂出的 segment_video 待办",
+            "headers": {
+              "Idempotency-Replayed": {
+                "description": "重放标记；首次换段不返回该头",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "缺少或无效的工作台访问令牌（problem+json）"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "Host/Origin 不是本机回环地址（problem+json）"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "会话或段不存在（problem+json）"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "会话/段状态冲突（problem+json）"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "请求参数校验失败（problem+json）"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "服务器内部错误（problem+json）"
+          }
+        },
+        "summary": "Reopen Segment",
         "tags": [
           "sessions"
         ]

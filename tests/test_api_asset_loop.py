@@ -429,7 +429,11 @@ def test_last_item_pass_chains_stage2(harness, monkeypatch):
 
     def record_stage2(state, brief, config, on_node=None, checkpoint_dir=None):
         stage2_briefs.append(brief)
-        return (state, "固定视频提示词")
+        # 与真实 run_stage2 同一份契约：state 里带 final_prompt。只交提示词不回填
+        # state，ref 的续跑判据（#258 起阶段 2 后接段循环）会认成「阶段 2 没跑过」。
+        updated = dict(state)
+        updated["final_prompt"] = "固定视频提示词"
+        return (updated, "固定视频提示词")
 
     monkeypatch.setattr(pipeline, "run_stage2", record_stage2)
     body = _to_first_card(harness)
@@ -448,7 +452,11 @@ def test_last_item_pass_chains_stage2(harness, monkeypatch):
     harness.readings.append(CLEAN)
     harness.submit_image(second, harness.upload(_png(10), "gen-lamp.png")["asset_id"])
 
-    body = harness.wait_until(lambda snapshot: snapshot["status"] == "completed")
+    # #258 起 ref 阶段 2 之后还要进段循环，不再直接 completed；本用例只钉「最后
+    # 一件定稿 → 阶段 2 开跑」，所以等阶段 2 的产物落盘，而不是终态。
+    body = harness.wait_until(
+        lambda snapshot: bool(stage2_briefs)
+        and any(item["name"] == "video-prompt.md" for item in snapshot["artifacts"]))
     assert all(entry["status"] == "passed" for entry in harness.ledger())
     assert any(item["name"] == "video-prompt.md" for item in body["artifacts"])
     # 阶段 2 也看得到台账语义名（<Picture N> 编号要对得上），但那份派生 refs

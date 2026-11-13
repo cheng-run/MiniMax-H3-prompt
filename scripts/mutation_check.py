@@ -1077,6 +1077,42 @@ MUTATIONS: tuple[Mutation, ...] = (
          "test_segment_card_writer_persists_and_registers_the_exact_text",),
         "段级卡模式失效＝写入口落盘后产物清单看不到、content 端点也读不出（#257）",
     ),
+    Mutation(
+        "ref_planning_falls_back_to_base",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "        if session.brief.is_ref:\n"
+        "            plans = self._plan_ref_segments(session_id, job_id, directory, session)",
+        "        if False:\n"
+        "            plans = self._plan_ref_segments(session_id, job_id, directory, session)",
+        ("tests/test_api_segment_ref_loop.py::"
+         "test_ref_planning_uses_ref_route_and_writes_segment_product",),
+        "路线分叉恒假＝ref 按 base 规划并写 shot-NN.md，段内子集、顺序卡与分镜表整条"
+        "静默消失（#258，spec §10）",
+    ),
+    Mutation(
+        "reopen_clears_the_asset_subset",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "                target[\"status\"] = SEGMENT_STATUS_WAITING_VIDEO\n"
+        "                target[\"video_asset_id\"] = \"\"",
+        "                target[\"status\"] = SEGMENT_STATUS_WAITING_VIDEO\n"
+        "                target[\"video_asset_id\"] = \"\"\n"
+        "                target[\"assets\"] = []",
+        ("tests/test_api_segment_ref_loop.py::test_ref_passed_segment_can_be_reopened",),
+        "换一段顺手清子集＝用户只想换视频，段内参考素材被悄悄推倒重算（#258，"
+        "spec §5.5「只换视频」）",
+    ),
+    Mutation(
+        "ref_validation_falls_back_to_frame_chain",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "        if session.brief.is_ref:\n"
+        "            # ref 没有桥接帧、也没有「尾帧对照末态」这一道（ADR 0011）：段尾语义在",
+        "        if False:\n"
+        "            # ref 没有桥接帧、也没有「尾帧对照末态」这一道（ADR 0011）：段尾语义在",
+        ("tests/test_api_segment_ref_loop.py::"
+         "test_ref_segment_validation_skips_bridge_frame_and_vision",),
+        "ref 校验退回帧链＝多参段开始剥尾帧读图判 end_hook，ADR 0011 明令不做的"
+        "那一道又接回来（#258）",
+    ),
 )
 
 

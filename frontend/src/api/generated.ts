@@ -347,6 +347,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{session_id}/segments/{index}/reopen": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reopen Segment
+         * @description 把一条**已通过**的 ref 段打回等待交视频（D7 §5.5 / #258）。
+         *
+         *     spec §12 原本写「不新增端点」，用户 2026-11-13 裁定新增这条段级端点。换段只换
+         *     视频：段词与段内参考素材子集不动，重交后重过双闸门。base 会话回 409
+         *     ``segment_resubmit_unsupported``（中间段换掉会断掉下一段的帧锚，ADR 0023）；
+         *     未通过的段回 409 ``segment_not_passed``。
+         *
+         *     状态判定与落盘在 ``JobRunner.reopen_segment`` 的会话临界区里完成，这里不先查
+         *     一遍状态——两处判据会在并发下各说各话。
+         */
+        post: operations["reopen_segment_api_v1_sessions__session_id__segments__index__reopen_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -632,6 +660,25 @@ export interface components {
             text: string;
         };
         /**
+         * SegmentAssetOut
+         * @description 本段实际要喂进 ComfyUI 的那几张参考图（D7 §10 / #258）。
+         *
+         *     ``number`` 是**段内重编号**后的 Picture 号（从 1 连续，段词正文里引用的就是它），
+         *     ``original_number`` 是整片台账原号（溯源用）。界面**只读**：段内子集由系统算，
+         *     没有任何手改入口——逐段手填等于把闭包算法搬到前端。
+         */
+        SegmentAssetOut: {
+            /** Name */
+            name: string;
+            /** Number */
+            number: number;
+            /**
+             * Original Number
+             * @default 0
+             */
+            original_number: number;
+        };
+        /**
          * SegmentOut
          * @description 长片的一个执行段（D6 spec §11）：规划完成后进会话快照，详情一次取到。
          *
@@ -639,6 +686,8 @@ export interface components {
          *     快照里，不靠 job 历史表达（``JOB_HISTORY_LIMIT`` 对 15 段偏紧）。
          */
         SegmentOut: {
+            /** Assets */
+            assets?: components["schemas"]["SegmentAssetOut"][];
             /**
              * End Hook
              * @default
@@ -2507,6 +2556,87 @@ export interface operations {
                 };
             };
             /** @description 会话/任务状态冲突（problem+json） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 请求参数校验失败（problem+json） */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 服务器内部错误（problem+json） */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+        };
+    };
+    reopen_segment_api_v1_sessions__session_id__segments__index__reopen_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                session_id: string;
+                index: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 段已回到等待交视频，返回新挂出的 segment_video 待办 */
+            200: {
+                headers: {
+                    /** @description 重放标记；首次换段不返回该头 */
+                    "Idempotency-Replayed"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActionItemOut"];
+                };
+            };
+            /** @description 缺少或无效的工作台访问令牌（problem+json） */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Host/Origin 不是本机回环地址（problem+json） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 会话或段不存在（problem+json） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 会话/段状态冲突（problem+json） */
             409: {
                 headers: {
                     [name: string]: unknown;

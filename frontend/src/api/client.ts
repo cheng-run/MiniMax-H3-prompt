@@ -359,3 +359,27 @@ export async function resolveActionItem(
   )
   return data ?? null
 }
+
+/**
+ * 把一条**已通过**的 ref 段打回等待交视频（D7 §5.5 / #258）。
+ *
+ * 换段只换视频：段词与段内参考素材子集不动，重交后重过双闸门。幂等键挡双击——
+ * 同一键重放不会把同一段重复打回。base 会话请求这个端点会得到 409
+ * `segment_resubmit_unsupported`，由统一错误拦截抛 `ApiError`。
+ */
+export async function reopenSegment(
+  sessionId: string,
+  index: number,
+  idempotencyKey: string,
+): Promise<ActionItemOut> {
+  const { data } = await apiClient.POST('/api/v1/sessions/{session_id}/segments/{index}/reopen', {
+    params: {
+      path: { session_id: sessionId, index },
+      header: { 'Idempotency-Key': idempotencyKey },
+    },
+  })
+  if (data === undefined) {
+    throw new ApiError(0, null)
+  }
+  return data
+}

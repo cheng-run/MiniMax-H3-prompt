@@ -28,7 +28,7 @@
 | `session_store.py` | 快照文件读写、`atomic_write_text`、向导续接状态与 `RESUMABLE_STATUSES` |
 | `api/fake_pipeline.py` | 确定性桩管线：固定阶段 1/2、假读图与假段提示词/段判据，**只认环境变量 `MINIMAX_FAKE_PIPELINE`**（默认关、无 HTTP 入口），真实/桩互斥 |
 | `segment_validation.py` | 段交接的两道判据：同步提交自检（段号/技术档，`segment_submission_problems`）与语义判据（尾帧描述 vs `end_hook`，`judge_end_hook`）；读图与模型调用在 `api/jobs.py` |
-| `frontend/src/features/sessions/` | 工作台五分区：`SessionDetailView`（壳/SSE/运行控制）、`ReviewTab`（审查与修订）、`AssetsTab` + `FrameSubmissionCard`（素材与帧提交）、`SegmentsTab` + `SegmentCard`（长片分段只读展示与 `segment_video` 回交）、`ArtifactsTab`（产物查看/复制/下载/通用媒体播放） |
+| `frontend/src/features/sessions/` | 工作台五分区：`SessionDetailView`（壳/SSE/运行控制）、`ReviewTab`（审查与修订）、`AssetsTab` + `FrameSubmissionCard`（素材与帧提交）、`SegmentsTab` + `SegmentCard`（长片分段只读展示、`segment_video` 回交、ref 段内素材只读回显与「换一段」）、`ArtifactsTab`（产物查看/复制/下载/通用媒体播放） |
 | `frontend/src/api/client.ts` | 生成契约的类型出口与唯一 API 门面：令牌注入、媒体/产物 URL、错误归一成 `ApiError` |
 | `scripts/accept_d2.py` | 真实 HTTP 验收驱动器（手动，不进 CI；启动时先取令牌） |
 | `scripts/accept_d3.py` | 媒体与素材的真实验收驱动器（手动；真实照片上传 + 真实 `final.mp4` 的 Range 与字节核对，报告落 `output/accept-d3/`） |
@@ -63,10 +63,10 @@
   已通过段与视频素材构造。成功产出 `final.mp4` 并转 `completed`（**没有交付确认闸门**）；
   缺段则 `failed`，`assemble_film` 的 reason（已点名第几段）原样进 `job.failed` 的
   `detail`，补齐后 `advance` 续拼，已通过段不重收。
-- 产物 content **按登记表的形态分支**（#225）：文本产物（登记表＝8 件固定名 + 三条
-  模式 `segments/shot-NN.md` → kind `segment_prompt`、`assets/picture-NN.md` →
-  kind `asset_prompt`、`segments/injection-card-NN.md` → kind
-  `segment_injection_card`，D6 §7 / D7 §7 / D7 §9）共用纯文本 + 1 MiB 上限
+- 产物 content **按登记表的形态分支**（#225）：文本产物（登记表＝11 件固定名 + 四条
+  模式 `segments/shot-NN.md` 与 `segments/segment-NN.md` → kind `segment_prompt`、
+  `assets/picture-NN.md` → kind `asset_prompt`、`segments/injection-card-NN.md` → kind
+  `segment_injection_card`，D6 §7 / D7 §7 / D7 §9 / D7 §10）共用纯文本 + 1 MiB 上限
   （超出 413）；成片 `final.mp4` 给字节 + 单段
   Range；两者都答 `HEAD`（同头、无体）。「算不算产物」「按什么形态读」「清单从哪来」
   三个判断只有一个入口 `workbench_store.artifact_spec`，端点与清单都不抄第二份白名单。
@@ -163,6 +163,31 @@
   warning 由验收驱动器用同一个函数本地复核后记录。
 - **不读也不写 CLI 的段产出账**（`segments/shot-ledger.jsonl`，D6-AC12）：同一会话目录
   曾被 CLI 跑过时，进度只以工作台自己的段状态为准。
+
+## ref 段循环（D7-5，#258）
+
+分段门槛是**路线属性**（spec §5.4）：`ref` 一律进段循环，`duration` 超过单次生成上限
+（`ref_segments.is_single_segment_route`，从 `MAX_SEG_S` 派生、不写字面 15）才真拆段；
+≤ 上限的会话就是「1 段」直出——页面显示 1 段，走同一套段循环（待办、双闸门、拼接），
+不是长片。`JobRunner._needs_segment_loop` 的判据：`brief.is_ref or is_long_form(duration)`。
+
+| 步骤 | 与 base 的差别 |
+|---|---|
+| 分段规划 | `_plan_ref_segments` 走 `prepare_ref_segmentation`（切点/闭包/重编号），`segments/plan.json` 落盘但**不是产物**（已由 `SegmentOut` 表达）；`segments/order-card.md`（kind `concat_order_card`，段序唯一依据）与 `segments/ref-shot-table.md`（kind `ref_shot_table`，四列分镜表）登记进产物表 |
+| 写段 | 从盘上 `plan.json` + `video-prompt.md` 重建（`load_ref_segments_for_resume`），**不重新规划**——段边界一变，已通过段就对不上了；段词落 `segments/segment-NN.md`（kind `segment_prompt`，与 base 的 `shot-NN.md` 并列两条模式） |
+| 段校验 | **不建桥接帧、不剥尾帧、不调 `describe_image`、不判 `end_hook`**（ADR 0011）：段尾语义在写段时由段内注记判；提交时只确认技术档（resolve 已判）与段词仍在 |
+| 换一段 | `POST /sessions/{id}/segments/{index}/reopen`：`passed → waiting_video`、清 `video_asset_id`、重建同段 `segment_video` 待办；**只换视频，段词与段内子集不动**。base → 409 `segment_resubmit_unsupported`；段号不存在 → 404 `segment_not_found`；未通过 → 409 `segment_not_passed` |
+
+- **段内参考素材只读**（spec §10）：`SegmentOut.assets` 回显规划期算好的子集（段内重编号
+  Picture 号 + 语义名 + 整片原号）；链条是分镜表标签 → 闭包 → 撤一致性锚 → 从 1 重编号。
+  没有任何手改入口——逐段手填等于把闭包算法搬到前端。
+- **容量在规划期硬失败**（spec §8）：段内子集超 9 图或单请求超 12 文件时 job 失败并点名
+  超限素材（`ref_segments._check_segment_capacity`；工作台把 `SessionState.asset_ledger`
+  当另一个台账来源传进去，9/3/3/12 的判据只有一份）。
+- **路线错配 409**（spec §13）：ref 会话带 `frames` 或 `frame_submission` →
+  `route_mismatch`（ref 不走帧链，ADR 0011）。
+- **base 的读图路径一字不变**（#258 AC）：桥接帧、尾帧剥取、`end_hook` 判据都还在
+  base 分支里；`_needs_segment_loop` 对 base 仍只认 `>10` 秒。
 
 验收命令（手动，不进 CI；配置来源断言在起被测程序之前）：
 

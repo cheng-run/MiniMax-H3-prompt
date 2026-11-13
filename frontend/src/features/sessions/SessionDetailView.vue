@@ -50,13 +50,14 @@ const BASE_TABS: { id: WorkbenchTab; label: string }[] = [
   { id: 'artifacts', label: '产物' },
 ]
 
-// 「分段」分区只在长片出现（D6 spec §4.2），判据是**会话时长**而不是段列表：
-// 规划还没落盘时长片也要有这一格（显示「规划中」），否则用户不知道去哪看进度。
-// 短视频的四个分区与它们的位置都不变。
+// 「分段」分区（D6 spec §4.2 / D7 §5.4）：判据是**路线或时长**，不是段列表。
+// base 只在 >10 秒出现（规划还没落盘的长片也要有这一格，显示「规划中」）；ref 一律
+// 走段循环——≤ 单次生成上限的会话是「1 段」直出，仍在这格交段视频，不是长片。
+// 短视频（base）的四个分区与它们的位置都不变。
 const LONG_FILM_SECONDS = 10
 const tabs = computed(() => {
   const entries = [...BASE_TABS]
-  if ((data.value?.brief.duration ?? 0) > LONG_FILM_SECONDS) {
+  if (data.value?.mode === 'ref' || (data.value?.brief.duration ?? 0) > LONG_FILM_SECONDS) {
     entries.splice(2, 0, { id: 'segments', label: '分段' })
   }
   return entries
@@ -346,7 +347,7 @@ const errorMessage = computed(() =>
         />
       </section>
 
-      <!-- 分段（D6-1 只读规划 / D6-4 段视频回交）：长片之外的会话没有这一格 -->
+      <!-- 分段（D6-1 只读规划 / D6-4 段视频回交 / D7 ref 段循环）：按路线或时长出现 -->
       <section
         v-else-if="ui.workbenchTab === 'segments'"
         id="workbench-panel-segments"
@@ -356,6 +357,7 @@ const errorMessage = computed(() =>
       >
         <SegmentsTab
           :session-id="data.session_id"
+          :mode="data.mode"
           :segments="data.segments ?? []"
           :assets="data.assets ?? []"
           :action-items="data.action_items ?? []"

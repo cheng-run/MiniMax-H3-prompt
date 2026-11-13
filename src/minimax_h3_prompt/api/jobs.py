@@ -32,15 +32,18 @@ if TYPE_CHECKING:  # 只用于段级注入卡写入口的签名，运行时按�
     from ..ref_segments import RefSegmentJob
 
 from .. import step_machine
+from ..brief_parser import is_ref_mode
 from ..errors import error_code
 from ..kinds import KIND_PICTURE
 from ..segment_validation import segment_submission_problems
 from ..session_store import FRAME_SUBMISSION_KEY, atomic_write_text, load_session
 from ..summary import PromptSummary, render_summary_zh
 from ..workbench_store import (
+    ARTIFACT_CONCAT_ORDER_CARD,
     ARTIFACT_FINAL_FILM,
     ARTIFACT_FIRST_FRAME_PROMPT,
     ARTIFACT_LAST_FRAME_PROMPT,
+    ARTIFACT_REF_SHOT_TABLE,
     ARTIFACT_SCRIPT,
     ARTIFACT_SHOT_TABLE,
     ARTIFACT_SUMMARY_JSON,
@@ -62,11 +65,16 @@ from ..workbench_store import (
     JobNotRunning,
     JobSummary,
     RevisionOut,
+    RouteMismatch,
     SEGMENT_STATUS_PASSED,
     SEGMENT_STATUS_PENDING,
     SEGMENT_STATUS_VALIDATING,
     SEGMENT_STATUS_WAITING_VIDEO,
+    SegmentNotFound,
+    SegmentNotPassed,
+    SegmentResubmitUnsupported,
     SegmentVideoInvalid,
+    SessionBusy,
     WorkbenchError,
     WorkbenchSessionStore,
 )
@@ -115,6 +123,11 @@ ASSET_PROMPT_FILENAME = ASSETS_DIRNAME + "/picture-{number:02d}.md"
 
 # advance 没有请求体；幂等键绑定的「请求摘要」是一个常量，同 key 重发永远算同一份命令。
 _JOB_FINGERPRINT = hashlib.sha256(b"advance").hexdigest()
+
+
+def _reopen_fingerprint(index: int) -> str:
+    """换段请求的摘要：段号进摘要，同 key 换一段重发不能重放上一段的响应。"""
+    return hashlib.sha256(f"reopen:{int(index)}".encode("utf-8")).hexdigest()
 
 
 def _resolve_fingerprint(item_id: str, decision: str | None,
@@ -375,6 +388,80 @@ class JobRunner:
                     fingerprint=_JOB_FINGERPRINT, response=_job_dict(job))
             return job, False
 
+    async def reopen_segment(
+        self, session_id: str, index: int, *, idempotency_key: str | None = None
+    ) -> tuple[ActionItemOut, bool]:
+        """把一条**已通过**的 ref 段打回 ``waiting_video``，重建本段待办（#258）。
+
+        spec §5.5 要求 ref 的已通过段能「换一段」，而 §12 又写「不新增端点」——用户
+        2026-11-13 裁定：**新增段级端点**。base 不开这条边（中间段换掉会断掉第 N+1 段
+        的帧锚，ADR 0023），所以 base 会话请求换段是 ``segment_resubmit_unsupported``。
+
+        换段**只换视频**：段词与段内参考素材子集原样不动（子集是系统算的，没有手改
+        入口），重交后照旧重过双闸门。
+        """
+        lock = self._locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            payload = _reopen_fingerprint(index)
+            registry = None
+            if idempotency_key:
+                registry = self.store.session_registry(session_id)
+                cached = await asyncio.to_thread(
+                    registry.replay, idempotency_key, fingerprint=payload)
+                if cached is not None:
+                    return ActionItemOut.model_validate(cached), True
+
+            item = ActionItemOut(
+                item_id=uuid.uuid4().hex,
+                kind=step_machine.ACTION_SEGMENT_VIDEO,
+                status="pending", created_at=_now(), segment_index=index)
+
+            def _apply(detail: Any) -> dict[str, Any]:
+                # 路线先判：base 会话压根不该有这个动作，回「段不存在」会把人带偏。
+                if not is_ref_mode(detail.brief.mode):
+                    raise SegmentResubmitUnsupported(
+                        "base 会话不能换段：中间段换掉会断掉下一段的帧锚（ADR 0023）。")
+                if detail.status == step_machine.STATUS_RUNNING:
+                    raise SessionBusy("会话有任务在跑，等它停下再换段。")
+                rows = [row.model_dump() for row in detail.segments]
+                target = next(
+                    (row for row in rows if int(row["index"]) == int(index)), None)
+                if target is None:
+                    raise SegmentNotFound(f"会话里没有第 {index} 段。")
+                if target["status"] != SEGMENT_STATUS_PASSED:
+                    raise SegmentNotPassed(
+                        f"第 {index} 段当前是 {target['status']}，只有已通过的段能换一段。")
+                # 换段只换视频：段词与段内子集不动，所以只清素材引用与拒绝原因。
+                target["status"] = SEGMENT_STATUS_WAITING_VIDEO
+                target["video_asset_id"] = ""
+                target["rejection_reason"] = ""
+                # 每段恰好一个待办：同类未决旧项先收掉再挂新的（与段收尾同一条纪律）。
+                items = [
+                    existing.model_dump(mode="json")
+                    for existing in detail.action_items
+                    if not (existing.kind == step_machine.ACTION_SEGMENT_VIDEO
+                            and existing.status == "pending")]
+                items.append(item.model_dump(mode="json"))
+                return {
+                    "status": step_machine.STATUS_AWAITING_HUMAN,
+                    "segments": rows,
+                    "action_items": items,
+                }
+
+            await asyncio.to_thread(
+                self.store.mutate, session_id, _apply, events=[
+                    EventDraft(
+                        "action_item.created",
+                        {"item_id": item.item_id, "kind": item.kind,
+                         "segment_index": index},
+                        job_id=None),
+                ])
+            if idempotency_key and registry is not None:
+                await asyncio.to_thread(
+                    registry.record, idempotency_key,
+                    fingerprint=payload, response=item.model_dump(mode="json"))
+            return item, False
+
     async def resolve(
         self, session_id: str, item_id: str, *, decision: str | None,
         revisions: list[dict[str, str]] | None = None,
@@ -455,6 +542,16 @@ class JobRunner:
                 if target.status != "pending":
                     raise ActionItemResolved(
                         f"待办已决议（{target.decision or target.status}），不能重复提交。")
+                # 路线错配先于 kind 判据（D7 §13 / #258）：ref 不走帧链（ADR 0011），
+                # frames 载荷与 frame_submission 都是 base 专属动作。只在**这一种
+                # 待办**上答 409——素材待办收到 frames 仍按「载荷与 kind 错配」报
+                # 422，那是用户发错了字段，不是路线问题，回路线错配会把人带偏。
+                if is_ref_mode(current.brief.mode) and (
+                        target.kind == step_machine.ACTION_FRAME_SUBMISSION
+                        or (frames is not None
+                            and target.kind == step_machine.ACTION_SEGMENT_VIDEO)):
+                    raise RouteMismatch(
+                        "ref 会话不走帧链：提交本段视频请用 video_asset_id。")
                 now = _now()
                 stage_state: dict[str, Any] | None = None
                 new_item: ActionItemOut | None = None
@@ -898,13 +995,22 @@ class JobRunner:
             # 长片的两段接缝都属于 ``segmenting``：① 阶段 2 已成功（``final_prompt``
             # 落盘）但还没段表——重试要重跑**规划**；② 段循环已开始（有段表）——重试要
             # 重跑当前那一段的写词或校验。两者都不能把阶段 2 再跑一遍（D6 spec §5.3）。
-            if step_machine.is_long_form(session.brief.duration):
+            if self._needs_segment_loop(session.brief):
                 if session.segments:
                     return step_machine.STEP_SEGMENTING
                 if str(session.stage_state.get("final_prompt") or "").strip():
                     return step_machine.STEP_SEGMENTING
             return step_machine.STEP_STAGE2
         return step_machine.STEP_STAGE1
+
+    @staticmethod
+    def _needs_segment_loop(brief: Any) -> bool:
+        """阶段 2 之后接不接段循环：门槛是**路线属性**，不是会话属性（D7 §5.4）。
+
+        base 只在 >10 秒时进分段（D6 §3，不动）；ref 一律进——≤ 单次生成上限的会话
+        走「1 段」直出，它仍是同一个段循环（同一套待办、双闸门与拼接），不是长片。
+        """
+        return brief.is_ref or step_machine.is_long_form(brief.duration)
 
     def _cleanup(self, session_id: str, job_id: str) -> None:
         self._cancel_events.pop(job_id, None)
@@ -1694,6 +1800,10 @@ class JobRunner:
         ``BASE_MAX_SEG_S``（4–10 秒，ADR 0012）。读图与用户修订按 CLI 的同一口径
         显式入参——规划层不读 state，看到什么在调用点一眼可见（issue #26）。
         ``segments/plan.json`` 落在**本会话目录**内，与 CLI 的同名产物互不覆盖。
+
+        路线从 ``brief`` 读（D7 §10 / #258），不再硬编 ``"base"``：ref 走
+        ``prepare_ref_segmentation`` 那一套（切点边界、段内素材子集、顺序卡与四列
+        分镜表），并且**≤ 单次生成上限也不跳过分段**——直出形态同样是一个执行段。
         """
         directory = self.store.session_directory(session_id)
         session = load_session(directory)
@@ -1707,33 +1817,117 @@ class JobRunner:
             session_id, job_id, SEGMENT_PLAN_NODE, "started",
             stage=step_machine.STEP_SEGMENTING)
         self._write_active_job(session_id, job_id, SEGMENT_PLAN_NODE)
-        plans: Any
-        if self.fake_pipeline:
-            # 桩模式一个模型都不建（D4 spec §11）：桩规划与真实规划同一份段长上限。
-            from .fake_pipeline import segment_plan
-
-            plans = segment_plan(int(round(session.brief.duration)))
+        if session.brief.is_ref:
+            plans = self._plan_ref_segments(session_id, job_id, directory, session)
+            if cancel_event.is_set():
+                raise JobCancelled(SEGMENT_PLAN_NODE)
         else:
-            from ..model_factory import build_chat_model
-            from ..segment_planner import plan_segments
-            from ..segment_prompts import frame_anchor_context, render_revision_context
-
-            plans = plan_segments(
-                shot_table, session.brief.duration, build_chat_model(),
-                # 图是用户提交的产物、分镜表是计划：冲突以图为准（与 CLI 同源）。
-                frame_context=frame_anchor_context(session.stage_state),
-                revision_context=render_revision_context(session.stage_state),
-                mode="base")
-        # 规划是一次慢速模型调用：按「当前步骤结束才停」的取消语义收尾。
-        if cancel_event.is_set():
-            raise JobCancelled(SEGMENT_PLAN_NODE)
-        if not plans:
-            raise RuntimeError("分段规划回复不合格（段长档/边界/段尾钩子），没有可用的段表")
-        self._write_segment_plan(directory, plans)
+            plans = self._plan_base_segments(session, shot_table)
+            # 规划是一次慢速模型调用：按「当前步骤结束才停」的取消语义收尾。
+            if cancel_event.is_set():
+                raise JobCancelled(SEGMENT_PLAN_NODE)
+            if not plans:
+                raise RuntimeError(
+                    "分段规划回复不合格（段长档/边界/段尾钩子），没有可用的段表")
+            self._write_segment_plan(directory, plans)
         self._emit_progress(
             session_id, job_id, SEGMENT_PLAN_NODE, "done",
             stage=step_machine.STEP_SEGMENTING)
         return [self._segment_row(index, plan) for index, plan in enumerate(plans)]
+
+    def _plan_base_segments(self, session: Any, shot_table: str) -> Any:
+        """base 路线的分段规划：一字不变地走 ``plan_segments(mode="base")``。"""
+        if self.fake_pipeline:
+            # 桩模式一个模型都不建（D4 spec §11）：桩规划与真实规划同一份段长上限。
+            from .fake_pipeline import segment_plan
+
+            return segment_plan(int(round(session.brief.duration)))
+        from ..model_factory import build_chat_model
+        from ..segment_planner import plan_segments
+        from ..segment_prompts import frame_anchor_context, render_revision_context
+
+        return plan_segments(
+            shot_table, session.brief.duration, build_chat_model(),
+            # 图是用户提交的产物、分镜表是计划：冲突以图为准（与 CLI 同源）。
+            frame_context=frame_anchor_context(session.stage_state),
+            revision_context=render_revision_context(session.stage_state),
+            mode="base")
+
+    def _plan_ref_segments(self, session_id: str, job_id: str,
+                           directory: Path, session: Any) -> Any:
+        """ref 路线的分段规划：整片提示词 + 台账 → 段表、顺序卡、四列分镜表。
+
+        两条路线共用 ``prepare_ref_segmentation``（不另写一套分段算法）。分流的是
+        **段数形态**：≤ ``MAX_SEG_S`` 时整片就是唯一执行段（``is_single_segment_route``
+        从常量派生，不写字面 15），段词直接取整片提示词原样——直出路线不重写、不套
+        分段注记（段数=1 无从对位，与 CLI ``single_segment_result`` 同口径）。
+        """
+        from ..ref_segments import is_single_segment_route, prepare_ref_segmentation
+
+        whole_prompt = str(session.stage_state.get("final_prompt") or "")
+        if not whole_prompt.strip():
+            raise RuntimeError("阶段 2 的整片提示词为空，无法做多参分段规划")
+        ref_meta, asset_paths = self._ref_plan_inputs(session)
+        film_media = self._ref_film_media(session)
+        single = is_single_segment_route(session.brief.duration)
+        llm = None
+        if not single and not self.fake_pipeline:
+            from ..model_factory import build_chat_model
+
+            llm = build_chat_model()
+        # 直出形态传 llm=None：它本来就不拆段，多一次规划调用只会得到同一个窗口。
+        job = prepare_ref_segmentation(
+            whole_prompt=whole_prompt, total_s=session.brief.duration,
+            out_dir=directory, llm=llm, ref_meta=ref_meta,
+            asset_paths=asset_paths or None, film_media=film_media)
+        if single:
+            # 段词＝整片六段式原样（直出）。写段 job 走 ``reuse_written`` 直接复用这份
+            # 文件，不再付一次 LLM——整片提示词就是那一段的提示词。
+            atomic_write_text(
+                directory / SEGMENTS_DIRNAME / "segment-01.md", whole_prompt)
+        # 两件多参只读清单由 ``prepare_ref_segmentation`` 落盘，这里登记进产物表
+        # （plan.json 是机器结构，已由 SegmentOut 表达，不进产物）。
+        for name in (ARTIFACT_CONCAT_ORDER_CARD, ARTIFACT_REF_SHOT_TABLE):
+            self.store.register_artifact(session_id, name, job_id=job_id)
+        return list(job.plans)
+
+    def _ref_plan_inputs(
+            self, session: Any) -> tuple[list[tuple[int, str, str]], dict[int, str]]:
+        """台账 → 段内子集算法要的 ``(ref_meta, 原号→正本路径)``。
+
+        编号与语义名取**台账**（D7 §6.4 的会话真源），不按剧本重排：工作台的编号在
+        上传时就定了，规划再排一次会让段内重编号与素材台账对不上。
+        """
+        ref_meta: list[tuple[int, str, str]] = []
+        asset_paths: dict[int, str] = {}
+        for entry in session.asset_ledger:
+            if str(entry.get("kind")) != KIND_PICTURE:
+                continue
+            number = int(entry["number"])
+            ref_meta.append((number, str(entry.get("name") or ""), ""))
+            try:
+                asset_paths[number] = str(
+                    self.store.resolve_asset_media(str(entry["asset_id"])).path)
+            except Exception as exc:  # noqa: BLE001 - 卡上少一条路径，不阻断规划
+                logger.warning("第 %d 件素材的正本解析不到（%s）：%s",
+                               number, entry.get("asset_id"), exc)
+        return ref_meta, asset_paths
+
+    @staticmethod
+    def _ref_film_media(session: Any) -> list[Any]:
+        """整片视频/音频（没有段内子集，每次请求都带全）：容量闸的另一个来源。
+
+        台账住会话状态，不是 ``out_dir`` 里那份 CLI 台账文件，所以显式交给
+        ``_check_segment_capacity``——9/3/3/12 的数字不在这里重抄一份。
+        """
+        from ..ref_capacity import ReferenceItem
+
+        return [
+            ReferenceItem(str(entry["kind"]), int(entry["number"]),
+                          str(entry.get("name") or ""))
+            for entry in session.asset_ledger
+            if str(entry.get("kind")) != KIND_PICTURE
+        ]
 
     @staticmethod
     def _write_segment_plan(directory: Path, plans: Any) -> None:
@@ -1747,7 +1941,23 @@ class JobRunner:
 
     @staticmethod
     def _segment_row(index: int, plan: Any) -> dict[str, Any]:
-        """规划结果 → 快照里的段条目（``index`` 转成 1 起的执行段号）。"""
+        """规划结果 → 快照里的段条目（``index`` 转成 1 起的执行段号）。
+
+        段内参考素材子集（D7 §10 / #258）随段条目只读回显：``number`` 是段内重编号
+        后的号（段词正文引用的就是它），``original_number`` 是整片原号。子集来自规划期
+        定案并落进 plan.json 的那一份，不在这里重算。
+        """
+        assets: list[dict[str, Any]] = []
+        stored = getattr(plan, "assets_in_segment", None)
+        if stored:
+            from ..segment_refs import SegmentAssetScope
+
+            scope = SegmentAssetScope.from_dict(stored)
+            assets = [
+                {"number": item.new_picture, "name": item.name,
+                 "original_number": item.original_picture}
+                for item in scope.pictures
+            ]
         return {
             "index": index + 1,
             "start_s": int(plan.start_s),
@@ -1758,6 +1968,7 @@ class JobRunner:
             "status": SEGMENT_STATUS_PENDING,
             "prompt_artifact_id": "",
             "video_asset_id": "",
+            "assets": assets,
         }
 
     def _segment_step(self, session_id: str) -> tuple[str, int]:
@@ -1806,16 +2017,22 @@ class JobRunner:
 
     def _execute_segment_write(self, session_id: str, job_id: str,
                                cancel_event: threading.Event, number: int) -> dict[str, Any]:
-        """写第 ``number`` 段提示词并落成 ``segments/shot-NN.md`` 产物（D6 §5.3/§7）。
+        """写第 ``number`` 段提示词并落成产物（D6 §5.3/§7，D7 §10 分叉）。
 
-        第 N 段（N>1）的请求要带第 N-1 段视频的尾帧锚——它由上一段校验通过时写进
+        base：请求要带第 N-1 段视频的尾帧锚——它由上一段校验通过时写进
         ``stage_state.bridge_frame_descriptions``，这里只把 state 原样交给写段器，
         不另抄一份锚。写词必须**逐段增量**，不能一次把所有段写完再收视频。
+
+        ref：没有桥接帧，段词落 ``segments/segment-NN.md``（与 base 的 ``shot-NN.md``
+        并列的两条模式），走 ``RefSegmentJob.write_segment``。
         """
         directory = self.store.session_directory(session_id)
         session = load_session(directory)
         if session is None:
             raise RuntimeError(f"会话文件读不到：{session_id}")
+        if session.brief.is_ref:
+            return self._write_ref_segment(
+                session_id, job_id, cancel_event, number, directory, session)
         plans = self._load_segment_plans(directory)
         plan = next((item for item in plans if item.index == number - 1), None)
         if plan is None:
@@ -1847,6 +2064,50 @@ class JobRunner:
             stage=step_machine.STEP_SEGMENTING)
         return {"number": number, "artifact_id": artifact.artifact_id}
 
+    def _write_ref_segment(self, session_id: str, job_id: str,
+                           cancel_event: threading.Event, number: int,
+                           directory: Path, session: Any) -> dict[str, Any]:
+        """多参写段（D7 §10 / #258）：从盘上重建作业，**不重新规划**。
+
+        规划是慢速模型调用，重跑会得到另一套段边界，而已通过的段只对产出它的那一套
+        有意义。所以写段只读 ``segments/plan.json``（边界已定案）＋ ``video-prompt.md``
+        （写单段的取材素材），这条重建口与 CLI 续跑同源
+        （``load_ref_segments_for_resume``）。直出形态的段文件在规划时就写好了，
+        ``reuse_written`` 让它零 LLM 直接复用。
+        """
+        from ..ref_segments import load_ref_segments_for_resume
+
+        ref_meta, _asset_paths = self._ref_plan_inputs(session)
+        llm = None
+        if not self.fake_pipeline:
+            from ..model_factory import build_chat_model
+
+            llm = build_chat_model()
+        node = f"{SEGMENT_WRITE_NODE}-{number:02d}"
+        self._emit_progress(
+            session_id, job_id, node, "started", stage=step_machine.STEP_SEGMENTING)
+        self._write_active_job(session_id, job_id, node)
+        job = load_ref_segments_for_resume(
+            directory, total_s=session.brief.duration, llm=llm, ref_meta=ref_meta)
+        if number > len(job.plans):
+            raise RuntimeError(f"段表里找不到第 {number} 段")
+        text, _issues = job.write_segment(number)
+        if cancel_event.is_set():
+            raise JobCancelled(node)
+        if not str(text).strip():
+            raise RuntimeError(f"第 {number} 段写词没有产出可用提示词")
+        name = f"{SEGMENTS_DIRNAME}/segment-{number:02d}.md"
+        # 产物写入仍走 store 的唯一入口（原子写 + 登记 + 事件）；``write_segment``
+        # 已按 CLI 口径落过同一份文件，这里再写一次是为了让工作台的产物账与事件成对。
+        artifact = self.store.write_text_artifact(
+            session_id, name, str(text), job_id=job_id)
+        # 段级注入卡（#257 的唯一写入口）：段词落地即卡落地，与段词同屏。
+        self._write_segment_injection_card(
+            session_id, number, job, job_id=job_id)
+        self._emit_progress(
+            session_id, job_id, node, "done", stage=step_machine.STEP_SEGMENTING)
+        return {"number": number, "artifact_id": artifact.artifact_id}
+
     def _execute_segment_validation(self, session_id: str, job_id: str,
                                     cancel_event: threading.Event,
                                     number: int) -> dict[str, Any]:
@@ -1867,6 +2128,11 @@ class JobRunner:
         session = load_session(directory)
         if session is None:
             raise RuntimeError(f"会话文件读不到：{session_id}")
+        if session.brief.is_ref:
+            # ref 没有桥接帧、也没有「尾帧对照末态」这一道（ADR 0011）：段尾语义在
+            # 写段时由段内注记判过，提交时只看技术档（resolve 已判）+ 段词还在。
+            return self._validate_ref_segment(
+                session_id, job_id, cancel_event, number, directory, session)
         row = next(
             (item for item in session.segments
              if int(item.get("index", 0)) == int(number)), None)
@@ -1922,6 +2188,46 @@ class JobRunner:
             # 拒绝原因要带上「本段要求」：收尾处据此给用户可读的原因（D6 §5.4）。
             "end_hook": plan.end_hook,
         }
+
+    def _validate_ref_segment(self, session_id: str, job_id: str,
+                              cancel_event: threading.Event, number: int,
+                              directory: Path, session: Any) -> dict[str, Any]:
+        """ref 段校验：**不建桥接帧、不剥尾帧、不调读图、不判 end_hook**（ADR 0011）。
+
+        多参的段尾语义靠写段时的段内注记（``validate_ref_segment``）判，不在提交时
+        再读一次图：读图判据是首尾帧链的东西（下一段的帧锚要从尾帧来），ref 没有下一段
+        的帧锚可喂。这里只剩两件：技术档（resolve 同步判过，重判会漂）与「段词还在」
+        ——段落定成 ``passed`` 的前提是这一段的产出与提交对得上。
+        """
+        from ..segment_validation import END_REACHED
+
+        row = next(
+            (item for item in session.segments
+             if int(item.get("index", 0)) == int(number)), None)
+        if row is None:
+            raise RuntimeError(f"快照里找不到第 {number} 段")
+        asset_id = str(row.get("video_asset_id") or "")
+        if not asset_id:
+            raise RuntimeError(f"第 {number} 段没有已交的视频")
+        # 归属与容器在 resolve 判过；这里只确认素材仍在盘上（读不到＝技术故障）。
+        self.store.resolve_asset_media(asset_id)
+        prompt_path = directory / SEGMENTS_DIRNAME / f"segment-{number:02d}.md"
+        if not prompt_path.is_file() or not prompt_path.read_text(
+                encoding="utf-8").strip():
+            raise RuntimeError(
+                f"第 {number} 段的段词不见了（{prompt_path.name}）："
+                "无从确认这份提交对应哪一段提示词")
+        node = f"{SEGMENT_VALIDATE_NODE}-{number:02d}"
+        self._emit_progress(
+            session_id, job_id, node, "started", stage=step_machine.STEP_SEGMENTING)
+        self._write_active_job(session_id, job_id, node)
+        if cancel_event.is_set():
+            raise JobCancelled(node)
+        self._emit_progress(
+            session_id, job_id, node, "done", stage=step_machine.STEP_SEGMENTING)
+        # ``description`` 留空：收尾据此跳过桥接帧锚的写入（ref 没有下段的帧锚）。
+        return {"number": number, "outcome": END_REACHED,
+                "description": "", "end_hook": ""}
 
     def _execute_segment_assemble(self, session_id: str, job_id: str,
                                   cancel_event: threading.Event) -> Any:
@@ -2244,7 +2550,7 @@ class JobRunner:
         running」或「已成功却没人接」的中间态。返回新任务给调用方起执行线程。
         """
         next_job: JobSummary | None = None
-        if step_machine.is_long_form(result["brief"].duration):
+        if self._needs_segment_loop(result["brief"]):
             next_job = JobSummary(
                 job_id=uuid.uuid4().hex, kind=JOB_KIND_SEGMENT, status="running",
                 started_at=_now())

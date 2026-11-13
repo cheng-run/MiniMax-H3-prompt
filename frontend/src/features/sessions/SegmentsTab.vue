@@ -10,6 +10,8 @@ import SegmentCard from './SegmentCard.vue'
 // 「确认分段」按钮（Q4）。段进度用「已通过 x / 总数 y」表达，不用百分比（§4.3）。
 const props = defineProps<{
   sessionId: string
+  // 路线决定段分区的能力（D7 §5.5 / #258）：ref 的已通过段能「换一段」，base 不能。
+  mode: string
   segments: SegmentOut[]
   assets: Asset[]
   actionItems: ActionItemOut[]
@@ -27,6 +29,8 @@ const currentIndex = computed(() => {
   return segment?.index ?? null
 })
 const emit = defineEmits<{ refresh: [] }>()
+
+const isRef = computed(() => props.mode === 'ref')
 
 // 待办与段按段号配对：每段最多一个 pending 的 segment_video 待办，表单只挂在对应
 // 那一段上；待办属于哪段由服务端给（`segment_index`），前端不按顺序猜。
@@ -71,6 +75,7 @@ function cardFor(index: number): ArtifactInfo | null {
           :item="itemFor(segment.index)"
           :assets="assets"
           :card-artifact="cardFor(segment.index)"
+          :is-ref="isRef"
           @refresh="emit('refresh')"
         />
       </li>

@@ -98,6 +98,10 @@ ARTIFACT_FINAL_FILM = "final.mp4"
 # 整片注入卡（D7 §9 / #257）：进阶段 2 前的最后一件产物，只读接线清单。槽位名与
 # 正本文件名只住在卡上——它是**给人照抄的**，绝不进任何一段的模型载荷。
 ARTIFACT_INJECTION_CARD = "injection-card.md"
+# 多参专属的两件只读清单（D7 §11 / #258）：拼接顺序卡是段序唯一依据，多参四列分镜表
+# 是段内素材编号的对照表。两者都由规划阶段写出（与 CLI 同名同址），工作台只读。
+ARTIFACT_CONCAT_ORDER_CARD = "segments/order-card.md"
+ARTIFACT_REF_SHOT_TABLE = "segments/ref-shot-table.md"
 
 
 @dataclass(frozen=True)
@@ -121,14 +125,18 @@ _FIXED_ARTIFACT_SPECS: dict[str, ArtifactSpec] = {
     ARTIFACT_FINAL_FILM: ArtifactSpec("video", "video/mp4"),
     # 注入卡是纯文本接线清单（1 MiB 上限与其余文本产物同一条口径）。
     ARTIFACT_INJECTION_CARD: ArtifactSpec("injection_card"),
+    # 多参两件只读清单（D7 §11 / #258）：都是规划阶段一次写定的文本，没有写作入口。
+    ARTIFACT_CONCAT_ORDER_CARD: ArtifactSpec("concat_order_card"),
+    ARTIFACT_REF_SHOT_TABLE: ArtifactSpec("ref_shot_table"),
 }
 
-# 模式产物（D6 §7）：每段一份 ``segments/shot-NN.md``。序号两位、与 CLI 的
-# ``f"shot-{position:02d}.md"`` 同名同形；``segments/`` 下的其他文件
-# （``plan.json``、``shot-ledger.jsonl``）不在这条模式里，不是产物。
+# 模式产物（D6 §7 / D7 §10）：每段一份。base 写 ``segments/shot-NN.md``，ref 写
+# ``segments/segment-NN.md``——**两条模式并列**（不是改名，路线决定产物名），同一种
+# kind ``segment_prompt``：读者只关心「这是第 N 段的提示词」，名字里带路线名。
+# ``segments/`` 下的其他文件（``plan.json``、``shot-ledger.jsonl``）不在这条模式里。
 SEGMENT_PROMPT_KIND = "segment_prompt"
 SEGMENTS_DIRNAME = "segments"
-_SEGMENT_PROMPT_FILENAME = r"shot-\d{2}\.md"
+_SEGMENT_PROMPT_FILENAME = r"(?:shot|segment)-\d{2}\.md"
 _SEGMENT_PROMPT_SPEC = ArtifactSpec(SEGMENT_PROMPT_KIND)
 # 资产图词（D7 §7）：素材循环里每件参考素材一份 ``assets/picture-NN.md``，与台账
 # 图片编号同号。改词重出**覆盖**同一份文件——历史靠台账轮次与待办决议表达。
@@ -451,6 +459,31 @@ class RouteMismatch(WorkbenchError):
 
     status_code = 409
     code = "route_mismatch"
+
+
+class SegmentResubmitUnsupported(WorkbenchError):
+    """base 会话请求「换一段」（D7 spec §5.5 / #258）。
+
+    base 中途换段会断掉第 N+1 段的帧锚（ADR 0023:34-38），是结构性禁止而非产品选择，
+    所以不开这条边——不是「暂不支持」，是这条路线上它永远不该发生。
+    """
+
+    status_code = 409
+    code = "segment_resubmit_unsupported"
+
+
+class SegmentNotFound(WorkbenchError):
+    """会话里没有这个段号的执行段（#258 换段端点）。"""
+
+    status_code = 404
+    code = "segment_not_found"
+
+
+class SegmentNotPassed(WorkbenchError):
+    """只有 ``passed`` 的段能换一段（#258）：其它状态本来就在等重交或在校验中。"""
+
+    status_code = 409
+    code = "segment_not_passed"
 
 
 class FrameInvalid(WorkbenchError):
@@ -948,6 +981,19 @@ class ActionItemOut(BaseModel):
     reason: str = ""
 
 
+class SegmentAssetOut(BaseModel):
+    """本段实际要喂进 ComfyUI 的那几张参考图（D7 §10 / #258）。
+
+    ``number`` 是**段内重编号**后的 Picture 号（从 1 连续，段词正文里引用的就是它），
+    ``original_number`` 是整片台账原号（溯源用）。界面**只读**：段内子集由系统算，
+    没有任何手改入口——逐段手填等于把闭包算法搬到前端。
+    """
+
+    number: int
+    name: str
+    original_number: int = 0
+
+
 class SegmentOut(BaseModel):
     """长片的一个执行段（D6 spec §11）：规划完成后进会话快照，详情一次取到。
 
@@ -968,6 +1014,8 @@ class SegmentOut(BaseModel):
     video_asset_id: str = ""
     # 语义闸门拒绝时给用户看的**具体**原因（D6 §5.4）；重交或通过后清空。
     rejection_reason: str = ""
+    # 段内参考素材子集（D7 §10 / #258）：只有 ref 有，base 是空表；只读回显。
+    assets: list[SegmentAssetOut] = Field(default_factory=list)
 
 
 class ArtifactInfo(BaseModel):

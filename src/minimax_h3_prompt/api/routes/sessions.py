@@ -701,6 +701,52 @@ async def resolve_action_item(
     return job
 
 
+_REOPEN_RESPONSES = {
+    **_SESSION_ERROR_RESPONSES,
+    200: {
+        "model": ActionItemOut,
+        "description": "段已回到等待交视频，返回新挂出的 segment_video 待办",
+        "headers": {
+            "Idempotency-Replayed": {
+                "description": "重放标记；首次换段不返回该头",
+                "schema": {"type": "string"},
+            },
+        },
+    },
+    404: {"model": ProblemDetail, "description": "会话或段不存在（problem+json）"},
+    409: {"model": ProblemDetail, "description": "会话/段状态冲突（problem+json）"},
+}
+
+
+@router.post(
+    "/sessions/{session_id:path}/segments/{index}/reopen",
+    response_model=ActionItemOut,
+    responses=_REOPEN_RESPONSES,
+)
+async def reopen_segment(
+    session_id: str,
+    index: int,
+    request: Request,
+    response: Response,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> ActionItemOut:
+    """把一条**已通过**的 ref 段打回等待交视频（D7 §5.5 / #258）。
+
+    spec §12 原本写「不新增端点」，用户 2026-11-13 裁定新增这条段级端点。换段只换
+    视频：段词与段内参考素材子集不动，重交后重过双闸门。base 会话回 409
+    ``segment_resubmit_unsupported``（中间段换掉会断掉下一段的帧锚，ADR 0023）；
+    未通过的段回 409 ``segment_not_passed``。
+
+    状态判定与落盘在 ``JobRunner.reopen_segment`` 的会话临界区里完成，这里不先查
+    一遍状态——两处判据会在并发下各说各话。
+    """
+    item, replayed = await _runner(request).reopen_segment(
+        session_id, index, idempotency_key=idempotency_key or None)
+    if replayed:
+        response.headers["Idempotency-Replayed"] = "true"
+    return item
+
+
 @router.get(
     "/sessions/{session_id:path}",
     response_model=SessionDetail,

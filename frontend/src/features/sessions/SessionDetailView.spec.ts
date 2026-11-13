@@ -521,6 +521,49 @@ describe('SessionDetailView 分段分区', () => {
     ])
     expect(wrapper.find('#workbench-panel-segments').exists()).toBe(false)
   })
+
+  it('ref 会话即使 ≤10 秒也出现「分段」：单段直出显示 1 段并带只读子集', async () => {
+    const refBrief = { ...makeDetail().brief, mode: 'ref', duration: 8 }
+    const single = {
+      index: 1,
+      start_s: 0,
+      end_s: 8,
+      shots_in_segment: [1, 2],
+      summary: '整片直出',
+      end_hook: '',
+      status: 'passed',
+      prompt_artifact_id: 'sess-1/segments/segment-01.md',
+      video_asset_id: 'sess-1/aaaaaaaaaaaaaaaa',
+      rejection_reason: '',
+      assets: [{ number: 1, name: '橘猫', original_number: 2 }],
+    }
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({
+            status: 'awaiting_human',
+            mode: 'ref',
+            brief: refBrief,
+            segments: [single],
+          }),
+        ),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    // 判据是路线：ref 一律走段循环，≤ 单次生成上限的会话是「1 段」而不是长片。
+    const tabs = wrapper.findAll('[role="tab"]')
+    expect(tabs.map((tab) => tab.text())).toContain('分段')
+    await tabs.find((tab) => tab.text() === '分段')!.trigger('click')
+    await settle()
+
+    const panel = wrapper.find('#workbench-panel-segments')
+    expect(panel.text()).toContain('第 1 段')
+    expect(panel.text()).toContain('已通过 1 / 总数 1')
+    expect(panel.text()).toContain('Picture 1 橘猫')
+    // 路线传到卡片：ref 的已通过段有「换一段」。
+    expect(panel.findAll('button').some((button) => button.text() === '换一段')).toBe(true)
+  })
 })
 
 // D4-7（#234）：产物分区接进工作台。完成态（阶段 2 成功）直接给出交付文本，

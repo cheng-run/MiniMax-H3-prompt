@@ -5,6 +5,7 @@ import {
   ApiError,
   assetMediaUrl,
   getArtifactContent,
+  reopenSegment,
   resolveActionItem,
   uploadSessionAsset,
   type ActionItemOut,
@@ -28,6 +29,8 @@ const props = defineProps<{
   assets: Asset[]
   // 本段的段级注入卡（D7 §9 / #257）：产物清单里有它才传，没有就不显示卡块。
   cardArtifact: ArtifactInfo | null
+  // 路线（D7 §5.5 / #258）：只有 ref 的已通过段能「换一段」，base 不开这条边。
+  isRef: boolean
 }>()
 
 const emit = defineEmits<{ refresh: [] }>()
@@ -46,6 +49,28 @@ function statusLabel(status: string): string {
 
 function shotsLabel(shots: number[] | undefined): string {
   return shots && shots.length > 0 ? shots.map((shot) => `镜头 ${shot}`).join('、') : '—'
+}
+
+// 换一段（D7 §5.5 / #258）：只换视频，段词与段内参考素材子集一个字都不动；
+// 重交后照样重过双闸门。base 走不到这里（按钮不渲染，服务端也会 409）。
+const reopening = ref(false)
+const reopenError = ref<string | null>(null)
+
+async function reopen(): Promise<void> {
+  if (reopening.value) {
+    return
+  }
+  reopening.value = true
+  reopenError.value = null
+  try {
+    await reopenSegment(props.sessionId, props.segment.index, newIdempotencyKey())
+    emit('refresh')
+  } catch (error) {
+    // 服务端原因原样呈现：会话忙、段未通过、路线不支持各有各的话。
+    reopenError.value = errorMessage(error, '换一段失败，请稍后重试。')
+  } finally {
+    reopening.value = false
+  }
 }
 
 const promptOpen = ref(false)
@@ -199,9 +224,27 @@ async function submitVideo(): Promise<void> {
       <h2>第 {{ segment.index }} 段</h2>
       <span class="segment__time">{{ segment.start_s }}–{{ segment.end_s }} 秒</span>
       <span class="segment__status">{{ statusLabel(segment.status) }}</span>
+      <!-- 换一段（D7 §5.5 / #258）：ref 专属，只在已通过的段上出现。 -->
+      <Button
+        v-if="isRef && segment.status === 'passed'"
+        variant="secondary"
+        :disabled="reopening"
+        @click="reopen"
+      >
+        {{ reopening ? '正在换段…' : '换一段' }}
+      </Button>
     </header>
+    <ErrorNotice v-if="reopenError" :message="reopenError" />
     <p class="segment__shots">覆盖镜头：{{ shotsLabel(segment.shots_in_segment) }}</p>
     <p class="segment__summary">{{ segment.summary }}</p>
+
+    <!-- 段内参考素材（D7 §10 / #258）：只读回显段内重编号后的 Picture 号与语义名。
+         子集由规划期算好（闭包 → 撤一致性锚 → 从 1 重编号），这里没有任何手改入口。 -->
+    <p v-if="segment.assets?.length" class="segment__assets" data-segment-assets>
+      本段参考素材：<span v-for="(asset, index) in segment.assets" :key="asset.number"
+        ><template v-if="index > 0">、</template>Picture {{ asset.number }} {{ asset.name }}</span
+      >
+    </p>
 
     <!-- 段级注入卡（D7 §9 / #257）：与本段段词同屏、只读；没有这份产物就没有这一块。 -->
     <section v-if="cardArtifact" class="injection-card" data-injection-card aria-label="本段注入卡">
@@ -314,7 +357,8 @@ async function submitVideo(): Promise<void> {
   font-weight: 600;
 }
 .segment__shots,
-.segment__summary {
+.segment__summary,
+.segment__assets {
   margin: 0;
 }
 .segment__rejection {

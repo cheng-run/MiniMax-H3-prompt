@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -437,7 +438,8 @@ def _plan_scope(plan: SegmentPlan, *, sections: dict[str, str],
 
 
 def _check_segment_capacity(scopes: list[SegmentAssetScope], *,
-                            out_dir: Path) -> None:
+                            out_dir: Path,
+                            film_media: Sequence[ReferenceItem] | None = None) -> None:
     """逐段按「一次请求」判官方容量（issue #86 / spec #84 D4 ①）。
 
     每段真正上传的文件＝**本段的图**（已按段内重编号，≤9 由 ``compute_segment_scope``
@@ -447,14 +449,18 @@ def _check_segment_capacity(scopes: list[SegmentAssetScope], *,
 
     台账读不到＝空（带路径的 ref brief 快路径没有台账）——那时视频/音频本来就为 0，
     判据退化成「段图 ≤9」，与 ``compute_segment_scope`` 同一结论，不会误伤。
+
+    ``film_media`` 让**别的台账来源**（工作台的 ``SessionState.asset_ledger``，它不住
+    ``out_dir`` 里的 CLI 台账文件）复用同一条判据，而不是各自抄一份 9/3/3/12。
     """
-    film_media = [ReferenceItem(entry.kind, entry.number, entry.name)
-                  for entry in load_asset_ledger(out_dir).entries
-                  if entry.kind != KIND_PICTURE]
+    items = (list(film_media) if film_media is not None
+             else [ReferenceItem(entry.kind, entry.number, entry.name)
+                   for entry in load_asset_ledger(out_dir).entries
+                   if entry.kind != KIND_PICTURE])
     for position, scope in enumerate(scopes, 1):
-        items = [ReferenceItem(KIND_PICTURE, item.new_picture, item.name)
-                 for item in scope.pictures]
-        check_reference_capacity(items + film_media,
+        pictures = [ReferenceItem(KIND_PICTURE, item.new_picture, item.name)
+                    for item in scope.pictures]
+        check_reference_capacity(pictures + items,
                                  where=f"第 {position} 段接线卡")
 
 
@@ -1291,6 +1297,7 @@ def prepare_ref_segmentation(*, whole_prompt: str, total_s: float, out_dir: Path
                              ref_meta: list[tuple[int, str, str]] | None = None,
                              asset_paths: dict[int, str] | None = None,
                              refs_per_segment: int | None = None,
+                             film_media: Sequence[ReferenceItem] | None = None,
                              ) -> RefSegmentJob:
     """规划/准备（issue #46）：切点 → 段边界（规划式，失败回退机械打包）→ 段表与顺序卡。
 
@@ -1358,7 +1365,7 @@ def prepare_ref_segmentation(*, whole_prompt: str, total_s: float, out_dir: Path
         for position, plan in enumerate(plans, 1)
     ]
     # 逐段按「一次请求」判官方容量（issue #86 / spec #84 D4 ①「生成段接线卡时」）
-    _check_segment_capacity(scopes, out_dir=Path(out_dir))
+    _check_segment_capacity(scopes, out_dir=Path(out_dir), film_media=film_media)
     plans = [replace(plan, assets_in_segment=scope.to_dict())
              for plan, scope in zip(plans, scopes)]
 
