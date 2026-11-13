@@ -872,10 +872,10 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "segment_tail_anchor_dropped",
         "src/minimax_h3_prompt/api/jobs.py",
-        '                anchors.append({"segment": number, "description": description})\n'
-        '                anchor_state["bridge_frame_descriptions"] = anchors',
-        '                anchors.append({"segment": number, "description": description})\n'
-        '                pass  # 变异：不写尾帧锚',
+        # 锚点只圈一行：整块带缩进地圈会在复审重构缩进后「出现 0 次」而静默失效
+        # （2026-11-13 实测，锁内合并把缩进从 16 格推到 20 格）。
+        'anchor_state["bridge_frame_descriptions"] = anchors',
+        'pass  # 变异：不写尾帧锚',
         ("tests/test_api_segment_loop.py"
          "::test_pass_records_segment_and_writes_next_with_tail_anchor",),
         "尾帧锚不写进 state＝第 N+1 段写词请求拿不到第 N 段尾帧，段间接不上而不报错"
