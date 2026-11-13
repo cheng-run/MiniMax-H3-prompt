@@ -64,7 +64,7 @@ def _pending_segment_todos(detail: dict) -> list[dict]:
             if item["kind"] == "segment_video" and item["status"] == "pending"]
 
 
-def _wait_job(client, session_id: str, job_id: str, timeout: float = 30.0) -> dict:
+def _wait_job(client, session_id: str, job_id: str, timeout: float = 15.0) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         body = client.get(f"/api/v1/sessions/{session_id}/jobs/{job_id}").json()
@@ -74,7 +74,7 @@ def _wait_job(client, session_id: str, job_id: str, timeout: float = 30.0) -> di
     raise AssertionError(f"任务没有在 {timeout}s 内结束：{job_id}")
 
 
-def _wait_until(client, session_id: str, predicate, timeout: float = 30.0) -> dict:
+def _wait_until(client, session_id: str, predicate, timeout: float = 15.0) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         detail = _detail(client, session_id)

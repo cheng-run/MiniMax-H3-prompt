@@ -61,7 +61,7 @@ def _brief_body(duration: float = 12.0, variant: str = "T2VA",
     }
 
 
-def _wait_job(client, session_id: str, job_id: str, timeout: float = 60.0) -> dict:
+def _wait_job(client, session_id: str, job_id: str, timeout: float = 15.0) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         body = client.get(f"/api/v1/sessions/{session_id}/jobs/{job_id}").json()
@@ -71,7 +71,7 @@ def _wait_job(client, session_id: str, job_id: str, timeout: float = 60.0) -> di
     raise AssertionError(f"任务没有在 {timeout}s 内结束：{job_id}")
 
 
-def _wait_until(client, session_id: str, predicate, timeout: float = 60.0) -> dict:
+def _wait_until(client, session_id: str, predicate, timeout: float = 15.0) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         detail = client.get(f"/api/v1/sessions/{session_id}").json()

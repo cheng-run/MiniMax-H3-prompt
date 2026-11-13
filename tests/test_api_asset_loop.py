@@ -107,7 +107,7 @@ class Harness:
         path = self.root / Path(self.session_id) / name
         return path.read_text(encoding="utf-8")
 
-    def wait_until(self, predicate, timeout: float = 30.0) -> dict:
+    def wait_until(self, predicate, timeout: float = 15.0) -> dict:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             body = self.detail()

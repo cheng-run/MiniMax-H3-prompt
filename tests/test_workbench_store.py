@@ -293,7 +293,7 @@ def test_concurrent_updates_do_not_lose_each_others_fields(tmp_path):
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join(timeout=30)
+        thread.join(timeout=10)
     assert not errors, errors
 
     final = store.get_session(session_id)

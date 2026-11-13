@@ -109,7 +109,7 @@ class Harness:
     def detail(self) -> dict:
         return self.client.get(f"/api/v1/sessions/{self.session_id}").json()
 
-    def wait_until(self, predicate, timeout: float = 30.0) -> dict:
+    def wait_until(self, predicate, timeout: float = 15.0) -> dict:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             body = self.detail()
@@ -118,7 +118,7 @@ class Harness:
             time.sleep(0.02)
         raise AssertionError(f"详情没有在 {timeout}s 内满足条件：{self.session_id}")
 
-    def wait_job(self, job_id: str, timeout: float = 30.0) -> dict:
+    def wait_job(self, job_id: str, timeout: float = 15.0) -> dict:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             body = self.client.get(

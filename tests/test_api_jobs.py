@@ -57,7 +57,7 @@ def _job_url(session_id: str, job_id: str, suffix: str = "") -> str:
     return f"/api/v1/sessions/{session_id}/jobs/{job_id}{suffix}"
 
 
-def _wait_job(client, session_id: str, job_id: str, timeout: float = 30.0) -> dict:
+def _wait_job(client, session_id: str, job_id: str, timeout: float = 15.0) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         resp = client.get(_job_url(session_id, job_id))
@@ -129,14 +129,18 @@ def test_concurrent_advance_is_rejected_with_session_busy(workbench):
         assert first.status_code == 202
         assert model.entered.wait(10), "第一次推进没有进入模型调用"
 
-        second = client.post(
-            f"/api/v1/sessions/{session['session_id']}/jobs",
-            headers={"Idempotency-Key": "another-key"})
+        # 第一次推进还卡在模型调用里：无论断言是否通过都要放行，否则变异检验里
+        # 得等 fixture 收尾把后台任务等死（每条多 30 秒，2026-11-13 实测）。
+        try:
+            second = client.post(
+                f"/api/v1/sessions/{session['session_id']}/jobs",
+                headers={"Idempotency-Key": "another-key"})
 
-        assert second.status_code == 409
-        assert second.headers["content-type"].startswith("application/problem+json")
-        assert second.json()["code"] == "session_busy"
-        model.release.set()
+            assert second.status_code == 409
+            assert second.headers["content-type"].startswith("application/problem+json")
+            assert second.json()["code"] == "session_busy"
+        finally:
+            model.release.set()
         _wait_job(client, session["session_id"], first.json()["job_id"])
 
 
