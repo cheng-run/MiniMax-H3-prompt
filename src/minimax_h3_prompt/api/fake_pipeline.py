@@ -12,16 +12,61 @@ from __future__ import annotations
 
 import math
 import os
+from pathlib import Path
 from typing import Any
 
 # 开关名是启动日志里要被点名的那一个，调用方从常量取，不重抄字符串。
 FAKE_PIPELINE_ENV = "MINIMAX_FAKE_PIPELINE"
+# H3 产物是 736×1280@24fps（帧数表与尺寸同住 ``tools.preflight``）；桩造的视频要与
+# 真实产物同档，否则段校验判它不合格——那时只剩「放宽闸门」一条路，而那是 CI 假绿。
+H3_VIDEO_FPS = 24
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 
 def fake_pipeline_enabled() -> bool:
     """环境变量开着吗：只认明确真值，其它取值（含空串）一律当关。"""
     return os.environ.get(FAKE_PIPELINE_ENV, "").strip().lower() in _TRUTHY
+
+
+def segment_video_frames(seconds: float) -> int:
+    """这一段该有多少帧：已知时长档取实测帧数表，档外按帧率折算。
+
+    「4s 档 = 107 帧」这类事实只住 ``H3_TIER_FRAMES``；桩造件从它派生，档位一改就跟着改，
+    不会悄悄造出一段过不了真实闸门的视频。
+    """
+    from ..tools.preflight import H3_TIER_FRAMES
+
+    return H3_TIER_FRAMES.get(
+        int(round(seconds)), int(round(seconds * H3_VIDEO_FPS)))
+
+
+def write_segment_video(path: Path, seconds: float) -> Path:
+    """用 ffmpeg 现造一段「用户去 ComfyUI 跑完回交」的替身视频（D6-7）。
+
+    造件参数（帧数 / 尺寸 / 帧率）全部从仓内常量派生，不手抄字面量；编码器用 ffmpeg
+    内置的 ``mpeg4``——不赌发行版带没带 x264，容器仍是真 mp4（``ftyp``），读图剥尾帧与
+    拼接都读得动。产物要过**真实**的 ``preflight.check_segment_video``，桩不为它开后门。
+    """
+    import subprocess  # noqa: PLC0415 - 只有桩造件这一处需要拉子进程
+
+    from ..tools.preflight import EXPECTED_VIDEO_SIZE
+    from ..tools.seam_audit import find_ffmpeg
+
+    frames = segment_video_frames(seconds)
+    width, height = EXPECTED_VIDEO_SIZE
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run(
+        [str(find_ffmpeg()), "-y", "-hide_banner", "-loglevel", "error",
+         "-f", "lavfi", "-i",
+         f"testsrc=size={width}x{height}:rate={H3_VIDEO_FPS}",
+         "-frames:v", str(frames), "-c:v", "mpeg4", "-q:v", "3",
+         "-pix_fmt", "yuv420p", str(target)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"桩管线造段视频失败（ffmpeg 退出 {proc.returncode}）：{proc.stderr[-800:]}")
+    return target
 
 
 def _frame_roles(variant: str) -> tuple[tuple[int, str], ...]:
@@ -230,13 +275,16 @@ def stage2_summary(brief: Any) -> Any:
 
 __all__ = [
     "FAKE_PIPELINE_ENV",
+    "H3_VIDEO_FPS",
     "fake_pipeline_enabled",
     "frame_descriptions",
     "judge_segment_end_hook",
     "segment_plan",
     "segment_prompt",
     "segment_tail_description",
+    "segment_video_frames",
     "stage1_state",
     "stage2_state",
     "stage2_summary",
+    "write_segment_video",
 ]

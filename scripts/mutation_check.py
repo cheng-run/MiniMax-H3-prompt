@@ -923,6 +923,17 @@ MUTATIONS: tuple[Mutation, ...] = (
          "test_missing_segment_fails_with_named_segment_and_retry_after_fix",),
         "把 reason 改写成泛泛的「拼接失败」＝用户不知道补哪一段（D6-AC9 的点名要求，#248）",
     ),
+    Mutation(
+        "fake_segment_frames_ignore_the_tier_table",
+        "src/minimax_h3_prompt/api/fake_pipeline.py",
+        "    return H3_TIER_FRAMES.get(\n"
+        "        int(round(seconds)), int(round(seconds * H3_VIDEO_FPS)))",
+        "    return int(round(seconds * H3_VIDEO_FPS))",
+        ("tests/test_api_fake_pipeline_segments.py"
+         "::test_stub_segment_video_passes_the_real_gate",),
+        "桩造件绕开实测帧数表＝4 秒档造出 96 帧，真实闸门只报「无法确证档位」而不报错，"
+        "CI 会静默变假绿（D6-AC13，#250）",
+    ),
 )
 
 
