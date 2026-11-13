@@ -220,9 +220,13 @@ def isolate_host_env():
         if name.endswith(("_API_KEY", "_AUTH_TOKEN", "_BASE_URL", "_MODEL", "_MODEL_NAME"))
         or name == "LLM_PROVIDER"
     }
+    # 隔离开了就留一个**可观察的**标记：干净检出里没有 ``.env``，只靠「解析不到 key」
+    # 判隔离在那种机器上永远为真——fixture 被改坏也发现不了（变异检验实测）。
+    os.environ["H3_TEST_ENV_ISOLATED"] = "1"
     try:
         yield
     finally:
+        os.environ.pop("H3_TEST_ENV_ISOLATED", None)
         config_module.load_dotenv = original
         os.environ.update(saved)
 

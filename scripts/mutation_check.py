@@ -68,8 +68,8 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "artifact_segment_pattern_off",
         "src/minimax_h3_prompt/workbench_store.py",
-        '_SEGMENT_PROMPT_FILENAME = r"shot-\\d{2}\\.md"',
-        '_SEGMENT_PROMPT_FILENAME = r"shot-\\d{2}\\.txt"',
+        "_SEGMENT_PROMPT_FILENAME = r\"(?:shot|segment)-\\d{2}\\.md\"",
+        "_SEGMENT_PROMPT_FILENAME = r\"(?:shot|segment)-\\d{2}\\.txt\"",
         ("tests/test_artifact_registry.py::test_segment_prompt_is_listed_and_readable",),
         "模式失效＝段提示词既不出现在清单里也读不出来，#245 的整条链静默归零",
     ),
@@ -993,8 +993,8 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "replay_drops_segment_index",
         "src/minimax_h3_prompt/workbench_store.py",
-        '                for key in ("segment_index", "asset_index", "reason"):',
-        '                for key in ("asset_index", "reason"):',
+        '_ACTION_ITEM_INDEX_KEYS: tuple[str, ...] = ("segment_index", "asset_index")',
+        '_ACTION_ITEM_INDEX_KEYS: tuple[str, ...] = ("asset_index",)',
         ("tests/test_api_events.py::test_action_item_payload_survives_snapshot_replay",),
         "重放不还原段号＝崩溃补齐后待办又说不出「在等第几段」，"
         "段循环的恢复只能靠人去翻产物名（#254）",

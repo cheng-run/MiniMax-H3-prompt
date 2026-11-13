@@ -20,5 +20,8 @@ _ALLOWED = os.getenv("H3_TEST_USE_ENV", "").strip().lower() in {"1", "true", "ye
 
 @pytest.mark.skipif(_ALLOWED, reason="H3_TEST_USE_ENV=1 时放行真实环境，本用例不适用")
 def test_default_mode_really_removes_the_api_keys():
+    # 先看机制：隔离 fixture 真的跑过。只看「解析不到 key」在干净检出（无 ``.env``）
+    # 上永远为真，fixture 被改坏也发现不了——变异检验实测过这条守卫是摆设。
+    assert os.environ.get("H3_TEST_ENV_ISOLATED") == "1"
     with pytest.raises(ConfigError):
         config.resolve_api_key(config.primary_model)
