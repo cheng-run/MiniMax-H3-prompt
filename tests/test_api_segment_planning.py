@@ -121,14 +121,19 @@ def test_long_form_auto_plans_segments_after_stage2(workbench, monkeypatch):
     assert segments[-1]["end_s"] >= 12
     for segment in segments:
         assert 4 <= segment["end_s"] - segment["start_s"] <= 10
-        assert segment["status"] == "pending"
         assert segment["end_hook"]
         assert segment["summary"]
-        assert segment["prompt_artifact_id"] == ""
         assert segment["video_asset_id"] == ""
-    # 规划完不要求人工确认：没有未决待办，会话停在等待人工（D6-2 接第 1 段写词）。
-    assert detail["status"] == "awaiting_human"
-    assert [item for item in detail["action_items"] if item["status"] == "pending"] == []
+    # #246：规划完自动写第 1 段并停下来收视频；第 2 段仍是 pending（逐段增量）。
+    assert [segment["status"] for segment in segments] == ["waiting_video", "pending"]
+    assert segments[0]["prompt_artifact_id"] == f"{session_id}/segments/shot-01.md"
+
+    # 第 1 段提示词落盘为产物；会话停在 awaiting_human 等本段视频（唯一的待办）。
+    shot_one = root / Path(session_id) / "segments" / "shot-01.md"
+    assert shot_one.is_file() and shot_one.read_text(encoding="utf-8").strip()
+    pending = [item for item in detail["action_items"] if item["status"] == "pending"]
+    assert [item["kind"] for item in pending] == ["segment_video"]
+    assert pending[0]["segment_index"] == 1
 
     # plan.json 落在**本会话目录**里，形状与 CLI 的 segments/plan.json 一致。
     plan_path = root / Path(session_id) / "segments" / "plan.json"
@@ -230,7 +235,11 @@ def test_unusable_plan_fails_and_retry_reruns_only_planning(workbench, monkeypat
         retried = client.post(f"/api/v1/sessions/{session_id}/jobs")
         assert retried.status_code == 202, retried.text
         _wait_job(client, session_id, retried.json()["job_id"])
-        done = client.get(f"/api/v1/sessions/{session_id}").json()
+        # 规划重试成功后会接着写第 1 段（#246），等它落定再取详情。
+        done = _wait_until(
+            client, session_id,
+            lambda body: body["status"] != "running"
+            and len(body.get("segments") or []) == 2)
 
     assert failed["segments"] == []
     assert len(stage2_calls) == 1, "重试把阶段 2 又跑了一遍"

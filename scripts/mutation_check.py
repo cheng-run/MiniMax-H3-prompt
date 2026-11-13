@@ -869,6 +869,18 @@ MUTATIONS: tuple[Mutation, ...] = (
         ("tests/test_step_machine.py::test_progress_stages_derive_from_the_step_labels",),
         "进度取值另抄一份＝新加的 segmenting 只写到一半才在运行期炸（守卫形态要从常量派生）",
     ),
+    Mutation(
+        "segment_tail_anchor_dropped",
+        "src/minimax_h3_prompt/api/jobs.py",
+        '                anchors.append({"segment": number, "description": description})\n'
+        '                anchor_state["bridge_frame_descriptions"] = anchors',
+        '                anchors.append({"segment": number, "description": description})\n'
+        '                pass  # 变异：不写尾帧锚',
+        ("tests/test_api_segment_loop.py"
+         "::test_pass_records_segment_and_writes_next_with_tail_anchor",),
+        "尾帧锚不写进 state＝第 N+1 段写词请求拿不到第 N 段尾帧，段间接不上而不报错"
+        "（D6-AC4 静默失守，#246）",
+    ),
 )
 
 

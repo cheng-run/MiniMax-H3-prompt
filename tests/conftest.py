@@ -106,6 +106,31 @@ def write_h3_tier_video(path: Path, seconds: float, *, fps: int = 24) -> Path:
     return path
 
 
+def write_h3_tier_mp4(path: Path, seconds: float, *, fps: int = 24) -> Path:
+    """与 ``write_h3_tier_video`` 同判据（帧数档 + H3 尺寸），但落成 **mp4** 容器。
+
+    D6 段回交要求容器是 mp4（素材嗅探按 ``ftyp`` 判 ``video/mp4``）；MJPG/AVI 那条
+    进不了这道素材闸门。``mp4v`` 写在 ``.mp4`` 里是真 mp4（``ftypisom``），
+    ``video_meta`` 与 ``extract_last_frame`` 都读得动（本机实测 107 帧 / 736×1280）。
+    """
+    from minimax_h3_prompt.tools.frame_match import video_meta
+    from minimax_h3_prompt.tools.preflight import EXPECTED_VIDEO_SIZE, H3_TIER_FRAMES
+
+    frames = H3_TIER_FRAMES.get(int(round(seconds)), int(round(seconds * fps)))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps,
+                             EXPECTED_VIDEO_SIZE)
+    assert writer.isOpened(), "测试环境缺 mp4v 编码器"
+    image = np.full((EXPECTED_VIDEO_SIZE[1], EXPECTED_VIDEO_SIZE[0], 3), 128, np.uint8)
+    for i in range(frames):
+        image[:] = 128 + (i % 8)
+        writer.write(image)
+    writer.release()
+    actual = video_meta(path).get("duration_s", 0.0)
+    assert abs(actual - frames / fps) < 0.05, f"测试视频时长不可控：{actual}"
+    return path
+
+
 @pytest.fixture(autouse=True)
 def no_real_network(request, monkeypatch):
     """默认禁止用例真实建连；确需联网的用例标 ``@pytest.mark.allow_network``。

@@ -342,16 +342,22 @@ export interface components {
             resolved_at: string;
             /** Revisions */
             revisions?: components["schemas"]["RevisionOut"][];
+            /** Segment Index */
+            segment_index?: number | null;
             /** Status */
             status: string;
         };
         /**
          * ActionItemResolve
-         * @description 决议载荷（spec §7 / D4 §9）：审查待办收 ``approve``/``revise``，帧待办收 ``frames``。
+         * @description 决议载荷（spec §7 / D4 §9 / D6 §8）。
          *
-         *     ``decision`` 自 D4-2 起可省略：第二个人工待办（``frame_submission``）没有
-         *     approve/revise 语义，它只收帧槽。kind 与载荷的错配由服务端判成 422
-         *     ``frame_invalid``（不是 pydantic 的通用 422）。
+         *     三种人工待办各收一种载荷：
+         *     - ``stage1_review`` 收 ``decision``（approve/revise，revise 带 ``revisions``）；
+         *     - ``frame_submission`` 收 ``frames``；
+         *     - ``segment_video`` 收 ``video_asset_id``（本段视频素材）。
+         *
+         *     kind 与载荷的错配由服务端判成 422（``frame_invalid`` / ``segment_video_invalid``，
+         *     不是 pydantic 的通用 422）。
          */
         ActionItemResolve: {
             /** Decision */
@@ -359,6 +365,8 @@ export interface components {
             frames?: components["schemas"]["FrameSelection"] | null;
             /** Revisions */
             revisions?: components["schemas"]["RevisionIn"][];
+            /** Video Asset Id */
+            video_asset_id?: string | null;
         };
         /** ArtifactInfo */
         ArtifactInfo: {

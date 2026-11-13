@@ -55,6 +55,9 @@ ACTION_STAGE1_REVIEW = "stage1_review"
 # 第二个人工待办（D4 spec §9）：帧链会话通过审查后先收关键帧，再进阶段 2。
 # 它不是新事件类型——仍走既有的 ``action_item.created``（十种闭合不变）。
 ACTION_FRAME_SUBMISSION = "frame_submission"
+# 第三个人工待办（D6 spec §8）：长片每段一次「交本段视频」。每段恰好一个，载荷带段号；
+# 等待期间会话是 ``awaiting_human``。同样复用既有 ``action_item.created``。
+ACTION_SEGMENT_VIDEO = "segment_video"
 
 STEP_STAGE1 = "stage1"
 STEP_STAGE2 = "stage2"
@@ -124,6 +127,9 @@ DECISION_REVISE = "revise"
 # 帧提交不是接口上的 ``decision`` 取值（请求体里靠 ``frames`` 分型），但决议事件与
 # 待办回显需要一个词说明「这条待办是被交帧决议掉的」——落成同一套内部词汇。
 DECISION_SUBMIT_FRAMES = "submit_frames"
+# 段视频回交同理：请求体里靠 ``video_asset_id`` 分型，决议事件用这个词说明「这段视频
+# 是被交上来的」。它只进内部事件与待办回显，不是接口上的 decision 取值。
+DECISION_SUBMIT_VIDEO = "submit_video"
 
 
 class InvalidTransition(ValueError):
@@ -279,12 +285,14 @@ def resolve(status: str, decision: str, *, layer: str = "") -> Decision:
 
 __all__ = [
     "ACTION_FRAME_SUBMISSION",
+    "ACTION_SEGMENT_VIDEO",
     "ACTION_STAGE1_REVIEW",
     "ADVANCEABLE_STATUSES",
     "Action",
     "DECISION_APPROVE",
     "DECISION_REVISE",
     "DECISION_SUBMIT_FRAMES",
+    "DECISION_SUBMIT_VIDEO",
     "Decision",
     "FRAME_CHAIN_VARIANTS",
     "Facts",

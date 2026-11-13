@@ -28,6 +28,7 @@ from typing import Any
 
 from .. import step_machine
 from ..errors import error_code
+from ..segment_validation import segment_submission_problems
 from ..session_store import FRAME_SUBMISSION_KEY, atomic_write_text, load_session
 from ..summary import PromptSummary, render_summary_zh
 from ..workbench_store import (
@@ -38,6 +39,7 @@ from ..workbench_store import (
     ARTIFACT_SUMMARY_JSON,
     ARTIFACT_SUMMARY_MARKDOWN,
     ARTIFACT_VIDEO_PROMPT,
+    SEGMENTS_DIRNAME,
     ActionItemNotFound,
     ActionItemOut,
     ActionItemPending,
@@ -48,7 +50,11 @@ from ..workbench_store import (
     JobNotRunning,
     JobSummary,
     RevisionOut,
+    SEGMENT_STATUS_PASSED,
     SEGMENT_STATUS_PENDING,
+    SEGMENT_STATUS_VALIDATING,
+    SEGMENT_STATUS_WAITING_VIDEO,
+    SegmentVideoInvalid,
     WorkbenchSessionStore,
 )
 
@@ -58,11 +64,25 @@ ACTIVE_JOB_FILENAME = "active-job.json"
 # 会话文件里保留的 job 摘要条数（spec §5.2：最近 N 条，完整历史在事件流里）。
 JOB_HISTORY_LIMIT = 20
 
-# 长片分段规划的 job kind 与进度节点名（D6 spec §5.3）。进度事件的 stage 取
+# 长片分段循环的 job kind 与进度节点名（D6 spec §5.3）。进度事件的 stage 取
 # ``step_machine.STEP_SEGMENTING``，与阶段标签同源。
 JOB_KIND_SEGMENT = "segment"
 SEGMENT_PLAN_NODE = "segment_plan"
 SEGMENT_PLAN_FILENAME = "plan.json"
+
+# ``segmenting`` 阶段里的三种子步骤（D6 #246）：一次 job 只做一件，落盘后再接下一件。
+# 用「读持久化事实」决定跑哪一种（``_segment_step``），不把子步骤塞进 job 记录——
+# job 记录会因 15 段 × 2 条挤爆 ``JOB_HISTORY_LIMIT``，段状态才是唯一事实源。
+SEGMENT_STEP_PLANNING = "planning"
+SEGMENT_STEP_WRITE = "write"
+SEGMENT_STEP_VALIDATE = "validate"
+SEGMENT_STEP_DONE = "done"
+
+# 段任务的进度节点名（带段号，前端据进度事件显示「正在写/校验第几段」）。
+SEGMENT_WRITE_NODE = "segment_write"
+SEGMENT_VALIDATE_NODE = "segment_validate"
+# 尾帧剥出的落点目录（不是产物：登记表只认 ``segments/shot-NN.md``）。
+SEGMENT_BRIDGE_DIRNAME = "bridge_frames"
 
 # advance 没有请求体；幂等键绑定的「请求摘要」是一个常量，同 key 重发永远算同一份命令。
 _JOB_FINGERPRINT = hashlib.sha256(b"advance").hexdigest()
@@ -70,11 +90,16 @@ _JOB_FINGERPRINT = hashlib.sha256(b"advance").hexdigest()
 
 def _resolve_fingerprint(item_id: str, decision: str | None,
                          revisions: list[dict[str, str]],
-                         frames: dict[str, str] | None) -> str:
-    """resolve 的请求摘要：待办、决定、修订内容与帧槽都算进去（同 key 换内容＝冲突）。"""
+                         frames: dict[str, str] | None,
+                         video_asset_id: str | None = None) -> str:
+    """resolve 的请求摘要：待办、决定、修订内容、帧槽与段视频素材都算进去。
+
+    段视频素材（``video_asset_id``）必须进摘要：不进的话，同一个 Idempotency-Key 换一段
+    视频重发会**重放第一次的响应**，用户以为重交了、系统其实没执行。
+    """
     canonical = json.dumps(
         {"item_id": item_id, "decision": decision, "revisions": revisions,
-         "frames": frames or {}},
+         "frames": frames or {}, "video_asset_id": video_asset_id or ""},
         sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -85,6 +110,9 @@ def _resolve_fingerprint(item_id: str, decision: str | None,
 _BRANCH_REVIEW = "review"
 _BRANCH_FRAME_GATE = "frame_gate"
 _BRANCH_FRAMES = "frames"
+# 第三个待办（D6 §8）：交本段视频。与帧提交同形——不是 approve/revise，靠 video_asset_id
+# 分型，resolve 之后起一个段校验 job。
+_BRANCH_SEGMENT_VIDEO = "segment_video"
 
 
 class JobCancelled(Exception):
@@ -228,6 +256,7 @@ class JobRunner:
         self, session_id: str, item_id: str, *, decision: str | None,
         revisions: list[dict[str, str]] | None = None,
         frames: dict[str, str] | None = None,
+        video_asset_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> tuple[JobSummary | None, bool]:
         """在人工待办上提交决定；返回 ``(job, 是否幂等重放)``（#219 / D4 §9）。
@@ -244,7 +273,7 @@ class JobRunner:
         lock = self._locks.setdefault(session_id, asyncio.Lock())
         async with lock:
             payload = _resolve_fingerprint(
-                item_id, decision, list(revisions or []), frames)
+                item_id, decision, list(revisions or []), frames, video_asset_id)
             registry = None
             if idempotency_key:
                 registry = self.store.session_registry(session_id)
@@ -312,6 +341,9 @@ class JobRunner:
                     if frames is not None:
                         raise FrameInvalid(
                             "stage1_review 待办不接受 frames：帧槽只用于 frame_submission。")
+                    if video_asset_id is not None:
+                        raise FrameInvalid(
+                            "stage1_review 待办不接受 video_asset_id：段视频只用于 segment_video。")
                     recorded_decision = decision
                     if (decision == step_machine.DECISION_APPROVE
                             and step_machine.needs_frame_submission(
@@ -329,6 +361,9 @@ class JobRunner:
                             "frame_submission 待办必须带 frames（首尾槽都空表示显式跳过）。")
                     if revisions:
                         raise FrameInvalid("帧提交不接受 revisions。")
+                    if video_asset_id is not None:
+                        raise FrameInvalid(
+                            "frame_submission 待办不接受 video_asset_id；段视频请交到 segment_video。")
                     for role in ("first", "last"):
                         asset_id = str(frames.get(role) or "").strip()
                         if asset_id:
@@ -344,6 +379,50 @@ class JobRunner:
                         raise RuntimeError(f"会话文件读不到：{session_id}")
                     stage_state = dict(session.stage_state)
                     stage_state[FRAME_SUBMISSION_KEY] = dict(resolved_frames)
+                elif target.kind == step_machine.ACTION_SEGMENT_VIDEO:
+                    # kind 与载荷强校验（D6 §8）：段视频只收 video_asset_id，别的载荷一律
+                    # 错配。判据放在锁内：并发决议下只有待办仍 pending 才走得到这里。
+                    if decision is not None:
+                        raise SegmentVideoInvalid(
+                            "segment_video 待办不接受 approve/revise；请提交 video_asset_id。")
+                    if revisions:
+                        raise SegmentVideoInvalid(
+                            "segment_video 待办不接受 revisions。")
+                    if frames is not None:
+                        raise SegmentVideoInvalid(
+                            "segment_video 待办不接受 frames。")
+                    asset_id = str(video_asset_id or "").strip()
+                    if not asset_id:
+                        raise SegmentVideoInvalid(
+                            "segment_video 待办必须带 video_asset_id。")
+                    number = target.segment_index
+                    if number is None:
+                        raise SegmentVideoInvalid(
+                            "这条 segment_video 待办缺段号，无法核对。")
+                    ordered = sorted(current.segments, key=lambda item: item.index)
+                    current_seg = next(
+                        (item for item in ordered
+                         if item.status != SEGMENT_STATUS_PASSED), None)
+                    if current_seg is None:
+                        raise SegmentVideoInvalid(
+                            "所有段都已通过，没有待交视频的段。")
+                    # 归属与 mp4 容器：不属于本会话/非 mp4 一律 segment_video_invalid（422）。
+                    resource = self.store.resolve_video_asset(session_id, asset_id)
+                    # 段号与当前段一致 + 技术档合格（复用 check_segment_video）。
+                    problems = segment_submission_problems(
+                        current_index=current_seg.index, number=int(number),
+                        video_path=resource.path,
+                        expected_seconds=float(current_seg.end_s - current_seg.start_s))
+                    if problems:
+                        raise SegmentVideoInvalid("；".join(problems))
+                    rows = [segment.model_dump() for segment in ordered]
+                    for row in rows:
+                        if int(row["index"]) == int(number):
+                            # 交上视频 → 异步校验排队；落盘后由 job 判三档结局。
+                            row["status"] = SEGMENT_STATUS_VALIDATING
+                            row["video_asset_id"] = asset_id
+                    holder["segments"] = rows
+                    recorded_decision = step_machine.DECISION_SUBMIT_VIDEO
                 else:
                     raise FrameInvalid(f"不认识的人工待办类型：{target.kind}")
                 holder["decision"] = recorded_decision
@@ -372,6 +451,9 @@ class JobRunner:
                         current.jobs, _job_dict(job))
                 if stage_state is not None:
                     changes["stage_state"] = stage_state
+                if "segments" in holder:
+                    # 段视频回交：段状态在这一笔里落到 validating（视频素材 id 一并记）。
+                    changes["segments"] = holder["segments"]
                 if decision == step_machine.DECISION_REVISE:
                     # 累积语义只住 user_revisions.py（begin_round + record_user_revision）；
                     # 这里不另造轮次号，也不改清单形状。
@@ -391,14 +473,21 @@ class JobRunner:
 
             resolved_payload: dict[str, Any] = {
                 "item_id": item_id,
-                "decision": (step_machine.DECISION_SUBMIT_FRAMES
-                             if branch == _BRANCH_FRAMES else decision),
+                "decision": (
+                    step_machine.DECISION_SUBMIT_FRAMES
+                    if branch == _BRANCH_FRAMES
+                    else step_machine.DECISION_SUBMIT_VIDEO
+                    if branch == _BRANCH_SEGMENT_VIDEO
+                    else decision),
                 "revisions": event_revisions,
             }
             if frames is not None:
                 # 帧槽载荷是用户输入的一部分（D4 §9）：重放与排障要看出用户当时
                 # 选了哪两个素材。审查待办没有这一项，就不写空对象进事件。
                 resolved_payload["frames"] = dict(frames)
+            if video_asset_id is not None:
+                # 段视频素材也是用户输入：重放要看出当时交的是哪一条。
+                resolved_payload["video_asset_id"] = video_asset_id
             events = [
                 EventDraft("action_item.resolved", resolved_payload,
                            job_id=job.job_id if job else None),
@@ -425,9 +514,14 @@ class JobRunner:
             await asyncio.to_thread(self._write_active_job, session_id, job.job_id, "")
             event = threading.Event()
             self._cancel_events[job.job_id] = event
-            self._tasks[job.job_id] = asyncio.create_task(
-                self._run_decision(
-                    session_id, job.job_id, event, holder["decision"], entries))
+            if branch == _BRANCH_SEGMENT_VIDEO:
+                # 段校验走通用分派（``_run`` 按持久化事实决定跑校验）：失败重试也走
+                # 同一条出口，两处各写一份子步骤判定会长出两套口径。
+                coroutine = self._run(session_id, job.job_id, event)
+            else:
+                coroutine = self._run_decision(
+                    session_id, job.job_id, event, holder["decision"], entries)
+            self._tasks[job.job_id] = asyncio.create_task(coroutine)
             if idempotency_key and registry is not None:
                 await asyncio.to_thread(
                     registry.record, idempotency_key,
@@ -452,6 +546,8 @@ class JobRunner:
         if target is None:
             return _BRANCH_REVIEW
         kind = str(target.get("kind"))
+        if kind == step_machine.ACTION_SEGMENT_VIDEO:
+            return _BRANCH_SEGMENT_VIDEO
         if kind == step_machine.ACTION_FRAME_SUBMISSION:
             return _BRANCH_FRAMES
         if (kind == step_machine.ACTION_STAGE1_REVIEW
@@ -494,16 +590,30 @@ class JobRunner:
         # 被网关卡住后强杀，重启再 advance 若回到阶段 1，只会重新开一个人工闸门
         # （阶段 1 已跑完、链已耗尽），阶段 2 永远走不到。
         step = await asyncio.to_thread(self._resume_step, session_id)
-        # 三档返回的形状不同（阶段 1/2 是 state 字典，分段规划是段条目列表）：
+        # 三档返回的形状不同（阶段 1/2 是 state 字典，分段步骤是各自的结果字典）：
         # 用 Any 承接，分派处按 step 决定怎么消费。
         result: Any
+        # ``segmenting`` 内部有三种子步骤（规划/写词/校验），按**已落盘的事实**决定。
+        seg_step: tuple[str, int] = (SEGMENT_STEP_DONE, 0)
         try:
             if step == step_machine.STEP_STAGE2:
                 result = await asyncio.to_thread(
                     self._execute_stage2, session_id, job_id, cancel_event)
             elif step == step_machine.STEP_SEGMENTING:
-                result = await asyncio.to_thread(
-                    self._execute_segment_planning, session_id, job_id, cancel_event)
+                seg_step = await asyncio.to_thread(self._segment_step, session_id)
+                kind, number = seg_step
+                if kind == SEGMENT_STEP_PLANNING:
+                    result = await asyncio.to_thread(
+                        self._execute_segment_planning, session_id, job_id, cancel_event)
+                elif kind == SEGMENT_STEP_WRITE:
+                    result = await asyncio.to_thread(
+                        self._execute_segment_write, session_id, job_id, cancel_event, number)
+                elif kind == SEGMENT_STEP_VALIDATE:
+                    result = await asyncio.to_thread(
+                        self._execute_segment_validation,
+                        session_id, job_id, cancel_event, number)
+                else:
+                    result = None
             else:
                 result = await asyncio.to_thread(
                     self._execute_stage1, session_id, job_id, cancel_event)
@@ -518,15 +628,27 @@ class JobRunner:
             if step == step_machine.STEP_STAGE2:
                 next_job = await asyncio.to_thread(
                     self._finish_stage2, session_id, job_id, result)
-                # 长片：阶段 2 收尾时已把规划任务写进快照，这里起它的执行线程。
-                if next_job is not None:
-                    await self._launch(session_id, next_job)
             elif step == step_machine.STEP_SEGMENTING:
-                await asyncio.to_thread(
-                    self._finish_segment_planning, session_id, job_id, result)
+                kind = seg_step[0]
+                if kind == SEGMENT_STEP_PLANNING:
+                    next_job = await asyncio.to_thread(
+                        self._finish_segment_planning, session_id, job_id, result)
+                elif kind == SEGMENT_STEP_WRITE:
+                    next_job = await asyncio.to_thread(
+                        self._finish_segment_write, session_id, job_id, result)
+                elif kind == SEGMENT_STEP_VALIDATE:
+                    next_job = await asyncio.to_thread(
+                        self._finish_segment_validation, session_id, job_id, result)
+                else:
+                    next_job = await asyncio.to_thread(
+                        self._finish_segment_done, session_id, job_id)
             else:
                 await asyncio.to_thread(
                     self._finish_succeeded, session_id, job_id, result)
+                next_job = None
+            # 长片：收尾时已把下一个任务写进快照，这里起它的执行线程。
+            if next_job is not None:
+                await self._launch(session_id, next_job)
         finally:
             await asyncio.to_thread(self._cleanup, session_id, job_id)
 
@@ -557,12 +679,14 @@ class JobRunner:
             and str(item.get("decision")) == step_machine.DECISION_APPROVE
             for item in session.action_items)
         if reviewed and approved and not pending:
-            # 长片阶段 2 已成功（``final_prompt`` 落盘）但还没段表：重试要重跑**规划**，
-            # 不能把阶段 2 再跑一遍（D6 spec §5.3 的接缝）。
-            if (step_machine.is_long_form(session.brief.duration)
-                    and str(session.stage_state.get("final_prompt") or "").strip()
-                    and not session.segments):
-                return step_machine.STEP_SEGMENTING
+            # 长片的两段接缝都属于 ``segmenting``：① 阶段 2 已成功（``final_prompt``
+            # 落盘）但还没段表——重试要重跑**规划**；② 段循环已开始（有段表）——重试要
+            # 重跑当前那一段的写词或校验。两者都不能把阶段 2 再跑一遍（D6 spec §5.3）。
+            if step_machine.is_long_form(session.brief.duration):
+                if session.segments:
+                    return step_machine.STEP_SEGMENTING
+                if str(session.stage_state.get("final_prompt") or "").strip():
+                    return step_machine.STEP_SEGMENTING
             return step_machine.STEP_STAGE2
         return step_machine.STEP_STAGE1
 
@@ -1077,6 +1201,165 @@ class JobRunner:
             "video_asset_id": "",
         }
 
+    def _segment_step(self, session_id: str) -> tuple[str, int]:
+        """下一次 segmenting job 该做哪件：看**已落盘**的段状态，不看 job 记录。
+
+        段按 index 顺序推进：当前段＝第一条非 passed 的段。段状态本身就是步骤判据，
+        于是失败重试无需额外记账——``validating`` 重跑校验、``pending`` 重跑写词。
+        """
+        session = load_session(self.store.session_directory(session_id))
+        if session is None or not session.segments:
+            return (SEGMENT_STEP_PLANNING, 0)
+        for row in sorted(
+                session.segments, key=lambda item: int(item.get("index", 0))):
+            status = str(row.get("status") or "")
+            if status == SEGMENT_STATUS_PASSED:
+                continue
+            number = int(row.get("index") or 0)
+            if status == SEGMENT_STATUS_VALIDATING:
+                return (SEGMENT_STEP_VALIDATE, number)
+            if status == SEGMENT_STATUS_PENDING:
+                return (SEGMENT_STEP_WRITE, number)
+            # waiting_video：在等人交视频，本不该有 job 在跑；给一个温和收尾。
+            return (SEGMENT_STEP_DONE, number)
+        return (SEGMENT_STEP_DONE, 0)
+
+    @staticmethod
+    def _load_segment_plans(directory: Path) -> list[Any]:
+        """读回本会话的 ``segments/plan.json``（与 CLI 同形，``from_dict`` 往返）。
+
+        写词与校验都要 ``plan.end_hook`` 与段长；plan.json 是规划时落下的**同一套分段**
+        事实（重算是另一套边界），所以只读它、不重算。
+        """
+        path = directory / SEGMENTS_DIRNAME / SEGMENT_PLAN_FILENAME
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        from ..segment_planner import SegmentPlan
+
+        try:
+            return [SegmentPlan.from_dict(entry) for entry in raw]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(f"段表读不回来：{path}（{exc}）") from exc
+
+    def _execute_segment_write(self, session_id: str, job_id: str,
+                               cancel_event: threading.Event, number: int) -> dict[str, Any]:
+        """写第 ``number`` 段提示词并落成 ``segments/shot-NN.md`` 产物（D6 §5.3/§7）。
+
+        第 N 段（N>1）的请求要带第 N-1 段视频的尾帧锚——它由上一段校验通过时写进
+        ``stage_state.bridge_frame_descriptions``，这里只把 state 原样交给写段器，
+        不另抄一份锚。写词必须**逐段增量**，不能一次把所有段写完再收视频。
+        """
+        directory = self.store.session_directory(session_id)
+        session = load_session(directory)
+        if session is None:
+            raise RuntimeError(f"会话文件读不到：{session_id}")
+        plans = self._load_segment_plans(directory)
+        plan = next((item for item in plans if item.index == number - 1), None)
+        if plan is None:
+            raise RuntimeError(f"段表里找不到第 {number} 段")
+        state = dict(session.stage_state)
+        node = f"{SEGMENT_WRITE_NODE}-{number:02d}"
+        self._emit_progress(
+            session_id, job_id, node, "started",
+            stage=step_machine.STEP_SEGMENTING)
+        self._write_active_job(session_id, job_id, node)
+        if self.fake_pipeline:
+            from .fake_pipeline import segment_prompt
+
+            text: str | None = segment_prompt(plan, plans, state)
+        else:
+            from ..model_factory import build_chat_model
+            from ..segment_prompts import write_segment_v2
+
+            text = write_segment_v2(plan, plans, state, build_chat_model())
+        if cancel_event.is_set():
+            raise JobCancelled(node)
+        if not text or not str(text).strip():
+            raise RuntimeError(f"第 {number} 段写词没有产出可用提示词")
+        name = f"{SEGMENTS_DIRNAME}/shot-{number:02d}.md"
+        artifact = self.store.write_text_artifact(
+            session_id, name, str(text), job_id=job_id)
+        self._emit_progress(
+            session_id, job_id, node, "done",
+            stage=step_machine.STEP_SEGMENTING)
+        return {"number": number, "artifact_id": artifact.artifact_id}
+
+    def _execute_segment_validation(self, session_id: str, job_id: str,
+                                    cancel_event: threading.Event,
+                                    number: int) -> dict[str, Any]:
+        """剥尾帧 → 读图 → 与本段 ``end_hook`` 对照（D6 §5.4 / §8）。
+
+        三种结局严格分开，**只有「通过」与「被拒」在这里返回**：
+        - 技术异常（文件读不到、读图服务不可用、判据回复不可解析）一律抛错，由 ``_run``
+          落 ``failed``——重试重跑同一次校验，不要求重交素材；
+        - 读图与末态不符返回 ``not_reached``，由收尾重建同一段的待办（不是 failed）。
+
+        读图走唯一读图口 ``describe_bridge_frame``（内部 ``describe_image``）；桩管线把这
+        一步连同判据一起桩掉，但**剥尾帧始终是真的**（cv2，无需模型）。
+        """
+        from ..tools.frame_auditor import describe_bridge_frame, extract_last_frame
+        from ..segment_validation import END_NOT_REACHED, END_REACHED
+
+        directory = self.store.session_directory(session_id)
+        session = load_session(directory)
+        if session is None:
+            raise RuntimeError(f"会话文件读不到：{session_id}")
+        row = next(
+            (item for item in session.segments
+             if int(item.get("index", 0)) == int(number)), None)
+        if row is None:
+            raise RuntimeError(f"快照里找不到第 {number} 段")
+        asset_id = str(row.get("video_asset_id") or "")
+        if not asset_id:
+            raise RuntimeError(f"第 {number} 段没有已交的视频")
+        # 已交素材的归属/mp4 容器在 resolve 时判过；这里只取路径（失败即技术异常）。
+        resource = self.store.resolve_asset_media(asset_id)
+        plans = self._load_segment_plans(directory)
+        plan = next((item for item in plans if item.index == number - 1), None)
+        if plan is None:
+            raise RuntimeError(f"段表里找不到第 {number} 段")
+        node = f"{SEGMENT_VALIDATE_NODE}-{number:02d}"
+        self._emit_progress(
+            session_id, job_id, node, "started",
+            stage=step_machine.STEP_SEGMENTING)
+        self._write_active_job(session_id, job_id, node)
+        tail = extract_last_frame(
+            resource.path,
+            directory / SEGMENTS_DIRNAME / SEGMENT_BRIDGE_DIRNAME
+            / f"shot-{number:02d}-start.png",
+            # 首尾帧链恒取末帧（issue #98）：取到倒数第几帧决定下一段回退几帧。
+            sharpest=False)
+        if cancel_event.is_set():
+            raise JobCancelled(node)
+        if self.fake_pipeline:
+            from .fake_pipeline import judge_segment_end_hook, segment_tail_description
+
+            tail_description = segment_tail_description(plan)
+            reached = judge_segment_end_hook(plan.end_hook, tail_description)
+        else:
+            # 读图返回可空；先落到独立变量再判空，否则 mypy 会按前一分支的 str 收窄。
+            described = describe_bridge_frame(tail)
+            if not described:
+                # 读图服务不可用＝系统故障，不是「用户的视频不合格」。
+                raise RuntimeError(f"第 {number} 段尾帧读图失败：视觉服务不可用")
+            tail_description = described
+            from ..model_factory import build_chat_model
+            from ..segment_validation import judge_end_hook
+
+            reached = judge_end_hook(plan.end_hook, tail_description, build_chat_model())
+        if cancel_event.is_set():
+            raise JobCancelled(node)
+        self._emit_progress(
+            session_id, job_id, node, "done",
+            stage=step_machine.STEP_SEGMENTING)
+        return {
+            "number": number,
+            "outcome": END_REACHED if reached else END_NOT_REACHED,
+            "description": tail_description,
+        }
+
     def _execute_revise(self, session_id: str, job_id: str,
                         cancel_event: threading.Event,
                         entries: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1365,27 +1648,194 @@ class JobRunner:
         return next_job
 
     def _finish_segment_planning(self, session_id: str, job_id: str,
-                                 segments: list[dict[str, Any]]) -> None:
-        """分段规划收尾：段列表进快照，会话停在 ``awaiting_human``（无确认待办）。
+                                 segments: list[dict[str, Any]]) -> JobSummary | None:
+        """分段规划收尾：段列表进快照，立刻接上第 1 段写词任务（D6 §5.3）。
 
-        规划结果是**只读**的（Q4）：不挂「确认分段」待办，也不需要用户点一下才继续。
-        这一档之后的第 1 段写词属于 D6-2；那一步在本函数收尾处接上任务，状态语义
-        不变（依旧是「系统与人都还没事可做、下一步由服务端接着起」）。
+        规划结果是**只读**的（Q4）：不挂「确认分段」待办、不需要用户点一下。写完即起
+        第 1 段写词 job——这一步替换掉 D6-1 留下的「awaiting_human 无待办」过渡态。
         """
+        next_job: JobSummary | None = None
+        if segments:
+            next_job = JobSummary(
+                job_id=uuid.uuid4().hex, kind=JOB_KIND_SEGMENT, status="running",
+                started_at=_now())
+        next_status = (step_machine.STATUS_RUNNING if next_job is not None
+                       else step_machine.STATUS_AWAITING_HUMAN)
+
+        def _apply(detail: Any) -> dict[str, Any]:
+            job = self._job_or_running(job_id, detail).model_copy(
+                update={"status": "succeeded", "finished_at": _now()})
+            jobs = _upsert_job(detail.jobs, _job_dict(job))
+            if next_job is not None:
+                jobs = _upsert_job(jobs, _job_dict(next_job))
+            return {
+                "status": next_status,
+                "jobs": jobs,
+                "segments": segments,
+            }
+
+        events = [EventDraft("job.succeeded", {"next": next_status}, job_id=job_id)]
+        if next_job is not None:
+            events.append(EventDraft(
+                "job.started", {"kind": JOB_KIND_SEGMENT}, job_id=next_job.job_id))
+        self.store.mutate(session_id, _apply, events=events)
+        return next_job
+
+    def _finish_segment_write(self, session_id: str, job_id: str,
+                              result: dict[str, Any]) -> JobSummary | None:
+        """第 N 段写词收尾：段转「等视频」，挂出本段唯一的 ``segment_video`` 待办。
+
+        写词/校验/交视频的顺序按 spec §5.3：一段写完就停下来收本段视频，绝不一次写完全
+        部段。待办载荷带段号（``segment_index``），等待期间会话是 ``awaiting_human``。
+        """
+        number = int(result["number"])
+        artifact_id = str(result["artifact_id"])
+        item = ActionItemOut(
+            item_id=uuid.uuid4().hex, kind=step_machine.ACTION_SEGMENT_VIDEO,
+            status="pending", created_at=_now(), segment_index=number)
+
+        def _apply(detail: Any) -> dict[str, Any]:
+            job = self._job_or_running(job_id, detail).model_copy(
+                update={"status": "succeeded", "finished_at": _now()})
+            rows = [row.model_dump() for row in detail.segments]
+            for row in rows:
+                if int(row["index"]) == number:
+                    row["status"] = SEGMENT_STATUS_WAITING_VIDEO
+                    row["prompt_artifact_id"] = artifact_id
+            # 每段恰好一个待办：同类未决旧项先收掉再挂新的（与阶段 1 收尾同一条纪律）。
+            items = [
+                existing.model_dump(mode="json")
+                for existing in detail.action_items
+                if not (existing.kind == step_machine.ACTION_SEGMENT_VIDEO
+                        and existing.status == "pending")]
+            items.append(item.model_dump(mode="json"))
+            return {
+                "status": step_machine.STATUS_AWAITING_HUMAN,
+                "jobs": _upsert_job(detail.jobs, _job_dict(job)),
+                "segments": rows,
+                "action_items": items,
+            }
+
+        self.store.mutate(session_id, _apply, events=[
+            EventDraft("job.succeeded",
+                       {"next": step_machine.STATUS_AWAITING_HUMAN}, job_id=job_id),
+            EventDraft("action_item.created",
+                       {"item_id": item.item_id, "kind": item.kind}, job_id=job_id),
+        ])
+        return None
+
+    def _finish_segment_validation(self, session_id: str, job_id: str,
+                                   result: dict[str, Any]) -> JobSummary | None:
+        """段校验收尾：通过则落段状态并起下一段写词；被拒则重建待办（D6 §5.4）。
+
+        - 通过：段转 ``passed``，**立刻持久化**；非末段把尾帧锚写进 state 并起下一段
+          写词 job；末段停在 ``awaiting_human``（拼接属 #248）。
+        - 被拒：段转回 ``waiting_video``、**不落 passed**，重建同一段的待办并发
+          ``action_item.created``。用户的素材不合格不是系统故障，**不记 failed**。
+        """
+        from ..segment_validation import END_REACHED
+
+        number = int(result["number"])
+        description = str(result.get("description") or "")
+        session = load_session(self.store.session_directory(session_id))
+        if session is None:
+            raise RuntimeError(f"会话文件读不到：{session_id}")
+        ordered = sorted(session.segments, key=lambda row: int(row.get("index", 0)))
+        total = len(ordered)
+        passed = str(result.get("outcome")) == END_REACHED
+
+        if passed:
+            last = number >= total
+            next_job: JobSummary | None = None
+            if not last:
+                next_job = JobSummary(
+                    job_id=uuid.uuid4().hex, kind=JOB_KIND_SEGMENT, status="running",
+                    started_at=_now())
+            next_status = (step_machine.STATUS_RUNNING if next_job is not None
+                           else step_machine.STATUS_AWAITING_HUMAN)
+            # 尾帧锚写进 state 供下一段写词用：段号取下一段的 0-based index（＝本段 1-based
+            # 段号），与 ``segment_prompts._frame_anchor_note`` 的取法同源。
+            anchor_state = dict(session.stage_state)
+            if not last and description:
+                anchors = [
+                    entry for entry in anchor_state.get("bridge_frame_descriptions") or []
+                    if isinstance(entry, dict)]
+                anchors.append({"segment": number, "description": description})
+                anchor_state["bridge_frame_descriptions"] = anchors
+
+            def _apply(detail: Any) -> dict[str, Any]:
+                job = self._job_or_running(job_id, detail).model_copy(
+                    update={"status": "succeeded", "finished_at": _now()})
+                rows = [row.model_dump() for row in detail.segments]
+                for row in rows:
+                    if int(row["index"]) == number:
+                        row["status"] = SEGMENT_STATUS_PASSED
+                jobs = _upsert_job(detail.jobs, _job_dict(job))
+                if next_job is not None:
+                    jobs = _upsert_job(jobs, _job_dict(next_job))
+                return {
+                    "status": next_status,
+                    "jobs": jobs,
+                    "segments": rows,
+                    "stage_state": anchor_state,
+                }
+
+            events = [EventDraft("job.succeeded", {"next": next_status}, job_id=job_id)]
+            if next_job is not None:
+                events.append(EventDraft(
+                    "job.started", {"kind": JOB_KIND_SEGMENT}, job_id=next_job.job_id))
+            self.store.mutate(session_id, _apply, events=events)
+            return next_job
+
+        item = ActionItemOut(
+            item_id=uuid.uuid4().hex, kind=step_machine.ACTION_SEGMENT_VIDEO,
+            status="pending", created_at=_now(), segment_index=number)
+
+        def _reject(detail: Any) -> dict[str, Any]:
+            job = self._job_or_running(job_id, detail).model_copy(
+                update={"status": "succeeded", "finished_at": _now()})
+            rows = [row.model_dump() for row in detail.segments]
+            for row in rows:
+                if int(row["index"]) == number:
+                    # 被拒的视频不算数：清掉素材 id，回到「等用户换一段视频重交」。
+                    row["status"] = SEGMENT_STATUS_WAITING_VIDEO
+                    row["video_asset_id"] = ""
+            items = [
+                existing.model_dump(mode="json")
+                for existing in detail.action_items
+                if not (existing.kind == step_machine.ACTION_SEGMENT_VIDEO
+                        and existing.status == "pending")]
+            items.append(item.model_dump(mode="json"))
+            return {
+                "status": step_machine.STATUS_AWAITING_HUMAN,
+                "jobs": _upsert_job(detail.jobs, _job_dict(job)),
+                "segments": rows,
+                "action_items": items,
+            }
+
+        self.store.mutate(session_id, _reject, events=[
+            EventDraft("job.succeeded",
+                       {"next": step_machine.STATUS_AWAITING_HUMAN}, job_id=job_id),
+            EventDraft("action_item.created",
+                       {"item_id": item.item_id, "kind": item.kind}, job_id=job_id),
+        ])
+        return None
+
+    def _finish_segment_done(self, session_id: str, job_id: str) -> JobSummary | None:
+        """没有下一步可做（全部段已通过、或当前段在等人）：温和收尾到 ``awaiting_human``。"""
         def _apply(detail: Any) -> dict[str, Any]:
             job = self._job_or_running(job_id, detail).model_copy(
                 update={"status": "succeeded", "finished_at": _now()})
             return {
                 "status": step_machine.STATUS_AWAITING_HUMAN,
                 "jobs": _upsert_job(detail.jobs, _job_dict(job)),
-                "segments": segments,
             }
 
         self.store.mutate(session_id, _apply, events=[
             EventDraft("job.succeeded",
-                       {"next": step_machine.STATUS_AWAITING_HUMAN},
-                       job_id=job_id),
+                       {"next": step_machine.STATUS_AWAITING_HUMAN}, job_id=job_id),
         ])
+        return None
 
     def _finish_cancelled(self, session_id: str, job_id: str, node: str) -> None:
         def _apply(detail: Any) -> dict[str, Any]:

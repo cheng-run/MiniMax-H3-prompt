@@ -183,6 +183,36 @@ def segment_plan(total_s: int) -> list:
     return plans
 
 
+def segment_prompt(plan: Any, all_plans: list, state: dict[str, Any]) -> str:
+    """桩写段（D6 #246）：不建模型，给一段形状合法、可展示的固定提示词。
+
+    桩不与真实写段抢道：真实路径 ``write_segment_v2`` 会调模型，桩模式
+    ``build_chat_model`` 一调就抛。段号与末态声明从规划里现读，让每段正文不同、
+    段尾钩子可核对，但不做语义闸门的真判（那一步由 ``judge_segment_end_hook`` 桩掉）。
+    """
+    number = int(plan.index) + 1
+    total = len(all_plans)
+    lines = [
+        f"[Shot 1] At 00:00.000, a fixed stub establishing shot for segment {number}/{total}.",
+        f"[Shot 1] At 00:02.000, the stub action settles toward: {plan.end_hook}",
+    ]
+    return "\n".join(lines)
+
+
+def segment_tail_description(plan: Any) -> str:
+    """桩读图（D6 #246）：尾帧画面固定落在本段末态声明上——供桩管线走通「通过」这一档。"""
+    return f"桩读图：第 {int(plan.index) + 1} 段尾帧，画面落在「{plan.end_hook}」。"
+
+
+def judge_segment_end_hook(end_hook: str, description: str) -> bool:
+    """桩语义判据（D6 #246）：桩管线里恒判「达到」，不建模型、不联网。
+
+    被拒/失败两档是**真实闸门**才可能出现的结局；桩管线只保证闭环能走完（E2E/Playwright），
+    不靠它证明闸门有牙齿——那两条由真实路径的用例（打桩读图/判据）咬。
+    """
+    return True
+
+
 def stage2_summary(brief: Any) -> Any:
     """桩阶段 2 的固定中文摘要：整体一句、无分镜条目。
 
@@ -202,7 +232,10 @@ __all__ = [
     "FAKE_PIPELINE_ENV",
     "fake_pipeline_enabled",
     "frame_descriptions",
+    "judge_segment_end_hook",
     "segment_plan",
+    "segment_prompt",
+    "segment_tail_description",
     "stage1_state",
     "stage2_state",
     "stage2_summary",

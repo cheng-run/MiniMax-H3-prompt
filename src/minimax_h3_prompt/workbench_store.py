@@ -44,9 +44,20 @@ SESSION_STATUSES: tuple[str, ...] = (
     "interrupted",
 )
 
-# 执行段的状态（D6 spec §10）。本票只产生 ``pending``（规划完、还没轮到此段）；
-# 写词/等视频/通过/被拒归 D6-2 起，不在这里预先枚举一份会过期的集合。
+# 执行段的状态（D6 spec §10 / #246）。规划完是 ``pending``；写词完成后等用户交视频是
+# ``waiting_video``；交上视频、异步校验在跑（含失败待重试）是 ``validating``；通过是
+# ``passed``。被拒的段回到 ``waiting_video``（换一段视频重交），**绝不落成 passed**
+# 否则恢复会跳过它（spec §8）。
 SEGMENT_STATUS_PENDING = "pending"
+SEGMENT_STATUS_WAITING_VIDEO = "waiting_video"
+SEGMENT_STATUS_VALIDATING = "validating"
+SEGMENT_STATUS_PASSED = "passed"
+SEGMENT_STATUSES: tuple[str, ...] = (
+    SEGMENT_STATUS_PENDING,
+    SEGMENT_STATUS_WAITING_VIDEO,
+    SEGMENT_STATUS_VALIDATING,
+    SEGMENT_STATUS_PASSED,
+)
 
 # 旧向导状态 → 工作台状态。历史会话全部是 completed；未完成的旧会话（用户还在
 # 向导里续接的那些）对 API 也是 legacy，映射只是给列表/详情一个可读的状态，
@@ -353,6 +364,18 @@ class FrameInvalid(WorkbenchError):
     code = "frame_invalid"
 
 
+class SegmentVideoInvalid(WorkbenchError):
+    """段视频回交无效（D6 spec §8 / §12）：段号不符、素材非本会话、非 mp4、技术档不合格。
+
+    与 ``FrameInvalid`` 分开是一个**稳定错误码**（``segment_video_invalid``）：前端要把
+    「本段视频不合格，重交一段」与「帧槽填错」这两种出路区分开。同码覆盖多种原因，
+    具体原因进 ``detail`` 文案。
+    """
+
+    status_code = 422
+    code = "segment_video_invalid"
+
+
 class StorageUnavailable(WorkbenchError):
     """素材落盘失败（磁盘满、只读目录）。请求本身没错，是这台机器的存储不行。"""
 
@@ -394,6 +417,8 @@ _DECISIONS = frozenset({
     step_machine.DECISION_REVISE,
     # 帧提交决议（D4 §9）：事件类型不变，只是同一事件多一个合法的 decision 取值。
     step_machine.DECISION_SUBMIT_FRAMES,
+    # 段视频回交决议（D6 §8）：同上，只多一个取值。
+    step_machine.DECISION_SUBMIT_VIDEO,
 })
 
 
@@ -774,6 +799,9 @@ class ActionItemOut(BaseModel):
     decision: str | None = None
     # 决议时提交的「层次 + 意见」，按提交顺序原样回显；未决议与 approve 是空表。
     revisions: list[RevisionOut] = Field(default_factory=list)
+    # 段视频待办的段号（1 起，与 segments[].index 同号，D6 §8「载荷带段号」）。其它
+    # 待办类型为 None。resolve 用它判「段号与当前段是否一致」。
+    segment_index: int | None = None
 
 
 class SegmentOut(BaseModel):
@@ -1663,6 +1691,27 @@ class WorkbenchSessionStore:
                 f"帧槽只接受图片素材（收到 {resource.media_type}）：{asset_id}")
         return resource.path
 
+    def resolve_video_asset(self, session_id: str, asset_id: str) -> MediaResource:
+        """把段视频待办的 ``video_asset_id`` 解析成本会话的 mp4 素材（D6 spec §8）。
+
+        与 ``resolve_frame_asset`` 同一条路：归属必须正是 URL 里那个会话、类型收窄；
+        差别只在要求 ``video/mp4``——spec §8 的「容器是 mp4」是**硬判据**（webm 之类
+        同是视频但下游剥帧/拼接口径不同）。「什么算素材」仍只由 ``resolve_asset_media``
+        判定一次，这里不另写命名规则。
+        """
+        prefix, _, _hash16 = asset_id.rpartition("/")
+        if prefix != session_id:
+            raise SegmentVideoInvalid(f"段视频素材不属于本会话：{asset_id}")
+        try:
+            resource = self.resolve_asset_media(asset_id)
+        except WorkbenchError as exc:
+            # 不存在与不可读同码：能区分就等于给了一个探测他会话素材的 oracle。
+            raise SegmentVideoInvalid(f"段视频素材不存在：{asset_id}") from exc
+        if resource.media_type != "video/mp4":
+            raise SegmentVideoInvalid(
+                f"本段视频必须是 mp4 容器（收到 {resource.media_type}）：{asset_id}")
+        return resource
+
     def store_asset(
         self,
         session_id: str,
@@ -1931,7 +1980,9 @@ __all__ = [
     "JobNotFound", "JobNotRunning",
     "JobSummary", "RefOut", "RevisionOut", "SessionBusy", "SessionCompleted", "SessionDetail",
     "SessionLegacy", "SessionNotFound", "SessionPage", "SessionSummary",
-    "SegmentOut", "SEGMENT_STATUS_PENDING",
+    "SegmentOut", "SEGMENT_STATUS_PENDING", "SEGMENT_STATUS_WAITING_VIDEO",
+    "SEGMENT_STATUS_VALIDATING", "SEGMENT_STATUS_PASSED", "SEGMENT_STATUSES",
+    "SegmentVideoInvalid",
     "SESSION_STATUSES", "StorageUnavailable", "UnknownEventType",
     "UnsupportedMediaType", "UploadInvalid", "VideoOutputOut", "WorkbenchError",
     "WorkbenchSessionStore",
