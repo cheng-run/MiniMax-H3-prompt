@@ -1590,12 +1590,9 @@ class JobRunner:
 
         词来自**阶段 1 已经写好的那一份**（``generation.asset_prompt_for`` 按语义名取）：
         素材循环不是重写一遍词，而是把它逐件拿去过图核对（D7 §7 的理由：合并成一件会让
-        「这件当时给的是哪一版词」脱钩）。
+        「这件当时给的是哪一版词」脱钩）。桩模式只换「谁写了阶段 1 那份词」，取数与落盘
+        仍是这条路——两处各写一份就成了「产物形状随开关变」。
         """
-        if self.fake_pipeline:
-            # 桩管线不伪造资产图词与校对结论（#259 才扩）：静默拿空词去落盘会让 CI
-            # 以为循环跑通了。
-            raise RuntimeError("桩管线还不支持 ref 素材循环（见 #259）。")
         from ..generation import asset_prompt_for
 
         session = load_session(self.store.session_directory(session_id))
@@ -1635,9 +1632,13 @@ class JobRunner:
         读图走**唯一入口** ``describe_image``（不另建视觉客户端）。不通过时用
         ``rewrite_asset_prompt`` 把差异清单当 feedback 重写这一件的词、覆盖同一份
         产物——用户没有「就这样吧」可点，**改词是唯一的降级通道**（spec §6.3）。
+
+        桩模式（``fake_pipeline``）只把这个 job 的「读图与改写」换成固定结论，台账
+        转移、待办重开与产物覆盖仍由收尾的同一份代码走——CI 里两条分支都要真的跑到。
         """
         if self.fake_pipeline:
-            raise RuntimeError("桩管线还不支持 ref 素材循环（见 #259）。")
+            return self._execute_asset_proofread_fake(
+                session_id, job_id, cancel_event, number)
         from ..asset_loop import rewrite_asset_prompt
         from ..asset_proofread import (
             build_proofread_request,
@@ -1690,6 +1691,53 @@ class JobRunner:
                             stage=step_machine.STEP_ASSET_LOOP)
         return {"step": ASSET_STEP_PROOFREAD, "number": number, "name": name,
                 "passed": False, "reason": reason}
+
+    def _execute_asset_proofread_fake(self, session_id: str, job_id: str,
+                                      cancel_event: threading.Event,
+                                      number: int) -> dict[str, Any]:
+        """桩校对（#259）：伪造读图结论，**不调 ``describe_image``**、不建模型。
+
+        结论必须确定性且两条路都覆盖：第 1 件第一轮不通过、其余通过（判据是台账
+        轮次，不是调用次数——重跑/续跑不能换结论）。不通过时照真实路径覆盖同一份
+        ``assets/picture-NN.md``，只是改写由桩完成；台账转移仍在 ``_finish_asset_proofread``
+        那一份代码里，桩不另写一套收尾。
+        """
+        from .fake_pipeline import asset_proofread_verdict, rewrite_asset_prompt_text
+
+        session = load_session(self.store.session_directory(session_id))
+        if session is None:
+            raise RuntimeError(f"会话文件读不到：{session_id}")
+        entry = self._picture_entry(session.asset_ledger, number)
+        name = str(entry["name"])
+        submitted = str(entry.get(ASSET_PROOFREAD_KEY) or "").strip()
+        if not submitted:
+            raise RuntimeError(f"第 {number} 件没有待校对的素材图标识")
+        # 归属与类型在 resolve 已判过一次；这里再确认那张图仍在盘上（读不到＝技术故障，
+        # 不是「用户的图不合格」）。桩不为它开后门，只是不读图内容。
+        self.store.resolve_image_asset(session_id, submitted)
+        first_number = min(
+            int(item["number"]) for item in session.asset_ledger
+            if str(item.get("kind")) == KIND_PICTURE)
+        passed, reason = asset_proofread_verdict(
+            number, first_number, int(entry.get("round", 0)))
+
+        self._emit_progress(session_id, job_id, ASSET_PROOFREAD_NODE, "started",
+                            stage=step_machine.STEP_ASSET_LOOP)
+        if cancel_event.is_set():
+            raise JobCancelled(ASSET_PROOFREAD_NODE)
+        if not passed:
+            artifact_name = ASSET_PROMPT_FILENAME.format(number=number)
+            text = (self.store.session_directory(session_id)
+                    / artifact_name).read_text(encoding="utf-8")
+            current = _parse_asset_prompt(text)
+            self.store.write_text_artifact(
+                session_id, artifact_name,
+                _render_asset_prompt(number, name, rewrite_asset_prompt_text(current)),
+                job_id=job_id)
+        self._emit_progress(session_id, job_id, ASSET_PROOFREAD_NODE, "done",
+                            stage=step_machine.STEP_ASSET_LOOP)
+        return {"step": ASSET_STEP_PROOFREAD, "number": number, "name": name,
+                "passed": passed, "reason": reason}
 
     def _finish_asset_write(self, session_id: str, job_id: str,
                             result: dict[str, Any]) -> None:
@@ -2269,12 +2317,17 @@ class JobRunner:
         self._write_active_job(session_id, job_id, node)
         if cancel_event.is_set():
             raise JobCancelled(node)
+        # 拼接口径是**路线属性**（D7 §10 / ``final_film`` 的既有纪律）：首尾帧链的第
+        # N+1 段首帧就是第 N 段末帧，原样接会重一帧，所以裁首帧；ref 没有帧链、段与段
+        # 之间没有共享首帧，裁首帧只会吃掉用户交的帧（成片少一帧）。
+        if session.brief.is_ref:
+            strategy = ConcatStrategy.STREAM_COPY_FIRST
+        else:
+            strategy = ConcatStrategy.TRIM_FIRST_FRAME
         film = assemble_film(
             plans=plans, rows=rows, total_s=int(session.brief.duration),
             out_path=directory / ARTIFACT_FINAL_FILM,
-            # 首尾帧链恒为「裁首帧 + 重编码」（spec #92 / CLI 同源）：第 N+1 段的首帧
-            # 就是第 N 段的末帧，原样接起来每个接缝都会重一帧。画质档同为 CRF 16。
-            strategy=ConcatStrategy.TRIM_FIRST_FRAME,
+            strategy=strategy,
             reencode_crf=16,
             remedy_hint="重跑本段并重新验收通过后，成片会自动取用最新的那份视频。",
         )

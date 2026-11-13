@@ -48,19 +48,35 @@ def segment_video_frames(seconds: float) -> int:
     return H3_TIER_FRAMES[tier]
 
 
-def write_segment_video(path: Path, seconds: float) -> Path:
-    """用 ffmpeg 现造一段「用户去 ComfyUI 跑完回交」的替身视频（D6-7）。
+def ref_segment_video_frames(seconds: float) -> int:
+    """多参执行段的帧数：段长是 H3 单体 4–15 秒的整数档，按 24fps 折算。
 
-    造件参数（帧数 / 尺寸 / 帧率）全部从仓内常量派生，不手抄字面量；编码器用 ffmpeg
-    内置的 ``mpeg4``——不赌发行版带没带 x264，容器仍是真 mp4（``ftyp``），读图剥尾帧与
-    拼接都读得动。产物要过**真实**的 ``preflight.check_segment_video``，桩不为它开后门。
+    与 ``segment_video_frames`` 有意分开：帧数表只校准到 6 秒，7–15 秒档没有实测样本。
+    桩按帧率折算造件，真实闸门会给「无法确证档位」的 warning——这是**诚实**的，不冒充
+    「档位已核对」；把 7–15 秒也塞进首尾帧链那张表反而是假绿。
+    """
+    from ..tools.preflight import SEGMENT_MAX_S, SEGMENT_MIN_S
+
+    tier = int(round(seconds))
+    if abs(seconds - tier) > 1e-6 or not (SEGMENT_MIN_S <= tier <= SEGMENT_MAX_S):
+        raise ValueError(
+            f"桩管线只造 {SEGMENT_MIN_S:g}–{SEGMENT_MAX_S:g} 整数秒的多参执行段，"
+            f"收到 {seconds:g} 秒")
+    return tier * H3_VIDEO_FPS
+
+
+def _encode_stub_video(path: Path, frames: int) -> Path:
+    """用 ffmpeg 现造一段合规 mp4：帧数由调用方按路线算好。
+
+    编码器用 ffmpeg 内置的 ``mpeg4``——不赌发行版带没带 x264，容器仍是真 mp4
+    （``ftyp``），读图剥尾帧与拼接都读得动。产物要过**真实**的
+    ``preflight.check_segment_video``，桩不为它开后门。
     """
     import subprocess  # noqa: PLC0415 - 只有桩造件这一处需要拉子进程
 
     from ..tools.preflight import EXPECTED_VIDEO_SIZE
     from ..tools.seam_audit import find_ffmpeg
 
-    frames = segment_video_frames(seconds)
     width, height = EXPECTED_VIDEO_SIZE
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -75,6 +91,16 @@ def write_segment_video(path: Path, seconds: float) -> Path:
         raise RuntimeError(
             f"桩管线造段视频失败（ffmpeg 退出 {proc.returncode}）：{proc.stderr[-800:]}")
     return target
+
+
+def write_segment_video(path: Path, seconds: float) -> Path:
+    """首尾帧链的桩段视频（D6-7）：帧数只认 H3 实测档位。"""
+    return _encode_stub_video(path, segment_video_frames(seconds))
+
+
+def write_ref_segment_video(path: Path, seconds: float) -> Path:
+    """多参执行段的桩段视频（D7-6）：4–15 整数秒档，帧数按 24fps 折算。"""
+    return _encode_stub_video(path, ref_segment_video_frames(seconds))
 
 
 def _frame_roles(variant: str) -> tuple[tuple[int, str], ...]:
@@ -113,6 +139,45 @@ def _frame_bundle(brief: Any, round_no: int) -> dict[str, Any] | None:
     }
 
 
+def asset_prompt_text(name: str) -> str:
+    """桩资产图词：按语义名固定成一句可直接复制的画面描述（D7-6）。
+
+    词由 ``stage1_state`` 按台账语义名写进 state，出词 job 再经真实的
+    ``generation.asset_prompt_for`` 取出来落盘——桩只换「词是谁写的」，取数与落盘
+    仍是真实那一份，所以产物的形状与真实跑一致。
+    """
+    return (f"{name}：成年女性全身正面，米色风衣，黑色长柄伞，雨夜老城街口，"
+            "中景，冷蓝霓虹侧逆光，写实电影感（桩管线固定词）")
+
+
+def asset_proofread_verdict(
+    number: int, first_number: int, round_no: int,
+) -> tuple[bool, str]:
+    """桩校对结论：**第 1 件的第一轮**不通过，其余一律通过（D7-6）。
+
+    必须确定性：随机或按调用次数会在重跑/续跑时换结论，E2E 就时红时绿。判据用台账
+    轮次（``round == 0`` 才是第一轮，与 ``_settle_asset`` 的转移规则同源），不数调用。
+    差异清单要提到「词里是什么、图里是什么」，否则卡片上的红框没有内容可读。
+    """
+    if number != first_number or round_no > 0:
+        return True, ""
+    return False, (
+        "差异清单（桩管线）：词里写的是「米色风衣、黑色长柄伞」，"
+        "图里人物穿深灰外套、撑透明塑料伞——外套颜色与伞的材质不一致。"
+        "按差异改词后重新生成一张，再交回这一件。"
+    )
+
+
+def rewrite_asset_prompt_text(current: str) -> str:
+    """桩改写：按差异把修订句追加到原词尾部（不建模型、确定性）。
+
+    与真实 ``rewrite_asset_prompt`` 的区别只在「谁写」：产物仍是同一份
+    ``assets/picture-NN.md`` 的覆盖写，用户手里的下一版词看得到这次改了什么。
+    """
+    return (str(current).rstrip()
+            + "\n\n修订（按校对差异）：外套改为米色，伞改为黑色长柄伞。")
+
+
 def stage1_state(brief: Any, previous: dict[str, Any] | None = None) -> dict[str, Any]:
     """固定阶段 1 的 state；轮次与用户意见从 ``previous`` 里现读。
 
@@ -126,6 +191,7 @@ def stage1_state(brief: Any, previous: dict[str, Any] | None = None) -> dict[str
         if isinstance(entry, dict) and str(entry.get("text", "")).strip()
     ]
     round_no = len(revisions) + 1
+    refs = sorted(getattr(brief, "refs", ()) or (), key=lambda item: item.picture)
     script_lines = [
         f"# 分场剧本（桩管线第 {round_no} 稿）",
         "",
@@ -134,8 +200,25 @@ def stage1_state(brief: Any, previous: dict[str, Any] | None = None) -> dict[str
         "分场 1：雨夜街口，人物撑伞走过积水，霓虹在积水里反光。",
         "分场 2：人物停在旧楼门前，收起伞，抬头看向窗内的灯。",
     ]
+    if refs:
+        script_lines += ["", "参考素材：", *[
+            f"- <Picture {ref.picture}> {ref.name}" for ref in refs]]
     if revisions:
         script_lines += ["", "本轮修订：", *[f"- {text}" for text in revisions]]
+    shot_lines = [f"# 分镜镜头表（桩管线第 {round_no} 稿）", ""]
+    if refs:
+        # 多参分镜表按台账语义名与 `<Picture N>` 写（D7 §10）：素材循环与段内子集
+        # 都靠这个名字对号，桩不另编一套指称。
+        shot_lines += [
+            f"[Shot {index}] At 00:{2 * index:02d}.000, a medium shot featuring "
+            f"{ref.name} <Picture {ref.picture}>, neon reflecting in the puddles."
+            for index, ref in enumerate(refs, 1)]
+    else:
+        shot_lines += [
+            "[Shot 1] At 00:00.000, a medium shot of the woman under a black umbrella "
+            "in the rainy street.",
+            "[Shot 2] At 00:02.000, a closer shot as she lowers the umbrella and looks up.",
+        ]
     update: dict[str, Any] = {
         "production_plan": "制作计划：4 秒竖屏短视频，双场景呈现（桩管线）。",
         "director_brief": f"导演阐述：围绕「{brief.plot}」的写实电影感，低饱和冷调（桩管线）。",
@@ -145,18 +228,19 @@ def stage1_state(brief: Any, previous: dict[str, Any] | None = None) -> dict[str
         "background_design": "背景设计：雨夜老城街口，霓虹与积水（桩管线）。",
         "prop_design": "道具设计：一把黑伞、一封旧信（桩管线）。",
         "art_design": "美术统筹：冷蓝主调，霓虹点缀，湿反光（桩管线）。",
-        "shot_table": "\n".join([
-            f"# 分镜镜头表（桩管线第 {round_no} 稿）",
-            "",
-            "[Shot 1] At 00:00.000, a medium shot of the woman under a black umbrella "
-            "in the rainy street.",
-            "[Shot 2] At 00:02.000, a closer shot as she lowers the umbrella and looks up.",
-        ]),
+        "shot_table": "\n".join(shot_lines),
         "shot_review_lock": "镜头评审锁定：两镜，中景到近景（桩管线）。",
         "visual_design": "画面细化：手持跟随，冷蓝侧逆光，浅景深（桩管线）。",
         "sound_design": "对白表：无对白。环境声：雨声与脚步声（桩管线）。",
         "music": "non_diegetic_music：低频弦乐铺底（桩管线）。",
     }
+    if refs:
+        # 资产图词一件一份，语义名是台账与阶段 1 之间的唯一对号键（D7 §7）：出词
+        # job 用真实的 ``asset_prompt_for`` 按名字取，取不到就硬失败而不是拿邻件顶替。
+        update["character_image_prompts"] = [
+            {"name": ref.name, "positive_prompt": asset_prompt_text(ref.name),
+             "negative_prompt": "", "locked_features": []}
+            for ref in refs]
     bundle = _frame_bundle(brief, round_no)
     if bundle is not None:
         update["fl2va_prompt_bundle"] = bundle
@@ -192,19 +276,54 @@ def frame_descriptions(
 
 def stage2_state(state: dict[str, Any], brief: Any,
                  descriptions: list[dict[str, Any]]) -> tuple[dict[str, Any], str]:
-    """固定阶段 2：注入**调用方给的**读图结果、给一份固定视频提示词。"""
+    """固定阶段 2：注入**调用方给的**读图结果、给一份固定视频提示词。
+
+    ref 走官方六段式（D7-6）：分段规划按 ``detailed_description`` 里的镜头块切段、
+    段内子集按 ``<Picture N>`` 标签收种子。桩若仍写 base 的三段式，分段器会退回
+    「整片一个窗口」，段内参考素材那一行永远是空的——CI 就证明不了 D7 的接线。
+    """
     updated = dict(state)
     updated["fl2va_frame_descriptions"] = descriptions
-    prompt = "\n".join([
-        "# H3 视频提示词（桩管线）",
-        "",
-        f"主题：{brief.plot}　风格：{brief.style}　时长：{brief.duration:g}s",
-        f"模式：{brief.mode}　变体：{brief.variant}",
-        "",
-        "[Shot 1] At 00:00.000, a medium shot of the woman under a black umbrella "
-        "in the rainy street, neon reflecting in the puddles.",
-        "[Shot 2] At 00:02.000, a closer shot as she lowers the umbrella and looks up.",
-    ])
+    refs = sorted(getattr(brief, "refs", ()) or (), key=lambda item: item.picture)
+    if refs:
+        shots = []
+        for index, ref in enumerate(refs):
+            seconds = 0 if index == 0 else int(round(brief.duration * index / len(refs)))
+            shots.append(
+                f"[Shot {index + 1}] At 00:{seconds:02d}.000, a medium shot of "
+                f"{ref.name} <Picture {ref.picture}> in the rainy street, "
+                "neon reflecting in the puddles.")
+        prompt = "\n".join([
+            "subject_definitions:",
+            *[f"<Subject {ref.picture}>: the {ref.name} reference asset, shown as "
+              f"<Picture {ref.picture}>." for ref in refs],
+            "",
+            "summary:",
+            f"target_video: {brief.duration:g}s，桩管线多参整片提示词。",
+            "",
+            "retention_analysis:",
+            "all subjects fully_preserved.",
+            "",
+            "detailed_description:",
+            *shots,
+            "",
+            "overall_soundscape:",
+            "雨声与脚步声（桩管线）。",
+            "",
+            "non_diegetic_music:",
+            "低频弦乐铺底（桩管线）。",
+        ])
+    else:
+        prompt = "\n".join([
+            "# H3 视频提示词（桩管线）",
+            "",
+            f"主题：{brief.plot}　风格：{brief.style}　时长：{brief.duration:g}s",
+            f"模式：{brief.mode}　变体：{brief.variant}",
+            "",
+            "[Shot 1] At 00:00.000, a medium shot of the woman under a black umbrella "
+            "in the rainy street, neon reflecting in the puddles.",
+            "[Shot 2] At 00:02.000, a closer shot as she lowers the umbrella and looks up.",
+        ])
     updated["final_prompt"] = prompt
     return updated, prompt
 
@@ -317,9 +436,13 @@ def stage2_summary(brief: Any) -> Any:
 __all__ = [
     "FAKE_PIPELINE_ENV",
     "H3_VIDEO_FPS",
+    "asset_prompt_text",
+    "asset_proofread_verdict",
     "fake_pipeline_enabled",
     "frame_descriptions",
     "judge_segment_end_hook",
+    "ref_segment_video_frames",
+    "rewrite_asset_prompt_text",
     "segment_plan",
     "segment_prompt",
     "segment_tail_description",
@@ -327,5 +450,6 @@ __all__ = [
     "stage1_state",
     "stage2_state",
     "stage2_summary",
+    "write_ref_segment_video",
     "write_segment_video",
 ]

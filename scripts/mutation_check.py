@@ -1113,6 +1113,29 @@ MUTATIONS: tuple[Mutation, ...] = (
         "ref 校验退回帧链＝多参段开始剥尾帧读图判 end_hook，ADR 0011 明令不做的"
         "那一道又接回来（#258）",
     ),
+    Mutation(
+        "fake_asset_proofread_never_rejects",
+        "src/minimax_h3_prompt/api/fake_pipeline.py",
+        "    if number != first_number or round_no > 0:\n        return True, \"\"",
+        "    if True:\n        return True, \"\"",
+        ("tests/test_api_fake_pipeline_ref.py::"
+         "test_fake_ref_closed_loop_rejects_then_settles",),
+        "桩校对永远通过＝CI 里「不通过重开」那条路从未被走到，票面要求的第二条分支"
+        "静默缺席（#259）",
+    ),
+    Mutation(
+        "ref_concat_trims_first_frame",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "        if session.brief.is_ref:\n"
+        "            strategy = ConcatStrategy.STREAM_COPY_FIRST\n"
+        "        else:\n"
+        "            strategy = ConcatStrategy.TRIM_FIRST_FRAME",
+        "        strategy = ConcatStrategy.TRIM_FIRST_FRAME",
+        ("tests/test_api_fake_pipeline_ref.py::"
+         "test_fake_ref_closed_loop_rejects_then_settles",),
+        "ref 套用首尾帧链的裁首帧＝用户交回的帧被吃掉一帧，多参成片比段之和短"
+        "（#259，D7 §10 复用拼接件但路线口径不同）",
+    ),
 )
 
 

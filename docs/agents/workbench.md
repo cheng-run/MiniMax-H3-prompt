@@ -26,7 +26,7 @@
 | `api/problems.py` | RFC 9457 problem+json；所有错误都走这里（中间件用 `build_problem_response`） |
 | `step_machine.py` | 状态/触发/闸门的单一声明；续跑起点；`resolve` 的 approve/revise 去向与 approve 按变体分叉（ref 走 `asset_loop`） |
 | `session_store.py` | 快照文件读写、`atomic_write_text`、向导续接状态与 `RESUMABLE_STATUSES` |
-| `api/fake_pipeline.py` | 确定性桩管线：固定阶段 1/2、假读图与假段提示词/段判据，**只认环境变量 `MINIMAX_FAKE_PIPELINE`**（默认关、无 HTTP 入口），真实/桩互斥 |
+| `api/fake_pipeline.py` | 确定性桩管线：固定阶段 1/2（含 ref 的资产图词与校对结论）、假读图与假段提示词/段判据/段视频造件，**只认环境变量 `MINIMAX_FAKE_PIPELINE`**（默认关、无 HTTP 入口），真实/桩互斥 |
 | `segment_validation.py` | 段交接的两道判据：同步提交自检（段号/技术档，`segment_submission_problems`）与语义判据（尾帧描述 vs `end_hook`，`judge_end_hook`）；读图与模型调用在 `api/jobs.py` |
 | `frontend/src/features/sessions/` | 工作台五分区：`SessionDetailView`（壳/SSE/运行控制）、`ReviewTab`（审查与修订）、`AssetsTab` + `FrameSubmissionCard`（素材与帧提交）、`SegmentsTab` + `SegmentCard`（长片分段只读展示、`segment_video` 回交、ref 段内素材只读回显与「换一段」）、`ArtifactsTab`（产物查看/复制/下载/通用媒体播放） |
 | `frontend/src/api/client.ts` | 生成契约的类型出口与唯一 API 门面：令牌注入、媒体/产物 URL、错误归一成 `ApiError` |
@@ -62,7 +62,9 @@
   `final_film.assemble_film`——`plans` 取本会话 `segments/plan.json`，`rows` 由段状态里的
   已通过段与视频素材构造。成功产出 `final.mp4` 并转 `completed`（**没有交付确认闸门**）；
   缺段则 `failed`，`assemble_film` 的 reason（已点名第几段）原样进 `job.failed` 的
-  `detail`，补齐后 `advance` 续拼，已通过段不重收。
+  `detail`，补齐后 `advance` 续拼，已通过段不重收。拼接口径是**路线属性**：base 裁
+  第 2..N 段首帧（帧链段间共享首帧），ref 走 `STREAM_COPY_FIRST`（多参段彼此独立，
+  裁首帧只会吃掉用户交的帧）。
 - 产物 content **按登记表的形态分支**（#225）：文本产物（登记表＝11 件固定名 + 四条
   模式 `segments/shot-NN.md` 与 `segments/segment-NN.md` → kind `segment_prompt`、
   `assets/picture-NN.md` → kind `asset_prompt`、`segments/injection-card-NN.md` → kind
@@ -128,8 +130,11 @@
   brief 文件里，阶段 1/2 与修订重跑交给管线的 `brief.refs` 都由台账现造（只收 Picture，
   `path` 留空）；漏接一处，分镜表 Subject 标签与资产图提示词命名就与上传的语义名脱钩。
   派生出来的 refs **不写回会话文件**（台账是唯一真源）；base 会话原样返回。
-- 桩管线**尚不支持** ref 素材循环（#259 才扩）：`MINIMAX_FAKE_PIPELINE=1` 下这两个 job
-  直接失败，不悄悄拿空词落盘。
+- 桩管线**覆盖到 ref 素材循环**（#259）：`MINIMAX_FAKE_PIPELINE=1` 下阶段 1 按台账
+  语义名产出资产图词，校对 job 伪造结论（不调 `describe_image`、不建模型）——第 1 件
+  的第一轮固定不通过、其余通过（判据是台账轮次，重跑不换结论）。桩只换「谁写/谁判」，
+  产物落盘、台账转移与待办重开都走真实那一份代码。开关关掉时没有任何一条路径会伪造
+  结论：出词走 `asset_prompt_for`，名字对不上就硬失败。
 
 ## 长片分段陪跑（D6，ADR 0036）
 
