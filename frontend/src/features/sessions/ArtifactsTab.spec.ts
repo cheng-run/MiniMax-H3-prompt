@@ -243,3 +243,41 @@ describe('ArtifactsTab 导演台段词（#262）', () => {
     expect(wrapper.text()).toContain('director/segment-01.md')
   })
 })
+
+// D8-3（#263）：导演包是归档（下载），简报是可复制文本。
+describe('ArtifactsTab 导演包与简报（#263）', () => {
+  it('director_pack 不塞进 <video>：媒体分区给 content 端点的下载链接', async () => {
+    const { wrapper } = await mountTab([
+      makeArtifact('director/initial.mmxpack.zip', 'director_pack'),
+    ])
+    await flushPromises()
+
+    expect(wrapper.find('video').exists()).toBe(false)
+    const link = wrapper.get('[data-download="director/initial.mmxpack.zip"]')
+    expect(link.text()).toContain('下载导演包')
+    expect(link.attributes('href')).toBe(
+      'http://localhost/api/v1/artifacts/sess-1/director/initial.mmxpack.zip/content',
+    )
+    expect(link.attributes('download')).toBe('initial.mmxpack.zip')
+  })
+
+  it('director_briefing 归交付文本，可复制正文', async () => {
+    server.use(
+      http.get(/\/api\/v1\/artifacts\/.+\/content$/, () =>
+        HttpResponse.text('用 runSelection 只勾第 1 段；导出 192 帧。'),
+      ),
+    )
+    const { wrapper } = await mountTab([
+      makeArtifact('director/briefing-01.md', 'director_briefing'),
+    ])
+
+    await vi.waitFor(() => {
+      expect(wrapper.text()).toContain('只勾第 1 段')
+    })
+    expect(wrapper.get('[data-group="deliverable"]').text()).toContain('导演台简报')
+    const copyButton = wrapper.get('[data-copy="director/briefing-01.md"]')
+    await copyButton.trigger('click')
+    await flushPromises()
+    expect(writeText).toHaveBeenCalledWith('用 runSelection 只勾第 1 段；导出 192 帧。')
+  })
+})

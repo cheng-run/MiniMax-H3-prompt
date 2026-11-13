@@ -59,6 +59,7 @@ export function makeJob(overrides: Partial<JobSummary> = {}): JobSummary {
     started_at: createdAt,
     finished_at: '',
     cancel_requested: false,
+    detail: '',
     ...overrides,
   }
 }

@@ -15,7 +15,9 @@ import logging
 import os
 import re
 import secrets
+import stat
 import threading
+import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -102,6 +104,10 @@ ARTIFACT_INJECTION_CARD = "injection-card.md"
 # 是段内素材编号的对照表。两者都由规划阶段写出（与 CLI 同名同址），工作台只读。
 ARTIFACT_CONCAT_ORDER_CARD = "segments/order-card.md"
 ARTIFACT_REF_SHOT_TABLE = "segments/ref-shot-table.md"
+# 导演台初始包（D8 §9 / #263）：唯一会写的二进制产物。它是**归档形态**——不能当
+# ``<video>`` 播，但走同一条 content 端点、同一套单段 Range 语义（插件里也可能很大）。
+# 登记成 ``application/zip`` 后自动进 ``ARTIFACT_MEDIA_TYPES``，端点不再认第二种形态。
+ARTIFACT_DIRECTOR_PACK = "director/initial.mmxpack.zip"
 
 
 @dataclass(frozen=True)
@@ -128,6 +134,8 @@ _FIXED_ARTIFACT_SPECS: dict[str, ArtifactSpec] = {
     # 多参两件只读清单（D7 §11 / #258）：都是规划阶段一次写定的文本，没有写作入口。
     ARTIFACT_CONCAT_ORDER_CARD: ArtifactSpec("concat_order_card"),
     ARTIFACT_REF_SHOT_TABLE: ArtifactSpec("ref_shot_table"),
+    # 导演台初始包（D8 §9 / #263）：归档形态，与成片共用 Range 语义。
+    ARTIFACT_DIRECTOR_PACK: ArtifactSpec("director_pack", "application/zip"),
 }
 
 # 模式产物（D6 §7 / D7 §10）：每段一份。base 写 ``segments/shot-NN.md``，ref 写
@@ -144,11 +152,20 @@ _SEGMENT_PROMPT_SPEC = ArtifactSpec(SEGMENT_PROMPT_KIND)
 DIRECTOR_DIRNAME = "director"
 DIRECTOR_SEGMENT_PROMPT_KIND = "director_segment_prompt"
 _DIRECTOR_SEGMENT_PROMPT_FILENAME = r"segment-\d{2}\.md"
+# 逐段操作简报（D8 §8.5 / #263）：可复制文本，与段词同号、同目录。它不是段词：
+# 前后端要能按 kind 把「照着在导演台里点」的清单与「丢进提示词框」的正文分开。
+DIRECTOR_BRIEFING_KIND = "director_briefing"
+_DIRECTOR_BRIEFING_FILENAME = r"briefing-\d{2}\.md"
 
 
 def director_segment_prompt_name(position: int) -> str:
     """第 ``position`` 段（1 起）的导演台段词产物名（与 CLI 落点同名同形）。"""
     return f"{DIRECTOR_DIRNAME}/segment-{position:02d}.md"
+
+
+def director_briefing_name(position: int) -> str:
+    """第 ``position`` 段（1 起）的导演台操作简报产物名。"""
+    return f"{DIRECTOR_DIRNAME}/briefing-{position:02d}.md"
 
 # 资产图词（D7 §7）：素材循环里每件参考素材一份 ``assets/picture-NN.md``，与台账
 # 图片编号同号。改词重出**覆盖**同一份文件——历史靠台账轮次与待办决议表达。
@@ -174,6 +191,9 @@ _PATTERN_ARTIFACT_SPECS: tuple[tuple[str, str, ArtifactSpec], ...] = (
     # 导演台段词（#262）：``director/plan.json`` 不在这条模式里，所以它不是产物。
     (DIRECTOR_DIRNAME, _DIRECTOR_SEGMENT_PROMPT_FILENAME,
      ArtifactSpec(DIRECTOR_SEGMENT_PROMPT_KIND)),
+    # 导演台逐段简报（#263）：同一个 ``director/`` 目录，文本形态。
+    (DIRECTOR_DIRNAME, _DIRECTOR_BRIEFING_FILENAME,
+     ArtifactSpec(DIRECTOR_BRIEFING_KIND)),
 )
 
 
@@ -246,6 +266,8 @@ ASSET_KIND_LIMITS: dict[str, int] = {
     "image": 20 * 1024 * 1024,
     "video": 512 * 1024 * 1024,
     "audio": 64 * 1024 * 1024,
+    # 导演包（D8 §9.2 / #263）：包里装的是媒体，上限与视频同档。
+    "zip": 512 * 1024 * 1024,
 }
 
 # 落盘扩展名 → (kind, 规范化格式)。嗅探与目录扫描共用这一张表：两处各写一份
@@ -260,6 +282,8 @@ _ASSET_FORMATS: dict[str, tuple[str, str]] = {
     "webm": ("video", "webm"),
     "wav": ("audio", "wav"),
     "mp3": ("audio", "mp3"),
+    # 导演包（D8 §9.2）：上传侧只用来收「最终包」，本票不真正解包业务包。
+    "zip": ("zip", "zip"),
 }
 
 # 规范化格式 → Content-Type。媒体读取端点与它自己的契约共用这一张表：端点按磁盘上
@@ -272,6 +296,7 @@ _FORMAT_MEDIA_TYPES: dict[str, str] = {
     "webm": "video/webm",
     "wav": "audio/wav",
     "mp3": "audio/mpeg",
+    "zip": "application/zip",
 }
 # 扩展名 → Content-Type：从 ``_ASSET_FORMATS`` **现算**，不给新扩展名留一条静默漏判
 # 的路（加了扩展名却忘了媒体类型，这里当场 KeyError）。
@@ -567,6 +592,18 @@ class StorageUnavailable(WorkbenchError):
 
     status_code = 507
     code = "storage_unavailable"
+
+
+class ArchiveInvalid(WorkbenchError):
+    """导演包（或任何 zip）不可信：缺件、包内路径越界、符号链接、不是合法 ZIP。
+
+    D8 spec §9.2 把「绝对路径 / ``..`` / 符号链接」列为**一律拒绝**：包来自用户
+    或外部工具，解包路径绝不能让包内文字决定。与「上传类型不对」分开一码，是因为
+    前端的出路不同（换一份包 vs 换一种文件）。
+    """
+
+    status_code = 422
+    code = "archive_invalid"
 
 
 # ---------------------------------------------------------------------------
@@ -919,8 +956,13 @@ def _replay_snapshot(
             status = str(payload["status"])
         elif event.type == "job.started":
             status = step_machine.STATUS_RUNNING
-            _replay_event_job(jobs, event, {"status": step_machine.STATUS_RUNNING,
-                                            "started_at": event.at})
+            # kind 也要跟着事件走：``pack`` 与 ``segment`` 混在默认值 ``advance`` 里，
+            # 快照丢失后重放出来的任务列表就分不清「跑了三分钟那条是什么」（#263）。
+            started: dict[str, Any] = {"status": step_machine.STATUS_RUNNING,
+                                       "started_at": event.at}
+            if isinstance(payload.get("kind"), str):
+                started["kind"] = payload["kind"]
+            _replay_event_job(jobs, event, started)
         elif event.type == "job.progress":
             status = step_machine.STATUS_RUNNING
         elif event.type == "job.succeeded":
@@ -1026,6 +1068,9 @@ class JobSummary(BaseModel):
     cancelled_at_node: str | None = None
     # 取消是协作式的：请求后只打标记，job 要等当前节点跑完才进 cancelled。
     cancel_requested: bool = False
+    # 给人看的结果/失败说明（#263）：打包 job 在这里带装配结论与节点该设的宽高，
+    # 失败的 job 带已点名约束与段的那句话。其余任务留空——它不是事件流的替代品。
+    detail: str = ""
 
 
 class RevisionOut(BaseModel):
@@ -1535,9 +1580,85 @@ def _sniff_asset(head: bytes) -> tuple[str, str] | None:
     # JPEG 的 ``0xFF 0xD8`` 不满足后半条（``0xD8 & 0xE0 != 0xE0``），不会撞车。
     if head.startswith(b"ID3"):
         return "audio", "mp3"
+    # ZIP（导演包）：普通条目 ``PK\x03\x04``，空包是 ``PK\x05\x06``（只有中央目录
+    # 结束记录）。两种都认，否则空包会被当成「认不出类型」拒掉。
+    if head.startswith(b"PK\x03\x04") or head.startswith(b"PK\x05\x06"):
+        return "zip", "zip"
     if len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0:
         return "audio", "mp3"
     return None
+
+
+def _archive_member_problem(info: zipfile.ZipInfo) -> str | None:
+    """包内条目名的越界判据；合法返回 ``None``，否则给一句给人看的原因。
+
+    只认 **POSIX 形态**：ZIP 规范用 ``/``；反斜杠在 Windows 上会被解释成分隔符，
+    同一份包因此在两端解到不同的位置——一律拒绝，不替它归一。盘符（``C:``）在
+    ``PurePosixPath`` 眼里不是「绝对路径」，必须单独判。
+    """
+    name = str(info.filename or "")
+    if not name:
+        return "空文件名"
+    if "\\" in name:
+        return "包含反斜杠"
+    parts = name.split("/")
+    if name.startswith("/"):
+        return "是绝对路径"
+    if re.match(r"^[A-Za-z]:", parts[0]):
+        return "带盘符（绝对路径）"
+    if ".." in parts:
+        return "包含 .."
+    mode = info.external_attr >> 16
+    if mode and stat.S_ISLNK(mode):
+        return "是符号链接"
+    return None
+
+
+def extract_archive_zip(
+    zip_path: str | Path, destination: str | Path,
+) -> list[str]:
+    """把 zip 安全解到 ``destination``，返回写出的相对路径（POSIX 形态）。
+
+    **不信任包内路径**（D8 spec §9.2 / #263）：绝对路径、``..``、符号链接任一出现
+    就整份拒绝，一个字节都不落盘。调用方拿到的异常带稳定码 ``archive_invalid``。
+
+    #266 的最终包比对会复用这一份：两处各写一遍解包，安全判据就会在某一次重构后
+    只留在其中一条路径上。
+    """
+    archive_path = Path(zip_path)
+    target_root = Path(destination)
+    try:
+        archive = zipfile.ZipFile(archive_path)
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise ArchiveInvalid(f"不是可读的 ZIP 包：{archive_path}（{exc}）") from exc
+    written: list[str] = []
+    with archive:
+        for info in archive.infolist():
+            problem = _archive_member_problem(info)
+            if problem is not None:
+                raise ArchiveInvalid(
+                    f"包内条目不可信：{info.filename!r} {problem}——"
+                    "导演包只接受包内相对路径（ASCII 文件名），"
+                    "绝对路径、.. 与符号链接一律拒绝")
+            if info.is_dir() or info.filename.endswith("/"):
+                continue
+            relative = info.filename.rstrip("/")
+            target = target_root / relative
+            resolved = target.resolve()
+            root_resolved = target_root.resolve()
+            if root_resolved != resolved and root_resolved not in resolved.parents:
+                # 名字层面已拦住越界；这里再按**真实落点**兜一次（防御性，不是主判据）。
+                raise ArchiveInvalid(
+                    f"包内条目 {relative!r} 解出的位置越出目标目录")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(info) as source, target.open("wb") as sink:
+                while True:
+                    chunk = source.read(ASSET_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    sink.write(chunk)
+            written.append(relative)
+    return written
 
 
 def _claimed_extension(filename: str) -> str:
@@ -2285,11 +2406,17 @@ class WorkbenchSessionStore:
                         if sniffed is None:
                             raise UnsupportedMediaType(
                                 "认不出上传内容的类型：只接受 PNG / JPEG / WebP 图片、"
-                                "MP4 / WebM 视频与 WAV / MP3 音频。")
+                                "MP4 / WebM 视频、WAV / MP3 音频与 ZIP 导演包。")
                         kind, ext = sniffed
                         _check_declared_extension(filename, ext)
                         limit = ASSET_KIND_LIMITS[kind]
                         if registering:
+                            # ZIP 是导演包的上传通道，不是参考素材类型：台账只有
+                            # picture/video/audio 三型，硬记会在这里 KeyError 成 500。
+                            if kind not in ASSET_KIND_TO_REFERENCE:
+                                raise UnsupportedMediaType(
+                                    "ZIP 归档不能登记为参考素材：参考素材只收图片 / "
+                                    "视频 / 音频，导演包请不带语义名上传。")
                             # 快速失败：拿当前台账快照先判一次，超限就不搬剩余字节。
                             # 权威判定在会话锁内再做一次（并发上传可能同时通过这一关）。
                             _check_ref_capacity(

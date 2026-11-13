@@ -74,6 +74,10 @@ ACTION_DIRECTOR_START_IMAGE = "director_start_image"
 
 STEP_STAGE1 = "stage1"
 STEP_STAGE2 = "stage2"
+# 导演台的打包步骤（D8 spec §5.2 / #263）：阶段 2 的规划＋写段之后、段循环之前。
+# 它有独立产物（zip）、独立失败路径与独立 job kind（``pack``），且是唯一写二进制
+# 产物的步骤——所以单独占一档阶段标签，不挤进 ``stage2``。
+STEP_PACKING = "packing"
 # 长片在阶段 2 之后追加的段循环（D6 spec §5.2）：只用于 ``job.progress`` 与任务记录，
 # **不是**会话状态——会话仍是既有七态里的 ``running``/``awaiting_human``。
 STEP_SEGMENTING = "segmenting"
@@ -82,8 +86,8 @@ STEP_SEGMENTING = "segmenting"
 STEP_ASSET_LOOP = "asset_loop"
 
 # 进度事件允许的 stage 取值从这份声明派生（``workbench_store._PROGRESS_STAGES``），
-# 加阶段时不再改第二份表。
-STEPS = (STEP_STAGE1, STEP_ASSET_LOOP, STEP_STAGE2, STEP_SEGMENTING)
+# 加阶段时不再改第二份表。顺序即导演台的实际执行顺序。
+STEPS = (STEP_STAGE1, STEP_ASSET_LOOP, STEP_STAGE2, STEP_PACKING, STEP_SEGMENTING)
 
 # 长片是产品阈值（D6 spec §3：>10 秒），不是领域概念；判定只在这一处，执行器与
 # 界面不各写一个 ``duration > 10``。

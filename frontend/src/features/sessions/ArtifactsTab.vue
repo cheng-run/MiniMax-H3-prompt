@@ -3,7 +3,13 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 
 import { artifactContentUrl, getArtifactContent, type ArtifactInfo } from '@/api/client'
 
-import { artifactGroup, artifactLabel, sortArtifacts, type ArtifactGroup } from './artifactKinds'
+import {
+  artifactGroup,
+  artifactLabel,
+  isArchiveArtifact,
+  sortArtifacts,
+  type ArtifactGroup,
+} from './artifactKinds'
 
 // 「产物」分区（D4 spec §10）：阶段 1 的中间产物与阶段 2 的交付文本都在这里看。
 // 正文经 content 端点读，不在快照里塞（stage_state 不出 API，spec §7）。
@@ -253,6 +259,24 @@ function noteDownload(name: string): void {
             controls
             preload="metadata"
           />
+          <!-- 归档（导演包）不是可播媒体：按 kind 给下载链接，不塞进 <video>。 -->
+          <template v-else-if="isArchiveArtifact(artifact.kind)">
+            <p class="muted">归档文件：下载后在 ComfyUI 导演台里导入。</p>
+            <div class="artifact__actions">
+              <a
+                class="download"
+                :href="artifactContentUrl(artifact.artifact_id)"
+                :download="artifact.name.split('/').pop() ?? artifact.name"
+                :data-download="artifact.name"
+                @click="noteDownload(artifact.name)"
+              >
+                下载导演包
+              </a>
+              <span v-if="downloadedName === artifact.name" role="status" class="muted">
+                已开始下载
+              </span>
+            </div>
+          </template>
         </article>
       </section>
     </template>

@@ -40,6 +40,7 @@ from ..session_store import FRAME_SUBMISSION_KEY, atomic_write_text, load_sessio
 from ..summary import PromptSummary, render_summary_zh
 from ..workbench_store import (
     ARTIFACT_CONCAT_ORDER_CARD,
+    ARTIFACT_DIRECTOR_PACK,
     ARTIFACT_FINAL_FILM,
     ARTIFACT_FIRST_FRAME_PROMPT,
     ARTIFACT_LAST_FRAME_PROMPT,
@@ -79,6 +80,7 @@ from ..workbench_store import (
     StartImageRequired,
     WorkbenchError,
     WorkbenchSessionStore,
+    director_briefing_name,
     director_segment_prompt_name,
 )
 
@@ -132,6 +134,10 @@ SEGMENT_BRIDGE_DIRNAME = "bridge_frames"
 # 素材循环（D7 spec §5.3 / §6.2）：出词与校对是**两个独立 job**，都记这个 kind；
 # 中间隔着持久化的 ``asset_image`` 待办（不是阻塞线程）。
 JOB_KIND_ASSET_LOOP = "asset_loop"
+# 导演台打包（D8 spec §5.4 / #263）：唯一会写二进制产物的 job，也是唯一可能长时间
+# 占磁盘的一步。单独一个 kind 才回答得了「任务列表里跑了三分钟的那条是什么」。
+JOB_KIND_PACK = "pack"
+DIRECTOR_PACK_NODE = "director_pack"
 # 一次 job 只做一件：子步骤按**已落盘的台账事实**决定（``_asset_step``），不另记账。
 ASSET_STEP_WRITE = "write"
 ASSET_STEP_PROOFREAD = "proofread"
@@ -281,6 +287,17 @@ class SegmentAssemblyRefused(RuntimeError):
     """
 
     code = "segment_assembly_refused"
+
+
+class DirectorPackFailed(WorkbenchError):
+    """导演包装配失败（D8 spec §9.1 / §15）：消息逐字来自打包器，已点名约束与段。
+
+    打包器在**落盘之前**跑完八条约束；这里只把 ``ValueError`` 翻成稳定的
+    ``pack_build_failed``，不改写它点名的那句话——用户要照着它去改画布/素材/段表。
+    """
+
+    status_code = 500
+    code = "pack_build_failed"
 
 
 def _now() -> str:
@@ -1176,6 +1193,9 @@ class JobRunner:
                     # ``_resume_step`` 只在循环没走完时给出 ``asset_loop``；真到了
                     # 「已完成」说明两处判据打架，按失败收场而不是静默跳过。
                     raise RuntimeError("素材循环已全部定稿，不该再起 asset_loop 任务")
+            elif step == step_machine.STEP_PACKING:
+                result = await asyncio.to_thread(
+                    self._execute_pack, session_id, job_id, cancel_event)
             elif step == step_machine.STEP_SEGMENTING:
                 seg_step = await asyncio.to_thread(self._segment_step, session_id)
                 kind, number = seg_step
@@ -1216,6 +1236,11 @@ class JobRunner:
                     await asyncio.to_thread(
                         self._finish_asset_write, session_id, job_id, result)
                     next_job = None
+            elif step == step_machine.STEP_PACKING:
+                # 打包成功只落 job 结果；段循环是 #264，本票停在过渡态。
+                await asyncio.to_thread(
+                    self._finish_pack, session_id, job_id, result)
+                next_job = None
             elif step == step_machine.STEP_SEGMENTING:
                 kind = seg_step[0]
                 if kind == SEGMENT_STEP_PLANNING:
@@ -1275,6 +1300,13 @@ class JobRunner:
             if (session.brief.is_ref
                     and _asset_step_of(session.asset_ledger)[0] != ASSET_STEP_DONE):
                 return step_machine.STEP_ASSET_LOOP
+            # 导演台的阶段 2 只做规划 + 写段；写完就该打包（#263），段循环是 #264。
+            # 判据全在磁盘（段表 + 每段段词），zip 已在时仍给 ``packing``——打包器
+            # 自己跳过重建、只补缺失的简报（spec §9.4）。
+            if session.brief.is_director:
+                return (step_machine.STEP_PACKING
+                        if self._director_segments_ready(directory)
+                        else step_machine.STEP_STAGE2)
             # 长片的两段接缝都属于 ``segmenting``：① 阶段 2 已成功（``final_prompt``
             # 落盘）但还没段表——重试要重跑**规划**；② 段循环已开始（有段表）——重试要
             # 重跑当前那一段的写词或校验。两者都不能把阶段 2 再跑一遍（D6 spec §5.3）。
@@ -1285,6 +1317,29 @@ class JobRunner:
                     return step_machine.STEP_SEGMENTING
             return step_machine.STEP_STAGE2
         return step_machine.STEP_STAGE1
+
+    @staticmethod
+    def _director_segments_ready(directory: Path) -> bool:
+        """导演台阶段 2 是否已把段表与每段段词写齐（读盘，不读 job 记录）。
+
+        ``plan.json`` 在这里只**宽松**数段数：坏表（未知类型/帧数不自洽）由打包器
+        严格读回时点名失败，续跑判定不该先替它下结论、也不该在 resume 阶段抛。
+        """
+        from ..director.planning import plan_path
+        from ..director.prompts import segment_path
+
+        plan_file = plan_path(directory)
+        if not plan_file.is_file():
+            return False
+        try:
+            data = json.loads(plan_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        raw = data.get("segments") if isinstance(data, dict) else None
+        if not isinstance(raw, list) or not raw:
+            return False
+        return all(segment_path(directory, position).is_file()
+                   for position in range(1, len(raw) + 1))
 
     @staticmethod
     def _needs_segment_loop(brief: Any) -> bool:
@@ -1637,6 +1692,105 @@ class JobRunner:
         return AssetRecord(
             name=name, kind=str(entry["kind"]), number=number,
             path=relative, sha256=str(entry["sha256"]))
+
+    def _execute_pack(self, session_id: str, job_id: str,
+                      cancel_event: threading.Event) -> dict[str, Any]:
+        """导演台打包 job（D8 §9.1 / #263）：段表 + 段词 → ``director/pack/`` + zip。
+
+        **顺序是契约**：``prepare_director_pack`` 自己先读齐输入、内存装配、跑完八条
+        约束，最后才落盘。这里不先建目录再校验——半份包会被用户直接拿去导入，插件
+        不会替我们拒绝它（它只会「成功了但少几张图」）。
+
+        zip 已在时**不重建**（spec §9.4：初始包是计划，改词不重打包），但仍要补缺失
+        的简报：续跑只补缺，不把用户已经看过的清单换一版。
+        """
+        from ..director.film_canvas import film_settings, node_setup_lines
+        from ..director.pack import (
+            CONTINUITY_DEFAULT,
+            prepare_director_pack,
+            validate_continuity_mode,
+            zip_path_for,
+        )
+        from ..director.planning import plan_path, read_plan_json
+
+        directory = self.store.session_directory(session_id)
+        session = load_session(directory)
+        if session is None:
+            raise RuntimeError(f"会话文件读不到：{session_id}")
+        if cancel_event.is_set():
+            raise JobCancelled(DIRECTOR_PACK_NODE)
+        self._emit_progress(session_id, job_id, DIRECTOR_PACK_NODE, "started",
+                            stage=step_machine.STEP_PACKING)
+        self._write_active_job(session_id, job_id, DIRECTOR_PACK_NODE)
+        zip_file = zip_path_for(directory)
+        try:
+            plan = read_plan_json(plan_path(directory))
+            settings = film_settings(self.config.director_settings(), session.brief)
+            continuity_mode = validate_continuity_mode(
+                str(session.brief.director_continuity_mode or CONTINUITY_DEFAULT))
+            if zip_file.is_file():
+                report = "\n".join([
+                    f"导演包已存在，跳过重建：{zip_file}",
+                    "初始包是计划、改词不重打包（spec §9.4）；本次只补缺失的简报。",
+                ])
+                skipped = True
+            else:
+                _job, report = prepare_director_pack(
+                    directory, plan, settings=settings,
+                    continuity_mode=continuity_mode)
+                skipped = False
+        except ValueError as exc:
+            # 八条装配约束与坏段表都是 ValueError；打包器已点名是哪一条、哪一段，
+            # 这里只翻成稳定错误码，不改写那句话（用户要照着它去改）。
+            raise DirectorPackFailed(str(exc)) from exc
+        if not skipped:
+            self.store.register_artifact(
+                session_id, ARTIFACT_DIRECTOR_PACK, job_id=job_id)
+        briefings = self._write_director_briefings(
+            session_id, job_id, plan, session, directory)
+        self._emit_progress(session_id, job_id, DIRECTOR_PACK_NODE, "done",
+                            stage=step_machine.STEP_PACKING)
+        return {
+            "report": report,
+            "node_lines": node_setup_lines(settings),
+            "skipped": skipped,
+            "briefings": briefings,
+        }
+
+    def _write_director_briefings(
+        self, session_id: str, job_id: str, plan: Any, session: Any,
+        directory: Path,
+    ) -> list[str]:
+        """补写缺失的逐段简报（D8 §8.5 / §4.6）：已存在的不重写。
+
+        简报正文只走 ``wizard_display.render_director_segment_briefing`` 这一份渲染口
+        （CLI 与工作台同源）。缓存目录**只用于定位**：配置缺失或路径非法就算了，
+        不让一个给人看的清单因为定位信息不可得而整份失败。
+        """
+        from ..director.cache import cache_dir
+        from ..ui.wizard_display import render_director_segment_briefing
+
+        cache_name = str(session.brief.director_cache_name or "")
+        cache_root = getattr(self.config, "director_comfy_output_root", None)
+        cache_directory: Path | None = None
+        if cache_root is not None:
+            try:
+                cache_directory = cache_dir(
+                    cache_root(), cache_name,
+                    getattr(session.brief, "director_node_id", ""))
+            except (OSError, ValueError):
+                cache_directory = None
+        written: list[str] = []
+        for segment in plan.segments:
+            name = director_briefing_name(segment.index)
+            if (directory / name).is_file():
+                continue
+            text = render_director_segment_briefing(
+                plan, segment, directory,
+                cache_directory=cache_directory, cache_name=cache_name)
+            self.store.write_text_artifact(session_id, name, text, job_id=job_id)
+            written.append(name)
+        return written
 
     def _execute_stage2(self, session_id: str, job_id: str,
                         cancel_event: threading.Event) -> dict[str, Any]:
@@ -3131,6 +3285,29 @@ class JobRunner:
                        job_id=job_id),
         ])
 
+    def _finish_pack(self, session_id: str, job_id: str,
+                     result: dict[str, Any]) -> None:
+        """打包成功：装配结论与节点宽高进 job 详情，会话停在过渡态（段循环是 #264）。
+
+        不写 ``completed``：初始包只是「交给导演台去跑」的计划，交付在 #266。
+        """
+        detail = "\n".join([str(result["report"]), "", *result["node_lines"]])
+
+        def _apply(current: Any) -> dict[str, Any]:
+            job = self._job_or_running(job_id, current).model_copy(
+                update={"status": "succeeded", "finished_at": _now(),
+                        "detail": detail})
+            return {
+                "status": step_machine.STATUS_AWAITING_HUMAN,
+                "jobs": _upsert_job(current.jobs, _job_dict(job)),
+            }
+
+        self.store.mutate(session_id, _apply, events=[
+            EventDraft("job.succeeded",
+                       {"next": step_machine.STATUS_AWAITING_HUMAN},
+                       job_id=job_id),
+        ])
+
     def _finish_stage2(self, session_id: str, job_id: str,
                        result: dict[str, Any]) -> JobSummary | None:
         """阶段 2 收尾：短视频 completed；长片改挂分段规划任务（D6 spec §5.3）。
@@ -3142,17 +3319,20 @@ class JobRunner:
         """
         next_job: JobSummary | None = None
         director = bool(result.get("director"))
-        if not director and self._needs_segment_loop(result["brief"]):
+        if director:
+            # 导演台阶段 2 的成功不等于交付：立刻接上**打包**（#263）。与长片的
+            # 「阶段 2 后接分段规划」同一形态——新任务摘要与旧任务的 ``succeeded``
+            # 在同一次落盘里写出，读者看不到「已成功却没人接」的中间态。
+            next_job = JobSummary(
+                job_id=uuid.uuid4().hex, kind=JOB_KIND_PACK, status="running",
+                started_at=_now())
+        elif self._needs_segment_loop(result["brief"]):
             next_job = JobSummary(
                 job_id=uuid.uuid4().hex, kind=JOB_KIND_SEGMENT, status="running",
                 started_at=_now())
-        if director:
-            # 导演台阶段 2 的成功不等于交付（打包在 #263、段循环在 #264）：停在
-            # awaiting_human 的过渡态，不写 completed（那会让页面以为片子做完了）。
-            next_status = step_machine.STATUS_AWAITING_HUMAN
-        else:
-            next_status = (step_machine.STATUS_RUNNING if next_job is not None
-                           else step_machine.STATUS_COMPLETED)
+        # 有后续任务时不能落 completed（页面会以为片子做完了）；导演台的交付在 #266。
+        next_status = (step_machine.STATUS_RUNNING if next_job is not None
+                       else step_machine.STATUS_COMPLETED)
 
         def _apply(detail: Any) -> dict[str, Any]:
             job = self._job_or_running(job_id, detail).model_copy(
@@ -3178,7 +3358,7 @@ class JobRunner:
         ]
         if next_job is not None:
             events.append(EventDraft(
-                "job.started", {"kind": JOB_KIND_SEGMENT}, job_id=next_job.job_id))
+                "job.started", {"kind": next_job.kind}, job_id=next_job.job_id))
         self.store.mutate(session_id, _apply, events=events)
         return next_job
 
@@ -3424,7 +3604,7 @@ class JobRunner:
         def _apply(current: Any) -> dict[str, Any]:
             job = self._job_or_running(job_id, current).model_copy(
                 update={"status": "failed", "finished_at": _now(),
-                        "error_code": code})
+                        "error_code": code, "detail": detail})
             return {
                 "status": step_machine.STATUS_FAILED,
                 "jobs": _upsert_job(current.jobs, _job_dict(job)),

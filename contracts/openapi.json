@@ -483,6 +483,11 @@
             ],
             "title": "Cancelled At Node"
           },
+          "detail": {
+            "default": "",
+            "title": "Detail",
+            "type": "string"
+          },
           "error_code": {
             "anyOf": [
               {
@@ -1256,6 +1261,12 @@
         "responses": {
           "200": {
             "content": {
+              "application/zip": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
               "text/plain": {
                 "schema": {
                   "type": "string"
@@ -1304,6 +1315,12 @@
           },
           "206": {
             "content": {
+              "application/zip": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
               "video/mp4": {
                 "schema": {
                   "format": "binary",
@@ -1822,6 +1839,12 @@
         "responses": {
           "200": {
             "content": {
+              "application/zip": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
               "audio/mpeg": {
                 "schema": {
                   "format": "binary",
@@ -1901,6 +1924,12 @@
           },
           "206": {
             "content": {
+              "application/zip": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
               "audio/mpeg": {
                 "schema": {
                   "format": "binary",

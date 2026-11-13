@@ -29,6 +29,7 @@ from minimax_h3_prompt import model_factory
 from minimax_h3_prompt.api import jobs as jobs_module
 from minimax_h3_prompt.api.app import create_app
 from minimax_h3_prompt.director.frames import FPS, DirectorPlan, DirectorSegment
+from minimax_h3_prompt.director.pack import DirectorPackSettings
 from minimax_h3_prompt.director.planning import plan_path, read_plan_json
 from minimax_h3_prompt.director.prompts import segment_path
 from minimax_h3_prompt.graph import pipeline
@@ -37,7 +38,12 @@ from workbench_client import workbench_client
 from workbench_deterministic import DEFAULT_REPLIES, DeterministicChatModel
 
 RUNTIME = SimpleNamespace(
-    roundtable_max_rounds=1, common_sense_qa=False, max_qa_iterations=1)
+    roundtable_max_rounds=1, common_sense_qa=False, max_qa_iterations=1,
+    # 阶段 2 成功会自动接上打包 job（#263）：执行器要能读导演台配置。
+    director_settings=lambda: DirectorPackSettings(
+        width=736, height=1280, ref_max_size=864, ref_image_size="match"),
+    director_comfy_output_root=lambda: Path("unused-comfy-output"),
+)
 
 # i2v 的阶段 1 要出首帧词；I2VA 只收 first 一份。取 FL2VA 的同一份内容去掉尾帧，
 # 形状与真实节点一致（``fl2va_bundle_from_dict`` 会校验字段齐全）。
@@ -97,6 +103,18 @@ def _wait_job(client, session_id: str, job_id: str, timeout: float = 60.0) -> di
     raise AssertionError(f"任务没有在 {timeout}s 内结束：{job_id}")
 
 
+def _wait_idle(client, session_id: str, timeout: float = 60.0) -> dict:
+    """等到没有 running 任务：阶段 2 收尾会把打包 job 接在同一次落盘里（#263）。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        detail = _detail(client, session_id)
+        if detail["status"] != "running" and not any(
+                job["status"] == "running" for job in detail["jobs"]):
+            return detail
+        time.sleep(0.02)
+    raise AssertionError(f"会话没有在 {timeout}s 内停下：{session_id}")
+
+
 def _detail(client, session_id: str) -> dict:
     return client.get(f"/api/v1/sessions/{session_id}").json()
 
@@ -131,7 +149,8 @@ def _plan_and_write(client, session_id: str, item: dict) -> dict:
     assert job is not None, "t2v 通过审查应直接起阶段 2 任务"
     body = _wait_job(client, session_id, job["job_id"])
     assert body["status"] == "succeeded", body
-    return body
+    # 阶段 2 收尾会自动接上打包 job（#263）：等它停稳，断言才看得到最终状态。
+    return _wait_idle(client, session_id)
 
 
 def test_t2v_plans_and_writes_segments_with_frame_grid(workbench):
@@ -150,7 +169,7 @@ def test_t2v_plans_and_writes_segments_with_frame_grid(workbench):
         assert segment_path(directory, 1).is_file()
 
         detail = _detail(client, session_id)
-        # 过渡态：本票没有打包（#263）+ 段循环（#264），写完后停在 awaiting_human，
+        # 过渡态：打包已在 #263 接上并完成，段循环是 #264——写完后停在 awaiting_human，
         # 不假装进 segmenting、不走 base 的拼接。
         assert detail["status"] == "awaiting_human"
         assert len(detail["segments"]) == 1
@@ -373,7 +392,8 @@ def test_start_image_submit_enters_planning_instead_of_revising_stage1(workbench
         directory = root / Path(session_id)
         assert plan_path(directory).is_file()
         assert segment_path(directory, 1).is_file()
-        detail = _detail(client, session_id)
+        # 阶段 2 之后自动接打包（#263）：等它停稳再看快照。
+        detail = _wait_idle(client, session_id)
         # 交完首帧后没有新挂的审查待办：走的是导演台规划，不是修订重跑阶段 1。
         assert _pending(detail, "stage1_review") == []
         assert detail["segments"][0]["give_images"] == ["first"]

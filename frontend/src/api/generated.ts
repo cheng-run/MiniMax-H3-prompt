@@ -592,6 +592,11 @@ export interface components {
             cancel_requested: boolean;
             /** Cancelled At Node */
             cancelled_at_node?: string | null;
+            /**
+             * Detail
+             * @default
+             */
+            detail: string;
             /** Error Code */
             error_code?: string | null;
             /**
@@ -963,6 +968,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
+                    "application/zip": string;
                     "text/plain": string;
                     "video/mp4": string;
                 };
@@ -985,6 +991,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
+                    "application/zip": string;
                     "video/mp4": string;
                 };
             };
@@ -1373,6 +1380,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
+                    "application/zip": string;
                     "audio/mpeg": string;
                     "audio/wav": string;
                     "image/jpeg": string;
@@ -1400,6 +1408,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
+                    "application/zip": string;
                     "audio/mpeg": string;
                     "audio/wav": string;
                     "image/jpeg": string;

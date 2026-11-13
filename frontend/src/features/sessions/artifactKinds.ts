@@ -29,12 +29,17 @@ const DELIVERABLE_KINDS = new Set([
   // 导演台段词（D8 §8.2 / #262）：逐段 ``director/segment-NN.md``。与 base/ref 的
   // ``segment_prompt`` 分开一个 kind：同一条会话目录里两种段词不会互相冒充。
   'director_segment_prompt',
+  // 导演台逐段操作简报（D8 §8.5 / #263）：用户照着抄进导演台，可复制文本。
+  'director_briefing',
   'injection_card',
   'concat_order_card',
   'summary_markdown',
   'summary_json',
 ])
-const MEDIA_KINDS = new Set(['video', 'audio'])
+// 归档不是一个播放形态：``director_pack`` 下载后交给插件导入，**不能**当 ``<video>``
+// 播。分组归媒体（它和成片一样是二进制交付物），渲染按 kind 走下载链接。
+const ARCHIVE_KINDS = new Set(['director_pack'])
+const MEDIA_KINDS = new Set(['video', 'audio', 'director_pack'])
 // 段级注入卡只住「分段」分区、与段词同屏（D7 §9）：它不属于产物分区的任何一组，
 // 这是**有意**不显示，不是漏登记。
 const SEGMENT_LOCAL_KINDS = new Set(['segment_injection_card'])
@@ -67,10 +72,12 @@ const KIND_ORDER = [
   'video_prompt',
   'segment_prompt',
   'director_segment_prompt',
+  'director_briefing',
   'summary_markdown',
   'summary_json',
   'video',
   'audio',
+  'director_pack',
 ]
 
 export function sortArtifacts(artifacts: ArtifactInfo[]): ArtifactInfo[] {
@@ -91,8 +98,20 @@ const KIND_LABELS: Record<string, string> = {
   video_prompt: '最终提示词',
   segment_prompt: '段提示词',
   director_segment_prompt: '导演台段词',
+  director_briefing: '导演台简报',
+  director_pack: '导演包',
   summary_markdown: '中文摘要',
   summary_json: '摘要数据（JSON）',
+}
+
+/**
+ * 该 kind 是否按**归档下载**渲染（而不是 `<video>` / `<audio>` 播放）。
+ *
+ * archive 与媒体共用 content 端点与 Range 语义，但浏览器没有内置播放器能打开
+ * zip：给一个下载链接是本分区唯一正确的渲染。
+ */
+export function isArchiveArtifact(kind: string): boolean {
+  return ARCHIVE_KINDS.has(kind)
 }
 
 /**
