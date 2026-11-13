@@ -519,3 +519,61 @@ def test_replaying_the_same_events_twice_does_not_duplicate_anything(workbench):
         assert detail["last_event_seq"] == 5
     # 第二次读没有可重放的事件：不白抬 revision（否则每次 GET 都在写盘）。
     assert first["revision"] == second["revision"]
+
+
+def test_action_item_payload_survives_snapshot_replay(workbench):
+    """段号/件号/被拒原因随事件重放回待办——快照没跟上也不丢（D7-1 AC1）。
+
+    这是 ref 素材循环与 director 段待办的地基：崩溃补齐后要说得清「在等第几段视频 /
+    第几件素材」，而不是一句「在等某件事」。
+    """
+    app, _model, root = workbench
+    with workbench_client(app) as client:
+        session = _create_session(client)
+    EventLog(root / Path(session["session_id"]), session["session_id"]).append([
+        EventDraft("job.started", {"kind": "segment"}, job_id="j1"),
+        EventDraft("job.succeeded", {"next": "awaiting_human"}, job_id="j1"),
+        EventDraft("action_item.created",
+                   {"item_id": "i1", "kind": "segment_video",
+                    "segment_index": 2, "reason": "尾帧未达到本段末态"},
+                   job_id="j1"),
+        EventDraft("action_item.created",
+                   {"item_id": "i2", "kind": "asset_image", "asset_index": 3}),
+    ])
+
+    with workbench_client(app) as client:
+        detail = client.get(
+            f"/api/v1/sessions/{session['session_id']}").json()
+
+    items = {item["item_id"]: item for item in detail["action_items"]}
+    assert items["i1"]["segment_index"] == 2
+    assert items["i1"]["reason"] == "尾帧未达到本段末态"
+    assert items["i2"]["asset_index"] == 3
+    # 事件里没带的字段保持缺省，不编一个「第几件」出来。
+    assert items["i1"]["asset_index"] is None
+    assert items["i2"]["segment_index"] is None
+    assert items["i2"]["reason"] == ""
+
+
+def test_old_two_field_action_items_still_replay(workbench):
+    """已落盘的旧会话事件只有 item_id + kind，重放仍给出可用待办（AC4）。"""
+    app, _model, root = workbench
+    with workbench_client(app) as client:
+        session = _create_session(client)
+    EventLog(root / Path(session["session_id"]), session["session_id"]).append([
+        EventDraft("job.started", {"kind": "segment"}, job_id="j1"),
+        EventDraft("job.succeeded", {"next": "awaiting_human"}, job_id="j1"),
+        EventDraft("action_item.created",
+                   {"item_id": "i1", "kind": "segment_video"}, job_id="j1"),
+    ])
+
+    with workbench_client(app) as client:
+        detail = client.get(
+            f"/api/v1/sessions/{session['session_id']}").json()
+
+    assert detail["status"] == "awaiting_human"
+    item = [entry for entry in detail["action_items"] if entry["item_id"] == "i1"][0]
+    assert item["status"] == "pending"
+    assert item["segment_index"] is None
+    assert item["asset_index"] is None
+    assert item["reason"] == ""

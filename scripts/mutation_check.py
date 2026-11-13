@@ -990,6 +990,15 @@ MUTATIONS: tuple[Mutation, ...] = (
         "批处理落成裸 LF＝cmd.exe 把命令劈开执行，双击一闪就关（2026-11-13 实测）",
         normalize_newlines=False,
     ),
+    Mutation(
+        "replay_drops_segment_index",
+        "src/minimax_h3_prompt/workbench_store.py",
+        '                for key in ("segment_index", "asset_index", "reason"):',
+        '                for key in ("asset_index", "reason"):',
+        ("tests/test_api_events.py::test_action_item_payload_survives_snapshot_replay",),
+        "重放不还原段号＝崩溃补齐后待办又说不出「在等第几段」，"
+        "段循环的恢复只能靠人去翻产物名（#254）",
+    ),
 )
 
 

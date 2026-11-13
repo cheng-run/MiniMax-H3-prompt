@@ -324,6 +324,8 @@ export interface components {
     schemas: {
         /** ActionItemOut */
         ActionItemOut: {
+            /** Asset Index */
+            asset_index?: number | null;
             /**
              * Created At
              * @default
@@ -335,6 +337,11 @@ export interface components {
             item_id: string;
             /** Kind */
             kind: string;
+            /**
+             * Reason
+             * @default
+             */
+            reason: string;
             /**
              * Resolved At
              * @default

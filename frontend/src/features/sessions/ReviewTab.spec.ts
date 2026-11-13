@@ -52,6 +52,7 @@ function pendingReview(): ActionItemOut {
     status: 'pending',
     created_at: '2026-11-11T00:01:00Z',
     resolved_at: '',
+    reason: '',
   }
 }
 
@@ -63,6 +64,7 @@ function resolvedReview(): ActionItemOut {
     decision: 'revise',
     created_at: '2026-11-11T00:00:00Z',
     resolved_at: '2026-11-11T00:00:30Z',
+    reason: '',
     revisions: [{ layer: 'story', text: '结局需要更克制的收束' }],
   }
 }

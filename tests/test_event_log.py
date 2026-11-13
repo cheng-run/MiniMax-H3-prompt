@@ -135,6 +135,11 @@ def test_unknown_event_type_is_rejected(tmp_path):
     ("job.cancelled", {"at_node": "producer"}),
     ("job.interrupted", {}),
     ("action_item.created", {"item_id": "i1", "kind": "stage1_review"}),
+    # 待办载荷（D7-1 / spec §14）：段号、素材件号、被拒原因随事件一起写。
+    ("action_item.created", {"item_id": "i1", "kind": "segment_video",
+                             "segment_index": 2, "reason": "尾帧未达到本段末态"}),
+    ("action_item.created", {"item_id": "i2", "kind": "asset_image",
+                             "asset_index": 3}),
     ("action_item.resolved", {"item_id": "i1", "decision": "approve"}),
     ("artifact.created",
      {"artifact_id": "主题/GEN001/video-prompt.md", "kind": "video_prompt",
@@ -163,6 +168,27 @@ def test_payload_missing_or_wrong_values_are_rejected(tmp_path, event_type, payl
 
     with pytest.raises(InvalidEventPayload):
         log.append([EventDraft(event_type, payload)])
+
+
+@pytest.mark.parametrize("payload", [
+    # 段号与素材件号是「第几段 / 第几件」的唯一依据，写错了重放就指向别的产物；
+    # 0、bool、字符串与小数都不是合法编号（``True == 1`` 是 Python 的陷阱）。
+    {"item_id": "i1", "kind": "segment_video", "segment_index": 0},
+    {"item_id": "i1", "kind": "segment_video", "segment_index": True},
+    {"item_id": "i1", "kind": "segment_video", "segment_index": "2"},
+    {"item_id": "i1", "kind": "segment_video", "segment_index": 1.5},
+    {"item_id": "i1", "kind": "asset_image", "asset_index": -1},
+    {"item_id": "i1", "kind": "asset_image", "asset_index": "3"},
+    # 校对差异/被拒原因是给人看的文本，不是编号。
+    {"item_id": "i1", "kind": "segment_video", "reason": 3},
+    {"item_id": "i1", "kind": "segment_video", "reason": ["尾帧未达到本段末态"]},
+])
+def test_action_item_payload_fields_must_be_well_typed(tmp_path, payload):
+    """待办载荷出现时必须类型正确——不能靠「重放时自然变空」静默兜住（AC2）。"""
+    log = _log(_directory(tmp_path))
+
+    with pytest.raises(InvalidEventPayload):
+        log.append([EventDraft("action_item.created", payload)])
 
 
 def test_payload_may_carry_extra_fields(tmp_path):

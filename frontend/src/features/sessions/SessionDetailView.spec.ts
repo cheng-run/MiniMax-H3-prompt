@@ -80,6 +80,7 @@ describe('SessionDetailView 四分区（页内 tab）', () => {
                 status: 'pending',
                 created_at: '2026-11-11T00:00:00Z',
                 resolved_at: '',
+                reason: '',
               },
             ],
             artifacts: [
@@ -309,6 +310,7 @@ describe('SessionDetailView 审查与修订回路（#232）', () => {
         status: 'pending',
         created_at: '2026-11-11T00:00:00Z',
         resolved_at: '',
+        reason: '',
       },
     ])
     const bodies: unknown[] = []
@@ -327,6 +329,7 @@ describe('SessionDetailView 审查与修订回路（#232）', () => {
             decision: 'revise',
             created_at: '2026-11-11T00:00:00Z',
             resolved_at: '2026-11-11T00:00:30Z',
+            reason: '',
             revisions: [{ layer: 'character', text: '服装改成米色风衣' }],
           },
           {
@@ -335,6 +338,7 @@ describe('SessionDetailView 审查与修订回路（#232）', () => {
             status: 'pending',
             created_at: '2026-11-11T00:01:00Z',
             resolved_at: '',
+            reason: '',
           },
         ])
         return HttpResponse.json(null, { status: 202 })
@@ -440,6 +444,7 @@ describe('SessionDetailView 分段分区', () => {
       status: 'pending',
       created_at: '2026-11-11T00:00:00Z',
       resolved_at: '',
+      reason: '',
       segment_index: 1,
     }
     server.use(

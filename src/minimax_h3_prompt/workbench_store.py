@@ -465,6 +465,18 @@ def _validate_failed(payload: dict[str, Any]) -> None:
 def _validate_action_item_created(payload: dict[str, Any]) -> None:
     _require_str(payload, "item_id")
     _require_str(payload, "kind")
+    # 待办载荷（D7-1 / spec §14）：段号与素材件号是「在等第几段 / 第几件」的唯一
+    # 依据，出现时必须是 1 起的整数（``type is int`` 挡掉 ``True == 1``）。不出现
+    # 是允许的——旧会话的事件只有 item_id + kind，仍要能重放（AC4）。
+    for key in ("segment_index", "asset_index"):
+        value = payload.get(key)
+        if value is not None and (type(value) is not int or value < 1):
+            raise InvalidEventPayload(
+                f"事件 payload 的 {key!r} 必须是 ≥1 的整数：{value!r}")
+    reason = payload.get("reason")
+    if reason is not None and not isinstance(reason, str):
+        raise InvalidEventPayload(
+            f"事件 payload 的 'reason' 必须是字符串：{reason!r}")
 
 
 def _validate_action_item_resolved(payload: dict[str, Any]) -> None:
@@ -720,11 +732,18 @@ def _replay_snapshot(
         elif event.type == "action_item.created":
             if not any(item.get("item_id") == payload["item_id"]
                        for item in action_items):
-                action_items.append({
+                created: dict[str, Any] = {
                     "item_id": payload["item_id"], "kind": payload["kind"],
                     "status": "pending", "created_at": event.at,
                     "resolved_at": "", "decision": None,
-                })
+                }
+                # 决议所需的载荷随事件走（D7-1 / spec §14）：段号/件号/被拒原因在
+                # 快照补齐后仍要说得出「在等第几段 / 第几件」。旧会话没有这些键，
+                # 保持缺省而不是补一个看似有值的零。
+                for key in ("segment_index", "asset_index", "reason"):
+                    if key in payload:
+                        created[key] = payload[key]
+                action_items.append(created)
         elif event.type == "action_item.resolved":
             revisions = payload.get("revisions")
             for item in action_items:
@@ -804,6 +823,10 @@ class ActionItemOut(BaseModel):
     # 段视频待办的段号（1 起，与 segments[].index 同号，D6 §8「载荷带段号」）。其它
     # 待办类型为 None。resolve 用它判「段号与当前段是否一致」。
     segment_index: int | None = None
+    # 素材循环待办的件号（1 起，与素材台账同号，D7 §6.3）。其它待办类型为 None。
+    asset_index: int | None = None
+    # 被拒原因/校对差异等给人看的文本：段循环被拒、素材校对不通过时填（D7 §6.3）。
+    reason: str = ""
 
 
 class SegmentOut(BaseModel):

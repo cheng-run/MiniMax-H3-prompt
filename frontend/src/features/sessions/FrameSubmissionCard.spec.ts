@@ -15,6 +15,7 @@ const item: ActionItemOut = {
   status: 'pending',
   created_at: '2026-11-11T00:00:00Z',
   resolved_at: '',
+  reason: '',
 }
 
 const firstImage: Asset = {

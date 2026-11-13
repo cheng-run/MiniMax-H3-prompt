@@ -246,6 +246,23 @@ def test_reject_rebuilds_the_same_segment_todo_without_passing(
     rebuilt = [event for event in events
                if event["type"] == "action_item.created"][-1]
     assert "尾帧未达到本段末态" in rebuilt["payload"].get("reason", "")
+    # 重建的待办事件同时带着段号：崩溃补齐后重放要说得清「在等第几段」（D7-1）。
+    assert rebuilt["payload"].get("segment_index") == 1
+
+
+def test_segment_todo_event_carries_the_segment_number(loop_app):
+    """首次挂出的段待办事件带段号——不只快照里有（D7-1 AC1）。"""
+    app, _model, root, _captured = loop_app
+
+    with workbench_client(app) as client:
+        session_id = client.post(
+            "/api/v1/sessions", json=_brief_body()).json()["session_id"]
+        _to_first_segment_todo(client, session_id)
+
+    created = [event for event in _events(root, session_id)
+               if event["type"] == "action_item.created"]
+    assert created[-1]["payload"]["kind"] == "segment_video"
+    assert created[-1]["payload"]["segment_index"] == 1
 
 
 # ---------------------------------------------------------------------------

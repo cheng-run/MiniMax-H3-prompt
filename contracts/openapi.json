@@ -3,6 +3,17 @@
     "schemas": {
       "ActionItemOut": {
         "properties": {
+          "asset_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asset Index"
+          },
           "created_at": {
             "default": "",
             "title": "Created At",
@@ -25,6 +36,11 @@
           },
           "kind": {
             "title": "Kind",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
             "type": "string"
           },
           "resolved_at": {

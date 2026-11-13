@@ -1818,7 +1818,8 @@ class JobRunner:
             EventDraft("job.succeeded",
                        {"next": step_machine.STATUS_AWAITING_HUMAN}, job_id=job_id),
             EventDraft("action_item.created",
-                       {"item_id": item.item_id, "kind": item.kind}, job_id=job_id),
+                       {"item_id": item.item_id, "kind": item.kind,
+                        "segment_index": number}, job_id=job_id),
         ])
         return None
 
@@ -1882,12 +1883,13 @@ class JobRunner:
             self.store.mutate(session_id, _apply, events=events)
             return next_job
 
-        item = ActionItemOut(
-            item_id=uuid.uuid4().hex, kind=step_machine.ACTION_SEGMENT_VIDEO,
-            status="pending", created_at=_now(), segment_index=number)
         # 具体原因随段状态与待办一起给到用户（D6 §5.4「被拒时看到具体原因」）。
         reason = _segment_rejection_reason(
             str(result.get("end_hook") or ""), description)
+        item = ActionItemOut(
+            item_id=uuid.uuid4().hex, kind=step_machine.ACTION_SEGMENT_VIDEO,
+            status="pending", created_at=_now(), segment_index=number,
+            reason=reason)
 
         def _reject(detail: Any) -> dict[str, Any]:
             job = self._job_or_running(job_id, detail).model_copy(
@@ -1917,7 +1919,8 @@ class JobRunner:
                        {"next": step_machine.STATUS_AWAITING_HUMAN}, job_id=job_id),
             EventDraft("action_item.created",
                        {"item_id": item.item_id, "kind": item.kind,
-                        "reason": reason}, job_id=job_id),
+                        "segment_index": number, "reason": reason},
+                       job_id=job_id),
         ])
         return None
 
