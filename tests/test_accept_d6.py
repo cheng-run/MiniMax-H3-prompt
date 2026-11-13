@@ -251,11 +251,63 @@ def test_frame_image_argument_must_point_at_a_real_photo(tmp_path):
     assert "missing.png" in str(raised.value)
 
 
-def test_accept_d4_finder_survives_module_registration():
-    """回归：动态载入 accept_d4 前必须登记 sys.modules，否则 @dataclass 炸 AttributeError。"""
-    finder = accept_d6._accept_d4_finder()
+def test_frame_image_is_required_not_looked_up_from_history(tmp_path):
+    """没给 --frame-image 就停：不许再去 output/ 的历史记录里捞一张（2026-11-13）。
 
-    assert finder is None or callable(finder)
+    捞到的是上一轮验收留下的 864×480 横幅图，而 H3 画布是 480×864 竖幅——
+    图与提示词从第一步就对不上，整轮白跑。
+    """
+    args = accept_d6.parse_args(["--out-dir", str(tmp_path / "out"), "--prepare"])
+
+    with pytest.raises(accept_d6.AcceptanceError) as raised:
+        accept_d6._resolve_frame_image(args)
+
+    assert "--frame-image" in str(raised.value)
+
+
+def _noisy_png(path, size: tuple[int, int]):
+    """造一张够大（过 8KB 夹具线）的纯噪声 PNG——纯色图会被压到几 KB。"""
+    import os
+
+    from PIL import Image
+
+    width, height = size
+    Image.frombytes("RGB", size, os.urandom(width * height * 3)).save(path)
+    return path
+
+
+def test_frame_image_must_be_portrait(tmp_path):
+    """横图会被 90° 拧着用：必须在提交前拦下，而不是让它跑完整轮。"""
+    landscape = _noisy_png(tmp_path / "landscape.png", (864, 480))
+    args = accept_d6.parse_args([
+        "--out-dir", str(tmp_path / "out"), "--prepare",
+        "--frame-image", str(landscape),
+    ])
+
+    with pytest.raises(accept_d6.AcceptanceError) as raised:
+        accept_d6._resolve_frame_image(args)
+
+    assert "横幅" in str(raised.value)
+
+
+def test_portrait_frame_image_passes(tmp_path):
+    portrait = _noisy_png(tmp_path / "portrait.png", (480, 864))
+    args = accept_d6.parse_args([
+        "--out-dir", str(tmp_path / "out"), "--prepare",
+        "--frame-image", str(portrait),
+    ])
+
+    assert accept_d6._resolve_frame_image(args) == portrait.resolve()
+
+
+def test_video_older_than_the_session_is_rejected():
+    """陈旧视频必须挡住：2026-11-13 实测复制旧片交上去，整轮证据作废。"""
+    import inspect
+
+    source = inspect.getsource(accept_d6.run_submit)
+
+    assert "_predates(video, created_at)" in source
+    assert "不是本轮生成的" in source
 
 
 def test_resume_is_exclusive_with_prepare_and_submit(capsys):
@@ -302,9 +354,14 @@ def test_handoff_names_the_first_frame_for_segment_one():
     assert "f_00.05.png" in text
 
 
-def test_handoff_says_later_segments_use_the_previous_tail_frame():
-    """第 2 段起是上一段剥出的尾帧，必须说清楚用户不用再准备图。"""
+def test_handoff_points_at_the_tail_frame_file_for_later_segments():
+    """第 2 段起必须给出尾帧**文件路径**：它不会自动进 H3 节点，要人手动接。
+
+    2026-11-13 复核：这里原先写「系统自动处理，你不用准备图」，照做的人到第 2 段
+    就卡住——尾帧只是落盘了，没有谁替用户把它接到首帧输入上。
+    """
     text = accept_d6.render_handoff(_handoff_facts("p.md"), 2, accept_d6.Path("out"))
 
-    assert "上一段" in text
-    assert "尾帧" in text
+    assert "上一段" in text and "尾帧" in text
+    assert "shot-01-start.png" in text
+    assert "Picture 1" in text

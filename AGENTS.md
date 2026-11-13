@@ -18,7 +18,7 @@ Issues 活在 GitHub Issues（github.com/cheng-run/MiniMax-H3-prompt），用 `g
 
 单上下文：根 `CONTEXT.md`（术语表）+ `docs/adr/`（架构决策）。见 `docs/agents/domain.md`。
 前端工程（技术栈、本地坑、`PW_CHANNEL` 跑 E2E、起前后端与关端口、契约生成）见 `docs/agents/frontend.md`。
-工作台会话与 Headless API（模块地图、事件/写入/产物不变量、契约链）见 `docs/agents/workbench.md`。
+工作台会话与 Headless API（**启动入口**、模块地图、事件/写入/产物不变量、契约链）见 `docs/agents/workbench.md`。
 导演台路线另有实现与插件契约：`docs/design/2026-10-29-导演台路线实现设计.md`、`docs/research/2026-10-29-director-插件原生格式.md`；2026-10-31 的陪跑证据改造（#112–#114）见同目录的 `2026-10-31-director-fl2v-video-evidence-*.md`。
 
 ## 产物落点（新产物写哪，2026-10-21 起）
@@ -36,6 +36,7 @@ spec 与票住 issue 是因为 `/to-spec`、`/to-tickets` 按 `docs/agents/issue
 
 ## 票据工作流（2026-10-21 修订）
 
+- **动手改文件前先开分支**：`git switch -c <类型>/<slug>`，不是提交前才开；main 工作区不留未提交的实现改动（2026-11-13 实际反例：在 main 上写完两个新文件才建分支）。
 - **默认不开工作树**：只有用户明确要求并行执行任务时才 `git worktree add worktree/ticket-NN`（`/worktree/` 已 gitignore）；单票照常在主树做。
 - **工作树的提交不进历史**：工作树里可以提交到它自己的临时分支，但那些提交**永不 push**；合并回原分支走 `git merge --squash`，**最终提交只落在主分支上、一票一次**。
 - **推送放最后，验收通过才推**：整条 spec 拆回 main 后跑一次全量（`full` ＋ `clean`）；**纯文档/占位改动沿用最近一次绿的结果**，并在推送时说明依据哪一次。全量绿只是**交验收的前提**——用户说「验收通过／可以合了」之后才合 main 并 `git push`；验收前不推。全局 `~/.claude/AGENTS.md` 的验收门是唯一真源（覆盖 2026-10-21 版「绿了即自动 push」）。

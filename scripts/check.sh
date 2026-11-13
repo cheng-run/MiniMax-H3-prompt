@@ -92,7 +92,12 @@ lint_changed() {
   # scripts/ 也查（retro 2026-11-10）：#226 里 accept_d3.py 带着 F541 进了提交，
   # 因为验收驱动器不在任何 lint 范围；只查改动文件，历史告警（accept_140、
   # measure_seam_motion 各一条）不会一次性刷屏。
-  files=$(git diff --name-only --diff-filter=ACMR HEAD -- 'src' 'tests' 'scripts' | grep -E '\.py$' || true)
+  # 未跟踪文件也算「改动」（retro 2026-11-13）：`git diff HEAD` 看不见新建文件，
+  # 于是每一个新加的 .py 都从 lint 与 mypy 底下溜过去，直到提交之后才第一次被看见
+  # （实测：新建的 scripts/start_web.py 在盘上，check.sh fast 打印「没有改动」）。
+  files=$({ git diff --name-only --diff-filter=ACMR HEAD -- 'src' 'tests' 'scripts'
+            git ls-files --others --exclude-standard -- 'src' 'tests' 'scripts'; } \
+          | grep -E '\.py$' | sort -u || true)
   if [ -z "$files" ]; then
     echo "[check] lint: 没有改动的 src/tests/scripts 下的 .py，跳过"
     return 0
@@ -123,7 +128,10 @@ run_types() {
   # #226 里 accept_d3.py 的 arg-type 错误只能靠复审手跑才发现。历史脚本还有存量
   # 错误，所以只查改动过的，不把整目录并进配置。
   local script_files
-  script_files=$(git diff --name-only --diff-filter=ACMR HEAD -- 'scripts' | grep -E '\.py$' || true)
+  # 同样要带上未跟踪文件（retro 2026-11-13）：新建的脚本在提交前也得过一遍类型。
+  script_files=$({ git diff --name-only --diff-filter=ACMR HEAD -- 'scripts'
+                   git ls-files --others --exclude-standard -- 'scripts'; } \
+                 | grep -E '\.py$' | sort -u || true)
   if [ -n "$script_files" ]; then
     echo "[check] types: mypy（改动的 scripts）"
     # shellcheck disable=SC2086 - 文件名按行拆分是刻意的（路径不含空格是本仓约定）

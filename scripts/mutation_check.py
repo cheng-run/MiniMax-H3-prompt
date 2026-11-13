@@ -41,6 +41,9 @@ class Mutation:
     new: str
     tests: tuple[str, ...]
     why: str
+    # 行尾本身就是被测对象时置 False。默认会先把锚点按 LF 归一、写完再补回 CRLF，
+    # 那会把「CRLF → LF」这类变异当场抵消掉，变异报「存活」而守卫其实好好的。
+    normalize_newlines: bool = True
 
 
 MUTATIONS: tuple[Mutation, ...] = (
@@ -978,6 +981,15 @@ MUTATIONS: tuple[Mutation, ...] = (
         ("tests/test_accept_d6.py::test_config_source_problems_names_every_mismatch",),
         "配置来源比对恒真＝拿着错的端点/模型/配置跑完整轮真实调用，整轮证据白费（#251）",
     ),
+    Mutation(
+        "batch_crlf_guard_off",
+        "start_web.cmd",
+        "setlocal\r\n",
+        "setlocal\n",
+        ("tests/test_script_line_endings.py::test_batch_files_have_crlf_line_endings",),
+        "批处理落成裸 LF＝cmd.exe 把命令劈开执行，双击一闪就关（2026-11-13 实测）",
+        normalize_newlines=False,
+    ),
 )
 
 
@@ -1021,12 +1033,13 @@ def check(mutation: Mutation) -> tuple[bool, str]:
     raw = path.read_bytes()
     original = raw.decode("utf-8")
     # 与 ``read_text`` 的通用换行同口径：锚点一律按 LF 写，CRLF 文件也能命中。
-    normalized = original.replace("\r\n", "\n")
+    # 测行尾的变异显式关掉这一步（见 ``normalize_newlines``）。
+    normalized = original.replace("\r\n", "\n") if mutation.normalize_newlines else original
     occurrences = normalized.count(mutation.old)
     if occurrences != 1:
         return False, f"锚点在 {mutation.path} 出现 {occurrences} 次（要求恰好 1 次）"
     mutated = normalized.replace(mutation.old, mutation.new, 1)
-    if "\r\n" in original:
+    if mutation.normalize_newlines and "\r\n" in original:
         mutated = mutated.replace("\n", "\r\n")
     try:
         path.write_bytes(mutated.encode("utf-8"))

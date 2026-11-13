@@ -416,78 +416,70 @@ def gate_issues_for(video: Path, expected_seconds: float) -> list[dict[str, str]
     ]
 
 
+# ---------------------------------------------------------------- 素材新鲜度
+
+def _session_created_at(sessions_root: Path, session_id: str) -> datetime | None:
+    """会话快照里的 ``created_at``：判「这段视频是不是本轮生成的」的基准时刻。
+
+    读不到就返回 None——那时不拦，只在证据里记一笔，不让一个坏文件挡住整轮验收。
+    """
+    path = Path(sessions_root) / session_id / "session-state.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    try:
+        return datetime.fromisoformat(str(payload.get("created_at") or ""))
+    except ValueError:
+        return None
+
+
+def _predates(path: Path, moment: datetime) -> bool:
+    return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc) < moment
+
+
+def _mtime_iso(path: Path) -> str:
+    return datetime.fromtimestamp(
+        path.stat().st_mtime, tz=timezone.utc).isoformat(timespec="seconds")
+
+
 # ---------------------------------------------------------------- 首帧图
 
-def recorded_frame_image(reports_root: Path) -> Path | None:
-    """``output/accept-d4`` 历史报告里记过、仍在盘上的真实图片（最近一次优先）。
-
-    D4 验收用过的图就是「真实照片」的现成证据：报告里带着路径与 sha256，
-    比重新猜一张更可靠（``accept_d4.find_real_image`` 的口径）。
-    """
-    for report in sorted(
-            Path(reports_root).glob("*/report.json"),
-            key=lambda path: path.stat().st_mtime, reverse=True):
-        try:
-            payload = json.loads(report.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        image = payload.get("image") or {}
-        candidate = Path(str(image.get("path") or ""))
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-def _accept_d4_finder() -> Callable[[Path], Path | None] | None:
-    """取回 ``accept_d4.find_real_image``：同一套挑图口径，不另写一份。"""
-    import importlib.util
-    import sys
-
-    path = ROOT / "scripts" / "accept_d4.py"
-    if not path.is_file():
-        return None
-    spec = importlib.util.spec_from_file_location("accept_d4_for_d6", path)
-    if spec is None or spec.loader is None:
-        return None
-    module = importlib.util.module_from_spec(spec)
-    # 必须先登记再执行：accept_d4 里的 @dataclass 要按模块名回查 sys.modules，
-    # 漏这一步会在 dataclasses 内部炸 AttributeError（2026-11-13 实测）。
-    sys.modules[spec.name] = module
+def _image_size(path: Path) -> tuple[int, int] | None:
+    """读像素尺寸；读不动返回 None——尺寸只用于体检，不拿它挡住整轮验收。"""
     try:
-        spec.loader.exec_module(module)
-    except (OSError, ImportError):
+        from PIL import Image
+
+        with Image.open(path) as image:
+            return image.size
+    except Exception:  # noqa: BLE001 - 打不开就交给后面的读图/上传去报错
         return None
-    finder = getattr(module, "find_real_image", None)
-    return finder if callable(finder) else None
-
-
-def find_frame_image() -> Path | None:
-    """默认首帧图：D4 验收记录 → 沿用 ``accept_d4.find_real_image`` 的口径挑一张。"""
-    recorded = recorded_frame_image(DEFAULT_OUTPUT_ROOT.parent / "accept-d4")
-    if recorded is not None:
-        return recorded
-    finder = _accept_d4_finder()
-    return finder(ROOT) if finder is not None else None
 
 
 def _resolve_frame_image(args: argparse.Namespace) -> Path:
-    """FL2VA 的首帧图：显式路径优先，否则按默认口径找；找不到就带可操作提示停下。"""
-    if args.frame_image:
-        path = Path(args.frame_image).expanduser().resolve()
-        _expect(path.is_file(), f"--frame-image 指定的图片不存在：{path}")
-    else:
-        found = find_frame_image()
-        _expect(
-            found is not None,
-            "找不到真实首帧图：FL2VA 的第 1 段要一张开场画面。"
-            "用 --frame-image PATH 指定一张真实照片"
-            "（例如 output/accept-137-16x9/f_00.05.png），"
-            "或先跑一次 D4 验收留下 output/accept-d4 记录")
-        path = Path(found).resolve()
+    """FL2VA 的开场帧：**必须显式指定，且必须竖幅**。
+
+    这里曾经有一条「默认值」——去 ``output/accept-d4`` 的历史报告里捞一张真实照片。
+    2026-11-13 实测它捞到 864×480 的横幅图，而 H3 画布是 480×864 竖幅：图与提示词
+    从第一步就对不上，整轮验收白跑。开场帧是这一轮现生成的，没有默认值可给。
+    """
+    if not args.frame_image:
+        raise AcceptanceError(
+            "FL2VA 必须用 --frame-image 指定本轮现生成的开场帧（竖幅）。"
+            "不再自动沿用 output/ 下的历史图片：那张图与本轮 plot 无关，"
+            "2026-11-13 实测捞到 864×480 横幅图，与竖幅画布差 90°。")
+    path = Path(args.frame_image).expanduser().resolve()
+    _expect(path.is_file(), f"--frame-image 指定的图片不存在：{path}")
     _expect(
         path.stat().st_size >= 8 * 1024,
-        f"首帧图太小（{path.stat().st_size} 字节），像测试夹具："
-        f"请用 --frame-image 换一张真实照片：{path}")
+        f"首帧图太小（{path.stat().st_size} 字节），像测试夹具：请换一张真实图片：{path}")
+    size = _image_size(path)
+    if size is not None:
+        width, height = size
+        _expect(
+            height > width,
+            f"开场帧是 {width}×{height} 横幅图，H3 画布是竖幅（736×1280 / 480×864）："
+            f"横竖差 90° 会让第 1 段视频与首帧对不上。请换一张竖幅图：{path}")
     return path
 
 
@@ -808,7 +800,17 @@ def render_handoff(
         picture_note = (
             f"`{frame['path']}` —— 你在帧提交步骤交的那张开场帧，直接接到 H3 节点的首帧输入")
     elif int(pending_index or 0) > 1:
-        picture_note = "上一段视频剥出的尾帧（系统自动处理，你不用准备图）"
+        # 尾帧不是「系统自动处理」：它落在会话目录里，必须由人接进 H3 节点的
+        # 首帧输入。原先这句写成「你不用准备图」，照做的人到第 2 段就卡住
+        # （2026-11-13 复核）。
+        tail = (Path(str(facts.get("sessions_root") or ""))
+                / str(facts.get("session_id") or "")
+                / "segments" / "bridge_frames"
+                / f"shot-{int(pending_index) - 1:02d}-start.png")
+        picture_note = (
+            f"`{tail}` —— 上一段视频剥出的尾帧，系统已落盘；"
+            "把它接到 H3 节点的首帧输入，就是本段提示词里的 `<Picture 1>`"
+            + ("" if tail.is_file() else "（文件尚未落盘：先让上一段通过校验）"))
     else:
         picture_note = "（本次会话没有交开场帧，T2VA 形态，无首帧图）"
     lines = [
@@ -1042,10 +1044,13 @@ def run_prepare(
         detail = _session_detail(client, base_url, token, session_id)
         item = pending_review_item(detail)
         # 续跑时会话的审查待办早已 resolved：不重复决议（决议一份已过的待办会 422）。
-        review_resumed = item is None
-        if review_resumed:
+        # 直接判 None 而不是先存成布尔量：mypy 不会替那个别名收窄，else 分支里
+        # `item["item_id"]` 会报「None 不可下标」。
+        if item is None:
+            review_resumed = True
             facts["review_resumed"] = True
         else:
+            review_resumed = False
             job = _resolve(client, base_url, token, session_id,
                            str(item["item_id"]), {"decision": "approve"})
             if job is not None:
@@ -1127,6 +1132,12 @@ def run_submit(
     facts["pipeline"] = (
         "real（真实 LLM；服务端桩开关无法从 HTTP 观测，桩文本标记会被内容检查拦下）")
     session_id = str(facts["session_id"])
+    created_at = _session_created_at(sessions_root, session_id)
+    facts["session_created_at"] = created_at.isoformat() if created_at else None
+    facts["freshness_check"] = (
+        "视频 mtime 早于会话创建时间即拒绝"
+        if created_at is not None else
+        "跳过（会话快照里没有可解析的 created_at）")
 
     while True:
         detail = _session_detail(client, base_url, token, session_id)
@@ -1164,6 +1175,15 @@ def run_submit(
                   flush=True)
             return EXIT_WAITING_USER
         video = videos.pop(index)
+        if created_at is not None and _predates(video, created_at):
+            # 2026-11-13 实测的作弊形态：从 ComfyUI 输出目录复制一段更早生成的片子
+            # 交上来，内容与提示词/首帧全对不上，闸门却只能按帧数放行。
+            # 时限判据挡不住「刚复制过来的旧片」（复制会刷新 mtime），所以证据里同时
+            # 记 sha256，复核时能量出同一份字节被交了两次。
+            raise AcceptanceError(
+                f"第 {index} 段视频早于本次会话创建，不是本轮生成的：{video}"
+                f"（视频 {_mtime_iso(video)} ＜ 会话 {created_at.isoformat()}）。"
+                "验收只接受按本段提示词现生成的视频，不接受复制来的旧片。")
 
         def submit() -> str:
             issues = gate_issues_for(video, float(row.get("planned_seconds") or 0))
