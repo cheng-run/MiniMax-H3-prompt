@@ -281,3 +281,30 @@ def test_resume_never_starts_stage1_again():
 
     assert source.count('report.run("起阶段 1 并等待审查待办"') == 1
     assert source.count('report.run("建 18 秒会话"') == 1
+
+
+def _handoff_facts(prompt_path: str) -> dict:
+    return {
+        "session_id": "话题/GEN001",
+        "base_url": "http://127.0.0.1:8000",
+        "sessions_root": "output/sessions",
+        "frame_image": {"path": "D:/frames/f_00.05.png"},
+        "segments": [{"index": 1, "planned_seconds": 5, "prompt_path": prompt_path},
+                     {"index": 2, "planned_seconds": 4, "prompt_path": prompt_path}],
+    }
+
+
+def test_handoff_names_the_first_frame_for_segment_one():
+    """第 1 段的 Picture 1 必须点名用户交的那张开场帧——不给图，用户无从下手。"""
+    text = accept_d6.render_handoff(_handoff_facts("p.md"), 1, accept_d6.Path("out"))
+
+    assert "Picture 1" in text
+    assert "f_00.05.png" in text
+
+
+def test_handoff_says_later_segments_use_the_previous_tail_frame():
+    """第 2 段起是上一段剥出的尾帧，必须说清楚用户不用再准备图。"""
+    text = accept_d6.render_handoff(_handoff_facts("p.md"), 2, accept_d6.Path("out"))
+
+    assert "上一段" in text
+    assert "尾帧" in text

@@ -803,6 +803,14 @@ def render_handoff(
     prompt_path = row.get("prompt_path") or (
         out_dir / "prompts" / f"segment-{int(pending_index or 1):02d}.md")
     videos_dir = out_dir / "videos"
+    frame = facts.get("frame_image") or {}
+    if int(pending_index or 0) == 1 and frame.get("path"):
+        picture_note = (
+            f"`{frame['path']}` —— 你在帧提交步骤交的那张开场帧，直接接到 H3 节点的首帧输入")
+    elif int(pending_index or 0) > 1:
+        picture_note = "上一段视频剥出的尾帧（系统自动处理，你不用准备图）"
+    else:
+        picture_note = "（本次会话没有交开场帧，T2VA 形态，无首帧图）"
     lines = [
         "# D6 真实验收：下一段视频请你生成",
         "",
@@ -811,10 +819,12 @@ def render_handoff(
         f"- 会话目录：`{facts.get('sessions_root', '')}`",
         f"- 当前待交：**第 {pending_index} 段**（规划 {seconds} 秒）",
         f"- 本段提示词：`{prompt_path}`",
+        f"- 本段首帧图（提示词里的 `<Picture 1>`）：{picture_note}",
         "",
         "## 你要做的",
         "",
-        f"1. 打开 `{prompt_path}`，把正文原样交给 ComfyUI 的 H3 节点。",
+        f"1. 打开 `{prompt_path}`，把正文原样交给 ComfyUI 的 H3 节点"
+        "（首行的 `<Picture 1>` 就是上面那张首帧图）。",
         f"2. 按本段规划时长生成：**{seconds} 秒**（H3 节点支持 4–15 秒整数档，"
         "不支持小数）。",
         f"3. 把输出视频保存为 `segment-{int(pending_index or 1):02d}.mp4`，放进 "
@@ -832,8 +842,11 @@ def render_handoff(
         "- 通过后剥尾帧、视觉模型读图判定是否达到本段 `end_hook`（语义闸门）；",
         "- 通过则自动写下一段提示词；全部通过后自动拼接 `final.mp4`。",
         "",
-        "## 如实记录的两条边界",
+        "## 如实记录的三条边界",
         "",
+        "- 段链是**首帧驱动**（ADR 0036）：第 1 段的 `<Picture 1>` 是你交的开场帧，"
+        "第 2 段起是上一段视频剥出的尾帧。没有「尾帧提示词」这一环——"
+        "尾帧是视频的真实末帧，不是另生成的一张图。",
         "- 7–10 秒档不在 H3 实测帧数表（`H3_TIER_FRAMES` 只有 4/5/6 秒档）内，"
         "技术档闸门只报 `warning`（`segment_video_duration_unknown_tier`），"
         "证据里会原样记录，不当作失败。",
