@@ -179,6 +179,9 @@ const detailFixture: SessionDetail = {
     clarifications: '',
     draft: '',
     director_mode: 'off',
+    director_node_id: '',
+    director_cache_name: '',
+    director_continuity_mode: '',
   },
 }
 

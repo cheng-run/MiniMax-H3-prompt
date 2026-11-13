@@ -176,9 +176,10 @@ export interface paths {
          * @description 提交人工决定：``approve`` 走后续步骤（base 进阶段 2，ref 先进素材循环），
          *     ``revise`` 从声明层次重跑阶段 1。
          *
-         *     第二个人工待办（``frame_submission``）复用同一个端点、靠 body 分型（D4 §9）：
-         *     带 ``frames`` 即帧提交；kind 与载荷错配一律 422 ``frame_invalid``。段视频
-         *     （``video_asset_id``，D6 §8）与素材图（``asset_id``，D7 §6.3）同理。
+         *     其余人工待办复用同一个端点、靠 body 分型（D4 §9）：带 ``frames`` 即帧提交；段视频
+         *     （``video_asset_id``，D6 §8）、素材图（``asset_id``，D7 §6.3）与导演台开场首帧
+         *     （``decision=submit_start_image`` + ``start_asset_id``，D8 §7.1）同理。kind 与载荷
+         *     错配一律 422（``frame_invalid`` / ``segment_video_invalid`` / ``asset_image_invalid``）。
          *
          *     状态判定与「决议 + 起任务」的原子性都在 ``JobRunner.resolve`` 的会话临界区里，
          *     这里只把请求体归一成内部词汇，不先查一遍状态（两处判据会在并发下各说各话）。
@@ -390,6 +391,8 @@ export interface components {
             created_at: string;
             /** Decision */
             decision?: string | null;
+            /** End Asset Id */
+            end_asset_id?: string | null;
             /** Item Id */
             item_id: string;
             /** Kind */
@@ -408,18 +411,22 @@ export interface components {
             revisions?: components["schemas"]["RevisionOut"][];
             /** Segment Index */
             segment_index?: number | null;
+            /** Start Asset Id */
+            start_asset_id?: string | null;
             /** Status */
             status: string;
         };
         /**
          * ActionItemResolve
-         * @description 决议载荷（spec §7 / D4 §9 / D6 §8 / D7 §6.3）。
+         * @description 决议载荷（spec §7 / D4 §9 / D6 §8 / D7 §6.3 / D8 §7.1）。
          *
-         *     四种人工待办各收一种载荷：
+         *     五类人工待办各收一种载荷：
          *     - ``stage1_review`` 收 ``decision``（approve/revise，revise 带 ``revisions``）；
          *     - ``frame_submission`` 收 ``frames``；
          *     - ``segment_video`` 收 ``video_asset_id``（本段视频素材）；
-         *     - ``asset_image`` 收 ``asset_id``（这一件资产图的生成结果，普通素材上传得到）。
+         *     - ``asset_image`` 收 ``asset_id``（这一件资产图的生成结果，普通素材上传得到）；
+         *     - ``director_start_image`` 收 ``decision="submit_start_image"`` 与
+         *       ``start_asset_id``（必填）/``end_asset_id``（可选）/``confirm_aspect_mismatch``。
          *
          *     kind 与载荷的错配由服务端判成 422（``frame_invalid`` / ``segment_video_invalid`` /
          *     ``asset_image_invalid``，不是 pydantic 的通用 422）。
@@ -427,11 +434,17 @@ export interface components {
         ActionItemResolve: {
             /** Asset Id */
             asset_id?: string | null;
+            /** Confirm Aspect Mismatch */
+            confirm_aspect_mismatch?: boolean | null;
             /** Decision */
-            decision?: ("approve" | "revise") | null;
+            decision?: ("approve" | "revise" | "submit_start_image") | null;
+            /** End Asset Id */
+            end_asset_id?: string | null;
             frames?: components["schemas"]["FrameSelection"] | null;
             /** Revisions */
             revisions?: components["schemas"]["RevisionIn"][];
+            /** Start Asset Id */
+            start_asset_id?: string | null;
             /** Video Asset Id */
             video_asset_id?: string | null;
         };
@@ -491,10 +504,25 @@ export interface components {
              */
             clarifications: string;
             /**
+             * Director Cache Name
+             * @default
+             */
+            director_cache_name: string;
+            /**
+             * Director Continuity Mode
+             * @default
+             */
+            director_continuity_mode: string;
+            /**
              * Director Mode
              * @default
              */
             director_mode: string;
+            /**
+             * Director Node Id
+             * @default
+             */
+            director_node_id: string;
             /**
              * Draft
              * @default
@@ -729,11 +757,17 @@ export interface components {
         };
         /**
          * SessionCreate
-         * @description 建会话的 brief 一次性给全（spec §7；D7 §4.1 放开 ``ref``）。
+         * @description 建会话的 brief 一次性给全（spec §7；D7 §4.1 放开 ``ref``，D8 放开 ``director``）。
          *
-         *     D2 起 ``mode`` 被写成单值字面量，由后续票扩成真实的两条路线。``ref`` 的参考
-         *     素材**不进创建表单**：素材是会话内资产，创建时还没有 asset_id——``RefIn`` 与
-         *     ``refs`` 一并删除，DTO 里不再出现本地路径。
+         *     ``mode`` 只作普通字符串：三路线的合法性由 ``_validate_route_parameters`` 判，
+         *     这样未知路线能拿到稳定的 ``director_mode_invalid``，而不是 pydantic 那份没有
+         *     ``code`` 的通用 422。``ref`` 的参考素材与 ``director`` 的开场首帧**都不进创建
+         *     表单**：前者是会话内资产（建好后上传），后者要等阶段 1 才有画幅可比。
+         *
+         *     导演台三个打包参数（节点 id / 段缓存名 / 段间引导模式）在创建时问齐，与 CLI
+         *     「会话开头问一次」是同一时点（``wizard_director.py:119-179``）。``director_mode``
+         *     与 ``director_continuity_mode`` 用 ``None`` 表示「没给」：空串与省略在这两个字段
+         *     上必须分开——引导模式省略要落默认 ``guide``，而不是落一个空串。
          */
         SessionCreate: {
             /** Canvases */
@@ -748,6 +782,14 @@ export interface components {
              * @default
              */
             clarifications: string;
+            /** Director Cache Name */
+            director_cache_name?: string | null;
+            /** Director Continuity Mode */
+            director_continuity_mode?: string | null;
+            /** Director Mode */
+            director_mode?: string | null;
+            /** Director Node Id */
+            director_node_id?: string | null;
             /**
              * Draft
              * @default
@@ -766,9 +808,8 @@ export interface components {
             /**
              * Mode
              * @default base
-             * @enum {string}
              */
-            mode: "base" | "ref";
+            mode: string;
             /** Plot */
             plot: string;
             /**

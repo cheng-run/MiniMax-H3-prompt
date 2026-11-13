@@ -13,6 +13,7 @@ import { useUiStore, type WorkbenchTab } from '@/stores/ui'
 import AssetsTab from './AssetsTab.vue'
 import ArtifactsTab from './ArtifactsTab.vue'
 import AssetImageCard from './AssetImageCard.vue'
+import DirectorStartImageCard from './DirectorStartImageCard.vue'
 import FrameSubmissionCard from './FrameSubmissionCard.vue'
 import { newIdempotencyKey } from './keys'
 import ReviewTab from './ReviewTab.vue'
@@ -149,6 +150,14 @@ const pendingAssetItem = computed(
   () =>
     data.value?.action_items?.find(
       (item) => item.kind === 'asset_image' && item.status === 'pending',
+    ) ?? null,
+)
+// 导演台开场首帧卡（D8 §4.4 / §7.1）：i2v / fl2v 审查通过后一个待办收两张图。
+// 它不是 base 的 frame_submission——两条路线各自一个 kind，界面也各一张卡。
+const pendingDirectorStartItem = computed(
+  () =>
+    data.value?.action_items?.find(
+      (item) => item.kind === 'director_start_image' && item.status === 'pending',
     ) ?? null,
 )
 const isCreated = computed(() => status.value === 'created')
@@ -337,6 +346,14 @@ const errorMessage = computed(() =>
           :item="pendingFrameItem"
           :assets="data.assets ?? []"
           :artifacts="data.artifacts ?? []"
+          @submitted="invalidateSnapshot"
+        />
+        <DirectorStartImageCard
+          v-if="pendingDirectorStartItem"
+          :session-id="data.session_id"
+          :item="pendingDirectorStartItem"
+          :assets="data.assets ?? []"
+          @uploaded="invalidateSnapshot"
           @submitted="invalidateSnapshot"
         />
         <ReviewTab

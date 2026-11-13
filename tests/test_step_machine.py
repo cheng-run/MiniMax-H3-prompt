@@ -8,6 +8,7 @@ from __future__ import annotations
 import pytest
 
 from minimax_h3_prompt import step_machine as m
+from minimax_h3_prompt.brief_parser import Brief
 from minimax_h3_prompt.graph.pipeline import _STAGE1_CHAIN
 from minimax_h3_prompt.user_revisions import LAYER_FRAME, LAYER_SPECS
 
@@ -200,6 +201,25 @@ def test_frame_chain_variant_requires_a_frame_submission_gate(variant):
 def test_other_variants_go_straight_to_stage2(variant):
     """非帧链不凭空多出一道待办；拼写错误也不该被当成帧链。"""
     assert not m.needs_frame_submission(variant)
+
+
+@pytest.mark.parametrize(
+    ("brief", "expected"),
+    [
+        # 非导演台路线：与 ``needs_frame_submission(brief.variant)`` 逐位相同。
+        (Brief(mode="base", variant="FL2VA"), True),
+        (Brief(mode="base", variant="T2VA"), False),
+        (Brief(mode="ref", variant="T2VA"), False),
+        # 导演台：判据来自 director_mode → 帧变体，不读恒为 T2VA 占位的 variant。
+        (Brief(mode="director", variant="T2VA", director_mode="i2v"), True),
+        (Brief(mode="director", variant="T2VA", director_mode="fl2v"), True),
+        (Brief(mode="director", variant="T2VA", director_mode="t2v"), False),
+        (Brief(mode="director", variant="T2VA", director_mode="r2v"), False),
+    ],
+)
+def test_frame_submission_predicate_reads_the_director_frame_variant(brief, expected):
+    """导演台的 ``variant`` 是 T2VA 占位：照读它会让 i2v/fl2v 静默不出帧待办。"""
+    assert m.needs_frame_submission_for_brief(brief) is expected
 
 
 def test_frame_submission_is_a_second_human_action_item_not_a_new_event_type():

@@ -43,6 +43,9 @@ export function makeDetail(overrides: Partial<SessionDetail> = {}): SessionDetai
       clarifications: '',
       draft: '',
       director_mode: 'off',
+      director_node_id: '',
+      director_cache_name: '',
+      director_continuity_mode: '',
     },
     ...overrides,
   }

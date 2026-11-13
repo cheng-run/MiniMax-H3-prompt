@@ -10,6 +10,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .brief_parser import (
+    FRAME_VARIANTS,
+    Brief,
+    director_frame_variant,
+    is_director_mode,
+)
 from .user_revisions import LAYER_FRAME, LAYER_SPECS
 
 # ---------------------------------------------------------------------------
@@ -61,6 +67,10 @@ ACTION_SEGMENT_VIDEO = "segment_video"
 # 第四个人工待办（D7 spec §6.3）：素材循环里每件参考素材一次「交这张生成的资产图」。
 # 载荷只有 ``asset_id``，决定只有 ``submit_image``——**没有放行键**（降级只能靠改词）。
 ACTION_ASSET_IMAGE = "asset_image"
+# 第五个人工待办（D8 spec §5.6 / §7）：导演台 i2v/fl2v 在阶段 1 审查通过之后、规划之前
+# 收开场首帧（必填）与全片尾帧（可选）。它不是 base 的 ``frame_submission``——串用会让
+# 「哪条路线产什么」重新散落（ADR 0020）。载荷仍是 ``action_item.created``（十种闭合不变）。
+ACTION_DIRECTOR_START_IMAGE = "director_start_image"
 
 STEP_STAGE1 = "stage1"
 STEP_STAGE2 = "stage2"
@@ -139,6 +149,9 @@ DECISION_SUBMIT_VIDEO = "submit_video"
 # 资产图交回同理：请求体里靠 ``asset_id`` 分型。它同样是待办的**唯一**决议——
 # 素材校对没有「就这样吧」的放行（spec §6.3）。
 DECISION_SUBMIT_IMAGE = "submit_image"
+# 导演台开场首帧（D8 §5.6）：与 ``submit_start_image`` 同名，是本票**唯一**在接口上
+# 显式声明的 decision 取值（其余交图类靠字段分型）。两张图分别是开场首帧与全片尾帧。
+DECISION_SUBMIT_START_IMAGE = "submit_start_image"
 
 
 class InvalidTransition(ValueError):
@@ -219,6 +232,24 @@ def needs_frame_submission(variant: str) -> bool:
     return str(variant).upper() in FRAME_CHAIN_VARIANTS
 
 
+def needs_frame_submission_for_brief(brief: "Brief") -> bool:
+    """该 brief 通过阶段 1 审查后是否要先收关键帧（D8 §6.4 的唯一入口）。
+
+    为什么不能直接读 ``brief.variant``：导演台的 variant 恒为 T2VA 占位（ADR 0024），
+    帧形态住在 ``director_mode`` 里。照读 variant 会让 i2v/fl2v **静默不出帧待办**，
+    用户要等到导入导演包才发现段里没图。非导演台路线的返回值与
+    ``needs_frame_submission(brief.variant)`` 逐位相同——base/ref 行为一字不变。
+
+    导演台这一支的集合是 ``FRAME_VARIANTS``（三种帧变体全收）而不是
+    ``FRAME_CHAIN_VARIANTS``（base 只认 FL2VA）：base 的 I2VA/L2VA 是降级产物、
+    不是创建时能选的档位，导演台的 i2v 却**本来就要**开场首帧，两个问题不同。
+    判据仍只从 ``director_frame_variant`` 派生，不另写一份模式名单。
+    """
+    if is_director_mode(brief.mode):
+        return director_frame_variant(brief) in FRAME_VARIANTS
+    return needs_frame_submission(brief.variant)
+
+
 def next_status(status: str, trigger: str) -> str:
     """按声明表取下一个状态；组合不在表里就报错，绝不默认放行。"""
     try:
@@ -294,6 +325,7 @@ def resolve(status: str, decision: str, *, layer: str = "") -> Decision:
 
 __all__ = [
     "ACTION_ASSET_IMAGE",
+    "ACTION_DIRECTOR_START_IMAGE",
     "ACTION_FRAME_SUBMISSION",
     "ACTION_SEGMENT_VIDEO",
     "ACTION_STAGE1_REVIEW",
@@ -303,6 +335,7 @@ __all__ = [
     "DECISION_REVISE",
     "DECISION_SUBMIT_FRAMES",
     "DECISION_SUBMIT_IMAGE",
+    "DECISION_SUBMIT_START_IMAGE",
     "DECISION_SUBMIT_VIDEO",
     "Decision",
     "FRAME_CHAIN_VARIANTS",
@@ -343,6 +376,7 @@ __all__ = [
     "can_advance",
     "is_long_form",
     "needs_frame_submission",
+    "needs_frame_submission_for_brief",
     "next_action",
     "next_status",
     "resolve",

@@ -82,8 +82,8 @@ class VideoOutputIn(BaseModel):
 DURATION_MIN_SECONDS = 4.0
 DURATION_MAX_SECONDS = 60.0
 
-# ref 路线不走帧链（ADR 0011）：variant 是帧形态（T2VA/I2VA/FL2VA/L2VA），ref 段
-# 不写单图锚，所以服务端固定落这一个值；DTO 里因此不出现「有时没有这个字段」。
+# ref 与 director 都不走帧链（ADR 0011 / ADR 0024）：variant 是帧形态，两条路线的
+# 服务端固定落这一个占位值，DTO 里因此不出现「有时没有这个字段」。
 REF_VARIANT = "T2VA"
 
 
@@ -94,6 +94,35 @@ class DurationOutOfScope(ProblemError):
     code = "duration_out_of_scope"
 
 
+class DirectorModeInvalid(ProblemError):
+    """路线或导演台模式不在声明表里（D8 §14）。
+
+    包含已取消的 ``v2v`` / ``rv2v`` / ``mixed``：它们在 #170 被收口掉，旧客户端带
+    这些值进来要被**点名拒绝**，而不是静默当成 base 跑下去。
+    """
+
+    status_code = 422
+    code = "director_mode_invalid"
+
+
+class DirectorParamMissing(ProblemError):
+    """director 路线缺必需参数，或非 director 路线带了导演台参数（D8 §14）。"""
+
+    status_code = 422
+    code = "director_param_missing"
+
+
+class DirectorContinuityInvalid(ProblemError):
+    """段间引导模式非法（D8 §4.2）。
+
+    单独一码而不是折进 ``director_mode_invalid``：它对应的是包内 ``continuityMode``，
+    前端的出路是「换一个引导模式」，与「选错生成方式」不是同一件事。
+    """
+
+    status_code = 422
+    code = "director_continuity_invalid"
+
+
 def _validate_duration(duration: float) -> None:
     if DURATION_MIN_SECONDS <= duration <= DURATION_MAX_SECONDS:
         return
@@ -102,28 +131,84 @@ def _validate_duration(duration: float) -> None:
         f"收到的 duration={duration:g}。")
 
 
-def _validate_route_parameters(payload: SessionCreate) -> None:
-    """ref 路线不接受帧链的变体（D7 §4.1）。
+# 导演台专属的四个字段：非 director 路线带任何一个都要响（D8 §14）。
+_DIRECTOR_FIELDS = (
+    "director_mode", "director_node_id", "director_cache_name",
+    "director_continuity_mode",
+)
 
-    前端选 ref 时会隐藏 variant 下拉，这条只兜外部调用方。用通用 422 而不是
-    ``route_mismatch``（409）：错的是**请求体字段**，不是会话状态冲突。
+
+def _director_field_is_set(payload: SessionCreate, name: str) -> bool:
+    value = getattr(payload, name)
+    return bool(str(value or "").strip())
+
+
+def _validate_route_parameters(payload: SessionCreate) -> None:
+    """三条路线的创建参数校验（D7 §4.1 / D8 §4.1–§4.2）。
+
+    - 路线值只认 ``base`` / ``ref`` / ``director`` 三个精确小写值；
+    - ``ref`` 不接受帧链变体（ADR 0011）；
+    - ``director`` 必须给生成模式（四选一）与节点 id；引导模式缺省 ``guide``；
+    - 其它路线带导演台参数 → ``director_param_missing``。
+
+    错的是**请求体字段**，不是会话状态冲突，所以全部落 422 而不是 409。
     """
-    if payload.mode == "ref" and payload.variant != REF_VARIANT:
-        raise HTTPException(
-            422,
-            f"ref 路线不走帧链（ADR 0011）：variant 只能是 {REF_VARIANT}，"
-            f"收到 {payload.variant!r}。")
+    from ...brief_parser import (
+        validate_director_mode,
+        validate_route_mode,
+    )
+    from ...director.pack import CONTINUITY_DEFAULT, validate_continuity_mode
+    from ...errors import UserInputError
+
+    try:
+        mode = validate_route_mode(payload.mode)
+    except UserInputError as exc:
+        # 未知路线（含已取消的 v2v/rv2v/mixed）：用导演台错误码而不是 pydantic 的
+        # 通用 422——前端要能靠 code 把「选错路线」与「剧情为空」分开。
+        raise DirectorModeInvalid(str(exc)) from exc
+
+    if mode != "director":
+        extra = [name for name in _DIRECTOR_FIELDS
+                 if _director_field_is_set(payload, name)]
+        if extra:
+            raise DirectorParamMissing(
+                f"{mode} 路线不接受导演台参数：{'、'.join(extra)}。")
+        if mode == "ref" and payload.variant != REF_VARIANT:
+            raise HTTPException(
+                422,
+                f"ref 路线不走帧链（ADR 0011）：variant 只能是 {REF_VARIANT}，"
+                f"收到 {payload.variant!r}。")
+        return
+
+    try:
+        validate_director_mode(str(payload.director_mode or ""))
+    except UserInputError as exc:
+        raise DirectorModeInvalid(str(exc)) from exc
+    if not str(payload.director_node_id or "").strip():
+        raise DirectorParamMissing(
+            "director 路线缺导演台节点 id：段缓存目录名由 <缓存名>_<节点id> 决定。")
+    try:
+        validate_continuity_mode(
+            str(payload.director_continuity_mode or CONTINUITY_DEFAULT))
+    except ValueError as exc:
+        raise DirectorContinuityInvalid(str(exc)) from exc
 
 
 class SessionCreate(BaseModel):
-    """建会话的 brief 一次性给全（spec §7；D7 §4.1 放开 ``ref``）。
+    """建会话的 brief 一次性给全（spec §7；D7 §4.1 放开 ``ref``，D8 放开 ``director``）。
 
-    D2 起 ``mode`` 被写成单值字面量，由后续票扩成真实的两条路线。``ref`` 的参考
-    素材**不进创建表单**：素材是会话内资产，创建时还没有 asset_id——``RefIn`` 与
-    ``refs`` 一并删除，DTO 里不再出现本地路径。
+    ``mode`` 只作普通字符串：三路线的合法性由 ``_validate_route_parameters`` 判，
+    这样未知路线能拿到稳定的 ``director_mode_invalid``，而不是 pydantic 那份没有
+    ``code`` 的通用 422。``ref`` 的参考素材与 ``director`` 的开场首帧**都不进创建
+    表单**：前者是会话内资产（建好后上传），后者要等阶段 1 才有画幅可比。
+
+    导演台三个打包参数（节点 id / 段缓存名 / 段间引导模式）在创建时问齐，与 CLI
+    「会话开头问一次」是同一时点（``wizard_director.py:119-179``）。``director_mode``
+    与 ``director_continuity_mode`` 用 ``None`` 表示「没给」：空串与省略在这两个字段
+    上必须分开——引导模式省略要落默认 ``guide``，而不是落一个空串。
     """
 
-    mode: Literal["base", "ref"] = "base"
+    mode: str = "base"
     variant: str = "T2VA"
     # 范围校验在 ``_validate_duration`` 里做（为的是拿到专用错误码）；这里不再写
     # ``gt=0``——pydantic 先拒会把 0/负数拦成没有 code 的通用 422。
@@ -135,6 +220,10 @@ class SessionCreate(BaseModel):
     draft: str = ""
     canvases: dict[str, tuple[int, int]] = Field(default_factory=dict)
     video_output: VideoOutputIn | None = None
+    director_mode: str | None = None
+    director_node_id: str | None = None
+    director_cache_name: str | None = None
+    director_continuity_mode: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -167,19 +256,21 @@ class FrameSelection(BaseModel):
 
 
 class ActionItemResolve(BaseModel):
-    """决议载荷（spec §7 / D4 §9 / D6 §8 / D7 §6.3）。
+    """决议载荷（spec §7 / D4 §9 / D6 §8 / D7 §6.3 / D8 §7.1）。
 
-    四种人工待办各收一种载荷：
+    五类人工待办各收一种载荷：
     - ``stage1_review`` 收 ``decision``（approve/revise，revise 带 ``revisions``）；
     - ``frame_submission`` 收 ``frames``；
     - ``segment_video`` 收 ``video_asset_id``（本段视频素材）；
-    - ``asset_image`` 收 ``asset_id``（这一件资产图的生成结果，普通素材上传得到）。
+    - ``asset_image`` 收 ``asset_id``（这一件资产图的生成结果，普通素材上传得到）；
+    - ``director_start_image`` 收 ``decision="submit_start_image"`` 与
+      ``start_asset_id``（必填）/``end_asset_id``（可选）/``confirm_aspect_mismatch``。
 
     kind 与载荷的错配由服务端判成 422（``frame_invalid`` / ``segment_video_invalid`` /
     ``asset_image_invalid``，不是 pydantic 的通用 422）。
     """
 
-    decision: Literal["approve", "revise"] | None = None
+    decision: Literal["approve", "revise", "submit_start_image"] | None = None
     revisions: list[RevisionIn] = Field(default_factory=list)
     frames: FrameSelection | None = None
     # 段视频待办（D6 §8）：本会话已上传的 mp4 素材 id。`Decision` 载荷互斥由路由先拦。
@@ -187,6 +278,14 @@ class ActionItemResolve(BaseModel):
     # 素材图待办（D7 §6.3）：本会话已上传的图片素材 id（上传时不带语义名——它是
     # 用户生成的产物图，不是参考素材，不进台账）。
     asset_id: str | None = None
+    # 导演台开场首帧与全片尾帧（D8 §7.1）：本会话已上传的图片素材 id。首帧必填，
+    # 尾帧可选；两张都不接受本地路径（工作台的素材只能走上传接口）。
+    start_asset_id: str | None = None
+    end_asset_id: str | None = None
+    # 画幅不符时用户必须显式确认（D8 §7.2）：缺这一项回 409 ``aspect_mismatch_unconfirmed``。
+    # 用 ``None`` 表示「没给」：``False`` 会让这个**新增可选字段**在契约里变成必填，
+    # 存量客户端的 approve/交图请求会整批类型报错。
+    confirm_aspect_mismatch: bool | None = None
 
 
 # 层次归一表（spec §7 的中文别名 + 向导屏幕标签 → 内部四档）。内部取值只住
@@ -241,11 +340,24 @@ def _brief_from_payload(payload: SessionCreate) -> Brief:
             # 三元组有独立的节点契约校验（比例档/面积/对齐）；越界是请求错误，
             # 不是服务端故障，统一落 422 problem+json。
             raise HTTPException(422, str(exc)) from exc
+    from ...director.pack import CONTINUITY_DEFAULT
+
+    is_director = payload.mode == "director"
     return Brief(
         mode=payload.mode,
-        # ref 的 variant 由服务端固定（见 ``REF_VARIANT``）；校验已在
+        # ref 与 director 的 variant 都由服务端固定（见 ``REF_VARIANT``）：ref 不走
+        # 帧链（ADR 0011），导演台的 variant 是 T2VA 占位（ADR 0024）。校验已在
         # ``_validate_route_parameters`` 里做过，这里只负责落库口径。
-        variant=REF_VARIANT if payload.mode == "ref" else payload.variant,
+        variant=(REF_VARIANT if payload.mode in ("ref", "director")
+                 else payload.variant),
+        director_mode=payload.director_mode or "",
+        director_node_id=str(payload.director_node_id or "").strip(),
+        director_cache_name=str(payload.director_cache_name or "").strip(),
+        # 非 director 的四个字段已在上面被拒（空串与省略都算「没带」），这里一律
+        # 落空；director 的引导模式省略时落默认 guide，与 CLI 的同一条默认同源。
+        director_continuity_mode=(
+            str(payload.director_continuity_mode or CONTINUITY_DEFAULT)
+            if is_director else ""),
         duration=payload.duration,
         style=payload.style,
         language=payload.language,
@@ -628,9 +740,10 @@ async def resolve_action_item(
     """提交人工决定：``approve`` 走后续步骤（base 进阶段 2，ref 先进素材循环），
     ``revise`` 从声明层次重跑阶段 1。
 
-    第二个人工待办（``frame_submission``）复用同一个端点、靠 body 分型（D4 §9）：
-    带 ``frames`` 即帧提交；kind 与载荷错配一律 422 ``frame_invalid``。段视频
-    （``video_asset_id``，D6 §8）与素材图（``asset_id``，D7 §6.3）同理。
+    其余人工待办复用同一个端点、靠 body 分型（D4 §9）：带 ``frames`` 即帧提交；段视频
+    （``video_asset_id``，D6 §8）、素材图（``asset_id``，D7 §6.3）与导演台开场首帧
+    （``decision=submit_start_image`` + ``start_asset_id``，D8 §7.1）同理。kind 与载荷
+    错配一律 422（``frame_invalid`` / ``segment_video_invalid`` / ``asset_image_invalid``）。
 
     状态判定与「决议 + 起任务」的原子性都在 ``JobRunner.resolve`` 的会话临界区里，
     这里只把请求体归一成内部词汇，不先查一遍状态（两处判据会在并发下各说各话）。
@@ -642,6 +755,8 @@ async def resolve_action_item(
     elif payload.decision == "revise":
         if not payload.revisions:
             raise HTTPException(422, "revise 至少要给一条修订。")
+    elif payload.decision == "submit_start_image" and payload.revisions:
+        raise FrameInvalid("director_start_image 待办不接受 revisions。")
     # 归一化并带上：revise 要走修订回路；「没带 decision 却带 revisions + 素材载荷」
     # 也要带过去，由锁内 kind 判据给对应错误码（这里不抢先判，否则错误码会被
     # 帧提交专用的 frame_invalid 抢先）。
@@ -674,11 +789,21 @@ async def resolve_action_item(
             payload.decision is not None or payload.frames is not None):
         raise AssetImageInvalid(
             "asset_id 不能与 decision/frames 同时提交：素材图待办只收图片素材。")
+    # 导演台首帧的两个字段只服务 ``submit_start_image``：带它们却不带那个 decision，
+    # 一定是发错了（D8 §7.1）。空串按「没带」处理，与其他载荷同一条口径。
+    start_given = bool(str(payload.start_asset_id or "").strip())
+    end_given = bool(str(payload.end_asset_id or "").strip())
+    if (start_given or end_given or payload.confirm_aspect_mismatch) and (
+            payload.decision != "submit_start_image"):
+        raise FrameInvalid(
+            "start_asset_id / end_asset_id / confirm_aspect_mismatch 只用于 "
+            "director_start_image 待办：请带 decision=submit_start_image。")
     if (payload.decision is None and payload.frames is None
             and payload.video_asset_id is None and payload.asset_id is None):
         raise HTTPException(
             422,
-            "resolve 需要 decision（approve/revise）、frames、video_asset_id 或 asset_id。")
+            "resolve 需要 decision（approve / revise / submit_start_image）、frames、"
+            "video_asset_id 或 asset_id。")
     frames: dict[str, str] | None = None
     if payload.frames is not None:
         # 空串与省略同义（前端清空槽位时两种形态都可能出现）；双空字典保留下来，
@@ -692,9 +817,15 @@ async def resolve_action_item(
     video_asset_id = (
         None if payload.video_asset_id is None else payload.video_asset_id.strip())
     asset_id = None if payload.asset_id is None else payload.asset_id.strip()
+    start_asset_id = (
+        None if payload.start_asset_id is None else payload.start_asset_id.strip())
+    end_asset_id = (
+        None if payload.end_asset_id is None else payload.end_asset_id.strip())
     job, replayed = await _runner(request).resolve(
         session_id, item_id, decision=payload.decision, revisions=revisions,
         frames=frames, video_asset_id=video_asset_id, asset_id=asset_id,
+        start_asset_id=start_asset_id, end_asset_id=end_asset_id,
+        confirm_aspect_mismatch=bool(payload.confirm_aspect_mismatch),
         idempotency_key=idempotency_key or None)
     if replayed:
         response.headers["Idempotency-Replayed"] = "true"

@@ -525,6 +525,28 @@ class AssetImageInvalid(WorkbenchError):
     code = "asset_image_invalid"
 
 
+class AspectMismatchUnconfirmed(WorkbenchError):
+    """开场首帧比例不符且用户没有显式确认（D8 spec §7.2 / §15）。
+
+    与上传时的 422 分开：用户可能就是要有意用这个比例（CLI 里也是「回车继续」），
+    所以这里**收下**上传，只在决议这一步要求一个明确的 ``confirm_aspect_mismatch``。
+    """
+
+    status_code = 409
+    code = "aspect_mismatch_unconfirmed"
+
+
+class StartImageRequired(WorkbenchError):
+    """导演台 i2v/fl2v 没有开场首帧就起跑（D8 spec §7.3 / §15）。
+
+    i2v 的每一段都必须有源图（插件 ``gen_timeline.py:304-310``），缺了会在导入后
+    直接抛 ``Segment #N has no source image``——所以闸门放在起跑之前，不是打包期。
+    """
+
+    status_code = 409
+    code = "start_image_required"
+
+
 class StorageUnavailable(WorkbenchError):
     """素材落盘失败（磁盘满、只读目录）。请求本身没错，是这台机器的存储不行。"""
 
@@ -570,6 +592,8 @@ _DECISIONS = frozenset({
     step_machine.DECISION_SUBMIT_VIDEO,
     # 素材图交回决议（D7 §6.3）：同上。
     step_machine.DECISION_SUBMIT_IMAGE,
+    # 导演台开场首帧决议（D8 §5.6）：唯一显式声明的 decision 取值。
+    step_machine.DECISION_SUBMIT_START_IMAGE,
 })
 
 
@@ -616,8 +640,11 @@ def _validate_failed(payload: dict[str, Any]) -> None:
 # 恢复后的待办静默少一项（「守卫形态要从常量派生」）。
 _ACTION_ITEM_INDEX_KEYS: tuple[str, ...] = ("segment_index", "asset_index")
 _ACTION_ITEM_REASON_KEY = "reason"
+# 一个待办收两件素材的槽位（D8 §7.1）：键与 ``ActionItemOut`` 同形，创建与决议两条
+# 事件的校验、重放都从这一份常量派生——抄两份时加第三个槽位就会静默丢。
+_ACTION_ITEM_ASSET_KEYS: tuple[str, ...] = ("start_asset_id", "end_asset_id")
 _ACTION_ITEM_PAYLOAD_KEYS: tuple[str, ...] = (
-    *_ACTION_ITEM_INDEX_KEYS, _ACTION_ITEM_REASON_KEY)
+    *_ACTION_ITEM_INDEX_KEYS, _ACTION_ITEM_REASON_KEY, *_ACTION_ITEM_ASSET_KEYS)
 
 
 def _validate_action_item_created(payload: dict[str, Any]) -> None:
@@ -635,11 +662,23 @@ def _validate_action_item_created(payload: dict[str, Any]) -> None:
     if reason is not None and not isinstance(reason, str):
         raise InvalidEventPayload(
             f"事件 payload 的 {_ACTION_ITEM_REASON_KEY!r} 必须是字符串：{reason!r}")
+    _validate_action_item_asset_keys(payload)
+
+
+def _validate_action_item_asset_keys(payload: dict[str, Any]) -> None:
+    """图槽标识出现时必须是字符串（D8 §7.1）：半截值会在读详情时炸。"""
+    for key in _ACTION_ITEM_ASSET_KEYS:
+        value = payload.get(key)
+        if value is not None and not isinstance(value, str):
+            raise InvalidEventPayload(
+                f"事件 payload 的 {key!r} 必须是字符串：{value!r}")
 
 
 def _validate_action_item_resolved(payload: dict[str, Any]) -> None:
     _require_str(payload, "item_id")
     _require_choice(payload, "decision", _DECISIONS)
+    # 决议事件也可能带图槽（导演台开场首帧）：与创建事件同一份校验。
+    _validate_action_item_asset_keys(payload)
     # 修订载荷是可选的加字段（D4 spec §7）：写了就必须是 [{layer, text}, …]，
     # 否则重放时 ``ActionItemOut`` 会拿半截字典去建模型并在**读详情**时报错。
     revisions = payload.get("revisions")
@@ -914,6 +953,10 @@ def _replay_snapshot(
                                  "revisions": (
                                      [dict(entry) for entry in revisions]
                                      if isinstance(revisions, list) else [])})
+                    # 图槽标识（D8 §7.1）：一个待办收两张图，重放要把两个槽都补回来。
+                    for key in _ACTION_ITEM_ASSET_KEYS:
+                        if isinstance(payload.get(key), str):
+                            item[key] = payload[key]
         # artifact.created：产物清单从目录现扫（_artifacts），没有快照字段要补。
     return status, jobs, action_items
 
@@ -942,6 +985,11 @@ class BriefOut(BaseModel):
     mode: str
     variant: str
     director_mode: str = ""
+    # 导演台三个打包参数（D8 §4.2）：创建时问齐、落 Brief，详情页据此回显。空串＝
+    # 不是导演台路线（非 director 带它们会在创建口被 422 拒掉）。
+    director_node_id: str = ""
+    director_cache_name: str = ""
+    director_continuity_mode: str = ""
     duration: float
     style: str
     language: str
@@ -990,6 +1038,12 @@ class ActionItemOut(BaseModel):
     segment_index: int | None = None
     # 素材循环待办的件号（1 起，与素材台账同号，D7 §6.3）。其它待办类型为 None。
     asset_index: int | None = None
+    # 导演台开场首帧待办交回的两张素材（D8 §7.1）：**一个待办两个图槽**，首帧必填、
+    # 全片尾帧可空。只记素材标识（与 ``asset_id`` 同形），不记路径。用 ``None`` 缺省
+    # 而不是空串：这两个槽只属于一种待办，其余 kind 的待办**没有**它们；顺带让这个
+    # 新增字段在契约里保持可选，存量客户端与夹具不必为无关 kind 补两个空键。
+    start_asset_id: str | None = None
+    end_asset_id: str | None = None
     # 被拒原因/校对差异等给人看的文本：段循环被拒、素材校对不通过时填（D7 §6.3）。
     reason: str = ""
 
@@ -1278,6 +1332,9 @@ def _brief_out(brief: Brief,
         mode=brief.mode,
         variant=brief.variant,
         director_mode=brief.director_mode,
+        director_node_id=brief.director_node_id,
+        director_cache_name=brief.director_cache_name,
+        director_continuity_mode=brief.director_continuity_mode,
         duration=brief.duration,
         style=brief.style,
         language=brief.language,

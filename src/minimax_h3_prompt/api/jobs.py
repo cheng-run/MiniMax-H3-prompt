@@ -32,7 +32,7 @@ if TYPE_CHECKING:  # 只用于段级注入卡写入口的签名，运行时按�
     from ..ref_segments import RefSegmentJob
 
 from .. import step_machine
-from ..brief_parser import is_ref_mode
+from ..brief_parser import is_director_mode, is_ref_mode
 from ..errors import error_code
 from ..kinds import KIND_PICTURE
 from ..segment_validation import segment_submission_problems
@@ -58,6 +58,7 @@ from ..workbench_store import (
     ActionItemOut,
     ActionItemPending,
     ActionItemResolved,
+    AspectMismatchUnconfirmed,
     AssetImageInvalid,
     EventDraft,
     FrameInvalid,
@@ -75,6 +76,7 @@ from ..workbench_store import (
     SegmentResubmitUnsupported,
     SegmentVideoInvalid,
     SessionBusy,
+    StartImageRequired,
     WorkbenchError,
     WorkbenchSessionStore,
 )
@@ -134,17 +136,23 @@ def _resolve_fingerprint(item_id: str, decision: str | None,
                          revisions: list[dict[str, str]],
                          frames: dict[str, str] | None,
                          video_asset_id: str | None = None,
-                         asset_id: str | None = None) -> str:
+                         asset_id: str | None = None,
+                         start_asset_id: str | None = None,
+                         end_asset_id: str | None = None,
+                         confirm_aspect_mismatch: bool = False) -> str:
     """resolve 的请求摘要：待办、决定、修订内容、帧槽与素材标识都算进去。
 
     段视频素材（``video_asset_id``）必须进摘要：不进的话，同一个 Idempotency-Key 换一段
     视频重发会**重放第一次的响应**，用户以为重交了、系统其实没执行。素材循环的交图
-    （``asset_id``）同理：换一张图重发不能重放上一张的结论。
+    （``asset_id``）同理：换一张图重发不能重放上一张的结论。导演台的两张图与画幅确认
+    同一条纪律：换图或改确认状态都不算同一份请求。
     """
     canonical = json.dumps(
         {"item_id": item_id, "decision": decision, "revisions": revisions,
          "frames": frames or {}, "video_asset_id": video_asset_id or "",
-         "asset_id": asset_id or ""},
+         "asset_id": asset_id or "", "start_asset_id": start_asset_id or "",
+         "end_asset_id": end_asset_id or "",
+         "confirm_aspect_mismatch": bool(confirm_aspect_mismatch)},
         sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -161,6 +169,12 @@ _BRANCH_SEGMENT_VIDEO = step_machine.ACTION_SEGMENT_VIDEO
 # 第四个去向（D7 §5.3）：素材循环。它同时覆盖两个入口——ref 会话通过阶段 1 审查
 # （先出第 1 件的词）与交回一张素材图（跑校对）。
 _BRANCH_ASSET_LOOP = step_machine.ACTION_ASSET_IMAGE
+# 第五个去向（D8 §5.6）：导演台开场首帧。**两个入口共用同一个待办 kind、不同分支**：
+# 审查通过后只挂待办（``_GATE``，不起任务，与 base 的帧闸门同形），交图之后才起阶段 2
+# （``_BRANCH_DIRECTOR_START_IMAGE``）。合成一个分支会让「刚挂出的待办」也被当成
+# 「要起任务的交图」，直接撞上「非闸门分支没有任务」的内部不一致。
+_BRANCH_DIRECTOR_START_GATE = "director_start_gate"
+_BRANCH_DIRECTOR_START_IMAGE = step_machine.ACTION_DIRECTOR_START_IMAGE
 
 
 def _asset_step_of(
@@ -372,6 +386,9 @@ class JobRunner:
 
             def _start(current: Any) -> dict[str, Any]:
                 self.store.ensure_can_advance(current)
+                # 导演台 i2v/fl2v 的开场首帧是规划前置（D8 §7.3）：起跑闸门放在写
+                # running 之前，缺图时会话仍停在原状态、可续。
+                self._ensure_director_start_image(session_id)
                 return {
                     "status": "running",
                     "jobs": _upsert_job(current.jobs, _job_dict(job)),
@@ -468,6 +485,9 @@ class JobRunner:
         frames: dict[str, str] | None = None,
         video_asset_id: str | None = None,
         asset_id: str | None = None,
+        start_asset_id: str | None = None,
+        end_asset_id: str | None = None,
+        confirm_aspect_mismatch: bool = False,
         idempotency_key: str | None = None,
     ) -> tuple[JobSummary | None, bool]:
         """在人工待办上提交决定；返回 ``(job, 是否幂等重放)``（#219 / D4 §9）。
@@ -485,7 +505,7 @@ class JobRunner:
         async with lock:
             payload = _resolve_fingerprint(
                 item_id, decision, list(revisions or []), frames, video_asset_id,
-                asset_id)
+                asset_id, start_asset_id, end_asset_id, confirm_aspect_mismatch)
             registry = None
             if idempotency_key:
                 registry = self.store.session_registry(session_id)
@@ -497,10 +517,13 @@ class JobRunner:
 
             branch = await asyncio.to_thread(
                 self._resolve_branch, session_id, item_id, decision, frames)
-            frame_gate = branch == _BRANCH_FRAME_GATE
-            # 帧链通过审查不产生任务；其余去向照旧。``job`` 为 None 时下面所有
+            # 两道「只挂待办、不起任务」的闸门：base 的帧闸门与导演台的开场首帧。
+            # 两者都不产生可等待的执行，所以 job 为 None，会话停在 awaiting_human。
+            gate_branch = branch in (
+                _BRANCH_FRAME_GATE, _BRANCH_DIRECTOR_START_GATE)
+            # 闸门分支通过审查不产生任务；其余去向照旧。``job`` 为 None 时下面所有
             # 与任务相关的落盘都跳过——契约里那一段的 202 是「已受理、无执行」。
-            job = None if frame_gate else JobSummary(
+            job = None if gate_branch else JobSummary(
                 job_id=uuid.uuid4().hex,
                 # 素材循环的两个 job 都记 ``asset_loop``（D7 §6.2）：前端/排障按 kind
                 # 就能把「出词」「校对」与外层的推进任务分开。
@@ -572,11 +595,15 @@ class JobRunner:
                             "stage1_review 待办不接受 video_asset_id：段视频只用于 segment_video。")
                     recorded_decision = decision
                     if (decision == step_machine.DECISION_APPROVE
-                            and step_machine.needs_frame_submission(
-                                current.brief.variant)):
+                            and step_machine.needs_frame_submission_for_brief(
+                                current.brief)):
+                        # 同一判据、两种 kind：base 收关键帧（frame_submission），
+                        # 导演台 i2v/fl2v 收开场首帧（director_start_image，D8 §5.6）。
                         new_item = ActionItemOut(
                             item_id=created_item_id,
-                            kind=step_machine.ACTION_FRAME_SUBMISSION,
+                            kind=(step_machine.ACTION_DIRECTOR_START_IMAGE
+                                  if is_director_mode(current.brief.mode)
+                                  else step_machine.ACTION_FRAME_SUBMISSION),
                             status="pending", created_at=now)
                 elif target.kind == step_machine.ACTION_FRAME_SUBMISSION:
                     if decision is not None:
@@ -689,15 +716,65 @@ class JobRunner:
                     current_entry[ASSET_PROOFREAD_KEY] = submitted
                     holder["asset_ledger"] = ledger
                     recorded_decision = step_machine.DECISION_SUBMIT_IMAGE
+                elif target.kind == step_machine.ACTION_DIRECTOR_START_IMAGE:
+                    # 开场首帧与全片尾帧（D8 §7.1）：两张都必须是**本会话已上传的图片
+                    # 素材**，不接受本地路径（spec §4.4 的不变式 6/10）。
+                    if decision != step_machine.DECISION_SUBMIT_START_IMAGE:
+                        raise FrameInvalid(
+                            "director_start_image 待办需要 decision=submit_start_image。")
+                    if revisions:
+                        raise FrameInvalid(
+                            "director_start_image 待办不接受 revisions。")
+                    if frames is not None:
+                        raise FrameInvalid(
+                            "director_start_image 待办不接受 frames；请用 start_asset_id。")
+                    if video_asset_id is not None:
+                        raise FrameInvalid(
+                            "director_start_image 待办不接受 video_asset_id。")
+                    if asset_id is not None:
+                        raise FrameInvalid(
+                            "director_start_image 待办不接受 asset_id；请用 start_asset_id。")
+                    submitted_start = str(start_asset_id or "").strip()
+                    if not submitted_start:
+                        raise FrameInvalid(
+                            "director_start_image 待办必须带 start_asset_id。")
+                    # 归属与图片类型都在 resolve_image_asset 里判（与素材循环同一个口）。
+                    start_path = self.store.resolve_image_asset(
+                        session_id, submitted_start)
+                    submitted_end = str(end_asset_id or "").strip()
+                    end_path = (
+                        self.store.resolve_image_asset(session_id, submitted_end)
+                        if submitted_end else None)
+                    # 画幅预检、落盘与警告都在这一处：判据只有 ``precheck_message``。
+                    holder["reason"] = self._accept_director_start_image(
+                        session_id, current, start_path, end_path,
+                        confirm=bool(confirm_aspect_mismatch))
+                    # 两个图槽都记到待办上（D8 §7.1）：一个待办收两张图，少一项就
+                    # 只剩「交过图」，说不清交的是哪一对。
+                    holder["start_asset_id"] = submitted_start
+                    if submitted_end:
+                        holder["end_asset_id"] = submitted_end
+                    recorded_decision = step_machine.DECISION_SUBMIT_START_IMAGE
                 else:
                     raise FrameInvalid(f"不认识的人工待办类型：{target.kind}")
                 holder["decision"] = recorded_decision
 
+                resolved_update: dict[str, Any] = {
+                    "status": "resolved", "decision": recorded_decision,
+                    "resolved_at": now,
+                    "revisions": recorded_revisions,
+                }
+                if holder.get("reason"):
+                    # 画幅警告落在待办上（D8 §7.2 的「有地方可读」）：决议响应是
+                    # ``JobSummary``，不给它长一个只服务导演台的字段。没有警告时
+                    # **不动** reason——段被拒/校对差异那几类的历史文本要留着。
+                    resolved_update["reason"] = holder["reason"]
+                for key in ("start_asset_id", "end_asset_id"):
+                    # 图槽标识与事件同一份来源：快照与重放读到的必须是这两个 id。
+                    if holder.get(key):
+                        resolved_update[key] = holder[key]
                 items = [
-                    (item.model_copy(update={
-                        "status": "resolved", "decision": recorded_decision,
-                        "resolved_at": now,
-                        "revisions": recorded_revisions}).model_dump(mode="json")
+                    (item.model_copy(update=resolved_update).model_dump(mode="json")
                      if item.item_id == item_id
                      else item.model_dump(mode="json"))
                     for item in current.action_items
@@ -742,6 +819,10 @@ class JobRunner:
 
             resolved_payload: dict[str, Any] = {
                 "item_id": item_id,
+                # 事件在 mutate 之前就要构造好（先写事件、后写快照），所以这里只能按
+                # 预判出的分支给 decision。导演台首帧不用单列：它是**显式**的 decision
+                # 取值（``submit_start_image``），与审查待办的 approve/revise 一样
+                # 直接取请求里的值；只有靠载荷分型的三种交图才要按分支改名。
                 "decision": (
                     step_machine.DECISION_SUBMIT_FRAMES
                     if branch == _BRANCH_FRAMES
@@ -762,6 +843,13 @@ class JobRunner:
             if asset_id is not None:
                 # 素材图同理：交回的是哪一张，重放要看得出来。
                 resolved_payload["asset_id"] = asset_id
+            if start_asset_id is not None:
+                # 导演台开场首帧（D8 §7.1）：两张图都是用户输入，重放要看得出。
+                resolved_payload["start_asset_id"] = start_asset_id
+            if end_asset_id is not None:
+                resolved_payload["end_asset_id"] = end_asset_id
+            if confirm_aspect_mismatch:
+                resolved_payload["confirm_aspect_mismatch"] = True
             events = [
                 EventDraft("action_item.resolved", resolved_payload,
                            job_id=job.job_id if job else None),
@@ -769,11 +857,13 @@ class JobRunner:
             if job is not None:
                 events.insert(0, EventDraft(
                     "job.started", {"kind": job.kind}, job_id=job.job_id))
-            if frame_gate:
+            if gate_branch:
                 events.append(EventDraft(
                     "action_item.created",
                     {"item_id": created_item_id,
-                     "kind": step_machine.ACTION_FRAME_SUBMISSION},
+                     "kind": (step_machine.ACTION_FRAME_SUBMISSION
+                              if branch == _BRANCH_FRAME_GATE
+                              else step_machine.ACTION_DIRECTOR_START_IMAGE)},
                     job_id=None))
 
             await asyncio.to_thread(
@@ -826,14 +916,100 @@ class JobRunner:
             return _BRANCH_FRAMES
         if kind == step_machine.ACTION_ASSET_IMAGE:
             return _BRANCH_ASSET_LOOP
+        if kind == step_machine.ACTION_DIRECTOR_START_IMAGE:
+            return _BRANCH_DIRECTOR_START_IMAGE
         if (kind == step_machine.ACTION_STAGE1_REVIEW
                 and decision == step_machine.DECISION_APPROVE):
             # ref 通过审查先走素材循环（D7 §5.3）：它不是帧链，也不直接进阶段 2。
             if session.brief.is_ref:
                 return _BRANCH_ASSET_LOOP
-            if step_machine.needs_frame_submission(session.brief.variant):
-                return _BRANCH_FRAME_GATE
+            # 判据只有一份（D8 §6.4）：base 的帧链与导演台 i2v/fl2v 都从这里分流，
+            # 只是落到不同的待办 kind。
+            if step_machine.needs_frame_submission_for_brief(session.brief):
+                return (_BRANCH_DIRECTOR_START_GATE
+                        if session.brief.is_director else _BRANCH_FRAME_GATE)
         return _BRANCH_REVIEW
+
+    def _accept_director_start_image(
+        self, session_id: str, current: Any, start_path: Path,
+        end_path: Path | None, *, confirm: bool,
+    ) -> str:
+        """收下开场首帧与全片尾帧并落到导演包认的位置（D8 spec §7）。
+
+        画幅判据只有 ``precheck_message`` 一份：比例超差时**收下并警告**，但决议必须
+        带 ``confirm_aspect_mismatch=True``——spec §7.2 不选「上传即 422」，因为用户
+        可能就是要有意用这个比例。返回给人看的警告文本（比例相符时为空串）。
+
+        落点与 CLI 同一个词干、同一个函数（``store_director_still``）：首帧进
+        ``director/assets/01/start.*``，全片尾帧进 ``director/assets/film-end.*``
+        ——后者**不进第 1 段目录**，否则会被当成第 1 段的终点画面。
+        """
+        from ..director.aspect import image_size
+        from ..director.aspect_flow import precheck_message
+        from ..director.pack import FILM_END_STEM, START_STEM
+        from ..ui.wizard_director import store_director_still
+
+        warning = ""
+        size = image_size(start_path)
+        declared = self._director_film_size(current.brief)
+        # 读不出宽高（损坏/非图片）按「元信息缺失」放行：上传时的嗅探已经验过类型，
+        # 这里再拦一次只会把一张坏图说成「比例不符」（同 ``aspect.image_size`` 的口径）。
+        if size is not None and declared is not None:
+            message = precheck_message(
+                str(current.brief.director_mode), frame_canvas=size,
+                declared=declared)
+            if message:
+                if not confirm:
+                    raise AspectMismatchUnconfirmed(message)
+                warning = message
+        directory = self.store.session_directory(session_id)
+        store_director_still(start_path, directory, START_STEM)
+        if end_path is not None:
+            store_director_still(end_path, directory, FILM_END_STEM, segment=None)
+        return warning
+
+    def _director_film_size(self, brief: Any) -> tuple[int, int] | None:
+        """成片画幅（宽, 高）：优先会话里选定的那一档，旧会话回落 ``director`` 节。
+
+        与 CLI 的 ``film_settings`` 同一条读法（#161 / ADR 0028）：``Brief.canvases``
+        里挂着成片画幅时以它为准；没有（旧会话或没选）才读配置。配置对象拿不到
+        ``director_settings`` 时返回 ``None``（预检不可判就跳过，不猜一个画幅）。
+        """
+        from ..director.film_canvas import film_size_for
+
+        film = film_size_for(brief)
+        if film is not None:
+            return film
+        settings_fn = getattr(self.config, "director_settings", None)
+        if settings_fn is None:
+            return None
+        settings = settings_fn()
+        return int(settings.width), int(settings.height)
+
+    def _ensure_director_start_image(self, session_id: str) -> None:
+        """导演台 i2v/fl2v 起跑前的开场首帧闸门（D8 spec §7.3 / §15）。
+
+        只在「下一次会进阶段 2」的会话上判：刚建的会话先跑阶段 1，那时还没有首帧
+        可言。判据复用打包器的那一份（``opening_start_still_missing``），扩展名偏好
+        与落点目录不会与打包分家。
+        """
+        session = load_session(self.store.session_directory(session_id))
+        if session is None or not session.brief.is_director:
+            return
+        from ..director.aspect_flow import PRECHECK_MODES
+        from ..director.pack import opening_start_still_missing
+
+        mode = session.brief.director_mode
+        if mode not in PRECHECK_MODES:
+            return
+        if self._resume_step(session_id) != step_machine.STEP_STAGE2:
+            return
+        missing = opening_start_still_missing(
+            self.store.session_directory(session_id), mode)
+        if missing is not None:
+            raise StartImageRequired(
+                f"{mode} 会话没有开场首帧：应放在 {missing}"
+                "（接受 png/jpg/jpeg/webp）。导入导演台的包缺这张图会被插件直接拒绝。")
 
 
     def get_job(self, session_id: str, job_id: str) -> JobSummary:

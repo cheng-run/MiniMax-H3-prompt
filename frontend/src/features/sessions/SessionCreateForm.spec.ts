@@ -296,3 +296,86 @@ describe('SessionCreateForm 创建即起跑', () => {
     expect(keys[1]).toBe(keys[0])
   })
 })
+
+describe('SessionCreateForm 导演台路线（D8-1）', () => {
+  function captureCreate() {
+    let created: Record<string, unknown> | null = null
+    server.use(
+      http.post(createUrl, async ({ request }) => {
+        created = (await request.json()) as Record<string, unknown>
+        return HttpResponse.json(makeDetail({ session_id: 'sess-1', status: 'created' }), {
+          status: 201,
+        })
+      }),
+      http.post(jobsUrl, () => HttpResponse.json(makeJob(), { status: 202 })),
+    )
+    return () => created
+  }
+
+  it('默认不出现导演台字段；选 director 后隐藏变体并问齐模式与三个打包参数', async () => {
+    const { wrapper } = mountWithPlugins(SessionCreateForm, { withRouter: true })
+
+    expect(wrapper.find('[name="director_mode"]').exists()).toBe(false)
+    expect(wrapper.find('[name="director_node_id"]').exists()).toBe(false)
+    expect(wrapper.find('select[name="variant"]').exists()).toBe(true)
+
+    await wrapper.find('input[name="mode"][value="director"]').setValue()
+
+    expect(wrapper.find('select[name="variant"]').exists()).toBe(false)
+    expect(wrapper.find('select[name="director_mode"]').exists()).toBe(true)
+    expect(wrapper.find('input[name="director_node_id"]').exists()).toBe(true)
+    expect(wrapper.find('input[name="director_cache_name"]').exists()).toBe(true)
+    // 引导模式省略时服务端落 guide：前端与它同一条默认。
+    expect(
+      (wrapper.find('select[name="director_continuity_mode"]').element as HTMLSelectElement).value,
+    ).toBe('guide')
+  })
+
+  it('提交 mode=director 与固定 T2VA，只带选中的导演台参数', async () => {
+    const created = captureCreate()
+    const { wrapper, router } = mountWithPlugins(SessionCreateForm, { withRouter: true })
+    await router!.isReady()
+    await wrapper.find('textarea[name="plot"]').setValue('雨夜街口的追逐')
+    await wrapper.find('input[name="mode"][value="director"]').setValue()
+    await wrapper.find('select[name="director_mode"]').setValue('i2v')
+    await wrapper.find('input[name="director_node_id"]').setValue('node-42')
+    await wrapper.find('input[name="director_cache_name"]').setValue('noir')
+    await wrapper.find('select[name="director_continuity_mode"]').setValue('continue')
+
+    await wrapper.find('form').trigger('submit')
+    await settle()
+
+    expect(created()).toMatchObject({
+      mode: 'director',
+      variant: 'T2VA',
+      director_mode: 'i2v',
+      director_node_id: 'node-42',
+      director_cache_name: 'noir',
+      director_continuity_mode: 'continue',
+    })
+  })
+
+  it('导演台模式与节点 id 未填时拦截提交', async () => {
+    let createCalls = 0
+    server.use(
+      http.post(createUrl, () => {
+        createCalls += 1
+        return HttpResponse.json(makeDetail(), { status: 201 })
+      }),
+    )
+    const { wrapper } = mountWithPlugins(SessionCreateForm, { withRouter: true })
+    await wrapper.find('textarea[name="plot"]').setValue('雨夜旧信')
+    await wrapper.find('input[name="mode"][value="director"]').setValue()
+
+    await wrapper.find('form').trigger('submit')
+    await settle()
+    expect(createCalls).toBe(0)
+    expect(wrapper.text()).toContain('生成方式')
+
+    await wrapper.find('select[name="director_mode"]').setValue('fl2v')
+    await wrapper.find('form').trigger('submit')
+    await settle()
+    expect(createCalls).toBe(0)
+    expect(wrapper.text()).toContain('节点 id')
+  })
+})

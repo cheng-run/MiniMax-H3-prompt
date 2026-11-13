@@ -16,23 +16,45 @@ const DURATION_MAX = 60
 const DEFAULT_DURATION = 5
 const DEFAULT_VARIANT = 'FL2VA'
 
+// 导演台生成模式（D8 §4.1）。服务端 `brief_parser.DIRECTOR_MODES` 是唯一真源，
+// 前端只是同一份四选一的界面镜像；v2v / rv2v / mixed 已取消（#170），不留墓碑。
+const DIRECTOR_MODES = [
+  { value: 't2v', label: '文生视频（t2v）' },
+  { value: 'i2v', label: '图生视频（i2v）' },
+  { value: 'fl2v', label: '首尾帧生视频（fl2v）' },
+  { value: 'r2v', label: '参考素材生视频（r2v）' },
+] as const
+type DirectorMode = (typeof DIRECTOR_MODES)[number]['value']
+// 段间引导模式的取值就是包内 `continuityMode`（`director/pack.py` 的
+// `CONTINUITY_MODES` / `CONTINUITY_DEFAULT`）：省略时服务端落 guide。
+const CONTINUITY_DEFAULT = 'guide'
+const CONTINUITY_MODES = ['guide', 'continue'] as const
+type ContinuityMode = (typeof CONTINUITY_MODES)[number]
+
 const router = useRouter()
 
 const form = reactive({
   plot: '',
   duration: DEFAULT_DURATION as number,
-  // 路线（D7 §4.1）：base = 首尾帧链，ref = 多参。创建时定死，中途不切换。
-  mode: 'base' as 'base' | 'ref',
+  // 路线：base = 首尾帧链，ref = 多参，director = 导演台。创建时定死，中途不切换。
+  mode: 'base' as 'base' | 'ref' | 'director',
   variant: DEFAULT_VARIANT as 'T2VA' | 'FL2VA',
   style: 'Cinematic',
   language: 'Chinese',
   clarifications: '',
   draft: '',
+  // 导演台三个打包参数（D8 §4.2）：只在 director 路线提交。生成模式无默认（四择一）。
+  directorMode: '' as DirectorMode | '',
+  directorNodeId: '',
+  directorCacheName: '',
+  directorContinuityMode: CONTINUITY_DEFAULT as ContinuityMode,
 })
 
-// ref 不走帧链（ADR 0011）：选 ref 时变体下拉整格隐藏，提交的 variant 由前端固定
-// 成 T2VA，与服务端「ref 一律落 T2VA」同口径。
+// ref 与 director 都不走帧链（ADR 0011 / 0024）：选它们时变体下拉整格隐藏。
+// director 的 variant 由服务端固定落 T2VA 占位，ref 同理。
 const isRef = computed(() => form.mode === 'ref')
+const isDirector = computed(() => form.mode === 'director')
+const hidesVariant = computed(() => isRef.value || isDirector.value)
 
 const submitting = ref(false)
 const plotMissing = ref(false)
@@ -46,6 +68,21 @@ const durationError = computed(() => {
   }
   if (value < DURATION_MIN || value > DURATION_MAX) {
     return `时长需在 ${DURATION_MIN}–${DURATION_MAX} 秒之间`
+  }
+  return null
+})
+
+// 导演台的两个必填项在客户端先拦：服务端给的是 422（director_mode_invalid /
+// director_param_missing），但让人填完表再被打回来没有必要。
+const directorError = computed(() => {
+  if (!isDirector.value) {
+    return null
+  }
+  if (!form.directorMode) {
+    return '导演台请选择生成方式（t2v / i2v / fl2v / r2v）'
+  }
+  if (!form.directorNodeId.trim()) {
+    return '导演台节点 id 必填：段缓存目录名由 <缓存名>_<节点id> 决定'
   }
   return null
 })
@@ -67,7 +104,7 @@ async function onSubmit(): Promise<void> {
   }
   submitError.value = null
   plotMissing.value = form.plot.trim().length === 0
-  if (plotMissing.value || durationError.value !== null) {
+  if (plotMissing.value || durationError.value !== null || directorError.value !== null) {
     return
   }
 
@@ -81,11 +118,21 @@ async function onSubmit(): Promise<void> {
         mode: form.mode,
         plot: form.plot.trim(),
         duration: Number(form.duration),
-        variant: isRef.value ? 'T2VA' : form.variant,
+        variant: hidesVariant.value ? 'T2VA' : form.variant,
         style: form.style.trim() || 'Cinematic',
         language: form.language.trim() || 'Chinese',
         clarifications: form.clarifications,
         draft: form.draft,
+        // 非 director 路线一个导演台参数都不带：服务端会按 director_param_missing
+        // 拒掉「带了却用不上」的那一份。
+        ...(isDirector.value
+          ? {
+              director_mode: form.directorMode,
+              director_node_id: form.directorNodeId.trim(),
+              director_cache_name: form.directorCacheName.trim(),
+              director_continuity_mode: form.directorContinuityMode,
+            }
+          : {}),
       },
       creationKey,
     )
@@ -141,10 +188,70 @@ async function onSubmit(): Promise<void> {
           <input v-model="form.mode" type="radio" name="mode" value="ref" />
           多参参考素材（ref）
         </label>
+        <label>
+          <input v-model="form.mode" type="radio" name="mode" value="director" />
+          导演台（director）
+        </label>
       </div>
       <p v-if="isRef" class="field-hint">
         多参会话不选帧变体；建好后在素材分区上传参考素材（语义名必填）才能开始。
       </p>
+      <p v-if="isDirector" class="field-hint">
+        导演台走段循环；阶段 1 审查通过后先交开场首帧，再规划与打包。
+      </p>
+    </div>
+
+    <div v-if="isDirector" class="field director-settings">
+      <div class="field-row">
+        <div class="field">
+          <label for="session-director-mode">导演台生成方式</label>
+          <select id="session-director-mode" v-model="form.directorMode" name="director_mode">
+            <option value="" disabled>请选择（t2v / i2v / fl2v / r2v）</option>
+            <option v-for="mode in DIRECTOR_MODES" :key="mode.value" :value="mode.value">
+              {{ mode.label }}
+            </option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="session-director-node-id">导演台节点 id</label>
+          <input
+            id="session-director-node-id"
+            v-model="form.directorNodeId"
+            name="director_node_id"
+            type="text"
+            placeholder="导演台节点 ID"
+          />
+        </div>
+      </div>
+
+      <div class="field-row">
+        <div class="field">
+          <label for="session-director-cache">段缓存名（可空）</label>
+          <input
+            id="session-director-cache"
+            v-model="form.directorCacheName"
+            name="director_cache_name"
+            type="text"
+            placeholder="留空则只用节点 id"
+          />
+        </div>
+
+        <div class="field">
+          <label for="session-director-continuity">段间引导模式</label>
+          <select
+            id="session-director-continuity"
+            v-model="form.directorContinuityMode"
+            name="director_continuity_mode"
+          >
+            <option v-for="mode in CONTINUITY_MODES" :key="mode" :value="mode">
+              {{ mode }}
+            </option>
+          </select>
+        </div>
+      </div>
+
+      <p v-if="directorError" class="field-error">{{ directorError }}</p>
     </div>
 
     <div class="field-row">
@@ -166,8 +273,8 @@ async function onSubmit(): Promise<void> {
         </p>
       </div>
 
-      <!-- ref 不走帧链（ADR 0011）：变体是帧形态，这一格对 ref 会话没有意义。 -->
-      <div v-if="!isRef" class="field">
+      <!-- ref / director 都不走帧链：变体是帧形态，对这一格没有意义。 -->
+      <div v-if="!hidesVariant" class="field">
         <label for="session-variant">生成方式</label>
         <select id="session-variant" v-model="form.variant" name="variant">
           <option value="T2VA">T2VA（纯文字）</option>

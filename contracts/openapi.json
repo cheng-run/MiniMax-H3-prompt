@@ -30,6 +30,17 @@
             ],
             "title": "Decision"
           },
+          "end_asset_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Asset Id"
+          },
           "item_id": {
             "title": "Item Id",
             "type": "string"
@@ -66,6 +77,17 @@
             ],
             "title": "Segment Index"
           },
+          "start_asset_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Asset Id"
+          },
           "status": {
             "title": "Status",
             "type": "string"
@@ -80,7 +102,7 @@
         "type": "object"
       },
       "ActionItemResolve": {
-        "description": "决议载荷（spec §7 / D4 §9 / D6 §8 / D7 §6.3）。\n\n四种人工待办各收一种载荷：\n- ``stage1_review`` 收 ``decision``（approve/revise，revise 带 ``revisions``）；\n- ``frame_submission`` 收 ``frames``；\n- ``segment_video`` 收 ``video_asset_id``（本段视频素材）；\n- ``asset_image`` 收 ``asset_id``（这一件资产图的生成结果，普通素材上传得到）。\n\nkind 与载荷的错配由服务端判成 422（``frame_invalid`` / ``segment_video_invalid`` /\n``asset_image_invalid``，不是 pydantic 的通用 422）。",
+        "description": "决议载荷（spec §7 / D4 §9 / D6 §8 / D7 §6.3 / D8 §7.1）。\n\n五类人工待办各收一种载荷：\n- ``stage1_review`` 收 ``decision``（approve/revise，revise 带 ``revisions``）；\n- ``frame_submission`` 收 ``frames``；\n- ``segment_video`` 收 ``video_asset_id``（本段视频素材）；\n- ``asset_image`` 收 ``asset_id``（这一件资产图的生成结果，普通素材上传得到）；\n- ``director_start_image`` 收 ``decision=\"submit_start_image\"`` 与\n  ``start_asset_id``（必填）/``end_asset_id``（可选）/``confirm_aspect_mismatch``。\n\nkind 与载荷的错配由服务端判成 422（``frame_invalid`` / ``segment_video_invalid`` /\n``asset_image_invalid``，不是 pydantic 的通用 422）。",
         "properties": {
           "asset_id": {
             "anyOf": [
@@ -93,12 +115,24 @@
             ],
             "title": "Asset Id"
           },
+          "confirm_aspect_mismatch": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confirm Aspect Mismatch"
+          },
           "decision": {
             "anyOf": [
               {
                 "enum": [
                   "approve",
-                  "revise"
+                  "revise",
+                  "submit_start_image"
                 ],
                 "type": "string"
               },
@@ -107,6 +141,17 @@
               }
             ],
             "title": "Decision"
+          },
+          "end_asset_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Asset Id"
           },
           "frames": {
             "anyOf": [
@@ -124,6 +169,17 @@
             },
             "title": "Revisions",
             "type": "array"
+          },
+          "start_asset_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Asset Id"
           },
           "video_asset_id": {
             "anyOf": [
@@ -249,9 +305,24 @@
             "title": "Clarifications",
             "type": "string"
           },
+          "director_cache_name": {
+            "default": "",
+            "title": "Director Cache Name",
+            "type": "string"
+          },
+          "director_continuity_mode": {
+            "default": "",
+            "title": "Director Continuity Mode",
+            "type": "string"
+          },
           "director_mode": {
             "default": "",
             "title": "Director Mode",
+            "type": "string"
+          },
+          "director_node_id": {
+            "default": "",
+            "title": "Director Node Id",
             "type": "string"
           },
           "draft": {
@@ -708,7 +779,7 @@
         "type": "object"
       },
       "SessionCreate": {
-        "description": "建会话的 brief 一次性给全（spec §7；D7 §4.1 放开 ``ref``）。\n\nD2 起 ``mode`` 被写成单值字面量，由后续票扩成真实的两条路线。``ref`` 的参考\n素材**不进创建表单**：素材是会话内资产，创建时还没有 asset_id——``RefIn`` 与\n``refs`` 一并删除，DTO 里不再出现本地路径。",
+        "description": "建会话的 brief 一次性给全（spec §7；D7 §4.1 放开 ``ref``，D8 放开 ``director``）。\n\n``mode`` 只作普通字符串：三路线的合法性由 ``_validate_route_parameters`` 判，\n这样未知路线能拿到稳定的 ``director_mode_invalid``，而不是 pydantic 那份没有\n``code`` 的通用 422。``ref`` 的参考素材与 ``director`` 的开场首帧**都不进创建\n表单**：前者是会话内资产（建好后上传），后者要等阶段 1 才有画幅可比。\n\n导演台三个打包参数（节点 id / 段缓存名 / 段间引导模式）在创建时问齐，与 CLI\n「会话开头问一次」是同一时点（``wizard_director.py:119-179``）。``director_mode``\n与 ``director_continuity_mode`` 用 ``None`` 表示「没给」：空串与省略在这两个字段\n上必须分开——引导模式省略要落默认 ``guide``，而不是落一个空串。",
         "properties": {
           "canvases": {
             "additionalProperties": {
@@ -732,6 +803,50 @@
             "title": "Clarifications",
             "type": "string"
           },
+          "director_cache_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Director Cache Name"
+          },
+          "director_continuity_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Director Continuity Mode"
+          },
+          "director_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Director Mode"
+          },
+          "director_node_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Director Node Id"
+          },
           "draft": {
             "default": "",
             "title": "Draft",
@@ -749,10 +864,6 @@
           },
           "mode": {
             "default": "base",
-            "enum": [
-              "base",
-              "ref"
-            ],
             "title": "Mode",
             "type": "string"
           },
@@ -2444,7 +2555,7 @@
     },
     "/api/v1/sessions/{session_id}/action-items/{item_id}/resolve": {
       "post": {
-        "description": "提交人工决定：``approve`` 走后续步骤（base 进阶段 2，ref 先进素材循环），\n``revise`` 从声明层次重跑阶段 1。\n\n第二个人工待办（``frame_submission``）复用同一个端点、靠 body 分型（D4 §9）：\n带 ``frames`` 即帧提交；kind 与载荷错配一律 422 ``frame_invalid``。段视频\n（``video_asset_id``，D6 §8）与素材图（``asset_id``，D7 §6.3）同理。\n\n状态判定与「决议 + 起任务」的原子性都在 ``JobRunner.resolve`` 的会话临界区里，\n这里只把请求体归一成内部词汇，不先查一遍状态（两处判据会在并发下各说各话）。",
+        "description": "提交人工决定：``approve`` 走后续步骤（base 进阶段 2，ref 先进素材循环），\n``revise`` 从声明层次重跑阶段 1。\n\n其余人工待办复用同一个端点、靠 body 分型（D4 §9）：带 ``frames`` 即帧提交；段视频\n（``video_asset_id``，D6 §8）、素材图（``asset_id``，D7 §6.3）与导演台开场首帧\n（``decision=submit_start_image`` + ``start_asset_id``，D8 §7.1）同理。kind 与载荷\n错配一律 422（``frame_invalid`` / ``segment_video_invalid`` / ``asset_image_invalid``）。\n\n状态判定与「决议 + 起任务」的原子性都在 ``JobRunner.resolve`` 的会话临界区里，\n这里只把请求体归一成内部词汇，不先查一遍状态（两处判据会在并发下各说各话）。",
         "operationId": "resolve_action_item_api_v1_sessions__session_id__action_items__item_id__resolve_post",
         "parameters": [
           {

@@ -1146,6 +1146,20 @@ MUTATIONS: tuple[Mutation, ...] = (
         "ref 套用首尾帧链的裁首帧＝用户交回的帧被吃掉一帧，多参成片比段之和短"
         "（#259，D7 §10 复用拼接件但路线口径不同）",
     ),
+    Mutation(
+        "director_frame_gate_reads_variant",
+        "src/minimax_h3_prompt/step_machine.py",
+        "    if is_director_mode(brief.mode):\n"
+        "        return director_frame_variant(brief) in FRAME_VARIANTS\n"
+        "    return needs_frame_submission(brief.variant)",
+        "    if False:\n"
+        "        return director_frame_variant(brief) in FRAME_VARIANTS\n"
+        "    return needs_frame_submission(brief.variant)",
+        ("tests/test_step_machine.py::"
+         "test_frame_submission_predicate_reads_the_director_frame_variant",),
+        "帧待办判据退回读 brief.variant（导演台恒 T2VA 占位）＝ i2v/fl2v 静默不出"
+        "开场首帧待办，用户导入导演包才发现段里没图（#261，D8 §6.4）",
+    ),
 )
 
 
