@@ -22,6 +22,8 @@ export type SegmentOut = components['schemas']['SegmentOut']
 export type ActionItemResolve = components['schemas']['ActionItemResolve']
 export type RevisionIn = components['schemas']['RevisionIn']
 export type Asset = components['schemas']['Asset']
+// 素材台账摘要（D7）：语义名 / 类型 / 编号 / 素材标识，形状来自契约。
+export type RefOut = components['schemas']['RefOut']
 
 /**
  * 统一 API 错误。组件只处理这一种错误，不各自识别 FastAPI 默认的 ``detail``。
@@ -274,16 +276,25 @@ export function diagnosticsBundleUrl(): string {
 }
 
 /**
- * 上传一份素材（复用 D3 端点，D4-AC13）。
+ * 上传一份素材（复用 D3 端点，D4-AC13 / D7 §4.2）。
  *
  * 走裸 fetch 而不是 `apiClient.POST`：生成的 multipart 类型把 `file` 声明成字符串
  * （format: binary），真正要发的是 `FormData`；用 openapi-fetch 得靠一个占位 body
  * 加 bodySerializer 绕过类型。这里复用同一份错误拦截与令牌注入，返回形状仍由契约
  * 类型约束。
+ *
+ * `name` 是 ref 会话必填的语义名；base 会话（帧提交）不传，服务端忽略它。
  */
-export async function uploadSessionAsset(sessionId: string, file: File): Promise<Asset> {
+export async function uploadSessionAsset(
+  sessionId: string,
+  file: File,
+  name?: string,
+): Promise<Asset> {
   const form = new FormData()
   form.append('file', file)
+  if (name !== undefined) {
+    form.append('name', name)
+  }
   const response = await errorHandlingFetch(
     `${baseUrl}/api/v1/sessions/${encodeSessionPath(sessionId)}/assets`,
     {
@@ -293,6 +304,21 @@ export async function uploadSessionAsset(sessionId: string, file: File): Promise
     },
   )
   return (await response.json()) as Asset
+}
+
+/**
+ * 删掉一条参考素材（D7 §4.2）。`assetId` 与媒体地址同形（`<会话标识>/<哈希>`），
+ * 端点因此是 `/sessions/{会话}/assets/{素材标识}`，两段都保留路径分隔。
+ * 成功是 204 空体；失败由统一错误拦截抛 `ApiError`。
+ */
+export async function deleteSessionAsset(sessionId: string, assetId: string): Promise<void> {
+  await errorHandlingFetch(
+    `${baseUrl}/api/v1/sessions/${encodeSessionPath(sessionId)}/assets/${encodeSessionPath(assetId)}`,
+    {
+      method: 'DELETE',
+      headers: { 'X-Workbench-Token': await ensureSessionToken() },
+    },
+  )
 }
 
 /**

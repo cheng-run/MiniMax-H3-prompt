@@ -476,6 +476,10 @@ class SessionState:
     # 长片的段列表（D6 spec §10）：每段的状态/产物/视频标识都在这里，是「哪一段过了」
     # 的唯一快照事实。事件重放不补它（与 jobs/action_items 不同），靠每次落盘保证。
     segments: tuple[dict[str, Any], ...] = ()
+    # 素材台账（D7 spec §6.4 / #255）：参考素材的语义名、类型、编号、内容哈希与轮次。
+    # **住会话状态而不是另写 asset-ledger.json**：会话文件是唯一真源（ADR 0032），
+    # 另开一份文件就会出现「台账与快照各说各话」的两处口径。旧会话没有这个键 → 空表。
+    asset_ledger: tuple[dict[str, Any], ...] = ()
 
     @property
     def awaiting_frames(self) -> bool:
@@ -519,6 +523,7 @@ class SessionState:
             payload["jobs"] = [dict(item) for item in self.jobs]
             payload["action_items"] = [dict(item) for item in self.action_items]
             payload["segments"] = [dict(item) for item in self.segments]
+            payload["asset_ledger"] = [dict(item) for item in self.asset_ledger]
         atomic_write_text(
             target, json.dumps(payload, ensure_ascii=False, indent=2))
         return target
@@ -531,7 +536,8 @@ def save_session(directory: str | Path, brief: Brief, stage_state: dict[str, Any
                  revision: int = 0,
                  last_event_seq: int = 0,
                  jobs: tuple[dict[str, Any], ...] = (),
-                 action_items: tuple[dict[str, Any], ...] = ()) -> Path:
+                 action_items: tuple[dict[str, Any], ...] = (),
+                 asset_ledger: tuple[dict[str, Any], ...] = ()) -> Path:
     """保存或更新会话；directory 为 generation 目录。"""
     session = SessionState(
         Path(directory), brief, stage_state, status,
@@ -541,6 +547,7 @@ def save_session(directory: str | Path, brief: Brief, stage_state: dict[str, Any
         last_event_seq=last_event_seq,
         jobs=tuple(jobs),
         action_items=tuple(action_items),
+        asset_ledger=tuple(asset_ledger),
     )
     return session.save()
 
@@ -602,6 +609,7 @@ def load_session(directory: str | Path) -> SessionState | None:
         jobs=_dict_tuple(raw, "jobs"),
         action_items=_dict_tuple(raw, "action_items"),
         segments=_dict_tuple(raw, "segments"),
+        asset_ledger=_dict_tuple(raw, "asset_ledger"),
     )
 
 

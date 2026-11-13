@@ -163,7 +163,7 @@
         "type": "object"
       },
       "Asset": {
-        "description": "上传素材的对外形状（#222 §9）。``asset_id`` 与 ``artifact_id`` 同形：\n``<session_id>/<sha256 前 16 位>``——路径参数按 ``{asset_id:path}`` 承接。",
+        "description": "上传素材的对外形状（#222 §9）。``asset_id`` 与 ``artifact_id`` 同形：\n``<session_id>/<sha256 前 16 位>``——路径参数按 ``{asset_id:path}`` 承接。\n\n``number`` 只有 ref 上传（台账登记）才有值（D7 §12「返回编号与类型」）；base\n上传与目录现扫（列表/详情）为 ``None``。``kind`` 始终是**嗅探类型**\n（image/video/audio），台账里的官方三型（picture/video/audio）在 ``brief.refs``。",
         "properties": {
           "asset_id": {
             "title": "Asset Id",
@@ -184,6 +184,17 @@
           "name": {
             "title": "Name",
             "type": "string"
+          },
+          "number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Number"
           }
         },
         "required": [
@@ -525,56 +536,31 @@
         "title": "ProblemFieldError",
         "type": "object"
       },
-      "RefIn": {
-        "properties": {
-          "description": {
-            "default": "",
-            "title": "Description",
-            "type": "string"
-          },
-          "name": {
-            "default": "",
-            "title": "Name",
-            "type": "string"
-          },
-          "path": {
-            "default": "",
-            "title": "Path",
-            "type": "string"
-          },
-          "picture": {
-            "default": 1,
-            "title": "Picture",
-            "type": "integer"
-          }
-        },
-        "title": "RefIn",
-        "type": "object"
-      },
       "RefOut": {
+        "description": "素材台账摘要（D7 spec §12）：语义名 / 官方三型 / 同类编号 / 素材标识。\n\n这里回显的是**台账**（会话状态），不是上传目录的现扫结果；两者语义不同\n（``SessionDetail.assets`` 仍是目录现扫）。``asset_id`` 用来把摘要接到缩略图与\n媒体读取上。**没有本地路径字段**：工作台的素材只能走上传接口（spec §4.1）。",
         "properties": {
-          "description": {
-            "default": "",
-            "title": "Description",
+          "asset_id": {
+            "title": "Asset Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
             "type": "string"
           },
           "name": {
-            "default": "",
             "title": "Name",
             "type": "string"
           },
-          "path": {
-            "default": "",
-            "title": "Path",
-            "type": "string"
-          },
-          "picture": {
-            "title": "Picture",
+          "number": {
+            "title": "Number",
             "type": "integer"
           }
         },
         "required": [
-          "picture"
+          "name",
+          "kind",
+          "number",
+          "asset_id"
         ],
         "title": "RefOut",
         "type": "object"
@@ -680,7 +666,7 @@
         "type": "object"
       },
       "SessionCreate": {
-        "description": "建会话的 brief 一次性给全（spec §7）。\n\nD2 只做 ``base`` 短视频，所以 ``mode`` 是单值字面量；扩大路线由后续票改契约，\n不在这里留一个「看起来支持」的自由字符串。",
+        "description": "建会话的 brief 一次性给全（spec §7；D7 §4.1 放开 ``ref``）。\n\nD2 起 ``mode`` 被写成单值字面量，由后续票扩成真实的两条路线。``ref`` 的参考\n素材**不进创建表单**：素材是会话内资产，创建时还没有 asset_id——``RefIn`` 与\n``refs`` 一并删除，DTO 里不再出现本地路径。",
         "properties": {
           "canvases": {
             "additionalProperties": {
@@ -720,8 +706,11 @@
             "type": "string"
           },
           "mode": {
-            "const": "base",
             "default": "base",
+            "enum": [
+              "base",
+              "ref"
+            ],
             "title": "Mode",
             "type": "string"
           },
@@ -729,13 +718,6 @@
             "minLength": 1,
             "title": "Plot",
             "type": "string"
-          },
-          "refs": {
-            "items": {
-              "$ref": "#/components/schemas/RefIn"
-            },
-            "title": "Refs",
-            "type": "array"
           },
           "style": {
             "default": "Cinematic",
@@ -2783,6 +2765,10 @@
                   "file": {
                     "format": "binary",
                     "type": "string"
+                  },
+                  "name": {
+                    "description": "参考素材的语义名；ref 会话必填且会话内唯一，base 会话忽略。",
+                    "type": "string"
                   }
                 },
                 "required": [
@@ -2871,7 +2857,7 @@
                 }
               }
             },
-            "description": "历史会话只读，或幂等键已用于另一份内容（problem+json）"
+            "description": "历史会话只读、幂等键已用于另一份内容，或 ref 会话已起跑（asset_locked）（problem+json）"
           },
           "413": {
             "content": {
@@ -2925,6 +2911,101 @@
           }
         },
         "summary": "Upload Asset",
+        "tags": [
+          "assets"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session_id}/assets/{asset_id}": {
+      "delete": {
+        "description": "删掉一条参考素材登记与它的正本（D7 spec §4.2）。\n\nspec §4.2 要求「循环开始前可删素材」，§12 又写「不新增端点」——两句话冲突，\n用户 2026-11-13 裁定**新增删除端点**。``asset_id`` 与 ``GET /api/v1/media/…``\n同形（``<会话标识>/<16 位内容哈希>``），归属校验在存储层：不属于本会话与不存在\n同码 404，不给出探测他会话素材的 oracle。\n\n成功回 204 空体；**不发事件**（素材增删仍不是事件，D3-AC13）。",
+        "operationId": "delete_asset_api_v1_sessions__session_id__assets__asset_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "asset_id",
+            "required": true,
+            "schema": {
+              "title": "Asset Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "缺少或无效的工作台访问令牌（problem+json）"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "Host/Origin 不是本机回环地址（problem+json）"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "素材不存在，或不属于 URL 里那个会话（problem+json）"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "base 会话调用（route_mismatch）、会话已起跑（asset_locked）或历史会话只读（problem+json）"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "请求参数校验失败（problem+json）"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "服务器内部错误（problem+json）"
+          }
+        },
+        "summary": "Delete Asset",
         "tags": [
           "assets"
         ]

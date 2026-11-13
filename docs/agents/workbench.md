@@ -12,7 +12,7 @@
 | `workbench_store.py` | 会话仓库：`workbench.v1` 快照、原子写、每会话线程锁、`mutate`、事件日志 `EventLog`、幂等登记表、产物登记 |
 | `api/jobs.py` | `JobRunner`：每会话 asyncio 锁、`to_thread` 跑 LangGraph、节点边界取消、`active-job.json`、启动对账、阶段 1/2 执行 |
 | `api/routes/sessions.py` | `/api/v1` 全部会话端点；**路由顺序即契约**：`{session_id:path}` 会吞斜杠，`/jobs`、`/events`、`/action-items` 必须注册在详情路由之前 |
-| `api/routes/assets.py` | 上传素材的收与列（`POST/GET /sessions/{id}/assets`）；整只路由器在 `create_app` 里排在 `sessions` 之前，顺序不靠人记 |
+| `api/routes/assets.py` | 上传素材的收、列与删除（`POST/GET/DELETE /sessions/{id}/assets`）；整只路由器在 `create_app` 里排在 `sessions` 之前，顺序不靠人记 |
 | `api/routes/media.py` | 素材字节读取（`GET/HEAD /media/{asset_id:path}`）；同样排在 `sessions` 之前 |
 | `api/media.py` | 单段 Range 解析、416 与字节流响应；素材与成片的 content 端点**共用这一份** |
 | `diagnostics.py` | 诊断包组装（manifest/环境/脱敏配置/日志窗口/会话/文本产物）；纯文件与字典操作，不依赖 FastAPI |
@@ -80,6 +80,17 @@
   `.json` 边车（显示名、类型、字节、首次创建时间），清单靠目录现扫 + 命名规则——
   `.tmp-*` 不是素材，列表看不见，只在启动时删；同内容不写第二份。上传**不改会话
   状态、不发事件**，残片由启动清理收拾（`store.cleanup_assets`）。
+- **参考素材台账**（D7-2 / #255）住 `SessionState.asset_ledger`（会话文件是唯一真源，
+  ADR 0032），不另写 `asset-ledger.json`：`name / kind / number / asset_id / sha256 /
+  round / status`。同一个上传端点的两种用法只差一个判据：**带语义名 = 登记参考素材**
+  ——会话内唯一、类型由嗅探定、同类编号从 1 起、容量按台账同步判 9 图 / 3 视频 /
+  3 音频 / 12 文件（422 `ref_capacity_exceeded`）、**起跑（离开 `created`）即锁登记**
+  （409 `asset_locked`）；**不带语义名 = 普通素材**——ref 与 base 一致，不记账、不编号、
+  不占容量、不受起跑锁，它就是素材图与段视频回交的通道（#256/#258）。base 会话带语义名
+  → 422 `asset_name_invalid`（没有台账可登记）。删除是
+  `DELETE /sessions/{id}/assets/{asset_id}`，只撤销台账登记（台账外 → 404
+  `asset_not_found`，base 调用 → 409 `route_mismatch`）；详情里的 `brief.refs` 就是
+  台账摘要。
 
 ## 长片分段陪跑（D6，ADR 0036）
 

@@ -504,6 +504,15 @@ def test_contract_declares_the_upload_trio(tmp_path):
         assert status in post["responses"], status
 
     schemas = schema["components"]["schemas"]
+    # number 是 D7（#255）加的：ref 上传回台账编号，base 上传与目录现扫为 null。
     assert set(schemas["Asset"]["properties"]) == {
-        "asset_id", "kind", "name", "bytes", "created_at"}
+        "asset_id", "kind", "name", "bytes", "created_at", "number"}
     assert "assets" in schemas["SessionDetail"]["properties"]
+
+    # 删除端点（D7 §4.2，用户裁定新增）：204 成功 + 404/409 都以 problem+json 回。
+    delete_path = "/api/v1/sessions/{session_id}/assets/{asset_id}"
+    assert "delete" in schema["paths"][delete_path]
+    delete = schema["paths"][delete_path]["delete"]
+    assert "204" in delete["responses"]
+    for status in ("404", "409"):
+        assert PROBLEM_CONTENT_TYPE in delete["responses"][status]["content"], status

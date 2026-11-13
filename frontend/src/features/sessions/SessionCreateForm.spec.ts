@@ -111,6 +111,53 @@ describe('SessionCreateForm 校验', () => {
   })
 })
 
+describe('SessionCreateForm 路线选择', () => {
+  it('默认 base；选 ref 隐藏变体下拉，提交 mode=ref 与固定 T2VA', async () => {
+    let created: Record<string, unknown> | null = null
+    server.use(
+      http.post(createUrl, async ({ request }) => {
+        created = (await request.json()) as Record<string, unknown>
+        return HttpResponse.json(makeDetail({ session_id: 'sess-1', status: 'created' }), {
+          status: 201,
+        })
+      }),
+      http.post(jobsUrl, () =>
+        HttpResponse.json(
+          {
+            type: 'about:blank',
+            title: '资源状态冲突',
+            status: 409,
+            detail: '先上传参考素材',
+            instance: jobsUrl,
+            code: 'asset_required',
+          },
+          { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    const { wrapper, router } = mountWithPlugins(SessionCreateForm, { withRouter: true })
+    await router!.isReady()
+    expect(
+      (wrapper.find('input[name="mode"][value="base"]').element as HTMLInputElement).checked,
+    ).toBe(true)
+    expect(wrapper.find('select[name="variant"]').exists()).toBe(true)
+
+    await wrapper.find('input[name="mode"][value="ref"]').setValue()
+    expect(wrapper.find('select[name="variant"]').exists()).toBe(false)
+
+    await wrapper.find('textarea[name="plot"]').setValue('雨夜旧信')
+    await wrapper.find('form').trigger('submit')
+    await settle()
+
+    expect(created).toMatchObject({ mode: 'ref', variant: 'T2VA', plot: '雨夜旧信' })
+    // 起跑被 409 拒绝（零素材）不算创建失败：会话已存在，仍进工作台。
+    expect(router!.currentRoute.value.path).toBe('/sessions/sess-1')
+    warn.mockRestore()
+  })
+})
+
 describe('SessionCreateForm 创建即起跑', () => {
   it('显式发送 duration=5 与 variant=FL2VA，起跑后跳转工作台', async () => {
     let created: Record<string, unknown> | null = null

@@ -16,9 +16,9 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
 from fastapi.responses import PlainTextResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-from ...brief_parser import Brief, RefItem
+from ...brief_parser import Brief
 from ...injection_card import VideoOutputParams
 from ...user_revisions import (
     LAYER_ART,
@@ -81,6 +81,10 @@ class VideoOutputIn(BaseModel):
 DURATION_MIN_SECONDS = 4.0
 DURATION_MAX_SECONDS = 60.0
 
+# ref 路线不走帧链（ADR 0011）：variant 是帧形态（T2VA/I2VA/FL2VA/L2VA），ref 段
+# 不写单图锚，所以服务端固定落这一个值；DTO 里因此不出现「有时没有这个字段」。
+REF_VARIANT = "T2VA"
+
 
 class DurationOutOfScope(ProblemError):
     """时长越界：文案给出当前支持的范围，不指向别的票。"""
@@ -97,21 +101,28 @@ def _validate_duration(duration: float) -> None:
         f"收到的 duration={duration:g}。")
 
 
-class RefIn(BaseModel):
-    picture: int = 1
-    name: str = ""
-    description: str = ""
-    path: str = ""
+def _validate_route_parameters(payload: SessionCreate) -> None:
+    """ref 路线不接受帧链的变体（D7 §4.1）。
+
+    前端选 ref 时会隐藏 variant 下拉，这条只兜外部调用方。用通用 422 而不是
+    ``route_mismatch``（409）：错的是**请求体字段**，不是会话状态冲突。
+    """
+    if payload.mode == "ref" and payload.variant != REF_VARIANT:
+        raise HTTPException(
+            422,
+            f"ref 路线不走帧链（ADR 0011）：variant 只能是 {REF_VARIANT}，"
+            f"收到 {payload.variant!r}。")
 
 
 class SessionCreate(BaseModel):
-    """建会话的 brief 一次性给全（spec §7）。
+    """建会话的 brief 一次性给全（spec §7；D7 §4.1 放开 ``ref``）。
 
-    D2 只做 ``base`` 短视频，所以 ``mode`` 是单值字面量；扩大路线由后续票改契约，
-    不在这里留一个「看起来支持」的自由字符串。
+    D2 起 ``mode`` 被写成单值字面量，由后续票扩成真实的两条路线。``ref`` 的参考
+    素材**不进创建表单**：素材是会话内资产，创建时还没有 asset_id——``RefIn`` 与
+    ``refs`` 一并删除，DTO 里不再出现本地路径。
     """
 
-    mode: Literal["base"] = "base"
+    mode: Literal["base", "ref"] = "base"
     variant: str = "T2VA"
     # 范围校验在 ``_validate_duration`` 里做（为的是拿到专用错误码）；这里不再写
     # ``gt=0``——pydantic 先拒会把 0/负数拦成没有 code 的通用 422。
@@ -123,7 +134,19 @@ class SessionCreate(BaseModel):
     draft: str = ""
     canvases: dict[str, tuple[int, int]] = Field(default_factory=dict)
     video_output: VideoOutputIn | None = None
-    refs: list[RefIn] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_legacy_refs(cls, data: Any) -> Any:
+        """``refs`` 已经不在契约里：带它的请求要响，不能静默忽略。
+
+        pydantic 默认忽略未知字段；旧客户端把一串本地路径塞进 ``refs`` 时会以为
+        素材登记成功了。这里点名拒绝，让它立刻改成上传接口。
+        """
+        if isinstance(data, dict) and "refs" in data:
+            raise ValueError(
+                "创建表单不再接受 refs：参考素材只能建会话后走上传接口。")
+        return data
 
 
 class RevisionIn(BaseModel):
@@ -215,7 +238,9 @@ def _brief_from_payload(payload: SessionCreate) -> Brief:
             raise HTTPException(422, str(exc)) from exc
     return Brief(
         mode=payload.mode,
-        variant=payload.variant,
+        # ref 的 variant 由服务端固定（见 ``REF_VARIANT``）；校验已在
+        # ``_validate_route_parameters`` 里做过，这里只负责落库口径。
+        variant=REF_VARIANT if payload.mode == "ref" else payload.variant,
         duration=payload.duration,
         style=payload.style,
         language=payload.language,
@@ -224,9 +249,6 @@ def _brief_from_payload(payload: SessionCreate) -> Brief:
         draft=payload.draft,
         canvases=dict(payload.canvases),
         video_output=video_output,
-        refs=[RefItem(picture=item.picture, name=item.name,
-                      description=item.description, path=item.path)
-              for item in payload.refs],
     )
 
 
@@ -263,6 +285,7 @@ def create_session(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> SessionDetail:
     _validate_duration(payload.duration)
+    _validate_route_parameters(payload)
     detail, replayed = _store(request).create(
         _brief_from_payload(payload),
         idempotency_key=idempotency_key or None,

@@ -21,12 +21,18 @@ const router = useRouter()
 const form = reactive({
   plot: '',
   duration: DEFAULT_DURATION as number,
+  // 路线（D7 §4.1）：base = 首尾帧链，ref = 多参。创建时定死，中途不切换。
+  mode: 'base' as 'base' | 'ref',
   variant: DEFAULT_VARIANT as 'T2VA' | 'FL2VA',
   style: 'Cinematic',
   language: 'Chinese',
   clarifications: '',
   draft: '',
 })
+
+// ref 不走帧链（ADR 0011）：选 ref 时变体下拉整格隐藏，提交的 variant 由前端固定
+// 成 T2VA，与服务端「ref 一律落 T2VA」同口径。
+const isRef = computed(() => form.mode === 'ref')
 
 const submitting = ref(false)
 const plotMissing = ref(false)
@@ -72,10 +78,10 @@ async function onSubmit(): Promise<void> {
   try {
     const detail = await createSession(
       {
-        mode: 'base',
+        mode: form.mode,
         plot: form.plot.trim(),
         duration: Number(form.duration),
-        variant: form.variant,
+        variant: isRef.value ? 'T2VA' : form.variant,
         style: form.style.trim() || 'Cinematic',
         language: form.language.trim() || 'Chinese',
         clarifications: form.clarifications,
@@ -124,6 +130,23 @@ async function onSubmit(): Promise<void> {
       />
     </div>
 
+    <div class="field">
+      <span class="field-label">路线</span>
+      <div class="mode-options" role="radiogroup" aria-label="路线">
+        <label>
+          <input v-model="form.mode" type="radio" name="mode" value="base" />
+          首尾帧（base）
+        </label>
+        <label>
+          <input v-model="form.mode" type="radio" name="mode" value="ref" />
+          多参参考素材（ref）
+        </label>
+      </div>
+      <p v-if="isRef" class="field-hint">
+        多参会话不选帧变体；建好后在素材分区上传参考素材（语义名必填）才能开始。
+      </p>
+    </div>
+
     <div class="field-row">
       <div class="field">
         <label for="session-duration">时长（秒，4–10）</label>
@@ -143,7 +166,8 @@ async function onSubmit(): Promise<void> {
         </p>
       </div>
 
-      <div class="field">
+      <!-- ref 不走帧链（ADR 0011）：变体是帧形态，这一格对 ref 会话没有意义。 -->
+      <div v-if="!isRef" class="field">
         <label for="session-variant">生成方式</label>
         <select id="session-variant" v-model="form.variant" name="variant">
           <option value="T2VA">T2VA（纯文字）</option>
@@ -216,6 +240,24 @@ async function onSubmit(): Promise<void> {
 .field-error {
   margin: 0;
   color: var(--color-error-text);
+  font-size: 0.875rem;
+}
+.field-label {
+  font-weight: 600;
+}
+.mode-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+.mode-options label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+.field-hint {
+  margin: 0;
+  color: var(--color-text-muted);
   font-size: 0.875rem;
 }
 .advanced {

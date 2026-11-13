@@ -147,11 +147,16 @@ def test_legacy_session_jobs_returns_problem_409(tmp_path):
     assert "legacy" in body["detail"].lower() or "历史" in body["detail"]
 
 
-def test_create_rejects_non_base_routes_and_bad_video_output(tmp_path):
+def test_create_rejects_unknown_routes_and_bad_video_output(tmp_path):
     client = _client(tmp_path)
 
-    other_route = client.post("/api/v1/sessions", json={**_brief_body(), "mode": "ref"})
-    assert other_route.status_code == 422
+    # D7-2（#255）起 ref 是合法路线；不认识的路线与导演台（本 spec 不含）仍要响。
+    unknown_route = client.post("/api/v1/sessions", json={**_brief_body(), "mode": "mixed"})
+    assert unknown_route.status_code == 422
+
+    director_route = client.post("/api/v1/sessions",
+                                 json={**_brief_body(), "mode": "director"})
+    assert director_route.status_code == 422
 
     bad_output = client.post("/api/v1/sessions", json={
         **_brief_body(),

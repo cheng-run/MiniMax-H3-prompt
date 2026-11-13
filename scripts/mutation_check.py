@@ -999,6 +999,25 @@ MUTATIONS: tuple[Mutation, ...] = (
         "重放不还原段号＝崩溃补齐后待办又说不出「在等第几段」，"
         "段循环的恢复只能靠人去翻产物名（#254）",
     ),
+    Mutation(
+        "ref_capacity_gate_off",
+        "src/minimax_h3_prompt/workbench_store.py",
+        "        check_reference_capacity(items, where=where)",
+        "        return",
+        ("tests/test_api_ref_assets.py::"
+         "test_tenth_picture_is_refused_and_names_the_picture_bucket",),
+        "同步容量闸失效＝第 10 张图在上传时就放行，直到真跑起来在文本编码器上"
+        "OOM（2026-10-22 实测 232 GiB）才炸（#255）",
+    ),
+    Mutation(
+        "ref_asset_lock_off",
+        "src/minimax_h3_prompt/workbench_store.py",
+        '        if session.brief.is_ref and session.status != "created":',
+        "        if False and session.brief.is_ref and session.status != \"created\":",
+        ("tests/test_api_ref_assets.py::"
+         "test_registration_after_start_is_locked_but_plain_upload_is_not",),
+        "起跑锁失效＝素材循环开始后还能加删台账，已写好的资产图词与图脱钩（#255）",
+    ),
 )
 
 

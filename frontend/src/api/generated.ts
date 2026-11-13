@@ -235,6 +235,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{session_id}/assets/{asset_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Asset
+         * @description 删掉一条参考素材登记与它的正本（D7 spec §4.2）。
+         *
+         *     spec §4.2 要求「循环开始前可删素材」，§12 又写「不新增端点」——两句话冲突，
+         *     用户 2026-11-13 裁定**新增删除端点**。``asset_id`` 与 ``GET /api/v1/media/…``
+         *     同形（``<会话标识>/<16 位内容哈希>``），归属校验在存储层：不属于本会话与不存在
+         *     同码 404，不给出探测他会话素材的 oracle。
+         *
+         *     成功回 204 空体；**不发事件**（素材增删仍不是事件，D3-AC13）。
+         */
+        delete: operations["delete_asset_api_v1_sessions__session_id__assets__asset_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{session_id}/events": {
         parameters: {
             query?: never;
@@ -392,6 +419,10 @@ export interface components {
          * Asset
          * @description 上传素材的对外形状（#222 §9）。``asset_id`` 与 ``artifact_id`` 同形：
          *     ``<session_id>/<sha256 前 16 位>``——路径参数按 ``{asset_id:path}`` 承接。
+         *
+         *     ``number`` 只有 ref 上传（台账登记）才有值（D7 §12「返回编号与类型」）；base
+         *     上传与目录现扫（列表/详情）为 ``None``。``kind`` 始终是**嗅探类型**
+         *     （image/video/audio），台账里的官方三型（picture/video/audio）在 ``brief.refs``。
          */
         Asset: {
             /** Asset Id */
@@ -404,6 +435,8 @@ export interface components {
             kind: string;
             /** Name */
             name: string;
+            /** Number */
+            number?: number | null;
         };
         /**
          * AuthTokenResponse
@@ -555,48 +588,23 @@ export interface components {
             /** Type */
             type: string;
         };
-        /** RefIn */
-        RefIn: {
-            /**
-             * Description
-             * @default
-             */
-            description: string;
-            /**
-             * Name
-             * @default
-             */
-            name: string;
-            /**
-             * Path
-             * @default
-             */
-            path: string;
-            /**
-             * Picture
-             * @default 1
-             */
-            picture: number;
-        };
-        /** RefOut */
+        /**
+         * RefOut
+         * @description 素材台账摘要（D7 spec §12）：语义名 / 官方三型 / 同类编号 / 素材标识。
+         *
+         *     这里回显的是**台账**（会话状态），不是上传目录的现扫结果；两者语义不同
+         *     （``SessionDetail.assets`` 仍是目录现扫）。``asset_id`` 用来把摘要接到缩略图与
+         *     媒体读取上。**没有本地路径字段**：工作台的素材只能走上传接口（spec §4.1）。
+         */
         RefOut: {
-            /**
-             * Description
-             * @default
-             */
-            description: string;
-            /**
-             * Name
-             * @default
-             */
+            /** Asset Id */
+            asset_id: string;
+            /** Kind */
+            kind: string;
+            /** Name */
             name: string;
-            /**
-             * Path
-             * @default
-             */
-            path: string;
-            /** Picture */
-            picture: number;
+            /** Number */
+            number: number;
         };
         /** RevisionIn */
         RevisionIn: {
@@ -667,10 +675,11 @@ export interface components {
         };
         /**
          * SessionCreate
-         * @description 建会话的 brief 一次性给全（spec §7）。
+         * @description 建会话的 brief 一次性给全（spec §7；D7 §4.1 放开 ``ref``）。
          *
-         *     D2 只做 ``base`` 短视频，所以 ``mode`` 是单值字面量；扩大路线由后续票改契约，
-         *     不在这里留一个「看起来支持」的自由字符串。
+         *     D2 起 ``mode`` 被写成单值字面量，由后续票扩成真实的两条路线。``ref`` 的参考
+         *     素材**不进创建表单**：素材是会话内资产，创建时还没有 asset_id——``RefIn`` 与
+         *     ``refs`` 一并删除，DTO 里不再出现本地路径。
          */
         SessionCreate: {
             /** Canvases */
@@ -703,13 +712,11 @@ export interface components {
             /**
              * Mode
              * @default base
-             * @constant
+             * @enum {string}
              */
-            mode: "base";
+            mode: "base" | "ref";
             /** Plot */
             plot: string;
-            /** Refs */
-            refs?: components["schemas"]["RefIn"][];
             /**
              * Style
              * @default Cinematic
@@ -2014,6 +2021,8 @@ export interface operations {
                 "multipart/form-data": {
                     /** Format: binary */
                     file: string;
+                    /** @description 参考素材的语义名；ref 会话必填且会话内唯一，base 会话忽略。 */
+                    name?: string;
                 };
             };
         };
@@ -2074,7 +2083,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["ProblemDetail"];
                 };
             };
-            /** @description 历史会话只读，或幂等键已用于另一份内容（problem+json） */
+            /** @description 历史会话只读、幂等键已用于另一份内容，或 ref 会话已起跑（asset_locked）（problem+json） */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -2121,6 +2130,81 @@ export interface operations {
             };
             /** @description 磁盘写入失败（problem+json） */
             507: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+        };
+    };
+    delete_asset_api_v1_sessions__session_id__assets__asset_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+                asset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 缺少或无效的工作台访问令牌（problem+json） */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Host/Origin 不是本机回环地址（problem+json） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 素材不存在，或不属于 URL 里那个会话（problem+json） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description base 会话调用（route_mismatch）、会话已起跑（asset_locked）或历史会话只读（problem+json） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 请求参数校验失败（problem+json） */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 服务器内部错误（problem+json） */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };

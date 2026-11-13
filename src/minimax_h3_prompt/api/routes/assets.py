@@ -39,7 +39,17 @@ _MULTIPART_BODY: dict[str, Any] = {
                 "schema": {
                     "type": "object",
                     "required": ["file"],
-                    "properties": {"file": {"type": "string", "format": "binary"}},
+                    "properties": {
+                        "file": {"type": "string", "format": "binary"},
+                        # 语义名（D7 §4.2）：ref 会话必填且会话内唯一，base 会话可省
+                        # （帧提交上传走同一个端点，不能逼它带语义名）。
+                        "name": {
+                            "type": "string",
+                            "description": (
+                                "参考素材的语义名；ref 会话必填且会话内唯一，"
+                                "base 会话忽略。"),
+                        },
+                    },
                 },
             },
         },
@@ -51,7 +61,8 @@ _UPLOAD_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: {"model": ProblemDetail,
           "description": "请求不是可解析的 multipart 表单，或缺 file 字段（problem+json）"},
     409: {"model": ProblemDetail,
-          "description": "历史会话只读，或幂等键已用于另一份内容（problem+json）"},
+          "description": "历史会话只读、幂等键已用于另一份内容，"
+                         "或 ref 会话已起跑（asset_locked）（problem+json）"},
     413: {"model": ProblemDetail, "description": "超过该类型上限，已中止写入（problem+json）"},
     415: {"model": ProblemDetail,
           "description": "魔数不在白名单，或声明的扩展名与内容不符（problem+json）"},
@@ -77,12 +88,17 @@ async def _receive_upload(
         uploaded = form.get("file")
         if not isinstance(uploaded, UploadFile):
             raise UploadInvalid("上传必须带单文件字段 file。")
+        # 语义名是普通文本部件；缺失或不是文本（例如客户端误当文件发）一律按空串，
+        # 由存储层对 ref 会话判「必填」——判据只住一处。
+        raw_name = form.get("name")
+        semantic_name = raw_name if isinstance(raw_name, str) else ""
         # 读盘走线程池：搬运 512 MiB 不能占着事件循环。
         return await asyncio.to_thread(
             store.store_asset,
             session_id,
             uploaded.file,
             filename=uploaded.filename or "",
+            semantic_name=semantic_name,
             idempotency_key=idempotency_key,
         )
     finally:
@@ -145,3 +161,32 @@ async def upload_asset(
 def list_assets(session_id: str, request: Request) -> list[Asset]:
     """会话的素材清单：与详情里的 ``assets`` 同一份来源（目录现扫，无登记表）。"""
     return request.app.state.session_store.list_assets(session_id)
+
+
+_DELETE_RESPONSES: dict[int | str, dict[str, Any]] = {
+    **COMMON_ERROR_RESPONSES,
+    404: {"model": ProblemDetail,
+          "description": "素材不存在，或不属于 URL 里那个会话（problem+json）"},
+    409: {"model": ProblemDetail,
+          "description": "base 会话调用（route_mismatch）、会话已起跑"
+                         "（asset_locked）或历史会话只读（problem+json）"},
+}
+
+
+@router.delete(
+    "/sessions/{session_id:path}/assets/{asset_id:path}",
+    status_code=204,
+    responses=_DELETE_RESPONSES,
+)
+def delete_asset(session_id: str, asset_id: str, request: Request) -> Response:
+    """删掉一条参考素材登记与它的正本（D7 spec §4.2）。
+
+    spec §4.2 要求「循环开始前可删素材」，§12 又写「不新增端点」——两句话冲突，
+    用户 2026-11-13 裁定**新增删除端点**。``asset_id`` 与 ``GET /api/v1/media/…``
+    同形（``<会话标识>/<16 位内容哈希>``），归属校验在存储层：不属于本会话与不存在
+    同码 404，不给出探测他会话素材的 oracle。
+
+    成功回 204 空体；**不发事件**（素材增删仍不是事件，D3-AC13）。
+    """
+    request.app.state.session_store.delete_asset(session_id, asset_id)
+    return Response(status_code=204)

@@ -36,6 +36,16 @@ _KIND_CAPS = {
     KIND_AUDIO: MAX_AUDIOS,
 }
 
+# 上传素材的类型（按魔数嗅探：image / video / audio）→ 官方参考素材三型。两套词表
+# 相遇只在这一处翻译：媒介层说「image」（Content-Type 的粗分类），参考素材契约说
+# 「Picture」（官方 `<Picture N>` 标签）。各写一份映射，改一处就会让容量闸按错的
+# 桶计数——它不会报错，只会某一天放行了第 10 张图。
+ASSET_KIND_TO_REFERENCE: dict[str, str] = {
+    "image": KIND_PICTURE,
+    "video": KIND_VIDEO,
+    "audio": KIND_AUDIO,
+}
+
 
 class ReferenceCapacityError(ValueError):
     """单次请求的参考素材超出官方上限（issue #86 AC3）。
@@ -140,6 +150,7 @@ def check_reference_capacity(items: Iterable[ReferenceItem], *,
 
 
 __all__ = [
+    "ASSET_KIND_TO_REFERENCE",
     "MAX_AUDIOS",
     "MAX_FILES",
     "MAX_PICTURES",

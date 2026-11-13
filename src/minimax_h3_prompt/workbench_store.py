@@ -24,7 +24,14 @@ from typing import Any, BinaryIO, Callable, Literal, Sequence, cast
 from pydantic import BaseModel, Field, PrivateAttr
 
 from . import step_machine
-from .brief_parser import Brief
+from .brief_parser import Brief, is_ref_mode
+from .kinds import KIND_PICTURE, KINDS
+from .ref_capacity import (
+    ASSET_KIND_TO_REFERENCE,
+    ReferenceCapacityError,
+    ReferenceItem,
+    check_reference_capacity,
+)
 from .session_store import (
     SESSION_FILENAME,
     WORKBENCH_SCHEMA_VERSION,
@@ -353,6 +360,66 @@ class AssetNotFound(WorkbenchError):
 
     status_code = 404
     code = "asset_not_found"
+
+
+class AssetLocked(WorkbenchError):
+    """ref 会话起跑后不允许再增删参考素材（D7 spec §4.3 / §13）。
+
+    比 §4.2 的「素材循环开始前」更严，按**起跑**（会话离开 ``created``）锁：素材
+    循环一开始，后面每一步的资产图词都基于当时那份台账写，事后加删会让已写好的词
+    与图对不上。base 会话不受这条约束——帧提交上传走同一个端点（D4）。
+    """
+
+    status_code = 409
+    code = "asset_locked"
+
+
+class AssetRequired(WorkbenchError):
+    """ref 会话零 Picture 起跑（D7 spec §4.3 / §13）：停在 created 等人交素材。"""
+
+    status_code = 409
+    code = "asset_required"
+
+
+class AssetNameInvalid(WorkbenchError):
+    """ref 上传的语义名缺失、超长或会话内重复（D7 §4.2）。
+
+    spec §13 的错误码表没给「语义名」单独一码（票面把这一条留给实现定），这里用
+    ``asset_name_invalid``：它只描述「这个名字不能用」，与容量、类型、不存在分开。
+    """
+
+    status_code = 422
+    code = "asset_name_invalid"
+
+
+class AssetDuplicate(WorkbenchError):
+    """同一份内容已经登记在台账里（D7 §4.2）。
+
+    ref 不沿用 base 的「同内容返回同一份」：台账按语义名逐件计数，一份内容对应两条
+    登记会让容量、编号与素材循环的件号同时说谎。
+    """
+
+    status_code = 422
+    code = "asset_duplicate"
+
+
+class RefCapacityExceeded(WorkbenchError):
+    """参考素材超出官方 9/3/3/12 上限（D7 spec §8 / §13）。
+
+    422 是同步闸门：上传时立刻拒，不留到跑起来才炸。超过哪一档由
+    ``ref_capacity.check_reference_capacity`` 的文案点名，这里只换错误码——数字与
+    文案都不在本模块再抄一份。
+    """
+
+    status_code = 422
+    code = "ref_capacity_exceeded"
+
+
+class RouteMismatch(WorkbenchError):
+    """用一条路线的专属动作操作另一条路线的会话（D7 spec §13）。"""
+
+    status_code = 409
+    code = "route_mismatch"
 
 
 class FrameInvalid(WorkbenchError):
@@ -761,10 +828,17 @@ def _replay_snapshot(
 
 
 class RefOut(BaseModel):
-    picture: int
-    name: str = ""
-    description: str = ""
-    path: str = ""
+    """素材台账摘要（D7 spec §12）：语义名 / 官方三型 / 同类编号 / 素材标识。
+
+    这里回显的是**台账**（会话状态），不是上传目录的现扫结果；两者语义不同
+    （``SessionDetail.assets`` 仍是目录现扫）。``asset_id`` 用来把摘要接到缩略图与
+    媒体读取上。**没有本地路径字段**：工作台的素材只能走上传接口（spec §4.1）。
+    """
+
+    name: str
+    kind: str
+    number: int
+    asset_id: str
 
 
 class VideoOutputOut(BaseModel):
@@ -878,13 +952,19 @@ class MediaResource:
 
 class Asset(BaseModel):
     """上传素材的对外形状（#222 §9）。``asset_id`` 与 ``artifact_id`` 同形：
-    ``<session_id>/<sha256 前 16 位>``——路径参数按 ``{asset_id:path}`` 承接。"""
+    ``<session_id>/<sha256 前 16 位>``——路径参数按 ``{asset_id:path}`` 承接。
+
+    ``number`` 只有 ref 上传（台账登记）才有值（D7 §12「返回编号与类型」）；base
+    上传与目录现扫（列表/详情）为 ``None``。``kind`` 始终是**嗅探类型**
+    （image/video/audio），台账里的官方三型（picture/video/audio）在 ``brief.refs``。
+    """
 
     asset_id: str
     kind: str
     name: str
     bytes: int
     created_at: str
+    number: int | None = None
 
 
 class SessionSummary(BaseModel):
@@ -983,7 +1063,94 @@ def _status_for(raw_status: str, *, legacy: bool) -> SessionStatus:
     return cast(SessionStatus, _LEGACY_STATUS.get(raw_status, "interrupted"))
 
 
-def _brief_out(brief: Brief) -> BriefOut:
+def _ledger_order(entries: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """台账的对外顺序：图 → 视频 → 音频，同类按编号升序（spec §4.2「按编号升序」）。
+
+    顺序在两个地方用同一份判据（详情回显与上传后的重排），各写一遍时改一处就会让
+    列表顺序与编号顺序各说各话。
+    """
+    return sorted(
+        entries,
+        key=lambda entry: (KINDS.index(str(entry["kind"])), int(entry["number"]),
+                           str(entry.get("asset_id", ""))))
+
+
+def _renumber_ledger(entries: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把同类编号重排成从 1 起的连续序号，返回新列表（不就地改入参）。
+
+    为什么删除后要重排：spec §4.2 的编号语义是「同类内第几件」，删掉第 2 件后留着
+    空洞会让下一件与既有件撞号（max+1），素材循环的「第 N 件」也就与编号脱钩。
+    台账只在起跑前可改，重排不会推翻任何已经写好的词。
+    """
+    renumbered = [dict(entry) for entry in _ledger_order(entries)]
+    counters = {kind: 0 for kind in KINDS}
+    for entry in renumbered:
+        counters[str(entry["kind"])] += 1
+        entry["number"] = counters[str(entry["kind"])]
+    return renumbered
+
+
+def _check_ref_capacity(entries: Sequence[dict[str, Any]], *, where: str) -> None:
+    """按台账算 9 图 / 3 视频 / 3 音频 / 12 文件；超限换成工作台错误码。
+
+    数字与「超了哪一档」的文案都来自 ``ref_capacity``（外部契约只住那一处），这里
+    只做词表翻译与错误码包装。
+    """
+    items = [
+        ReferenceItem(kind=str(entry["kind"]), number=int(entry["number"]),
+                      name=str(entry["name"]))
+        for entry in entries
+    ]
+    try:
+        check_reference_capacity(items, where=where)
+    except ReferenceCapacityError as exc:
+        raise RefCapacityExceeded(str(exc)) from exc
+
+
+# 台账条目的初始状态（D7 §6.4）。素材循环（#256）会把轮次与「已定稿」写进同一条目；
+# 本票只负责「已登记、还没出词」这一态。
+ASSET_LEDGER_STATUS_REGISTERED = "registered"
+
+
+def _ledger_entry(name: str, asset_kind: str, number: int, asset_id: str,
+                  sha256: str) -> dict[str, Any]:
+    """一条素材台账记录（D7 §6.4 的七字段）。
+
+    ``kind`` 落**官方三型**（picture / video / audio）而不是嗅探结果的
+    image/video/audio：台账是参考素材的账，``<Picture N>`` 与分镜表标签都按这套词表
+    说话；翻译只在 ``ASSET_KIND_TO_REFERENCE`` 一处做。
+    """
+    return {
+        "name": name,
+        "kind": ASSET_KIND_TO_REFERENCE[asset_kind],
+        "number": number,
+        "asset_id": asset_id,
+        "sha256": sha256,
+        "round": 0,
+        "status": ASSET_LEDGER_STATUS_REGISTERED,
+    }
+
+
+def _next_number(ledger: Sequence[dict[str, Any]], asset_kind: str) -> int:
+    """同类下一件的编号：取现有最大值 + 1（删除后 ``_renumber_ledger`` 会把它压回连续）。"""
+    kind = ASSET_KIND_TO_REFERENCE[asset_kind]
+    return max((int(entry["number"]) for entry in ledger if entry["kind"] == kind),
+               default=0) + 1
+
+
+def _validate_semantic_name(name: str) -> None:
+    """ref 登记的语义名：只限长度。
+
+    「必填」不在这一层：带 ``name`` 才是登记，不带就是不记账的普通素材（#256/#258
+    回交通道）。前端「上传参考素材」框的必填校验是界面规则，不是 API 规则。
+    """
+    if len(name) > ASSET_NAME_MAX_CHARS:
+        raise AssetNameInvalid(
+            f"语义名最多 {ASSET_NAME_MAX_CHARS} 个字符（收到 {len(name)} 个）。")
+
+
+def _brief_out(brief: Brief,
+               ledger: Sequence[dict[str, Any]] = ()) -> BriefOut:
     return BriefOut(
         mode=brief.mode,
         variant=brief.variant,
@@ -1004,9 +1171,11 @@ def _brief_out(brief: Brief) -> BriefOut:
             )
             if brief.video_output is not None else None
         ),
-        refs=[RefOut(picture=item.picture, name=item.name,
-                    description=item.description, path=item.path)
-              for item in brief.refs],
+        # brief.refs 属于 CLI 文件流程（带本地路径的那套登记），工作台的参考素材
+        # 只能从台账来（spec §4.1）：这里统一按台账回显，不让两套登记混进同一个字段。
+        refs=[RefOut(name=str(entry["name"]), kind=str(entry["kind"]),
+                     number=int(entry["number"]), asset_id=str(entry["asset_id"]))
+              for entry in _ledger_order(ledger)],
     )
 
 
@@ -1426,7 +1595,7 @@ class WorkbenchSessionStore:
             (job for job in reversed(jobs) if job.status == "running"), None)
         detail = SessionDetail(
             **summary.model_dump(),
-            brief=_brief_out(session.brief),
+            brief=_brief_out(session.brief, session.asset_ledger),
             last_event_seq=session.last_event_seq,
             current_job=current_job,
             jobs=jobs,
@@ -1474,6 +1643,7 @@ class WorkbenchSessionStore:
         brief: Brief | None = None,
         variant_downgraded: str | None = None,
         segments: Sequence[dict[str, Any]] | None = None,
+        asset_ledger: Sequence[dict[str, Any]] | None = None,
     ) -> SessionState:
         """以现有快照为底，覆盖调用方点名要改的字段。"""
         return SessionState(
@@ -1502,6 +1672,9 @@ class WorkbenchSessionStore:
             segments=(
                 tuple(segments) if segments is not None
                 else session.segments),
+            asset_ledger=(
+                tuple(asset_ledger) if asset_ledger is not None
+                else session.asset_ledger),
         )
 
     def list_sessions(
@@ -1549,6 +1722,12 @@ class WorkbenchSessionStore:
             raise SessionCompleted("会话已完成，不能再推进。")
         if detail.status == "awaiting_human":
             raise ActionItemPending("会话停在人工待办上，请先提交决定。")
+        # ref 起跑门槛（D7 spec §4.3）：零素材可以建会话（停在 created），但参考素材
+        # 是阶段 1 分镜表 Subject 标签的来源，一张 Picture 都没有就没有可写的闭包。
+        if (is_ref_mode(detail.brief.mode)
+                and not any(ref.kind == KIND_PICTURE for ref in detail.brief.refs)):
+            raise AssetRequired(
+                "先上传参考素材：ref 会话至少要有一张 Picture 才能起跑。")
 
     def session_directory(self, session_id: str) -> Path:
         """会话目录（执行器要在旁边写 ``active-job.json``）。"""
@@ -1662,10 +1841,26 @@ class WorkbenchSessionStore:
 
         单独成方法是为了让路由能在**读请求体之前**就把 404/409 发出去：先收完 512 MiB
         再告诉对方「这个会话不存在」没有道理，也不是 spec 的检查顺序。
+
+        **起跑锁不在这里**：同一个端点既收参考素材登记，也收素材图与段视频回交
+        （#256/#258，那时会话早已离开 ``created``）。锁只挡**台账登记**，见
+        ``_ensure_asset_writable``——把它挪到这层会把整条回交路径一起锁死。
         """
         _directory, _session, _derived, legacy = self._load(session_id)
         if legacy:
             raise SessionLegacy("历史会话（legacy）只读，不能上传素材。")
+
+    @staticmethod
+    def _ensure_asset_writable(session: SessionState) -> None:
+        """ref 台账的写入口径：起跑（离开 ``created``）即锁死**登记与撤销**。
+
+        只对「带语义名的登记」生效：不带语义名的上传是普通素材（素材图/段视频回交），
+        不在台账里、也不受这条约束。base 会话没有台账，整条判据对它是空操作。
+        """
+        if session.brief.is_ref and session.status != "created":
+            raise AssetLocked(
+                "参考素材只能在起跑前增删：会话已经开始，改台账会让已写好的资产图词"
+                "与图对不上。")
 
     def list_assets(self, session_id: str) -> list[Asset]:
         """会话的素材清单（目录现扫）；会话不存在与产物清单同口径，一律 404。"""
@@ -1756,6 +1951,7 @@ class WorkbenchSessionStore:
         source: BinaryIO,
         *,
         filename: str = "",
+        semantic_name: str = "",
         idempotency_key: str | None = None,
     ) -> tuple[Asset, bool]:
         """把一份上传写进 ``<会话目录>/assets``；返回 ``(素材, 是否幂等重放)``。
@@ -1763,6 +1959,12 @@ class WorkbenchSessionStore:
         顺序照 #222 §5.2：会话存在且非 legacy → 嗅探（顺带定上限）→ 边写边判超限。
         嗅探**先于**读完整份内容：类型不在白名单就立刻 415，不陪一份 512 MiB 的垃圾
         走完全程。
+
+        同一个端点收两种东西，判据只有一个：**带语义名 = 登记参考素材**（D7 §4.2，
+        ref 专属）——语义名会话内唯一、容量按台账 9/3/3/12 在落盘前就 422、起跑后
+        不再接受登记；**不带语义名 = 普通素材**——ref 与 base 行为一致，不记账、不
+        编号、不进容量、不受起跑锁（素材图与段视频回交走这条，#256/#258）。base
+        会话带语义名是 422 ``asset_name_invalid``：它没有台账可登记。
 
         「流式」的边界要说清：multipart 的解析由 Starlette 完成，>1 MiB 的部件先落
         **系统临时目录**里的 SpooledTemporaryFile——那一层不归本函数管（#222 §13 已
@@ -1777,7 +1979,19 @@ class WorkbenchSessionStore:
         # 会话判定与路由共用一处（``ensure_upload_target``）：两处各写一遍 legacy
         # 判据时，改判据的人只会改到一处。
         self.ensure_upload_target(session_id)
-        directory, _session, derived, _legacy = self._load(session_id)
+        directory, session, derived, _legacy = self._load(session_id)
+        is_ref = session.brief.is_ref
+        semantic_name = semantic_name.strip()
+        # **带语义名 = 登记参考素材；不带 = 普通素材**（用户 2026-11-13 裁定）。
+        # 同一个端点也收素材图与段视频回交（#256/#258），那时会话早已离开 created；
+        # 按「起跑就锁全部上传」会把这些回交一起锁死，所以台账约束只挂在登记这条路上。
+        registering = bool(semantic_name)
+        if registering:
+            if not is_ref:
+                raise AssetNameInvalid(
+                    "base 会话没有参考素材台账：语义名只对 ref 会话有效。")
+            # 名字不合格不该陪一份 512 MiB 的字节流跑完整条通路。
+            _validate_semantic_name(semantic_name)
         assets_dir = directory / ASSETS_DIRNAME
         tmp = assets_dir / f"{ASSET_TMP_PREFIX}{secrets.token_hex(8)}"
         digest = hashlib.sha256()
@@ -1805,6 +2019,16 @@ class WorkbenchSessionStore:
                         kind, ext = sniffed
                         _check_declared_extension(filename, ext)
                         limit = ASSET_KIND_LIMITS[kind]
+                        if registering:
+                            # 快速失败：拿当前台账快照先判一次，超限就不搬剩余字节。
+                            # 权威判定在会话锁内再做一次（并发上传可能同时通过这一关）。
+                            _check_ref_capacity(
+                                [*session.asset_ledger,
+                                 _ledger_entry(
+                                     semantic_name, kind,
+                                     _next_number(session.asset_ledger, kind),
+                                     "", "")],
+                                where="上传参考素材")
                     # 先判后写：超限的那一块一个字节都不落盘，残片也不会长过上限。
                     if total + len(chunk) > limit:
                         raise AssetTooLarge(
@@ -1833,6 +2057,19 @@ class WorkbenchSessionStore:
                 if cached is not None:
                     _unlink_quietly(tmp)
                     return Asset.model_validate(cached), True
+            # 锁内重新读一次：另一次并发上传可能已经改了台账；起跑也可能刚好发生
+            # （``ensure_upload_target`` 是进入锁之前的事）。
+            _directory2, fresh, _derived2, _legacy2 = self._load(session_id)
+            ledger = [dict(entry) for entry in fresh.asset_ledger]
+            if registering:
+                try:
+                    ledger = self._register_ledger_entry(
+                        fresh, ledger, semantic_name=semantic_name,
+                        asset_id=f"{derived}/{hash16}", sha256=hash_full,
+                        asset_kind=kind)
+                except BaseException:
+                    _unlink_quietly(tmp)
+                    raise
             if target.exists():
                 # 去重：同内容不产生第二份文件，``created_at`` 保持首次（#222 §5.3）。
                 _unlink_quietly(tmp)
@@ -1857,10 +2094,93 @@ class WorkbenchSessionStore:
             asset = _asset_from_path(derived, target, self.root.resolve())
             if asset is None:
                 raise StorageUnavailable(f"素材落盘后读不回来：{target.name}")
+            if registering:
+                # 上传响应带台账分配的编号（D7 §12「返回编号与类型」）；类型仍是
+                # 嗅探类型，官方三型见详情里的 brief.refs。
+                entry = next(item for item in ledger
+                             if item["asset_id"] == asset.asset_id)
+                asset = asset.model_copy(update={"number": int(entry["number"])})
+                # 台账与快照同一次落盘完成：正本已经在了，登记不能只留在内存里。
+                self._state_with(directory, fresh, derived,
+                                 asset_ledger=ledger).save()
             if idempotency_key:
                 registry.record(idempotency_key, fingerprint=hash_full,
                                 response=asset.model_dump(mode="json"))
             return asset, False
+
+    def _register_ledger_entry(
+        self,
+        session: SessionState,
+        ledger: list[dict[str, Any]],
+        *,
+        semantic_name: str,
+        asset_id: str,
+        sha256: str,
+        asset_kind: str,
+    ) -> list[dict[str, Any]]:
+        """把一次 ref 上传登记进台账，返回重编号后的新台账（不落盘）。
+
+        三条判据都在会话锁内跑：起跑锁（并发起跑刚发生）、语义名唯一、容量 9/3/3/12。
+        同一份内容二次上传单独一码（``asset_duplicate``）——重复登记会让容量与件号
+        同时说谎。
+        """
+        self._ensure_asset_writable(session)
+        if any(str(entry["name"]) == semantic_name for entry in ledger):
+            raise AssetNameInvalid(
+                f"语义名「{semantic_name}」在本会话已用过：参考素材的语义名必须唯一。")
+        if any(str(entry["asset_id"]) == asset_id for entry in ledger):
+            raise AssetDuplicate(
+                f"同一份素材已经在台账里（{asset_id}）：请换一份内容，或删掉旧登记。")
+        updated = _renumber_ledger(
+            [*ledger, _ledger_entry(semantic_name, asset_kind,
+                                    _next_number(ledger, asset_kind), asset_id,
+                                    sha256)])
+        _check_ref_capacity(updated, where="上传参考素材")
+        return updated
+
+    def delete_asset(self, session_id: str, asset_id: str) -> None:
+        """撤销一条参考素材**登记**并删掉它的正本（D7 §4.2，用户 2026-11-13 裁定新增）。
+
+        只认台账里登记过的素材：台账外的 asset_id（含普通上传的素材图、段视频）一律
+        404 ``asset_not_found``——删除撤销的是「登记」，不是「文件」；#256/#258 回交的
+        普通素材不是参考素材，不该被这个端点摘掉。
+
+        ``asset_id`` 与 ``GET /api/v1/media/{asset_id}`` 同形：``<会话标识>/<16 位哈希>``。
+        拒法各有自己的码：base 会话调它 → ``route_mismatch``；不在台账里 → 404；
+        **在台账里但已起跑** → ``asset_locked``（判据顺序如此：先说「没有这条登记」，
+        再说「这条现在不能动」）。
+        """
+        directory, session, derived, legacy = self._load(session_id)
+        if legacy:
+            raise SessionLegacy("历史会话（legacy）只读，不能删除素材。")
+        if not session.brief.is_ref:
+            raise RouteMismatch("只有 ref 会话有参考素材台账；base 会话的素材不能删。")
+        prefix, _, hash16 = asset_id.rpartition("/")
+        if prefix != derived or _ASSET_ID_RE.match(hash16) is None:
+            raise AssetNotFound(f"素材不存在：{asset_id}")
+        with self._lock_for(session_id):
+            # 锁内重读：起跑与另一次删除都可能刚好发生。
+            directory, fresh, derived, _legacy = self._load(session_id)
+            if not fresh.brief.is_ref:
+                raise RouteMismatch("只有 ref 会话有参考素材台账；base 会话的素材不能删。")
+            ledger = [dict(entry) for entry in fresh.asset_ledger]
+            remaining = [entry for entry in ledger
+                         if str(entry["asset_id"]) != asset_id]
+            if len(remaining) == len(ledger):
+                raise AssetNotFound(f"素材不存在：{asset_id}")
+            # 起跑锁只挡「撤销登记」：先确认它真在台账里，再判能不能动。
+            self._ensure_asset_writable(fresh)
+            # 先落台账再删文件：台账是唯一真源，反过来会在「已删文件、台账还在」的
+            # 窗口里让详情指向一份读不到的素材。
+            self._state_with(directory, fresh, derived,
+                             asset_ledger=_renumber_ledger(remaining)).save()
+            for candidate in sorted((directory / ASSETS_DIRNAME).glob(f"{hash16}.*")):
+                try:
+                    candidate.unlink()
+                except OSError as exc:
+                    # 台账已经不再引用它：残留文件不影响任何读法，只记一行。
+                    logger.warning("删除素材文件失败（台账已摘除）：%s（%s）",
+                                   candidate, exc)
 
     def cleanup_assets(self) -> None:
         """启动清理（#222 §5.3）：删崩溃残留的 ``.tmp-*``，给孤儿正本补最小边车。
@@ -1944,6 +2264,7 @@ class WorkbenchSessionStore:
                 brief=changes.get("brief"),
                 variant_downgraded=changes.get("variant_downgraded"),
                 segments=changes.get("segments"),
+                asset_ledger=changes.get("asset_ledger"),
                 last_event_seq=(
                     appended[-1].seq if appended else session.last_event_seq),
             ).save()
@@ -2011,6 +2332,8 @@ __all__ = [
     "ARTIFACT_SUMMARY_JSON", "ARTIFACT_SUMMARY_MARKDOWN",
     "ARTIFACT_VIDEO_PROMPT",
     "Asset", "AssetTooLarge",
+    "AssetDuplicate", "AssetLocked", "AssetNameInvalid", "AssetRequired",
+    "RefCapacityExceeded", "RouteMismatch",
     "ArtifactInfo", "ArtifactNotFound", "ArtifactTooLarge", "BriefOut",
     "EVENT_TYPES", "EVENTS_FILENAME", "Event", "EventDraft", "EventLog",
     "FrameInvalid",
