@@ -256,3 +256,14 @@ def test_accept_d4_finder_survives_module_registration():
     finder = accept_d6._accept_d4_finder()
 
     assert finder is None or callable(finder)
+
+
+def test_resume_is_exclusive_with_prepare_and_submit(capsys):
+    """续跑是一个独立模式：与 --prepare / --submit-dir 同时给必须当场拒绝。
+
+    续跑存在的理由：阶段 1 的真实调用可能要十几分钟，换模型重试时不能重跑它。
+    """
+    for extra in (["--prepare"], ["--submit-dir", "x"]):
+        code = accept_d6.main(["--resume", "话题/GEN001", *extra])
+        assert code == accept_d6.EXIT_FAILED
+        assert "只能选一种模式" in capsys.readouterr().out

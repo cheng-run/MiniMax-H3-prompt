@@ -79,6 +79,8 @@ EXIT_SELF_CHECK_FAILED = 2
 # 「等用户生成下一段视频」不是失败：prepare 阶段本来就停在这里，submit 阶段也可能
 # 只推进一段就交回用户。单独一档，调用方不必从文案里猜。
 EXIT_WAITING_USER = 3
+# 与本仓 step_machine 的同名状态一致：failed 是「可以点重试」的那种失败。
+STATUS_FAILED = "failed"
 
 
 class AcceptanceError(RuntimeError):
@@ -972,7 +974,30 @@ def run_prepare(
             f"{base_url}/sessions/{_session_path(session_id)}")
         return session_id
 
-    session_id = report.run("建 18 秒会话", create)
+    resume_id = str(args.resume or "").strip()
+    if resume_id:
+        session_id = resume_id
+        facts["session_id"] = session_id
+        facts["session_url"] = f"{base_url}/sessions/{_session_path(session_id)}"
+        facts["resumed_from"] = resume_id
+
+        def resume() -> str:
+            """复用已有会话：阶段 1 的产物已在快照里，绝不重跑。
+
+            处于 ``failed`` 时发一次重试任务——那正是「阶段 2 被 provider 拒掉后
+            换模型接着跑」的形态；其它状态不重起，交给后面的待办推进。
+            """
+            detail = _session_detail(client, base_url, token, session_id)
+            status = str(detail.get("status") or "")
+            facts["resume_status"] = status
+            if status == STATUS_FAILED:
+                job_id = _start_job(client, base_url, token, session_id)
+                _wait_job(client, base_url, token, session_id, job_id,
+                          timeout=args.timeout, sessions_root=sessions_root)
+                return "会话处于 failed：重试任务已跑完"
+            return f"会话状态 {status}：不重起任务"
+
+        report.run("续跑已有会话（不重建、不重跑阶段 1）", resume)
 
     def stage1() -> str:
         job_id = _start_job(client, base_url, token, session_id)
@@ -994,36 +1019,52 @@ def run_prepare(
             _artifact_content(client, base_url, token, script_id), "阶段 1 剧本")
         return f"阶段 1 完成；中间产物 {[item['name'] for item in artifacts]}"
 
+    if not resume_id:
+        session_id = report.run("建 18 秒会话", create)
+        report.run("起阶段 1 并等待审查待办", stage1)
+
     report.run("起阶段 1 并等待审查待办", stage1)
 
     def approve() -> str:
         detail = _session_detail(client, base_url, token, session_id)
-        item = _require(pending_review_item(detail),
-                        "没有 pending 的 stage1_review 待办")
-        job = _resolve(client, base_url, token, session_id,
-                       str(item["item_id"]), {"decision": "approve"})
-        if job is not None:
-            _wait_job(client, base_url, token, session_id, str(job["job_id"]),
-                      timeout=args.timeout, sessions_root=sessions_root)
+        item = pending_review_item(detail)
+        # 续跑时会话的审查待办早已 resolved：不重复决议（决议一份已过的待办会 422）。
+        review_resumed = item is None
+        if review_resumed:
+            facts["review_resumed"] = True
+        else:
+            job = _resolve(client, base_url, token, session_id,
+                           str(item["item_id"]), {"decision": "approve"})
+            if job is not None:
+                _wait_job(client, base_url, token, session_id, str(job["job_id"]),
+                          timeout=args.timeout, sessions_root=sessions_root)
         frame_note = "T2VA（无首帧图）"
         if variant == "FL2VA":
             assert frame_image is not None  # run_prepare 已在启动前解析过
-            frame_detail = _wait_detail(
-                client, base_url, token, session_id,
-                lambda body: pending_frame_item(body) is not None,
-                timeout=args.timeout, what="帧提交待办", sessions_root=sessions_root)
-            frame_item = _require(pending_frame_item(frame_detail),
-                                  "FL2VA 审查通过后没有 frame_submission 待办")
-            frame_asset = _upload_frame_image(
-                client, base_url, token, session_id, frame_image)
-            frame_job = _resolve(
-                client, base_url, token, session_id,
-                str(frame_item["item_id"]), {"frames": {"first": frame_asset}})
-            if frame_job is not None:
-                _wait_job(client, base_url, token, session_id,
-                          str(frame_job["job_id"]),
-                          timeout=args.timeout, sessions_root=sessions_root)
-            facts["frame_asset_id"] = frame_asset
+            if review_resumed:
+                # 续跑：帧可能已交（待办已 resolved），也可能还没交——有 pending 才交。
+                frame_item = pending_frame_item(detail)
+            else:
+                frame_detail = _wait_detail(
+                    client, base_url, token, session_id,
+                    lambda body: pending_frame_item(body) is not None,
+                    timeout=args.timeout, what="帧提交待办",
+                    sessions_root=sessions_root)
+                frame_item = _require(pending_frame_item(frame_detail),
+                                      "FL2VA 审查通过后没有 frame_submission 待办")
+            if frame_item is None:
+                facts["frame_resumed"] = True
+            else:
+                frame_asset = _upload_frame_image(
+                    client, base_url, token, session_id, frame_image)
+                frame_job = _resolve(
+                    client, base_url, token, session_id,
+                    str(frame_item["item_id"]), {"frames": {"first": frame_asset}})
+                if frame_job is not None:
+                    _wait_job(client, base_url, token, session_id,
+                              str(frame_job["job_id"]),
+                              timeout=args.timeout, sessions_root=sessions_root)
+                facts["frame_asset_id"] = frame_asset
             frame_note = f"FL2VA（首帧 {frame_image.name}）"
         final = _wait_detail(
             client, base_url, token, session_id,
@@ -1614,6 +1655,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--language", default=DEFAULT_LANGUAGE)
     parser.add_argument("--prepare", action="store_true",
                         help="阶段 A：建会话跑到第 1 段提示词")
+    parser.add_argument("--resume", default=None,
+                        help="阶段 A 的续跑：复用这个会话标识，不重建、不重跑阶段 1；"
+                             "会话处于 failed 时发一次重试任务。用于换模型/排障后接着跑")
     parser.add_argument("--submit-dir", default=None,
                         help="阶段 B：这个目录里的 segment-NN.mp4 按段交回")
     parser.add_argument("--session-id", default=None,
@@ -1651,8 +1695,8 @@ def main(argv: list[str] | None = None) -> int:
         code = self_check(args)
         print(f"[self-check] {'PASS' if code == 0 else 'FAIL'}")
         return code
-    if bool(args.prepare) == bool(args.submit_dir):
-        print("必须且只能选一种模式：--prepare 或 --submit-dir <目录>")
+    if sum(bool(x) for x in (args.prepare, args.submit_dir, args.resume)) != 1:
+        print("必须且只能选一种模式：--prepare 或 --resume <会话> 或 --submit-dir <目录>")
         return EXIT_FAILED
     variant = args.variant.strip().upper()
     if variant not in ("FL2VA", "T2VA"):
@@ -1663,7 +1707,7 @@ def main(argv: list[str] | None = None) -> int:
               "（「Picture 1 是用户提交的首帧图」）。要按真实首帧验收请用默认 FL2VA。",
               flush=True)
     # 首帧图在**启动被测程序之前**定下来：缺图/夹具图不该先花几十秒起服务再失败。
-    if args.prepare and variant == "FL2VA":
+    if (args.prepare or args.resume) and variant == "FL2VA":
         try:
             args.frame_image = str(_resolve_frame_image(args))
         except AcceptanceError as exc:
@@ -1680,7 +1724,7 @@ def main(argv: list[str] | None = None) -> int:
     report.facts["output_dir"] = str(out_dir)
     report.facts["started_at"] = _utc_now()
     report.facts["command"] = args.command or " ".join(sys.argv)
-    phase = "prepare" if args.prepare else "submit"
+    phase = "prepare" if (args.prepare or args.resume) else "submit"
     code = EXIT_FAILED
     service: ServiceHandle | None = None
     try:
@@ -1710,7 +1754,7 @@ def main(argv: list[str] | None = None) -> int:
         with httpx.Client(timeout=httpx.Timeout(60.0)) as client:
             _assert_service_health(client, service.base_url, report.facts)
             token = _session_token(client, service.base_url)
-            if args.prepare:
+            if args.prepare or args.resume:
                 code = run_prepare(client, service.base_url, token, args, report)
             else:
                 code = run_submit(client, service.base_url, token, args, report)
