@@ -222,10 +222,15 @@ def _tier_durations(total_s: int) -> list[int] | None:
     best[0] = []
     for part in range(1, total_s + 1):
         for tier in tiers:
-            if tier > part or best[part - tier] is None:
+            if tier > part:
                 continue
-            candidate = [*best[part - tier], tier]
-            if best[part] is None or len(candidate) < len(best[part]):
+            # 取到局部变量再收窄：mypy 不对下标表达式做 None 收窄
+            head = best[part - tier]
+            if head is None:
+                continue
+            candidate = [*head, tier]
+            current = best[part]
+            if current is None or len(candidate) < len(current):
                 best[part] = candidate
     return best[total_s]
 
