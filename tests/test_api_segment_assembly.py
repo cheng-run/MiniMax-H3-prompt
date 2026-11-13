@@ -215,8 +215,7 @@ def test_last_segment_auto_assembles_final_film_and_completes(
     directory = _session_dir(root, session_id)
     assert (directory / "final.mp4").is_file()
     # 终态就是 completed：没有交付确认待办，也没有待办被挂出来。
-    assert detail["action_items"] == [] or all(
-        item["status"] != "pending" for item in detail["action_items"])
+    assert all(item["status"] != "pending" for item in detail["action_items"])
     assert [seg["video_asset_id"] for seg in detail["segments"]] == [
         first_asset, second_asset]
     assert all(seg["status"] == "passed" for seg in detail["segments"])

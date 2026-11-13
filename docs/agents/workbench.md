@@ -58,6 +58,11 @@
   重启后重新呈现（不新建）。
 - 工作台**不读也不写** CLI 的段产出账 `segments/shot-ledger.jsonl`（D6-AC12）：同一会话
   目录曾被 CLI 跑过时，进度只以工作台自己的段状态为准。
+- **全部段通过后服务端自动拼接**（D6 §9，`segmenting` 阶段里的一步）：复用
+  `final_film.assemble_film`——`plans` 取本会话 `segments/plan.json`，`rows` 由段状态里的
+  已通过段与视频素材构造。成功产出 `final.mp4` 并转 `completed`（**没有交付确认闸门**）；
+  缺段则 `failed`，`assemble_film` 的 reason（已点名第几段）原样进 `job.failed` 的
+  `detail`，补齐后 `advance` 续拼，已通过段不重收。
 - 产物 content **按登记表的形态分支**（#225）：文本产物（登记表＝7 件固定名 + 一条
   模式 `segments/shot-NN.md` → kind `segment_prompt`，D6 §7）共用纯文本 + 1 MiB 上限
   （超出 413）；成片 `final.mp4` 给字节 + 单段

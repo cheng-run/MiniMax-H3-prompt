@@ -1420,7 +1420,7 @@ class JobRunner:
             asset_id = str(row.get("video_asset_id") or "")
             if not asset_id:
                 # 通过却没有视频引用：不当成「这段可以拼」静默放行——缺席的段由
-                # ``assemble_film`` 点名，user 才知道该补哪一段。
+                # ``assemble_film`` 点名，用户才知道该补哪一段。
                 continue
             try:
                 resource = self.store.resolve_asset_media(asset_id)
@@ -1835,30 +1835,15 @@ class JobRunner:
 
         number = int(result["number"])
         description = str(result.get("description") or "")
-        session = load_session(self.store.session_directory(session_id))
-        if session is None:
-            raise RuntimeError(f"会话文件读不到：{session_id}")
-        ordered = sorted(session.segments, key=lambda row: int(row.get("index", 0)))
-        total = len(ordered)
         passed = str(result.get("outcome")) == END_REACHED
 
         if passed:
             # 通过就一定有下一步：非末段接下一段写词，末段接拼接（D6 §5.3/§9）。
             # 两者由 ``_segment_step`` 按已落盘的段状态分辨，这里只负责把 job 放出去。
-            last = number >= total
-            next_job: JobSummary | None = JobSummary(
+            next_job = JobSummary(
                 job_id=uuid.uuid4().hex, kind=JOB_KIND_SEGMENT, status="running",
                 started_at=_now())
             next_status = step_machine.STATUS_RUNNING
-            # 尾帧锚写进 state 供下一段写词用：段号取下一段的 0-based index（＝本段 1-based
-            # 段号），与 ``segment_prompts._frame_anchor_note`` 的取法同源。
-            anchor_state = dict(session.stage_state)
-            if not last and description:
-                anchors = [
-                    entry for entry in anchor_state.get("bridge_frame_descriptions") or []
-                    if isinstance(entry, dict)]
-                anchors.append({"segment": number, "description": description})
-                anchor_state["bridge_frame_descriptions"] = anchors
 
             def _apply(detail: Any) -> dict[str, Any]:
                 job = self._job_or_running(job_id, detail).model_copy(
@@ -1870,19 +1855,30 @@ class JobRunner:
                         # 重交成功后不再展示上一轮的原因（D6 §5.4）。
                         row["rejection_reason"] = ""
                 jobs = _upsert_job(detail.jobs, _job_dict(job))
-                if next_job is not None:
-                    jobs = _upsert_job(jobs, _job_dict(next_job))
-                return {
+                jobs = _upsert_job(jobs, _job_dict(next_job))
+                changes: dict[str, Any] = {
                     "status": next_status,
                     "jobs": jobs,
                     "segments": rows,
-                    "stage_state": anchor_state,
                 }
+                # 尾帧锚在**锁内**基于当前 state 合并（D6 §5.4）：校验是慢速调用，开始前
+                # 读到的 state 到收尾时可能已被别的写者推进，整份写回会盖掉那些键。
+                # 段号取下一段的 0-based index（＝本段 1-based 段号），与
+                # ``segment_prompts._frame_anchor_note`` 的取法同源。
+                if number < len(rows) and description:
+                    anchor_state = detail.stage_state_snapshot()
+                    anchors = [
+                        entry for entry in
+                        anchor_state.get("bridge_frame_descriptions") or []
+                        if isinstance(entry, dict)]
+                    anchors.append({"segment": number, "description": description})
+                    anchor_state["bridge_frame_descriptions"] = anchors
+                    changes["stage_state"] = anchor_state
+                return changes
 
             events = [EventDraft("job.succeeded", {"next": next_status}, job_id=job_id)]
-            if next_job is not None:
-                events.append(EventDraft(
-                    "job.started", {"kind": JOB_KIND_SEGMENT}, job_id=next_job.job_id))
+            events.append(EventDraft(
+                "job.started", {"kind": JOB_KIND_SEGMENT}, job_id=next_job.job_id))
             self.store.mutate(session_id, _apply, events=events)
             return next_job
 
