@@ -147,6 +147,9 @@ WebView 里都做不到。这类冲突**不要**在实现里自行挑一边，�
 4. 收尾必须内容保真：`git diff --stat <integration> main` **为空**。不为空说明漏了
    提交或解冲突时改坏了内容——停下，不要 push。
 5. main 上再跑 `scripts/check.sh full` 与 `scripts/check.sh clean`；绿后 push。
+   这是整条 spec 的**唯一一次全量**——集成分支上逐票合并只跑 `fast`（2026-11-12 用户
+   裁定，旧「每合一张票跑全量」已废）。合并/解冲突的兜底是「拆完
+   `git diff --stat main <集成分支>` 为空」＋受影响测试文件。
    删分支时注意：`git branch --merged main` 只覆盖真祖先，cherry-pick 出来的分支
    不是祖先；先用 `git merge-base --is-ancestor <branch> <integration>` 确认它的
    历史已包含在集成分支里，再 `-D`。
