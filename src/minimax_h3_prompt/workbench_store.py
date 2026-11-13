@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Literal, Sequence, cast
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from . import step_machine
 from .brief_parser import Brief
@@ -887,6 +887,15 @@ class SessionDetail(SessionSummary):
     assets: list[Asset] = Field(default_factory=list)
     # 长片的段列表（D6 spec §11）：来自快照字段，≤10 秒的会话是空表。
     segments: list[SegmentOut] = Field(default_factory=list)
+    # 快照 state 的内部副本（D6 §5.4）：只给 ``mutate`` 的 mutator 在会话锁内读，
+    # 让「读 state → 改 → 写回」不再绕开单写入者。用 PrivateAttr 而不是字段：
+    # 它不进 JSON Schema、不跨 API 边界（D4 §7 的裁定，mutation
+    # ``session_detail_leaks_stage_state`` 守着）。
+    _stage_state: dict[str, Any] = PrivateAttr(default_factory=dict)
+
+    def stage_state_snapshot(self) -> dict[str, Any]:
+        """mutator 内读原始 state 的唯一入口；返回副本，改它不会写回。"""
+        return dict(self._stage_state)
 
 
 class SessionPage(BaseModel):
@@ -1392,7 +1401,7 @@ class WorkbenchSessionStore:
                         for item in session.action_items]
         current_job = next(
             (job for job in reversed(jobs) if job.status == "running"), None)
-        return SessionDetail(
+        detail = SessionDetail(
             **summary.model_dump(),
             brief=_brief_out(session.brief),
             last_event_seq=session.last_event_seq,
@@ -1403,6 +1412,8 @@ class WorkbenchSessionStore:
             assets=_assets_of(derived, directory, self.root.resolve()),
             segments=[SegmentOut.model_validate(item) for item in session.segments],
         )
+        detail._stage_state = dict(session.stage_state)
+        return detail
 
     def _replay_if_needed(self, session_id: str) -> None:
         """快照的 ``last_event_seq`` 落后于事件流尾号时，把差额重放进快照并落盘。
