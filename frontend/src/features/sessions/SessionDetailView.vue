@@ -318,7 +318,7 @@ const errorMessage = computed(() =>
         />
       </section>
 
-      <!-- 分段（D6-1）：规划结果只读，长片之外的会话没有这一格 -->
+      <!-- 分段（D6-1 只读规划 / D6-4 段视频回交）：长片之外的会话没有这一格 -->
       <section
         v-else-if="ui.workbenchTab === 'segments'"
         id="workbench-panel-segments"
@@ -326,7 +326,13 @@ const errorMessage = computed(() =>
         aria-labelledby="workbench-tab-segments"
         class="panel"
       >
-        <SegmentsTab :segments="data.segments ?? []" />
+        <SegmentsTab
+          :session-id="data.session_id"
+          :segments="data.segments ?? []"
+          :assets="data.assets ?? []"
+          :action-items="data.action_items ?? []"
+          @refresh="invalidateSnapshot"
+        />
       </section>
 
       <!-- 素材（完整交互归 #233） -->

@@ -420,6 +420,60 @@ describe('SessionDetailView 分段分区', () => {
     expect(panel.findAll('button')).toHaveLength(0)
   })
 
+  it('段视频提交后由快照失效通道重拉详情，无需手动刷新', async () => {
+    let detailCalls = 0
+    const waitingSegments = [{ ...segments[0]!, status: 'waiting_video' }, { ...segments[1]! }]
+    const asset = {
+      asset_id: 'sess-1/aaaaaaaaaaaaaaaa',
+      name: 'shot-01.mp4',
+      kind: 'video',
+      bytes: 1024,
+      created_at: '2026-11-11T00:00:00Z',
+    }
+    const item = {
+      item_id: 'item-seg-1',
+      kind: 'segment_video',
+      status: 'pending',
+      created_at: '2026-11-11T00:00:00Z',
+      resolved_at: '',
+      segment_index: 1,
+    }
+    server.use(
+      http.get(detailUrl, () => {
+        detailCalls += 1
+        return HttpResponse.json(
+          makeDetail({
+            status: 'awaiting_human',
+            segments: waitingSegments,
+            assets: [asset],
+            action_items: [item],
+          }),
+        )
+      }),
+      http.post('http://localhost/api/v1/sessions/sess-1/action-items/item-seg-1/resolve', () =>
+        HttpResponse.json(null, { status: 202 }),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+    expect(detailCalls).toBe(1)
+
+    const tabs = wrapper.findAll('[role="tab"]')
+    await tabs[2]!.trigger('click')
+    await settle()
+
+    const select = wrapper.find('#workbench-panel-segments select[name="segment-video"]')
+    expect(select.exists()).toBe(true)
+    await select.setValue(asset.asset_id)
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '提交视频')!
+      .trigger('click')
+    await settle()
+
+    // 提交后父组件的失效通道立刻重拉详情；SSE 的事件失效走的是同一个口。
+    expect(detailCalls).toBe(2)
+  })
+
   it('没有段列表（短视频）时不出现这一格', async () => {
     server.use(http.get(detailUrl, () => HttpResponse.json(makeDetail({ status: 'completed' }))))
     const { wrapper } = await mountDetail(makeStreamFetch())
