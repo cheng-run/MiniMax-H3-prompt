@@ -882,6 +882,24 @@ MUTATIONS: tuple[Mutation, ...] = (
         "（D6-AC4 静默失守，#246）",
     ),
     Mutation(
+        "segment_assembly_never_starts",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "        return (SEGMENT_STEP_ASSEMBLE, 0)",
+        "        return (SEGMENT_STEP_DONE, 0)",
+        ("tests/test_api_segment_assembly.py::"
+         "test_last_segment_auto_assembles_final_film_and_completes",),
+        "末段通过后不自动拼接＝成片永远不产出、会话停在 awaiting_human（D6-AC9 静默失守，#248）",
+    ),
+    Mutation(
+        "segment_assembly_reason_generalised",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "            raise SegmentAssemblyRefused(film.reason)",
+        '            raise SegmentAssemblyRefused("拼接失败")',
+        ("tests/test_api_segment_assembly.py::"
+         "test_missing_segment_fails_with_named_segment_and_retry_after_fix",),
+        "把 reason 改写成泛泛的「拼接失败」＝用户不知道补哪一段（D6-AC9 的点名要求，#248）",
+    ),
+    Mutation(
         "segment_resume_rewrites_validating",
         "src/minimax_h3_prompt/api/jobs.py",
         "            if status == SEGMENT_STATUS_VALIDATING:\n"
@@ -906,32 +924,13 @@ MUTATIONS: tuple[Mutation, ...] = (
         "（spec §10 恢复失守，#249）",
     ),
     Mutation(
-        "segment_assembly_never_starts",
-        "src/minimax_h3_prompt/api/jobs.py",
-        "        return (SEGMENT_STEP_ASSEMBLE, 0)",
-        "        return (SEGMENT_STEP_DONE, 0)",
-        ("tests/test_api_segment_assembly.py::"
-         "test_last_segment_auto_assembles_final_film_and_completes",),
-        "末段通过后不自动拼接＝成片永远不产出、会话停在 awaiting_human（D6-AC9 静默失守，#248）",
-    ),
-    Mutation(
-        "segment_assembly_reason_generalised",
-        "src/minimax_h3_prompt/api/jobs.py",
-        "            raise SegmentAssemblyRefused(film.reason)",
-        '            raise SegmentAssemblyRefused("拼接失败")',
-        ("tests/test_api_segment_assembly.py::"
-         "test_missing_segment_fails_with_named_segment_and_retry_after_fix",),
-        "把 reason 改写成泛泛的「拼接失败」＝用户不知道补哪一段（D6-AC9 的点名要求，#248）",
-    ),
-    Mutation(
         "fake_segment_frames_ignore_the_tier_table",
         "src/minimax_h3_prompt/api/fake_pipeline.py",
-        "    return H3_TIER_FRAMES.get(\n"
-        "        int(round(seconds)), int(round(seconds * H3_VIDEO_FPS)))",
+        "    return H3_TIER_FRAMES[tier]",
         "    return int(round(seconds * H3_VIDEO_FPS))",
         ("tests/test_api_fake_pipeline_segments.py"
          "::test_stub_segment_video_passes_the_real_gate",),
-        "桩造件绕开实测帧数表＝4 秒档造出 96 帧，真实闸门只报「无法确证档位」而不报错，"
+        "桩造件绕开实测帧数表＝6 秒档造出 144 帧，真实闸门只报「无法确证档位」而不报错，"
         "CI 会静默变假绿（D6-AC13，#250）",
     ),
     Mutation(

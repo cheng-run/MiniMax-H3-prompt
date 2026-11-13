@@ -201,18 +201,43 @@ def stage2_state(state: dict[str, Any], brief: Any,
     return updated, prompt
 
 
-def segment_plan(total_s: int) -> list:
-    """桩分段规划（D6-1）：按 4–10 秒等分出 ``ceil(total/10)`` 段，末段吸收余数。
+def _tier_durations(total_s: int) -> list[int] | None:
+    """把总时长拆成 H3 实测档位（``H3_TIER_FRAMES`` 的 4/5/6 秒），段数取最少。
 
-    与真实规划同一份段长上限（``segment_planner.BASE_MAX_SEG_S``）；桩不调模型，
-    也不编造镜头覆盖——``shots_in_segment`` 留空，避免让界面上出现一份假的分镜归属。
+    DP 而不是贪心：贪心在 13 秒会先拿 6 再卡在 7（拆不出 4/5/6），DP 得 5+4+4。
+    总时长 ≤60，这个规模可以忽略。拆不出（如 7 秒）返回 None，由调用方退回等分。
+    """
+    from ..tools.preflight import H3_TIER_FRAMES
+
+    tiers = tuple(sorted(H3_TIER_FRAMES))
+    best: list[list[int] | None] = [None] * (total_s + 1)
+    best[0] = []
+    for part in range(1, total_s + 1):
+        for tier in tiers:
+            if tier > part or best[part - tier] is None:
+                continue
+            candidate = [*best[part - tier], tier]
+            if best[part] is None or len(candidate) < len(best[part]):
+                best[part] = candidate
+    return best[total_s]
+
+
+def segment_plan(total_s: int) -> list:
+    """桩分段规划（D6-1）：把总时长拆成 H3 能生成的档位（4/5/6 秒）。
+
+    真实规划允许 4–10 秒，但 H3 工作流只有 4/5/6 秒档（2026-11-12 用户裁定）：桩若仍按
+    10 秒上限等分，18 秒会拆成 2×9、24 秒拆成 3×8，这些段在真实闸门上只能拿到「无法
+    确证档位」的 warning，CI 就证明不了档位合规。拆不出档位组合的时长（如 7 秒）退回
+    等分，让真实闸门照常判定——桩不假装合规。``shots_in_segment`` 留空：桩不编造分镜归属。
     """
     from ..segment_planner import BASE_MAX_SEG_S, SegmentPlan
 
-    count = max(1, math.ceil(total_s / BASE_MAX_SEG_S))
-    base = total_s // count
-    durations = [base] * count
-    durations[-1] += total_s - base * count
+    durations = _tier_durations(int(total_s))
+    if not durations:
+        count = max(1, math.ceil(total_s / BASE_MAX_SEG_S))
+        base = total_s // count
+        durations = [base] * count
+        durations[-1] += total_s - base * count
     plans = []
     start = 0
     for index, duration in enumerate(durations):

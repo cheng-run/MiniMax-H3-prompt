@@ -2,11 +2,14 @@
 
 两层判据：
 
-1. **造件**：桩用 ffmpeg 现造的 4 秒档视频必须是 H3 实测档位（107 帧 / 736×1280），
+1. **造件**：桩用 ffmpeg 现造的 6 秒档视频必须是 H3 实测档位（158 帧 / 736×1280），
    并且过得了**真实的** ``preflight.check_segment_video``——为了「让桩过」去放宽闸门
    等于让 CI 假绿。
-2. **闭环**：24 秒 / 3 段走完规划 → 写词 → 回交 → 校验 → 拼接，``final.mp4`` 存在
+2. **闭环**：18 秒 / 3 段走完规划 → 写词 → 回交 → 校验 → 拼接，``final.mp4`` 存在
    且可读；全程不建模型、不碰 ComfyUI、不读 ``output/accept-*``（D6-AC13/AC15）。
+
+段长必须是 H3 真能生成的档位（4/5/6 秒，2026-11-12 用户裁定）：桩规划不再按 10 秒
+上限等分，否则 8/9 秒的段在真实闸门上只能拿到「无法确证档位」的 warning。
 """
 from __future__ import annotations
 
@@ -34,8 +37,8 @@ RUNTIME = SimpleNamespace(
     roundtable_max_rounds=1, common_sense_qa=False, max_qa_iterations=0)
 ENV = "MINIMAX_FAKE_PIPELINE"
 
-# 24 秒 = 3 段 × 8 秒（桩规划按 BASE_MAX_SEG_S=10 等分），正好覆盖「三段闭环」。
-LONGFORM_SECONDS = 24.0
+# 18 秒 = 3 段 × 6 秒（H3 的 4/5/6 秒档里最大的那一档），正好覆盖「三段闭环」。
+LONGFORM_SECONDS = 18.0
 
 
 def _brief_body(duration: float = LONGFORM_SECONDS) -> dict:
@@ -86,18 +89,32 @@ def _events(root: Path, session_id: str) -> list[dict]:
 
 
 def test_stub_segment_video_passes_the_real_gate(tmp_path):
-    """4 秒档造件：帧数/尺寸从仓内常量派生，真实闸门判它没有 error。
+    """6 秒档造件：帧数/尺寸从仓内常量派生，真实闸门判它没有 error。
 
     这一条直接拿 ``check_segment_video``（生产闸门，不是测试重写的副本）判桩产物：
     桩造的视频若不合规，CI 里的「段校验通过」就是假的。
     """
-    video = fake_pipeline.write_segment_video(tmp_path / "seg-04.mp4", 4)
+    video = fake_pipeline.write_segment_video(tmp_path / "seg-06.mp4", 6)
 
     meta = video_meta(video)
-    assert meta["frames"] == H3_TIER_FRAMES[4]
+    assert meta["frames"] == H3_TIER_FRAMES[6]
     assert (meta["width"], meta["height"]) == EXPECTED_VIDEO_SIZE
-    issues = check_segment_video(video, expected_seconds=4)
+    issues = check_segment_video(video, expected_seconds=6)
     assert [issue for issue in issues if issue.severity == "error"] == []
+
+
+def test_stub_segment_plan_uses_only_h3_tier_lengths():
+    """桩规划的每段时长都落在 H3 实测档位（4/5/6），且无缝覆盖总时长。
+
+    判据不是「拆成几段」而是「拆出来的段 H3 真能生成」：按 10 秒上限等分会拆出
+    8/9 秒的段，真实闸门只能给「无法确证档位」的 warning，CI 就证不了档位合规。
+    """
+    for total in (11, 12, 13, 18, 23, 24, 60):
+        plans = fake_pipeline.segment_plan(total)
+        durations = [plan.duration_s for plan in plans]
+        assert sum(durations) == total, (total, durations)
+        assert set(durations) <= set(H3_TIER_FRAMES), (total, durations)
+        assert [plan.start_s for plan in plans] == [0, *[p.end_s for p in plans[:-1]]]
 
 
 @pytest.fixture
@@ -114,7 +131,7 @@ def fake_app(tmp_path, monkeypatch):
 
 
 def test_fake_pipeline_runs_the_three_segment_closed_loop(fake_app, tmp_path):
-    """24 秒 / 3 段：规划 → 写词 ×3 → 回交 ×3 → 校验 ×3 → 拼接，final.mp4 可读。
+    """18 秒 / 3 段：规划 → 写词 ×3 → 回交 ×3 → 校验 ×3 → 拼接，final.mp4 可读。
 
     「用户去 ComfyUI 跑」这一步由桩管线的 ffmpeg 造件替身，其余每一环走真实代码：
     上传素材、resolve 闸门（真实 ``check_segment_video``）、剥尾帧、段状态推进、
@@ -141,9 +158,9 @@ def test_fake_pipeline_runs_the_three_segment_closed_loop(fake_app, tmp_path):
         detail = _wait_until(
             client, session_id,
             lambda body: body["status"] != "running" and _pending_segment_todos(body))
-        # 规划 → 写第 1 段：段表 3 段 × 8 秒。
+        # 规划 → 写第 1 段：段表 3 段 × 6 秒（H3 可生成档位）。
         assert [(seg["index"], seg["start_s"], seg["end_s"])
-                for seg in detail["segments"]] == [(1, 0, 8), (2, 8, 16), (3, 16, 24)]
+                for seg in detail["segments"]] == [(1, 0, 6), (2, 6, 12), (3, 12, 18)]
 
         submitted: list[str] = []
         for number in (1, 2, 3):
