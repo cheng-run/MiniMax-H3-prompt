@@ -117,8 +117,8 @@ _BRANCH_REVIEW = "review"
 _BRANCH_FRAME_GATE = "frame_gate"
 _BRANCH_FRAMES = "frames"
 # 第三个待办（D6 §8）：交本段视频。与帧提交同形——不是 approve/revise，靠 video_asset_id
-# 分型，resolve 之后起一个段校验 job。
-_BRANCH_SEGMENT_VIDEO = "segment_video"
+# 分型，resolve 之后起一个段校验 job。分支名就是待办 kind，不另抄一份字面量。
+_BRANCH_SEGMENT_VIDEO = step_machine.ACTION_SEGMENT_VIDEO
 
 
 class JobCancelled(Exception):

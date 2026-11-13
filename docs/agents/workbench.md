@@ -1,7 +1,7 @@
-# 工作台会话与 Headless API（D2–D4）
+# 工作台会话与 Headless API（D2–D6）
 
 > 入口：`python -m minimax_h3_prompt.api`（开发形态只绑 `127.0.0.1:8000`）；冻结形态见下文「冻结形态（EXE）」。
-> spec #214 / #227 / #235，ADR 0032、0033、0034、0035；
+> spec #214 / #227 / #235 / #243，ADR 0032、0033、0034、0035、0036；
 > 本地鉴权见 #222 §4 与 ADR 0033。
 > 这张表是导航与不变量，不是教程；实现细节以代码注释为准。
 
@@ -26,12 +26,14 @@
 | `api/problems.py` | RFC 9457 problem+json；所有错误都走这里（中间件用 `build_problem_response`） |
 | `step_machine.py` | 状态/触发/闸门的单一声明；续跑起点；`resolve` 的 approve/revise 去向与 approve 按变体分叉 |
 | `session_store.py` | 快照文件读写、`atomic_write_text`、向导续接状态与 `RESUMABLE_STATUSES` |
-| `api/fake_pipeline.py` | 确定性桩管线：固定阶段 1/2 与假读图，**只认环境变量 `MINIMAX_FAKE_PIPELINE`**（默认关、无 HTTP 入口），真实/桩互斥 |
-| `frontend/src/features/sessions/` | 工作台四分区：`SessionDetailView`（壳/SSE/运行控制）、`ReviewTab`（审查与修订）、`AssetsTab` + `FrameSubmissionCard`（素材与帧提交）、`ArtifactsTab`（产物查看/复制/下载/通用媒体播放） |
+| `api/fake_pipeline.py` | 确定性桩管线：固定阶段 1/2、假读图与假段提示词/段判据，**只认环境变量 `MINIMAX_FAKE_PIPELINE`**（默认关、无 HTTP 入口），真实/桩互斥 |
+| `segment_validation.py` | 段交接的两道判据：同步提交自检（段号/技术档，`segment_submission_problems`）与语义判据（尾帧描述 vs `end_hook`，`judge_end_hook`）；读图与模型调用在 `api/jobs.py` |
+| `frontend/src/features/sessions/` | 工作台五分区：`SessionDetailView`（壳/SSE/运行控制）、`ReviewTab`（审查与修订）、`AssetsTab` + `FrameSubmissionCard`（素材与帧提交）、`SegmentsTab` + `SegmentCard`（长片分段只读展示与 `segment_video` 回交）、`ArtifactsTab`（产物查看/复制/下载/通用媒体播放） |
 | `frontend/src/api/client.ts` | 生成契约的类型出口与唯一 API 门面：令牌注入、媒体/产物 URL、错误归一成 `ApiError` |
 | `scripts/accept_d2.py` | 真实 HTTP 验收驱动器（手动，不进 CI；启动时先取令牌） |
 | `scripts/accept_d3.py` | 媒体与素材的真实验收驱动器（手动；真实照片上传 + 真实 `final.mp4` 的 Range 与字节核对，报告落 `output/accept-d3/`） |
 | `scripts/accept_d4.py` | D4 真实浏览器验收驱动器（手动；Playwright + 真实 LLM 走审查/修订/帧提交/阶段 2/复制，报告落 `output/accept-d4/`） |
+| `scripts/accept_d6.py` | D6 真实长片验收驱动器（手动；真实 LLM + 用户 ComfyUI 生成的真段视频走分段规划/回交/读图/拼接，报告落 `output/accept-d6/`） |
 
 ## 不变量（改这些之前先读）
 
@@ -73,7 +75,54 @@
   `.tmp-*` 不是素材，列表看不见，只在启动时删；同内容不写第二份。上传**不改会话
   状态、不发事件**，残片由启动清理收拾（`store.cleanup_assets`）。
 
-## 媒体与鉴权（D3，ADR 0033）
+## 长片分段陪跑（D6，ADR 0036）
+
+`duration > 10` 秒即长片（`step_machine.is_long_form`）。长片**不替代阶段 2**：阶段 2 照旧产出
+`video-prompt.md` 与中文摘要，成功收尾时接上分段循环，会话保持 `running`。
+
+| 步骤 | 类型 | 阶段标签 | 产物/状态 |
+|---|---|---|---|
+| 阶段 1 | job | `stage1` | `script.md` / `shot-table.md`；审查待办 `stage1_review` |
+| 阶段 2 | job | `stage2` | `video-prompt.md` + 摘要；长片收尾接分段规划 |
+| 分段规划 | job | `segmenting` | 段列表进快照，`segments/plan.json` 落盘；只读展示、**不要求确认** |
+| 第 N 段写词 | job | `segmenting` | `segments/shot-NN.md`（kind `segment_prompt`），段转 `waiting_video` |
+| 第 N 段回交 | 待办 `segment_video` | — | 载荷 `video_asset_id`；会话 `awaiting_human` |
+| 第 N 段校验 | job | `segmenting` | 同步技术档（resolve 时 422）+ 异步剥尾帧读图；通过转 `passed` |
+| 拼接 | job | `segmenting` | 全部 `passed` 后自动 `assemble_film` → `final.mp4` → `completed` |
+
+- **`segmenting` 是阶段标签，不是会话状态**：会话仍用七态；「等用户交视频」是 `awaiting_human`。
+- **`segment_video` 是第三个人工待办**：每段一个，`segment_index` 带段号；resolve 只收
+  `video_asset_id`（本会话已上传的 mp4 素材），与 `decision`/`frames` 错配一律 422
+  `segment_video_invalid`。语义闸门拒绝 → 不落 `passed`、重建同一段待办（不是 `failed`）；
+  技术异常 → `failed`，重试重跑同一次校验、素材不重交。
+- **段状态住快照**：`session.segments[]` 的 `status`（`pending` / `waiting_video` /
+  `validating` / `passed`）、`prompt_artifact_id`、`video_asset_id` 每段落定立刻落盘；
+  `_segment_step` 用「第一条非 `passed` 的段」决定下一次 job 做规划/写词/校验/拼接，
+  不靠 job 记录记账（15 段会挤爆 `JOB_HISTORY_LIMIT`）。
+- **写词逐段增量**：第 N+1 段的请求带第 N 段尾帧锚（`stage_state.bridge_frame_descriptions`），
+  不能一次写完所有段。
+- **两道闸门没有 opt-out**：技术档在 resolve 时同步判（帧数档/时长/尺寸），语义在 job 内
+  读尾帧与 `end_hook` 对照。7–10 秒档不在 `H3_TIER_FRAMES` 实测表内，技术档只报
+  `segment_video_duration_unknown_tier` **warning**，不阻断；服务端只把 `error` 回给客户端，
+  warning 由验收驱动器用同一个函数本地复核后记录。
+- **不读也不写 CLI 的段产出账**（`segments/shot-ledger.jsonl`，D6-AC12）：同一会话目录
+  曾被 CLI 跑过时，进度只以工作台自己的段状态为准。
+
+验收命令（手动，不进 CI；配置来源断言在起被测程序之前）：
+
+```bash
+# 阶段 A：真实 LLM 跑完阶段 1/2/规划，写出第 1 段提示词与 handoff.md
+PYTHONIOENCODING=utf-8 PYTHONPATH=src .venv/Scripts/python.exe scripts/accept_d6.py --prepare
+# 用户按提示词在 ComfyUI 生成 segment-01.mp4… 放进 videos/ 后
+PYTHONIOENCODING=utf-8 PYTHONPATH=src .venv/Scripts/python.exe \
+    scripts/accept_d6.py --submit-dir output/accept-d6/<戳>/videos
+```
+
+CI 侧由桩管线覆盖三段闭环（`tests/test_api_fake_pipeline_segments.py`、
+`frontend/e2e/longfilm.spec.ts`）；真实档的证据与「未跑到 60 秒上限」的边界声明落
+`output/accept-d6/`。驱动器拒绝桩模式（`MINIMAX_FAKE_PIPELINE=1` / `--fake` 一律 FAIL）。
+
+
 
 媒体读取（素材 `GET/HEAD /media/{asset_id:path}` 与成片
 `GET/HEAD /artifacts/{artifact_id:path}/content`）和本地鉴权共用一套边界：只服务
@@ -160,3 +209,10 @@ D4 的浏览器闭环：CI 由 `frontend/e2e/delivery.spec.ts`（T2VA 直通 + F
 （Playwright + 真实审查/修订 + 真实图片帧 + 真实读图，报告落 `output/accept-d4/`）。
 完成态还会读会话文件核对帧证据（首/尾读图描述非空、`frame_images[].target` 的文件存在），
 不以「页面显示已完成」代替「读图真的发生过」。证据评论里**不出现令牌**。
+
+D6 的分段闭环：CI 由 `frontend/e2e/longfilm.spec.ts`（桩管线的段列表与回交表单）与
+`tests/test_api_fake_pipeline_segments.py`（规划→写词→回交→校验→拼接）覆盖；真实档由
+`scripts/accept_d6.py` 两阶段手动跑（`--prepare` / `--submit-dir`，报告落
+`output/accept-d6/`）。驱动器在**起被测程序之前**断言配置来源（绝对路径、`sha256`、
+端点/模型），并拒绝桩模式；`--submit-dir` 用服务端同一个技术档函数本地复核，把
+服务端不回的 `warning`（7–10 秒档 `unknown tier`）如实写进证据。

@@ -934,6 +934,51 @@ MUTATIONS: tuple[Mutation, ...] = (
         "桩造件绕开实测帧数表＝4 秒档造出 96 帧，真实闸门只报「无法确证档位」而不报错，"
         "CI 会静默变假绿（D6-AC13，#250）",
     ),
+    Mutation(
+        "fake_segment_video_accepts_unknown_tiers",
+        "src/minimax_h3_prompt/api/fake_pipeline.py",
+        "    if tier not in H3_TIER_FRAMES or abs(seconds - tier) > 1e-6:\n",
+        "    if False:\n",
+        ("tests/test_api_fake_pipeline_segments.py"
+         "::test_stub_segment_video_refuses_unknown_tiers",),
+        "档外秒数也静默造件＝8 秒件只拿到 unknown tier warning，CI 误以为档位已验证"
+        "（D6-AC13，#250）",
+    ),
+    Mutation(
+        "fake_segment_plan_ignores_tiers",
+        "src/minimax_h3_prompt/api/fake_pipeline.py",
+        "    return best[total_s]",
+        "    return None",
+        ("tests/test_api_fake_pipeline_segments.py"
+         "::test_stub_segment_plan_uses_only_h3_tier_lengths",),
+        "桩规划退回按 10 秒上限等分＝18 秒拆成 2×9 秒，段长不再是 H3 可生成档位（#250）",
+    ),
+    Mutation(
+        "end_hook_verdict_affirmative_first",
+        "src/minimax_h3_prompt/segment_validation.py",
+        "    if any(marker in low for marker in _NEGATIVE_MARKERS):\n"
+        "        return False\n"
+        "    if any(marker in low for marker in _AFFIRMATIVE_MARKERS):\n"
+        "        return True\n",
+        "    if any(marker in low for marker in _AFFIRMATIVE_MARKERS):\n"
+        "        return True\n"
+        "    if any(marker in low for marker in _NEGATIVE_MARKERS):\n"
+        "        return False\n",
+        ("tests/test_segment_validation.py::test_parse_end_hook_verdict",),
+        "否定词后判＝「未达到」里含「达到」，不合格的尾帧被判成达到，"
+        "语义闸门永不让用户换视频（#246）",
+    ),
+    Mutation(
+        "config_source_assertion_always_true",
+        "scripts/accept_d6.py",
+        "    problems: list[str] = []\n"
+        "    actual_path = str(facts.get(\"config_path\") or \"\")\n",
+        "    problems: list[str] = []\n"
+        "    return problems\n"
+        "    actual_path = str(facts.get(\"config_path\") or \"\")\n",
+        ("tests/test_accept_d6.py::test_config_source_problems_names_every_mismatch",),
+        "配置来源比对恒真＝拿着错的端点/模型/配置跑完整轮真实调用，整轮证据白费（#251）",
+    ),
 )
 
 
