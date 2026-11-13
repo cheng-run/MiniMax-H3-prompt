@@ -86,6 +86,8 @@ ARTIFACT_LAST_FRAME_PROMPT = "last-frame-prompt.md"
 # 阶段 2 的中文摘要两件：``video-prompt.md`` 的展示层提炼（向导与工作台共用同一格式）。
 ARTIFACT_SUMMARY_MARKDOWN = "summary-zh.md"
 ARTIFACT_SUMMARY_JSON = "summary-zh.json"
+# 成片（D6 §9）：拼接成功后登记，仍是既有 ``video`` kind 与 ``video/mp4`` 媒体类型。
+ARTIFACT_FINAL_FILM = "final.mp4"
 
 
 @dataclass(frozen=True)
@@ -106,7 +108,7 @@ _FIXED_ARTIFACT_SPECS: dict[str, ArtifactSpec] = {
     ARTIFACT_SUMMARY_MARKDOWN: ArtifactSpec("summary_markdown"),
     ARTIFACT_SUMMARY_JSON: ArtifactSpec("summary_json"),
     # 媒体产物：名字 → Content-Type。目前只有成片；列表里的 kind 仍是 ``video``。
-    "final.mp4": ArtifactSpec("video", "video/mp4"),
+    ARTIFACT_FINAL_FILM: ArtifactSpec("video", "video/mp4"),
 }
 
 # 模式产物（D6 §7）：每段一份 ``segments/shot-NN.md``。序号两位、与 CLI 的
@@ -1970,7 +1972,7 @@ class WorkbenchSessionStore:
 
 __all__ = [
     "ActionItemNotFound", "ActionItemOut", "ActionItemPending", "ActionItemResolved",
-    "ARTIFACT_FIRST_FRAME_PROMPT", "ARTIFACT_LAST_FRAME_PROMPT",
+    "ARTIFACT_FINAL_FILM", "ARTIFACT_FIRST_FRAME_PROMPT", "ARTIFACT_LAST_FRAME_PROMPT",
     "ARTIFACT_MAX_BYTES", "ARTIFACT_SCRIPT", "ARTIFACT_SHOT_TABLE",
     "ARTIFACT_SUMMARY_JSON", "ARTIFACT_SUMMARY_MARKDOWN",
     "ARTIFACT_VIDEO_PROMPT",

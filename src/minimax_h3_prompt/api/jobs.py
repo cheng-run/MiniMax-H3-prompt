@@ -32,6 +32,7 @@ from ..segment_validation import segment_submission_problems
 from ..session_store import FRAME_SUBMISSION_KEY, atomic_write_text, load_session
 from ..summary import PromptSummary, render_summary_zh
 from ..workbench_store import (
+    ARTIFACT_FINAL_FILM,
     ARTIFACT_FIRST_FRAME_PROMPT,
     ARTIFACT_LAST_FRAME_PROMPT,
     ARTIFACT_SCRIPT,
@@ -55,6 +56,7 @@ from ..workbench_store import (
     SEGMENT_STATUS_VALIDATING,
     SEGMENT_STATUS_WAITING_VIDEO,
     SegmentVideoInvalid,
+    WorkbenchError,
     WorkbenchSessionStore,
 )
 
@@ -76,11 +78,15 @@ SEGMENT_PLAN_FILENAME = "plan.json"
 SEGMENT_STEP_PLANNING = "planning"
 SEGMENT_STEP_WRITE = "write"
 SEGMENT_STEP_VALIDATE = "validate"
+# 全部段通过后的下一步（D6 §9）：拼成 final.mp4 并收成 completed。它同样由
+# ``_segment_step`` 从**已落盘的段状态**判定，所以拼接失败后的重试不需要额外记账。
+SEGMENT_STEP_ASSEMBLE = "assemble"
 SEGMENT_STEP_DONE = "done"
 
 # 段任务的进度节点名（带段号，前端据进度事件显示「正在写/校验第几段」）。
 SEGMENT_WRITE_NODE = "segment_write"
 SEGMENT_VALIDATE_NODE = "segment_validate"
+SEGMENT_ASSEMBLE_NODE = "segment_assemble"
 # 尾帧剥出的落点目录（不是产物：登记表只认 ``segments/shot-NN.md``）。
 SEGMENT_BRIDGE_DIRNAME = "bridge_frames"
 
@@ -121,6 +127,16 @@ class JobCancelled(Exception):
     def __init__(self, node: str) -> None:
         super().__init__(f"任务在当前节点结束后取消（{node or '未知'}）")
         self.node = node
+
+
+class SegmentAssemblyRefused(RuntimeError):
+    """拼接没有产出成片（缺段／段表对不上／ffmpeg 失败）。
+
+    ``reason`` 逐字来自 ``assemble_film`` 的返回（**它已点名第几段**）——改写成一句
+    「拼接失败」会让用户不知道该补哪一段，所以这里只做搬运，不做归纳。
+    """
+
+    code = "segment_assembly_refused"
 
 
 def _now() -> str:
@@ -622,6 +638,9 @@ class JobRunner:
                     result = await asyncio.to_thread(
                         self._execute_segment_validation,
                         session_id, job_id, cancel_event, number)
+                elif kind == SEGMENT_STEP_ASSEMBLE:
+                    result = await asyncio.to_thread(
+                        self._execute_segment_assemble, session_id, job_id, cancel_event)
                 else:
                     result = None
             else:
@@ -649,6 +668,9 @@ class JobRunner:
                 elif kind == SEGMENT_STEP_VALIDATE:
                     next_job = await asyncio.to_thread(
                         self._finish_segment_validation, session_id, job_id, result)
+                elif kind == SEGMENT_STEP_ASSEMBLE:
+                    next_job = await asyncio.to_thread(
+                        self._finish_segment_assembly, session_id, job_id, result)
                 else:
                     next_job = await asyncio.to_thread(
                         self._finish_segment_done, session_id, job_id)
@@ -1216,6 +1238,8 @@ class JobRunner:
 
         段按 index 顺序推进：当前段＝第一条非 passed 的段。段状态本身就是步骤判据，
         于是失败重试无需额外记账——``validating`` 重跑校验、``pending`` 重跑写词。
+        全部段都 passed 时只剩拼接（``assemble``）：拼接失败会落 ``failed``，重试时
+        这里照样给出 ``assemble``，不需要另记一笔「还没拼」。
         """
         session = load_session(self.store.session_directory(session_id))
         if session is None or not session.segments:
@@ -1232,7 +1256,7 @@ class JobRunner:
                 return (SEGMENT_STEP_WRITE, number)
             # waiting_video：在等人交视频，本不该有 job 在跑；给一个温和收尾。
             return (SEGMENT_STEP_DONE, number)
-        return (SEGMENT_STEP_DONE, 0)
+        return (SEGMENT_STEP_ASSEMBLE, 0)
 
     @staticmethod
     def _load_segment_plans(directory: Path) -> list[Any]:
@@ -1371,6 +1395,68 @@ class JobRunner:
             # 拒绝原因要带上「本段要求」：收尾处据此给用户可读的原因（D6 §5.4）。
             "end_hook": plan.end_hook,
         }
+
+    def _execute_segment_assemble(self, session_id: str, job_id: str,
+                                  cancel_event: threading.Event) -> Any:
+        """把本会话**已通过**的段接成 ``final.mp4``（D6 §9）：只调用 ``assemble_film``。
+
+        ``plans`` 读本会话的 ``segments/plan.json``；``rows`` 由本会话段状态构造——
+        CLI 的 ``segments/shot-ledger.jsonl`` 在这里一次都不读（spec §2/§10：两套风格
+        互不续接）。「未通过即不拼」不住在这里：它住在 ``assemble_film`` 里，这里只
+        提供「哪几段过了」这份事实。
+        """
+        from ..final_film import ConcatStrategy, assemble_film
+
+        directory = self.store.session_directory(session_id)
+        session = load_session(directory)
+        if session is None:
+            raise RuntimeError(f"会话文件读不到：{session_id}")
+        plans = self._load_segment_plans(directory)
+        rows: dict[int, dict[str, Any]] = {}
+        for row in session.segments:
+            if str(row.get("status")) != SEGMENT_STATUS_PASSED:
+                continue
+            number = int(row.get("index") or 0)
+            asset_id = str(row.get("video_asset_id") or "")
+            if not asset_id:
+                # 通过却没有视频引用：不当成「这段可以拼」静默放行——缺席的段由
+                # ``assemble_film`` 点名，user 才知道该补哪一段。
+                continue
+            try:
+                resource = self.store.resolve_asset_media(asset_id)
+            except WorkbenchError as exc:
+                raise RuntimeError(
+                    f"第 {number} 段的视频素材读不到（{asset_id}）：{exc}") from exc
+            rows[number] = {"video": resource.path}
+
+        node = SEGMENT_ASSEMBLE_NODE
+        self._emit_progress(
+            session_id, job_id, node, "started",
+            stage=step_machine.STEP_SEGMENTING)
+        self._write_active_job(session_id, job_id, node)
+        if cancel_event.is_set():
+            raise JobCancelled(node)
+        film = assemble_film(
+            plans=plans, rows=rows, total_s=int(session.brief.duration),
+            out_path=directory / ARTIFACT_FINAL_FILM,
+            # 首尾帧链恒为「裁首帧 + 重编码」（spec #92 / CLI 同源）：第 N+1 段的首帧
+            # 就是第 N 段的末帧，原样接起来每个接缝都会重一帧。画质档同为 CRF 16。
+            strategy=ConcatStrategy.TRIM_FIRST_FRAME,
+            reencode_crf=16,
+            remedy_hint="重跑本段并重新验收通过后，成片会自动取用最新的那份视频。",
+        )
+        if cancel_event.is_set():
+            raise JobCancelled(node)
+        if film.path is None:
+            # 不产出成片＝任务失败；reason 原样带走（它已经说了缺哪一段）。
+            raise SegmentAssemblyRefused(film.reason)
+        for note in film.warnings:
+            # 成片提醒（只报短、接缝退回重复首帧）没有别的事件位可进，落日志至少留痕。
+            logger.warning("成片提醒：%s / %s", session_id, note)
+        self._emit_progress(
+            session_id, job_id, node, "done",
+            stage=step_machine.STEP_SEGMENTING)
+        return film
 
     def _execute_revise(self, session_id: str, job_id: str,
                         cancel_event: threading.Event,
@@ -1741,7 +1827,7 @@ class JobRunner:
         """段校验收尾：通过则落段状态并起下一段写词；被拒则重建待办（D6 §5.4）。
 
         - 通过：段转 ``passed``，**立刻持久化**；非末段把尾帧锚写进 state 并起下一段
-          写词 job；末段停在 ``awaiting_human``（拼接属 #248）。
+          写词 job；末段起拼接 job（D6 §9：不要求用户点任何按钮，也没有交付确认闸门）。
         - 被拒：段转回 ``waiting_video``、**不落 passed**，重建同一段的待办并发
           ``action_item.created``。用户的素材不合格不是系统故障，**不记 failed**。
         """
@@ -1757,14 +1843,13 @@ class JobRunner:
         passed = str(result.get("outcome")) == END_REACHED
 
         if passed:
+            # 通过就一定有下一步：非末段接下一段写词，末段接拼接（D6 §5.3/§9）。
+            # 两者由 ``_segment_step`` 按已落盘的段状态分辨，这里只负责把 job 放出去。
             last = number >= total
-            next_job: JobSummary | None = None
-            if not last:
-                next_job = JobSummary(
-                    job_id=uuid.uuid4().hex, kind=JOB_KIND_SEGMENT, status="running",
-                    started_at=_now())
-            next_status = (step_machine.STATUS_RUNNING if next_job is not None
-                           else step_machine.STATUS_AWAITING_HUMAN)
+            next_job: JobSummary | None = JobSummary(
+                job_id=uuid.uuid4().hex, kind=JOB_KIND_SEGMENT, status="running",
+                started_at=_now())
+            next_status = step_machine.STATUS_RUNNING
             # 尾帧锚写进 state 供下一段写词用：段号取下一段的 0-based index（＝本段 1-based
             # 段号），与 ``segment_prompts._frame_anchor_note`` 的取法同源。
             anchor_state = dict(session.stage_state)
@@ -1840,8 +1925,36 @@ class JobRunner:
         ])
         return None
 
+    def _finish_segment_assembly(self, session_id: str, job_id: str,
+                                 film: Any) -> JobSummary | None:
+        """拼接收尾：登记 ``final.mp4``，会话转 ``completed``（D6 §9）。
+
+        「拼不出来」在 ``_execute_segment_assemble`` 里已经抛成任务失败，走到这里的
+        只有成功一条：成片已落盘，先登记产物再落终态——事件说的必须是已发生的事实，
+        反过来会让订阅者拿到一个还不存在的 ``artifact.created``。
+        """
+        self.store.register_artifact(
+            session_id, ARTIFACT_FINAL_FILM, job_id=job_id)
+
+        def _apply(detail: Any) -> dict[str, Any]:
+            job = self._job_or_running(job_id, detail).model_copy(
+                update={"status": "succeeded", "finished_at": _now()})
+            return {
+                "status": step_machine.STATUS_COMPLETED,
+                "jobs": _upsert_job(detail.jobs, _job_dict(job)),
+            }
+
+        self.store.mutate(session_id, _apply, events=[
+            EventDraft("job.succeeded",
+                       {"next": step_machine.STATUS_COMPLETED}, job_id=job_id),
+        ])
+        return None
+
     def _finish_segment_done(self, session_id: str, job_id: str) -> JobSummary | None:
-        """没有下一步可做（全部段已通过、或当前段在等人）：温和收尾到 ``awaiting_human``。"""
+        """没有下一步可做（当前段在等人交视频）：温和收尾到 ``awaiting_human``。
+
+        全部段都已通过时不走这里——那时该做的是拼接（``SEGMENT_STEP_ASSEMBLE``）。
+        """
         def _apply(detail: Any) -> dict[str, Any]:
             job = self._job_or_running(job_id, detail).model_copy(
                 update={"status": "succeeded", "finished_at": _now()})

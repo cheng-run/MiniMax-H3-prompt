@@ -905,6 +905,24 @@ MUTATIONS: tuple[Mutation, ...] = (
         "重启不给「未写词」的段重起写词 job＝重试空转收尾、会话卡在没有待办的半截"
         "（spec §10 恢复失守，#249）",
     ),
+    Mutation(
+        "segment_assembly_never_starts",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "        return (SEGMENT_STEP_ASSEMBLE, 0)",
+        "        return (SEGMENT_STEP_DONE, 0)",
+        ("tests/test_api_segment_assembly.py::"
+         "test_last_segment_auto_assembles_final_film_and_completes",),
+        "末段通过后不自动拼接＝成片永远不产出、会话停在 awaiting_human（D6-AC9 静默失守，#248）",
+    ),
+    Mutation(
+        "segment_assembly_reason_generalised",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "            raise SegmentAssemblyRefused(film.reason)",
+        '            raise SegmentAssemblyRefused("拼接失败")',
+        ("tests/test_api_segment_assembly.py::"
+         "test_missing_segment_fails_with_named_segment_and_retry_after_fix",),
+        "把 reason 改写成泛泛的「拼接失败」＝用户不知道补哪一段（D6-AC9 的点名要求，#248）",
+    ),
 )
 
 
