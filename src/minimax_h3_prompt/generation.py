@@ -1118,6 +1118,34 @@ def asset_prompts_for(brief: Brief, state: Mapping[str, Any]) -> tuple[ImageProm
     return image_prompt_variants(state, brief.canvases)
 
 
+class AssetPromptMissing(ValueError):
+    """阶段 1 的资产图提示词里找不到台账那个语义名（素材循环无法出词）。
+
+    名字对号是**硬判据**：拿相邻那件的词顶替会让用户举着一张别的角色的描述去出图，
+    而卡片上还写着这一件的语义名——静默错配比停下来的代价大得多（D7 §16 的
+    「Subject 标签与台账语义名对不上 → 硬失败，不静默降级」）。
+    """
+
+
+def asset_prompt_for(
+    brief: Brief, state: Mapping[str, Any], name: str,
+) -> ImagePromptVariant:
+    """按语义名取这一件的资产图提示词（素材循环出词的唯一取数口，D7 §7）。
+
+    来源是阶段 1 已经写好的那一份（``asset_prompts_for``），**不另起一次 LLM 调用**：
+    素材循环存在的理由是把阶段 1 的词逐件拿去过图校对，重新写一遍会让
+    「产物里是 A、拿来校对的是 B」。语义名是台账与阶段 1 之间的唯一对号键。
+    """
+    variants = asset_prompts_for(brief, state)
+    for variant in variants:
+        if variant.name == name:
+            return variant
+    raise AssetPromptMissing(
+        f"阶段 1 没有为「{name}」写资产图提示词（现有："
+        f"{'、'.join(variant.name for variant in variants) or '无'}）。")
+
+
+
 def ref_asset_registry(state: Mapping[str, Any], brief: Brief) -> list[RefItem]:
     """多参路线的参考素材登记：语义名 + `<Picture N>` 编号 + 描述（生图提示词）。
 

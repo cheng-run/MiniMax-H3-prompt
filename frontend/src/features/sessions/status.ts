@@ -43,3 +43,21 @@ export function statusLabel(status: SessionStatus): string {
 export function statusTone(status: SessionStatus): StatusTone {
   return TONES[status]
 }
+
+// 步骤标签（`job.progress` 的 stage，D7 §5.2 增 `asset_loop`）：只给「正在执行」
+// 那一行做说明，**不是**会话状态——会话仍是七态，状态徽章不因它长分支。
+// 取值与后端 `step_machine.STEPS` 同源（契约里的进度事件），前端只负责翻译。
+const STEP_LABELS: Record<string, string> = {
+  stage1: '阶段 1',
+  asset_loop: '素材循环',
+  stage2: '阶段 2',
+  segmenting: '分段循环',
+}
+
+/** 进度阶段 → 给人看的步骤名；未知/缺席返回 null（不猜）。 */
+export function stepLabel(step: string | null | undefined): string | null {
+  if (!step) {
+    return null
+  }
+  return STEP_LABELS[step] ?? null
+}

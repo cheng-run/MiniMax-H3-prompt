@@ -22,12 +22,15 @@ import os
 import threading
 import time
 import uuid
+from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .. import step_machine
 from ..errors import error_code
+from ..kinds import KIND_PICTURE
 from ..segment_validation import segment_submission_problems
 from ..session_store import FRAME_SUBMISSION_KEY, atomic_write_text, load_session
 from ..summary import PromptSummary, render_summary_zh
@@ -40,11 +43,16 @@ from ..workbench_store import (
     ARTIFACT_SUMMARY_JSON,
     ARTIFACT_SUMMARY_MARKDOWN,
     ARTIFACT_VIDEO_PROMPT,
+    ASSETS_DIRNAME,
+    ASSET_LEDGER_STATUS_PASSED,
+    ASSET_LEDGER_STATUS_REGISTERED,
+    ASSET_PROOFREAD_KEY,
     SEGMENTS_DIRNAME,
     ActionItemNotFound,
     ActionItemOut,
     ActionItemPending,
     ActionItemResolved,
+    AssetImageInvalid,
     EventDraft,
     FrameInvalid,
     JobNotFound,
@@ -90,6 +98,18 @@ SEGMENT_ASSEMBLE_NODE = "segment_assemble"
 # 尾帧剥出的落点目录（不是产物：登记表只认 ``segments/shot-NN.md``）。
 SEGMENT_BRIDGE_DIRNAME = "bridge_frames"
 
+# 素材循环（D7 spec §5.3 / §6.2）：出词与校对是**两个独立 job**，都记这个 kind；
+# 中间隔着持久化的 ``asset_image`` 待办（不是阻塞线程）。
+JOB_KIND_ASSET_LOOP = "asset_loop"
+# 一次 job 只做一件：子步骤按**已落盘的台账事实**决定（``_asset_step``），不另记账。
+ASSET_STEP_WRITE = "write"
+ASSET_STEP_PROOFREAD = "proofread"
+ASSET_STEP_DONE = "done"
+ASSET_WRITE_NODE = "asset_write"
+ASSET_PROOFREAD_NODE = "asset_proofread"
+# 资产图词的落点模板（与 ``workbench_store`` 的模式产物同号：两位件号）。
+ASSET_PROMPT_FILENAME = ASSETS_DIRNAME + "/picture-{number:02d}.md"
+
 # advance 没有请求体；幂等键绑定的「请求摘要」是一个常量，同 key 重发永远算同一份命令。
 _JOB_FINGERPRINT = hashlib.sha256(b"advance").hexdigest()
 
@@ -97,20 +117,23 @@ _JOB_FINGERPRINT = hashlib.sha256(b"advance").hexdigest()
 def _resolve_fingerprint(item_id: str, decision: str | None,
                          revisions: list[dict[str, str]],
                          frames: dict[str, str] | None,
-                         video_asset_id: str | None = None) -> str:
-    """resolve 的请求摘要：待办、决定、修订内容、帧槽与段视频素材都算进去。
+                         video_asset_id: str | None = None,
+                         asset_id: str | None = None) -> str:
+    """resolve 的请求摘要：待办、决定、修订内容、帧槽与素材标识都算进去。
 
     段视频素材（``video_asset_id``）必须进摘要：不进的话，同一个 Idempotency-Key 换一段
-    视频重发会**重放第一次的响应**，用户以为重交了、系统其实没执行。
+    视频重发会**重放第一次的响应**，用户以为重交了、系统其实没执行。素材循环的交图
+    （``asset_id``）同理：换一张图重发不能重放上一张的结论。
     """
     canonical = json.dumps(
         {"item_id": item_id, "decision": decision, "revisions": revisions,
-         "frames": frames or {}, "video_asset_id": video_asset_id or ""},
+         "frames": frames or {}, "video_asset_id": video_asset_id or "",
+         "asset_id": asset_id or ""},
         sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-# resolve 的三个去向。待办 kind 与 brief 建好后不再改写，所以先在锁外读一次决定
+# resolve 的四个去向。待办 kind 与 brief 建好后不再改写，所以先在锁外读一次决定
 # 「要不要起任务」是安全的；「待办是否仍 pending」仍由 _decide 在存储层锁内判定。
 # 帧选择在决议时落进 ``session_store.FRAME_SUBMISSION_KEY``（为什么要先落盘见那里）。
 _BRANCH_REVIEW = "review"
@@ -119,6 +142,79 @@ _BRANCH_FRAMES = "frames"
 # 第三个待办（D6 §8）：交本段视频。与帧提交同形——不是 approve/revise，靠 video_asset_id
 # 分型，resolve 之后起一个段校验 job。分支名就是待办 kind，不另抄一份字面量。
 _BRANCH_SEGMENT_VIDEO = step_machine.ACTION_SEGMENT_VIDEO
+# 第四个去向（D7 §5.3）：素材循环。它同时覆盖两个入口——ref 会话通过阶段 1 审查
+# （先出第 1 件的词）与交回一张素材图（跑校对）。
+_BRANCH_ASSET_LOOP = step_machine.ACTION_ASSET_IMAGE
+
+
+def _asset_step_of(
+    ledger: Sequence[Mapping[str, Any]],
+) -> tuple[str, int]:
+    """素材循环走到哪一步：**只看台账**（最大连续通过编号 + 1），不看 job 历史。
+
+    严格串行意味着「第 1..N-1 件已定稿、当前是第 N 件」由编号本身就说得清；事件与
+    job 记录只做通知，进程重启后不靠它们重建进度（D7 §6.4 / §14）。当前件上带着
+    ``ASSET_PROOFREAD_KEY`` ＝ 用户已交图、还差校对；否则该件还欠出词。
+    """
+    pictures = sorted(
+        (entry for entry in ledger if str(entry.get("kind")) == KIND_PICTURE),
+        key=lambda entry: int(entry["number"]))
+    index = 0
+    while (index < len(pictures)
+           and pictures[index].get("status") == ASSET_LEDGER_STATUS_PASSED):
+        index += 1
+    if index >= len(pictures):
+        return (ASSET_STEP_DONE, 0)
+    entry = pictures[index]
+    number = int(entry["number"])
+    if str(entry.get(ASSET_PROOFREAD_KEY) or "").strip():
+        return (ASSET_STEP_PROOFREAD, number)
+    return (ASSET_STEP_WRITE, number)
+
+
+def _settle_asset(
+    ledger: Sequence[Mapping[str, Any]], number: int, passed: bool,
+) -> list[dict[str, Any]]:
+    """把第 ``number`` 件的校对结论写进台账：轮次 +1，通过即定稿，收回交图标识。
+
+    这是「轮次 + 状态」的唯一转移规则：收尾写盘与「下一件是谁」的判定都调它，
+    两处各写一遍就会在改状态名时静默分家。
+    """
+    updated: list[dict[str, Any]] = []
+    for entry in ledger:
+        row = dict(entry)
+        if (str(row.get("kind")) == KIND_PICTURE
+                and int(row.get("number", 0)) == int(number)):
+            row["round"] = int(row.get("round", 0)) + 1
+            row["status"] = (ASSET_LEDGER_STATUS_PASSED if passed
+                             else ASSET_LEDGER_STATUS_REGISTERED)
+            # 交上去的那张已经判过：清掉它，下一轮重新交图才算数。
+            row.pop(ASSET_PROOFREAD_KEY, None)
+        updated.append(row)
+    return updated
+
+
+def _render_asset_prompt(number: int, name: str, prompt: str) -> str:
+    """资产图词产物正文：头部写语义名/类型/编号，空行以下是可直接复制的词（D7 §7）。"""
+    return "\n".join([
+        f"# 资产图提示词 · 第 {number} 件",
+        f"- 语义名：{name}",
+        "- 类型：Picture",
+        f"- 编号：{number}",
+        "",
+        str(prompt).strip(),
+        "",
+    ])
+
+
+def _parse_asset_prompt(text: str) -> str:
+    """从产物正文取回词本体（头部是给人看的标签，不参与校对与改写）。
+
+    头部固定四行 + 一个空行。找不到分隔行时整篇当词——那时产物是旧形态，宁可多带
+    一段标签也不要丢掉词。
+    """
+    _head, separator, body = str(text).partition("\n\n")
+    return body if separator else str(text)
 
 
 class JobCancelled(Exception):
@@ -281,6 +377,7 @@ class JobRunner:
         revisions: list[dict[str, str]] | None = None,
         frames: dict[str, str] | None = None,
         video_asset_id: str | None = None,
+        asset_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> tuple[JobSummary | None, bool]:
         """在人工待办上提交决定；返回 ``(job, 是否幂等重放)``（#219 / D4 §9）。
@@ -297,7 +394,8 @@ class JobRunner:
         lock = self._locks.setdefault(session_id, asyncio.Lock())
         async with lock:
             payload = _resolve_fingerprint(
-                item_id, decision, list(revisions or []), frames, video_asset_id)
+                item_id, decision, list(revisions or []), frames, video_asset_id,
+                asset_id)
             registry = None
             if idempotency_key:
                 registry = self.store.session_registry(session_id)
@@ -313,8 +411,12 @@ class JobRunner:
             # 帧链通过审查不产生任务；其余去向照旧。``job`` 为 None 时下面所有
             # 与任务相关的落盘都跳过——契约里那一段的 202 是「已受理、无执行」。
             job = None if frame_gate else JobSummary(
-                job_id=uuid.uuid4().hex, kind="advance", status="running",
-                started_at=_now())
+                job_id=uuid.uuid4().hex,
+                # 素材循环的两个 job 都记 ``asset_loop``（D7 §6.2）：前端/排障按 kind
+                # 就能把「出词」「校对」与外层的推进任务分开。
+                kind=(JOB_KIND_ASSET_LOOP if branch == _BRANCH_ASSET_LOOP
+                      else "advance"),
+                status="running", started_at=_now())
             # 新待办的 id 先生成：``action_item.created`` 事件要和决议在**同一次**
             # 落盘里写出，不能等 _decide 返回后再补一条事件。
             created_item_id = uuid.uuid4().hex
@@ -389,11 +491,13 @@ class JobRunner:
                         raise FrameInvalid(
                             "frame_submission 待办不接受 video_asset_id；段视频请交到 segment_video。")
                     for role in ("first", "last"):
-                        asset_id = str(frames.get(role) or "").strip()
-                        if asset_id:
+                        # 变量名与素材循环的 ``asset_id`` 分开：两处同名会让闭包里的
+                        # 后者变成未绑定的局部变量（Python 的赋值即声明）。
+                        frame_asset_id = str(frames.get(role) or "").strip()
+                        if frame_asset_id:
                             # 归属、存在性、类型都在这里判；错误一律 422 frame_invalid。
                             resolved_frames[role] = str(
-                                self.store.resolve_frame_asset(session_id, asset_id))
+                                self.store.resolve_frame_asset(session_id, frame_asset_id))
                     holder["frames"] = resolved_frames
                     recorded_decision = step_machine.DECISION_SUBMIT_FRAMES
                     # 帧选择随决议一起落进 stage_state：慢速读图在任务里，崩溃在
@@ -415,8 +519,8 @@ class JobRunner:
                     if frames is not None:
                         raise SegmentVideoInvalid(
                             "segment_video 待办不接受 frames。")
-                    asset_id = str(video_asset_id or "").strip()
-                    if not asset_id:
+                    submitted_video = str(video_asset_id or "").strip()
+                    if not submitted_video:
                         raise SegmentVideoInvalid(
                             "segment_video 待办必须带 video_asset_id。")
                     number = target.segment_index
@@ -431,7 +535,8 @@ class JobRunner:
                         raise SegmentVideoInvalid(
                             "所有段都已通过，没有待交视频的段。")
                     # 归属与 mp4 容器：不属于本会话/非 mp4 一律 segment_video_invalid（422）。
-                    resource = self.store.resolve_video_asset(session_id, asset_id)
+                    resource = self.store.resolve_video_asset(
+                        session_id, submitted_video)
                     # 段号与当前段一致 + 技术档合格（复用 check_segment_video）。
                     problems = segment_submission_problems(
                         current_index=current_seg.index, number=int(number),
@@ -444,11 +549,46 @@ class JobRunner:
                         if int(row["index"]) == int(number):
                             # 交上视频 → 异步校验排队；落盘后由 job 判三档结局。
                             row["status"] = SEGMENT_STATUS_VALIDATING
-                            row["video_asset_id"] = asset_id
+                            row["video_asset_id"] = submitted_video
                             # 重新交回＝上一轮拒绝的原因不再适用（D6 §5.4）。
                             row["rejection_reason"] = ""
                     holder["segments"] = rows
                     recorded_decision = step_machine.DECISION_SUBMIT_VIDEO
+                elif target.kind == step_machine.ACTION_ASSET_IMAGE:
+                    # kind 与载荷强校验（D7 §6.3）：素材图待办只收 ``asset_id``。它没有
+                    # 「就这样吧」那一档——放行入口一旦存在，校对结论就只是建议。
+                    if decision is not None:
+                        raise AssetImageInvalid(
+                            "asset_image 待办不接受 approve/revise；请提交 asset_id。")
+                    if revisions:
+                        raise AssetImageInvalid("asset_image 待办不接受 revisions。")
+                    if frames is not None:
+                        raise AssetImageInvalid("asset_image 待办不接受 frames。")
+                    if video_asset_id is not None:
+                        raise AssetImageInvalid(
+                            "asset_image 待办不接受 video_asset_id；段视频请交到 "
+                            "segment_video。")
+                    submitted = str(asset_id or "").strip()
+                    if not submitted:
+                        raise AssetImageInvalid("asset_image 待办必须带 asset_id。")
+                    number = target.asset_index
+                    if number is None:
+                        raise AssetImageInvalid("这条 asset_image 待办缺件号，无法核对。")
+                    ledger = current.asset_ledger_snapshot()
+                    current_entry = next(
+                        (entry for entry in ledger
+                         if entry["kind"] == KIND_PICTURE
+                         and int(entry["number"]) == int(number)), None)
+                    if current_entry is None:
+                        raise AssetImageInvalid(
+                            f"素材台账里没有第 {number} 件参考素材。")
+                    # 归属与类型（不属于本会话 / 非图片）都在这里判，一律 422。
+                    self.store.resolve_image_asset(session_id, submitted)
+                    # 先落盘再接校对：崩在两者之间时，恢复能重跑校对而不是要求重交
+                    # （用户已经交过一次的图不该再交一遍）。
+                    current_entry[ASSET_PROOFREAD_KEY] = submitted
+                    holder["asset_ledger"] = ledger
+                    recorded_decision = step_machine.DECISION_SUBMIT_IMAGE
                 else:
                     raise FrameInvalid(f"不认识的人工待办类型：{target.kind}")
                 holder["decision"] = recorded_decision
@@ -480,6 +620,9 @@ class JobRunner:
                 if "segments" in holder:
                     # 段视频回交：段状态在这一笔里落到 validating（视频素材 id 一并记）。
                     changes["segments"] = holder["segments"]
+                if "asset_ledger" in holder:
+                    # 素材图回交：台账条目记下「刚交的那张待校对图」，与决议同一笔落盘。
+                    changes["asset_ledger"] = holder["asset_ledger"]
                 if decision == step_machine.DECISION_REVISE:
                     # 累积语义只住 user_revisions.py（begin_round + record_user_revision）；
                     # 这里不另造轮次号，也不改清单形状。
@@ -504,6 +647,8 @@ class JobRunner:
                     if branch == _BRANCH_FRAMES
                     else step_machine.DECISION_SUBMIT_VIDEO
                     if branch == _BRANCH_SEGMENT_VIDEO
+                    else step_machine.DECISION_SUBMIT_IMAGE
+                    if branch == _BRANCH_ASSET_LOOP
                     else decision),
                 "revisions": event_revisions,
             }
@@ -514,6 +659,9 @@ class JobRunner:
             if video_asset_id is not None:
                 # 段视频素材也是用户输入：重放要看出当时交的是哪一条。
                 resolved_payload["video_asset_id"] = video_asset_id
+            if asset_id is not None:
+                # 素材图同理：交回的是哪一张，重放要看得出来。
+                resolved_payload["asset_id"] = asset_id
             events = [
                 EventDraft("action_item.resolved", resolved_payload,
                            job_id=job.job_id if job else None),
@@ -540,9 +688,9 @@ class JobRunner:
             await asyncio.to_thread(self._write_active_job, session_id, job.job_id, "")
             event = threading.Event()
             self._cancel_events[job.job_id] = event
-            if branch == _BRANCH_SEGMENT_VIDEO:
-                # 段校验走通用分派（``_run`` 按持久化事实决定跑校验）：失败重试也走
-                # 同一条出口，两处各写一份子步骤判定会长出两套口径。
+            if branch in (_BRANCH_SEGMENT_VIDEO, _BRANCH_ASSET_LOOP):
+                # 段校验与素材循环都走通用分派（``_run`` 按持久化事实决定跑哪一步）：
+                # 失败重试也走同一条出口，两处各写一份子步骤判定会长出两套口径。
                 coroutine = self._run(session_id, job.job_id, event)
             else:
                 coroutine = self._run_decision(
@@ -576,10 +724,15 @@ class JobRunner:
             return _BRANCH_SEGMENT_VIDEO
         if kind == step_machine.ACTION_FRAME_SUBMISSION:
             return _BRANCH_FRAMES
+        if kind == step_machine.ACTION_ASSET_IMAGE:
+            return _BRANCH_ASSET_LOOP
         if (kind == step_machine.ACTION_STAGE1_REVIEW
-                and decision == step_machine.DECISION_APPROVE
-                and step_machine.needs_frame_submission(session.brief.variant)):
-            return _BRANCH_FRAME_GATE
+                and decision == step_machine.DECISION_APPROVE):
+            # ref 通过审查先走素材循环（D7 §5.3）：它不是帧链，也不直接进阶段 2。
+            if session.brief.is_ref:
+                return _BRANCH_ASSET_LOOP
+            if step_machine.needs_frame_submission(session.brief.variant):
+                return _BRANCH_FRAME_GATE
         return _BRANCH_REVIEW
 
 
@@ -625,6 +778,21 @@ class JobRunner:
             if step == step_machine.STEP_STAGE2:
                 result = await asyncio.to_thread(
                     self._execute_stage2, session_id, job_id, cancel_event)
+            elif step == step_machine.STEP_ASSET_LOOP:
+                asset_step, number = await asyncio.to_thread(
+                    self._asset_step, session_id)
+                if asset_step == ASSET_STEP_PROOFREAD:
+                    result = await asyncio.to_thread(
+                        self._execute_asset_proofread,
+                        session_id, job_id, cancel_event, number)
+                elif asset_step == ASSET_STEP_WRITE:
+                    result = await asyncio.to_thread(
+                        self._execute_asset_write,
+                        session_id, job_id, cancel_event, number)
+                else:
+                    # ``_resume_step`` 只在循环没走完时给出 ``asset_loop``；真到了
+                    # 「已完成」说明两处判据打架，按失败收场而不是静默跳过。
+                    raise RuntimeError("素材循环已全部定稿，不该再起 asset_loop 任务")
             elif step == step_machine.STEP_SEGMENTING:
                 seg_step = await asyncio.to_thread(self._segment_step, session_id)
                 kind, number = seg_step
@@ -657,6 +825,14 @@ class JobRunner:
             if step == step_machine.STEP_STAGE2:
                 next_job = await asyncio.to_thread(
                     self._finish_stage2, session_id, job_id, result)
+            elif step == step_machine.STEP_ASSET_LOOP:
+                if result["step"] == ASSET_STEP_PROOFREAD:
+                    next_job = await asyncio.to_thread(
+                        self._finish_asset_proofread, session_id, job_id, result)
+                else:
+                    await asyncio.to_thread(
+                        self._finish_asset_write, session_id, job_id, result)
+                    next_job = None
             elif step == step_machine.STEP_SEGMENTING:
                 kind = seg_step[0]
                 if kind == SEGMENT_STEP_PLANNING:
@@ -711,6 +887,11 @@ class JobRunner:
             and str(item.get("decision")) == step_machine.DECISION_APPROVE
             for item in session.action_items)
         if reviewed and approved and not pending:
+            # 素材循环（D7 §5.3 / §14）：ref 在阶段 1 与阶段 2 之间多一档。判据只读
+            # 台账——重启后照样能重建「在等第几件」，不依赖 job 历史。
+            if (session.brief.is_ref
+                    and _asset_step_of(session.asset_ledger)[0] != ASSET_STEP_DONE):
+                return step_machine.STEP_ASSET_LOOP
             # 长片的两段接缝都属于 ``segmenting``：① 阶段 2 已成功（``final_prompt``
             # 落盘）但还没段表——重试要重跑**规划**；② 段循环已开始（有段表）——重试要
             # 重跑当前那一段的写词或校验。两者都不能把阶段 2 再跑一遍（D6 spec §5.3）。
@@ -766,6 +947,32 @@ class JobRunner:
                     self._finish_succeeded, session_id, job_id, result["state"])
         finally:
             await asyncio.to_thread(self._cleanup, session_id, job_id)
+
+    def _ref_brief(self, session: Any) -> Any:
+        """执行器交给管线的 Brief：ref 会话的 ``refs`` 从**素材台账**现造（D7 §5.3 / §10）。
+
+        工作台的参考素材不在 brief 文件里——创建口不收 refs，台账才是唯一真源
+        （D7 §4.1）。阶段 1 的分镜表 Subject 标签与资产图提示词命名都要按台账语义名
+        对齐，所以每个「把 brief 交给管线或写词」的执行点都必须走这里；漏一处，
+        真实 ref 会话就会在出词那一步对不上号。
+
+        只收 Picture：``RefItem.picture`` 是 ``<Picture N>`` 槽位，视频/音频没有这个
+        编号（它们的段内子集是 #258 的事）。``path`` 留空——本地路径既不进 DTO 也不进
+        管线输入。用 ``replace`` 而不是就地改：``_finish_stage2`` 会把 brief 写回会话
+        文件，就地加就是给台账造一份会变旧的副本。base 会话原样返回。
+        """
+        if not session.brief.is_ref:
+            return session.brief
+        pictures = sorted(
+            (entry for entry in session.asset_ledger
+             if str(entry.get("kind")) == KIND_PICTURE),
+            key=lambda entry: int(entry["number"]))
+        from ..brief_parser import RefItem
+
+        return replace(session.brief, refs=[
+            RefItem(picture=int(entry["number"]), name=str(entry["name"]),
+                    description="", path="")
+            for entry in pictures])
 
     def _execute_stage1(self, session_id: str, job_id: str,
                         cancel_event: threading.Event) -> dict[str, Any]:
@@ -841,7 +1048,7 @@ class JobRunner:
         else:
             _emit_node_started(0)
             final_state = dict(run_stage1(
-                session.brief, self.config, initial_state=state,
+                self._ref_brief(session), self.config, initial_state=state,
                 resume_from_node=resume_from, on_step_done=on_step_done)[0])
             _close_open_node()
 
@@ -871,7 +1078,10 @@ class JobRunner:
             if cancel_event.is_set():
                 raise JobCancelled(name)
             self._emit_progress(session_id, job_id, name, "done")
-        final_state = stage1_state(session.brief, dict(session.stage_state))
+        final_state = stage1_state(
+            # 桩与真实两路只在「怎么跑」上不同，「交给管线的 brief 从哪来」必须同源；
+            # #259 扩桩支持 ref 素材循环时从这里接（桩 state 目前不产资产图提示词）。
+            self._ref_brief(session), dict(session.stage_state))
         self._write_stage1_artifacts(session_id, job_id, final_state)
         return final_state
 
@@ -976,7 +1186,7 @@ class JobRunner:
         if session is None:
             raise RuntimeError(f"会话文件读不到：{session_id}")
         state = dict(session.stage_state)
-        brief = session.brief
+        brief = self._ref_brief(session)
         original = brief.variant
         paths = self._stage2_frame_paths(state)
         have_first, have_last = "first" in paths, "last" in paths
@@ -1042,7 +1252,11 @@ class JobRunner:
         self.store.write_text_artifact(
             session_id, ARTIFACT_VIDEO_PROMPT, prompt, job_id=job_id)
         self._summarize_stage2_prompt(session_id, job_id, prompt, cancel_event)
-        return {"state": dict(final_state), "brief": brief,
+        # 派生出来的 refs 不回写会话文件：``_finish_stage2`` 会把这份 brief 落盘，
+        # 带上副本就等于给台账造一份会变旧的拷贝。交回的是一份新副本，不动刚交给
+        # 管线的那一份（降级后的 variant 仍照旧写回）。
+        persisted_brief = replace(brief, refs=list(session.brief.refs))
+        return {"state": dict(final_state), "brief": persisted_brief,
                 "variant_downgraded": downgraded}
 
     def _summarize_stage2_prompt(self, session_id: str, job_id: str, prompt: str,
@@ -1125,7 +1339,7 @@ class JobRunner:
         session = load_session(directory)
         if session is None:
             raise RuntimeError(f"会话文件读不到：{session_id}")
-        brief = session.brief
+        brief = self._ref_brief(session)
         state = dict(session.stage_state)
         paths = self._stage2_frame_paths(state)
         if paths:
@@ -1156,8 +1370,239 @@ class JobRunner:
             session_id, ARTIFACT_VIDEO_PROMPT, prompt, job_id=job_id)
         # 桩模式同样落三件：桩不建模型，摘要正文固定，渲染与落盘仍是真实路径那份。
         self._write_summary_artifacts(session_id, job_id, stage2_summary(brief))
-        return {"state": updated, "brief": brief,
+        # 同真实路径：交回的 brief 不带派生的 refs，也不动刚交给管线的那一份。
+        persisted_brief = replace(brief, refs=list(session.brief.refs))
+        return {"state": updated, "brief": persisted_brief,
                 "variant_downgraded": downgraded}
+
+    # ------------------------------------------------------------------
+    # 素材循环（D7 §5.3 / §6）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _picture_entry(ledger: Any, number: int) -> dict[str, Any]:
+        """台账里第 ``number`` 件 Picture；找不到是内部不一致（待办不该存在）。"""
+        for entry in ledger:
+            if (str(entry.get("kind")) == KIND_PICTURE
+                    and int(entry.get("number", 0)) == int(number)):
+                return dict(entry)
+        raise RuntimeError(f"素材台账里没有第 {number} 件 Picture")
+
+    def _asset_step(self, session_id: str) -> tuple[str, int]:
+        """``_asset_step_of`` 的读取版：``_run`` 里按 job 分派用。"""
+        session = load_session(self.store.session_directory(session_id))
+        if session is None:
+            raise RuntimeError(f"会话文件读不到：{session_id}")
+        return _asset_step_of(session.asset_ledger)
+
+    def _execute_asset_write(self, session_id: str, job_id: str,
+                             cancel_event: threading.Event,
+                             number: int) -> dict[str, Any]:
+        """写这一件的资产图词：落 ``assets/picture-NN.md``，job 结束。
+
+        词来自**阶段 1 已经写好的那一份**（``generation.asset_prompt_for`` 按语义名取）：
+        素材循环不是重写一遍词，而是把它逐件拿去过图核对（D7 §7 的理由：合并成一件会让
+        「这件当时给的是哪一版词」脱钩）。
+        """
+        if self.fake_pipeline:
+            # 桩管线不伪造资产图词与校对结论（#259 才扩）：静默拿空词去落盘会让 CI
+            # 以为循环跑通了。
+            raise RuntimeError("桩管线还不支持 ref 素材循环（见 #259）。")
+        from ..generation import asset_prompt_for
+
+        session = load_session(self.store.session_directory(session_id))
+        if session is None:
+            raise RuntimeError(f"会话文件读不到：{session_id}")
+        entry = self._picture_entry(session.asset_ledger, number)
+        name = str(entry["name"])
+        artifact_name = ASSET_PROMPT_FILENAME.format(number=number)
+
+        self._emit_progress(session_id, job_id, ASSET_WRITE_NODE, "started",
+                            stage=step_machine.STEP_ASSET_LOOP)
+        if cancel_event.is_set():
+            raise JobCancelled(ASSET_WRITE_NODE)
+        artifact_id = f"{session_id}/{artifact_name}"
+        if int(entry.get("round", 0)) > 0:
+            # 轮次 > 0 ＝这件被校对打回过，盘上那一版是**按差异改过的词**。重出会把它
+            # 悄悄换回阶段 1 的初稿（崩溃恢复正是这条路），所以只重开卡片、不动正文。
+            self._emit_progress(session_id, job_id, ASSET_WRITE_NODE, "done",
+                                stage=step_machine.STEP_ASSET_LOOP)
+            return {"step": ASSET_STEP_WRITE, "number": number, "name": name,
+                    "artifact_id": artifact_id}
+        variant = asset_prompt_for(session.brief, session.stage_state, name)
+        info = self.store.write_text_artifact(
+            session_id, artifact_name,
+            _render_asset_prompt(number, name, variant.positive_prompt),
+            job_id=job_id)
+        self._emit_progress(session_id, job_id, ASSET_WRITE_NODE, "done",
+                            stage=step_machine.STEP_ASSET_LOOP)
+        return {"step": ASSET_STEP_WRITE, "number": number, "name": name,
+                "artifact_id": info.artifact_id}
+
+    def _execute_asset_proofread(self, session_id: str, job_id: str,
+                                 cancel_event: threading.Event,
+                                 number: int) -> dict[str, Any]:
+        """读用户交的图并校对（D7 §6.2）：通过 → 定稿；不通过 → 按差异改词。
+
+        读图走**唯一入口** ``describe_image``（不另建视觉客户端）。不通过时用
+        ``rewrite_asset_prompt`` 把差异清单当 feedback 重写这一件的词、覆盖同一份
+        产物——用户没有「就这样吧」可点，**改词是唯一的降级通道**（spec §6.3）。
+        """
+        if self.fake_pipeline:
+            raise RuntimeError("桩管线还不支持 ref 素材循环（见 #259）。")
+        from ..asset_loop import rewrite_asset_prompt
+        from ..asset_proofread import (
+            build_proofread_request,
+            compare_descriptions,
+            parse_reading,
+            render_proofread_report,
+        )
+        from ..generation import asset_prompt_for
+        from ..model_factory import build_chat_model
+        from ..tools.reference_auditor import describe_image
+
+        session = load_session(self.store.session_directory(session_id))
+        if session is None:
+            raise RuntimeError(f"会话文件读不到：{session_id}")
+        entry = self._picture_entry(session.asset_ledger, number)
+        name = str(entry["name"])
+        submitted = str(entry.get(ASSET_PROOFREAD_KEY) or "").strip()
+        if not submitted:
+            raise RuntimeError(f"第 {number} 件没有待校对的素材图标识")
+        path = self.store.resolve_image_asset(session_id, submitted)
+        artifact_name = ASSET_PROMPT_FILENAME.format(number=number)
+        text = (self.store.session_directory(session_id)
+                / artifact_name).read_text(encoding="utf-8")
+        current = _parse_asset_prompt(text)
+        # 锁死清单是判偏差的唯一判据（#53）：没声明就不收窄，与 CLI 同一口径。
+        variant = asset_prompt_for(session.brief, session.stage_state, name)
+        locked = tuple(variant.locked_features)
+
+        self._emit_progress(session_id, job_id, ASSET_PROOFREAD_NODE, "started",
+                            stage=step_machine.STEP_ASSET_LOOP)
+        if cancel_event.is_set():
+            raise JobCancelled(ASSET_PROOFREAD_NODE)
+        raw = describe_image(path, build_proofread_request(current, locked))
+        reading = parse_reading(raw)
+        report = compare_descriptions(current, reading, locked)
+        if cancel_event.is_set():
+            raise JobCancelled(ASSET_PROOFREAD_NODE)
+        if report.is_clean():
+            self._emit_progress(session_id, job_id, ASSET_PROOFREAD_NODE, "done",
+                                stage=step_machine.STEP_ASSET_LOOP)
+            return {"step": ASSET_STEP_PROOFREAD, "number": number, "name": name,
+                    "passed": True, "reason": ""}
+
+        reason = render_proofread_report(report)
+        rewritten = rewrite_asset_prompt(current, reason, build_chat_model())
+        self.store.write_text_artifact(
+            session_id, artifact_name,
+            _render_asset_prompt(number, name, rewritten), job_id=job_id)
+        self._emit_progress(session_id, job_id, ASSET_PROOFREAD_NODE, "done",
+                            stage=step_machine.STEP_ASSET_LOOP)
+        return {"step": ASSET_STEP_PROOFREAD, "number": number, "name": name,
+                "passed": False, "reason": reason}
+
+    def _finish_asset_write(self, session_id: str, job_id: str,
+                            result: dict[str, Any]) -> None:
+        """出词收尾：挂出本件唯一的 ``asset_image`` 待办，会话等人工交图。"""
+        number = int(result["number"])
+        item = ActionItemOut(
+            item_id=uuid.uuid4().hex, kind=step_machine.ACTION_ASSET_IMAGE,
+            status="pending", created_at=_now(), asset_index=number)
+
+        def _apply(detail: Any) -> dict[str, Any]:
+            job = self._job_or_running(job_id, detail).model_copy(
+                update={"status": "succeeded", "finished_at": _now()})
+            # 每件同时最多一个未决项：同类旧项先收掉再挂新的（与阶段 1 / 段循环同一条
+            # 纪律）。严格串行也由这里兜住——新卡片出现时上一张必然已决议。
+            items = [
+                existing.model_dump(mode="json") for existing in detail.action_items
+                if not (existing.kind == step_machine.ACTION_ASSET_IMAGE
+                        and existing.status == "pending")]
+            items.append(item.model_dump(mode="json"))
+            return {
+                "status": step_machine.STATUS_AWAITING_HUMAN,
+                "jobs": _upsert_job(detail.jobs, _job_dict(job)),
+                "action_items": items,
+            }
+
+        self.store.mutate(session_id, _apply, events=[
+            EventDraft("job.succeeded",
+                       {"next": step_machine.STATUS_AWAITING_HUMAN}, job_id=job_id),
+            EventDraft("action_item.created",
+                       {"item_id": item.item_id, "kind": item.kind,
+                        "asset_index": number}, job_id=job_id),
+        ])
+
+    def _finish_asset_proofread(self, session_id: str, job_id: str,
+                                result: dict[str, Any]) -> JobSummary | None:
+        """校验收尾：通过则定稿并接下一件（或转阶段 2）；不通过则同件号重开待办。
+
+        去向只看台账（``_asset_step_of``）：全部定稿时起一个普通 ``advance`` 任务，
+        由 ``_resume_step`` 落到阶段 2——阶段 2 的入口仍只有那一处。
+        """
+        number = int(result["number"])
+        passed = bool(result["passed"])
+        reason = str(result["reason"])
+        # 下一个任务的 kind 由「这一件定稿之后的台账」决定。台账在这次锁内的样子
+        # 只能是这一份：同一会话同时只有一个 job，resolve 在 running 时被拒。判据与
+        # 写入共用 ``_settle_asset``／``_asset_step_of``，不另写一份转移规则。
+        session = load_session(self.store.session_directory(session_id))
+        if session is None:
+            raise RuntimeError(f"会话文件读不到：{session_id}")
+        settled = _settle_asset(session.asset_ledger, number, passed)
+        step, _cc = _asset_step_of(settled)
+        next_job: JobSummary | None = None
+        item: ActionItemOut | None = None
+        if passed:
+            next_job = JobSummary(
+                job_id=uuid.uuid4().hex,
+                # 还有下一件 → 继续素材循环；全部定稿 → 普通推进任务（进阶段 2）。
+                kind=(JOB_KIND_ASSET_LOOP if step != ASSET_STEP_DONE else "advance"),
+                status="running", started_at=_now())
+        else:
+            item = ActionItemOut(
+                item_id=uuid.uuid4().hex, kind=step_machine.ACTION_ASSET_IMAGE,
+                status="pending", created_at=_now(), asset_index=number,
+                reason=reason)
+
+        def _apply(detail: Any) -> dict[str, Any]:
+            job = self._job_or_running(job_id, detail).model_copy(
+                update={"status": "succeeded", "finished_at": _now()})
+            jobs = _upsert_job(detail.jobs, _job_dict(job))
+            changes: dict[str, Any] = {
+                "asset_ledger": _settle_asset(
+                    detail.asset_ledger_snapshot(), number, passed)}
+            if next_job is not None:
+                changes["status"] = step_machine.STATUS_RUNNING
+                changes["jobs"] = _upsert_job(jobs, _job_dict(next_job))
+            else:
+                # 同一件号重开：同类未决旧项先收掉再挂新的（收旧挂新）。
+                items = [
+                    existing.model_dump(mode="json")
+                    for existing in detail.action_items
+                    if not (existing.kind == step_machine.ACTION_ASSET_IMAGE
+                            and existing.status == "pending")]
+                items.append(item.model_dump(mode="json"))
+                changes["status"] = step_machine.STATUS_AWAITING_HUMAN
+                changes["jobs"] = jobs
+                changes["action_items"] = items
+            return changes
+
+        next_status = (step_machine.STATUS_RUNNING if next_job is not None
+                       else step_machine.STATUS_AWAITING_HUMAN)
+        events = [EventDraft("job.succeeded", {"next": next_status}, job_id=job_id)]
+        if next_job is not None:
+            events.append(EventDraft(
+                "job.started", {"kind": next_job.kind}, job_id=next_job.job_id))
+        else:
+            events.append(EventDraft(
+                "action_item.created",
+                {"item_id": item.item_id, "kind": item.kind,
+                 "asset_index": number, "reason": reason}, job_id=job_id))
+        self.store.mutate(session_id, _apply, events=events)
+        return next_job
 
     def _execute_segment_planning(self, session_id: str, job_id: str,
                                   cancel_event: threading.Event) -> list[dict[str, Any]]:
@@ -1482,7 +1927,7 @@ class JobRunner:
         session = load_session(directory)
         if session is None:
             raise RuntimeError(f"会话文件读不到：{session_id}")
-        brief = session.brief
+        brief = self._ref_brief(session)
         state = dict(session.stage_state)
         chain = list(_STAGE1_CHAIN)
         setting_entries = [entry for entry in entries if entry["layer"] in LAYER_SPECS]
@@ -1520,7 +1965,9 @@ class JobRunner:
         # 每轮修订重跑完成都把审查面刷新一遍（spec §7 / §14 风险表）：审查看到的
         # 必须是这一稿，而不是上一轮意见之前的旧稿。
         self._write_stage1_artifacts(session_id, job_id, state)
-        return {"state": state, "brief": brief}
+        # 修订重跑用的是派生的 brief（带台账 refs）；回执里交回原样，避免任何人顺手
+        # 把它写回会话文件（台账是唯一真源）。
+        return {"state": state, "brief": session.brief}
 
     def _execute_revise_fake(self, session_id: str, job_id: str,
                              cancel_event: threading.Event) -> dict[str, Any]:
@@ -1539,7 +1986,7 @@ class JobRunner:
         self._emit_progress(session_id, job_id, _STAGE1_CHAIN[0], "started")
         if cancel_event.is_set():
             raise JobCancelled(_STAGE1_CHAIN[0])
-        state = stage1_state(session.brief, dict(session.stage_state))
+        state = stage1_state(self._ref_brief(session), dict(session.stage_state))
         self._emit_progress(session_id, job_id, _STAGE1_CHAIN[-1], "done")
         self._write_stage1_artifacts(session_id, job_id, state)
         return {"state": state, "brief": session.brief}

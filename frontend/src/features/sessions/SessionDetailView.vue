@@ -12,11 +12,12 @@ import { useUiStore, type WorkbenchTab } from '@/stores/ui'
 
 import AssetsTab from './AssetsTab.vue'
 import ArtifactsTab from './ArtifactsTab.vue'
+import AssetImageCard from './AssetImageCard.vue'
 import FrameSubmissionCard from './FrameSubmissionCard.vue'
 import { newIdempotencyKey } from './keys'
 import ReviewTab from './ReviewTab.vue'
 import SegmentsTab from './SegmentsTab.vue'
-import { statusLabel, statusTone } from './status'
+import { statusLabel, statusTone, stepLabel } from './status'
 import { SESSION_STREAM_FETCH, useSessionStream } from './useSessionStream'
 
 // 工作台单页（D4 spec §4）：四分区是页内 tab、不进 URL，刷新回概览。
@@ -67,6 +68,7 @@ const streamFetch = inject(SESSION_STREAM_FETCH, undefined)
 const {
   connection,
   currentNode,
+  currentStage,
   start: startStream,
   stop: stopStream,
 } = useSessionStream({
@@ -99,6 +101,7 @@ watch(sessionId, () => {
   streamArmed = false
   stopStream()
   currentNode.value = null
+  currentStage.value = null
   ui.selectWorkbenchTab('overview')
 })
 
@@ -140,6 +143,13 @@ const pendingFrameItem = computed(
       (item) => item.kind === 'frame_submission' && item.status === 'pending',
     ) ?? null,
 )
+// 素材待办卡（D7 §4.4）：ref 会话在阶段 1 之后逐件等「交这张生成结果」，同样一次只一张。
+const pendingAssetItem = computed(
+  () =>
+    data.value?.action_items?.find(
+      (item) => item.kind === 'asset_image' && item.status === 'pending',
+    ) ?? null,
+)
 const isCreated = computed(() => status.value === 'created')
 const canRetry = computed(
   () => status.value === 'failed' || status.value === 'cancelled' || status.value === 'interrupted',
@@ -147,6 +157,11 @@ const canRetry = computed(
 // 当前节点只是「最后一条进度信号」：快照里没有节点字段，断线后暂时没有它也不影响
 // 业务状态（业务状态永远来自快照）。
 const runningNode = computed(() => (status.value === 'running' ? currentNode.value : null))
+// 步骤标签来自同一条进度事件（stage）：素材循环期间这里显示「素材循环」，
+// 而状态徽章仍是七态之一（D7 §5.1：SSE 与徽章都不新增分支）。
+const runningStep = computed(() =>
+  status.value === 'running' ? stepLabel(currentStage.value) : null,
+)
 const cancelRequested = computed(() => data.value?.current_job?.cancel_requested === true)
 const canCancel = computed(
   () => status.value === 'running' && Boolean(data.value?.current_job?.job_id),
@@ -256,7 +271,10 @@ const errorMessage = computed(() =>
 
         <div v-if="status === 'running'" class="run-controls">
           <p role="status" class="run-node">
-            正在执行：<strong>{{ runningNode ?? '等待进度…' }}</strong>
+            正在执行：<strong
+              ><template v-if="runningStep">{{ runningStep }} · </template
+              >{{ runningNode ?? '等待进度…' }}</strong
+            >
           </p>
           <p v-if="cancelRequested" class="muted">已请求取消，当前步骤结束后停止。</p>
           <Button v-else-if="canCancel" variant="secondary" :disabled="busy" @click="cancelRun">
@@ -304,6 +322,14 @@ const errorMessage = computed(() =>
         aria-labelledby="workbench-tab-review"
         class="panel"
       >
+        <AssetImageCard
+          v-if="pendingAssetItem"
+          :session-id="data.session_id"
+          :item="pendingAssetItem"
+          :refs="data.brief.refs ?? []"
+          :artifacts="data.artifacts ?? []"
+          @submitted="invalidateSnapshot"
+        />
         <FrameSubmissionCard
           v-if="pendingFrameItem"
           :session-id="data.session_id"

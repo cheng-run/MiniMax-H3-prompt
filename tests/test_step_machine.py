@@ -226,7 +226,9 @@ def test_segmenting_is_a_step_label_not_a_session_status():
     """``segmenting`` 只用于进度与任务记录；会话状态仍是既有七态（D6-AC1）。"""
     assert m.STEP_SEGMENTING == "segmenting"
     assert m.STEP_SEGMENTING in m.STEPS
-    assert set(m.STEPS) == {m.STEP_STAGE1, m.STEP_STAGE2, m.STEP_SEGMENTING}
+    # 断言「包含」而不是「全等」：D7 又加了 ``asset_loop``，逐项重抄一份集合会在
+    # 下次加步骤时把这行变成第二份会漂的清单（本仓「守卫形态要从常量派生」）。
+    assert {m.STEP_STAGE1, m.STEP_STAGE2, m.STEP_SEGMENTING} <= set(m.STEPS)
     assert m.STEP_SEGMENTING not in m.STATUSES
     assert len(m.STATUSES) == 7
 

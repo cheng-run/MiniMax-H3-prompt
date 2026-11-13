@@ -125,10 +125,21 @@ SEGMENT_PROMPT_KIND = "segment_prompt"
 SEGMENTS_DIRNAME = "segments"
 _SEGMENT_PROMPT_FILENAME = r"shot-\d{2}\.md"
 _SEGMENT_PROMPT_SPEC = ArtifactSpec(SEGMENT_PROMPT_KIND)
+# 资产图词（D7 §7）：素材循环里每件参考素材一份 ``assets/picture-NN.md``，与台账
+# 图片编号同号。改词重出**覆盖**同一份文件——历史靠台账轮次与待办决议表达。
+ASSET_PROMPT_KIND = "asset_prompt"
+_ASSET_PROMPT_FILENAME = r"picture-\d{2}\.md"
+_ASSET_PROMPT_SPEC = ArtifactSpec(ASSET_PROMPT_KIND)
 # 目录名与文件名模式分开存：解析（名字 → 规格）与扫描（去哪个目录找）都从这一份
 # 取；写死在两处时，改一处就会让「清单里有、读取说没有」。
+#
+# ``assets/`` 同时是上传素材的落点与资产图词的落点：素材正本是
+# ``<16 位内容哈希>.<扩展名>``（``_resolved_asset_file`` 只认这一种），与
+# ``picture-NN.md`` 不会互相认领——两边各自按自己的命名规则判定。
+ASSETS_DIRNAME = "assets"
 _PATTERN_ARTIFACT_SPECS: tuple[tuple[str, str, ArtifactSpec], ...] = (
     (SEGMENTS_DIRNAME, _SEGMENT_PROMPT_FILENAME, _SEGMENT_PROMPT_SPEC),
+    (ASSETS_DIRNAME, _ASSET_PROMPT_FILENAME, _ASSET_PROMPT_SPEC),
 )
 
 
@@ -173,7 +184,7 @@ ARTIFACT_MAX_BYTES = 1024 * 1024
 # ---------------------------------------------------------------------------
 # 上传素材（D3-2，#222 §5）
 # ---------------------------------------------------------------------------
-ASSETS_DIRNAME = "assets"
+# ``ASSETS_DIRNAME`` 在产物登记表那一节声明（它是资产图词的目录，也是素材落点）。
 # 临时文件的固定前缀：崩溃残留靠它认出来（启动清理只删这一种）。
 ASSET_TMP_PREFIX = ".tmp-"
 # 上传的读块大小。它同时是「边写边判」的粒度：一次最多多读一块就能发现超限，
@@ -445,6 +456,18 @@ class SegmentVideoInvalid(WorkbenchError):
     code = "segment_video_invalid"
 
 
+class AssetImageInvalid(WorkbenchError):
+    """素材图回交无效（D7 spec §6.3）：件号不符、素材非本会话、非图片、载荷错配。
+
+    错误码 ``asset_image_invalid`` 是票面留给实现定的一格（spec §13 没单列）。它与
+    ``frame_invalid`` 分开，是因为前端的出路不同：帧槽填错要重选槽位，素材图不合格
+    要重新生成一张再交。
+    """
+
+    status_code = 422
+    code = "asset_image_invalid"
+
+
 class StorageUnavailable(WorkbenchError):
     """素材落盘失败（磁盘满、只读目录）。请求本身没错，是这台机器的存储不行。"""
 
@@ -488,6 +511,8 @@ _DECISIONS = frozenset({
     step_machine.DECISION_SUBMIT_FRAMES,
     # 段视频回交决议（D6 §8）：同上，只多一个取值。
     step_machine.DECISION_SUBMIT_VIDEO,
+    # 素材图交回决议（D7 §6.3）：同上。
+    step_machine.DECISION_SUBMIT_IMAGE,
 })
 
 
@@ -1000,6 +1025,16 @@ class SessionDetail(SessionSummary):
         """mutator 内读原始 state 的唯一入口；返回副本，改它不会写回。"""
         return dict(self._stage_state)
 
+    # 素材台账的内部副本（D7 §6.4 同款理由）：素材循环的「在等第几件」只从台账推，
+    # 而 mutator 拿到的是详情、不是会话文件。做成内部副本后，收尾写台账不必在锁内
+    # 再读一次文件。同样用 PrivateAttr：台账不进 JSON Schema、不跨 API 边界
+    # （对外只有 ``brief.refs`` 那份摘要）。
+    _asset_ledger: list[dict[str, Any]] = PrivateAttr(default_factory=list)
+
+    def asset_ledger_snapshot(self) -> list[dict[str, Any]]:
+        """mutator 内读台账的唯一入口；返回逐条副本，改它不会写回。"""
+        return [dict(entry) for entry in self._asset_ledger]
+
 
 class SessionPage(BaseModel):
     items: list[SessionSummary]
@@ -1107,9 +1142,16 @@ def _check_ref_capacity(entries: Sequence[dict[str, Any]], *, where: str) -> Non
         raise RefCapacityExceeded(str(exc)) from exc
 
 
-# 台账条目的初始状态（D7 §6.4）。素材循环（#256）会把轮次与「已定稿」写进同一条目；
-# 本票只负责「已登记、还没出词」这一态。
+# 台账条目的初始状态（D7 §6.4）。素材循环（#256）会把轮次与「已定稿」写进同一条目：
+# ``registered`` = 已登记、还没出词或上一轮被拒；``passed`` = 校对通过、该件定稿。
 ASSET_LEDGER_STATUS_REGISTERED = "registered"
+ASSET_LEDGER_STATUS_PASSED = "passed"
+
+# 素材循环把「用户刚交的那张图」暂存在台账条目上，而不是 stage_state：会话文件是唯一
+# 真源（ADR 0032），而 ``stage_state`` 只保存白名单里的键——写进去会在下次保存时被
+# 静默丢掉。它也是崩溃恢复的唯一依据：本键在＝这张还没校对，重启后重跑校对而不是
+# 重新出词（用户不必重交）。校对落定（通过或被拒）即清掉它。
+ASSET_PROOFREAD_KEY = "proofread_asset_id"
 
 
 def _ledger_entry(name: str, asset_kind: str, number: int, asset_id: str,
@@ -1605,6 +1647,7 @@ class WorkbenchSessionStore:
             segments=[SegmentOut.model_validate(item) for item in session.segments],
         )
         detail._stage_state = dict(session.stage_state)
+        detail._asset_ledger = [dict(entry) for entry in session.asset_ledger]
         return detail
 
     def _replay_if_needed(self, session_id: str) -> None:
@@ -1911,17 +1954,30 @@ class WorkbenchSessionStore:
         「什么算素材」仍只判定一次（``_resolved_asset_file`` 那条路），这里只叠加
         会话归属与类型，不另写一份命名规则。
         """
+        return self._resolve_owned_image(session_id, asset_id, FrameInvalid, "帧槽")
+
+    def resolve_image_asset(self, session_id: str, asset_id: str) -> Path:
+        """把素材循环交回的 ``asset_id`` 解析成本会话的图片文件（D7 spec §6.3）。
+
+        与 ``resolve_frame_asset`` 同一个判据、不同的错误码：素材图不合格的出路是
+        「重新生成一张再交」，与帧槽填错不是一回事，前端要分得开。
+        """
+        return self._resolve_owned_image(
+            session_id, asset_id, AssetImageInvalid, "素材图")
+
+    def _resolve_owned_image(self, session_id: str, asset_id: str,
+                             error: type[WorkbenchError], what: str) -> Path:
+        """归属 + 类型两道的单一声明：两个图片写入口共用，不各写一遍。"""
         prefix, _, _hash16 = asset_id.rpartition("/")
         if prefix != session_id:
-            raise FrameInvalid(f"帧槽引用的素材不属于本会话：{asset_id}")
+            raise error(f"{what}引用的素材不属于本会话：{asset_id}")
         try:
             resource = self.resolve_asset_media(asset_id)
         except WorkbenchError as exc:
             # 不存在与不可读同码：能区分就等于给了一个探测别人会话素材的 oracle。
-            raise FrameInvalid(f"帧槽引用的素材不存在：{asset_id}") from exc
+            raise error(f"{what}引用的素材不存在：{asset_id}") from exc
         if not resource.media_type.startswith("image/"):
-            raise FrameInvalid(
-                f"帧槽只接受图片素材（收到 {resource.media_type}）：{asset_id}")
+            raise error(f"{what}只接受图片素材（收到 {resource.media_type}）：{asset_id}")
         return resource.path
 
     def resolve_video_asset(self, session_id: str, asset_id: str) -> MediaResource:
@@ -2332,7 +2388,9 @@ __all__ = [
     "ARTIFACT_SUMMARY_JSON", "ARTIFACT_SUMMARY_MARKDOWN",
     "ARTIFACT_VIDEO_PROMPT",
     "Asset", "AssetTooLarge",
-    "AssetDuplicate", "AssetLocked", "AssetNameInvalid", "AssetRequired",
+    "AssetDuplicate", "AssetImageInvalid", "AssetLocked", "AssetNameInvalid",
+    "AssetRequired",
+    "ASSET_PROMPT_KIND", "ASSET_LEDGER_STATUS_PASSED", "ASSET_PROOFREAD_KEY",
     "RefCapacityExceeded", "RouteMismatch",
     "ArtifactInfo", "ArtifactNotFound", "ArtifactTooLarge", "BriefOut",
     "EVENT_TYPES", "EVENTS_FILENAME", "Event", "EventDraft", "EventLog",

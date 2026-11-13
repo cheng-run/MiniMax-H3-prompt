@@ -24,7 +24,7 @@
 | `bootstrap.py` | 首次启动把内置配置模板复制进 `<数据根>/config/`（#238）；只由启动入口在 import `api.app` **之前**调用，已存在不覆盖，开发形态是空操作 |
 | `paths.py` | 唯一路径解析口（#237）：只读资源（`_MEIPASS` / 仓库根）与可写数据（`data/` / 仓库根）分行；密钥文件按形态分流（冻结态 `%APPDATA%\MiniMax-H3-prompt\.env`，开发态仓库 `.env`，#238） |
 | `api/problems.py` | RFC 9457 problem+json；所有错误都走这里（中间件用 `build_problem_response`） |
-| `step_machine.py` | 状态/触发/闸门的单一声明；续跑起点；`resolve` 的 approve/revise 去向与 approve 按变体分叉 |
+| `step_machine.py` | 状态/触发/闸门的单一声明；续跑起点；`resolve` 的 approve/revise 去向与 approve 按变体分叉（ref 走 `asset_loop`） |
 | `session_store.py` | 快照文件读写、`atomic_write_text`、向导续接状态与 `RESUMABLE_STATUSES` |
 | `api/fake_pipeline.py` | 确定性桩管线：固定阶段 1/2、假读图与假段提示词/段判据，**只认环境变量 `MINIMAX_FAKE_PIPELINE`**（默认关、无 HTTP 入口），真实/桩互斥 |
 | `segment_validation.py` | 段交接的两道判据：同步提交自检（段号/技术档，`segment_submission_problems`）与语义判据（尾帧描述 vs `end_hook`，`judge_end_hook`）；读图与模型调用在 `api/jobs.py` |
@@ -63,8 +63,9 @@
   已通过段与视频素材构造。成功产出 `final.mp4` 并转 `completed`（**没有交付确认闸门**）；
   缺段则 `failed`，`assemble_film` 的 reason（已点名第几段）原样进 `job.failed` 的
   `detail`，补齐后 `advance` 续拼，已通过段不重收。
-- 产物 content **按登记表的形态分支**（#225）：文本产物（登记表＝7 件固定名 + 一条
-  模式 `segments/shot-NN.md` → kind `segment_prompt`，D6 §7）共用纯文本 + 1 MiB 上限
+- 产物 content **按登记表的形态分支**（#225）：文本产物（登记表＝7 件固定名 + 两条
+  模式 `segments/shot-NN.md` → kind `segment_prompt`、`assets/picture-NN.md` →
+  kind `asset_prompt`，D6 §7 / D7 §7）共用纯文本 + 1 MiB 上限
   （超出 413）；成片 `final.mp4` 给字节 + 单段
   Range；两者都答 `HEAD`（同头、无体）。「算不算产物」「按什么形态读」「清单从哪来」
   三个判断只有一个入口 `workbench_store.artifact_spec`，端点与清单都不抄第二份白名单。
@@ -91,6 +92,36 @@
   `DELETE /sessions/{id}/assets/{asset_id}`，只撤销台账登记（台账外 → 404
   `asset_not_found`，base 调用 → 409 `route_mismatch`）；详情里的 `brief.refs` 就是
   台账摘要。
+
+## 素材循环（D7-3，ADR 见 D7 的「ref 多参进工作台」）
+
+`ref` 在阶段 1 与阶段 2 之间多一档 `asset_loop`（阶段标签，不是会话状态）。
+
+| 步骤 | 类型 | 阶段标签 | 产物/状态 |
+|---|---|---|---|
+| 阶段 1 | job | `stage1` | `script.md` / `shot-table.md`；审查待办 `stage1_review` |
+| 第 N 件出词 | job `asset_loop` | `asset_loop` | `assets/picture-NN.md`（kind `asset_prompt`）；挂 `asset_image` 待办 |
+| 第 N 件交图 | 待办 `asset_image` | — | 载荷 `asset_id`；会话 `awaiting_human` |
+| 第 N 件校对 | job `asset_loop` | `asset_loop` | 读图（`describe_image`）对照这一件的词；通过转 `passed` |
+| 阶段 2 | job | `stage2` | 全部图片定稿后自动接上（注入卡是 #257） |
+
+- **ref 通过审查不直接进阶段 2**：`resolve` 的 approve 分支按 `brief.is_ref` 分叉，
+  `_resume_step` 在「阶段 1 已 approve」与「阶段 2」之间插入 `asset_loop`；base 一字不变。
+- **严格串行、一次一件**：当前件号＝台账里**最大连续通过编号 + 1**（台账是唯一真源，
+  重启后照样重建）；每件同时最多一个未决 `asset_image`。
+- **没有放行键**：`asset_image` 的唯一决议是 `asset_id`；校对不通过时用
+  `rewrite_asset_prompt` 按差异清单改词、**覆盖同一份** `assets/picture-NN.md`，
+  同一件号重开待办（`reason` 带差异清单）。台账只记轮次与状态，历史不靠多份文件。
+- **交图标识住台账条目**（`proofread_asset_id`）：崩在「已交图、未校对」之间时，
+  恢复跑校对而不是要求重交；判过即清。
+- **资产图词按语义名取**（`generation.asset_prompt_for` → 阶段 1 的
+  `asset_prompts_for`）：名字对不上是硬失败（`AssetPromptMissing`），不拿相邻件的词顶替。
+- **台账 → 管线的 brief.refs 只有一处**（`JobRunner._ref_brief`）：工作台的参考素材不在
+  brief 文件里，阶段 1/2 与修订重跑交给管线的 `brief.refs` 都由台账现造（只收 Picture，
+  `path` 留空）；漏接一处，分镜表 Subject 标签与资产图提示词命名就与上传的语义名脱钩。
+  派生出来的 refs **不写回会话文件**（台账是唯一真源）；base 会话原样返回。
+- 桩管线**尚不支持** ref 素材循环（#259 才扩）：`MINIMAX_FAKE_PIPELINE=1` 下这两个 job
+  直接失败，不悄悄拿空词落盘。
 
 ## 长片分段陪跑（D6，ADR 0036）
 

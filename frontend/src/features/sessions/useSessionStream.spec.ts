@@ -178,7 +178,7 @@ describe('useSessionStream（失效信号模式）', () => {
     api.stop()
   })
 
-  it('job.progress 的 node 作为当前节点展示；任务收尾即清空', async () => {
+  it('job.progress 的 node/stage 作为当前步骤展示；任务收尾即清空', async () => {
     const stream = makeStream()
     const { impl, queue } = makeFetch()
     queue.push(stream.response)
@@ -193,14 +193,20 @@ describe('useSessionStream（失效信号模式）', () => {
     api.start()
     await settle(5)
     expect(api.currentNode.value).toBeNull()
+    expect(api.currentStage.value).toBeNull()
 
-    stream.push(frame(1, 'job.progress', { node: 'storyboard', status: 'started' }))
+    // 素材循环的进度事件带 stage=asset_loop（D7 §5.2）：界面上显示的是「素材循环」。
+    stream.push(
+      frame(1, 'job.progress', { node: 'asset_write', stage: 'asset_loop', status: 'started' }),
+    )
     await settle(5)
-    expect(api.currentNode.value).toBe('storyboard')
+    expect(api.currentNode.value).toBe('asset_write')
+    expect(api.currentStage.value).toBe('asset_loop')
 
     stream.push(frame(2, 'job.succeeded', { next: 'awaiting_human' }))
     await settle(5)
     expect(api.currentNode.value).toBeNull()
+    expect(api.currentStage.value).toBeNull()
     api.stop()
   })
 

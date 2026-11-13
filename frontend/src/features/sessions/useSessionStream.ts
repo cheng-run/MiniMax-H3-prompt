@@ -62,6 +62,8 @@ export function useSessionStream(options: SessionStreamOptions) {
 
   const connection = ref<StreamConnection>('idle')
   const currentNode = ref<string | null>(null)
+  // 当前步骤标签（`job.progress` 的 stage）：纯展示，与节点名一样不是业务状态。
+  const currentStage = ref<string | null>(null)
   const lastEventId = ref<number | null>(null)
 
   let running = false
@@ -110,12 +112,18 @@ export function useSessionStream(options: SessionStreamOptions) {
   function handleFrame(frame: SseFrame): void {
     applyFrameId(frame.id)
     if (frame.event === 'job.progress') {
-      const node = parsePayload(frame.data)?.node
+      const payload = parsePayload(frame.data)
+      const node = payload?.node
       if (typeof node === 'string' && node.length > 0) {
         currentNode.value = node
       }
+      const stage = payload?.stage
+      if (typeof stage === 'string' && stage.length > 0) {
+        currentStage.value = stage
+      }
     } else if (FINISH_EVENTS.has(frame.event)) {
       currentNode.value = null
+      currentStage.value = null
     }
     scheduleInvalidate()
   }
@@ -274,5 +282,5 @@ export function useSessionStream(options: SessionStreamOptions) {
     onBeforeUnmount(stop)
   }
 
-  return { connection, currentNode, lastEventId, start, stop }
+  return { connection, currentNode, currentStage, lastEventId, start, stop }
 }

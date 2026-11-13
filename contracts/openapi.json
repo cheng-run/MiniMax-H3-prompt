@@ -80,8 +80,19 @@
         "type": "object"
       },
       "ActionItemResolve": {
-        "description": "决议载荷（spec §7 / D4 §9 / D6 §8）。\n\n三种人工待办各收一种载荷：\n- ``stage1_review`` 收 ``decision``（approve/revise，revise 带 ``revisions``）；\n- ``frame_submission`` 收 ``frames``；\n- ``segment_video`` 收 ``video_asset_id``（本段视频素材）。\n\nkind 与载荷的错配由服务端判成 422（``frame_invalid`` / ``segment_video_invalid``，\n不是 pydantic 的通用 422）。",
+        "description": "决议载荷（spec §7 / D4 §9 / D6 §8 / D7 §6.3）。\n\n四种人工待办各收一种载荷：\n- ``stage1_review`` 收 ``decision``（approve/revise，revise 带 ``revisions``）；\n- ``frame_submission`` 收 ``frames``；\n- ``segment_video`` 收 ``video_asset_id``（本段视频素材）；\n- ``asset_image`` 收 ``asset_id``（这一件资产图的生成结果，普通素材上传得到）。\n\nkind 与载荷的错配由服务端判成 422（``frame_invalid`` / ``segment_video_invalid`` /\n``asset_image_invalid``，不是 pydantic 的通用 422）。",
         "properties": {
+          "asset_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asset Id"
+          },
           "decision": {
             "anyOf": [
               {
@@ -2402,7 +2413,7 @@
     },
     "/api/v1/sessions/{session_id}/action-items/{item_id}/resolve": {
       "post": {
-        "description": "提交人工决定：``approve`` 起阶段 2，``revise`` 从声明层次重跑阶段 1。\n\n第二个人工待办（``frame_submission``）复用同一个端点、靠 body 分型（D4 §9）：\n带 ``frames`` 即帧提交；kind 与载荷错配一律 422 ``frame_invalid``。\n\n状态判定与「决议 + 起任务」的原子性都在 ``JobRunner.resolve`` 的会话临界区里，\n这里只把请求体归一成内部词汇，不先查一遍状态（两处判据会在并发下各说各话）。",
+        "description": "提交人工决定：``approve`` 走后续步骤（base 进阶段 2，ref 先进素材循环），\n``revise`` 从声明层次重跑阶段 1。\n\n第二个人工待办（``frame_submission``）复用同一个端点、靠 body 分型（D4 §9）：\n带 ``frames`` 即帧提交；kind 与载荷错配一律 422 ``frame_invalid``。段视频\n（``video_asset_id``，D6 §8）与素材图（``asset_id``，D7 §6.3）同理。\n\n状态判定与「决议 + 起任务」的原子性都在 ``JobRunner.resolve`` 的会话临界区里，\n这里只把请求体归一成内部词汇，不先查一遍状态（两处判据会在并发下各说各话）。",
         "operationId": "resolve_action_item_api_v1_sessions__session_id__action_items__item_id__resolve_post",
         "parameters": [
           {

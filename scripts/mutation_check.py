@@ -1018,6 +1018,36 @@ MUTATIONS: tuple[Mutation, ...] = (
          "test_registration_after_start_is_locked_but_plain_upload_is_not",),
         "起跑锁失效＝素材循环开始后还能加删台账，已写好的资产图词与图脱钩（#255）",
     ),
+    Mutation(
+        "asset_loop_settles_a_rejected_item",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "            row[\"status\"] = (ASSET_LEDGER_STATUS_PASSED if passed\n"
+        "                             else ASSET_LEDGER_STATUS_REGISTERED)",
+        "            row[\"status\"] = ASSET_LEDGER_STATUS_PASSED",
+        ("tests/test_api_asset_loop.py::"
+         "test_proofread_failure_reopens_the_same_item_with_the_diff",),
+        "不通过也落定＝校对结论只是建议，下一件会照样推进，差异清单永远无人处理（#256）",
+    ),
+    Mutation(
+        "asset_loop_reopens_the_wrong_number",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "                status=\"pending\", created_at=_now(), asset_index=number,\n"
+        "                reason=reason)",
+        "                status=\"pending\", created_at=_now(), asset_index=number + 1,\n"
+        "                reason=reason)",
+        ("tests/test_api_asset_loop.py::"
+         "test_proofread_failure_reopens_the_same_item_with_the_diff",),
+        "重开的件号错位＝用户被要求交下一件的图，而第 N 件永远定不了稿（#256）",
+    ),
+    Mutation(
+        "ref_brief_not_wired",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "        if not session.brief.is_ref:\n            return session.brief",
+        "        if True:\n            return session.brief",
+        ("tests/test_api_asset_loop.py::test_ref_stage1_sees_the_ledger_as_brief_refs",),
+        "台账不喂给管线＝brief.refs 恒空，阶段 1 按不存在的参考素材写词、"
+        "出词那一步按语义名对不上号（#256，spec §5.3）",
+    ),
 )
 
 

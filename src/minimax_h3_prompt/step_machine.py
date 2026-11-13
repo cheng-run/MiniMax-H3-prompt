@@ -58,16 +58,22 @@ ACTION_FRAME_SUBMISSION = "frame_submission"
 # 第三个人工待办（D6 spec §8）：长片每段一次「交本段视频」。每段恰好一个，载荷带段号；
 # 等待期间会话是 ``awaiting_human``。同样复用既有 ``action_item.created``。
 ACTION_SEGMENT_VIDEO = "segment_video"
+# 第四个人工待办（D7 spec §6.3）：素材循环里每件参考素材一次「交这张生成的资产图」。
+# 载荷只有 ``asset_id``，决定只有 ``submit_image``——**没有放行键**（降级只能靠改词）。
+ACTION_ASSET_IMAGE = "asset_image"
 
 STEP_STAGE1 = "stage1"
 STEP_STAGE2 = "stage2"
 # 长片在阶段 2 之后追加的段循环（D6 spec §5.2）：只用于 ``job.progress`` 与任务记录，
 # **不是**会话状态——会话仍是既有七态里的 ``running``/``awaiting_human``。
 STEP_SEGMENTING = "segmenting"
+# ref 在阶段 1 与阶段 2 之间的素材循环（D7 spec §5.2）：同样是阶段标签而不是会话状态。
+# 注入卡不单独占一档（它是进阶段 2 前的最后一件产物）。
+STEP_ASSET_LOOP = "asset_loop"
 
 # 进度事件允许的 stage 取值从这份声明派生（``workbench_store._PROGRESS_STAGES``），
 # 加阶段时不再改第二份表。
-STEPS = (STEP_STAGE1, STEP_STAGE2, STEP_SEGMENTING)
+STEPS = (STEP_STAGE1, STEP_ASSET_LOOP, STEP_STAGE2, STEP_SEGMENTING)
 
 # 长片是产品阈值（D6 spec §3：>10 秒），不是领域概念；判定只在这一处，执行器与
 # 界面不各写一个 ``duration > 10``。
@@ -130,6 +136,9 @@ DECISION_SUBMIT_FRAMES = "submit_frames"
 # 段视频回交同理：请求体里靠 ``video_asset_id`` 分型，决议事件用这个词说明「这段视频
 # 是被交上来的」。它只进内部事件与待办回显，不是接口上的 decision 取值。
 DECISION_SUBMIT_VIDEO = "submit_video"
+# 资产图交回同理：请求体里靠 ``asset_id`` 分型。它同样是待办的**唯一**决议——
+# 素材校对没有「就这样吧」的放行（spec §6.3）。
+DECISION_SUBMIT_IMAGE = "submit_image"
 
 
 class InvalidTransition(ValueError):
@@ -284,6 +293,7 @@ def resolve(status: str, decision: str, *, layer: str = "") -> Decision:
 
 
 __all__ = [
+    "ACTION_ASSET_IMAGE",
     "ACTION_FRAME_SUBMISSION",
     "ACTION_SEGMENT_VIDEO",
     "ACTION_STAGE1_REVIEW",
@@ -292,6 +302,7 @@ __all__ = [
     "DECISION_APPROVE",
     "DECISION_REVISE",
     "DECISION_SUBMIT_FRAMES",
+    "DECISION_SUBMIT_IMAGE",
     "DECISION_SUBMIT_VIDEO",
     "Decision",
     "FRAME_CHAIN_VARIANTS",
@@ -314,6 +325,7 @@ __all__ = [
     "STATUS_INTERRUPTED",
     "STATUS_RUNNING",
     "STEP_STAGE1",
+    "STEP_ASSET_LOOP",
     "STEP_STAGE2",
     "STEP_SEGMENTING",
     "STEPS",

@@ -30,6 +30,7 @@ from ...workbench_store import (
     ARTIFACT_MEDIA_TYPES,
     ActionItemOut,
     ArtifactInfo,
+    AssetImageInvalid,
     EventLog,
     FrameInvalid,
     JobSummary,
@@ -166,15 +167,16 @@ class FrameSelection(BaseModel):
 
 
 class ActionItemResolve(BaseModel):
-    """决议载荷（spec §7 / D4 §9 / D6 §8）。
+    """决议载荷（spec §7 / D4 §9 / D6 §8 / D7 §6.3）。
 
-    三种人工待办各收一种载荷：
+    四种人工待办各收一种载荷：
     - ``stage1_review`` 收 ``decision``（approve/revise，revise 带 ``revisions``）；
     - ``frame_submission`` 收 ``frames``；
-    - ``segment_video`` 收 ``video_asset_id``（本段视频素材）。
+    - ``segment_video`` 收 ``video_asset_id``（本段视频素材）；
+    - ``asset_image`` 收 ``asset_id``（这一件资产图的生成结果，普通素材上传得到）。
 
-    kind 与载荷的错配由服务端判成 422（``frame_invalid`` / ``segment_video_invalid``，
-    不是 pydantic 的通用 422）。
+    kind 与载荷的错配由服务端判成 422（``frame_invalid`` / ``segment_video_invalid`` /
+    ``asset_image_invalid``，不是 pydantic 的通用 422）。
     """
 
     decision: Literal["approve", "revise"] | None = None
@@ -182,6 +184,9 @@ class ActionItemResolve(BaseModel):
     frames: FrameSelection | None = None
     # 段视频待办（D6 §8）：本会话已上传的 mp4 素材 id。`Decision` 载荷互斥由路由先拦。
     video_asset_id: str | None = None
+    # 素材图待办（D7 §6.3）：本会话已上传的图片素材 id（上传时不带语义名——它是
+    # 用户生成的产物图，不是参考素材，不进台账）。
+    asset_id: str | None = None
 
 
 # 层次归一表（spec §7 的中文别名 + 向导屏幕标签 → 内部四档）。内部取值只住
@@ -620,10 +625,12 @@ async def resolve_action_item(
     response: Response,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> JobSummary | None:
-    """提交人工决定：``approve`` 起阶段 2，``revise`` 从声明层次重跑阶段 1。
+    """提交人工决定：``approve`` 走后续步骤（base 进阶段 2，ref 先进素材循环），
+    ``revise`` 从声明层次重跑阶段 1。
 
     第二个人工待办（``frame_submission``）复用同一个端点、靠 body 分型（D4 §9）：
-    带 ``frames`` 即帧提交；kind 与载荷错配一律 422 ``frame_invalid``。
+    带 ``frames`` 即帧提交；kind 与载荷错配一律 422 ``frame_invalid``。段视频
+    （``video_asset_id``，D6 §8）与素材图（``asset_id``，D7 §6.3）同理。
 
     状态判定与「决议 + 起任务」的原子性都在 ``JobRunner.resolve`` 的会话临界区里，
     这里只把请求体归一成内部词汇，不先查一遍状态（两处判据会在并发下各说各话）。
@@ -635,33 +642,43 @@ async def resolve_action_item(
     elif payload.decision == "revise":
         if not payload.revisions:
             raise HTTPException(422, "revise 至少要给一条修订。")
-    # 归一化并带上：revise 要走修订回路；「没带 decision 却带 revisions + video_asset_id」
-    # 也要带过去，由锁内 kind 判据给 segment_video_invalid（这里不抢先判，否则错误码
-    # 变成帧提交专用的 frame_invalid）。
+    # 归一化并带上：revise 要走修订回路；「没带 decision 却带 revisions + 素材载荷」
+    # 也要带过去，由锁内 kind 判据给对应错误码（这里不抢先判，否则错误码会被
+    # 帧提交专用的 frame_invalid 抢先）。
     if (payload.decision == "revise"
-            or (payload.decision is None and payload.video_asset_id is not None)):
+            or (payload.decision is None
+                and (payload.video_asset_id is not None
+                     or payload.asset_id is not None))):
         for revision in payload.revisions:
             text = revision.text.strip()
             if not text:
                 raise HTTPException(422, "修订内容不能为空。")
             revisions.append(
                 {"layer": _normalize_layer(revision.layer), "text": text})
-    if payload.decision is None and payload.revisions and payload.video_asset_id is None:
+    if (payload.decision is None and payload.revisions
+            and payload.video_asset_id is None and payload.asset_id is None):
         # 帧提交没有修订语义；没有 decision 时若不点名拦下，这条会被静默忽略。
         raise FrameInvalid("帧提交不接受 revisions。")
-    # 三套载荷互斥（D4 §9 / D6 §8）：decision 属于审查待办，frames 属于帧提交待办，
-    # video_asset_id 属于段视频待办。这一层先拦「同时给了多套」——哪个待办都不接受。
+    # 四套载荷互斥（D4 §9 / D6 §8 / D7 §6.3）：decision 属于审查待办，frames 属于帧
+    # 提交待办，video_asset_id 属于段视频待办，asset_id 属于素材图待办。这一层先拦
+    # 「同时给了多套」——哪个待办都不接受。
     if payload.decision is not None and payload.frames is not None:
         raise FrameInvalid(
             "decision 与 frames 不能同时提交：审查待办不帧提交，帧待办不 approve/revise。")
     if payload.video_asset_id is not None and (
-            payload.decision is not None or payload.frames is not None):
+            payload.decision is not None or payload.frames is not None
+            or payload.asset_id is not None):
         raise SegmentVideoInvalid(
-            "video_asset_id 不能与 decision/frames 同时提交：段视频待办只收视频素材。")
+            "video_asset_id 不能与 decision/frames/asset_id 同时提交：段视频待办只收视频素材。")
+    if payload.asset_id is not None and (
+            payload.decision is not None or payload.frames is not None):
+        raise AssetImageInvalid(
+            "asset_id 不能与 decision/frames 同时提交：素材图待办只收图片素材。")
     if (payload.decision is None and payload.frames is None
-            and payload.video_asset_id is None):
+            and payload.video_asset_id is None and payload.asset_id is None):
         raise HTTPException(
-            422, "resolve 需要 decision（approve/revise）、frames 或 video_asset_id。")
+            422,
+            "resolve 需要 decision（approve/revise）、frames、video_asset_id 或 asset_id。")
     frames: dict[str, str] | None = None
     if payload.frames is not None:
         # 空串与省略同义（前端清空槽位时两种形态都可能出现）；双空字典保留下来，
@@ -674,9 +691,10 @@ async def resolve_action_item(
         }
     video_asset_id = (
         None if payload.video_asset_id is None else payload.video_asset_id.strip())
+    asset_id = None if payload.asset_id is None else payload.asset_id.strip()
     job, replayed = await _runner(request).resolve(
         session_id, item_id, decision=payload.decision, revisions=revisions,
-        frames=frames, video_asset_id=video_asset_id,
+        frames=frames, video_asset_id=video_asset_id, asset_id=asset_id,
         idempotency_key=idempotency_key or None)
     if replayed:
         response.headers["Idempotency-Replayed"] = "true"
