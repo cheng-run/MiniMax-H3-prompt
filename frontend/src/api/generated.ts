@@ -603,6 +603,48 @@ export interface components {
             text: string;
         };
         /**
+         * SegmentOut
+         * @description 长片的一个执行段（D6 spec §11）：规划完成后进会话快照，详情一次取到。
+         *
+         *     ``index`` 是**1 起**的执行段号（与 ``segments/shot-NN.md`` 同号）；段状态在
+         *     快照里，不靠 job 历史表达（``JOB_HISTORY_LIMIT`` 对 15 段偏紧）。
+         */
+        SegmentOut: {
+            /**
+             * End Hook
+             * @default
+             */
+            end_hook: string;
+            /** End S */
+            end_s: number;
+            /** Index */
+            index: number;
+            /**
+             * Prompt Artifact Id
+             * @default
+             */
+            prompt_artifact_id: string;
+            /** Shots In Segment */
+            shots_in_segment?: number[];
+            /** Start S */
+            start_s: number;
+            /**
+             * Status
+             * @default pending
+             */
+            status: string;
+            /**
+             * Summary
+             * @default
+             */
+            summary: string;
+            /**
+             * Video Asset Id
+             * @default
+             */
+            video_asset_id: string;
+        };
+        /**
          * SessionCreate
          * @description 建会话的 brief 一次性给全（spec §7）。
          *
@@ -683,6 +725,8 @@ export interface components {
             plot: string;
             /** Revision */
             revision: number;
+            /** Segments */
+            segments?: components["schemas"]["SegmentOut"][];
             /** Session Id */
             session_id: string;
             /**

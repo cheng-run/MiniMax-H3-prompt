@@ -10,8 +10,9 @@ import { newIdempotencyKey } from './keys'
 
 // 新建会话表单（spec §5）：字段与默认值在这里显式给出——服务端 SessionCreate 的缺省
 // 仍是 duration=4.0 / variant=T2VA，前端必须自己发送 5 / FL2VA，不能依赖服务端缺省。
+// 时长范围与服务端同一条产品规则（D6-AC1）：4–60 秒，越过 10 秒的会话走长片分段。
 const DURATION_MIN = 4
-const DURATION_MAX = 10
+const DURATION_MAX = 60
 const DEFAULT_DURATION = 5
 const DEFAULT_VARIANT = 'FL2VA'
 
@@ -38,7 +39,7 @@ const durationError = computed(() => {
     return '时长需为数字'
   }
   if (value < DURATION_MIN || value > DURATION_MAX) {
-    return `时长需在 ${DURATION_MIN}–${DURATION_MAX} 秒之间（V1 只支持短视频，长片归 D6）`
+    return `时长需在 ${DURATION_MIN}–${DURATION_MAX} 秒之间`
   }
   return null
 })

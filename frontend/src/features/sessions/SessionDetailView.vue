@@ -15,6 +15,7 @@ import ArtifactsTab from './ArtifactsTab.vue'
 import FrameSubmissionCard from './FrameSubmissionCard.vue'
 import { newIdempotencyKey } from './keys'
 import ReviewTab from './ReviewTab.vue'
+import SegmentsTab from './SegmentsTab.vue'
 import { statusLabel, statusTone } from './status'
 import { SESSION_STREAM_FETCH, useSessionStream } from './useSessionStream'
 
@@ -41,12 +42,22 @@ const { data, isPending, isError, error } = useQuery({
   retry: false,
 })
 
-const TABS: { id: WorkbenchTab; label: string }[] = [
+const BASE_TABS: { id: WorkbenchTab; label: string }[] = [
   { id: 'overview', label: '概览与进度' },
   { id: 'review', label: '审查与待办' },
   { id: 'assets', label: '素材' },
   { id: 'artifacts', label: '产物' },
 ]
+
+// 「分段」分区只在长片且规划已落地时出现（D6 spec §4.2）：短视频的四个分区与
+// 它们的位置都不变，长片在「审查」之后多一格。
+const tabs = computed(() => {
+  const entries = [...BASE_TABS]
+  if ((data.value?.segments?.length ?? 0) > 0) {
+    entries.splice(2, 0, { id: 'segments', label: '分段' })
+  }
+  return entries
+})
 
 // 事件流只作失效信号：事件、断线重同步都走同一个口——重拉详情与列表两处快照。
 // 详情 query 是活动查询，失效后会立刻重拉；列表不活动时只是标记过期。
@@ -101,18 +112,18 @@ function onTabKeydown(event: KeyboardEvent): void {
     return
   }
   event.preventDefault()
-  const index = TABS.findIndex((tab) => tab.id === ui.workbenchTab)
+  const index = tabs.value.findIndex((tab) => tab.id === ui.workbenchTab)
   let next = index
   if (event.key === 'ArrowRight') {
-    next = (index + 1) % TABS.length
+    next = (index + 1) % tabs.value.length
   } else if (event.key === 'ArrowLeft') {
-    next = (index - 1 + TABS.length) % TABS.length
+    next = (index - 1 + tabs.value.length) % tabs.value.length
   } else if (event.key === 'Home') {
     next = 0
   } else if (event.key === 'End') {
-    next = TABS.length - 1
+    next = tabs.value.length - 1
   }
-  ui.selectWorkbenchTab(TABS[next]!.id)
+  ui.selectWorkbenchTab(tabs.value[next]!.id)
   const buttons = (
     event.currentTarget as HTMLElement
   ).parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')
@@ -210,7 +221,7 @@ const errorMessage = computed(() =>
 
       <div class="tabs" role="tablist" aria-label="工作台分区">
         <button
-          v-for="tab in TABS"
+          v-for="tab in tabs"
           :id="`workbench-tab-${tab.id}`"
           :key="tab.id"
           type="button"
@@ -305,6 +316,17 @@ const errorMessage = computed(() =>
           :artifacts="data.artifacts ?? []"
           @resolved="invalidateSnapshot()"
         />
+      </section>
+
+      <!-- 分段（D6-1）：规划结果只读，长片之外的会话没有这一格 -->
+      <section
+        v-else-if="ui.workbenchTab === 'segments'"
+        id="workbench-panel-segments"
+        role="tabpanel"
+        aria-labelledby="workbench-tab-segments"
+        class="panel"
+      >
+        <SegmentsTab :segments="data.segments ?? []" />
       </section>
 
       <!-- 素材（完整交互归 #233） -->

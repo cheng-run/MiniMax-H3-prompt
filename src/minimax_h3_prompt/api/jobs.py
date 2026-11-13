@@ -48,6 +48,7 @@ from ..workbench_store import (
     JobNotRunning,
     JobSummary,
     RevisionOut,
+    SEGMENT_STATUS_PENDING,
     WorkbenchSessionStore,
 )
 
@@ -56,6 +57,12 @@ logger = logging.getLogger(__name__)
 ACTIVE_JOB_FILENAME = "active-job.json"
 # 会话文件里保留的 job 摘要条数（spec §5.2：最近 N 条，完整历史在事件流里）。
 JOB_HISTORY_LIMIT = 20
+
+# 长片分段规划的 job kind 与进度节点名（D6 spec §5.3）。进度事件的 stage 取
+# ``step_machine.STEP_SEGMENTING``，与阶段标签同源。
+JOB_KIND_SEGMENT = "segment"
+SEGMENT_PLAN_NODE = "segment_plan"
+SEGMENT_PLAN_FILENAME = "plan.json"
 
 # advance 没有请求体；幂等键绑定的「请求摘要」是一个常量，同 key 重发永远算同一份命令。
 _JOB_FINGERPRINT = hashlib.sha256(b"advance").hexdigest()
@@ -96,9 +103,16 @@ def _job_dict(job: JobSummary | dict[str, Any]) -> dict[str, Any]:
     return job.model_dump(mode="json") if isinstance(job, JobSummary) else dict(job)
 
 
+def _job_id_of(job: JobSummary | dict[str, Any]) -> str:
+    """摘要或已落盘的字典都认：长片收尾要把**两个**任务写进同一份 jobs 列表。"""
+    if isinstance(job, JobSummary):
+        return job.job_id
+    return str(job.get("job_id", ""))
+
+
 def _upsert_job(jobs: Any, job: dict[str, Any]) -> list[dict[str, Any]]:
     """按 job_id 覆盖或追加，并只保留最近 ``JOB_HISTORY_LIMIT`` 条。"""
-    items = [_job_dict(item) for item in jobs if item.job_id != job["job_id"]]
+    items = [_job_dict(item) for item in jobs if _job_id_of(item) != job["job_id"]]
     items.append(dict(job))
     return items[-JOB_HISTORY_LIMIT:]
 
@@ -203,12 +217,7 @@ class JobRunner:
                 self.store.mutate, session_id, _start,
                 events=[EventDraft("job.started", {"kind": job.kind},
                                    job_id=job.job_id)])
-            self._started_at[job.job_id] = job.started_at
-            await asyncio.to_thread(self._write_active_job, session_id, job.job_id, "")
-            event = threading.Event()
-            self._cancel_events[job.job_id] = event
-            self._tasks[job.job_id] = asyncio.create_task(
-                self._run(session_id, job.job_id, event))
+            await self._launch(session_id, job)
             if idempotency_key and registry is not None:
                 await asyncio.to_thread(
                     registry.record, idempotency_key,
@@ -466,16 +475,35 @@ class JobRunner:
     # 执行
     # ------------------------------------------------------------------
 
+    async def _launch(self, session_id: str, job: JobSummary) -> None:
+        """登记在跑标记并起后台任务。
+
+        显式 ``advance`` 与长片阶段 2 后自动接上的分段规划共用这一处：两条路都要
+        「先写 active-job、再登记取消事件、最后起任务」，抄第二份会漏掉其中一步。
+        """
+        self._started_at[job.job_id] = job.started_at
+        await asyncio.to_thread(self._write_active_job, session_id, job.job_id, "")
+        event = threading.Event()
+        self._cancel_events[job.job_id] = event
+        self._tasks[job.job_id] = asyncio.create_task(
+            self._run(session_id, job.job_id, event))
+
     async def _run(self, session_id: str, job_id: str,
                    cancel_event: threading.Event) -> None:
         # 续跑落点由**已完成到哪**决定，不能一律从阶段 1 重进：#221 真实跑在阶段 2
         # 被网关卡住后强杀，重启再 advance 若回到阶段 1，只会重新开一个人工闸门
         # （阶段 1 已跑完、链已耗尽），阶段 2 永远走不到。
         step = await asyncio.to_thread(self._resume_step, session_id)
+        # 三档返回的形状不同（阶段 1/2 是 state 字典，分段规划是段条目列表）：
+        # 用 Any 承接，分派处按 step 决定怎么消费。
+        result: Any
         try:
             if step == step_machine.STEP_STAGE2:
                 result = await asyncio.to_thread(
                     self._execute_stage2, session_id, job_id, cancel_event)
+            elif step == step_machine.STEP_SEGMENTING:
+                result = await asyncio.to_thread(
+                    self._execute_segment_planning, session_id, job_id, cancel_event)
             else:
                 result = await asyncio.to_thread(
                     self._execute_stage1, session_id, job_id, cancel_event)
@@ -488,8 +516,14 @@ class JobRunner:
                 self._finish_failed, session_id, job_id, error_code(exc), str(exc))
         else:
             if step == step_machine.STEP_STAGE2:
-                await asyncio.to_thread(
+                next_job = await asyncio.to_thread(
                     self._finish_stage2, session_id, job_id, result)
+                # 长片：阶段 2 收尾时已把规划任务写进快照，这里起它的执行线程。
+                if next_job is not None:
+                    await self._launch(session_id, next_job)
+            elif step == step_machine.STEP_SEGMENTING:
+                await asyncio.to_thread(
+                    self._finish_segment_planning, session_id, job_id, result)
             else:
                 await asyncio.to_thread(
                     self._finish_succeeded, session_id, job_id, result)
@@ -497,10 +531,11 @@ class JobRunner:
             await asyncio.to_thread(self._cleanup, session_id, job_id)
 
     def _resume_step(self, session_id: str) -> str:
-        """下次 advance 该跑阶段 1 还是阶段 2：看**已落盘的事实**，不看内存。
+        """下次 advance 该跑阶段 1、阶段 2 还是分段规划：看**已落盘的事实**，不看内存。
 
         判据两条同时成立才进阶段 2：阶段 1 已过闸门（存在 stage1_review 待办）、
         最新待办已被 approve 决议；有未决的新待办（revise 跑完会挂新待办）仍属阶段 1。
+        长片在阶段 2 成功之后、段表落盘之前是第三档（``segmenting``）。
         """
         directory = self.store.session_directory(session_id)
         session = load_session(directory)
@@ -522,6 +557,12 @@ class JobRunner:
             and str(item.get("decision")) == step_machine.DECISION_APPROVE
             for item in session.action_items)
         if reviewed and approved and not pending:
+            # 长片阶段 2 已成功（``final_prompt`` 落盘）但还没段表：重试要重跑**规划**，
+            # 不能把阶段 2 再跑一遍（D6 spec §5.3 的接缝）。
+            if (step_machine.is_long_form(session.brief.duration)
+                    and str(session.stage_state.get("final_prompt") or "").strip()
+                    and not session.segments):
+                return step_machine.STEP_SEGMENTING
             return step_machine.STEP_STAGE2
         return step_machine.STEP_STAGE1
 
@@ -559,8 +600,10 @@ class JobRunner:
         else:
             if decision in (step_machine.DECISION_APPROVE,
                             step_machine.DECISION_SUBMIT_FRAMES):
-                await asyncio.to_thread(
+                next_job = await asyncio.to_thread(
                     self._finish_stage2, session_id, job_id, result)
+                if next_job is not None:
+                    await self._launch(session_id, next_job)
             else:
                 # 修订跑完回到**同一个人工闸门**：新待办、状态 awaiting_human。
                 await asyncio.to_thread(
@@ -960,6 +1003,80 @@ class JobRunner:
         return {"state": updated, "brief": brief,
                 "variant_downgraded": downgraded}
 
+    def _execute_segment_planning(self, session_id: str, job_id: str,
+                                  cancel_event: threading.Event) -> list[dict[str, Any]]:
+        """线程里的分段规划（D6 spec §6）：复用 ``plan_segments``，产出只读段表。
+
+        输入是阶段 1 的 ``shot_table``；``mode="base"`` 的段长上限是
+        ``BASE_MAX_SEG_S``（4–10 秒，ADR 0012）。读图与用户修订按 CLI 的同一口径
+        显式入参——规划层不读 state，看到什么在调用点一眼可见（issue #26）。
+        ``segments/plan.json`` 落在**本会话目录**内，与 CLI 的同名产物互不覆盖。
+        """
+        directory = self.store.session_directory(session_id)
+        session = load_session(directory)
+        if session is None:
+            raise RuntimeError(f"会话文件读不到：{session_id}")
+        shot_table = str(session.stage_state.get("shot_table") or "")
+        if not shot_table.strip():
+            raise RuntimeError("阶段 1 的分镜表为空，无法分段规划")
+
+        self._emit_progress(
+            session_id, job_id, SEGMENT_PLAN_NODE, "started",
+            stage=step_machine.STEP_SEGMENTING)
+        self._write_active_job(session_id, job_id, SEGMENT_PLAN_NODE)
+        plans: Any
+        if self.fake_pipeline:
+            # 桩模式一个模型都不建（D4 spec §11）：桩规划与真实规划同一份段长上限。
+            from .fake_pipeline import segment_plan
+
+            plans = segment_plan(int(round(session.brief.duration)))
+        else:
+            from ..model_factory import build_chat_model
+            from ..segment_planner import plan_segments
+            from ..segment_prompts import frame_anchor_context, render_revision_context
+
+            plans = plan_segments(
+                shot_table, session.brief.duration, build_chat_model(),
+                # 图是用户提交的产物、分镜表是计划：冲突以图为准（与 CLI 同源）。
+                frame_context=frame_anchor_context(session.stage_state),
+                revision_context=render_revision_context(session.stage_state),
+                mode="base")
+        # 规划是一次慢速模型调用：按「当前步骤结束才停」的取消语义收尾。
+        if cancel_event.is_set():
+            raise JobCancelled(SEGMENT_PLAN_NODE)
+        if not plans:
+            raise RuntimeError("分段规划回复不合格（段长档/边界/段尾钩子），没有可用的段表")
+        self._write_segment_plan(directory, plans)
+        self._emit_progress(
+            session_id, job_id, SEGMENT_PLAN_NODE, "done",
+            stage=step_machine.STEP_SEGMENTING)
+        return [self._segment_row(index, plan) for index, plan in enumerate(plans)]
+
+    @staticmethod
+    def _write_segment_plan(directory: Path, plans: Any) -> None:
+        """段表落盘：形状与 CLI 的 ``segments/plan.json`` 一致（``to_dict`` 列表）。"""
+        target = directory / "segments" / SEGMENT_PLAN_FILENAME
+        target.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(
+            target,
+            json.dumps([plan.to_dict() for plan in plans],
+                       ensure_ascii=False, indent=2))
+
+    @staticmethod
+    def _segment_row(index: int, plan: Any) -> dict[str, Any]:
+        """规划结果 → 快照里的段条目（``index`` 转成 1 起的执行段号）。"""
+        return {
+            "index": index + 1,
+            "start_s": int(plan.start_s),
+            "end_s": int(plan.end_s),
+            "shots_in_segment": [int(shot) for shot in plan.shots_in_segment],
+            "summary": str(plan.summary),
+            "end_hook": str(plan.end_hook),
+            "status": SEGMENT_STATUS_PENDING,
+            "prompt_artifact_id": "",
+            "video_asset_id": "",
+        }
+
     def _execute_revise(self, session_id: str, job_id: str,
                         cancel_event: threading.Event,
                         entries: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1208,22 +1325,65 @@ class JobRunner:
         ])
 
     def _finish_stage2(self, session_id: str, job_id: str,
-                       result: dict[str, Any]) -> None:
-        """阶段 2 收尾：会话 completed，降级事实与生效变体一起落盘（D2-AC7 的前半）。"""
+                       result: dict[str, Any]) -> JobSummary | None:
+        """阶段 2 收尾：短视频 completed；长片改挂分段规划任务（D6 spec §5.3）。
+
+        短视频这条路一个字段都不变（D4 的交付语义：阶段 2 成功即 completed，没有交付
+        确认）。长片不能落 completed——规划紧接着跑，会话仍是 running；新任务的摘要
+        与旧任务的 ``succeeded`` **在同一次落盘**里写出，读者不会看到「两个任务同时
+        running」或「已成功却没人接」的中间态。返回新任务给调用方起执行线程。
+        """
+        next_job: JobSummary | None = None
+        if step_machine.is_long_form(result["brief"].duration):
+            next_job = JobSummary(
+                job_id=uuid.uuid4().hex, kind=JOB_KIND_SEGMENT, status="running",
+                started_at=_now())
+        next_status = (step_machine.STATUS_RUNNING if next_job is not None
+                       else step_machine.STATUS_COMPLETED)
+
         def _apply(detail: Any) -> dict[str, Any]:
             job = self._job_or_running(job_id, detail).model_copy(
                 update={"status": "succeeded", "finished_at": _now()})
+            jobs = _upsert_job(detail.jobs, _job_dict(job))
+            if next_job is not None:
+                jobs = _upsert_job(jobs, _job_dict(next_job))
             return {
-                "status": step_machine.STATUS_COMPLETED,
+                "status": next_status,
                 "stage_state": result["state"],
-                "jobs": _upsert_job(detail.jobs, _job_dict(job)),
+                "jobs": jobs,
                 "brief": result["brief"],
                 "variant_downgraded": result["variant_downgraded"],
             }
 
+        events = [
+            EventDraft("job.succeeded", {"next": next_status}, job_id=job_id),
+        ]
+        if next_job is not None:
+            events.append(EventDraft(
+                "job.started", {"kind": JOB_KIND_SEGMENT}, job_id=next_job.job_id))
+        self.store.mutate(session_id, _apply, events=events)
+        return next_job
+
+    def _finish_segment_planning(self, session_id: str, job_id: str,
+                                 segments: list[dict[str, Any]]) -> None:
+        """分段规划收尾：段列表进快照，会话停在 ``awaiting_human``（无确认待办）。
+
+        规划结果是**只读**的（Q4）：不挂「确认分段」待办，也不需要用户点一下才继续。
+        这一档之后的第 1 段写词属于 D6-2；那一步在本函数收尾处接上任务，状态语义
+        不变（依旧是「系统与人都还没事可做、下一步由服务端接着起」）。
+        """
+        def _apply(detail: Any) -> dict[str, Any]:
+            job = self._job_or_running(job_id, detail).model_copy(
+                update={"status": "succeeded", "finished_at": _now()})
+            return {
+                "status": step_machine.STATUS_AWAITING_HUMAN,
+                "jobs": _upsert_job(detail.jobs, _job_dict(job)),
+                "segments": segments,
+            }
+
         self.store.mutate(session_id, _apply, events=[
             EventDraft("job.succeeded",
-                       {"next": step_machine.STATUS_COMPLETED},
+                       {"next": step_machine.STATUS_AWAITING_HUMAN},
                        job_id=job_id),
         ])
 

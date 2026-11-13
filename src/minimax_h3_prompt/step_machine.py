@@ -58,6 +58,17 @@ ACTION_FRAME_SUBMISSION = "frame_submission"
 
 STEP_STAGE1 = "stage1"
 STEP_STAGE2 = "stage2"
+# 长片在阶段 2 之后追加的段循环（D6 spec §5.2）：只用于 ``job.progress`` 与任务记录，
+# **不是**会话状态——会话仍是既有七态里的 ``running``/``awaiting_human``。
+STEP_SEGMENTING = "segmenting"
+
+# 进度事件允许的 stage 取值从这份声明派生（``workbench_store._PROGRESS_STAGES``），
+# 加阶段时不再改第二份表。
+STEPS = (STEP_STAGE1, STEP_STAGE2, STEP_SEGMENTING)
+
+# 长片是产品阈值（D6 spec §3：>10 秒），不是领域概念；判定只在这一处，执行器与
+# 界面不各写一个 ``duration > 10``。
+LONG_FORM_MIN_SECONDS = 10.0
 
 # 需要人工提交关键帧的变体。只有帧链（FL2VA）走第二道待办；T2VA 通过即进阶段 2，
 # I2VA/L2VA 是降级产物、不是创建时可选的变体。集中在这里，落盘与判定不各写一份。
@@ -179,6 +190,11 @@ def can_advance(status: str) -> bool:
     return status in ADVANCEABLE_STATUSES
 
 
+def is_long_form(duration: float) -> bool:
+    """这个时长要不要走分段陪跑：>10 秒即长片（D6 spec §3）。"""
+    return float(duration) > LONG_FORM_MIN_SECONDS
+
+
 def needs_frame_submission(variant: str) -> bool:
     """这个变体通过审查后是否要先收关键帧（D4 spec §9 的分叉判据）。
 
@@ -275,6 +291,7 @@ __all__ = [
     "FRAME_PROMPT_NODE",
     "InvalidTransition",
     "LEGAL_TRANSITIONS",
+    "LONG_FORM_MIN_SECONDS",
     "RESUME_EXHAUSTED",
     "RESUME_FROM_NODE",
     "RESUME_NO_CHECKPOINT",
@@ -290,6 +307,8 @@ __all__ = [
     "STATUS_RUNNING",
     "STEP_STAGE1",
     "STEP_STAGE2",
+    "STEP_SEGMENTING",
+    "STEPS",
     "TERMINAL_STATUSES",
     "TRIGGER_ADVANCE",
     "TRIGGER_CANCEL",
@@ -302,6 +321,7 @@ __all__ = [
     "TRIGGER_STAGE2_DONE",
     "TRIGGERS",
     "can_advance",
+    "is_long_form",
     "needs_frame_submission",
     "next_action",
     "next_status",

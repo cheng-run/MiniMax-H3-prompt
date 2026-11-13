@@ -77,7 +77,7 @@ describe('SessionCreateForm 校验', () => {
     expect(createCalls).toBe(0)
   })
 
-  it('时长越界即时提示并阻止提交（4–10 之外）', async () => {
+  it('时长越界即时提示并阻止提交（4–60 之外）', async () => {
     let createCalls = 0
     server.use(
       http.post(createUrl, () => {
@@ -88,10 +88,11 @@ describe('SessionCreateForm 校验', () => {
 
     const { wrapper } = mountWithPlugins(SessionCreateForm, { withRouter: true })
     await wrapper.find('textarea[name="plot"]').setValue('雨夜旧信')
+    server.use(http.post(jobsUrl, () => HttpResponse.json(makeJob(), { status: 202 })))
 
     const duration = wrapper.find('input[name="duration"]')
-    await duration.setValue('11')
-    expect(wrapper.text()).toContain('4–10')
+    await duration.setValue('61')
+    expect(wrapper.text()).toContain('4–60')
 
     await wrapper.find('form').trigger('submit')
     await settle()
@@ -101,6 +102,12 @@ describe('SessionCreateForm 校验', () => {
     await wrapper.find('form').trigger('submit')
     await settle()
     expect(createCalls).toBe(0)
+
+    // 长片不再由前端拦住：12 秒能提交（服务端上界 60）。
+    await duration.setValue('12')
+    await wrapper.find('form').trigger('submit')
+    await settle()
+    expect(createCalls).toBe(1)
   })
 })
 

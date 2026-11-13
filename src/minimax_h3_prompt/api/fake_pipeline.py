@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import math
 import os
 from typing import Any
 
@@ -155,6 +156,33 @@ def stage2_state(state: dict[str, Any], brief: Any,
     return updated, prompt
 
 
+def segment_plan(total_s: int) -> list:
+    """桩分段规划（D6-1）：按 4–10 秒等分出 ``ceil(total/10)`` 段，末段吸收余数。
+
+    与真实规划同一份段长上限（``segment_planner.BASE_MAX_SEG_S``）；桩不调模型，
+    也不编造镜头覆盖——``shots_in_segment`` 留空，避免让界面上出现一份假的分镜归属。
+    """
+    from ..segment_planner import BASE_MAX_SEG_S, SegmentPlan
+
+    count = max(1, math.ceil(total_s / BASE_MAX_SEG_S))
+    base = total_s // count
+    durations = [base] * count
+    durations[-1] += total_s - base * count
+    plans = []
+    start = 0
+    for index, duration in enumerate(durations):
+        plans.append(SegmentPlan(
+            index=index,
+            start_s=start,
+            end_s=start + duration,
+            shots_in_segment=(),
+            summary=f"桩管线第 {index + 1} 段",
+            end_hook=f"桩管线：第 {index + 1} 段结束时画面落定",
+        ))
+        start += duration
+    return plans
+
+
 def stage2_summary(brief: Any) -> Any:
     """桩阶段 2 的固定中文摘要：整体一句、无分镜条目。
 
@@ -174,6 +202,7 @@ __all__ = [
     "FAKE_PIPELINE_ENV",
     "fake_pipeline_enabled",
     "frame_descriptions",
+    "segment_plan",
     "stage1_state",
     "stage2_state",
     "stage2_summary",

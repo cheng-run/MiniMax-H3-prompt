@@ -44,6 +44,10 @@ SESSION_STATUSES: tuple[str, ...] = (
     "interrupted",
 )
 
+# 执行段的状态（D6 spec §10）。本票只产生 ``pending``（规划完、还没轮到此段）；
+# 写词/等视频/通过/被拒归 D6-2 起，不在这里预先枚举一份会过期的集合。
+SEGMENT_STATUS_PENDING = "pending"
+
 # 旧向导状态 → 工作台状态。历史会话全部是 completed；未完成的旧会话（用户还在
 # 向导里续接的那些）对 API 也是 legacy，映射只是给列表/详情一个可读的状态，
 # **不承诺它们能被 advance**——legacy 标记才是那个判据。
@@ -326,10 +330,13 @@ EVENT_TYPES: tuple[str, ...] = (
 
 # 进度事件的取值从步骤机常量派生：阶段与状态各有一份声明，这里重抄一遍就会在
 # 步骤机改名时静默放过错值（本仓「守卫形态要从常量派生」）。
-_PROGRESS_STAGES = frozenset({step_machine.STEP_STAGE1, step_machine.STEP_STAGE2})
+_PROGRESS_STAGES = frozenset(step_machine.STEPS)
 _PROGRESS_STATUSES = frozenset({"started", "done"})
 _SUCCEEDED_NEXT = frozenset(
-    {step_machine.STATUS_AWAITING_HUMAN, step_machine.STATUS_COMPLETED})
+    # ``running`` 自 D6 起合法：长片阶段 2 成功不落 completed，服务端立刻接上分段
+    # 规划任务，会话仍是 running（事件类型不变，只是同一事件多一个合法去向）。
+    {step_machine.STATUS_AWAITING_HUMAN, step_machine.STATUS_COMPLETED,
+     step_machine.STATUS_RUNNING})
 _DECISIONS = frozenset({
     step_machine.DECISION_APPROVE,
     step_machine.DECISION_REVISE,
@@ -717,6 +724,26 @@ class ActionItemOut(BaseModel):
     revisions: list[RevisionOut] = Field(default_factory=list)
 
 
+class SegmentOut(BaseModel):
+    """长片的一个执行段（D6 spec §11）：规划完成后进会话快照，详情一次取到。
+
+    ``index`` 是**1 起**的执行段号（与 ``segments/shot-NN.md`` 同号）；段状态在
+    快照里，不靠 job 历史表达（``JOB_HISTORY_LIMIT`` 对 15 段偏紧）。
+    """
+
+    index: int
+    start_s: int
+    end_s: int
+    # 覆盖的镜头号（1 起，与分镜表的 ``[Shot N]`` 同号）。
+    shots_in_segment: list[int] = Field(default_factory=list)
+    summary: str = ""
+    end_hook: str = ""
+    status: str = SEGMENT_STATUS_PENDING
+    # 本段提示词产物与已回交视频素材：D6-2 起才会被填上。
+    prompt_artifact_id: str = ""
+    video_asset_id: str = ""
+
+
 class ArtifactInfo(BaseModel):
     artifact_id: str
     kind: str
@@ -774,6 +801,8 @@ class SessionDetail(SessionSummary):
     artifacts: list[ArtifactInfo] = Field(default_factory=list)
     # 素材是目录现扫的结果，与产物同款（#222 §5.3）：不进快照、不占会话状态写入。
     assets: list[Asset] = Field(default_factory=list)
+    # 长片的段列表（D6 spec §11）：来自快照字段，≤10 秒的会话是空表。
+    segments: list[SegmentOut] = Field(default_factory=list)
 
 
 class SessionPage(BaseModel):
@@ -1261,6 +1290,7 @@ class WorkbenchSessionStore:
             action_items=action_items,
             artifacts=_artifacts(derived, directory, self.root.resolve()),
             assets=_assets_of(derived, directory, self.root.resolve()),
+            segments=[SegmentOut.model_validate(item) for item in session.segments],
         )
 
     def _replay_if_needed(self, session_id: str) -> None:
@@ -1298,6 +1328,7 @@ class WorkbenchSessionStore:
         last_event_seq: int | None = None,
         brief: Brief | None = None,
         variant_downgraded: str | None = None,
+        segments: Sequence[dict[str, Any]] | None = None,
     ) -> SessionState:
         """以现有快照为底，覆盖调用方点名要改的字段。"""
         return SessionState(
@@ -1323,6 +1354,9 @@ class WorkbenchSessionStore:
             action_items=(
                 tuple(action_items) if action_items is not None
                 else session.action_items),
+            segments=(
+                tuple(segments) if segments is not None
+                else session.segments),
         )
 
     def list_sessions(
@@ -1717,8 +1751,9 @@ class WorkbenchSessionStore:
         取消请求）来自不同线程，两次文件读之间别人可能已经写过。把读也放进临界区，
         「找 job → 改字段 → 写回」才是原子的（#217 复审：取消标记曾被下一次进度写盖掉）。
         可覆盖的字段是 ``status`` / ``stage_state`` / ``jobs`` / ``action_items`` /
-        ``brief`` / ``variant_downgraded``（#219 起阶段 2 收尾要把生效变体与降级事实
-        一起写回，绕开会话锁用 ``update_session_file`` 会把并发写盖掉）。
+        ``brief`` / ``variant_downgraded`` / ``segments``（#219 起阶段 2 收尾要把生效
+        变体与降级事实一起写回，绕开会话锁用 ``update_session_file`` 会把并发写盖掉；
+        D6 起段状态也是快照字段，每次段通过立刻落盘）。
 
         ``events`` 是这次改动要**一起**落盘的事件（#218）：事件先写、快照后写，且两者
         在同一把锁内——序号分配与状态转移因此不会被别的写者插进来。``mutator`` 返回空
@@ -1744,6 +1779,7 @@ class WorkbenchSessionStore:
                 action_items=changes.get("action_items"),
                 brief=changes.get("brief"),
                 variant_downgraded=changes.get("variant_downgraded"),
+                segments=changes.get("segments"),
                 last_event_seq=(
                     appended[-1].seq if appended else session.last_event_seq),
             ).save()
@@ -1818,6 +1854,7 @@ __all__ = [
     "JobNotFound", "JobNotRunning",
     "JobSummary", "RefOut", "RevisionOut", "SessionBusy", "SessionCompleted", "SessionDetail",
     "SessionLegacy", "SessionNotFound", "SessionPage", "SessionSummary",
+    "SegmentOut", "SEGMENT_STATUS_PENDING",
     "SESSION_STATUSES", "StorageUnavailable", "UnknownEventType",
     "UnsupportedMediaType", "UploadInvalid", "VideoOutputOut", "WorkbenchError",
     "WorkbenchSessionStore",

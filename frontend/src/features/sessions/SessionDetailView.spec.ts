@@ -363,6 +363,77 @@ describe('SessionDetailView 审查与修订回路（#232）', () => {
   })
 })
 
+// D6-1（#244）：长片多一个只读「分段」分区；短视频的四分区不变。
+describe('SessionDetailView 分段分区', () => {
+  const segments = [
+    {
+      index: 1,
+      start_s: 0,
+      end_s: 6,
+      shots_in_segment: [1, 2],
+      summary: '开场：雨夜街口',
+      end_hook: '人物停在旧楼门口',
+      status: 'pending',
+      prompt_artifact_id: '',
+      video_asset_id: '',
+    },
+    {
+      index: 2,
+      start_s: 6,
+      end_s: 12,
+      shots_in_segment: [3],
+      summary: '收束：抬头看向楼内',
+      end_hook: '灯亮起',
+      status: 'pending',
+      prompt_artifact_id: '',
+      video_asset_id: '',
+    },
+  ]
+
+  it('有段列表时出现「分段」，展示只读段表与「已通过 / 总数」', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(makeDetail({ status: 'awaiting_human', segments })),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    const tabs = wrapper.findAll('[role="tab"]')
+    expect(tabs.map((tab) => tab.text())).toEqual([
+      '概览与进度',
+      '审查与待办',
+      '分段',
+      '素材',
+      '产物',
+    ])
+
+    await tabs[2]!.trigger('click')
+    await settle()
+
+    const panel = wrapper.find('#workbench-panel-segments')
+    expect(panel.text()).toContain('第 1 段')
+    expect(panel.text()).toContain('0–6 秒')
+    expect(panel.text()).toContain('镜头 1、镜头 2')
+    expect(panel.text()).toContain('开场：雨夜街口')
+    expect(panel.text()).toContain('已通过 0 / 总数 2')
+    // 只读：分区里没有编辑/确认/合并入口。
+    expect(panel.findAll('button')).toHaveLength(0)
+  })
+
+  it('没有段列表（短视频）时不出现这一格', async () => {
+    server.use(http.get(detailUrl, () => HttpResponse.json(makeDetail({ status: 'completed' }))))
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    expect(wrapper.findAll('[role="tab"]').map((tab) => tab.text())).toEqual([
+      '概览与进度',
+      '审查与待办',
+      '素材',
+      '产物',
+    ])
+    expect(wrapper.find('#workbench-panel-segments').exists()).toBe(false)
+  })
+})
+
 // D4-7（#234）：产物分区接进工作台。完成态（阶段 2 成功）直接给出交付文本，
 // 没有「交付确认」第二道闸门（D4 spec §10 / Q7）。
 describe('SessionDetailView 产物分区', () => {

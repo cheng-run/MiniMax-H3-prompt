@@ -841,6 +841,15 @@ MUTATIONS: tuple[Mutation, ...] = (
         ("tests/test_no_machine_paths.py::test_no_machine_specific_paths_in_shipped_code",),
         "随仓脚本写死本机绝对路径＝换机器即错（accept_d5 复审曾抓到同款）",
     ),
+    Mutation(
+        "progress_stages_not_derived",
+        "src/minimax_h3_prompt/workbench_store.py",
+        "_PROGRESS_STAGES = frozenset(step_machine.STEPS)",
+        "_PROGRESS_STAGES = frozenset("
+        "{step_machine.STEP_STAGE1, step_machine.STEP_STAGE2})",
+        ("tests/test_step_machine.py::test_progress_stages_derive_from_the_step_labels",),
+        "进度取值另抄一份＝新加的 segmenting 只写到一半才在运行期炸（守卫形态要从常量派生）",
+    ),
 )
 
 

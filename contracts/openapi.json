@@ -580,6 +580,62 @@
         "title": "RevisionOut",
         "type": "object"
       },
+      "SegmentOut": {
+        "description": "长片的一个执行段（D6 spec §11）：规划完成后进会话快照，详情一次取到。\n\n``index`` 是**1 起**的执行段号（与 ``segments/shot-NN.md`` 同号）；段状态在\n快照里，不靠 job 历史表达（``JOB_HISTORY_LIMIT`` 对 15 段偏紧）。",
+        "properties": {
+          "end_hook": {
+            "default": "",
+            "title": "End Hook",
+            "type": "string"
+          },
+          "end_s": {
+            "title": "End S",
+            "type": "integer"
+          },
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          },
+          "prompt_artifact_id": {
+            "default": "",
+            "title": "Prompt Artifact Id",
+            "type": "string"
+          },
+          "shots_in_segment": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Shots In Segment",
+            "type": "array"
+          },
+          "start_s": {
+            "title": "Start S",
+            "type": "integer"
+          },
+          "status": {
+            "default": "pending",
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "title": "Summary",
+            "type": "string"
+          },
+          "video_asset_id": {
+            "default": "",
+            "title": "Video Asset Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "start_s",
+          "end_s"
+        ],
+        "title": "SegmentOut",
+        "type": "object"
+      },
       "SessionCreate": {
         "description": "建会话的 brief 一次性给全（spec §7）。\n\nD2 只做 ``base`` 短视频，所以 ``mode`` 是单值字面量；扩大路线由后续票改契约，\n不在这里留一个「看起来支持」的自由字符串。",
         "properties": {
@@ -731,6 +787,13 @@
           "revision": {
             "title": "Revision",
             "type": "integer"
+          },
+          "segments": {
+            "items": {
+              "$ref": "#/components/schemas/SegmentOut"
+            },
+            "title": "Segments",
+            "type": "array"
           },
           "session_id": {
             "title": "Session Id",

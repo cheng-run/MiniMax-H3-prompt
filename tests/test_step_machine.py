@@ -216,3 +216,33 @@ def test_submit_frames_is_an_internal_decision_value():
     """帧提交不是接口上的 decision 取值，但它要能被决议事件记住。"""
     assert m.DECISION_SUBMIT_FRAMES not in (m.DECISION_APPROVE, m.DECISION_REVISE)
     assert m.DECISION_SUBMIT_FRAMES == "submit_frames"
+
+
+# ---------------------------------------------------------------------------
+# D6-1：分段阶段标签（spec §5.2）
+# ---------------------------------------------------------------------------
+
+def test_segmenting_is_a_step_label_not_a_session_status():
+    """``segmenting`` 只用于进度与任务记录；会话状态仍是既有七态（D6-AC1）。"""
+    assert m.STEP_SEGMENTING == "segmenting"
+    assert m.STEP_SEGMENTING in m.STEPS
+    assert set(m.STEPS) == {m.STEP_STAGE1, m.STEP_STAGE2, m.STEP_SEGMENTING}
+    assert m.STEP_SEGMENTING not in m.STATUSES
+    assert len(m.STATUSES) == 7
+
+
+def test_progress_stages_derive_from_the_step_labels():
+    """进度事件允许的 stage 从步骤常量派生：加标签时不用再改第二份表。"""
+    from minimax_h3_prompt.workbench_store import _PROGRESS_STAGES
+
+    assert _PROGRESS_STAGES == frozenset(m.STEPS)
+    # 派生之外还要钉住「新标签真的被接受」：只写等式的话，两份表一起漏掉它仍然绿。
+    assert m.STEP_SEGMENTING in _PROGRESS_STAGES
+
+
+@pytest.mark.parametrize("duration,expected", [
+    (4, False), (10, False), (10.0, False), (10.1, True), (12, True), (60, True),
+])
+def test_long_form_threshold_is_duration_over_ten_seconds(duration, expected):
+    """长片是产品阈值（>10 秒），不是领域概念；只在一处判定（spec §3）。"""
+    assert m.is_long_form(duration) is expected

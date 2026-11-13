@@ -473,6 +473,9 @@ class SessionState:
     last_event_seq: int = 0
     jobs: tuple[dict[str, Any], ...] = ()
     action_items: tuple[dict[str, Any], ...] = ()
+    # 长片的段列表（D6 spec §10）：每段的状态/产物/视频标识都在这里，是「哪一段过了」
+    # 的唯一快照事实。事件重放不补它（与 jobs/action_items 不同），靠每次落盘保证。
+    segments: tuple[dict[str, Any], ...] = ()
 
     @property
     def awaiting_frames(self) -> bool:
@@ -515,6 +518,7 @@ class SessionState:
             payload["last_event_seq"] = self.last_event_seq
             payload["jobs"] = [dict(item) for item in self.jobs]
             payload["action_items"] = [dict(item) for item in self.action_items]
+            payload["segments"] = [dict(item) for item in self.segments]
         atomic_write_text(
             target, json.dumps(payload, ensure_ascii=False, indent=2))
         return target
@@ -597,6 +601,7 @@ def load_session(directory: str | Path) -> SessionState | None:
         last_event_seq=_non_negative_int(raw, "last_event_seq", 0),
         jobs=_dict_tuple(raw, "jobs"),
         action_items=_dict_tuple(raw, "action_items"),
+        segments=_dict_tuple(raw, "segments"),
     )
 
 

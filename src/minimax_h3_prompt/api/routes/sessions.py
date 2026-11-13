@@ -73,15 +73,16 @@ class VideoOutputIn(BaseModel):
     multiple: int
 
 
-# D4 spec §5：V1 只支持 4–10 秒短视频，两端都限。范围写在常量里而不是塞进
-# ``Field(ge=, le=)``：pydantic 的校验失败走通用 422（没有 ``code``），前端只能
-# 靠解析文案分支；这个范围是一条**产品规则**，要有自己的稳定错误码。
+# D6 起时长放开到 4–60 秒（D6-AC1）：越过 10 秒的会话走长片分段陪跑，表单与校验
+# 共用同一个上界。范围写在常量里而不是塞进 ``Field(ge=, le=)``：pydantic 的校验失败
+# 走通用 422（没有 ``code``），前端只能靠解析文案分支；这个范围是一条**产品规则**，
+# 要有自己的稳定错误码。
 DURATION_MIN_SECONDS = 4.0
-DURATION_MAX_SECONDS = 10.0
+DURATION_MAX_SECONDS = 60.0
 
 
 class DurationOutOfScope(ProblemError):
-    """时长越界。文案点名 D6：长片是那张票的范围，用户要知道界限去哪看。"""
+    """时长越界：文案给出当前支持的范围，不指向别的票。"""
 
     status_code = 422
     code = "duration_out_of_scope"
@@ -91,8 +92,8 @@ def _validate_duration(duration: float) -> None:
     if DURATION_MIN_SECONDS <= duration <= DURATION_MAX_SECONDS:
         return
     raise DurationOutOfScope(
-        f"V1 只支持 {DURATION_MIN_SECONDS:g}–{DURATION_MAX_SECONDS:g} 秒的短视频，"
-        f"长片归 D6；收到的 duration={duration:g}。")
+        f"V1 支持 {DURATION_MIN_SECONDS:g}–{DURATION_MAX_SECONDS:g} 秒；"
+        f"收到的 duration={duration:g}。")
 
 
 class RefIn(BaseModel):

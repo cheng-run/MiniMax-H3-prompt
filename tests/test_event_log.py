@@ -126,7 +126,11 @@ def test_unknown_event_type_is_rejected(tmp_path):
     ("job.progress", {"stage": "stage1", "node": "producer", "status": "started"}),
     ("job.progress", {"stage": "stage2", "node": "prompt_engineer", "status": "done",
                       "elapsed_ms": 12}),
+    # D6 的分段阶段：仍是 ``job.progress``，只多一个派生自步骤机的 stage 取值。
+    ("job.progress", {"stage": "segmenting", "node": "segment_plan", "status": "done"}),
     ("job.succeeded", {"next": "awaiting_human"}),
+    # 长片阶段 2 成功即接分段规划任务：会话不落 completed，``next`` 是 running。
+    ("job.succeeded", {"next": "running"}),
     ("job.failed", {"code": "MODEL_OUTPUT", "detail": "坏 JSON"}),
     ("job.cancelled", {"at_node": "producer"}),
     ("job.interrupted", {}),
@@ -149,7 +153,7 @@ def test_all_ten_types_accept_their_documented_payload(tmp_path, event_type, pay
     ("job.progress", {"stage": "stage1", "status": "started"}),
     ("job.progress", {"stage": "stage3", "node": "x", "status": "started"}),
     ("job.progress", {"stage": "stage1", "node": "x", "status": "halfway"}),
-    ("job.succeeded", {"next": "running"}),
+    ("job.succeeded", {"next": "created"}),
     ("job.failed", {"code": "MODEL_OUTPUT"}),
     ("action_item.resolved", {"item_id": "i1", "decision": "maybe"}),
     ("artifact.created", {"artifact_id": "a", "kind": "video_prompt"}),

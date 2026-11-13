@@ -95,6 +95,55 @@ def test_idempotency_registry_keeps_only_the_last_50_keys(tmp_path):
     assert registry.replay("key-54", fingerprint="body-54") == {"n": 54}
 
 
+# ---------------------------------------------------------------------------
+# D6-1：段列表进快照与详情（spec §10 / §11）
+# ---------------------------------------------------------------------------
+
+def _segment_rows() -> list[dict]:
+    return [
+        {"index": 1, "start_s": 0, "end_s": 6, "shots_in_segment": [1, 2],
+         "summary": "开场：雨夜街口", "end_hook": "人物停在旧楼门口",
+         "status": "pending", "prompt_artifact_id": "", "video_asset_id": ""},
+        {"index": 2, "start_s": 6, "end_s": 12, "shots_in_segment": [3],
+         "summary": "收束：抬头看向楼内", "end_hook": "灯亮起",
+         "status": "pending", "prompt_artifact_id": "", "video_asset_id": ""},
+    ]
+
+
+def test_segments_default_to_empty_and_round_trip_through_the_snapshot(tmp_path):
+    """段状态是**快照字段**：写进去要落盘，别的 mutate 不能把它重置回空。"""
+    store = _store(tmp_path)
+    detail, _ = store.create(_brief(), fingerprint="body-1")
+    assert detail.segments == [], "≤10 秒的会话不该带段列表"
+
+    rows = _segment_rows()
+    store.mutate(detail.session_id, lambda _detail: {"segments": rows})
+
+    again = store.get_session(detail.session_id)
+    assert [segment.index for segment in again.segments] == [1, 2]
+    assert again.segments[1].end_hook == "灯亮起"
+    raw = json.loads(
+        (tmp_path / detail.session_id / SESSION_FILENAME).read_text(encoding="utf-8"))
+    assert raw["segments"] == rows
+
+    # 其他字段的写入以现有快照为底，段列表原样保留。
+    store.mutate(detail.session_id, lambda _detail: {"status": "running"})
+    assert [segment.index for segment in store.get_session(detail.session_id).segments] == [1, 2]
+
+
+def test_cached_detail_without_segments_is_still_valid(tmp_path):
+    """旧幂等缓存里没有 segments：``model_validate`` 必须靠默认值放行（spec R2）。"""
+    from minimax_h3_prompt.workbench_store import SessionDetail
+
+    store = _store(tmp_path)
+    detail, _ = store.create(_brief(), fingerprint="body-1")
+
+    cached = detail.model_dump(mode="json")
+    cached.pop("segments", None)
+
+    assert SessionDetail.model_validate(cached).segments == []
+
+
 def _write_raw(root: Path, session_id: str, *, updated_at: str,
                schema: str = "workbench.v1", status: str = "created") -> Path:
     directory = root / Path(session_id)

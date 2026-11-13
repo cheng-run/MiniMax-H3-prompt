@@ -165,20 +165,23 @@ def test_create_rejects_non_base_routes_and_bad_video_output(tmp_path):
 # 时长范围（D4 spec §5 / 本票 D4-AC1 的服务端一半）
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("duration", [3.9, 10.1, 0, 30])
+@pytest.mark.parametrize("duration", [3.9, 60.1, 0, 61])
 def test_create_session_rejects_duration_out_of_scope(tmp_path, duration):
-    """越界两端都回 422 + 专用码；文案必须点名「长片归 D6」，否则用户不知道
-    为什么短表单不收它、也不知道该去哪找长片。"""
+    """越界两端都回 422 + 专用码；文案给出**新的** 4–60 范围（D6-AC1）。
+
+    文案不再点名「长片归 D6」：那张票已经落地，长片就在同一个表单里。
+    """
     client = _client(tmp_path)
 
     resp = client.post("/api/v1/sessions", json={**_brief_body(), "duration": duration})
 
     body = _assert_problem(resp, 422, "duration_out_of_scope")
-    assert "D6" in body["detail"]
+    assert "4–60" in body["detail"]
+    assert "D6" not in body["detail"]
     assert not list(tmp_path.glob("*/GEN*")), "越界请求不该建出会话目录"
 
 
-@pytest.mark.parametrize("duration", [4, 10])
+@pytest.mark.parametrize("duration", [4, 10, 12, 60])
 def test_create_session_accepts_duration_at_the_bounds(tmp_path, duration):
     client = _client(tmp_path)
 

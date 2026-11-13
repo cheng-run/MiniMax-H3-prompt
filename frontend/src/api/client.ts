@@ -17,6 +17,8 @@ export type JobSummary = components['schemas']['JobSummary']
 // 审查面（D4-5）与素材（D4-6）：形状都从契约导出，组件不手写模型。
 export type ActionItemOut = components['schemas']['ActionItemOut']
 export type ArtifactInfo = components['schemas']['ArtifactInfo']
+// 长片分段（D6）：段列表形状同样来自契约，组件不手写模型。
+export type SegmentOut = components['schemas']['SegmentOut']
 export type ActionItemResolve = components['schemas']['ActionItemResolve']
 export type RevisionIn = components['schemas']['RevisionIn']
 export type Asset = components['schemas']['Asset']
