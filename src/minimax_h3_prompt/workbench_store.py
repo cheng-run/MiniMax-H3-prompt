@@ -60,9 +60,9 @@ _LEGACY_STATUS = {
     "director_segments_running": "interrupted",
 }
 
-# 产物登记范围（D2 spec §10、D3 #222 §7）：两张表各管一种响应形态——文本产物
-# 走纯文本（1 MiB 上限），媒体产物走字节 + 单段 Range。分成两张表是为了让「某个
-# 名字按哪种形态读」由登记范围派生，而不是在读取端点再抄一份白名单。
+# 产物登记范围（D2 spec §10、D3 #222 §7、D6 §7）：登记表同时决定两件事——「哪些
+# 名字算产物」与「某个名字按哪种形态读」。分成两张表各写一份时，改一处漏一处就会
+# 让「按什么形态读」与「算不算产物」各说各话。
 # 产物名字是契约的一部分：登记表、执行器写盘与用例都从这些常量取，不各写一份字面量
 # （「守卫形态要从常量派生」——字面重抄在改名时会静默指到旧名字）。
 ARTIFACT_VIDEO_PROMPT = "video-prompt.md"
@@ -76,23 +76,75 @@ ARTIFACT_LAST_FRAME_PROMPT = "last-frame-prompt.md"
 ARTIFACT_SUMMARY_MARKDOWN = "summary-zh.md"
 ARTIFACT_SUMMARY_JSON = "summary-zh.json"
 
-_ARTIFACT_KINDS = {
-    ARTIFACT_VIDEO_PROMPT: "video_prompt",
-    ARTIFACT_SCRIPT: "script",
-    ARTIFACT_SHOT_TABLE: "shot_table",
-    ARTIFACT_FIRST_FRAME_PROMPT: "frame_prompt",
-    ARTIFACT_LAST_FRAME_PROMPT: "frame_prompt",
-    ARTIFACT_SUMMARY_MARKDOWN: "summary_markdown",
-    ARTIFACT_SUMMARY_JSON: "summary_json",
+
+@dataclass(frozen=True)
+class ArtifactSpec:
+    """一种产物的形态：``kind`` 进契约，``media_type`` 为空表示按文本读。"""
+
+    kind: str
+    media_type: str | None = None
+
+
+# 固定名表：一个名字一条记录，「算不算产物」与「按什么形态读」从同一条取。
+_FIXED_ARTIFACT_SPECS: dict[str, ArtifactSpec] = {
+    ARTIFACT_VIDEO_PROMPT: ArtifactSpec("video_prompt"),
+    ARTIFACT_SCRIPT: ArtifactSpec("script"),
+    ARTIFACT_SHOT_TABLE: ArtifactSpec("shot_table"),
+    ARTIFACT_FIRST_FRAME_PROMPT: ArtifactSpec("frame_prompt"),
+    ARTIFACT_LAST_FRAME_PROMPT: ArtifactSpec("frame_prompt"),
+    ARTIFACT_SUMMARY_MARKDOWN: ArtifactSpec("summary_markdown"),
+    ARTIFACT_SUMMARY_JSON: ArtifactSpec("summary_json"),
+    # 媒体产物：名字 → Content-Type。目前只有成片；列表里的 kind 仍是 ``video``。
+    "final.mp4": ArtifactSpec("video", "video/mp4"),
 }
-# 媒体产物：名字 → Content-Type。目前只有成片；列表里的 kind 仍是 ``video``。
-ARTIFACT_MEDIA_TYPES = {
-    "final.mp4": "video/mp4",
-}
-# 「哪些名字算产物」的唯一来源：清单扫描、登记守卫、内容读取都从它派生。
-_KNOWN_ARTIFACTS = {
-    **_ARTIFACT_KINDS,
-    **{name: "video" for name in ARTIFACT_MEDIA_TYPES},
+
+# 模式产物（D6 §7）：每段一份 ``segments/shot-NN.md``。序号两位、与 CLI 的
+# ``f"shot-{position:02d}.md"`` 同名同形；``segments/`` 下的其他文件
+# （``plan.json``、``shot-ledger.jsonl``）不在这条模式里，不是产物。
+SEGMENT_PROMPT_KIND = "segment_prompt"
+SEGMENTS_DIRNAME = "segments"
+_SEGMENT_PROMPT_FILENAME = r"shot-\d{2}\.md"
+_SEGMENT_PROMPT_SPEC = ArtifactSpec(SEGMENT_PROMPT_KIND)
+# 目录名与文件名模式分开存：解析（名字 → 规格）与扫描（去哪个目录找）都从这一份
+# 取；写死在两处时，改一处就会让「清单里有、读取说没有」。
+_PATTERN_ARTIFACT_SPECS: tuple[tuple[str, str, ArtifactSpec], ...] = (
+    (SEGMENTS_DIRNAME, _SEGMENT_PROMPT_FILENAME, _SEGMENT_PROMPT_SPEC),
+)
+
+
+def artifact_spec(name: str) -> ArtifactSpec | None:
+    """``name`` → 产物规格；不在登记范围内返回 ``None``。
+
+    「算不算产物」「按文本还是媒体读」「清单从哪来」三个判断都走这一个函数，
+    调用点不再各抄一份白名单字面量。
+    """
+    fixed = _FIXED_ARTIFACT_SPECS.get(name)
+    if fixed is not None:
+        return fixed
+    directory, _, filename = name.rpartition("/")
+    for dirname, filename_pattern, spec in _PATTERN_ARTIFACT_SPECS:
+        if directory == dirname and re.fullmatch(filename_pattern, filename):
+            return spec
+    return None
+
+
+def _text_spec(name: str) -> ArtifactSpec | None:
+    """文本形态的规格；媒体产物与登记范围外的名字都返回 ``None``。"""
+    spec = artifact_spec(name)
+    return spec if spec is not None and spec.media_type is None else None
+
+
+def _media_spec(name: str) -> ArtifactSpec | None:
+    """媒体形态的规格；文本产物与登记范围外的名字都返回 ``None``。"""
+    spec = artifact_spec(name)
+    return spec if spec is not None and spec.media_type is not None else None
+
+
+# 媒体表保留给路由的契约声明（``ARTIFACT_MEDIA_TYPES.values()``）：数据仍只有上面
+# 那一张表，这里只是按形态筛一遍。
+ARTIFACT_MEDIA_TYPES: dict[str, str] = {
+    name: spec.media_type for name, spec in _FIXED_ARTIFACT_SPECS.items()
+    if spec.media_type is not None
 }
 
 # 文本内容读取的上限（spec §10）：1 MiB，超出回 413 artifact_too_large。
@@ -895,10 +947,13 @@ def _brief_out(brief: Brief) -> BriefOut:
 
 
 def _artifact_info(session_id: str, name: str, path: Path) -> ArtifactInfo:
+    spec = artifact_spec(name)
+    if spec is None:
+        raise ArtifactNotFound(f"不是登记范围内的产物名：{name!r}")
     stat = path.stat()
     return ArtifactInfo(
         artifact_id=f"{session_id}/{name}",
-        kind=_KNOWN_ARTIFACTS[name],
+        kind=spec.kind,
         name=name,
         bytes=stat.st_size,
         created_at=datetime.fromtimestamp(
@@ -915,15 +970,20 @@ def _is_within(path: Path, root: Path) -> bool:
 
 
 def _split_artifact_id(artifact_id: str) -> tuple[str, str]:
-    """``<会话标识>/<文件名>`` → 两段；缺会话段或文件名一律 404。
+    """``<会话标识>/<产物名>`` → 两段；按登记表**最长合法后缀**切分。
 
-    会话标识本身可以含斜杠，所以按**最后一个**斜杠切；越界与不存在的判定在各自的
-    ``_resolve`` / ``_artifact_path`` 里，不在这里替它们下结论。
+    产物名可以带斜杠（``segments/shot-01.md``），会话标识本身也可以
+    （``<主题>/GEN00N``），所以不能按最后一个斜杠切：从最靠左的斜杠试起，第一个
+    能让后半段成为合法产物名的位置就是切点（此时后缀最长）。越界与不存在的判定
+    在各自的 ``_resolve`` / ``_artifact_path`` 里，不在这里替它们下结论。
     """
-    session_id, _, name = artifact_id.rpartition("/")
-    if not session_id or not name:
-        raise ArtifactNotFound(f"产物标识必须形如 <会话标识>/<文件名>：{artifact_id}")
-    return session_id, name
+    for index, char in enumerate(artifact_id):
+        if char != "/":
+            continue
+        session_id, name = artifact_id[:index], artifact_id[index + 1:]
+        if session_id and artifact_spec(name) is not None:
+            return session_id, name
+    raise ArtifactNotFound(f"产物标识必须形如 <会话标识>/<产物名>：{artifact_id}")
 
 
 def _unlink_quietly(path: Path) -> None:
@@ -934,13 +994,32 @@ def _unlink_quietly(path: Path) -> None:
         logger.warning("删除素材临时文件失败：%s（%s）", path, exc)
 
 
+def _candidate_artifact_names(directory: Path) -> list[str]:
+    """会话目录下**名字合法**的产物名（相对路径形态）：固定名 + 模式目录现扫。
+
+    模式目录取自 ``_PATTERN_ARTIFACT_SPECS``，与解析函数同一份数据——目录或模式
+    写死在两处时，改一处就会让清单与读取各说各话。扫描到的候选名仍要过
+    ``artifact_spec``：``segments/plan.json`` 这种同目录下的文件不算产物。
+    """
+    names = set(_FIXED_ARTIFACT_SPECS)
+    for dirname, _filename_pattern, _spec in _PATTERN_ARTIFACT_SPECS:
+        sub = directory / dirname
+        if not sub.is_dir():
+            continue
+        for entry in sub.rglob("*"):
+            name = entry.relative_to(directory).as_posix()
+            if artifact_spec(name) is not None:
+                names.add(name)
+    return sorted(names)
+
+
 def _artifacts(session_id: str, directory: Path, root: Path) -> list[ArtifactInfo]:
-    """会话目录下已知文件名的产物元数据；不读内容（内容读取归 #220）。
+    """会话目录下登记范围内的产物元数据；不读内容（内容读取归 #220）。
 
     解析后不在登记根之下的条目不出现：名字合法不代表落点在根内（符号链接）。
     """
     found: list[ArtifactInfo] = []
-    for name in sorted(_KNOWN_ARTIFACTS):
+    for name in _candidate_artifact_names(directory):
         path = (directory / name).resolve()
         if not path.is_file() or not _is_within(path, root):
             continue
@@ -1416,8 +1495,8 @@ class WorkbenchSessionStore:
         先落盘再登记——事件说的必须是已经发生的事实，反过来会让订阅者拿到一个
         还不存在的产物标识。
         """
-        if name not in _ARTIFACT_KINDS:
-            raise ValueError(f"不是文本产物名：{name!r}；可用：{sorted(_ARTIFACT_KINDS)}")
+        if _text_spec(name) is None:
+            raise ValueError(f"不是文本产物名：{name!r}")
         directory = self.session_directory(session_id)
         atomic_write_text(directory / name, text)
         return self.register_artifact(session_id, name, job_id=job_id)
@@ -1429,7 +1508,7 @@ class WorkbenchSessionStore:
         产物清单本身从目录现扫（``_artifacts``），事件是给订阅者的「它出现了」信号；
         重复产出同名文件是真实的第二次创建，每次都发，不在登记表里去重。
         """
-        if name not in _KNOWN_ARTIFACTS:
+        if artifact_spec(name) is None:
             raise ArtifactNotFound(f"不是登记范围内的产物名：{name!r}")
         directory = self.session_directory(session_id)
         path = self._artifact_path(directory, name)
@@ -1449,7 +1528,8 @@ class WorkbenchSessionStore:
         是否真有文件（spec §12）。
         """
         session_id, name = _split_artifact_id(artifact_id)
-        if name not in _ARTIFACT_KINDS:
+        # 切分已保证名字在登记范围内；这里排除的是媒体形态（成片不按文本读）。
+        if _text_spec(name) is None:
             raise ArtifactNotFound(f"没有可读的文本产物：{artifact_id}")
         try:
             directory = self.session_directory(session_id)
@@ -1469,21 +1549,17 @@ class WorkbenchSessionStore:
     def is_media_artifact(self, artifact_id: str) -> bool:
         """该名字按**媒体**形态读吗（False ⇒ 纯文本 + 1 MiB 上限）。
 
-        形态由登记表派生（文本表与媒体表各一张），端点不再抄第二份白名单
-        （#222 §7）。名字不在任何一张表里就 404，与读内容同码。
+        形态由登记表派生，端点不再抄第二份白名单（#222 §7）。名字不在登记范围
+        内就 404，与读内容同码。
         """
         _session_id, name = _split_artifact_id(artifact_id)
-        if name in ARTIFACT_MEDIA_TYPES:
-            return True
-        if name in _ARTIFACT_KINDS:
-            return False
-        raise ArtifactNotFound(f"没有可读的产物：{artifact_id}")
+        return _media_spec(name) is not None
 
     def resolve_artifact_media(self, artifact_id: str) -> MediaResource:
         """媒体产物的可读字节（#222 §7）：与素材共用同一套 Range 口径。"""
         session_id, name = _split_artifact_id(artifact_id)
-        media_type = ARTIFACT_MEDIA_TYPES.get(name)
-        if media_type is None:
+        spec = _media_spec(name)
+        if spec is None:
             raise ArtifactNotFound(f"没有可读的媒体产物：{artifact_id}")
         try:
             directory = self.session_directory(session_id)
@@ -1495,7 +1571,7 @@ class WorkbenchSessionStore:
         stat = path.stat()
         return MediaResource(
             path=path,
-            media_type=media_type,
+            media_type=cast(str, spec.media_type),
             size=stat.st_size,
             mtime=stat.st_mtime,
             # 不哈希成片：一次请求读几百 MiB 换个缓存标识不值，mtime+大小够本机用。
@@ -1506,8 +1582,9 @@ class WorkbenchSessionStore:
     def _artifact_path(self, directory: Path, name: str) -> Path | None:
         """解析成真实文件并确认仍在登记根之下；符号链接逃逸返回 ``None``。
 
-        名字白名单已经排除了 ``/`` 与 ``..``，这里再解析一次是因为**文件本身**可能
-        是指向根外的符号链接——名字合法不代表落点在根内。
+        登记表里的名字要么是固定名，要么是 ``segments/shot-NN.md``——都不含
+        ``..``；这里再解析一次是因为**文件本身**可能是指向根外的符号链接，
+        名字合法不代表落点在根内。
         """
         path = (directory / name).resolve()
         if not path.is_file() or not _is_within(path, self.root.resolve()):

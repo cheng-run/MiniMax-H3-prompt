@@ -49,10 +49,11 @@
 - 取消是协作式：只在节点边界生效，job 记 `cancelled_at_node`；**不要承诺立即停止**。
 - 启动对账只把 `running` 收成 `interrupted`，**不自动续跑**。
 - 阶段 2 中断后再 `advance`：按 `stage1_review` 的决议事实续跑阶段 2（`_resume_step`），不回人工闸门。
-- 产物 content **按登记表的形态分支**（#225）：文本产物（登记表现有 7 件，名字由
-  登记表派生）共用纯文本 + 1 MiB 上限（超出 413）；成片 `final.mp4` 给字节 + 单段
-  Range；两者都答 `HEAD`（同头、无体）。哪几个名字能读由 `workbench_store` 的登记表
-  派生，端点里不抄第二份白名单。
+- 产物 content **按登记表的形态分支**（#225）：文本产物（登记表＝7 件固定名 + 一条
+  模式 `segments/shot-NN.md` → kind `segment_prompt`，D6 §7）共用纯文本 + 1 MiB 上限
+  （超出 413）；成片 `final.mp4` 给字节 + 单段
+  Range；两者都答 `HEAD`（同头、无体）。「算不算产物」「按什么形态读」「清单从哪来」
+  三个判断只有一个入口 `workbench_store.artifact_spec`，端点与清单都不抄第二份白名单。
 - **媒体读取**（#225 / D3-3）：`GET` 与 `HEAD` 分开注册——HEAD 的**成功**响应在契约里
   不声明响应体（错误响应两条路径同形，都是 problem+json）；
   固定带 `Accept-Ranges: bytes`、`ETag`、`Last-Modified`、`Content-Length`、`Content-Type`

@@ -145,6 +145,23 @@ describe('产物分区', () => {
     )
   })
 
+  it('段提示词（segment_prompt）有分组有标签，不许静默消失', async () => {
+    // D6-AC8：新 kind 若不在分组表里，`artifactGroup` 返回 null，整件产物从界面上消失。
+    server.use(
+      http.get(/\/api\/v1\/artifacts\/.+\/content$/, () => HttpResponse.text('第 1 段：雨夜街口')),
+    )
+    const { wrapper } = await mountTab([
+      ...ARTIFACTS,
+      makeArtifact('segments/shot-01.md', 'segment_prompt'),
+    ])
+
+    await vi.waitFor(() => {
+      expect(wrapper.text()).toContain('第 1 段：雨夜街口')
+    })
+    expect(wrapper.get('[data-group="deliverable"]').text()).toContain('段提示词')
+    expect(wrapper.find('[data-copy="segments/shot-01.md"]').exists()).toBe(true)
+  })
+
   it('没有产物时显示空态', async () => {
     const { wrapper } = await mountTab([])
     expect(wrapper.text()).toContain('暂无产物')

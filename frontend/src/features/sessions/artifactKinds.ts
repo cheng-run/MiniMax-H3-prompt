@@ -2,13 +2,20 @@ import type { ArtifactInfo } from '@/api/client'
 
 // 产物分组与中文标签的**唯一来源**（ADR 0034 / workbench.md 不变量）。
 //
-// 分组按契约里的 `ArtifactInfo.kind` 派生（值见 `workbench_store._ARTIFACT_KINDS`），
+// 分组按契约里的 `ArtifactInfo.kind` 派生（值见 `workbench_store.artifact_spec`），
 // 不在组件里抄文件名白名单：后端登记表改名或新增产物时，前端按 kind 自动跟上；
 // 按名字枚举的旧写法会在改名后静默少显示一件。
 export type ArtifactGroup = 'intermediate' | 'deliverable' | 'media'
 
 const INTERMEDIATE_KINDS = new Set(['script', 'shot_table', 'frame_prompt'])
-const DELIVERABLE_KINDS = new Set(['video_prompt', 'summary_markdown', 'summary_json'])
+// `segment_prompt` 是逐段写出来的提示词（D6 §7）：用户要拿单段去跑，跟最终提示词
+// 一样是可拿走的成品，所以归交付文本；漏登记会让它整件从界面上消失。
+const DELIVERABLE_KINDS = new Set([
+  'video_prompt',
+  'segment_prompt',
+  'summary_markdown',
+  'summary_json',
+])
 const MEDIA_KINDS = new Set(['video', 'audio'])
 
 export function artifactGroup(artifact: ArtifactInfo): ArtifactGroup | null {
@@ -30,6 +37,7 @@ const KIND_ORDER = [
   'shot_table',
   'frame_prompt',
   'video_prompt',
+  'segment_prompt',
   'summary_markdown',
   'summary_json',
   'video',
@@ -48,6 +56,7 @@ const KIND_LABELS: Record<string, string> = {
   shot_table: '分镜表',
   frame_prompt: '帧提示词',
   video_prompt: '最终提示词',
+  segment_prompt: '段提示词',
   summary_markdown: '中文摘要',
   summary_json: '摘要数据（JSON）',
 }

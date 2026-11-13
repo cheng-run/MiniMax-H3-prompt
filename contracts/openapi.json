@@ -982,7 +982,7 @@
   "paths": {
     "/api/v1/artifacts/{artifact_id}/content": {
       "get": {
-        "description": "按登记形态读产物（spec §10、#222 §7）。\n\n文本产物回纯文本（1 MiB 上限），媒体产物回字节并支持单段 Range——形态来自\n``workbench_store`` 的登记表，这里不认文件名。``artifact_id`` 是\n``<session_id>/<文件名>``：会话标识本身含斜杠，所以 ``:path`` 沿用会话路由的\n口径，最后一段才是文件名。越界与不存在一律 404 ``artifact_not_found``。",
+        "description": "按登记形态读产物（spec §10、#222 §7）。\n\n文本产物回纯文本（1 MiB 上限），媒体产物回字节并支持单段 Range——形态来自\n``workbench_store`` 的登记表，这里不认文件名。``artifact_id`` 是\n``<session_id>/<产物名>``：两边都可能含斜杠（``<主题>/GEN00N`` +\n``segments/shot-01.md``），切分按登记表的最长合法后缀走，``:path`` 沿用会话\n路由的口径。越界与不存在一律 404 ``artifact_not_found``。",
         "operationId": "get_artifact_content_api_v1_artifacts__artifact_id__content_get",
         "parameters": [
           {

@@ -63,6 +63,25 @@ MUTATIONS: tuple[Mutation, ...] = (
         "文本读取上限失守＝大产物把内存与响应体一起拖爆，413 专用码永不出现",
     ),
     Mutation(
+        "artifact_segment_pattern_off",
+        "src/minimax_h3_prompt/workbench_store.py",
+        '_SEGMENT_PROMPT_FILENAME = r"shot-\\d{2}\\.md"',
+        '_SEGMENT_PROMPT_FILENAME = r"shot-\\d{2}\\.txt"',
+        ("tests/test_artifact_registry.py::test_segment_prompt_is_listed_and_readable",),
+        "模式失效＝段提示词既不出现在清单里也读不出来，#245 的整条链静默归零",
+    ),
+    Mutation(
+        "artifact_scan_skips_the_resolver",
+        "src/minimax_h3_prompt/workbench_store.py",
+        "            if artifact_spec(name) is not None:\n"
+        "                names.add(name)",
+        "            names.add(name)",
+        ("tests/test_artifact_registry.py::"
+         "test_files_outside_the_pattern_are_neither_listed_nor_readable",),
+        "清单扫描绕开解析函数＝segments/ 下 plan.json、shot-ledger.jsonl 一并当成产物，"
+        "「算不算产物」出现第二份判据",
+    ),
+    Mutation(
         "session_detail_leaks_stage_state",
         "src/minimax_h3_prompt/workbench_store.py",
         "    artifacts: list[ArtifactInfo] = Field(default_factory=list)\n"

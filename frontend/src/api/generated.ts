@@ -12,8 +12,9 @@ export interface paths {
          *
          *     文本产物回纯文本（1 MiB 上限），媒体产物回字节并支持单段 Range——形态来自
          *     ``workbench_store`` 的登记表，这里不认文件名。``artifact_id`` 是
-         *     ``<session_id>/<文件名>``：会话标识本身含斜杠，所以 ``:path`` 沿用会话路由的
-         *     口径，最后一段才是文件名。越界与不存在一律 404 ``artifact_not_found``。
+         *     ``<session_id>/<产物名>``：两边都可能含斜杠（``<主题>/GEN00N`` +
+         *     ``segments/shot-01.md``），切分按登记表的最长合法后缀走，``:path`` 沿用会话
+         *     路由的口径。越界与不存在一律 404 ``artifact_not_found``。
          */
         get: operations["get_artifact_content_api_v1_artifacts__artifact_id__content_get"];
         put?: never;
