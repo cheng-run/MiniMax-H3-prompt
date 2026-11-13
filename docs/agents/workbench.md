@@ -49,6 +49,12 @@
 - 取消是协作式：只在节点边界生效，job 记 `cancelled_at_node`；**不要承诺立即停止**。
 - 启动对账只把 `running` 收成 `interrupted`，**不自动续跑**。
 - 阶段 2 中断后再 `advance`：按 `stage1_review` 的决议事实续跑阶段 2（`_resume_step`），不回人工闸门。
+- **长片的段状态住快照**（`session.segments`，D6 §10）：段号、状态、提示词产物 id 与已交
+  视频素材 id 都是快照字段，**每次段落定（通过/被拒/重建待办）立刻落盘**；事件重放不补它。
+  重启后从第一条未通过的段继续——已通过段不重跑、不重收视频，`validating` 重跑校验
+  （素材不重交），`pending` 重起写词 job，`waiting_video` 重建待办。
+- 工作台**不读也不写** CLI 的段产出账 `segments/shot-ledger.jsonl`（D6-AC12）：同一会话
+  目录曾被 CLI 跑过时，进度只以工作台自己的段状态为准。
 - 产物 content **按登记表的形态分支**（#225）：文本产物（登记表＝7 件固定名 + 一条
   模式 `segments/shot-NN.md` → kind `segment_prompt`，D6 §7）共用纯文本 + 1 MiB 上限
   （超出 413）；成片 `final.mp4` 给字节 + 单段

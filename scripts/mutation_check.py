@@ -881,6 +881,30 @@ MUTATIONS: tuple[Mutation, ...] = (
         "尾帧锚不写进 state＝第 N+1 段写词请求拿不到第 N 段尾帧，段间接不上而不报错"
         "（D6-AC4 静默失守，#246）",
     ),
+    Mutation(
+        "segment_resume_rewrites_validating",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "            if status == SEGMENT_STATUS_VALIDATING:\n"
+        "                return (SEGMENT_STEP_VALIDATE, number)\n",
+        "            if status == SEGMENT_STATUS_VALIDATING:\n"
+        "                return (SEGMENT_STEP_WRITE, number)\n",
+        ("tests/test_api_segment_recovery.py"
+         "::test_killed_validation_resumes_after_interrupted_reconcile",),
+        "重启把「已交视频、待校验」的段当成没写过＝重试丢掉用户交的素材、要求重交"
+        "（D6-AC11 断点续跑失守，#249）",
+    ),
+    Mutation(
+        "segment_resume_skips_unwritten",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "            if status == SEGMENT_STATUS_PENDING:\n"
+        "                return (SEGMENT_STEP_WRITE, number)\n",
+        "            if status == SEGMENT_STATUS_PENDING:\n"
+        "                return (SEGMENT_STEP_DONE, number)\n",
+        ("tests/test_api_segment_recovery.py"
+         "::test_killed_segment_write_restarts_that_write_only",),
+        "重启不给「未写词」的段重起写词 job＝重试空转收尾、会话卡在没有待办的半截"
+        "（spec §10 恢复失守，#249）",
+    ),
 )
 
 
