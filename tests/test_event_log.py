@@ -105,6 +105,33 @@ def test_read_returns_only_events_after_the_cursor(tmp_path):
     assert log.read(after_seq=3) == []
 
 
+def test_latest_of_type_is_none_when_the_cursor_has_no_such_event(tmp_path):
+    """游标之前没有这种事件：调用方（SSE 补发）不补任何东西，不是编一条空的。"""
+    directory = _directory(tmp_path)
+    log = _log(directory)
+    log.append([EventDraft("session.created", {"status": "created"})])
+
+    assert log.latest_of_type("job.progress", up_to_seq=1) is None
+
+
+def test_latest_of_type_picks_the_last_match_at_or_before_the_cursor(tmp_path):
+    """刷新后要恢复的是**游标那一刻**的节点，不是更早的、也不是游标之后的。"""
+    directory = _directory(tmp_path)
+    log = _log(directory)
+    log.append([
+        EventDraft("job.progress",
+                   {"stage": "stage1", "node": "producer", "status": "started"}),
+        EventDraft("job.progress",
+                   {"stage": "stage1", "node": "storyboard", "status": "started"}),
+        EventDraft("action_item.created", {"item_id": "i1", "kind": "stage1_review"}),
+    ])
+
+    assert log.latest_of_type("job.progress", up_to_seq=3).seq == 2
+    assert log.latest_of_type("job.progress", up_to_seq=2).seq == 2
+    assert log.latest_of_type("job.progress", up_to_seq=1).seq == 1
+    assert log.latest_of_type("job.progress", up_to_seq=0) is None
+
+
 # ---------------------------------------------------------------------------
 # 闭合类型（spec §8）
 # ---------------------------------------------------------------------------

@@ -190,6 +190,29 @@ describe('SessionDetailView 运行控制（spec §6.3）', () => {
     expect(wrapper.findAll('button').some((b) => b.text() === '取消')).toBe(false)
   })
 
+  it('刷新/重连后仍显示当前阶段与节点：服务端补发的旧进度也生效（#271）', async () => {
+    // 刷新时快照序号 4 就是订阅游标；游标之后没有事件，节点只能来自服务端补发的
+    // 那条 seq <= 4 的 job.progress。
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({ status: 'running', current_job: makeJob(), last_event_seq: 4 }),
+        ),
+      ),
+    )
+    const stream = makeStreamFetch()
+    const { wrapper } = await mountDetail(stream)
+
+    expect(wrapper.text()).toContain('等待进度…')
+
+    stream.push(
+      'id: 3\nevent: job.progress\ndata: {"stage":"stage1","node":"storyboard","status":"started"}\n\n',
+    )
+    await settle()
+    expect(wrapper.text()).toContain('阶段 1 · storyboard')
+    expect(wrapper.text()).not.toContain('等待进度…')
+  })
+
   it('失败/取消/中断的会话显示「重试」，点击即再 POST /jobs 并回到运行态', async () => {
     let detail = makeDetail({ status: 'failed' })
     let starts = 0

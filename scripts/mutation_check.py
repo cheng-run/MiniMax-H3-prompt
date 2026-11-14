@@ -997,8 +997,32 @@ MUTATIONS: tuple[Mutation, ...] = (
         "    if any(marker in head for marker in _NO_CONFLICT_MARKERS):\n"
         "        return \"\"\n",
         ("tests/test_segment_validation.py::test_parse_end_hook_reply",),
-        "否定词后判＝「未达到」里含「达到」，不合格的尾帧被判成达到，"
-        "语义闸门永不让用户换视频（#246）",
+        "无冲突类后判＝「无冲突」里含「冲突」，一致的尾帧被读成冲突，"
+        "每段都挂一条假提示（#270；ADR 0039 起语义检查只提示、不阻断）",
+    ),
+    Mutation(
+        "event_log_latest_of_type_takes_the_first_match",
+        "src/minimax_h3_prompt/workbench_store.py",
+        "        return matches[-1] if matches else None\n",
+        "        return matches[0] if matches else None\n",
+        ("tests/test_event_log.py"
+         "::test_latest_of_type_picks_the_last_match_at_or_before_the_cursor",),
+        "补发「游标之前最近一条进度」取成最早一条＝刷新后节点停在旧节点（#271）",
+    ),
+    Mutation(
+        "segment_out_legacy_key_ignored",
+        "src/minimax_h3_prompt/workbench_store.py",
+        '        if isinstance(data, dict) and "semantic_warning" not in data:\n'
+        "            legacy = semantic_warning_of(data)\n"
+        "            if legacy:\n"
+        '                data = {**data, "semantic_warning": legacy}\n',
+        '        if isinstance(data, dict) and "semantic_warning" not in data:\n'
+        "            legacy = semantic_warning_of(data)\n"
+        "            if False:\n"
+        '                data = {**data, "semantic_warning": legacy}\n',
+        ("tests/test_workbench_store.py"
+         "::test_segment_out_reads_legacy_rejection_reason_as_semantic_warning",),
+        "旧快照的 rejection_reason 读不出来＝已有会话的语义提示整段消失、且不报错（#270）",
     ),
     Mutation(
         "config_source_assertion_always_true",

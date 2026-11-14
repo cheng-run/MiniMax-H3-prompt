@@ -52,6 +52,10 @@
   复制/下载都走 content 端点（下载是 `<a download>` + Cookie），媒体按 `kind` 通用渲染，
   不按文件名特判成片。阶段 2 成功即 `completed`，**没有交付确认闸门**（ADR 0034）。
 - **先写事件、后写快照**；快照 `last_event_seq` 落后时按 `seq > last_event_seq` 重放，重放幂等。
+- **SSE 新订阅补发两条**（#271）：先补 `seq > 游标` 的事件，再补游标之前最近一条
+  `job.progress`。刷新后快照序号就是游标、节点只住在旧事件里，没有第二条就只剩
+  「等待进度…」。补发的旧事件序号小于游标：客户端 `lastEventId` 只升不降（下限是快照游标），
+  节点/stage 同样只认更新的进度；`resync` 路径（游标超出尾号）一条都不补。
 - 每会话**单写入者**：任何「读 → 改 → 写」都走 `WorkbenchSessionStore.mutate`（锁在存储层，别在调用方自己拼）。
 - `session_id` = `sessions_root` 下的相对路径；`_resolve` 拒绝绝对路径、`..` 与根外路径。
 - legacy（`wizard_session.v1` 或无 `session_id`）只读：可列/可查/可列产物，起 job 回 409 `session_legacy`。

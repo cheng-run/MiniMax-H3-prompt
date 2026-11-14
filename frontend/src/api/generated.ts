@@ -2358,7 +2358,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description 事件流（SSE）。快照优先：先 GET 详情拿快照，再订阅本流；断线重连带 Last-Event-ID（或 ?last_event_id=）补发序号更大的事件；序号超出事件流尾号时响应头带 X-Resync-Required: true，要求客户端重取快照。每 15 秒一条心跳注释行；同一会话允许多条并发订阅。 */
+            /** @description 事件流（SSE）。快照优先：先 GET 详情拿快照，再订阅本流；断线重连带 Last-Event-ID（或 ?last_event_id=）时先补发序号更大的事件，再补发一条 游标之前最近的 job.progress（刷新后仍能显示当前节点）；序号超出事件流尾号时响应头带 X-Resync-Required: true，要求客户端重取快照。每 15 秒一条心跳注释行；同一会话允许多条并发订阅。 */
             200: {
                 headers: {
                     /** @description 缺口补不上，需要重新 GET 详情拿快照 */

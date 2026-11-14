@@ -521,14 +521,29 @@ def _parse_cursor(header_value: str | None, query_value: str | None) -> int:
 async def _event_stream(log: EventLog, cursor: int, tail: int) -> AsyncIterator[str]:
     """从 ``cursor`` 之后补发，然后持续跟读；空闲时发心跳注释行。
 
+    补发分两步（#271）：先发 ``seq > cursor`` 的事件，再发 ``cursor`` 之前最近一条
+    ``job.progress``——刷新后快照序号就是游标，节点只在旧事件里，不回放它就只剩
+    「等待进度…」。旧事件的 ``id`` 小于游标，客户端的 ``lastEventId`` 只升不降。
+
     读文件走 ``asyncio.to_thread``：长任务本身也在线程池里跑，事件循环必须一直是空的，
     否则详情查询与别的订阅会被拖着（spec §6）。
     """
-    if cursor > tail:
+    resync = cursor > tail
+    if resync:
         # 缺口补不上（事件文件被清掉、换了机器）：注释行给人看，
         # ``X-Resync-Required`` 响应头给程序看——注释行浏览器拿不到，光有它等于没信号。
+        # 此时一切旧事件都不可信，连「游标那一刻的节点」也不补。
         yield ": resync required：事件序号超出事件流尾号，请重新 GET 详情拿快照\n\n"
     last = cursor
+    events = await asyncio.to_thread(log.read, after_seq=last)
+    for event in events:
+        yield event.sse_frame()
+        last = event.seq
+    if not resync:
+        previous = await asyncio.to_thread(
+            log.latest_of_type, "job.progress", up_to_seq=cursor)
+        if previous is not None:
+            yield previous.sse_frame()
     last_ping = time.monotonic()
     while True:
         events = await asyncio.to_thread(log.read, after_seq=last)
@@ -554,7 +569,8 @@ async def _event_stream(log: EventLog, cursor: int, tail: int) -> AsyncIterator[
         200: {
             "description": (
                 "事件流（SSE）。快照优先：先 GET 详情拿快照，再订阅本流；断线重连带 "
-                "Last-Event-ID（或 ?last_event_id=）补发序号更大的事件；序号超出事件流"
+                "Last-Event-ID（或 ?last_event_id=）时先补发序号更大的事件，再补发一条 "
+                "游标之前最近的 job.progress（刷新后仍能显示当前节点）；序号超出事件流"
                 "尾号时响应头带 X-Resync-Required: true，要求客户端重取快照。"
                 "每 15 秒一条心跳注释行；同一会话允许多条并发订阅。"),
             "content": {"text/event-stream": {"schema": {"type": "string"}}},

@@ -330,20 +330,95 @@ def test_sse_frames_carry_id_type_and_json_data(workbench):
     assert json.loads(frame["data"]) == _events(root, session["session_id"])[0]
 
 
-def test_sse_replays_only_events_after_last_event_id(workbench):
+def test_sse_replays_events_after_last_event_id(workbench):
     app, _model, root = workbench
     with workbench_client(app) as client:
         session = _create_session(client)
         started = client.post(f"/api/v1/sessions/{session['session_id']}/jobs").json()
         _wait_job(client, session["session_id"], started["job_id"])
-        total = len(_events(root, session["session_id"]))
+        events = _events(root, session["session_id"])
+        total = len(events)
+        # 新契约（#271）：游标之后的事件补完之后，再补一条游标之前最近的 job.progress。
+        prior = [event for event in events
+                 if event["type"] == "job.progress" and event["seq"] <= 3][-1]
 
         frames, _comments, _headers = _collect(
             client, _events_url(session["session_id"]), headers={"Last-Event-ID": "3"},
-            until=_enough(total - 3))
+            until=_enough(total - 3 + 1))
 
     ids = [int(frame["id"]) for frame in frames]
-    assert ids == list(range(4, total + 1))
+    assert ids == list(range(4, total + 1)) + [prior["seq"]]
+
+
+def test_sse_replays_the_latest_progress_at_or_before_the_cursor(workbench, monkeypatch):
+    """刷新：快照序号就是游标，之后没有事件——节点只能靠补发的那一条进度恢复。"""
+    monkeypatch.setattr(sessions_route, "SSE_HEARTBEAT_SECONDS", 0.05)
+    app, _model, root = workbench
+    with workbench_client(app) as client:
+        session = _create_session(client)
+        started = client.post(f"/api/v1/sessions/{session['session_id']}/jobs").json()
+        _wait_job(client, session["session_id"], started["job_id"])
+        events = _events(root, session["session_id"])
+        cursor = client.get(
+            f"/api/v1/sessions/{session['session_id']}").json()["last_event_seq"]
+
+        frames, comments, _headers = _collect(
+            client, _events_url(session["session_id"]),
+            headers={"Last-Event-ID": str(cursor)},
+            until=lambda _frames, comments: bool(comments))
+
+    # 等到一次心跳才收尾：这期间只能有那一条补发的进度，没有别的事件重放。
+    assert comments
+    latest = [event for event in events
+              if event["type"] == "job.progress" and event["seq"] <= cursor][-1]
+    assert len(frames) == 1
+    assert frames[0]["event"] == "job.progress"
+    assert int(frames[0]["id"]) == latest["seq"]
+    assert json.loads(frames[0]["data"]) == latest
+
+
+def test_sse_replays_prior_events_before_the_prior_progress(workbench):
+    """顺序是契约：先 ``seq > 游标`` 的事件，再 ``seq <= 游标`` 的那条进度。"""
+    app, _model, root = workbench
+    with workbench_client(app) as client:
+        session = _create_session(client)
+    EventLog(root / Path(session["session_id"]), session["session_id"]).append([
+        EventDraft("job.progress",
+                   {"stage": "stage1", "node": "producer", "status": "started"},
+                   job_id="j1"),
+        EventDraft("job.progress",
+                   {"stage": "stage1", "node": "storyboard", "status": "started"},
+                   job_id="j1"),
+        EventDraft("action_item.created",
+                   {"item_id": "i1", "kind": "stage1_review"}, job_id="j1"),
+    ])
+
+    with workbench_client(app) as client:
+        frames, _comments, _headers = _collect(
+            client, _events_url(session["session_id"]), headers={"Last-Event-ID": "3"},
+            until=_enough(2))
+
+    assert [int(frame["id"]) for frame in frames] == [4, 3]
+    assert frames[0]["event"] == "action_item.created"
+    assert frames[1]["event"] == "job.progress"
+    # 补的是游标那一刻的节点（storyboard），不是更早的 producer。
+    assert json.loads(frames[1]["data"])["payload"]["node"] == "storyboard"
+
+
+def test_sse_does_not_replay_a_progress_that_does_not_exist_before_the_cursor(
+        workbench, monkeypatch):
+    """游标之前没有 ``job.progress``：不补发——不编一条空进度出来。"""
+    monkeypatch.setattr(sessions_route, "SSE_HEARTBEAT_SECONDS", 0.05)
+    app, _model, _root = workbench
+    with workbench_client(app) as client:
+        session = _create_session(client)
+        frames, comments, _headers = _collect(
+            client, _events_url(session["session_id"]),
+            headers={"Last-Event-ID": "1"},
+            until=lambda _frames, comments: bool(comments))
+
+    assert comments
+    assert frames == []
 
 
 def test_sse_accepts_last_event_id_as_a_query_parameter(workbench):

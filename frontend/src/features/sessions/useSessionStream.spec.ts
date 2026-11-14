@@ -210,6 +210,101 @@ describe('useSessionStream（失效信号模式）', () => {
     api.stop()
   })
 
+  it('补发的旧进度恢复节点，但不让 lastEventId 回退到游标之前', async () => {
+    // 刷新场景：快照序号 9 就是游标，游标之后没有事件；服务端补发 id=7 的那条旧进度
+    // （#271），节点因此仍然可显示。
+    const stream = makeStream()
+    const { impl, queue } = makeFetch()
+    queue.push(stream.response)
+    const api = useSessionStream({
+      sessionId: () => 'sess-1',
+      snapshotCursor: () => 9,
+      onInvalidate: () => {},
+      fetchImpl: impl,
+      throttleMs: 5,
+      reconnectDelayMs: 5,
+    })
+
+    api.start()
+    await settle(5)
+    stream.push(
+      frame(7, 'job.progress', { node: 'storyboard', stage: 'stage1', status: 'started' }),
+    )
+    await settle(5)
+    expect(api.currentNode.value).toBe('storyboard')
+    expect(api.currentStage.value).toBe('stage1')
+    // 旧序号不进入游标：仍是快照的 9，下次重连不会退回去重放已经覆盖的事件。
+    expect(api.lastEventId.value).toBeNull()
+
+    stream.push(
+      frame(10, 'job.progress', { node: 'cinematographer', stage: 'stage1', status: 'started' }),
+    )
+    await settle(5)
+    expect(api.currentNode.value).toBe('cinematographer')
+    expect(api.lastEventId.value).toBe(10)
+    api.stop()
+  })
+
+  it('补发的旧进度不覆盖更新的节点（重连时游标之后已含新进度）', async () => {
+    const stream = makeStream()
+    const { impl, queue } = makeFetch()
+    queue.push(stream.response)
+    const api = useSessionStream({
+      sessionId: () => 'sess-1',
+      onInvalidate: () => {},
+      fetchImpl: impl,
+      throttleMs: 5,
+      reconnectDelayMs: 5,
+    })
+
+    api.start()
+    await settle(5)
+    stream.push(
+      frame(5, 'job.progress', { node: 'storyboard', stage: 'stage1', status: 'started' }),
+    )
+    await settle(5)
+    // 服务端在游标之后的批次之后补发一条更早的进度：序号更小，节点不回退。
+    stream.push(frame(3, 'job.progress', { node: 'producer', stage: 'stage1', status: 'started' }))
+    await settle(5)
+    expect(api.currentNode.value).toBe('storyboard')
+    expect(api.lastEventId.value).toBe(5)
+    api.stop()
+  })
+
+  it('切会话后进度序号从头算：上一个会话的高序号不吞掉新会话的低序号', async () => {
+    // 序号是**会话内**单调的。同一个订阅器实例先后接两个会话（详情页切会话时不重建
+    // 组件），拿旧会话的序号当门槛会让新会话的进度全被丢掉。
+    const first = makeStream()
+    const second = makeStream()
+    const { impl, queue } = makeFetch()
+    queue.push(first.response, second.response)
+    let session = 'sess-1'
+    const api = useSessionStream({
+      sessionId: () => session,
+      onInvalidate: () => {},
+      fetchImpl: impl,
+      throttleMs: 5,
+      reconnectDelayMs: 5,
+    })
+
+    api.start()
+    await settle(5)
+    first.push(
+      frame(40, 'job.progress', { node: 'storyboard', stage: 'stage1', status: 'started' }),
+    )
+    await settle(5)
+    expect(api.currentNode.value).toBe('storyboard')
+
+    api.stop()
+    session = 'sess-2'
+    api.start()
+    await settle(5)
+    second.push(frame(2, 'job.progress', { node: 'producer', stage: 'stage1', status: 'started' }))
+    await settle(5)
+    expect(api.currentNode.value).toBe('producer')
+    api.stop()
+  })
+
   it('stop 之后不再重连', async () => {
     const stream = makeStream()
     const { impl, calls, queue } = makeFetch()

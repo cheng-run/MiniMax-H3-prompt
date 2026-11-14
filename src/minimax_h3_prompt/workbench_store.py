@@ -956,6 +956,18 @@ class EventLog:
     def read(self, *, after_seq: int = 0) -> list[Event]:
         return [event for event in self._read_all() if event.seq > after_seq]
 
+    def latest_of_type(self, event_type: str, *, up_to_seq: int) -> Event | None:
+        """``seq <= up_to_seq`` 里最后一条指定类型的事件；没有则 ``None``。
+
+        新订阅要恢复「游标那一刻的当前节点」：只回放序号更大的事件时，刷新后
+        ``job.progress`` 全落在游标之前，前端就没有节点可显示（#271）。
+        """
+        if event_type not in EVENT_TYPES:
+            raise UnknownEventType(f"不是闭合集合里的事件类型：{event_type!r}")
+        matches = [event for event in self._read_all()
+                   if event.type == event_type and event.seq <= up_to_seq]
+        return matches[-1] if matches else None
+
     def last_seq(self) -> int:
         events = self._read_all()
         return events[-1].seq if events else 0

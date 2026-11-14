@@ -68,6 +68,8 @@ export function useSessionStream(options: SessionStreamOptions) {
 
   let running = false
   let stopped = false
+  // 已消费的最大进度序号：`job.progress` 的节点/stage 是纯展示，但同样只升不降。
+  let lastProgressSeq: number | null = null
   // 代际：切换会话 / stop 会让在途的旧连接作废。只靠 stopped 不够——stop 后紧接着
   // start 会把 stopped 重置回 false，旧请求的拒绝回调就会误以为「还可以重连」，与
   // 新连接并行跑出两条订阅（同一会话被失效两次，且旧会话的节点名会串进新会话）。
@@ -104,7 +106,10 @@ export function useSessionStream(options: SessionStreamOptions) {
       return
     }
     // 重同步之后起点可能回落：只升不降，避免把补发起点退回到快照之前的旧事件。
-    if (lastEventId.value === null || seq > lastEventId.value) {
+    // 下限是快照游标：服务端会补发游标之前最近一条进度（#271），它的序号更小，
+    // 不能因此把下次重连的起点退回去重放快照已经覆盖的事件。
+    const floor = lastEventId.value ?? options.snapshotCursor?.() ?? null
+    if (floor === null || seq > floor) {
       lastEventId.value = seq
     }
   }
@@ -112,14 +117,22 @@ export function useSessionStream(options: SessionStreamOptions) {
   function handleFrame(frame: SseFrame): void {
     applyFrameId(frame.id)
     if (frame.event === 'job.progress') {
-      const payload = parsePayload(frame.data)
-      const node = payload?.node
-      if (typeof node === 'string' && node.length > 0) {
-        currentNode.value = node
-      }
-      const stage = payload?.stage
-      if (typeof stage === 'string' && stage.length > 0) {
-        currentStage.value = stage
+      // 节点只认**更新的**进度：补发的旧进度比流上已有的旧，不能把节点写回上一跳。
+      const seq = Number(frame.id)
+      const fresh = !Number.isInteger(seq) || lastProgressSeq === null || seq > lastProgressSeq
+      if (fresh) {
+        if (Number.isInteger(seq)) {
+          lastProgressSeq = seq
+        }
+        const payload = parsePayload(frame.data)
+        const node = payload?.node
+        if (typeof node === 'string' && node.length > 0) {
+          currentNode.value = node
+        }
+        const stage = payload?.stage
+        if (typeof stage === 'string' && stage.length > 0) {
+          currentStage.value = stage
+        }
       }
     } else if (FINISH_EVENTS.has(frame.event)) {
       currentNode.value = null
@@ -264,6 +277,8 @@ export function useSessionStream(options: SessionStreamOptions) {
     running = false
     // 让在途连接与它的重连计时器失效（见 generation 的注释）。
     generation += 1
+    // 序号是**会话内**单调的：切会话时新的订阅从头算，旧会话的高序号不能当门槛。
+    lastProgressSeq = null
     abortController?.abort()
     abortController = null
     if (reconnectTimer !== null) {
