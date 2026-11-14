@@ -215,6 +215,17 @@ def route_emits_asset_prompts(brief: Brief) -> bool:
     return is_ref_mode(brief.mode)
 
 
+def route_uses_asset_ledger_fields(*, mode: str, director_mode: str) -> bool:
+    """``route_uses_asset_ledger`` 的字段形态：给只拿得到 DTO（``BriefOut``）的调用点用。
+
+    判据仍只住 ``route_uses_asset_ledger``：两处各写一份路线名单时，加一条路线就会出现
+    「上传口放行、起跑闸门不放行」这种只在一侧生效的半接线。
+    """
+    if is_director_mode(mode):
+        return director_mode == "r2v"
+    return is_ref_mode(mode)
+
+
 def route_uses_asset_ledger(brief: Brief) -> bool:
     """该 brief 的参考素材是否登记在**素材台账**里（D7 §4 / D8 §8.1）。
 
@@ -228,6 +239,7 @@ def route_uses_asset_ledger(brief: Brief) -> bool:
     """
     if is_director_mode(brief.mode):
         return brief.director_mode == "r2v"
+    return is_ref_mode(brief.mode)
     return is_ref_mode(brief.mode)
 
 

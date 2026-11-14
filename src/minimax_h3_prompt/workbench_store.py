@@ -26,7 +26,11 @@ from typing import Any, BinaryIO, Callable, Literal, Sequence, cast
 from pydantic import BaseModel, Field, PrivateAttr
 
 from . import step_machine
-from .brief_parser import Brief, route_uses_asset_ledger
+from .brief_parser import (
+    Brief,
+    route_uses_asset_ledger,
+    route_uses_asset_ledger_fields,
+)
 from .kinds import KIND_PICTURE, KINDS
 from .ref_capacity import (
     ASSET_KIND_TO_REFERENCE,
@@ -2194,7 +2198,9 @@ class WorkbenchSessionStore:
         # 素材是阶段 1 分镜表 Subject 标签的来源，一张 Picture 都没有就没有可写的闭包。
         # 判据走 ``route_uses_asset_ledger``：导演台 r2v 也用台账（它没有开场首帧待办，
         # 开场图只能来自已登记的参考素材），t2v/i2v/fl2v 不受这条约束。
-        if (route_uses_asset_ledger(detail.brief)
+        if (route_uses_asset_ledger_fields(
+                mode=detail.brief.mode,
+                director_mode=detail.brief.director_mode)
                 and not any(ref.kind == KIND_PICTURE for ref in detail.brief.refs)):
             raise AssetRequired(
                 "先上传参考素材：走素材台账的会话至少要有一张 Picture 才能起跑。")

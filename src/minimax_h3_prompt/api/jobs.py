@@ -2617,7 +2617,7 @@ class JobRunner:
 
             from .fake_pipeline import director_segment_prompt
 
-            written = []
+            written: list[Any] = []
             for segment in missing:
                 path = segment_path(directory, segment.index)
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -3953,14 +3953,15 @@ class JobRunner:
         else:
             from ..image_config import load_frame_image_model
 
-            text = write_firstframe_prompt(
+            written_text = write_firstframe_prompt(
                 segment, llm=build_chat_model(),
                 shot_table=str(session.stage_state.get("shot_table") or ""),
                 brief=session.brief, session_dir=directory,
                 model=load_frame_image_model(), state=session.stage_state)
-            if not text:
+            if not written_text:
                 raise RuntimeError(
                     f"第 {number} 段段首帧词没有产出（调用失败或回复里没有正文）")
+            text = written_text
         if cancel_event.is_set():
             raise JobCancelled(node)
         self.store.register_artifact(
