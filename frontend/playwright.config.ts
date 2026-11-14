@@ -31,7 +31,11 @@ export default defineConfig({
     { name: 'chromium', use: { ...devices['Desktop Chrome'], ...(channel ? { channel } : {}) } },
   ],
   webServer: {
-    command: 'node scripts/serve-e2e.mjs',
+    // 先 `vite build` 再起 API（retro 2026-11-14）：`serve-e2e.mjs` 托管的是
+    // `frontend/dist`，本地残留一份旧产物时，新加的 UI 元素在浏览器里根本不存在——
+    // 表现为 locator 等 5 分钟超时，而不是「构建过期」。CI 本来就先 build，
+    // 这里让本地与 CI 同一条命令。
+    command: 'npm run build && node scripts/serve-e2e.mjs',
     url: `${baseURL}/api/v1/health`,
     reuseExistingServer: false,
     timeout: 120_000,

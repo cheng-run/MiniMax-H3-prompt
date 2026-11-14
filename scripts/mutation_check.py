@@ -49,6 +49,20 @@ class Mutation:
 
 MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
+        "changed_paths_ignores_branch_commits",
+        "scripts/check.sh",
+        '    if [ -n "$base" ]; then\n'
+        '      git diff --name-only --diff-filter=ACMR "$base" HEAD -- "$@"\n'
+        '    fi',
+        '    if false; then\n'
+        '      git diff --name-only --diff-filter=ACMR "$base" HEAD -- "$@"\n'
+        '    fi',
+        ("tests/test_check_changed_paths.py"
+         "::test_committed_changes_on_a_branch_are_in_scope",),
+        "变更集漏掉已提交的改动＝提交后跑 fast 静默跳过 mypy/前端/契约守卫"
+        "（2026-11-14，#253 复审拿到假绿）",
+    ),
+    Mutation(
         "usage_off",
         "src/minimax_h3_prompt/model_factory.py",
         "        ),\n        max_retries=_LLM_MAX_RETRIES,\n        streaming=True,\n"
