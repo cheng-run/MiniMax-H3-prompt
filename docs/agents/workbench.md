@@ -43,6 +43,9 @@
 
 - 事件类型是**十种闭合集合**；加字段可以，改语义不行。`seq` 会话内从 1 严格单调，只在会话锁内分配。
   **D4 之后仍然闭合**：帧提交复用 `action_item.created`，approve 按变体分叉也不新增类型。
+- **新增人工待办 kind 必须同票接前端卡**：`SessionDetailView` 的 pending 判据 + 一个组件 + vitest。
+  没有卡的 `awaiting_human` 在浏览器里是无入口的死端——后端验收全绿、用户却无处交东西。
+  #261 的 `director_start_image` 就这样被复审抓回过一次；复审 Standards 轴按这条查。
 - **`stage_state` 不出 API**（D4）：阶段 1 的中间产物落成登记表里的产物，前端经 content 端点读正文；
   快照、待办载荷与错误体都不带 state 内部键。revise 重跑原地更新文件，产物清单是「显示哪些文件」的唯一事实。
 - **产物分区不按变体判断**：登记表里有哪几件就显示哪几件（T2VA 两件、帧链多两帧词）；
@@ -69,15 +72,16 @@
   `detail`，补齐后 `advance` 续拼，已通过段不重收。拼接口径是**路线属性**：base 裁
   第 2..N 段首帧（帧链段间共享首帧），ref 走 `STREAM_COPY_FIRST`（多参段彼此独立，
   裁首帧只会吃掉用户交的帧）。
-- 产物 content **按登记表的形态分支**（#225）：登记表共 **14 件固定名**——**11 件文本**
-  （`video-prompt.md` / `script.md` / `shot-table.md` / 两个帧提示词 / 两份摘要 /
-  `injection-card.md` / `segments/order-card.md` / `segments/ref-shot-table.md`，
-  D4 §7 / D7 §9 / §11；加交付的成片记录 `director/final-film.json`，D8 §12），共用纯
-  文本 + 1 MiB 上限（超出 413）；**3 件媒体**——成片 `final.mp4`（`video/mp4`）、
-  导演台初始包 `director/initial.mmxpack.zip` 与最终包 `director/final.mmxpack.zip`
-  （`application/zip`，即 `archive` 形态）。3 件媒体都给字节 + 单段 Range，文本与媒体
-  **共用同一个 content 端点**、都答 `HEAD`（同头、无体）：「按什么形态读」只看登记表
-  里的 media_type，端点不分叉。另有四条**模式** `segments/shot-NN.md` 与
+- 产物 content **按登记表的形态分支**（#225）：`_FIXED_ARTIFACT_SPECS` 里的固定名分
+  两态——**文本**（`video-prompt.md` / `script.md` / `shot-table.md` / 两个帧提示词 /
+  两份摘要 / `injection-card.md` / `segments/order-card.md` /
+  `segments/ref-shot-table.md`，D4 §7 / D7 §9 / §11；加交付的成片记录
+  `director/final-film.json`，D8 §12），共用纯文本 + 1 MiB 上限（超出 413）；**媒体**
+  ——成片 `final.mp4`（`video/mp4`）、导演台初始包 `director/initial.mmxpack.zip` 与
+  最终包 `director/final.mmxpack.zip`（`application/zip`，即 `archive` 形态）。媒体
+  都给字节 + 单段 Range，文本与媒体**共用同一个 content 端点**、都答 `HEAD`（同头、
+  无体）：「按什么形态读」只看登记表里的 media_type，端点不分叉。另有**模式**条目
+  `segments/shot-NN.md` 与
   `segments/segment-NN.md` → kind `segment_prompt`、
   `assets/picture-NN.md` → kind `asset_prompt`、`segments/injection-card-NN.md` → kind
   `segment_injection_card`（D6 §7 / D7 §7 / D7 §9 / D7 §10），以及导演台逐段产物。
