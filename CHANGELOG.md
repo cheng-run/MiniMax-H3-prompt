@@ -10,6 +10,18 @@
 
 ### 新增
 
+- **导演台路线进工作台（D8 / #253，#261–#266、#268）**：第三条路线 `director` 在浏览器里
+  从创建走到 `completed`。创建时选四种生成模式之一（`t2v` / `i2v` / `fl2v` / `r2v`）并一次
+  问齐打包参数；`i2v` / `fl2v` 在阶段 1 审查后收开场首帧（必填）与全片尾帧（可选，画幅不符
+  必须显式确认）；段表按**帧**显示（声明帧 → 导出帧、段类型、段间引导、给图清单），总长不可
+  达时写明差几帧。按需词在该段轮到时自动产出（切镜段首帧词、运镜与收尾段尾帧词，`ending`
+  有全片尾帧则跳过）。打包是独立 job（kind `pack`），产出 `director/initial.mmxpack.zip`
+  并在产物分区下载（新增 `archive` 形态）；每段一份可复制的操作简报（含 `runSelection`
+  只勾第 N 段与预期帧数）。段视频回交认「单段导出」与「合并导出/整片」两种形态，帧数读不出
+  明确报错而不是判 0。改一段是**级联**：作废下游通过行并删这些段的插件缓存与旧末帧派生件
+  （删前按配置根校验路径）。全部段通过后交成片与最终包，归档并补记段词差异（`rewrite` 行）。
+  `r2v` 复用多参的素材台账与循环，另出英文定义块与段内素材预算/子集（只读）。裁定见
+  ADR 0038。
 - **EXE 打包流水线（D5-6 / #241）**：`uv run python scripts/build_exe.py` 一条命令完成
   「前端构建 → PyInstaller（onedir）→ zip」，产物是 `build-exe/MiniMax-H3-prompt/` 与
   同名 zip（输出目录刻意不叫 `dist/`，不与 `frontend/dist` 互相覆盖）。冻结后可用
@@ -88,6 +100,17 @@
 
 ### 工程化
 
+- `scripts/check.sh` 的变更集改为「工作区 ∪ 本分支相对 main 的已提交改动」（retro
+  2026-11-14）：提交之后再跑 `fast` 是验收前的常见动作，旧判据只看 `git diff HEAD`，
+  mypy / 前端 / 契约三条守卫会静默跳过。#253 的复审代理因此拿到假绿，拆回 main 跑
+  `full` 才炸出三处类型错误。新守卫 `tests/test_check_changed_paths.py` 与配对变异
+  `changed_paths_ignores_branch_commits` 进快档。
+- Playwright E2E 的 webServer 先 `npm run build` 再起服务（retro 2026-11-14）：本地残留
+  旧 `frontend/dist` 时，新增 UI 在浏览器里根本不存在，表现为 locator 等 5 分钟超时而不是
+  「构建过期」。端口默认 8000、可用 `E2E_PORT` 覆盖并透传给 API 的 `H3_PORT`；
+  `reuseExistingServer` 恒 false，并行会话撞端口时当场报错而不是静默连上别人的服务。
+- `scripts/worktree.sh remove NN --branch`：删树成功后一并删除票分支（squash 合入的分支
+  不是 main 祖先，用 `-D`）。
 - 打包链路 spike（D5-1 / #236）：`scripts/build_spike_exe.py` 一条命令用 PyInstaller
   产出 `build-exe/spike/H3Spike/`（输出目录不叫 `dist`，避开 Vite 的 `frontend/dist`），
   `scripts/spike_exe.py` 是能被 CDP 连上、并会自己关窗的最小窗口程序。实测
