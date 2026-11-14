@@ -88,11 +88,16 @@ def cascade_derived_artifacts(directory: str | Path, *, from_segment: int,
 
 
 def cascade_rerun(directory: str | Path, *, from_segment: int, total_segments: int,
-                  cache_directory: str | Path, reason: str | None = None) -> CascadeResult:
+                  cache_directory: str | Path | None = None,
+                  reason: str | None = None) -> CascadeResult:
     """从第 ``from_segment`` 段起重跑：作废通过行 ＋ 删该段及其后的缓存与派生件。
 
     ``directory`` 是会话目录（账与派生件在那里），``cache_directory`` 是插件缓存目录
     （帧文件在那里）——两者分开传，因为账跟着会话走、缓存跟着 ComfyUI 的 output 走。
+    ``cache_directory=None`` 表示**定位不到缓存根**（配置缺失/路径非法）：跳过缓存
+    删除，账与派生件照常作废——缓存只用于定位（#112 起证据是用户贴回的成片视频），
+    不该让「这段通没通过」的判定失败（#265）。路径**越界**不走这条路：那会抛
+    ``ValueError``，由调用方翻成稳定错误码，且一个文件都不删。
 
     **先校验、再删、最后写作废行**：校验（越界/符号链接）必须在任何删除之前全部跑完，
     否则「删了一半抛错」既没法回滚、也没法告诉用户该重跑哪一段。删除失败则一行作废
@@ -108,16 +113,21 @@ def cascade_rerun(directory: str | Path, *, from_segment: int, total_segments: i
     """
     _validate_range(from_segment, total_segments)
     affected = affected_segments(from_segment, total_segments)
-    cache_targets = [path for segment in affected
-                     for path in cache.segment_cache_files(cache_directory, segment)]
+    cache_targets = (
+        [path for segment in affected
+         for path in cache.segment_cache_files(cache_directory, segment)]
+        if cache_directory is not None else [])
     derived_targets = cascade_derived_artifacts(
         directory, from_segment=from_segment, total_segments=total_segments)
 
     # 两个根各校验一遍，都在**删第一个文件之前**完成（见 docstring 第二段）。
-    cache.assert_files_inside(cache_directory, cache_targets, what="缓存目录")
+    if cache_directory is not None:
+        cache.assert_files_inside(cache_directory, cache_targets, what="缓存目录")
     cache.assert_files_inside(directory, derived_targets, what="会话目录")
 
-    deleted = cache.delete_files_under(cache_directory, cache_targets, what="缓存目录")
+    deleted = (
+        cache.delete_files_under(cache_directory, cache_targets, what="缓存目录")
+        if cache_directory is not None else ())
     derived_deleted = cache.delete_files_under(
         directory, derived_targets, what="会话目录")
 

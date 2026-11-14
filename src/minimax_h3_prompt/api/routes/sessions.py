@@ -839,8 +839,8 @@ async def resolve_action_item(
 _REOPEN_RESPONSES = {
     **_SESSION_ERROR_RESPONSES,
     200: {
-        "model": ActionItemOut,
-        "description": "段已回到等待交视频，返回新挂出的 segment_video 待办",
+        "description": "段已打回：ref 返回新挂出的 segment_video 待办；"
+                       "导演台级联后没有立刻可返回的待办，响应体为 null",
         "headers": {
             "Idempotency-Replayed": {
                 "description": "重放标记；首次换段不返回该头",
@@ -848,6 +848,8 @@ _REOPEN_RESPONSES = {
             },
         },
     },
+    400: {"model": ProblemDetail,
+          "description": "级联要删的路径越出配置根，一个文件都没删（problem+json）"},
     404: {"model": ProblemDetail, "description": "会话或段不存在（problem+json）"},
     409: {"model": ProblemDetail, "description": "会话/段状态冲突（problem+json）"},
 }
@@ -855,7 +857,7 @@ _REOPEN_RESPONSES = {
 
 @router.post(
     "/sessions/{session_id:path}/segments/{index}/reopen",
-    response_model=ActionItemOut,
+    response_model=ActionItemOut | None,
     responses=_REOPEN_RESPONSES,
 )
 async def reopen_segment(
@@ -864,13 +866,16 @@ async def reopen_segment(
     request: Request,
     response: Response,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-) -> ActionItemOut:
-    """把一条**已通过**的 ref 段打回等待交视频（D7 §5.5 / #258）。
+) -> ActionItemOut | None:
+    """把一条**已通过**的段打回，重建下一步（D7 §5.5 / #258；D8 §11 / #265）。
 
-    spec §12 原本写「不新增端点」，用户 2026-11-13 裁定新增这条段级端点。换段只换
-    视频：段词与段内参考素材子集不动，重交后重过双闸门。base 会话回 409
-    ``segment_resubmit_unsupported``（中间段换掉会断掉下一段的帧锚，ADR 0023）；
-    未通过的段回 409 ``segment_not_passed``。
+    spec §12 原本写「不新增端点」，用户 2026-11-13 裁定新增这条段级端点。两条新路线
+    语义不同构：ref 只换本段视频（段词与段内参考素材子集不动，重交后重过双闸门）；
+    导演台是**级联**——第 N..末段的通过行作废、插件段缓存与旧末帧派生件一并删除，
+    段状态回到 ``pending``，按需词由随后起的段 job 重生成，所以这次没有待办可返回
+    （``null``）。base 会话回 409 ``segment_resubmit_unsupported``（中间段换掉会断掉
+    下一段的帧锚，ADR 0023）；未通过的段回 409 ``segment_not_passed``；级联路径越界
+    回 400 ``cache_out_of_root`` 且一个文件都没删。
 
     状态判定与落盘在 ``JobRunner.reopen_segment`` 的会话临界区里完成，这里不先查
     一遍状态——两处判据会在并发下各说各话。

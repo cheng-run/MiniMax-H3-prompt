@@ -3729,7 +3729,7 @@
     },
     "/api/v1/sessions/{session_id}/segments/{index}/reopen": {
       "post": {
-        "description": "把一条**已通过**的 ref 段打回等待交视频（D7 §5.5 / #258）。\n\nspec §12 原本写「不新增端点」，用户 2026-11-13 裁定新增这条段级端点。换段只换\n视频：段词与段内参考素材子集不动，重交后重过双闸门。base 会话回 409\n``segment_resubmit_unsupported``（中间段换掉会断掉下一段的帧锚，ADR 0023）；\n未通过的段回 409 ``segment_not_passed``。\n\n状态判定与落盘在 ``JobRunner.reopen_segment`` 的会话临界区里完成，这里不先查\n一遍状态——两处判据会在并发下各说各话。",
+        "description": "把一条**已通过**的段打回，重建下一步（D7 §5.5 / #258；D8 §11 / #265）。\n\nspec §12 原本写「不新增端点」，用户 2026-11-13 裁定新增这条段级端点。两条新路线\n语义不同构：ref 只换本段视频（段词与段内参考素材子集不动，重交后重过双闸门）；\n导演台是**级联**——第 N..末段的通过行作废、插件段缓存与旧末帧派生件一并删除，\n段状态回到 ``pending``，按需词由随后起的段 job 重生成，所以这次没有待办可返回\n（``null``）。base 会话回 409 ``segment_resubmit_unsupported``（中间段换掉会断掉\n下一段的帧锚，ADR 0023）；未通过的段回 409 ``segment_not_passed``；级联路径越界\n回 400 ``cache_out_of_root`` 且一个文件都没删。\n\n状态判定与落盘在 ``JobRunner.reopen_segment`` 的会话临界区里完成，这里不先查\n一遍状态——两处判据会在并发下各说各话。",
         "operationId": "reopen_segment_api_v1_sessions__session_id__segments__index__reopen_post",
         "parameters": [
           {
@@ -3772,11 +3772,19 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ActionItemOut"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ActionItemOut"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Reopen Segment Api V1 Sessions  Session Id  Segments  Index  Reopen Post"
                 }
               }
             },
-            "description": "段已回到等待交视频，返回新挂出的 segment_video 待办",
+            "description": "段已打回：ref 返回新挂出的 segment_video 待办；导演台级联后没有立刻可返回的待办，响应体为 null",
             "headers": {
               "Idempotency-Replayed": {
                 "description": "重放标记；首次换段不返回该头",
@@ -3785,6 +3793,16 @@
                 }
               }
             }
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "级联要删的路径越出配置根，一个文件都没删（problem+json）"
           },
           "401": {
             "content": {

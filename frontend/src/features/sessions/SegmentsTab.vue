@@ -14,7 +14,8 @@ import SegmentCard from './SegmentCard.vue'
 // 「确认分段」按钮（Q4）。段进度用「已通过 x / 总数 y」表达，不用百分比（§4.3）。
 const props = defineProps<{
   sessionId: string
-  // 路线决定段分区的能力（D7 §5.5 / #258）：ref 的已通过段能「换一段」，base 不能。
+  // 路线决定段分区的能力（D7 §5.5 / #258；D8 §11 / #265）：ref 与导演台的已通过段
+  // 都能「换一段」（前者只换视频、后者级联作废其后），base 不能。
   mode: string
   segments: SegmentOut[]
   assets: Asset[]
@@ -38,6 +39,10 @@ const currentIndex = computed(() => {
 const emit = defineEmits<{ refresh: [] }>()
 
 const isRef = computed(() => props.mode === 'ref')
+const isDirector = computed(() => props.mode === 'director')
+// 「换一段」的能力判据（D8 §11 / #265）：两条新路线都有，但语义不同构——ref 只换
+// 本段视频，导演台是级联（第 N..末段作废并删缓存）。base 结构性禁止。
+const canResubmit = computed(() => isRef.value || isDirector.value)
 // 可选 prop：既有 base/ref 用例不传它；导演台详情总会传（可能为空表）。
 const notes = computed(() => props.directorNotes ?? [])
 
@@ -98,7 +103,8 @@ function tailframePromptFor(index: number): ArtifactInfo | null {
           :card-artifact="cardFor(segment.index)"
           :first-frame-prompt-artifact="firstFramePromptFor(segment.index)"
           :tailframe-prompt-artifact="tailframePromptFor(segment.index)"
-          :is-ref="isRef"
+          :can-resubmit="canResubmit"
+          :is-director="isDirector"
           @refresh="emit('refresh')"
         />
       </li>

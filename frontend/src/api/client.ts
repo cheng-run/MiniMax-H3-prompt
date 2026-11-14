@@ -362,17 +362,20 @@ export async function resolveActionItem(
 }
 
 /**
- * 把一条**已通过**的 ref 段打回等待交视频（D7 §5.5 / #258）。
+ * 把一条**已通过**的段打回，重建下一步（D7 §5.5 / #258；D8 §11 / #265）。
  *
- * 换段只换视频：段词与段内参考素材子集不动，重交后重过双闸门。幂等键挡双击——
- * 同一键重放不会把同一段重复打回。base 会话请求这个端点会得到 409
- * `segment_resubmit_unsupported`，由统一错误拦截抛 `ApiError`。
+ * 两条路线语义不同构：ref 只换本段视频（段词与段内参考素材子集不动，重交后重过
+ * 双闸门），返回新挂出的 `segment_video` 待办；导演台是级联（第 N..末段作废并删
+ * 缓存），按需词由服务端随后的段任务重生成，所以**没有待办可立刻返回**——响应体是
+ * `null`，刷新交给快照/SSE。幂等键挡双击。base 会话请求这个端点会得到 409
+ * `segment_resubmit_unsupported`，级联路径越界是 400 `cache_out_of_root`，都由统一
+ * 错误拦截抛 `ApiError`。
  */
 export async function reopenSegment(
   sessionId: string,
   index: number,
   idempotencyKey: string,
-): Promise<ActionItemOut> {
+): Promise<ActionItemOut | null> {
   const { data } = await apiClient.POST('/api/v1/sessions/{session_id}/segments/{index}/reopen', {
     params: {
       path: { session_id: sessionId, index },
@@ -382,5 +385,5 @@ export async function reopenSegment(
   if (data === undefined) {
     throw new ApiError(0, null)
   }
-  return data
+  return data ?? null
 }

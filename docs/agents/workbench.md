@@ -188,7 +188,7 @@
 | 分段规划 | `_plan_ref_segments` 走 `prepare_ref_segmentation`（切点/闭包/重编号），`segments/plan.json` 落盘但**不是产物**（已由 `SegmentOut` 表达）；`segments/order-card.md`（kind `concat_order_card`，段序唯一依据）与 `segments/ref-shot-table.md`（kind `ref_shot_table`，四列分镜表）登记进产物表 |
 | 写段 | 从盘上 `plan.json` + `video-prompt.md` 重建（`load_ref_segments_for_resume`），**不重新规划**——段边界一变，已通过段就对不上了；段词落 `segments/segment-NN.md`（kind `segment_prompt`，与 base 的 `shot-NN.md` 并列两条模式） |
 | 段校验 | **不建桥接帧、不剥尾帧、不调 `describe_image`、不判 `end_hook`**（ADR 0011）：段尾语义在写段时由段内注记判；提交时只确认技术档（resolve 已判）与段词仍在 |
-| 换一段 | `POST /sessions/{id}/segments/{index}/reopen`：`passed → waiting_video`、清 `video_asset_id`、重建同段 `segment_video` 待办；**只换视频，段词与段内子集不动**。base → 409 `segment_resubmit_unsupported`；段号不存在 → 404 `segment_not_found`；未通过 → 409 `segment_not_passed` |
+| 换一段 | `POST /sessions/{id}/segments/{index}/reopen`：ref 上 `passed → waiting_video`、清 `video_asset_id`、重建同段 `segment_video` 待办；**只换视频，段词与段内子集不动**。导演台上同一端点走**级联**（见下节）。base → 409 `segment_resubmit_unsupported`；段号不存在 → 404 `segment_not_found`；未通过 → 409 `segment_not_passed` |
 
 - **段内参考素材只读**（spec §10）：`SegmentOut.assets` 回显规划期算好的子集（段内重编号
   Picture 号 + 语义名 + 整片原号）；链条是分镜表标签 → 闭包 → 撤一致性锚 → 从 1 重编号。
@@ -237,6 +237,23 @@ PYTHONIOENCODING=utf-8 PYTHONPATH=src .venv/Scripts/python.exe \
 CI 侧由桩管线覆盖三段闭环（`tests/test_api_fake_pipeline_segments.py`、
 `frontend/e2e/longfilm.spec.ts`）；真实档的证据与「未跑到 60 秒上限」的边界声明落
 `output/accept-d6/`。驱动器拒绝桩模式（`MINIMAX_FAKE_PIPELINE=1` / `--fake` 一律 FAIL）。
+
+## 导演台换段（D8-5，#265）
+
+已通过的段在导演台上多一个「换一段」：**级联**，与 CLI 调同一份
+`director.cascade` 的 `cascade_rerun`（`src/minimax_h3_prompt/director/cascade.py`）。
+
+| 事 | 行为 |
+|---|---|
+| 作废区间 | 第 N..末段（`cascade.affected_segments`，**含第 N 段**——不作废 N 的通过行，陪跑会跳过它；不删 N 的缓存，重跑读到旧帧直接判通过）。只对「现在算通过」的段追加 `event=invalidate`，旧行原样保留 |
+| 删什么 | 插件段缓存里 `seg_XXXX.*` 整套（`cache.segment_cache_files`）+ 项目侧派生件：`director/tailframe-NN.md`（N..末段）、`director/frame-KK-last.png`（N-1..末段-1）。根目录与非 `seg_XXXX.*` 文件永不删 |
+| 快照 | 第 N..末段 → `pending`，清 `video_asset_id` / `rejection_reason`；第 1..N-1 段一行不动。下游段挂在待办里的旧锚点产物（`segment_video` / `director_segment_image`）一并收掉，由段 job 从第 N 段重挂 |
+| 之后 | 端点返回 **`null`**（没有立刻可返回的待办）：先起一个 `segment` job，走 #264 的按盘判据——被级联删掉的 `tailframe-NN.md` 重写，再挂 `segment_video`。前端提示「正在准备本段按需词」，刷新由快照/SSE 驱动 |
+| 缓存根 | 唯一读口 `Config.director_comfy_output_root()`，目录 `cache.cache_dir(...)`。**定位不到**（配置缺失/非法）→ 跳过删缓存、照常作废；**越界**（段文件符号链接、缓存目录本身是链接）→ 400 `cache_out_of_root`，一个文件都不删 |
+
+两道路径判据各管一层：目录级 `_require_cache_inside_root`（`api/jobs.py`）先确认缓存
+目录解析后仍在配置根内，逐文件 `cache.assert_files_inside` 再确认每个删除目标仍在
+该目录之下——只留后者时，目录本身被链接出去会让它的基准跟着跑。
 
 
 

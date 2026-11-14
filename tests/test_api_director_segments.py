@@ -143,6 +143,11 @@ def _resolve(client, session_id: str, item_id: str, body: dict):
 @pytest.fixture
 def director_app(tmp_path, monkeypatch):
     """桩管线 + 固定三段表（开场/切镜/收尾）；真实模型一调就抛。"""
+    app, root = _build_app(tmp_path, monkeypatch, _runtime(tmp_path))
+    return app, root, tmp_path
+
+
+def _build_app(tmp_path: Path, monkeypatch, runtime):
     monkeypatch.setattr(pipeline.stage_saver, "base", tmp_path / "stages")
     monkeypatch.setenv(ENV, "1")
     monkeypatch.setattr(
@@ -151,8 +156,7 @@ def director_app(tmp_path, monkeypatch):
     monkeypatch.setattr(fake_pipeline, "director_plan",
                         lambda mode, total_s: PLAN)
     root = tmp_path / "sessions"
-    app = create_app(sessions_root=root, runtime_config=_runtime(tmp_path))
-    return app, root, tmp_path
+    return create_app(sessions_root=root, runtime_config=runtime), root
 
 
 def _create(client, mode: str = "fl2v", duration: float = 14.375) -> str:
@@ -442,6 +446,300 @@ def test_unreadable_video_is_422_video_unreadable(director_app):
         detail = _detail(client, session_id)
         assert _segment_row(detail, 1)["status"] == "waiting_video"
         assert not ledger.read_director_rows(root / Path(session_id))
+
+
+# ---------------------------------------------------------------------------
+# 5. 换一段（导演台级联，#265）
+# ---------------------------------------------------------------------------
+
+def _cache_directory(tmp_path: Path) -> Path:
+    """本会话的插件段缓存目录：缓存名空、节点 id 固定 node-42（``_create``）。"""
+    return tmp_path / "comfy-output" / "minimax_seg_cache" / "node-42"
+
+
+def _plant_cache(directory: Path, segments: tuple[int, ...]) -> list[Path]:
+    """按插件的 0 基文件名造段缓存（帧 + meta），返回造出来的路径。"""
+    directory.mkdir(parents=True, exist_ok=True)
+    planted: list[Path] = []
+    for segment in segments:
+        for suffix in (".frames.mkv", ".meta.json"):
+            path = directory / f"seg_{segment - 1:04d}{suffix}"
+            path.write_bytes(f"cache-{segment}".encode("utf-8"))
+            planted.append(path)
+    return planted
+
+
+def test_director_reopen_cascades_and_deletes_only_the_downstream_cache(
+        director_app):
+    """换第 2 段：第 2、3 段作废并删缓存，第 1 段一行不动、一个文件不动。"""
+    app, root, tmp_path = director_app
+    with workbench_client(app) as client:
+        session_id = _create(client)
+        cache_directory = _cache_directory(tmp_path)
+        _run_to_first_todo(client, session_id)
+        planted = _plant_cache(cache_directory, (1, 2, 3))
+        keeper = cache_directory / "notes.txt"
+        keeper.write_text("不是段缓存，谁也别碰", encoding="utf-8")
+        # 从第 1、2 段依次通过（缓存文件已就位，通过行会照记缓存路径）。
+        _pass_segment(client, session_id, _mp4(tmp_path, 107, "o"), "o.mp4")
+        _submit_cut_image(client, session_id)
+        detail = _pass_segment(
+            client, session_id, _mp4(tmp_path, 214, "c"), "c.mp4")
+        assert _segment_row(detail, 2)["status"] == "passed"
+        assert _segment_row(detail, 3)["status"] == "waiting_video"
+        first_video = _segment_row(detail, 1)["video_asset_id"]
+        assert (root / Path(session_id) / "director" / "tailframe-03.md").is_file()
+
+        response = client.post(
+            f"/api/v1/sessions/{session_id}/segments/2/reopen")
+        assert response.status_code == 200, response.text
+        # 导演台换段没有「立刻可返回的待办」：按需词由随后的段 job 产出。
+        assert response.json() is None
+
+        settled = _wait_idle(client, session_id)
+        rows = {row["index"]: row for row in settled["segments"]}
+        assert rows[1]["status"] == "passed"
+        assert rows[1]["video_asset_id"] == first_video
+        assert rows[2]["status"] == "waiting_video"
+        assert rows[2]["video_asset_id"] == ""
+        assert rows[3]["status"] == "pending"
+        assert rows[3]["video_asset_id"] == ""
+        # 第 1 段的缓存与账一行不动；第 2、3 段的缓存按 seg_XXXX.* 形态删除。
+        deleted = {path for path in planted if not path.exists()}
+        assert {path.name for path in deleted} == {
+            "seg_0001.frames.mkv", "seg_0001.meta.json",
+            "seg_0002.frames.mkv", "seg_0002.meta.json"}
+        assert keeper.is_file() and cache_directory.is_dir()
+        # 账只追加：两者的旧 output 行原样保留，第 2 段追加一条 invalidate。
+        # 第 3 段本来就没通过（等视频），没有通过行可作废——账是证据，不是日志。
+        ledger_rows = ledger.read_director_rows(root / Path(session_id))
+        assert [row["segment"] for row in ledger_rows
+                if row["event"] == "output"] == [1, 2]
+        invalidated = [row for row in ledger_rows if row["event"] == "invalidate"]
+        assert [row["segment"] for row in invalidated] == [2]
+        assert all("用户换第 2 段" in row["reason"] for row in invalidated)
+        assert sorted(ledger.passed_director_rows(root / Path(session_id))) == [1]
+        # 第 2 段的按需词被级联删掉后重新生成，段 job 停在等本段视频。
+        assert (root / Path(session_id) / "director" / "tailframe-02.md").is_file()
+        # 第 3 段的尾帧词属于更下游：还没走到，不重写。
+        assert not (root / Path(session_id) / "director" / "tailframe-03.md").exists()
+        assert [item["segment_index"] for item in _pending(settled, "segment_video")] == [2]
+
+
+def _pass_first_segment(client, session_id: str, tmp_path: Path) -> dict:
+    """走到「第 1 段通过、第 2 段等图/等视频」——换第 1 段的最小现场。"""
+    _run_to_first_todo(client, session_id)
+    return _pass_segment(client, session_id, _mp4(tmp_path, 107, "o"), "o.mp4")
+
+
+def test_cache_directory_outside_the_configured_root_is_rejected_by_itself():
+    """目录级判据是独立的一道：符号链接造不出来的机器上也照样咬得住。
+
+    逐文件校验的基准就是这个目录——目录被链接到根外时它跟着一起跑出去，
+    所以必须在调用 ``cascade_rerun`` 之前单独判一次。
+    """
+    from minimax_h3_prompt.api.jobs import _require_cache_inside_root
+    from minimax_h3_prompt.workbench_store import CacheOutOfRoot
+
+    root = Path("D:/comfy-output")
+    _require_cache_inside_root(root, root / "minimax_seg_cache" / "node-42")
+    with pytest.raises(CacheOutOfRoot) as caught:
+        _require_cache_inside_root(root, root.parent / "elsewhere" / "node-42")
+    assert "不在配置根内" in str(caught.value)
+
+
+def test_reopen_refuses_a_cache_file_symlinked_outside_the_root(director_app):
+    """段文件被链接到根外：400 且**一个文件都不删**，快照与账也不动。"""
+    app, root, tmp_path = director_app
+    with workbench_client(app) as client:
+        session_id = _create(client)
+        cache_directory = _cache_directory(tmp_path)
+        detail = _pass_first_segment(client, session_id, tmp_path)
+        assert _segment_row(detail, 1)["status"] == "passed"
+        planted = _plant_cache(cache_directory, (1, 2, 3))
+        outside = tmp_path / "precious.mkv"
+        outside.write_bytes(b"must-not-be-touched")
+        link = cache_directory / "seg_0000.frames.mkv"
+        link.unlink()
+        try:
+            link.symlink_to(outside)
+        except OSError as exc:  # 没开开发者模式的 Windows：跳过并写明原因
+            pytest.skip(f"本机建不了符号链接：{exc}")
+
+        response = client.post(
+            f"/api/v1/sessions/{session_id}/segments/1/reopen")
+        assert response.status_code == 400, response.text
+        assert response.json()["code"] == "cache_out_of_root"
+        assert outside.read_bytes() == b"must-not-be-touched"
+        # 一个都不删：同批里排在链接后面的段缓存也还在。
+        assert all(path.is_file() for path in planted if path != link)
+        # 快照与账原样：失败发生在落盘之前。
+        after = _detail(client, session_id)
+        assert _segment_row(after, 1)["status"] == "passed"
+        assert not [row for row in ledger.read_director_rows(root / Path(session_id))
+                    if row["event"] == "invalidate"]
+
+
+def test_reopen_refuses_a_cache_directory_linked_outside_the_root(director_app):
+    """缓存目录本身是链接（目录联接同形）：目录级判据先拦，逐文件校验根本轮不到。"""
+    app, root, tmp_path = director_app
+    with workbench_client(app) as client:
+        session_id = _create(client)
+        outside = tmp_path / "outside-cache"
+        outside.mkdir()
+        victim = outside / "seg_0000.frames.mkv"
+        victim.write_bytes(b"outside-segment-cache")
+        cache_directory = _cache_directory(tmp_path)
+        cache_directory.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            cache_directory.symlink_to(outside, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"本机建不了符号链接：{exc}")
+        _pass_first_segment(client, session_id, tmp_path)
+
+        response = client.post(
+            f"/api/v1/sessions/{session_id}/segments/1/reopen")
+        assert response.status_code == 400, response.text
+        assert response.json()["code"] == "cache_out_of_root"
+        assert victim.read_bytes() == b"outside-segment-cache"
+
+
+def test_reopen_succeeds_when_the_cache_directory_does_not_exist(director_app):
+    """缓存根不存在只是「没东西可删」：作废照走，不阻断。"""
+    app, root, tmp_path = director_app
+    with workbench_client(app) as client:
+        session_id = _create(client)
+        _run_to_first_todo(client, session_id)
+        _pass_segment(client, session_id, _mp4(tmp_path, 107, "o"), "o.mp4")
+        assert not _cache_directory(tmp_path).exists()
+
+        response = client.post(
+            f"/api/v1/sessions/{session_id}/segments/1/reopen")
+        assert response.status_code == 200, response.text
+        settled = _wait_idle(client, session_id)
+        assert _segment_row(settled, 1)["status"] == "waiting_video"
+        assert [row["segment"] for row in
+                ledger.read_director_rows(root / Path(session_id))
+                if row["event"] == "invalidate"] == [1]
+
+
+def test_reopen_succeeds_when_the_cache_root_cannot_be_located(
+        tmp_path, monkeypatch):
+    """配置读不到缓存根（ConfigError）：跳过删缓存，作废照走（缓存只用于定位）。"""
+    from minimax_h3_prompt.errors import ConfigError
+
+    runtime = _runtime(tmp_path)
+
+    def _unreadable() -> Path:
+        raise ConfigError("director.comfy_output_root 读不到")
+
+    runtime.director_comfy_output_root = _unreadable
+    app, root = _build_app(tmp_path, monkeypatch, runtime)
+    with workbench_client(app) as client:
+        session_id = _create(client)
+        _run_to_first_todo(client, session_id)
+        _pass_segment(client, session_id, _mp4(tmp_path, 107, "o"), "o.mp4")
+
+        response = client.post(
+            f"/api/v1/sessions/{session_id}/segments/1/reopen")
+        assert response.status_code == 200, response.text
+        settled = _wait_idle(client, session_id)
+        assert _segment_row(settled, 1)["status"] == "waiting_video"
+        assert [row["segment"] for row in
+                ledger.read_director_rows(root / Path(session_id))
+                if row["event"] == "invalidate"] == [1]
+
+
+def test_reopen_drops_pending_todos_of_later_segments(director_app):
+    """换第 1 段后，第 2 段的图片待办是旧锚点算的：必须收掉，不能让两段表单并存。"""
+    app, root, tmp_path = director_app
+    with workbench_client(app) as client:
+        session_id = _create(client)
+        _run_to_first_todo(client, session_id)
+        _pass_segment(client, session_id, _mp4(tmp_path, 107, "o"), "o.mp4")
+        assert [item["segment_index"]
+                for item in _pending(_detail(client, session_id),
+                                     "director_segment_image")] == [2]
+
+        response = client.post(
+            f"/api/v1/sessions/{session_id}/segments/1/reopen")
+        assert response.status_code == 200, response.text
+        settled = _wait_idle(client, session_id)
+        assert not _pending(settled, "director_segment_image")
+        assert [item["segment_index"]
+                for item in _pending(settled, "segment_video")] == [1]
+
+
+def _submit_cut_image(client, session_id: str) -> dict:
+    """给切镜段交首帧图并等任务收尾；返回等停后的详情。"""
+    detail = _detail(client, session_id)
+    image_todo = _pending(detail, "director_segment_image")[0]
+    image_asset = _upload(client, session_id, "cut.png", _png(), "image/png")
+    submitted = _resolve(client, session_id, image_todo["item_id"], {
+        "decision": "submit_segment_image", "asset_id": image_asset})
+    assert submitted.status_code == 202, submitted.text
+    assert _wait_job(
+        client, session_id, submitted.json()["job_id"])["status"] == "succeeded"
+    return _wait_idle(client, session_id)
+
+
+def test_director_reopen_invalidates_passed_rows_from_that_segment_down(
+        director_app):
+    """三段全通过后换第 2 段：第 2、3 段的通过行各追加一条 invalidate，第 1 段不动。"""
+    app, root, tmp_path = director_app
+    with workbench_client(app) as client:
+        session_id = _create(client)
+        _run_to_first_todo(client, session_id)
+        _pass_segment(client, session_id, _mp4(tmp_path, 107, "o"), "o.mp4")
+        _submit_cut_image(client, session_id)
+        _pass_segment(client, session_id, _mp4(tmp_path, 214, "c"), "c.mp4")
+        detail = _wait_idle(client, session_id)
+        assert _segment_row(detail, 3)["status"] == "waiting_video"
+        detail = _pass_segment(
+            client, session_id, _mp4(tmp_path, 119, "e"), "e.mp4")
+        assert [row["status"] for row in detail["segments"]] == ["passed"] * 3
+        directory = root / Path(session_id)
+
+        response = client.post(
+            f"/api/v1/sessions/{session_id}/segments/2/reopen")
+        assert response.status_code == 200, response.text
+        assert response.json() is None
+        settled = _wait_idle(client, session_id)
+
+        rows = {row["index"]: row for row in settled["segments"]}
+        assert rows[1]["status"] == "passed"
+        assert rows[2]["status"] == "waiting_video"
+        assert rows[3]["status"] == "pending"
+        ledger_rows = ledger.read_director_rows(directory)
+        assert [row["segment"] for row in ledger_rows
+                if row["event"] == "output"] == [1, 2, 3]
+        assert [row["segment"] for row in ledger_rows
+                if row["event"] == "invalidate"] == [2, 3]
+        assert sorted(ledger.passed_director_rows(directory)) == [1]
+        # 事件类型闭集不变：换段只用到既有的 job.started。
+        events = [
+            json.loads(line)
+            for line in (directory / "events.jsonl").read_text(
+                encoding="utf-8").splitlines() if line.strip()]
+        assert len(EVENT_TYPES) == 10
+        assert {event["type"] for event in events} <= set(EVENT_TYPES)
+
+
+def test_reopen_pending_director_segment_is_conflict_or_not_found(director_app):
+    """导演台同一套前置判据：没通过的段 409、段号不存在 404。"""
+    app, root, tmp_path = director_app
+    with workbench_client(app) as client:
+        session_id = _create(client)
+        _run_to_first_todo(client, session_id)
+
+        pending = client.post(
+            f"/api/v1/sessions/{session_id}/segments/1/reopen")
+        assert pending.status_code == 409, pending.text
+        assert pending.json()["code"] == "segment_not_passed"
+        missing = client.post(
+            f"/api/v1/sessions/{session_id}/segments/99/reopen")
+        assert missing.status_code == 404, missing.text
+        assert missing.json()["code"] == "segment_not_found"
 
 
 def test_frame_mismatch_is_422_and_segment_never_passes(director_app):

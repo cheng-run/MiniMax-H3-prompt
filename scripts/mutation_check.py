@@ -1169,6 +1169,40 @@ MUTATIONS: tuple[Mutation, ...] = (
         "帧待办判据退回读 brief.variant（导演台恒 T2VA 占位）＝ i2v/fl2v 静默不出"
         "开场首帧待办，用户导入导演包才发现段里没图（#261，D8 §6.4）",
     ),
+    Mutation(
+        "reopen_cache_root_check_off",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "        Path(directory).resolve().relative_to(Path(root).resolve())",
+        "        Path(directory).resolve()",
+        ("tests/test_api_director_segments.py::"
+         "test_cache_directory_outside_the_configured_root_is_rejected_by_itself",
+         "tests/test_api_director_segments.py::"
+         "test_reopen_refuses_a_cache_directory_linked_outside_the_root"),
+        "缓存目录级判据失效＝目录被链接到根外时逐文件校验的基准也跟着跑出去，"
+        "级联删的是别人的文件（#265，D8 §11）",
+    ),
+    Mutation(
+        "reopen_cache_file_check_off",
+        "src/minimax_h3_prompt/director/cache.py",
+        "            Path(path).resolve().relative_to(base)",
+        "            Path(path)",
+        ("tests/test_api_director_segments.py::"
+         "test_reopen_refuses_a_cache_file_symlinked_outside_the_root",),
+        "逐文件越界校验失效＝符号链接指向的段文件被当成缓存删掉，"
+        "「一个文件都不删」的语义失守（#265，D8 §11）",
+    ),
+    Mutation(
+        "reopen_keeps_downstream_todos",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "                    if not (existing.status == \"pending\"\n"
+        "                            and existing.segment_index is not None\n"
+        "                            and int(existing.segment_index) >= int(index))]",
+        "                    if True]",
+        ("tests/test_api_director_segments.py::"
+         "test_reopen_drops_pending_todos_of_later_segments",),
+        "换段不清下游待办＝界面同时挂着第 1、2 段的表单，第 2 段的待办是旧锚点算的"
+        "（#265，D8 §11「每段恰好一个待办」）",
+    ),
 )
 
 

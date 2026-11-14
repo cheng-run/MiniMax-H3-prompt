@@ -549,6 +549,17 @@ class SegmentNotPassed(WorkbenchError):
     code = "segment_not_passed"
 
 
+class CacheOutOfRoot(WorkbenchError):
+    """级联要删的路径解析后跑出了配置根（#265）。
+
+    ``cascade_rerun`` 的越界判据（符号链接把段文件指到别处、缓存目录本身是链接）
+    在接线层翻成这个稳定码：**一个文件都没删**是这条错误的语义，不能只当一句文案。
+    """
+
+    status_code = 400
+    code = "cache_out_of_root"
+
+
 class FrameInvalid(WorkbenchError):
     """帧槽引用无效（D4 spec §9 / §12）。
 
@@ -2778,7 +2789,7 @@ __all__ = [
     "AssetDuplicate", "AssetImageInvalid", "AssetLocked", "AssetNameInvalid",
     "AssetRequired",
     "ASSET_PROMPT_KIND", "ASSET_LEDGER_STATUS_PASSED", "ASSET_PROOFREAD_KEY",
-    "RefCapacityExceeded", "RouteMismatch",
+    "RefCapacityExceeded", "RouteMismatch", "CacheOutOfRoot",
     "ArtifactInfo", "ArtifactNotFound", "ArtifactTooLarge", "BriefOut",
     "EVENT_TYPES", "EVENTS_FILENAME", "Event", "EventDraft", "EventLog",
     "FrameInvalid", "FrameMismatch", "VideoUnreadable",

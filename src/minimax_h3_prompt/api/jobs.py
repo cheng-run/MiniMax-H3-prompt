@@ -61,6 +61,7 @@ from ..workbench_store import (
     ActionItemResolved,
     AspectMismatchUnconfirmed,
     AssetImageInvalid,
+    CacheOutOfRoot,
     EventDraft,
     FrameInvalid,
     FrameMismatch,
@@ -168,6 +169,21 @@ _JOB_FINGERPRINT = hashlib.sha256(b"advance").hexdigest()
 def _reopen_fingerprint(index: int) -> str:
     """换段请求的摘要：段号进摘要，同 key 换一段重发不能重放上一段的响应。"""
     return hashlib.sha256(f"reopen:{int(index)}".encode("utf-8")).hexdigest()
+
+
+def _require_cache_inside_root(root: Path, directory: Path) -> None:
+    """段缓存目录解析后必须仍在配置根内（#265 路径安全的第一道）。
+
+    第二道是 ``cache.assert_files_inside``（逐文件）——但它的基准就是**这个目录**：
+    目录本身被符号链接指到根外时，逐文件校验也跟着跑出去，等于没校验。两道判据各管
+    一层，缺一条就能把别人的文件删掉。
+    """
+    try:
+        Path(directory).resolve().relative_to(Path(root).resolve())
+    except ValueError:
+        raise CacheOutOfRoot(
+            f"段缓存目录不在配置根内：{directory}（解析后不在 {root} 之下；"
+            "目录可能被符号链接引到别处）") from None
 
 
 def _resolve_fingerprint(item_id: str, decision: str | None,
@@ -546,15 +562,22 @@ class JobRunner:
 
     async def reopen_segment(
         self, session_id: str, index: int, *, idempotency_key: str | None = None
-    ) -> tuple[ActionItemOut, bool]:
-        """把一条**已通过**的 ref 段打回 ``waiting_video``，重建本段待办（#258）。
+    ) -> tuple[ActionItemOut | None, bool]:
+        """把一条**已通过**的段打回，重建下一步（#258 ref / #265 导演台）。
 
-        spec §5.5 要求 ref 的已通过段能「换一段」，而 §12 又写「不新增端点」——用户
-        2026-11-13 裁定：**新增段级端点**。base 不开这条边（中间段换掉会断掉第 N+1 段
-        的帧锚，ADR 0023），所以 base 会话请求换段是 ``segment_resubmit_unsupported``。
+        spec §5.5 要求 ref 的已通过段能「换一段」，§12 又写「不新增端点」——用户
+        2026-11-13 裁定：**新增段级端点**。两条新路线的语义**不同构**：
 
-        换段**只换视频**：段词与段内参考素材子集原样不动（子集是系统算的，没有手改
-        入口），重交后照旧重过双闸门。
+        - ``ref``：只换本段视频——段词与段内参考素材子集原样不动，重交后重过双闸门；
+        - ``director``：**级联**——第 N..末段的通过行作废、插件段缓存与旧末帧派生件
+          一并删掉（``director.cascade.cascade_rerun``，与 CLI 同一份实现），段状态
+          回到 ``pending``。按需词（``tailframe-NN.md`` 等）由随后起的段 job 按盘
+          重生成——这里同步写模型词会让一次点击阻塞几分钟。
+
+        base 两条边都不开：中间段换掉会断掉第 N+1 段的帧锚（ADR 0023）。
+
+        返回值：ref 立刻挂出的 ``segment_video`` 待办；导演台没有立刻可返回的待办
+        （下一步是先产按需词），返回 ``None``，刷新由快照/SSE 接力。
         """
         lock = self._locks.setdefault(session_id, asyncio.Lock())
         async with lock:
@@ -565,16 +588,28 @@ class JobRunner:
                 cached = await asyncio.to_thread(
                     registry.replay, idempotency_key, fingerprint=payload)
                 if cached is not None:
-                    return ActionItemOut.model_validate(cached), True
+                    # 空对象是导演台的「无待办」重放结果；ref 一定是一份完整待办。
+                    return (
+                        ActionItemOut.model_validate(cached) if cached else None), True
+
+            # 路线是会话属性、不会中途改：读一次用来决定「这次换段起不起任务」。
+            # 权威判定仍在下面的 ``_apply`` 里（会话锁内），这里只选事件与返回形态。
+            before = await asyncio.to_thread(self.store.get_session, session_id)
+            director = is_director_mode(before.brief.mode)
 
             item = ActionItemOut(
                 item_id=uuid.uuid4().hex,
                 kind=step_machine.ACTION_SEGMENT_VIDEO,
                 status="pending", created_at=_now(), segment_index=index)
+            job = (
+                JobSummary(job_id=uuid.uuid4().hex, kind=JOB_KIND_SEGMENT,
+                           status="running", started_at=_now())
+                if director else None)
 
             def _apply(detail: Any) -> dict[str, Any]:
+                mode = detail.brief.mode
                 # 路线先判：base 会话压根不该有这个动作，回「段不存在」会把人带偏。
-                if not is_ref_mode(detail.brief.mode):
+                if not (mode and (is_ref_mode(mode) or is_director_mode(mode))):
                     raise SegmentResubmitUnsupported(
                         "base 会话不能换段：中间段换掉会断掉下一段的帧锚（ADR 0023）。")
                 if detail.status == step_machine.STATUS_RUNNING:
@@ -587,36 +622,109 @@ class JobRunner:
                 if target["status"] != SEGMENT_STATUS_PASSED:
                     raise SegmentNotPassed(
                         f"第 {index} 段当前是 {target['status']}，只有已通过的段能换一段。")
-                # 换段只换视频：段词与段内子集不动，所以只清素材引用与拒绝原因。
-                target["status"] = SEGMENT_STATUS_WAITING_VIDEO
-                target["video_asset_id"] = ""
-                target["rejection_reason"] = ""
-                # 每段恰好一个待办：同类未决旧项先收掉再挂新的（与段收尾同一条纪律）。
+
+                if is_ref_mode(mode):
+                    # 换段只换视频：段词与段内子集不动，所以只清素材引用与拒绝原因。
+                    target["status"] = SEGMENT_STATUS_WAITING_VIDEO
+                    target["video_asset_id"] = ""
+                    target["rejection_reason"] = ""
+                    # 每段恰好一个待办：同类未决旧项先收掉再挂新的（与段收尾同一条纪律）。
+                    items = [
+                        existing.model_dump(mode="json")
+                        for existing in detail.action_items
+                        if not (existing.kind == step_machine.ACTION_SEGMENT_VIDEO
+                                and existing.status == "pending")]
+                    items.append(item.model_dump(mode="json"))
+                    return {
+                        "status": step_machine.STATUS_AWAITING_HUMAN,
+                        "segments": rows,
+                        "action_items": items,
+                    }
+
+                assert job is not None
+                # 破坏性部分：作废账行 + 删缓存 + 删旧末帧派生件，与 CLI 同源。
+                self._cascade_director_segments(
+                    self.store.session_directory(session_id), detail.brief,
+                    index, len(rows))
+                for row in rows:
+                    if int(row["index"]) < int(index):
+                        continue
+                    row["status"] = SEGMENT_STATUS_PENDING
+                    row["video_asset_id"] = ""
+                    row["rejection_reason"] = ""
+                # 第 N 段之后的待办是**旧锚点**算出来的：清掉，让段 job 从第 N 段
+                # 重新判「缺哪份按需词 / 该挂哪种待办」。留着会让界面同时挂着两段的表单。
                 items = [
                     existing.model_dump(mode="json")
                     for existing in detail.action_items
-                    if not (existing.kind == step_machine.ACTION_SEGMENT_VIDEO
-                            and existing.status == "pending")]
-                items.append(item.model_dump(mode="json"))
+                    if not (existing.status == "pending"
+                            and existing.segment_index is not None
+                            and int(existing.segment_index) >= int(index))]
                 return {
-                    "status": step_machine.STATUS_AWAITING_HUMAN,
+                    "status": step_machine.STATUS_RUNNING,
                     "segments": rows,
                     "action_items": items,
+                    "jobs": _upsert_job(detail.jobs, _job_dict(job)),
                 }
 
+            events = (
+                [EventDraft("job.started", {"kind": job.kind}, job_id=job.job_id)]
+                if job is not None else
+                [EventDraft(
+                    "action_item.created",
+                    {"item_id": item.item_id, "kind": item.kind,
+                     "segment_index": index}, job_id=None)])
             await asyncio.to_thread(
-                self.store.mutate, session_id, _apply, events=[
-                    EventDraft(
-                        "action_item.created",
-                        {"item_id": item.item_id, "kind": item.kind,
-                         "segment_index": index},
-                        job_id=None),
-                ])
+                self.store.mutate, session_id, _apply, events=events)
+            if job is not None:
+                # 段 job 走 #264 现成的按盘判据：首帧词→段首图待办→尾帧词→视频待办。
+                await self._launch(session_id, job)
             if idempotency_key and registry is not None:
                 await asyncio.to_thread(
-                    registry.record, idempotency_key,
-                    fingerprint=payload, response=item.model_dump(mode="json"))
-            return item, False
+                    registry.record, idempotency_key, fingerprint=payload,
+                    # 导演台没有待办可重放：记一个空对象，重发仍返回 null。
+                    response=(item.model_dump(mode="json") if job is None else {}))
+            return (None if job is not None else item), False
+
+    def _director_cache_directory(self, brief: Any) -> Path | None:
+        """段缓存目录；定位不到返回 ``None``（跳过删缓存，不阻断作废）。
+
+        缓存只用于定位（#112 起证据是用户贴回的成片视频），配置缺失/路径非法不该让
+        「这段通没通过」的判定失败。但**越界**是另一回事：目录解析后跑出配置根说明它
+        可能被符号链接引到别处，删下去就是删别人的文件——那一条必须 400 而不是跳过。
+        """
+        from ..director import cache
+
+        reader = getattr(self.config, "director_comfy_output_root", None)
+        if reader is None:
+            return None
+        try:
+            root = Path(reader())
+            directory = cache.cache_dir(
+                root, brief.director_cache_name, brief.director_node_id)
+        except (OSError, ValueError):
+            return None
+        _require_cache_inside_root(root, directory)
+        return directory
+
+    def _cascade_director_segments(
+        self, directory: Path, brief: Any, index: int, total: int,
+    ) -> None:
+        """导演台换段的破坏性部分：与 CLI 同一份 ``cascade_rerun``（#265）。
+
+        ``cascade_rerun`` 自己会先全量校验再删；这里只把路径越界翻成稳定错误码。
+        段号已在快照里校验过（1..总数），所以剩下的 ``ValueError`` 只可能来自路径。
+        """
+        from ..director import cascade
+
+        cache_directory = self._director_cache_directory(brief)
+        try:
+            cascade.cascade_rerun(
+                directory, from_segment=index, total_segments=total,
+                cache_directory=cache_directory,
+                reason=f"用户换第 {index} 段（工作台）")
+        except ValueError as exc:
+            raise CacheOutOfRoot(f"级联重跑被拒，没有删除任何文件：{exc}") from exc
 
     async def resolve(
         self, session_id: str, item_id: str, *, decision: str | None,

@@ -34,8 +34,12 @@ const props = defineProps<{
   // 清单里有才传——词是按段产出的，还没轮到的段没有这两份文件。
   firstFramePromptArtifact?: ArtifactInfo | null
   tailframePromptArtifact?: ArtifactInfo | null
-  // 路线（D7 §5.5 / #258）：只有 ref 的已通过段能「换一段」，base 不开这条边。
-  isRef: boolean
+  // 路线能力（D7 §5.5 / #258；D8 §11 / #265）：ref 与导演台的已通过段都能「换一段」，
+  // base 不开这条边（中间段换掉会断掉下一段的帧锚）。
+  canResubmit: boolean
+  // 导演台换段是**级联**：服务端作废第 N..末段并删缓存，随后起段任务重生成按需词，
+  // 这次没有待办可立刻返回。前端据此给一句「在准备」而不是等一个不存在的待办。
+  isDirector: boolean
 }>()
 
 const emit = defineEmits<{ refresh: [] }>()
@@ -83,10 +87,14 @@ function shotsLabel(shots: number[] | undefined): string {
   return shots && shots.length > 0 ? shots.map((shot) => `镜头 ${shot}`).join('、') : '—'
 }
 
-// 换一段（D7 §5.5 / #258）：只换视频，段词与段内参考素材子集一个字都不动；
-// 重交后照样重过双闸门。base 走不到这里（按钮不渲染，服务端也会 409）。
+// 换一段（D7 §5.5 / #258；D8 §11 / #265）：两条新路线能力不同构——ref 只换视频，
+// 段词与段内参考素材子集一个字都不动；导演台是级联，第 N..末段一起作废。重交后
+// 照样重过双闸门。base 走不到这里（按钮不渲染，服务端也会 409）。
 const reopening = ref(false)
 const reopenError = ref<string | null>(null)
+// 导演台换段没有立刻返回的待办：段任务在后台重生成按需词，然后才挂视频待办。
+// 待办出现（或段进入等视频）就收起这句提示，刷新本身仍由快照/SSE 驱动。
+const preparing = ref(false)
 
 async function reopen(): Promise<void> {
   if (reopening.value) {
@@ -96,14 +104,24 @@ async function reopen(): Promise<void> {
   reopenError.value = null
   try {
     await reopenSegment(props.sessionId, props.segment.index, newIdempotencyKey())
+    preparing.value = props.isDirector
     emit('refresh')
   } catch (error) {
-    // 服务端原因原样呈现：会话忙、段未通过、路线不支持各有各的话。
+    // 服务端原因原样呈现：会话忙、段未通过、路线不支持、路径越界各有各的话。
     reopenError.value = errorMessage(error, '换一段失败，请稍后重试。')
   } finally {
     reopening.value = false
   }
 }
+
+watch(
+  () => [props.segment.status, props.item?.item_id] as const,
+  ([status, itemId]) => {
+    if (itemId || status === 'waiting_video') {
+      preparing.value = false
+    }
+  },
+)
 
 const promptOpen = ref(false)
 const promptText = ref<string | null>(null)
@@ -256,9 +274,10 @@ async function submitVideo(): Promise<void> {
       <h2>第 {{ segment.index }} 段</h2>
       <span class="segment__time">{{ segment.start_s }}–{{ segment.end_s }} 秒</span>
       <span class="segment__status">{{ statusLabel(segment.status) }}</span>
-      <!-- 换一段（D7 §5.5 / #258）：ref 专属，只在已通过的段上出现。 -->
+      <!-- 换一段（D7 §5.5 / #258；D8 §11 / #265）：ref 与导演台的已通过段上出现，
+           base 结构性禁止（按钮不渲染）。 -->
       <Button
-        v-if="isRef && segment.status === 'passed'"
+        v-if="canResubmit && segment.status === 'passed'"
         variant="secondary"
         :disabled="reopening"
         @click="reopen"
@@ -267,6 +286,9 @@ async function submitVideo(): Promise<void> {
       </Button>
     </header>
     <ErrorNotice v-if="reopenError" :message="reopenError" />
+    <p v-if="preparing" role="status" class="muted">
+      正在准备本段按需词…完成后会挂出本段视频待办。
+    </p>
     <!-- 导演台的帧执行契约（#262）：声明帧 → 导出帧两个数都给；引导与给图清单都从
          段类型派生，界面没有任何修改入口。 -->
     <dl v-if="segment.segment_type" class="segment__grid" data-director-grid>

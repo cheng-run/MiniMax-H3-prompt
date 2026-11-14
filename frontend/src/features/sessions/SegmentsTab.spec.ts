@@ -284,6 +284,33 @@ describe('SegmentsTab 换一段（#258）', () => {
     expect(wrapper.emitted('refresh')).toHaveLength(1)
   })
 
+  it('导演台的已通过段也显示「换一段」', () => {
+    const wrapper = mountTab({
+      mode: 'director',
+      segments: [makeSegment({ status: 'passed', segment_type: 'ending' })],
+    })
+
+    expect(hasReopenButton(wrapper)).toBe(true)
+  })
+
+  it('导演台换段成功后提示正在准备本段按需词，并通知父组件刷新', async () => {
+    server.use(http.post(reopenUrl, () => HttpResponse.json(null)))
+
+    const wrapper = mountTab({
+      mode: 'director',
+      segments: [makeSegment({ status: 'passed', segment_type: 'ending' })],
+    })
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '换一段')!
+      .trigger('click')
+    await settle()
+
+    // 级联换段没有待办可回：响应体是 null，不等于失败。
+    expect(wrapper.emitted('refresh')).toHaveLength(1)
+    expect(wrapper.text()).toContain('正在准备本段按需词')
+  })
+
   it('reopen 被拒时原样呈现服务端原因', async () => {
     const detail = '会话有任务在跑，等它停下再换段。'
     server.use(
