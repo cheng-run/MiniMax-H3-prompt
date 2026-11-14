@@ -624,3 +624,59 @@ describe('SegmentsTab 导演台段表（#262）', () => {
     expect(wrapper.find('textarea').exists()).toBe(false)
   })
 })
+
+describe('SegmentsTab 导演台按需词（#264）', () => {
+  function cutSegment(overrides: Partial<SegmentOut> = {}): SegmentOut {
+    return makeSegment({
+      index: 2,
+      segment_type: 'camera_cut',
+      guided: true,
+      start_frame: 107,
+      end_frame: 214,
+      declared_frames: 107,
+      export_frames: 107,
+      give_images: ['first', 'end'],
+      ...overrides,
+    })
+  }
+
+  it('显示本段预期帧数与两种按需词，正文可复制', async () => {
+    server.use(
+      http.get(/\/api\/v1\/artifacts\/.+\/content$/, ({ request }) => {
+        const url = request.url
+        if (url.includes('firstframe')) {
+          return HttpResponse.text('第 2 段首帧词：雨夜街口，中景。', {
+            headers: { 'Content-Type': 'text/plain' },
+          })
+        }
+        return HttpResponse.text('第 2 段尾帧词：### 变换指令\n转向回望。', {
+          headers: { 'Content-Type': 'text/plain' },
+        })
+      }),
+    )
+    const wrapper = mountTab({
+      mode: 'director',
+      segments: [cutSegment()],
+      artifacts: [
+        makeArtifact('director/firstframe-02.md', 'director_first_frame_prompt'),
+        makeArtifact('director/tailframe-02.md', 'director_tailframe_prompt'),
+      ],
+    })
+    await settle()
+
+    const text = wrapper.text()
+    expect(text).toContain('本段预期帧数（声明 → 导出）')
+    expect(text).toContain('107 → 107')
+    expect(text).toContain('本段首帧词（切镜段）')
+    expect(text).toContain('第 2 段首帧词：雨夜街口，中景。')
+    expect(text).toContain('本段尾帧词（终点画面）')
+    expect(text).toContain('转向回望。')
+    expect(wrapper.findAll('button').some((button) => button.text() === '复制提示词')).toBe(true)
+  })
+
+  it('没轮到该段时没有词文件，就不渲染空块', () => {
+    const wrapper = mountTab({ mode: 'director', segments: [cutSegment()] })
+
+    expect(wrapper.find('[data-prompt-kind]').exists()).toBe(false)
+  })
+})

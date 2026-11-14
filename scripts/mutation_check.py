@@ -123,6 +123,15 @@ MUTATIONS: tuple[Mutation, ...] = (
         "切镜段被写成续接＝插件导入后静默续上上一段（#142 的真身）",
     ),
     Mutation(
+        "director_frame_tolerance_zero",
+        "src/minimax_h3_prompt/director/companion.py",
+        "DIRECTOR_FRAME_TOLERANCE = 5",
+        "DIRECTOR_FRAME_TOLERANCE = 0",
+        ("tests/test_api_director_segments.py::"
+         "test_default_tolerance_comes_from_the_constant",),
+        "容差归零＝相位对齐裁尾的合法形态被当成贴错段（2026-10-31 现场 226 帧）",
+    ),
+    Mutation(
         "asset_modes_drop_r2v",
         "src/minimax_h3_prompt/brief_parser.py",
         'DIRECTOR_ASSET_MODES = ("r2v",)',

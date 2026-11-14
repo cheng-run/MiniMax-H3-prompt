@@ -13,6 +13,7 @@ import { useUiStore, type WorkbenchTab } from '@/stores/ui'
 import AssetsTab from './AssetsTab.vue'
 import ArtifactsTab from './ArtifactsTab.vue'
 import AssetImageCard from './AssetImageCard.vue'
+import DirectorSegmentImageCard from './DirectorSegmentImageCard.vue'
 import DirectorStartImageCard from './DirectorStartImageCard.vue'
 import FrameSubmissionCard from './FrameSubmissionCard.vue'
 import { newIdempotencyKey } from './keys'
@@ -163,6 +164,13 @@ const pendingDirectorStartItem = computed(
   () =>
     data.value?.action_items?.find(
       (item) => item.kind === 'director_start_image' && item.status === 'pending',
+    ) ?? null,
+)
+// 切镜段的段首图（D8 §5.6 / #264）：逐段出现，不是开场首帧的别名。
+const pendingDirectorSegmentImageItem = computed(
+  () =>
+    data.value?.action_items?.find(
+      (item) => item.kind === 'director_segment_image' && item.status === 'pending',
     ) ?? null,
 )
 const isCreated = computed(() => status.value === 'created')
@@ -357,6 +365,14 @@ const errorMessage = computed(() =>
           v-if="pendingDirectorStartItem"
           :session-id="data.session_id"
           :item="pendingDirectorStartItem"
+          :assets="data.assets ?? []"
+          @uploaded="invalidateSnapshot"
+          @submitted="invalidateSnapshot"
+        />
+        <DirectorSegmentImageCard
+          v-if="pendingDirectorSegmentImageItem"
+          :session-id="data.session_id"
+          :item="pendingDirectorSegmentImageItem"
           :assets="data.assets ?? []"
           @uploaded="invalidateSnapshot"
           @submitted="invalidateSnapshot"

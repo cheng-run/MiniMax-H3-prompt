@@ -32,7 +32,7 @@
 | `segment_refs.py` | 段内参考素材子集：`compute_segment_scope` → `compute_asset_closure` → `demote_consistency_anchors`，结果随段只读回显 |
 | `injection_card.py` | 注入卡渲染（整片 / 段级）：给人照抄的接线清单，只显示用量、不做容量拒绝 |
 | `ref_capacity.py` | 多参容量外部契约 9/3/3/12；`asset_ledger.py` / `asset_loop.py` / `asset_proofread.py` 是 CLI 侧台账、循环与校对实现——工作台复用校对判据，不读 CLI 的 `asset-ledger.json` |
-| `frontend/src/features/sessions/` | 工作台五分区：`SessionDetailView`（壳/SSE/运行控制）、`ReviewTab`（审查与修订）、`AssetsTab` + `FrameSubmissionCard`（素材与帧提交）、`SegmentsTab` + `SegmentCard`（长片分段只读展示、`segment_video` 回交、ref 段内素材只读回显与「换一段」）、`ArtifactsTab`（产物查看/复制/下载/通用媒体播放） |
+| `frontend/src/features/sessions/` | 工作台五分区：`SessionDetailView`（壳/SSE/运行控制）、`ReviewTab`（审查与修订）、`AssetsTab` + `FrameSubmissionCard` + `DirectorStartImageCard` / `DirectorSegmentImageCard`（素材与帧/段首图提交）、`SegmentsTab` + `SegmentCard` + `DirectorPromptBlock`（长片分段只读展示、`segment_video` 回交、按需词复制、ref 段内素材只读回显与「换一段」）、`ArtifactsTab`（产物查看/复制/下载/通用媒体播放） |
 | `frontend/src/api/client.ts` | 生成契约的类型出口与唯一 API 门面：令牌注入、媒体/产物 URL、错误归一成 `ApiError` |
 | `scripts/accept_d2.py` | 真实 HTTP 验收驱动器（手动，不进 CI；启动时先取令牌） |
 | `scripts/accept_d3.py` | 媒体与素材的真实验收驱动器（手动；真实照片上传 + 真实 `final.mp4` 的 Range 与字节核对，报告落 `output/accept-d3/`） |
@@ -193,6 +193,29 @@
 - **段内参考素材只读**（spec §10）：`SegmentOut.assets` 回显规划期算好的子集（段内重编号
   Picture 号 + 语义名 + 整片原号）；链条是分镜表标签 → 闭包 → 撤一致性锚 → 从 1 重编号。
   没有任何手改入口——逐段手填等于把闭包算法搬到前端。
+
+## 导演台段循环（D8-4，#264）
+
+导演台在打包成功后自动进段循环，**复用**长片的段状态四态与 `segment_video` 待办
+（不新造第二套）。判据全部读盘：`director/plan.json`、`director/firstframe-NN.md`、
+`director/tailframe-NN.md` 与段首图 sidecar。
+
+| 步骤 | 类型 | 产物/状态 |
+|---|---|---|
+| 打包完成 | job `pack` | zip 与逐段简报齐了才进段循环（缺简报回 `packing` 补） |
+| 切镜段首帧词 | job `segment` | `director/firstframe-NN.md`（kind `director_first_frame_prompt`）→ 挂 `director_segment_image` |
+| 交段首图 | 待办 `director_segment_image` | 载荷 `asset_id` + `decision=submit_segment_image`；路径记进首帧词 sidecar |
+| 尾帧词 | job `segment` | `director/tailframe-NN.md`（kind `director_tailframe_prompt`）→ 挂 `segment_video` |
+| 段视频回交 | 待办 `segment_video` | **同步** `cache.actual_frames` + `companion.judge_video_evidence`；读不出 422 `video_unreadable`，判不过 422 `frame_mismatch` |
+| 慢收尾 | job `segment` | `ledger.log_director_output` 追加 `event=output`；段转 `passed`，接下一段 |
+
+- 按需词**进入该段自动产出**，没有按钮；盘上已有的沿用、不重付。`ending` 有作者给的
+  全片尾帧时不写尾帧词。
+- 尾帧词的起点画面：切镜段用**自己的**首帧图；引导段用上一段通过行的 `end_image`，
+  没有才取上一段成片视频末帧（`cache.export_last_frame`）——不拿段缓存当参考。
+- 判帧**只有一份判据**（companion）：合并导出（前 N 段/整片）与单段导出都认；有引导段
+  允许少 ≤ `DIRECTOR_FRAME_TOLERANCE`，无引导段必须等于声明帧。
+- 被拒的段回到 `waiting_video`、同一待办保持，**绝不落 passed**。
 - **容量在规划期硬失败**（spec §8）：段内子集超 9 图或单请求超 12 文件时 job 失败并点名
   超限素材（`ref_segments._check_segment_capacity`；工作台把 `SessionState.asset_ledger`
   当另一个台账来源传进去，9/3/3/12 的判据只有一份）。

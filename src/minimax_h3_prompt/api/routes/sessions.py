@@ -270,7 +270,8 @@ class ActionItemResolve(BaseModel):
     ``asset_image_invalid``，不是 pydantic 的通用 422）。
     """
 
-    decision: Literal["approve", "revise", "submit_start_image"] | None = None
+    decision: Literal[
+        "approve", "revise", "submit_start_image", "submit_segment_image"] | None = None
     revisions: list[RevisionIn] = Field(default_factory=list)
     frames: FrameSelection | None = None
     # 段视频待办（D6 §8）：本会话已上传的 mp4 素材 id。`Decision` 载荷互斥由路由先拦。
@@ -786,9 +787,12 @@ async def resolve_action_item(
         raise SegmentVideoInvalid(
             "video_asset_id 不能与 decision/frames/asset_id 同时提交：段视频待办只收视频素材。")
     if payload.asset_id is not None and (
-            payload.decision is not None or payload.frames is not None):
+            payload.decision is not None
+            and payload.decision != "submit_segment_image"
+            or payload.frames is not None):
         raise AssetImageInvalid(
-            "asset_id 不能与 decision/frames 同时提交：素材图待办只收图片素材。")
+            "asset_id 只能单独提交（asset_image 待办）或与 "
+            "decision=submit_segment_image 一起提交（director_segment_image 待办）。")
     # 导演台首帧的两个字段只服务 ``submit_start_image``：带它们却不带那个 decision，
     # 一定是发错了（D8 §7.1）。空串按「没带」处理，与其他载荷同一条口径。
     start_given = bool(str(payload.start_asset_id or "").strip())

@@ -156,6 +156,12 @@ _DIRECTOR_SEGMENT_PROMPT_FILENAME = r"segment-\d{2}\.md"
 # 前后端要能按 kind 把「照着在导演台里点」的清单与「丢进提示词框」的正文分开。
 DIRECTOR_BRIEFING_KIND = "director_briefing"
 _DIRECTOR_BRIEFING_FILENAME = r"briefing-\d{2}\.md"
+# 按需词（D8 §8.3 / #264）：切镜段的首帧词与运镜/收尾段的尾帧词，逐段一份、与段号
+# 同号。两者 kind 分开：产物分区里「复制去生图」的用途不同（首帧 vs 终点图变换）。
+DIRECTOR_FIRST_FRAME_PROMPT_KIND = "director_first_frame_prompt"
+_DIRECTOR_FIRST_FRAME_PROMPT_FILENAME = r"firstframe-\d{2}\.md"
+DIRECTOR_TAILFRAME_PROMPT_KIND = "director_tailframe_prompt"
+_DIRECTOR_TAILFRAME_PROMPT_FILENAME = r"tailframe-\d{2}\.md"
 
 
 def director_segment_prompt_name(position: int) -> str:
@@ -166,6 +172,16 @@ def director_segment_prompt_name(position: int) -> str:
 def director_briefing_name(position: int) -> str:
     """第 ``position`` 段（1 起）的导演台操作简报产物名。"""
     return f"{DIRECTOR_DIRNAME}/briefing-{position:02d}.md"
+
+
+def director_first_frame_prompt_name(position: int) -> str:
+    """第 ``position`` 段的段首帧词产物名（与 ``firstframe.py`` 落点同名同形）。"""
+    return f"{DIRECTOR_DIRNAME}/firstframe-{position:02d}.md"
+
+
+def director_tailframe_prompt_name(position: int) -> str:
+    """第 ``position`` 段的尾帧词产物名（与 ``tailframe.py`` 落点同名同形）。"""
+    return f"{DIRECTOR_DIRNAME}/tailframe-{position:02d}.md"
 
 # 资产图词（D7 §7）：素材循环里每件参考素材一份 ``assets/picture-NN.md``，与台账
 # 图片编号同号。改词重出**覆盖**同一份文件——历史靠台账轮次与待办决议表达。
@@ -194,6 +210,11 @@ _PATTERN_ARTIFACT_SPECS: tuple[tuple[str, str, ArtifactSpec], ...] = (
     # 导演台逐段简报（#263）：同一个 ``director/`` 目录，文本形态。
     (DIRECTOR_DIRNAME, _DIRECTOR_BRIEFING_FILENAME,
      ArtifactSpec(DIRECTOR_BRIEFING_KIND)),
+    # 导演台按需词（#264）：首帧词与尾帧词各一种 kind，产物分区按 kind 分开读。
+    (DIRECTOR_DIRNAME, _DIRECTOR_FIRST_FRAME_PROMPT_FILENAME,
+     ArtifactSpec(DIRECTOR_FIRST_FRAME_PROMPT_KIND)),
+    (DIRECTOR_DIRNAME, _DIRECTOR_TAILFRAME_PROMPT_FILENAME,
+     ArtifactSpec(DIRECTOR_TAILFRAME_PROMPT_KIND)),
 )
 
 
@@ -552,6 +573,28 @@ class SegmentVideoInvalid(WorkbenchError):
     code = "segment_video_invalid"
 
 
+class VideoUnreadable(WorkbenchError):
+    """段视频读不出帧数（D8 §5.6 / #264）：容器坏了、不是能解码的视频。
+
+    与 ``frame_mismatch`` 分开是**可证层的要求**：读不出是设备/文件问题，不是
+    「贴错了段」。判 0 帧会把两者混成同一句话（``cache.actual_frames`` 的同一取舍）。
+    """
+
+    status_code = 422
+    code = "video_unreadable"
+
+
+class FrameMismatch(WorkbenchError):
+    """帧数判不过（D8 §10 / #264）：这不是本段成片，或差得超出容差。
+
+    判据只有 ``companion.judge_video_evidence`` 一份；这里只把结论翻成稳定错误码，
+    文案原样带走（它已经点名该怎么做）。
+    """
+
+    status_code = 422
+    code = "frame_mismatch"
+
+
 class AssetImageInvalid(WorkbenchError):
     """素材图回交无效（D7 spec §6.3）：件号不符、素材非本会话、非图片、载荷错配。
 
@@ -646,6 +689,8 @@ _DECISIONS = frozenset({
     step_machine.DECISION_SUBMIT_IMAGE,
     # 导演台开场首帧决议（D8 §5.6）：唯一显式声明的 decision 取值。
     step_machine.DECISION_SUBMIT_START_IMAGE,
+    # 切镜段段首图决议（D8 §5.6 / #264）：逐段的图槽，同样显式声明。
+    step_machine.DECISION_SUBMIT_SEGMENT_IMAGE,
 })
 
 
@@ -2736,7 +2781,9 @@ __all__ = [
     "RefCapacityExceeded", "RouteMismatch",
     "ArtifactInfo", "ArtifactNotFound", "ArtifactTooLarge", "BriefOut",
     "EVENT_TYPES", "EVENTS_FILENAME", "Event", "EventDraft", "EventLog",
-    "FrameInvalid",
+    "FrameInvalid", "FrameMismatch", "VideoUnreadable",
+    "DIRECTOR_FIRST_FRAME_PROMPT_KIND", "DIRECTOR_TAILFRAME_PROMPT_KIND",
+    "director_first_frame_prompt_name", "director_tailframe_prompt_name",
     "IdempotencyConflict", "IdempotencyRegistry", "InvalidEventPayload",
     "JobNotFound", "JobNotRunning",
     "JobSummary", "RefOut", "RevisionOut", "SessionBusy", "SessionCompleted", "SessionDetail",

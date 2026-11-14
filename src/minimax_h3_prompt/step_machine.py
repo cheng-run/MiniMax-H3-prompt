@@ -71,6 +71,9 @@ ACTION_ASSET_IMAGE = "asset_image"
 # 收开场首帧（必填）与全片尾帧（可选）。它不是 base 的 ``frame_submission``——串用会让
 # 「哪条路线产什么」重新散落（ADR 0020）。载荷仍是 ``action_item.created``（十种闭合不变）。
 ACTION_DIRECTOR_START_IMAGE = "director_start_image"
+# 第六个人工待办（D8 §5.6 / #264）：切镜段的段首帧不是开场首帧——它按段产出，用户在
+# 段循环里逐段挂。复用 ``asset_id`` 载荷与十种闭合事件，不新造第二种交图方式。
+ACTION_DIRECTOR_SEGMENT_IMAGE = "director_segment_image"
 
 STEP_STAGE1 = "stage1"
 STEP_STAGE2 = "stage2"
@@ -156,6 +159,10 @@ DECISION_SUBMIT_IMAGE = "submit_image"
 # 导演台开场首帧（D8 §5.6）：与 ``submit_start_image`` 同名，是本票**唯一**在接口上
 # 显式声明的 decision 取值（其余交图类靠字段分型）。两张图分别是开场首帧与全片尾帧。
 DECISION_SUBMIT_START_IMAGE = "submit_start_image"
+# 切镜段的段首图交回（D8 §5.6 / #264）：与开场首帧同一个显式 decision 形状，但它是
+# **逐段**的图槽。单独一个词是为了让决议事件与待办回显能区分「全片第一张」和
+# 「第 N 段那张」。
+DECISION_SUBMIT_SEGMENT_IMAGE = "submit_segment_image"
 
 
 class InvalidTransition(ValueError):

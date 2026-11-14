@@ -16,6 +16,7 @@ import {
 import Button from '@/components/ui/Button.vue'
 import ErrorNotice from '@/components/ui/ErrorNotice.vue'
 
+import DirectorPromptBlock from './DirectorPromptBlock.vue'
 import { newIdempotencyKey } from './keys'
 import { useClipboardCopy } from './useClipboardCopy'
 
@@ -29,6 +30,10 @@ const props = defineProps<{
   assets: Asset[]
   // 本段的段级注入卡（D7 §9 / #257）：产物清单里有它才传，没有就不显示卡块。
   cardArtifact: ArtifactInfo | null
+  // 本段的按需词（D8 §8.3 / #264）：切镜段的首帧词、运镜/收尾段的尾帧词。产物
+  // 清单里有才传——词是按段产出的，还没轮到的段没有这两份文件。
+  firstFramePromptArtifact?: ArtifactInfo | null
+  tailframePromptArtifact?: ArtifactInfo | null
   // 路线（D7 §5.5 / #258）：只有 ref 的已通过段能「换一段」，base 不开这条边。
   isRef: boolean
 }>()
@@ -274,7 +279,7 @@ async function submitVideo(): Promise<void> {
         <dd>{{ segment.guided ? '开' : '关' }}</dd>
       </div>
       <div class="segment__grid-item">
-        <dt>声明帧 → 导出帧</dt>
+        <dt>本段预期帧数（声明 → 导出）</dt>
         <dd>{{ segment.declared_frames }} → {{ segment.export_frames }}</dd>
       </div>
       <div class="segment__grid-item">
@@ -286,6 +291,17 @@ async function submitVideo(): Promise<void> {
         <dd>{{ segment.start_frame }}–{{ segment.end_frame }}</dd>
       </div>
     </dl>
+    <!-- 按需词（D8 §8.3 / #264）：轮到这一段才产出，产物分区里也有同一份。 -->
+    <DirectorPromptBlock
+      v-if="firstFramePromptArtifact"
+      title="本段首帧词（切镜段）"
+      :artifact="firstFramePromptArtifact"
+    />
+    <DirectorPromptBlock
+      v-if="tailframePromptArtifact"
+      title="本段尾帧词（终点画面）"
+      :artifact="tailframePromptArtifact"
+    />
     <p class="segment__shots">覆盖镜头：{{ shotsLabel(segment.shots_in_segment) }}</p>
     <p class="segment__summary">{{ segment.summary }}</p>
 

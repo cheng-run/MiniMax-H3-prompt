@@ -437,7 +437,7 @@ export interface components {
             /** Confirm Aspect Mismatch */
             confirm_aspect_mismatch?: boolean | null;
             /** Decision */
-            decision?: ("approve" | "revise" | "submit_start_image") | null;
+            decision?: ("approve" | "revise" | "submit_start_image" | "submit_segment_image") | null;
             /** End Asset Id */
             end_asset_id?: string | null;
             frames?: components["schemas"]["FrameSelection"] | null;

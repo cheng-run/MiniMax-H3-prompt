@@ -103,6 +103,18 @@ def write_ref_segment_video(path: Path, seconds: float) -> Path:
     return _encode_stub_video(path, ref_segment_video_frames(seconds))
 
 
+def write_director_segment_video(path: Path, frames: int) -> Path:
+    """导演台段视频的桩件（#264）：帧数由调用方**直传**。
+
+    为什么不复用 ``segment_video_frames``：那张表只认 H3 的 4/5/6 秒档，而导演台的
+    执行契约是 17k+5 网格（有引导段导出恒为 17 的倍数）。为让桩也能造件而去放宽档位
+    校验，等于把 CI 的档位判据换成桩自己的口径（假绿）。这里只借真实的编码封装。
+    """
+    if isinstance(frames, bool) or not isinstance(frames, int) or frames <= 0:
+        raise ValueError(f"桩导演台视频需要正整数帧数，收到 {frames!r}")
+    return _encode_stub_video(path, frames)
+
+
 def _frame_roles(variant: str) -> tuple[tuple[int, str], ...]:
     # 变体 → 需要的帧位那份知识只住 ``frame_auditor.required_frames``（真实读图也用它）；
     # 桩不另立一张表，否则插进新变体时两边会各说各话。
@@ -391,6 +403,35 @@ def director_segment_prompt(plan: Any, segment: Any) -> str:
     )
 
 
+def director_firstframe_prompt(segment: Any) -> str:
+    """桩段首帧词（#264）：不建模型，正文形状与真实产物一致（可直接复制给生图模型）。
+
+    真实写词要走 ``frame_prompt_engineer`` 角色与读图；桩只替「谁写这句话」，落盘与
+    产物登记仍走执行器那一份真实路径。
+    """
+    return (
+        f"第 {segment.index} 段段首帧（桩管线）：雨夜老城街口，撑黑伞的成年女性，"
+        "中景，冷蓝霓虹侧逆光，写实电影感")
+
+
+def director_tailframe_prompt(segment: Any, start_image: str | Path) -> str:
+    """桩尾帧词（#264）：三段式外壳齐全，起点画面路径原样点出。
+
+    真实路径会先用视觉模型读起点画面再写变换；桩把这一步换成固定文案，避免在 CI
+    里建模型或读图。``start_image`` 仍由执行器按真实规则选（本段首帧/上一段末帧）。
+    """
+    return "\n".join([
+        f"### 变换指令（第 {segment.index} 段，桩管线）",
+        f"以起点画面 {Path(start_image).name} 为参考，把人物转为回望姿态。",
+        "",
+        "### 保留项声明",
+        "人物服装、道具与场景地标保持不变。",
+        "",
+        "### 锁死清单",
+        "米色风衣；黑色长柄伞。",
+    ])
+
+
 def segment_plan(total_s: int) -> list[SegmentPlan]:
     """桩分段规划（D6-1）：把总时长拆成实测帧数表里的档位（4/5/6 秒）。
 
@@ -475,6 +516,8 @@ __all__ = [
     "H3_VIDEO_FPS",
     "asset_prompt_text",
     "asset_proofread_verdict",
+    "director_firstframe_prompt",
+    "director_tailframe_prompt",
     "fake_pipeline_enabled",
     "frame_descriptions",
     "judge_segment_end_hook",
@@ -487,6 +530,7 @@ __all__ = [
     "stage1_state",
     "stage2_state",
     "stage2_summary",
+    "write_director_segment_video",
     "write_ref_segment_video",
     "write_segment_video",
 ]

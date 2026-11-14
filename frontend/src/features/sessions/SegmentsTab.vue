@@ -3,7 +3,11 @@ import { computed } from 'vue'
 
 import type { ActionItemOut, ArtifactInfo, Asset, SegmentOut } from '@/api/client'
 
-import { segmentInjectionCardName } from './artifactKinds'
+import {
+  directorFirstFramePromptName,
+  directorTailframePromptName,
+  segmentInjectionCardName,
+} from './artifactKinds'
 import SegmentCard from './SegmentCard.vue'
 
 // 「分段」分区（D6 spec §4.2）：规划结果**只读**——不提供编辑、合并/拆分，也没有
@@ -56,6 +60,15 @@ const artifactsByName = computed(() => new Map(props.artifacts.map((item) => [it
 function cardFor(index: number): ArtifactInfo | null {
   return artifactsByName.value.get(segmentInjectionCardName(index)) ?? null
 }
+
+// 按需词同样按「产物在不在」显示（D8 §8.3）：没轮到的那一段没有文件，组件不做空卡。
+function firstFramePromptFor(index: number): ArtifactInfo | null {
+  return artifactsByName.value.get(directorFirstFramePromptName(index)) ?? null
+}
+
+function tailframePromptFor(index: number): ArtifactInfo | null {
+  return artifactsByName.value.get(directorTailframePromptName(index)) ?? null
+}
 </script>
 
 <template>
@@ -83,6 +96,8 @@ function cardFor(index: number): ArtifactInfo | null {
           :item="itemFor(segment.index)"
           :assets="assets"
           :card-artifact="cardFor(segment.index)"
+          :first-frame-prompt-artifact="firstFramePromptFor(segment.index)"
+          :tailframe-prompt-artifact="tailframePromptFor(segment.index)"
           :is-ref="isRef"
           @refresh="emit('refresh')"
         />

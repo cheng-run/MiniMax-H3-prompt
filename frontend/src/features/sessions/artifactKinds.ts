@@ -31,6 +31,10 @@ const DELIVERABLE_KINDS = new Set([
   'director_segment_prompt',
   // 导演台逐段操作简报（D8 §8.5 / #263）：用户照着抄进导演台，可复制文本。
   'director_briefing',
+  // 导演台按需词（D8 §8.3 / #264）：切镜段首帧词与运镜/收尾段尾帧词，都是
+  // 「复制去生图」的成品文本，归交付文本。
+  'director_first_frame_prompt',
+  'director_tailframe_prompt',
   'injection_card',
   'concat_order_card',
   'summary_markdown',
@@ -73,6 +77,8 @@ const KIND_ORDER = [
   'segment_prompt',
   'director_segment_prompt',
   'director_briefing',
+  'director_first_frame_prompt',
+  'director_tailframe_prompt',
   'summary_markdown',
   'summary_json',
   'video',
@@ -99,6 +105,8 @@ const KIND_LABELS: Record<string, string> = {
   segment_prompt: '段提示词',
   director_segment_prompt: '导演台段词',
   director_briefing: '导演台简报',
+  director_first_frame_prompt: '导演台段首帧词',
+  director_tailframe_prompt: '导演台尾帧词',
   director_pack: '导演包',
   summary_markdown: '中文摘要',
   summary_json: '摘要数据（JSON）',
@@ -128,6 +136,19 @@ export function segmentInjectionCardName(position: number): string {
  */
 export function assetPromptName(number: number): string {
   return `assets/picture-${String(number).padStart(2, '0')}.md`
+}
+
+/**
+ * 导演台按需词（D8 §8.3 / #264）：与后端 `director_first_frame_prompt_name` /
+ * `director_tailframe_prompt_name` 同形，段号两位。两个名字只在这里拼一次——
+ * 组件里再写一遍，登记表改名时它会静默取不到词。
+ */
+export function directorFirstFramePromptName(position: number): string {
+  return `director/firstframe-${String(position).padStart(2, '0')}.md`
+}
+
+export function directorTailframePromptName(position: number): string {
+  return `director/tailframe-${String(position).padStart(2, '0')}.md`
 }
 
 /**

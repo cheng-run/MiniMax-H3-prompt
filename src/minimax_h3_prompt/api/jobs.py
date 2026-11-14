@@ -63,6 +63,7 @@ from ..workbench_store import (
     AssetImageInvalid,
     EventDraft,
     FrameInvalid,
+    FrameMismatch,
     JobNotFound,
     JobNotRunning,
     JobSummary,
@@ -78,10 +79,13 @@ from ..workbench_store import (
     SegmentVideoInvalid,
     SessionBusy,
     StartImageRequired,
+    VideoUnreadable,
     WorkbenchError,
     WorkbenchSessionStore,
     director_briefing_name,
+    director_first_frame_prompt_name,
     director_segment_prompt_name,
+    director_tailframe_prompt_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -123,6 +127,16 @@ SEGMENT_STEP_VALIDATE = "validate"
 # ``_segment_step`` 从**已落盘的段状态**判定，所以拼接失败后的重试不需要额外记账。
 SEGMENT_STEP_ASSEMBLE = "assemble"
 SEGMENT_STEP_DONE = "done"
+
+# 导演台段循环的子步骤（D8 §5.5-§5.6 / §8.3 / #264）。它复用同一组段状态四态，
+# 只是「pending 的下一步」比 base/ref 多：按需词、段首图、尾帧词都发生在等视频之前。
+# 这些名字只进分派，不进 job 记录——判据依旧是**已落盘的段状态与词文件**。
+DIRECTOR_STEP_FIRSTFRAME = "director_firstframe"
+DIRECTOR_STEP_SEGMENT_IMAGE = "director_segment_image"
+DIRECTOR_STEP_TAILFRAME = "director_tailframe"
+DIRECTOR_STEP_WAIT_VIDEO = "director_wait_video"
+DIRECTOR_STEP_FINALIZE = "director_finalize"
+DIRECTOR_STEP_DONE = "director_done"
 
 # 段任务的进度节点名（带段号，前端据进度事件显示「正在写/校验第几段」）。
 SEGMENT_WRITE_NODE = "segment_write"
@@ -199,6 +213,9 @@ _BRANCH_ASSET_LOOP = step_machine.ACTION_ASSET_IMAGE
 # 「要起任务的交图」，直接撞上「非闸门分支没有任务」的内部不一致。
 _BRANCH_DIRECTOR_START_GATE = "director_start_gate"
 _BRANCH_DIRECTOR_START_IMAGE = step_machine.ACTION_DIRECTOR_START_IMAGE
+# 第六个去向（D8 §5.6 / #264）：切镜段的段首图。与开场首帧同形——交图之后起 job
+# 继续本段（写尾帧词或挂 segment_video），没有闸门入口（词先自动产出，再挂待办）。
+_BRANCH_DIRECTOR_SEGMENT_IMAGE = step_machine.ACTION_DIRECTOR_SEGMENT_IMAGE
 
 
 def _asset_step_of(
@@ -786,13 +803,24 @@ class JobRunner:
                     # 归属与 mp4 容器：不属于本会话/非 mp4 一律 segment_video_invalid（422）。
                     resource = self.store.resolve_video_asset(
                         session_id, submitted_video)
-                    # 段号与当前段一致 + 技术档合格（复用 check_segment_video）。
-                    problems = segment_submission_problems(
-                        current_index=current_seg.index, number=int(number),
-                        video_path=resource.path,
-                        expected_seconds=float(current_seg.end_s - current_seg.start_s))
-                    if problems:
-                        raise SegmentVideoInvalid("；".join(problems))
+                    if int(current_seg.index) != int(number):
+                        raise SegmentVideoInvalid(
+                            f"第 {number} 段不是当前段：段视频只能交给轮到的这一段。")
+                    if is_director_mode(current.brief.mode):
+                        # 导演台的判据是**帧**（17k+5 网格），而且合并导出常常比本段长：
+                        # 技术档的「秒数」闸门（base/ref 用）会把它误判成不合格。
+                        # 同步判帧在这里做——AC 要 422，不能等异步任务。
+                        self._judge_director_segment_video(
+                            session_id, int(number), resource.path)
+                    else:
+                        # 段号与当前段一致 + 技术档合格（复用 check_segment_video）。
+                        problems = segment_submission_problems(
+                            current_index=current_seg.index, number=int(number),
+                            video_path=resource.path,
+                            expected_seconds=float(
+                                current_seg.end_s - current_seg.start_s))
+                        if problems:
+                            raise SegmentVideoInvalid("；".join(problems))
                     rows = [segment.model_dump() for segment in ordered]
                     for row in rows:
                         if int(row["index"]) == int(number):
@@ -877,6 +905,65 @@ class JobRunner:
                     if submitted_end:
                         holder["end_asset_id"] = submitted_end
                     recorded_decision = step_machine.DECISION_SUBMIT_START_IMAGE
+                elif target.kind == step_machine.ACTION_DIRECTOR_SEGMENT_IMAGE:
+                    # 切镜段的段首图（D8 §5.6 / #264）：一个逐段图槽，只收 ``asset_id``。
+                    if decision != step_machine.DECISION_SUBMIT_SEGMENT_IMAGE:
+                        raise FrameInvalid(
+                            "director_segment_image 待办需要 "
+                            "decision=submit_segment_image。")
+                    if revisions:
+                        raise FrameInvalid(
+                            "director_segment_image 待办不接受 revisions。")
+                    if frames is not None:
+                        raise FrameInvalid(
+                            "director_segment_image 待办不接受 frames。")
+                    if video_asset_id is not None:
+                        raise FrameInvalid(
+                            "director_segment_image 待办不接受 video_asset_id。")
+                    if start_asset_id is not None or end_asset_id is not None:
+                        raise FrameInvalid(
+                            "director_segment_image 待办只收 asset_id，"
+                            "开场首帧/全片尾帧用 director_start_image。")
+                    submitted_image = str(asset_id or "").strip()
+                    if not submitted_image:
+                        raise FrameInvalid(
+                            "director_segment_image 待办必须带 asset_id。")
+                    number = target.segment_index
+                    if number is None:
+                        raise FrameInvalid(
+                            "这条 director_segment_image 待办缺段号，无法核对。")
+                    if not is_director_mode(current.brief.mode):
+                        raise RouteMismatch(
+                            "只有导演台会话有逐段首帧图槽。")
+                    ordered = sorted(current.segments, key=lambda item: item.index)
+                    current_seg = next(
+                        (item for item in ordered
+                         if item.status != SEGMENT_STATUS_PASSED), None)
+                    if current_seg is None or int(current_seg.index) != int(number):
+                        raise FrameInvalid(
+                            f"第 {number} 段不是当前段：段首图只能交给轮到的这一段。")
+                    from ..director.frames import (
+                        FIRST_SEGMENT_TYPE, needs_first_frame_image)
+
+                    segment_type = str(current_seg.segment_type or "")
+                    if (not segment_type
+                            or segment_type == FIRST_SEGMENT_TYPE
+                            or not needs_first_frame_image(
+                                segment_type, current.brief.director_mode)):
+                        raise FrameInvalid(
+                            f"第 {number} 段（{segment_type or '未知类型'}）没有段首图槽："
+                            "开场首帧走 director_start_image，其余段按给图契约判。")
+                    image_path = self.store.resolve_image_asset(
+                        session_id, submitted_image)
+                    # 路径记进本段首帧词的 sidecar（#158）：尾帧词要拿它当参考，续跑
+                    # 那一轮也要靠它知道这一段该是什么画幅。
+                    from ..director.firstframe import record_first_frame_image
+
+                    record_first_frame_image(
+                        self.store.session_directory(session_id), int(number),
+                        image_path)
+                    recorded_decision = (
+                        step_machine.DECISION_SUBMIT_SEGMENT_IMAGE)
                 else:
                     raise FrameInvalid(f"不认识的人工待办类型：{target.kind}")
                 holder["decision"] = recorded_decision
@@ -1001,7 +1088,8 @@ class JobRunner:
             event = threading.Event()
             self._cancel_events[job.job_id] = event
             if branch in (_BRANCH_SEGMENT_VIDEO, _BRANCH_ASSET_LOOP,
-                          _BRANCH_DIRECTOR_START_IMAGE):
+                          _BRANCH_DIRECTOR_START_IMAGE,
+                          _BRANCH_DIRECTOR_SEGMENT_IMAGE):
                 # 段校验、素材循环与导演台开场首帧都走通用分派（``_run`` 按持久化
                 # 事实决定跑哪一步）：交完首帧后的下一步是导演台阶段 2（规划 + 写段），
                 # 不是修订重跑阶段 1。三处各写一份子步骤判定会长出两套口径。
@@ -1042,6 +1130,8 @@ class JobRunner:
             return _BRANCH_ASSET_LOOP
         if kind == step_machine.ACTION_DIRECTOR_START_IMAGE:
             return _BRANCH_DIRECTOR_START_IMAGE
+        if kind == step_machine.ACTION_DIRECTOR_SEGMENT_IMAGE:
+            return _BRANCH_DIRECTOR_SEGMENT_IMAGE
         if (kind == step_machine.ACTION_STAGE1_REVIEW
                 and decision == step_machine.DECISION_APPROVE):
             # ref 通过审查先走素材循环（D7 §5.3）：它不是帧链，也不直接进阶段 2。
@@ -1053,6 +1143,59 @@ class JobRunner:
                 return (_BRANCH_DIRECTOR_START_GATE
                         if session.brief.is_director else _BRANCH_FRAME_GATE)
         return _BRANCH_REVIEW
+
+    def _director_frame_tolerance(self) -> int | None:
+        """配置里的帧容差；拿不到就交 ``None`` 给 companion 用代码默认值。
+
+        容差是**用户旋钮**（``config/agent.yaml``），代码默认值住在 companion 一处；
+        测试的 runtime 桩可能没有这一项，缺了不该让判帧整条挂掉。
+        """
+        getter = getattr(self.config, "director_frame_tolerance", None)
+        if getter is None:
+            return None
+        try:
+            return int(getter())
+        except (TypeError, ValueError):
+            return None
+
+    def _judge_director_segment_video(
+        self, session_id: str, number: int, video_path: Path,
+    ) -> tuple[int, Any]:
+        """同步判一段导演台成片视频（D8 §10 / #264）：**唯一判据**是 companion。
+
+        返回 ``(实际帧数, verdict)``。读不出 → ``video_unreadable``（不判 0 帧）；
+        帧数不合任何合法导出形态 → ``frame_mismatch``（AC 点名「请确认贴的是本段成片」）。
+        合并导出（前 N 段/整片）与单段导出都由 ``judge_video_evidence`` 认。
+        """
+        from ..director import cache, companion
+        from ..director.planning import plan_path, read_plan_json
+
+        directory = self.store.session_directory(session_id)
+        try:
+            plan = read_plan_json(plan_path(directory))
+        except (OSError, ValueError) as exc:
+            raise SegmentVideoInvalid(
+                f"导演台段表读不回来，无法判帧：{exc}") from exc
+        segment = next(
+            (item for item in plan.segments if item.index == int(number)), None)
+        if segment is None:
+            raise SegmentVideoInvalid(f"段表里找不到第 {number} 段。")
+        try:
+            actual = cache.actual_frames(video_path)
+        except ValueError as exc:
+            # 读不出与「不是这一段」是两种结论（``actual_frames`` 的同一取舍）。
+            raise VideoUnreadable(str(exc)) from exc
+        verdict = companion.judge_video_evidence(
+            segment, actual_frames=actual, plan=plan,
+            tolerance=self._director_frame_tolerance())
+        if not verdict.passed:
+            message = verdict.message
+            # AC 要求文案点名这一句；judge 对「不是本段」的几支已经写了，帧数不等
+            # 那一支没有——在这里补齐，不另写一份判据。
+            if "请确认贴的是本段成片" not in message:
+                message = f"{message} 请确认贴的是本段成片。"
+            raise FrameMismatch(message)
+        return actual, verdict
 
     def _accept_director_start_image(
         self, session_id: str, current: Any, start_path: Path,
@@ -1212,6 +1355,21 @@ class JobRunner:
                 elif kind == SEGMENT_STEP_ASSEMBLE:
                     result = await asyncio.to_thread(
                         self._execute_segment_assemble, session_id, job_id, cancel_event)
+                elif kind == DIRECTOR_STEP_FIRSTFRAME:
+                    result = await asyncio.to_thread(
+                        self._execute_director_firstframe,
+                        session_id, job_id, cancel_event, number)
+                elif kind == DIRECTOR_STEP_TAILFRAME:
+                    result = await asyncio.to_thread(
+                        self._execute_director_tailframe,
+                        session_id, job_id, cancel_event, number)
+                elif kind == DIRECTOR_STEP_FINALIZE:
+                    result = await asyncio.to_thread(
+                        self._execute_director_finalize,
+                        session_id, job_id, cancel_event, number)
+                elif kind in (DIRECTOR_STEP_SEGMENT_IMAGE,
+                              DIRECTOR_STEP_WAIT_VIDEO):
+                    result = {"number": number, "todo_kind": kind}
                 else:
                     result = None
             else:
@@ -1237,10 +1395,11 @@ class JobRunner:
                         self._finish_asset_write, session_id, job_id, result)
                     next_job = None
             elif step == step_machine.STEP_PACKING:
-                # 打包成功只落 job 结果；段循环是 #264，本票停在过渡态。
-                await asyncio.to_thread(
+                # 打包成功：导演台立刻接段循环的第一件（按需词/挂待办），与阶段 2
+                # 接打包同形——新任务的 ``job.started`` 与旧任务的 ``succeeded``
+                # 在同一次落盘里写出（#264）。
+                next_job = await asyncio.to_thread(
                     self._finish_pack, session_id, job_id, result)
-                next_job = None
             elif step == step_machine.STEP_SEGMENTING:
                 kind = seg_step[0]
                 if kind == SEGMENT_STEP_PLANNING:
@@ -1255,6 +1414,23 @@ class JobRunner:
                 elif kind == SEGMENT_STEP_ASSEMBLE:
                     next_job = await asyncio.to_thread(
                         self._finish_segment_assembly, session_id, job_id, result)
+                elif kind == DIRECTOR_STEP_FIRSTFRAME:
+                    next_job = await asyncio.to_thread(
+                        self._finish_director_firstframe,
+                        session_id, job_id, result)
+                elif kind == DIRECTOR_STEP_TAILFRAME:
+                    next_job = await asyncio.to_thread(
+                        self._finish_director_tailframe,
+                        session_id, job_id, result)
+                elif kind == DIRECTOR_STEP_FINALIZE:
+                    next_job = await asyncio.to_thread(
+                        self._finish_director_finalize,
+                        session_id, job_id, result)
+                elif kind in (DIRECTOR_STEP_SEGMENT_IMAGE,
+                              DIRECTOR_STEP_WAIT_VIDEO):
+                    next_job = await asyncio.to_thread(
+                        self._finish_director_todo,
+                        session_id, job_id, result)
                 else:
                     next_job = await asyncio.to_thread(
                         self._finish_segment_done, session_id, job_id)
@@ -1300,13 +1476,18 @@ class JobRunner:
             if (session.brief.is_ref
                     and _asset_step_of(session.asset_ledger)[0] != ASSET_STEP_DONE):
                 return step_machine.STEP_ASSET_LOOP
-            # 导演台的阶段 2 只做规划 + 写段；写完就该打包（#263），段循环是 #264。
-            # 判据全在磁盘（段表 + 每段段词），zip 已在时仍给 ``packing``——打包器
-            # 自己跳过重建、只补缺失的简报（spec §9.4）。
+            # 导演台的阶段 2 只做规划 + 写段；写完就该打包（#263）。zip 已落盘
+            # 之后进入段循环（#264）——判据全在磁盘（段表 + 每段段词 + zip），
+            # 重启后照样知道「该打包还是该跑段」。
             if session.brief.is_director:
-                return (step_machine.STEP_PACKING
-                        if self._director_segments_ready(directory)
-                        else step_machine.STEP_STAGE2)
+                if not self._director_segments_ready(directory):
+                    return step_machine.STEP_STAGE2
+                from ..director.pack import zip_path_for
+
+                if (zip_path_for(directory).is_file()
+                        and self._director_briefings_ready(directory)):
+                    return step_machine.STEP_SEGMENTING
+                return step_machine.STEP_PACKING
             # 长片的两段接缝都属于 ``segmenting``：① 阶段 2 已成功（``final_prompt``
             # 落盘）但还没段表——重试要重跑**规划**；② 段循环已开始（有段表）——重试要
             # 重跑当前那一段的写词或校验。两者都不能把阶段 2 再跑一遍（D6 spec §5.3）。
@@ -1340,6 +1521,26 @@ class JobRunner:
             return False
         return all(segment_path(directory, position).is_file()
                    for position in range(1, len(raw) + 1))
+
+    @staticmethod
+    def _director_briefings_ready(directory: Path) -> bool:
+        """打包步骤是否收尾完整：每段一份简报都在，才算打包真的做完（#263 / #264）。
+
+        zip 早于简报落盘：崩在两者之间时，续跑要回到 ``packing`` 只补简报——直接
+        进段循环会把「用户该照抄的清单」永久漏掉。
+        """
+        from ..director.planning import plan_path
+
+        try:
+            data = json.loads(plan_path(directory).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        raw = data.get("segments") if isinstance(data, dict) else None
+        if not isinstance(raw, list) or not raw:
+            return False
+        return all(
+            (directory / director_briefing_name(position)).is_file()
+            for position in range(1, len(raw) + 1))
 
     @staticmethod
     def _needs_segment_loop(brief: Any) -> bool:
@@ -2722,6 +2923,8 @@ class JobRunner:
         session = load_session(self.store.session_directory(session_id))
         if session is None or not session.segments:
             return (SEGMENT_STEP_PLANNING, 0)
+        if session.brief.is_director:
+            return self._director_segment_step(session_id, session)
         for row in sorted(
                 session.segments, key=lambda item: int(item.get("index", 0))):
             status = str(row.get("status") or "")
@@ -2735,6 +2938,68 @@ class JobRunner:
             # waiting_video：在等人交视频，本不该有 job 在跑；给一个温和收尾。
             return (SEGMENT_STEP_DONE, number)
         return (SEGMENT_STEP_ASSEMBLE, 0)
+
+    def _director_segment_step(
+        self, session_id: str, session: Any,
+    ) -> tuple[str, int]:
+        """导演台段循环下一次做什么：**全部读盘**（段状态 + 词文件 + 段首图 sidecar）。
+
+        与 base/ref 的区别只在「pending 的下一步」：一段在等视频之前，先要按需词
+        （切镜段首帧词、运镜/收尾段尾帧词），切镜段还要等用户挂一张本段首帧图。
+        段状态仍是同一套四态——``validating`` 只表示「视频收了、慢收尾还没落完」。
+        """
+        from ..director import frame_meta
+        from ..director.frames import FIRST_SEGMENT_TYPE, needs_first_frame_image
+        from ..director.pack import film_end_still
+        from ..director.planning import plan_path, read_plan_json
+        from ..director.firstframe import FIRST_FRAME_IMAGE_FIELD, firstframe_path
+        from ..director.tailframe import needs_tailframe, tailframe_path
+
+        directory = self.store.session_directory(session_id)
+        # 段表先读、先校验：坏表不能在「当前段在等视频」这一支被静默放过——续跑
+        # 之后交付要读同一张表，坏表晚一点炸只会让用户更晚知道（#262 的同一条纪律）。
+        try:
+            plan = read_plan_json(plan_path(directory))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                f"导演台段表读不回来，段循环无法继续：{exc}") from exc
+        current = next(
+            (row for row in sorted(
+                session.segments, key=lambda item: int(item.get("index", 0)))
+             if str(row.get("status")) != SEGMENT_STATUS_PASSED), None)
+        if current is None:
+            # 全部段通过：本票的终点。交付（#266）是下一张票，不在这里造终态。
+            return (DIRECTOR_STEP_DONE, 0)
+        number = int(current.get("index") or 0)
+        status = str(current.get("status") or "")
+        if status == SEGMENT_STATUS_VALIDATING:
+            return (DIRECTOR_STEP_FINALIZE, number)
+        if status in (SEGMENT_STATUS_WAITING_VIDEO, SEGMENT_STATUS_PASSED):
+            return (DIRECTOR_STEP_DONE, number)
+
+        segment = next(
+            (item for item in plan.segments if item.index == number), None)
+        if segment is None:
+            raise RuntimeError(f"导演台段表里找不到第 {number} 段")
+        # 切镜段：首帧词自动产出；产完后等用户把用它生成的图挂回来。开场段的首帧
+        # 已经在阶段 2 前的 director_start_image 收过，不再重复产词（CLI 同一判据）。
+        if (segment.type != FIRST_SEGMENT_TYPE
+                and needs_first_frame_image(segment.type, plan.mode)):
+            prompt = firstframe_path(directory, number)
+            if not prompt.is_file():
+                return (DIRECTOR_STEP_FIRSTFRAME, number)
+            meta = frame_meta.read_frame_meta(prompt) or {}
+            image = str(meta.get(FIRST_FRAME_IMAGE_FIELD) or "")
+            if not image or not Path(image).is_file():
+                return (DIRECTOR_STEP_SEGMENT_IMAGE, number)
+        # 运镜/收尾段：尾帧词自动产出；``ending`` 有作者给的全片尾帧时跳过（#149：
+        # 作者终点优先，不写词、不花那次模型调用）。
+        if needs_tailframe(segment.type, plan.mode):
+            skip_ending = (segment.type == "ending"
+                           and film_end_still(directory) is not None)
+            if not skip_ending and not tailframe_path(directory, number).is_file():
+                return (DIRECTOR_STEP_TAILFRAME, number)
+        return (DIRECTOR_STEP_WAIT_VIDEO, number)
 
     @staticmethod
     def _load_segment_plans(directory: Path) -> list[Any]:
@@ -3285,28 +3550,402 @@ class JobRunner:
                        job_id=job_id),
         ])
 
-    def _finish_pack(self, session_id: str, job_id: str,
-                     result: dict[str, Any]) -> None:
-        """打包成功：装配结论与节点宽高进 job 详情，会话停在过渡态（段循环是 #264）。
+    # ------------------------------------------------------------------
+    # 导演台段循环（D8 §5.5-§5.6 / §8.3-§8.4 / #264）
+    # ------------------------------------------------------------------
 
-        不写 ``completed``：初始包只是「交给导演台去跑」的计划，交付在 #266。
+    @staticmethod
+    def _director_plan_segment(directory: Path, number: int) -> tuple[Any, Any]:
+        """读回段表与第 ``number`` 段；坏表/缺段都是技术故障（不能让 job 静默跳过）。"""
+        from ..director.planning import plan_path, read_plan_json
+
+        try:
+            plan = read_plan_json(plan_path(directory))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                f"导演台段表读不回来，第 {number} 段推进不了：{exc}") from exc
+        segment = next(
+            (item for item in plan.segments if item.index == int(number)), None)
+        if segment is None:
+            raise RuntimeError(f"导演台段表里找不到第 {number} 段")
+        return plan, segment
+
+    def _execute_director_firstframe(
+        self, session_id: str, job_id: str,
+        cancel_event: threading.Event, number: int,
+    ) -> dict[str, Any]:
+        """切镜段的段首帧词（#264）：轮到该段才写，盘上已有就沿用、不重付。
+
+        慢调用（模型）只在这里；请求阶段只起 job。
         """
-        detail = "\n".join([str(result["report"]), "", *result["node_lines"]])
+        from ..director.firstframe import firstframe_path, write_firstframe_prompt
 
-        def _apply(current: Any) -> dict[str, Any]:
-            job = self._job_or_running(job_id, current).model_copy(
-                update={"status": "succeeded", "finished_at": _now(),
-                        "detail": detail})
+        directory = self.store.session_directory(session_id)
+        session = load_session(directory)
+        if session is None:
+            raise RuntimeError(f"会话文件读不到：{session_id}")
+        path = firstframe_path(directory, number)
+        if path.is_file():
+            return {"number": number, "skipped": True}
+        _plan, segment = self._director_plan_segment(directory, number)
+        node = f"director_firstframe-{number:02d}"
+        self._emit_progress(
+            session_id, job_id, node, "started",
+            stage=step_machine.STEP_SEGMENTING)
+        self._write_active_job(session_id, job_id, node)
+        if self.fake_pipeline:
+            from . import fake_pipeline
+
+            text = fake_pipeline.director_firstframe_prompt(segment)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(path, text.rstrip() + "\n")
+        else:
+            from ..image_config import load_frame_image_model
+
+            text = write_firstframe_prompt(
+                segment, llm=build_chat_model(),
+                shot_table=str(session.stage_state.get("shot_table") or ""),
+                brief=session.brief, session_dir=directory,
+                model=load_frame_image_model(), state=session.stage_state)
+            if not text:
+                raise RuntimeError(
+                    f"第 {number} 段段首帧词没有产出（调用失败或回复里没有正文）")
+        if cancel_event.is_set():
+            raise JobCancelled(node)
+        self.store.register_artifact(
+            session_id, director_first_frame_prompt_name(number), job_id=job_id)
+        self._emit_progress(
+            session_id, job_id, node, "done",
+            stage=step_machine.STEP_SEGMENTING)
+        return {"number": number, "skipped": False}
+
+    def _director_start_image(
+        self, directory: Path, plan: Any, segment: Any,
+    ) -> Path:
+        """本段尾帧词的起点画面（D8 §8.4）：切镜段用**自己的**首帧图，引导段用
+        上一段的终点图，没有就取上一段成片视频的末帧。
+
+        不拿段缓存当参考：插件默认 raw 编码常常读不了；用户实际跑的是哪一版视频，
+        提示词就该描述哪一版（#114）。终点图优先于视频末帧：视频末帧每段都会漂。
+        """
+        from ..director import cache, ledger
+        from ..director.frames import needs_first_frame_image
+        from ..director.frame_meta import read_frame_meta
+        from ..director.firstframe import FIRST_FRAME_IMAGE_FIELD, firstframe_path
+        from ..director.tailframe import last_frame_png_path
+
+        if needs_first_frame_image(segment.type, plan.mode):
+            meta = read_frame_meta(firstframe_path(directory, segment.index)) or {}
+            raw = str(meta.get(FIRST_FRAME_IMAGE_FIELD) or "")
+            if not raw or not Path(raw).is_file():
+                raise RuntimeError(
+                    f"第 {segment.index} 段的段首帧图不见了（sidecar 记的是 {raw or '空'}）："
+                    "尾帧词没有可用的起点画面")
+            return Path(raw)
+        previous = segment.index - 1
+        if previous < 1:
+            raise RuntimeError(
+                f"第 {segment.index} 段不该要终点画面：首段没有起点画面")
+        try:
+            row = ledger.passed_director_rows(directory).get(previous) or {}
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"段产出账读不回来：{exc}") from exc
+        end_image = str(row.get("end_image") or "")
+        if end_image and Path(end_image).is_file():
+            return Path(end_image)
+        video = str(row.get("video") or "")
+        if not video or not Path(video).is_file():
+            raise RuntimeError(
+                f"第 {segment.index} 段要终点画面，但账里没有上一段（第 {previous} 段）"
+                "可用的起点画面（终点图与成片视频都没有）")
+        return cache.export_last_frame(
+            video, last_frame_png_path(directory, previous))
+
+    def _execute_director_tailframe(
+        self, session_id: str, job_id: str,
+        cancel_event: threading.Event, number: int,
+    ) -> dict[str, Any]:
+        """运镜/收尾段的尾帧词（#264）：只在轮到时写；``ending`` 有全片尾帧则跳过。"""
+        from dataclasses import replace
+
+        from ..director.pack import film_end_still
+        from ..director.tailframe import (
+            needs_tailframe, tailframe_path, write_tailframe_prompts,
+        )
+
+        directory = self.store.session_directory(session_id)
+        session = load_session(directory)
+        if session is None:
+            raise RuntimeError(f"会话文件读不到：{session_id}")
+        plan, segment = self._director_plan_segment(directory, number)
+        if not needs_tailframe(segment.type, plan.mode):
+            return {"number": number, "skipped": True}
+        if segment.type == "ending" and film_end_still(directory) is not None:
+            # 作者给的全片终点优先（#149）：不写词、不花那次模型调用。
+            return {"number": number, "skipped": True}
+        path = tailframe_path(directory, number)
+        if path.is_file():
+            return {"number": number, "skipped": True}
+        start_image = self._director_start_image(directory, plan, segment)
+        node = f"director_tailframe-{number:02d}"
+        self._emit_progress(
+            session_id, job_id, node, "started",
+            stage=step_machine.STEP_SEGMENTING)
+        self._write_active_job(session_id, job_id, node)
+        if self.fake_pipeline:
+            from . import fake_pipeline
+
+            text = fake_pipeline.director_tailframe_prompt(segment, start_image)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(path, text.rstrip() + "\n")
+        else:
+            written = write_tailframe_prompts(
+                replace(plan, segments=(segment,)), llm=build_chat_model(),
+                session_dir=directory, start_image=start_image,
+                identity_baseline=session.stage_state.get("character_design"))
+            if not written:
+                raise RuntimeError(f"第 {number} 段尾帧词没有产出")
+        if cancel_event.is_set():
+            raise JobCancelled(node)
+        self.store.register_artifact(
+            session_id, director_tailframe_prompt_name(number), job_id=job_id)
+        self._emit_progress(
+            session_id, job_id, node, "done",
+            stage=step_machine.STEP_SEGMENTING)
+        return {"number": number, "skipped": False}
+
+    def _director_cache_file(self, session: Any, number: int) -> Path | None:
+        """缓存段文件**只作定位**（#112 起不是证据）：找得到就记路径，找不到传 None。"""
+        from ..director import cache
+
+        root = getattr(self.config, "director_comfy_output_root", None)
+        if root is None:
+            return None
+        try:
+            directory = cache.cache_dir(
+                root(), session.brief.director_cache_name,
+                session.brief.director_node_id)
+            for candidate in cache.segment_cache_files(directory, number):
+                if candidate.is_file():
+                    return candidate
+        except (OSError, ValueError):
+            return None
+        return None
+
+    def _execute_director_finalize(
+        self, session_id: str, job_id: str,
+        cancel_event: threading.Event, number: int,
+    ) -> dict[str, Any]:
+        """视频已收、同步判帧已过：慢收尾——追加账本行并交回通过事实（#264）。
+
+        账本行**幂等**：崩溃后重跑本段收尾时，同一段、同一条视频、同一实际帧数的
+        通过行已经在了就不再追加（追加式账不会自己去重）。
+        """
+        from ..director import ledger
+
+        directory = self.store.session_directory(session_id)
+        session = load_session(directory)
+        if session is None:
+            raise RuntimeError(f"会话文件读不到：{session_id}")
+        row = next(
+            (item for item in session.segments
+             if int(item.get("index", 0)) == int(number)), None)
+        if row is None:
+            raise RuntimeError(f"快照里找不到第 {number} 段")
+        asset_id = str(row.get("video_asset_id") or "")
+        if not asset_id:
+            raise RuntimeError(f"第 {number} 段没有已交的视频")
+        resource = self.store.resolve_asset_media(asset_id)
+        _plan, segment = self._director_plan_segment(directory, number)
+        actual, _verdict = self._judge_director_segment_video(
+            session_id, number, resource.path)
+        node = f"director_finalize-{number:02d}"
+        self._emit_progress(
+            session_id, job_id, node, "started",
+            stage=step_machine.STEP_SEGMENTING)
+        self._write_active_job(session_id, job_id, node)
+        previous = ledger.passed_director_rows(directory).get(number)
+        already = bool(
+            previous
+            and Path(str(previous.get("video") or "")).resolve()
+            == resource.path.resolve()
+            and previous.get("actual_frames") == actual)
+        if not already:
+            ledger.log_director_output(
+                directory,
+                segment=number,
+                start_frame=segment.start_frame,
+                end_frame=segment.end_frame,
+                declared_frames=segment.declared_frames,
+                export_frames=segment.export_frames,
+                actual_frames=actual,
+                video_path=resource.path,
+                cache_path=self._director_cache_file(session, number),
+            )
+        if cancel_event.is_set():
+            raise JobCancelled(node)
+        self._emit_progress(
+            session_id, job_id, node, "done",
+            stage=step_machine.STEP_SEGMENTING)
+        return {"number": number, "actual_frames": actual,
+                "already_logged": already}
+
+    def _hang_director_todo(
+        self, session_id: str, job_id: str, number: int, todo_kind: str,
+    ) -> JobSummary | None:
+        """挂出导演台段循环的下一步待办（#264），并把本段状态推到对应档位。
+
+        两种待办共用这一处：``director_segment_image`` 只等图（段仍是 ``pending``）；
+        ``segment_video`` 等视频（段转 ``waiting_video``）。每段恰好一个同类待办。
+        """
+        waits_video = todo_kind == step_machine.ACTION_SEGMENT_VIDEO
+        item = ActionItemOut(
+            item_id=uuid.uuid4().hex, kind=todo_kind, status="pending",
+            created_at=_now(), segment_index=number)
+
+        def _apply(detail: Any) -> dict[str, Any]:
+            job = self._job_or_running(job_id, detail).model_copy(
+                update={"status": "succeeded", "finished_at": _now()})
+            rows = [row.model_dump() for row in detail.segments]
+            if waits_video:
+                for row in rows:
+                    if int(row["index"]) == number:
+                        row["status"] = SEGMENT_STATUS_WAITING_VIDEO
+                        row["rejection_reason"] = ""
+            items = [
+                existing.model_dump(mode="json")
+                for existing in detail.action_items
+                if not (existing.kind == todo_kind
+                        and existing.status == "pending")]
+            items.append(item.model_dump(mode="json"))
             return {
                 "status": step_machine.STATUS_AWAITING_HUMAN,
-                "jobs": _upsert_job(current.jobs, _job_dict(job)),
+                "jobs": _upsert_job(detail.jobs, _job_dict(job)),
+                "segments": rows,
+                "action_items": items,
             }
 
         self.store.mutate(session_id, _apply, events=[
             EventDraft("job.succeeded",
                        {"next": step_machine.STATUS_AWAITING_HUMAN},
                        job_id=job_id),
+            EventDraft("action_item.created",
+                       {"item_id": item.item_id, "kind": item.kind,
+                        "segment_index": number}, job_id=job_id),
         ])
+        return None
+
+    def _finish_director_firstframe(
+        self, session_id: str, job_id: str, result: dict[str, Any],
+    ) -> JobSummary | None:
+        """段首帧词写完：挂出本段的 ``director_segment_image`` 待办（#264）。"""
+        return self._hang_director_todo(
+            session_id, job_id, int(result["number"]),
+            step_machine.ACTION_DIRECTOR_SEGMENT_IMAGE)
+
+    def _finish_director_tailframe(
+        self, session_id: str, job_id: str, result: dict[str, Any],
+    ) -> JobSummary | None:
+        """尾帧词写完（或全片尾帧已给、跳过）：挂出本段 ``segment_video`` 待办。"""
+        return self._hang_director_todo(
+            session_id, job_id, int(result["number"]),
+            step_machine.ACTION_SEGMENT_VIDEO)
+
+    def _finish_director_todo(
+        self, session_id: str, job_id: str, result: dict[str, Any],
+    ) -> JobSummary | None:
+        """「只剩挂待办」的步骤（无慢调用）：按 todo 类型落到同一处挂法。"""
+        todo_kind = (
+            step_machine.ACTION_SEGMENT_VIDEO
+            if result.get("todo_kind") == DIRECTOR_STEP_WAIT_VIDEO
+            else step_machine.ACTION_DIRECTOR_SEGMENT_IMAGE)
+        return self._hang_director_todo(
+            session_id, job_id, int(result["number"]), todo_kind)
+
+    def _finish_director_finalize(
+        self, session_id: str, job_id: str, result: dict[str, Any],
+    ) -> JobSummary | None:
+        """通过行落盘后：段进 ``passed``，立刻起下一段的 job（#264）。
+
+        下一段该写词还是只挂待办由 ``_segment_step`` 按盘判；这里只负责把 job 放出去，
+        不在这儿重写一套子步骤判据。
+        """
+        number = int(result["number"])
+        session = load_session(self.store.session_directory(session_id))
+        total = len(session.segments) if session is not None else 0
+        next_job = (
+            JobSummary(job_id=uuid.uuid4().hex, kind=JOB_KIND_SEGMENT,
+                       status="running", started_at=_now())
+            if number < total else None)
+        next_status = (step_machine.STATUS_RUNNING if next_job is not None
+                       else step_machine.STATUS_AWAITING_HUMAN)
+
+        def _apply(detail: Any) -> dict[str, Any]:
+            job = self._job_or_running(job_id, detail).model_copy(
+                update={"status": "succeeded", "finished_at": _now()})
+            rows = [row.model_dump() for row in detail.segments]
+            for row in rows:
+                if int(row["index"]) == number:
+                    row["status"] = SEGMENT_STATUS_PASSED
+                    row["rejection_reason"] = ""
+            jobs = _upsert_job(detail.jobs, _job_dict(job))
+            if next_job is not None:
+                jobs = _upsert_job(jobs, _job_dict(next_job))
+            return {
+                "status": next_status,
+                "jobs": jobs,
+                "segments": rows,
+            }
+
+        events = [
+            EventDraft("job.succeeded", {"next": next_status}, job_id=job_id)]
+        if next_job is not None:
+            events.append(EventDraft(
+                "job.started", {"kind": next_job.kind},
+                job_id=next_job.job_id))
+        self.store.mutate(session_id, _apply, events=events)
+        return next_job
+
+    def _finish_pack(self, session_id: str, job_id: str,
+                     result: dict[str, Any]) -> JobSummary | None:
+        """打包成功：装配结论与节点宽高进 job 详情，立刻接上段循环（#264）。
+
+        不写 ``completed``：初始包只是「交给导演台去跑」的计划，交付在 #266。
+        段循环的第一件（按需词或挂 ``segment_video``）由 ``_segment_step`` 按盘判。
+        """
+        detail = "\n".join([str(result["report"]), "", *result["node_lines"]])
+        session = load_session(self.store.session_directory(session_id))
+        start_segments = bool(
+            session is not None and session.segments
+            and any(str(row.get("status")) != SEGMENT_STATUS_PASSED
+                    for row in session.segments))
+        next_job = (
+            JobSummary(job_id=uuid.uuid4().hex, kind=JOB_KIND_SEGMENT,
+                       status="running", started_at=_now())
+            if start_segments else None)
+        next_status = (step_machine.STATUS_RUNNING if next_job is not None
+                       else step_machine.STATUS_AWAITING_HUMAN)
+
+        def _apply(current: Any) -> dict[str, Any]:
+            job = self._job_or_running(job_id, current).model_copy(
+                update={"status": "succeeded", "finished_at": _now(),
+                        "detail": detail})
+            jobs = _upsert_job(current.jobs, _job_dict(job))
+            if next_job is not None:
+                jobs = _upsert_job(jobs, _job_dict(next_job))
+            return {
+                "status": next_status,
+                "jobs": jobs,
+            }
+
+        events = [
+            EventDraft("job.succeeded", {"next": next_status}, job_id=job_id),
+        ]
+        if next_job is not None:
+            events.append(EventDraft(
+                "job.started", {"kind": next_job.kind}, job_id=next_job.job_id))
+        self.store.mutate(session_id, _apply, events=events)
+        return next_job
 
     def _finish_stage2(self, session_id: str, job_id: str,
                        result: dict[str, Any]) -> JobSummary | None:
