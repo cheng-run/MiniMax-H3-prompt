@@ -367,24 +367,39 @@ def _tier_durations(total_s: int) -> list[int] | None:
 
 
 def director_plan(mode: str, total_s: float) -> Any:
-    """桩导演台规划（#262）：单段开场，声明帧落在 17k+5 网格上、Σ 导出＝总帧。
+    """桩导演台规划：帧网格自洽、Σ 导出＝总帧，读回不炸（#262 / #266）。
 
-    帧网格必须**自洽**才能过 ``read_plan_json`` 的严格读回——桩不造一张读不回来的
-    表，否则续跑用例会在与真实路径不同的地方报错。目标总帧常不可达（96 帧不在网格
-    上），这里取向上吸附后的最近可达值，与真实规划器的落位口径一致。
+    长片 ``fl2v``（>10 秒）走**三段**（开场 / 切镜 / 收尾）：E2E 要覆盖切镜段的
+    段首图交接与两种按需词，单段表根本走不到那些分支。短 ``fl2v`` 与其余模式仍是
+    单段开场——既有用例只验证「有段表」，多造段只会让它们多等几个后台 job。
+
+    帧数取 107/107/119：首两段无引导（声明＝导出 107，17×6+5），收尾有引导（声明
+    107 → 导出 119＝17×7），合计 333。目标总帧常不可达（96 帧不在网格上），单段分支
+    仍按 ``align_frames`` 向上吸附。
     """
     from ..director.frames import (
-        FPS, DirectorPlan, DirectorSegment, align_frames, give_images_for)
+        FPS, DirectorPlan, DirectorSegment, align_frames, give_images_for, is_guided)
 
+    def _segment(index: int, segment_type: str, start: int,
+                 declared: int, export: int) -> Any:
+        return DirectorSegment(
+            index=index, type=segment_type, guided=is_guided(segment_type),
+            start_frame=start, end_frame=start + export,
+            declared_frames=declared, export_frames=export,
+            summary=f"桩管线导演台第 {index} 段：雨夜街口",
+            end_hook=f"桩管线：第 {index} 段结束时画面落定",
+            give_images=give_images_for(segment_type, mode),
+        )
+
+    if mode == "fl2v" and float(total_s) > 10:
+        segments = (
+            _segment(1, "opening", 0, 107, 107),
+            _segment(2, "camera_cut", 107, 107, 107),
+            _segment(3, "ending", 214, 107, 119),
+        )
+        return DirectorPlan(mode=mode, total_frames=333, segments=segments)
     landed = align_frames(round(float(total_s) * FPS))
-    segment = DirectorSegment(
-        index=1, type="opening", guided=False,
-        start_frame=0, end_frame=landed,
-        declared_frames=landed, export_frames=landed,
-        summary="桩管线导演台单段：雨夜街口开场",
-        end_hook="桩管线：人物停在旧楼门前收起伞，画面落定",
-        give_images=give_images_for("opening", mode),
-    )
+    segment = _segment(1, "opening", 0, landed, landed)
     return DirectorPlan(mode=mode, total_frames=landed, segments=(segment,))
 
 

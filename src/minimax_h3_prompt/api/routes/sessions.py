@@ -271,7 +271,8 @@ class ActionItemResolve(BaseModel):
     """
 
     decision: Literal[
-        "approve", "revise", "submit_start_image", "submit_segment_image"] | None = None
+        "approve", "revise", "submit_start_image", "submit_segment_image",
+        "submit_delivery"] | None = None
     revisions: list[RevisionIn] = Field(default_factory=list)
     frames: FrameSelection | None = None
     # 段视频待办（D6 §8）：本会话已上传的 mp4 素材 id。`Decision` 载荷互斥由路由先拦。
@@ -283,6 +284,9 @@ class ActionItemResolve(BaseModel):
     # 尾帧可选；两张都不接受本地路径（工作台的素材只能走上传接口）。
     start_asset_id: str | None = None
     end_asset_id: str | None = None
+    # 交付归档的最终包（D8 §12 / #266）：本会话已上传的 zip 素材 id。与
+    # ``video_asset_id``（成片 mp4）一起、在 ``decision=submit_delivery`` 下提交。
+    pack_asset_id: str | None = None
     # 画幅不符时用户必须显式确认（D8 §7.2）：缺这一项回 409 ``aspect_mismatch_unconfirmed``。
     # 用 ``None`` 表示「没给」：``False`` 会让这个**新增可选字段**在契约里变成必填，
     # 存量客户端的 approve/交图请求会整批类型报错。
@@ -782,10 +786,17 @@ async def resolve_action_item(
         raise FrameInvalid(
             "decision 与 frames 不能同时提交：审查待办不帧提交，帧待办不 approve/revise。")
     if payload.video_asset_id is not None and (
-            payload.decision is not None or payload.frames is not None
+            (payload.decision is not None
+             and payload.decision != "submit_delivery")
+            or payload.frames is not None
             or payload.asset_id is not None):
         raise SegmentVideoInvalid(
-            "video_asset_id 不能与 decision/frames/asset_id 同时提交：段视频待办只收视频素材。")
+            "video_asset_id 不能与 decision/frames/asset_id 同时提交：段视频待办只收视频素材"
+            "（交付归档除外：它用 decision=submit_delivery 一次交成片与最终包）。")
+    if payload.pack_asset_id is not None and payload.decision != "submit_delivery":
+        raise FrameInvalid(
+            "pack_asset_id 只用于 director_delivery 待办：请带 "
+            "decision=submit_delivery，并与 video_asset_id 一起提交。")
     if payload.asset_id is not None and (
             payload.decision is not None
             and payload.decision != "submit_segment_image"
@@ -825,10 +836,13 @@ async def resolve_action_item(
         None if payload.start_asset_id is None else payload.start_asset_id.strip())
     end_asset_id = (
         None if payload.end_asset_id is None else payload.end_asset_id.strip())
+    pack_asset_id = (
+        None if payload.pack_asset_id is None else payload.pack_asset_id.strip())
     job, replayed = await _runner(request).resolve(
         session_id, item_id, decision=payload.decision, revisions=revisions,
         frames=frames, video_asset_id=video_asset_id, asset_id=asset_id,
         start_asset_id=start_asset_id, end_asset_id=end_asset_id,
+        pack_asset_id=pack_asset_id,
         confirm_aspect_mismatch=bool(payload.confirm_aspect_mismatch),
         idempotency_key=idempotency_key or None)
     if replayed:

@@ -1194,14 +1194,35 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "reopen_keeps_downstream_todos",
         "src/minimax_h3_prompt/api/jobs.py",
-        "                    if not (existing.status == \"pending\"\n"
-        "                            and existing.segment_index is not None\n"
-        "                            and int(existing.segment_index) >= int(index))]",
-        "                    if True]",
+        "                    return (existing.segment_index is not None\n"
+        "                            and int(existing.segment_index) >= int(index))",
+        "                    return False",
         ("tests/test_api_director_segments.py::"
          "test_reopen_drops_pending_todos_of_later_segments",),
         "换段不清下游待办＝界面同时挂着第 1、2 段的表单，第 2 段的待办是旧锚点算的"
         "（#265，D8 §11「每段恰好一个待办」）",
+    ),
+    Mutation(
+        "delivery_skips_final_film_verdict",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "        if not ok:\n"
+        "            raise FinalFilmMismatch(",
+        "        if False:\n"
+        "            raise FinalFilmMismatch(",
+        ("tests/test_api_director_delivery.py::"
+         "test_final_film_mismatch_uses_the_shared_verdict",),
+        "交付不调 final_film_verdict＝画幅不符的片子被归档成「已交付」，"
+        "`deliver` 自己根本不查宽高（#266，spec §12.3）",
+    ),
+    Mutation(
+        "stub_director_plan_falls_back_to_single_segment",
+        "src/minimax_h3_prompt/api/fake_pipeline.py",
+        "    if mode == \"fl2v\" and float(total_s) > 10:",
+        "    if mode == \"fl2v\" and float(total_s) > 100:",
+        ("tests/test_api_director_delivery.py::"
+         "test_default_stub_plan_reaches_the_delivery_todo",),
+        "桩计划退回单段＝E2E 再走不到切镜段图槽与两种按需词，却仍然全绿"
+        "（#266，spec §19「桩管线覆盖到导演台」）",
     ),
 )
 

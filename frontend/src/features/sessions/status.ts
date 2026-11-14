@@ -51,6 +51,7 @@ const STEP_LABELS: Record<string, string> = {
   stage1: '阶段 1',
   asset_loop: '素材循环',
   stage2: '阶段 2',
+  packing: '打包',
   segmenting: '分段循环',
 }
 

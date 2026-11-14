@@ -4,6 +4,7 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { artifactContentUrl, getArtifactContent, type ArtifactInfo } from '@/api/client'
 
 import {
+  archiveDownloadLabel,
   artifactGroup,
   artifactLabel,
   isArchiveArtifact,
@@ -270,7 +271,7 @@ function noteDownload(name: string): void {
                 :data-download="artifact.name"
                 @click="noteDownload(artifact.name)"
               >
-                下载导演包
+                {{ archiveDownloadLabel(artifact.kind) }}
               </a>
               <span v-if="downloadedName === artifact.name" role="status" class="muted">
                 已开始下载

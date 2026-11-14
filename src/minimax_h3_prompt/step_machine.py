@@ -74,6 +74,10 @@ ACTION_DIRECTOR_START_IMAGE = "director_start_image"
 # 第六个人工待办（D8 §5.6 / #264）：切镜段的段首帧不是开场首帧——它按段产出，用户在
 # 段循环里逐段挂。复用 ``asset_id`` 载荷与十种闭合事件，不新造第二种交图方式。
 ACTION_DIRECTOR_SEGMENT_IMAGE = "director_segment_image"
+# 第七个人工待办（D8 §12 / #266）：全部段通过后的交付归档。它是这条路线**唯一**的
+# 交付闸门——成片与最终包都由用户在导演台导出、再作为本会话素材交回，项目不拼片。
+# 载荷带两个必填素材 id（成片 mp4 与最终包 zip），同样是 ``action_item.created``。
+ACTION_DIRECTOR_DELIVERY = "director_delivery"
 
 STEP_STAGE1 = "stage1"
 STEP_STAGE2 = "stage2"
@@ -163,6 +167,10 @@ DECISION_SUBMIT_START_IMAGE = "submit_start_image"
 # **逐段**的图槽。单独一个词是为了让决议事件与待办回显能区分「全片第一张」和
 # 「第 N 段那张」。
 DECISION_SUBMIT_SEGMENT_IMAGE = "submit_segment_image"
+# 交付归档（D8 §12 / #266）：与开场首帧同形——显式 decision + 两个素材槽。不复用
+# ``submit_video``：那一个只收一段视频、由服务端按段号核对，语义不同，混用会让
+# 「交的是第几段」与「交的是整片」在日志里分不开。
+DECISION_SUBMIT_DELIVERY = "submit_delivery"
 
 
 class InvalidTransition(ValueError):
@@ -336,6 +344,8 @@ def resolve(status: str, decision: str, *, layer: str = "") -> Decision:
 
 __all__ = [
     "ACTION_ASSET_IMAGE",
+    "ACTION_DIRECTOR_DELIVERY",
+    "ACTION_DIRECTOR_SEGMENT_IMAGE",
     "ACTION_DIRECTOR_START_IMAGE",
     "ACTION_FRAME_SUBMISSION",
     "ACTION_SEGMENT_VIDEO",
@@ -346,6 +356,8 @@ __all__ = [
     "DECISION_REVISE",
     "DECISION_SUBMIT_FRAMES",
     "DECISION_SUBMIT_IMAGE",
+    "DECISION_SUBMIT_DELIVERY",
+    "DECISION_SUBMIT_SEGMENT_IMAGE",
     "DECISION_SUBMIT_START_IMAGE",
     "DECISION_SUBMIT_VIDEO",
     "Decision",

@@ -35,6 +35,8 @@ const DELIVERABLE_KINDS = new Set([
   // 「复制去生图」的成品文本，归交付文本。
   'director_first_frame_prompt',
   'director_tailframe_prompt',
+  // 交付记录（D8 §12.2 / #266）：成片路径/帧数/段数/宽高/时间的文本记录。
+  'director_final_film',
   'injection_card',
   'concat_order_card',
   'summary_markdown',
@@ -42,8 +44,10 @@ const DELIVERABLE_KINDS = new Set([
 ])
 // 归档不是一个播放形态：``director_pack`` 下载后交给插件导入，**不能**当 ``<video>``
 // 播。分组归媒体（它和成片一样是二进制交付物），渲染按 kind 走下载链接。
-const ARCHIVE_KINDS = new Set(['director_pack'])
-const MEDIA_KINDS = new Set(['video', 'audio', 'director_pack'])
+// ``director_final_pack`` 是交付归档的最终包（D8 §12.2 / #266）：与初始包同一种读法，
+// 但分开一个 kind——页面要能说清「哪一份是计划、哪一份是结论」。
+const ARCHIVE_KINDS = new Set(['director_pack', 'director_final_pack'])
+const MEDIA_KINDS = new Set(['video', 'audio', 'director_pack', 'director_final_pack'])
 // 段级注入卡只住「分段」分区、与段词同屏（D7 §9）：它不属于产物分区的任何一组，
 // 这是**有意**不显示，不是漏登记。
 const SEGMENT_LOCAL_KINDS = new Set(['segment_injection_card'])
@@ -79,11 +83,13 @@ const KIND_ORDER = [
   'director_briefing',
   'director_first_frame_prompt',
   'director_tailframe_prompt',
+  'director_final_film',
   'summary_markdown',
   'summary_json',
   'video',
   'audio',
   'director_pack',
+  'director_final_pack',
 ]
 
 export function sortArtifacts(artifacts: ArtifactInfo[]): ArtifactInfo[] {
@@ -107,7 +113,9 @@ const KIND_LABELS: Record<string, string> = {
   director_briefing: '导演台简报',
   director_first_frame_prompt: '导演台段首帧词',
   director_tailframe_prompt: '导演台尾帧词',
+  director_final_film: '成片记录',
   director_pack: '导演包',
+  director_final_pack: '最终包',
   summary_markdown: '中文摘要',
   summary_json: '摘要数据（JSON）',
 }
@@ -120,6 +128,11 @@ const KIND_LABELS: Record<string, string> = {
  */
 export function isArchiveArtifact(kind: string): boolean {
   return ARCHIVE_KINDS.has(kind)
+}
+
+/** 归档下载按钮的文案：初始包是计划、最终包是结论，两句话不能合成一句。 */
+export function archiveDownloadLabel(kind: string): string {
+  return kind === 'director_final_pack' ? '下载最终包' : '下载导演包'
 }
 
 /**

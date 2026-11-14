@@ -40,6 +40,8 @@ from ..session_store import FRAME_SUBMISSION_KEY, atomic_write_text, load_sessio
 from ..summary import PromptSummary, render_summary_zh
 from ..workbench_store import (
     ARTIFACT_CONCAT_ORDER_CARD,
+    ARTIFACT_DIRECTOR_FINAL_FILM,
+    ARTIFACT_DIRECTOR_FINAL_PACK,
     ARTIFACT_DIRECTOR_PACK,
     ARTIFACT_FINAL_FILM,
     ARTIFACT_FIRST_FRAME_PROMPT,
@@ -61,8 +63,10 @@ from ..workbench_store import (
     ActionItemResolved,
     AspectMismatchUnconfirmed,
     AssetImageInvalid,
+    ArchiveInvalid,
     CacheOutOfRoot,
     EventDraft,
+    FinalFilmMismatch,
     FrameInvalid,
     FrameMismatch,
     JobNotFound,
@@ -138,6 +142,9 @@ DIRECTOR_STEP_TAILFRAME = "director_tailframe"
 DIRECTOR_STEP_WAIT_VIDEO = "director_wait_video"
 DIRECTOR_STEP_FINALIZE = "director_finalize"
 DIRECTOR_STEP_DONE = "director_done"
+# 全部段通过之后的最后一步（D8 §12 / #266）：交付归档。它同样是「读盘判出来的」
+# 子步骤——判据是快照里那条已决议、带两个素材 id 的 ``director_delivery`` 待办。
+DIRECTOR_STEP_DELIVERY = "director_delivery"
 
 # 段任务的进度节点名（带段号，前端据进度事件显示「正在写/校验第几段」）。
 SEGMENT_WRITE_NODE = "segment_write"
@@ -153,6 +160,10 @@ JOB_KIND_ASSET_LOOP = "asset_loop"
 # 占磁盘的一步。单独一个 kind 才回答得了「任务列表里跑了三分钟的那条是什么」。
 JOB_KIND_PACK = "pack"
 DIRECTOR_PACK_NODE = "director_pack"
+# 交付归档（D8 §12 / #266）：唯一会复制成片并现算包摘要的 job。单独一个 kind 才回答
+# 得了「会话为什么在收尾阶段又跑了几十秒」——它是长 I/O，不是一次段校验。
+JOB_KIND_DELIVERY = "delivery"
+DIRECTOR_DELIVERY_NODE = "director_delivery"
 # 一次 job 只做一件：子步骤按**已落盘的台账事实**决定（``_asset_step``），不另记账。
 ASSET_STEP_WRITE = "write"
 ASSET_STEP_PROOFREAD = "proofread"
@@ -193,7 +204,8 @@ def _resolve_fingerprint(item_id: str, decision: str | None,
                          asset_id: str | None = None,
                          start_asset_id: str | None = None,
                          end_asset_id: str | None = None,
-                         confirm_aspect_mismatch: bool = False) -> str:
+                         confirm_aspect_mismatch: bool = False,
+                         pack_asset_id: str | None = None) -> str:
     """resolve 的请求摘要：待办、决定、修订内容、帧槽与素材标识都算进去。
 
     段视频素材（``video_asset_id``）必须进摘要：不进的话，同一个 Idempotency-Key 换一段
@@ -206,7 +218,8 @@ def _resolve_fingerprint(item_id: str, decision: str | None,
          "frames": frames or {}, "video_asset_id": video_asset_id or "",
          "asset_id": asset_id or "", "start_asset_id": start_asset_id or "",
          "end_asset_id": end_asset_id or "",
-         "confirm_aspect_mismatch": bool(confirm_aspect_mismatch)},
+         "confirm_aspect_mismatch": bool(confirm_aspect_mismatch),
+         "pack_asset_id": pack_asset_id or ""},
         sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -232,6 +245,9 @@ _BRANCH_DIRECTOR_START_IMAGE = step_machine.ACTION_DIRECTOR_START_IMAGE
 # 第六个去向（D8 §5.6 / #264）：切镜段的段首图。与开场首帧同形——交图之后起 job
 # 继续本段（写尾帧词或挂 segment_video），没有闸门入口（词先自动产出，再挂待办）。
 _BRANCH_DIRECTOR_SEGMENT_IMAGE = step_machine.ACTION_DIRECTOR_SEGMENT_IMAGE
+# 第七个去向（D8 §12 / #266）：交付归档。它有自己的同步校验（包段数/成片宽高），
+# 过了才起 job；与其他交图分支不同，这一支的 job kind 是 ``delivery``。
+_BRANCH_DIRECTOR_DELIVERY = step_machine.ACTION_DIRECTOR_DELIVERY
 
 
 def _asset_step_of(
@@ -654,12 +670,20 @@ class JobRunner:
                     row["rejection_reason"] = ""
                 # 第 N 段之后的待办是**旧锚点**算出来的：清掉，让段 job 从第 N 段
                 # 重新判「缺哪份按需词 / 该挂哪种待办」。留着会让界面同时挂着两段的表单。
+                # 交付待办（#266）一并收掉：它建立在「全部段通过」之上，段被打回后那个
+                # 前提不成立了——留着的后果是重跑完最后一段又挂一个，界面出现两个交付入口。
+                def _drop(existing: Any) -> bool:
+                    if existing.status != "pending":
+                        return False
+                    if existing.kind == step_machine.ACTION_DIRECTOR_DELIVERY:
+                        return True
+                    return (existing.segment_index is not None
+                            and int(existing.segment_index) >= int(index))
+
                 items = [
                     existing.model_dump(mode="json")
                     for existing in detail.action_items
-                    if not (existing.status == "pending"
-                            and existing.segment_index is not None
-                            and int(existing.segment_index) >= int(index))]
+                    if not _drop(existing)]
                 return {
                     "status": step_machine.STATUS_RUNNING,
                     "segments": rows,
@@ -734,6 +758,7 @@ class JobRunner:
         asset_id: str | None = None,
         start_asset_id: str | None = None,
         end_asset_id: str | None = None,
+        pack_asset_id: str | None = None,
         confirm_aspect_mismatch: bool = False,
         idempotency_key: str | None = None,
     ) -> tuple[JobSummary | None, bool]:
@@ -752,7 +777,8 @@ class JobRunner:
         async with lock:
             payload = _resolve_fingerprint(
                 item_id, decision, list(revisions or []), frames, video_asset_id,
-                asset_id, start_asset_id, end_asset_id, confirm_aspect_mismatch)
+                asset_id, start_asset_id, end_asset_id, confirm_aspect_mismatch,
+                pack_asset_id)
             registry = None
             if idempotency_key:
                 registry = self.store.session_registry(session_id)
@@ -775,6 +801,7 @@ class JobRunner:
                 # 素材循环的两个 job 都记 ``asset_loop``（D7 §6.2）：前端/排障按 kind
                 # 就能把「出词」「校对」与外层的推进任务分开。
                 kind=(JOB_KIND_ASSET_LOOP if branch == _BRANCH_ASSET_LOOP
+                      else JOB_KIND_DELIVERY if branch == _BRANCH_DIRECTOR_DELIVERY
                       else "advance"),
                 status="running", started_at=_now())
             # 新待办的 id 先生成：``action_item.created`` 事件要和决议在**同一次**
@@ -1072,6 +1099,43 @@ class JobRunner:
                         image_path)
                     recorded_decision = (
                         step_machine.DECISION_SUBMIT_SEGMENT_IMAGE)
+                elif target.kind == step_machine.ACTION_DIRECTOR_DELIVERY:
+                    # 交付归档（D8 §12 / #266）：成片 mp4 + 最终包 zip，两个都必填。
+                    # 两条校验在**这里**同步跑（AC 要 422，不能等异步 job）：包段数
+                    # 与计划一致、成片宽高走 ``final_film_verdict``。``deliver`` 自己
+                    # 只查成片存在与包段数，不查宽高——漏调那道判据就是静默放行。
+                    if decision != step_machine.DECISION_SUBMIT_DELIVERY:
+                        raise FrameInvalid(
+                            "director_delivery 待办需要 decision=submit_delivery。")
+                    if revisions:
+                        raise FrameInvalid(
+                            "director_delivery 待办不接受 revisions。")
+                    if frames is not None or asset_id is not None:
+                        raise FrameInvalid(
+                            "director_delivery 待办不接受 frames/asset_id；"
+                            "请用 video_asset_id 与 pack_asset_id。")
+                    if start_asset_id is not None or end_asset_id is not None:
+                        raise FrameInvalid(
+                            "director_delivery 待办不接受 start_asset_id/"
+                            "end_asset_id。")
+                    submitted_video = str(video_asset_id or "").strip()
+                    submitted_pack = str(pack_asset_id or "").strip()
+                    if not submitted_video or not submitted_pack:
+                        raise FrameInvalid(
+                            "director_delivery 待办必须同时带 video_asset_id"
+                            "（成片 mp4）与 pack_asset_id（最终包 zip）。")
+                    video_resource = self.store.resolve_video_asset(
+                        session_id, submitted_video)
+                    pack_resource = self.store.resolve_pack_asset(
+                        session_id, submitted_pack)
+                    # 同步校验一：最终包能安全解、段数与计划一致（不归档）。
+                    self._validate_delivery_pack(
+                        session_id, pack_resource.path)
+                    # 同步校验二：成片宽高。t2v 没有画布判据，直接放行。
+                    self._validate_final_film(current, video_resource.path)
+                    holder["video_asset_id"] = submitted_video
+                    holder["pack_asset_id"] = submitted_pack
+                    recorded_decision = step_machine.DECISION_SUBMIT_DELIVERY
                 else:
                     raise FrameInvalid(f"不认识的人工待办类型：{target.kind}")
                 holder["decision"] = recorded_decision
@@ -1086,8 +1150,9 @@ class JobRunner:
                     # ``JobSummary``，不给它长一个只服务导演台的字段。没有警告时
                     # **不动** reason——段被拒/校对差异那几类的历史文本要留着。
                     resolved_update["reason"] = holder["reason"]
-                for key in ("start_asset_id", "end_asset_id"):
-                    # 图槽标识与事件同一份来源：快照与重放读到的必须是这两个 id。
+                for key in ("start_asset_id", "end_asset_id",
+                            "video_asset_id", "pack_asset_id"):
+                    # 图槽与交付槽标识与事件同一份来源：快照与重放读到的必须是这些 id。
                     if holder.get(key):
                         resolved_update[key] = holder[key]
                 items = [
@@ -1165,6 +1230,10 @@ class JobRunner:
                 resolved_payload["start_asset_id"] = start_asset_id
             if end_asset_id is not None:
                 resolved_payload["end_asset_id"] = end_asset_id
+            if pack_asset_id is not None:
+                # 最终包素材（D8 §12 / #266）：与成片 id 一起进事件，重放才重建得出
+                # 「当时交的是哪一份包」。
+                resolved_payload["pack_asset_id"] = pack_asset_id
             if confirm_aspect_mismatch:
                 resolved_payload["confirm_aspect_mismatch"] = True
             events = [
@@ -1197,7 +1266,8 @@ class JobRunner:
             self._cancel_events[job.job_id] = event
             if branch in (_BRANCH_SEGMENT_VIDEO, _BRANCH_ASSET_LOOP,
                           _BRANCH_DIRECTOR_START_IMAGE,
-                          _BRANCH_DIRECTOR_SEGMENT_IMAGE):
+                          _BRANCH_DIRECTOR_SEGMENT_IMAGE,
+                          _BRANCH_DIRECTOR_DELIVERY):
                 # 段校验、素材循环与导演台开场首帧都走通用分派（``_run`` 按持久化
                 # 事实决定跑哪一步）：交完首帧后的下一步是导演台阶段 2（规划 + 写段），
                 # 不是修订重跑阶段 1。三处各写一份子步骤判定会长出两套口径。
@@ -1240,6 +1310,8 @@ class JobRunner:
             return _BRANCH_DIRECTOR_START_IMAGE
         if kind == step_machine.ACTION_DIRECTOR_SEGMENT_IMAGE:
             return _BRANCH_DIRECTOR_SEGMENT_IMAGE
+        if kind == step_machine.ACTION_DIRECTOR_DELIVERY:
+            return _BRANCH_DIRECTOR_DELIVERY
         if (kind == step_machine.ACTION_STAGE1_REVIEW
                 and decision == step_machine.DECISION_APPROVE):
             # ref 通过审查先走素材循环（D7 §5.3）：它不是帧链，也不直接进阶段 2。
@@ -1387,6 +1459,64 @@ class JobRunner:
                 "（接受 png/jpg/jpeg/webp）。导入导演台的包缺这张图会被插件直接拒绝。")
 
 
+    def _validate_delivery_pack(self, session_id: str, pack_path: Path) -> None:
+        """同步核对最终包：能安全解、含 ``timeline.json``、段数与计划一致（#266）。
+
+        用 #263 的 ``extract_archive_zip`` 在临时目录解包，而不是直接读 zip 里的成员：
+        解包器的路径判据（绝对路径 / ``..`` / 符号链接）只差这一处复用，另写一份
+        读取就会让「包安全」这件事有两条口径。段数比的是**计划**的段数——计划是这次
+        打包的依据，成交包里多一段少一段都说明它不属于本次交付。
+        """
+        import tempfile
+
+        from ..director.pack import TIMELINE_FILENAME
+        from ..director.planning import plan_path, read_plan_json
+        from ..workbench_store import extract_archive_zip
+
+        directory = self.store.session_directory(session_id)
+        try:
+            plan = read_plan_json(plan_path(directory))
+        except (OSError, ValueError) as exc:
+            raise ArchiveInvalid(
+                f"导演台段表读不回来，无法核对最终包：{exc}") from exc
+        with tempfile.TemporaryDirectory() as temp_dir:
+            extract_archive_zip(pack_path, temp_dir)
+            timeline_file = Path(temp_dir) / TIMELINE_FILENAME
+            if not timeline_file.is_file():
+                raise ArchiveInvalid(
+                    f"最终包缺 {TIMELINE_FILENAME}：{pack_path}"
+                    "（不是导演台导出的包？）")
+            try:
+                data = json.loads(timeline_file.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ArchiveInvalid(
+                    f"最终包的 {TIMELINE_FILENAME} 读不出：{exc}") from exc
+        rows = data.get("segments") if isinstance(data, dict) else None
+        if not isinstance(rows, list) or not rows:
+            raise ArchiveInvalid(
+                f"最终包的 {TIMELINE_FILENAME} 缺 segments 数组（或为空）")
+        if len(rows) != len(plan.segments):
+            raise ArchiveInvalid(
+                f"最终包段数 {len(rows)} 与计划 {len(plan.segments)} 段不一致："
+                "段数变了说明这不是本次交付的那份包，比对与归档都不做")
+
+    def _validate_final_film(self, current: Any, video_path: Path) -> None:
+        """同步核对成片宽高：判据只走 ``final_film_verdict``（#266 / spec §12.3）。
+
+        ``deliver`` **不查宽高**——它只查成片存在、初始包段数、比对与归档。漏调这道
+        判据不会报错，只会把一条画幅不符的片子归档成「已交付」。``ask=None``：工作台
+        没有交互入口，尺寸差一档时也按停止处理（与 CLI 的「没有入口就停」同一条）。
+        """
+        from ..director.aspect_flow import final_film_verdict
+
+        ok, note = final_film_verdict(
+            mode=str(current.brief.director_mode), video=video_path,
+            brief=current.brief, session_created_at=str(current.created_at or ""),
+            stage_state=current.stage_state_snapshot(), ask=None)
+        if not ok:
+            raise FinalFilmMismatch(
+                note or "成片宽高与画布不符：没有归档最终包（未通过画幅核对）。")
+
     def get_job(self, session_id: str, job_id: str) -> JobSummary:
         detail = self.store.get_session(session_id)
         job = _find_job(detail.jobs, job_id)
@@ -1475,6 +1605,10 @@ class JobRunner:
                     result = await asyncio.to_thread(
                         self._execute_director_finalize,
                         session_id, job_id, cancel_event, number)
+                elif kind == DIRECTOR_STEP_DELIVERY:
+                    result = await asyncio.to_thread(
+                        self._execute_director_delivery,
+                        session_id, job_id, cancel_event)
                 elif kind in (DIRECTOR_STEP_SEGMENT_IMAGE,
                               DIRECTOR_STEP_WAIT_VIDEO):
                     result = {"number": number, "todo_kind": kind}
@@ -1533,6 +1667,10 @@ class JobRunner:
                 elif kind == DIRECTOR_STEP_FINALIZE:
                     next_job = await asyncio.to_thread(
                         self._finish_director_finalize,
+                        session_id, job_id, result)
+                elif kind == DIRECTOR_STEP_DELIVERY:
+                    next_job = await asyncio.to_thread(
+                        self._finish_director_delivery,
                         session_id, job_id, result)
                 elif kind in (DIRECTOR_STEP_SEGMENT_IMAGE,
                               DIRECTOR_STEP_WAIT_VIDEO):
@@ -3076,7 +3214,11 @@ class JobRunner:
                 session.segments, key=lambda item: int(item.get("index", 0)))
              if str(row.get("status")) != SEGMENT_STATUS_PASSED), None)
         if current is None:
-            # 全部段通过：本票的终点。交付（#266）是下一张票，不在这里造终态。
+            # 全部段通过：交付待办**已决议**（带两个素材 id）才跑交付 job；否则是
+            # 刚挂出待办、正等用户交件——`_segment_step` 本不该被调到，但用它兜住
+            # 能让「技巧性命名」这种错判退化成一次温和收尾，而不是起一份空交付。
+            if self._director_delivery_submitted(session):
+                return (DIRECTOR_STEP_DELIVERY, 0)
             return (DIRECTOR_STEP_DONE, 0)
         number = int(current.get("index") or 0)
         status = str(current.get("status") or "")
@@ -3108,6 +3250,22 @@ class JobRunner:
             if not skip_ending and not tailframe_path(directory, number).is_file():
                 return (DIRECTOR_STEP_TAILFRAME, number)
         return (DIRECTOR_STEP_WAIT_VIDEO, number)
+
+    @staticmethod
+    def _director_delivery_submitted(session: Any) -> bool:
+        """交付待办是否已被决议且带着两个素材 id（#266 的续跑判据）。
+
+        只看快照里的事实：崩溃/重启后重放会把这两个 id 补回待办上，所以「该跑交付」
+        不依赖任何 job 记录或内存。
+        """
+        for item in session.action_items:
+            if (str(item.get("kind")) != step_machine.ACTION_DIRECTOR_DELIVERY
+                    or str(item.get("status")) != "resolved"):
+                continue
+            if (str(item.get("video_asset_id") or "").strip()
+                    and str(item.get("pack_asset_id") or "").strip()):
+                return True
+        return False
 
     @staticmethod
     def _load_segment_plans(directory: Path) -> list[Any]:
@@ -3898,6 +4056,119 @@ class JobRunner:
         return {"number": number, "actual_frames": actual,
                 "already_logged": already}
 
+    def _execute_director_delivery(
+        self, session_id: str, job_id: str,
+        cancel_event: threading.Event,
+    ) -> dict[str, Any]:
+        """交付归档的线程体（D8 §12.2 / #266）：复制成片 → ``deliver`` → 补宽高。
+
+        读的是**快照里已决议的交付待办**（不是本次 resolve 的参数）：崩溃/重启后
+        ``advance`` 重跑同一份交付时，素材 id 只能从那里拿回来。
+        """
+        import shutil
+
+        from ..director import delivery
+        from ..director.planning import plan_path, read_plan_json
+        from ..tools.frame_match import video_meta
+
+        directory = self.store.session_directory(session_id)
+        session = load_session(directory)
+        if session is None:
+            raise RuntimeError(f"会话文件读不到：{session_id}")
+        item = next(
+            (row for row in session.action_items
+             if str(row.get("kind")) == step_machine.ACTION_DIRECTOR_DELIVERY
+             and str(row.get("status")) == "resolved"
+             and str(row.get("video_asset_id") or "").strip()
+             and str(row.get("pack_asset_id") or "").strip()),
+            None)
+        if item is None:
+            raise RuntimeError(
+                "交付待办已决议但读不到两个素材 id：不能归档半份交付")
+        video = self.store.resolve_video_asset(
+            session_id, str(item["video_asset_id"]))
+        pack = self.store.resolve_pack_asset(
+            session_id, str(item["pack_asset_id"]))
+        try:
+            plan = read_plan_json(plan_path(directory))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"导演台段表读不回来，无法交付：{exc}") from exc
+        self._emit_progress(
+            session_id, job_id, DIRECTOR_DELIVERY_NODE, "started",
+            stage=step_machine.STEP_SEGMENTING)
+        self._write_active_job(session_id, job_id, DIRECTOR_DELIVERY_NODE)
+        if cancel_event.is_set():
+            raise JobCancelled(DIRECTOR_DELIVERY_NODE)
+        # 成片落在固定名 ``final.mp4``（既有 video 产物）：产物分区与 final-film.json
+        # 因此指向同一份文件，不是两套坐标。
+        film = directory / ARTIFACT_FINAL_FILM
+        existed = film.exists()
+        shutil.copyfile(video.path, film)
+        try:
+            report = delivery.deliver(
+                directory, plan=plan, film_path=film, pack_zip=pack.path)
+        except Exception:
+            # deliver 先在内存里校验完才落盘；走到这里说明连成片副本都不该留。
+            # 只删这一次自己建的那份，不碰用户原有的文件。
+            if not existed:
+                film.unlink(missing_ok=True)
+            raise
+        # 宽高是工作台这一层追加的（spec §13）：CLI 的 ``record_final_film`` 不写它，
+        # 改它会把 CLI 的记录形状也一起改掉。
+        record_path = delivery.final_film_path(directory)
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        meta = video_meta(film)
+        width = int(meta.get("width") or 0)
+        height = int(meta.get("height") or 0)
+        record["width"] = width
+        record["height"] = height
+        record_path.write_text(
+            json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._emit_progress(
+            session_id, job_id, DIRECTOR_DELIVERY_NODE, "done",
+            stage=step_machine.STEP_SEGMENTING)
+        detail = "\n".join([
+            report.render().strip(),
+            "",
+            f"成片宽高：{width}×{height}",
+            "初始包＝计划，最终包＝结论：改词后的差异已补记成 rewrite 行，"
+            "初始包没有被重建。",
+        ])
+        return {
+            "changes": len(report.changes),
+            "detail": detail,
+        }
+
+    def _finish_director_delivery(
+        self, session_id: str, job_id: str, result: dict[str, Any],
+    ) -> JobSummary | None:
+        """交付成功：登记三件产物并置 ``completed``（D8 §12 / #266）。
+
+        先登记再落终态（事件说的必须是已发生的事实）：``final.mp4``、最终包、
+        成片记录都已落盘；校验值不单独登记（spec §13），它随最终包显示。
+        """
+        self.store.register_artifact(
+            session_id, ARTIFACT_FINAL_FILM, job_id=job_id)
+        self.store.register_artifact(
+            session_id, ARTIFACT_DIRECTOR_FINAL_PACK, job_id=job_id)
+        self.store.register_artifact(
+            session_id, ARTIFACT_DIRECTOR_FINAL_FILM, job_id=job_id)
+
+        def _apply(current: Any) -> dict[str, Any]:
+            job = self._job_or_running(job_id, current).model_copy(
+                update={"status": "succeeded", "finished_at": _now(),
+                        "detail": str(result.get("detail") or "")})
+            return {
+                "status": step_machine.STATUS_COMPLETED,
+                "jobs": _upsert_job(current.jobs, _job_dict(job)),
+            }
+
+        self.store.mutate(session_id, _apply, events=[
+            EventDraft("job.succeeded",
+                       {"next": step_machine.STATUS_COMPLETED}, job_id=job_id),
+        ])
+        return None
+
     def _hang_director_todo(
         self, session_id: str, job_id: str, number: int, todo_kind: str,
     ) -> JobSummary | None:
@@ -3987,6 +4258,14 @@ class JobRunner:
             if number < total else None)
         next_status = (step_machine.STATUS_RUNNING if next_job is not None
                        else step_machine.STATUS_AWAITING_HUMAN)
+        # 最后一段通过＝该交付了（D8 §12 / #266）：挂出唯一一道交付闸门，载荷在
+        # 决议时才带（两张素材还没交）。这是人工待办，所以会话停在 awaiting_human。
+        delivery_item = (
+            ActionItemOut(
+                item_id=uuid.uuid4().hex,
+                kind=step_machine.ACTION_DIRECTOR_DELIVERY,
+                status="pending", created_at=_now())
+            if next_job is None else None)
 
         def _apply(detail: Any) -> dict[str, Any]:
             job = self._job_or_running(job_id, detail).model_copy(
@@ -3999,11 +4278,17 @@ class JobRunner:
             jobs = _upsert_job(detail.jobs, _job_dict(job))
             if next_job is not None:
                 jobs = _upsert_job(jobs, _job_dict(next_job))
-            return {
+            changes: dict[str, Any] = {
                 "status": next_status,
                 "jobs": jobs,
                 "segments": rows,
             }
+            if delivery_item is not None:
+                items = [
+                    item.model_dump(mode="json") for item in detail.action_items]
+                items.append(delivery_item.model_dump(mode="json"))
+                changes["action_items"] = items
+            return changes
 
         events = [
             EventDraft("job.succeeded", {"next": next_status}, job_id=job_id)]
@@ -4011,6 +4296,11 @@ class JobRunner:
             events.append(EventDraft(
                 "job.started", {"kind": next_job.kind},
                 job_id=next_job.job_id))
+        if delivery_item is not None:
+            events.append(EventDraft(
+                "action_item.created",
+                {"item_id": delivery_item.item_id,
+                 "kind": delivery_item.kind}, job_id=job_id))
         self.store.mutate(session_id, _apply, events=events)
         return next_job
 

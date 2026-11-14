@@ -49,6 +49,17 @@
             "title": "Kind",
             "type": "string"
           },
+          "pack_asset_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pack Asset Id"
+          },
           "reason": {
             "default": "",
             "title": "Reason",
@@ -91,6 +102,17 @@
           "status": {
             "title": "Status",
             "type": "string"
+          },
+          "video_asset_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Video Asset Id"
           }
         },
         "required": [
@@ -133,7 +155,8 @@
                   "approve",
                   "revise",
                   "submit_start_image",
-                  "submit_segment_image"
+                  "submit_segment_image",
+                  "submit_delivery"
                 ],
                 "type": "string"
               },
@@ -163,6 +186,17 @@
                 "type": "null"
               }
             ]
+          },
+          "pack_asset_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pack Asset Id"
           },
           "revisions": {
             "items": {

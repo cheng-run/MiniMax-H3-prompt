@@ -108,6 +108,10 @@ ARTIFACT_REF_SHOT_TABLE = "segments/ref-shot-table.md"
 # ``<video>`` 播，但走同一条 content 端点、同一套单段 Range 语义（插件里也可能很大）。
 # 登记成 ``application/zip`` 后自动进 ``ARTIFACT_MEDIA_TYPES``，端点不再认第二种形态。
 ARTIFACT_DIRECTOR_PACK = "director/initial.mmxpack.zip"
+# 交付归档（D8 §12.2 / #266）：最终包与成片记录。校验值 ``director/final.sha256``
+# **不是**产物——它随最终包显示（spec §13），单独列一份只会让用户以为还有第三件要下载。
+ARTIFACT_DIRECTOR_FINAL_PACK = "director/final.mmxpack.zip"
+ARTIFACT_DIRECTOR_FINAL_FILM = "director/final-film.json"
 
 
 @dataclass(frozen=True)
@@ -136,6 +140,11 @@ _FIXED_ARTIFACT_SPECS: dict[str, ArtifactSpec] = {
     ARTIFACT_REF_SHOT_TABLE: ArtifactSpec("ref_shot_table"),
     # 导演台初始包（D8 §9 / #263）：归档形态，与成片共用 Range 语义。
     ARTIFACT_DIRECTOR_PACK: ArtifactSpec("director_pack", "application/zip"),
+    # 交付两件（D8 §12.2 / #266）：最终包是归档、成片记录是纯文本。前者与初始包
+    # 同一种读法（下载），但 kind 不同——产物分区要能分开「计划」与「结论」。
+    ARTIFACT_DIRECTOR_FINAL_PACK: ArtifactSpec(
+        "director_final_pack", "application/zip"),
+    ARTIFACT_DIRECTOR_FINAL_FILM: ArtifactSpec("director_final_film"),
 }
 
 # 模式产物（D6 §7 / D7 §10）：每段一份。base 写 ``segments/shot-NN.md``，ref 写
@@ -660,6 +669,18 @@ class ArchiveInvalid(WorkbenchError):
     code = "archive_invalid"
 
 
+class FinalFilmMismatch(WorkbenchError):
+    """成片宽高与画布不符（D8 §12.3 / #266）：交付停在归档之前。
+
+    判据不是这里写的——它来自 ``director.aspect_flow.final_film_verdict``（CLI 交付
+    也是同一份）。这个类只把「判不过」翻成稳定错误码；文案逐字来自判据，已经给了
+    期望/实际两个数与来源。
+    """
+
+    status_code = 422
+    code = "final_film_mismatch"
+
+
 # ---------------------------------------------------------------------------
 # 事件流（D2 spec §5.3 / §8，ADR 0032）
 # ---------------------------------------------------------------------------
@@ -702,6 +723,8 @@ _DECISIONS = frozenset({
     step_machine.DECISION_SUBMIT_START_IMAGE,
     # 切镜段段首图决议（D8 §5.6 / #264）：逐段的图槽，同样显式声明。
     step_machine.DECISION_SUBMIT_SEGMENT_IMAGE,
+    # 交付归档决议（D8 §12 / #266）：整片成片与最终包一起交回。
+    step_machine.DECISION_SUBMIT_DELIVERY,
 })
 
 
@@ -751,8 +774,13 @@ _ACTION_ITEM_REASON_KEY = "reason"
 # 一个待办收两件素材的槽位（D8 §7.1）：键与 ``ActionItemOut`` 同形，创建与决议两条
 # 事件的校验、重放都从这一份常量派生——抄两份时加第三个槽位就会静默丢。
 _ACTION_ITEM_ASSET_KEYS: tuple[str, ...] = ("start_asset_id", "end_asset_id")
+# 交付归档的两个素材槽（D8 §12 / #266）：成片 mp4 与最终包 zip。它们与上一行的图槽
+# 分开声明，是因为重放侧的处理不同——图槽在两个事件（created/resolved）上都补，
+# 交付槽只在 resolved 上补（待办创建时用户还没交）。两份键表都不许手抄。
+_ACTION_ITEM_DELIVERY_KEYS: tuple[str, ...] = ("video_asset_id", "pack_asset_id")
 _ACTION_ITEM_PAYLOAD_KEYS: tuple[str, ...] = (
-    *_ACTION_ITEM_INDEX_KEYS, _ACTION_ITEM_REASON_KEY, *_ACTION_ITEM_ASSET_KEYS)
+    *_ACTION_ITEM_INDEX_KEYS, _ACTION_ITEM_REASON_KEY, *_ACTION_ITEM_ASSET_KEYS,
+    *_ACTION_ITEM_DELIVERY_KEYS)
 
 
 def _validate_action_item_created(payload: dict[str, Any]) -> None:
@@ -771,6 +799,7 @@ def _validate_action_item_created(payload: dict[str, Any]) -> None:
         raise InvalidEventPayload(
             f"事件 payload 的 {_ACTION_ITEM_REASON_KEY!r} 必须是字符串：{reason!r}")
     _validate_action_item_asset_keys(payload)
+    _validate_action_item_delivery_keys(payload)
 
 
 def _validate_action_item_asset_keys(payload: dict[str, Any]) -> None:
@@ -782,11 +811,26 @@ def _validate_action_item_asset_keys(payload: dict[str, Any]) -> None:
                 f"事件 payload 的 {key!r} 必须是字符串：{value!r}")
 
 
+def _validate_action_item_delivery_keys(payload: dict[str, Any]) -> None:
+    """交付素材槽出现时必须是字符串（D8 §12 / #266）：与图槽同一条口径。
+
+    交付槽只在决议事件里出现（创建时用户还没交），但校验放在共用位置：两张事件
+    的形状随时可能被人扩展成「创建时就带候选」，那时这里已经咬得住。
+    """
+    for key in _ACTION_ITEM_DELIVERY_KEYS:
+        value = payload.get(key)
+        if value is not None and not isinstance(value, str):
+            raise InvalidEventPayload(
+                f"事件 payload 的 {key!r} 必须是字符串：{value!r}")
+
+
 def _validate_action_item_resolved(payload: dict[str, Any]) -> None:
     _require_str(payload, "item_id")
     _require_choice(payload, "decision", _DECISIONS)
     # 决议事件也可能带图槽（导演台开场首帧）：与创建事件同一份校验。
     _validate_action_item_asset_keys(payload)
+    # 交付槽（成片/最终包）只在这条事件上出现，同样要挡住半截值。
+    _validate_action_item_delivery_keys(payload)
     # 修订载荷是可选的加字段（D4 spec §7）：写了就必须是 [{layer, text}, …]，
     # 否则重放时 ``ActionItemOut`` 会拿半截字典去建模型并在**读详情**时报错。
     revisions = payload.get("revisions")
@@ -1070,6 +1114,11 @@ def _replay_snapshot(
                     for key in _ACTION_ITEM_ASSET_KEYS:
                         if isinstance(payload.get(key), str):
                             item[key] = payload[key]
+                    # 交付素材槽（D8 §12 / #266）：崩在「已决议、未完成」之间时，
+                    # 续跑要靠重放把两个素材 id 拿回来（job 从快照读它们）。
+                    for key in _ACTION_ITEM_DELIVERY_KEYS:
+                        if isinstance(payload.get(key), str):
+                            item[key] = payload[key]
         # artifact.created：产物清单从目录现扫（_artifacts），没有快照字段要补。
     return status, jobs, action_items
 
@@ -1160,6 +1209,11 @@ class ActionItemOut(BaseModel):
     # 新增字段在契约里保持可选，存量客户端与夹具不必为无关 kind 补两个空键。
     start_asset_id: str | None = None
     end_asset_id: str | None = None
+    # 交付归档的两个素材槽（D8 §12 / #266）：成片 mp4 与最终包 zip。只有
+    # ``director_delivery`` 待办会填；用 ``None`` 缺省（同图槽的理由：它不是所有
+    # kind 都有的字段，空串会让无关待办在契约里多长两个键）。
+    video_asset_id: str | None = None
+    pack_asset_id: str | None = None
     # 被拒原因/校对差异等给人看的文本：段循环被拒、素材校对不通过时填（D7 §6.3）。
     reason: str = ""
 
@@ -2392,6 +2446,25 @@ class WorkbenchSessionStore:
                 f"本段视频必须是 mp4 容器（收到 {resource.media_type}）：{asset_id}")
         return resource
 
+    def resolve_pack_asset(self, session_id: str, asset_id: str) -> MediaResource:
+        """把交付待办的 ``pack_asset_id`` 解析成本会话的 zip 素材（D8 §12 / #266）。
+
+        与 ``resolve_video_asset`` 同一条路：归属必须正是 URL 里那个会话、类型收窄到
+        ``application/zip``。缺件与类型不符都回 ``archive_invalid``——前端对这两种
+        情形的出路相同（换一份包），分码只会让人以为要改代码。
+        """
+        prefix, _, _hash16 = asset_id.rpartition("/")
+        if prefix != session_id:
+            raise ArchiveInvalid(f"最终包素材不属于本会话：{asset_id}")
+        try:
+            resource = self.resolve_asset_media(asset_id)
+        except WorkbenchError as exc:
+            raise ArchiveInvalid(f"最终包素材不存在：{asset_id}") from exc
+        if resource.media_type != "application/zip":
+            raise ArchiveInvalid(
+                f"最终包必须是 zip 容器（收到 {resource.media_type}）：{asset_id}")
+        return resource
+
     def store_asset(
         self,
         session_id: str,
@@ -2784,6 +2857,8 @@ __all__ = [
     "ARTIFACT_MAX_BYTES", "ARTIFACT_SCRIPT", "ARTIFACT_SHOT_TABLE",
     "ARTIFACT_SUMMARY_JSON", "ARTIFACT_SUMMARY_MARKDOWN",
     "ARTIFACT_VIDEO_PROMPT", "ARTIFACT_INJECTION_CARD",
+    "ARTIFACT_DIRECTOR_FINAL_PACK", "ARTIFACT_DIRECTOR_FINAL_FILM",
+    "ArchiveInvalid", "FinalFilmMismatch", "extract_archive_zip",
     "SEGMENT_INJECTION_CARD_KIND", "segment_injection_card_name",
     "Asset", "AssetTooLarge",
     "AssetDuplicate", "AssetImageInvalid", "AssetLocked", "AssetNameInvalid",

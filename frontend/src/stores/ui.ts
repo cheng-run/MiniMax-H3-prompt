@@ -3,7 +3,7 @@ import { ref } from 'vue'
 
 // Pinia 只保存客户端 UI 状态（D1 spec §6）：面板展开/收起、工作台分区选择之类，
 // 绝不复制服务器业务状态——业务状态只来自快照 query（D4 spec §6.1）。
-export type WorkbenchTab = 'overview' | 'review' | 'segments' | 'assets' | 'artifacts'
+export type WorkbenchTab = 'overview' | 'review' | 'segments' | 'assets' | 'artifacts' | 'delivery'
 
 export const useUiStore = defineStore('ui', () => {
   const diagnosticsExpanded = ref(false)

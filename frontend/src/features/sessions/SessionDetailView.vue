@@ -13,6 +13,7 @@ import { useUiStore, type WorkbenchTab } from '@/stores/ui'
 import AssetsTab from './AssetsTab.vue'
 import ArtifactsTab from './ArtifactsTab.vue'
 import AssetImageCard from './AssetImageCard.vue'
+import DeliveryTab from './DeliveryTab.vue'
 import DirectorSegmentImageCard from './DirectorSegmentImageCard.vue'
 import DirectorStartImageCard from './DirectorStartImageCard.vue'
 import FrameSubmissionCard from './FrameSubmissionCard.vue'
@@ -66,6 +67,11 @@ const tabs = computed(() => {
     (data.value?.brief.duration ?? 0) > LONG_FILM_SECONDS
   ) {
     entries.splice(2, 0, { id: 'segments', label: '分段' })
+  }
+  // 交付分区（D8 §4.7 / #266）：只有导演台恒有——成片与最终包都由导演台导出、再交回。
+  // base/ref 的交付形态是「拼接成片/交付文本」，没有这一格。
+  if (mode === 'director') {
+    entries.push({ id: 'delivery', label: '交付' })
   }
   return entries
 })
@@ -425,13 +431,33 @@ const errorMessage = computed(() =>
 
       <!-- 产物（D4-7）：中间产物与交付文本可看/复制/下载；媒体通用播放 -->
       <section
-        v-else
+        v-else-if="ui.workbenchTab === 'artifacts'"
         id="workbench-panel-artifacts"
         role="tabpanel"
         aria-labelledby="workbench-tab-artifacts"
         class="panel"
       >
         <ArtifactsTab :session-id="data.session_id" :artifacts="data.artifacts ?? []" />
+      </section>
+
+      <!-- 交付（D8 §4.7 / #266）：非导演台会话没有这一格，走不到这里；用 v-else
+           兜住「分区值来自持久化 UI 状态、但新会话不是导演台」的边界。 -->
+      <section
+        v-else
+        id="workbench-panel-delivery"
+        role="tabpanel"
+        aria-labelledby="workbench-tab-delivery"
+        class="panel"
+      >
+        <DeliveryTab
+          :session-id="data.session_id"
+          :status="data.status"
+          :segments="data.segments ?? []"
+          :action-items="data.action_items ?? []"
+          :artifacts="data.artifacts ?? []"
+          :jobs="data.jobs ?? []"
+          @refresh="invalidateSnapshot"
+        />
       </section>
     </template>
   </section>

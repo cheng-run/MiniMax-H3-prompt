@@ -255,6 +255,41 @@ CI 侧由桩管线覆盖三段闭环（`tests/test_api_fake_pipeline_segments.py
 目录解析后仍在配置根内，逐文件 `cache.assert_files_inside` 再确认每个删除目标仍在
 该目录之下——只留后者时，目录本身被链接出去会让它的基准跟着跑。
 
+## 导演台交付（D8-6，#266，ADR 0038）
+
+全部段 `passed` 之后，会话停在**唯一一道交付闸门** `director_delivery` 上：
+成片与最终包都由用户在导演台导出、作为本会话素材交回，系统不拼片。
+
+| 步骤 | 类型 | 产物/状态 |
+|---|---|---|
+| 最后一段通过 | job `segment` 收尾 | 段转 `passed`，挂 `director_delivery` 待办；会话 `awaiting_human` |
+| 交成片 + 最终包 | 待办 `director_delivery` | 载荷 `decision=submit_delivery` + `video_asset_id`（mp4）+ `pack_asset_id`（zip） |
+| 同步校验 | resolve 内 | 包可安全解、`timeline.json` 段数＝计划段数（否则 422 `archive_invalid`）；成片宽高走 `final_film_verdict`（否则 422 `final_film_mismatch`） |
+| 交付归档 | job `delivery` | `final.mp4` / `director/final.mmxpack.zip` / `director/final.sha256` / `director/final-film.json`；`rewrite` 行补记；会话 `completed` |
+
+- **`deliver` 不查成片宽高**：判据在 `director.aspect_flow.final_film_verdict`，工作台必须
+  自己调（`ask=None`，尺寸差一档也按停止处理）。漏调不会报错，只会把画幅不符的片子
+  归档成「已交付」。
+- **同步校验 + 异步归档**：段数/宽高在 resolve 里同步判（AC 要 422），复制成片、归档与
+  现算摘要放在 `delivery` job——它们是长 I/O，不该占着决议请求。
+- **产物三件**：`director/final.mmxpack.zip`（kind `director_final_pack`，归档）与
+  `director/final-film.json`（kind `director_final_film`，文本）登记进产物表；
+  `final.mp4` 是既有 `video` 产物。**`director/final.sha256` 不单独登记**——它随最终包
+  显示（spec §13）。
+- **宽高只在这一层追加**：`deliver` 的 `record_final_film` 不写 `width`/`height`，工作台
+  克隆一份记录再合并写回，不改 CLI 的写入形状。
+- **改词不重建初始包**：交付时逐段比对初始包与最终包（`segments[].id` 为 join 键，
+  `fl2v` 另比 `shots[].prompt`，**不比帧数**），差异补成 `rewrite` 行；页面明写
+  「初始包＝计划，最终包＝结论」，条数从 `delivery` job 的 `detail` 读。
+- **换一段会收掉交付待办**：交付闸门建立在「全部段通过」上；重开某段后该前提不成立，
+  悬念的 `director_delivery` 与下游段待办一起收掉，最后一段重跑完再挂一个新的。
+- **段 DTO 的帧字段**（D8 §6.1，#262）只在导演台会话上出现：`start_frame` / `end_frame`
+  / `declared_frames` / `export_frames` / `segment_type` / `guided` / `give_images`；
+  `start_s` / `end_s` 仍是它们的向下截断。base/ref 这些字段为 `None`/空表。
+- **导演台不产 base/ref 专属产物**（路线决定产物集，ADR 0020）：没有关键帧词、桥接帧、
+  注入卡、`segments/plan.json`；`director/plan.json` 不是产物（段表已由 `SegmentOut`
+  表达）。
+
 
 
 媒体读取（素材 `GET/HEAD /media/{asset_id:path}` 与成片
