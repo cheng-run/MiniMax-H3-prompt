@@ -15,6 +15,15 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 
 Infer the repo from `git remote -v`; `gh` does this automatically when run inside a clone.
 
+## 写票面的两条硬规则（retro 2026-11-14）
+
+- **覆盖表**：`/to-tickets` 收尾必须给一张「spec 小节 → 票号/AC 或明确延后」的表；集合差非空先裁定再派发。
+  2026-11-14 的 D8：§11.3（改词补 `rewrite` 行）没有任何票接，§5.6/§14 漏了交付触发，
+  实现期才由协调会话裁定新增 `director_delivery` 待办。
+- **代码指针不带行号**：票面里指向本仓的代码写「模块.符号」（必要时附一行片段），不写 `file.py:123`。
+  D8 八张票的行号在实现时整体过期，每张都要重新 grep——与 `CODING_STANDARDS.md` 对活文档的要求同一条理由
+  （真源行号会漂且不报错）。
+
 ## Pull requests as a triage surface
 
 **PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_
