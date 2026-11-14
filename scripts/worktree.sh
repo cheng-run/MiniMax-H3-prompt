@@ -38,10 +38,11 @@ usage() {
       serve-e2e.mjs 找的是工作树根的 .venv）。同样只能用 unlink-venv 摘掉。
   scripts/worktree.sh unlink-venv NN
       删除工作树的 .venv 目录联接（只删联接、不动主树 .venv）。
-  scripts/worktree.sh remove NN [--force]
+  scripts/worktree.sh remove NN [--force] [--branch]
       默认先自动 harvest，再同步主树最新 tests 副本；删前检查跟踪文件脏改动，
       并先摘掉 frontend/node_modules 与 .venv 两处目录联接。
       任一项不满足就拒绝；--force 会打印警告后跳过。
+      --branch 在删树成功后一并删除分支 ticket/NN（内容应已在 main 上）。
   scripts/worktree.sh remove-path <绝对路径>
       删除**自建**工作树（integration-* 等非 ticket-NN 命名）。同样先摘
       frontend/node_modules 与 .venv 联接、并拒绝顶层还有其它联接的树。
@@ -337,11 +338,14 @@ EOF
     id=${2:-}
     [ -n "$id" ] || usage
     force=0
-    case "${3:-}" in
-      "") ;;
-      --force) force=1 ;;
-      *) usage ;;
-    esac
+    delete_branch=0
+    for arg in "${@:3}"; do
+      case "$arg" in
+        --force) force=1 ;;
+        --branch) delete_branch=1 ;;
+        *) usage ;;
+      esac
+    done
     target="$MAIN_ROOT/worktree/ticket-$id"
     [ -d "$target" ] || { echo "[错误] 没有这个工作树：$target" >&2; exit 1; }
     branch=$(git -C "$target" branch --show-current || true)
@@ -428,7 +432,18 @@ EOF
     # 此时跟踪文件已干净、测试副本已同步（或用户明确 --force）：允许清掉忽略文件。
     git -C "$MAIN_ROOT" worktree remove --force "$target"
     rm -rf "$MAIN_ROOT/worktree/.base-$id"
-    echo "已删除工作树：$target（分支 $branch 保留；按仓规合回 main 后再删分支）"
+    if [ "$delete_branch" -eq 1 ]; then
+      # 票分支多半是 squash 合入的，不是 main 的祖先：用 -D。内容已在 main 上
+      # （拆票提交），这里删的只是名字——留着会在 `git branch` 里堆成一片。
+      if [ "$branch" = "main" ]; then
+        echo "[错误] 拒绝删除 main 分支。" >&2
+        exit 1
+      fi
+      git -C "$MAIN_ROOT" branch -D "$branch"
+      echo "已删除工作树与分支：$target / $branch"
+    else
+      echo "已删除工作树：$target（分支 $branch 保留；要一并删分支加 --branch）"
+    fi
     ;;
   harvest)
     id=${2:-}

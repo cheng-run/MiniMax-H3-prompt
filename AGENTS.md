@@ -45,7 +45,7 @@ spec 与票住 issue 是因为 `/to-spec`、`/to-tickets` 按 `docs/agents/issue
 - **全量只在整条 spec 收尾跑一次（2026-11-12 用户裁定，覆盖旧「每合一张票跑全量」）**：集成分支上逐票合并不跑全量，每张票自己的 `fast` 绿即可——一轮 full 约 2 分钟，十几张票逐票跑纯属浪费。spec 全部完成、按票拆回 main 后，在 main 跑一次 `scripts/check.sh full` ＋ `clean`。合并/解冲突后需要兜底就只跑**受影响的测试文件**（`fast` 档已含秒级用例）。拆完 `git diff --stat main <集成分支>` 必须为空（内容保真的重放）；非空说明漏了提交或解冲突改坏了内容，停下别 push。交验收时说明依据哪一次全量。
 - **并行期全量耗时不可比**：多个工作树同时跑全量时 CPU 争用会把 80s 拉成 180s+（2026-11-01 实测 183s／195s，空载复测 78–84s）。判「接线回归」前先空载复测一次，别拿并行期的墙钟下结论。
 - **提交只圈定路径**：`git add <票涉及的路径>`，不用 `git add -A`——主树常带着未提交的模型/网关切换改动（`config/agent.yaml`、`model_factory.py` 等），`-A` 会把它们一起裹进票的提交。
-- **工作树用完即删，但删前先核对**：优先用 `scripts/worktree.sh remove NN`——默认拒绝「跟踪文件有未提交改动」或「测试副本与主树有差异」的树，别用 `--force` 绕过。删前确认分支 tip 已含实现代理报告的最新提交、且代理已 idle；**追加意见后要等第二次回报再删**（2026-10-31 实测：提前删树，两条未提交文案丢失，只能重建工作树补提交）。建树用 `scripts/worktree.sh add NN`：自动复制 `tests/`、`scripts/` 并打印 `PYTHONPATH` 测试命令。**自建工作树（`integration-*` 等）用 `remove-path <绝对路径>`**；工作树里的 `frontend/node_modules` / `.venv` 只能是目录联接，且**永远别绕过脚本直接 `git worktree remove`**——它会顺着联接把主树依赖删空（2026-11-12 实测，`.bin` 整份消失）。
+- **工作树用完即删，但删前先核对**：优先用 `scripts/worktree.sh remove NN`——默认拒绝「跟踪文件有未提交改动」或「测试副本与主树有差异」的树，别用 `--force` 绕过。删前确认分支 tip 已含实现代理报告的最新提交、且代理已 idle；**追加意见后要等第二次回报再删**（2026-10-31 实测：提前删树，两条未提交文案丢失，只能重建工作树补提交）。建树用 `scripts/worktree.sh add NN`：自动复制 `tests/`、`scripts/` 并打印 `PYTHONPATH` 测试命令。**合入 main 后**用 `remove NN --branch` 一并删票分支（票分支是 squash 合入、不是 main 祖先，脚本用 `-D`；手工删容易漏，2026-11-14 一次清理漏了 11 个）。**自建工作树（`integration-*` 等）用 `remove-path <绝对路径>`**；工作树里的 `frontend/node_modules` / `.venv` 只能是目录联接，且**永远别绕过脚本直接 `git worktree remove`**——它会顺着联接把主树依赖删空（2026-11-12 实测，`.bin` 整份消失）。
 - 协调会话只负责验证、合并、提交、关票，**不代开实现代理**（除非用户明确要求）。
 
 ## 守卫（2026-11-02 起入库）
@@ -54,6 +54,7 @@ spec 与票住 issue 是因为 `/to-spec`、`/to-tickets` 按 `docs/agents/issue
 - **时机**：提交前 `scripts/check.sh fast`；交验收/推送前 `full` + `clean`（`clean` 把本机 `.env` 从测试里摘掉，模拟 CI 的干净检出；`full` 已含变异检验）。
 - **跑动顺序**：实现 → **复审 → 全量**。复审还可能改代码时先别跑全量，那一轮会被作废；`/implement` 的步骤串默认把全量排在复审之前，本仓不照做（2026-11-10 #225：上一次 retro 只把这条写进 cadence，57 分钟后仍白跑 129 秒——规则要住在这里）。长检查（full / 变异 / 打包）只跑一次、放后台等完成通知，别在等待期周期性探查；实现切片用 `fast`。
 - **判据是最后一行**：`[check] <档位>: PASS` / `FAIL（退出码 N）`——管道随便接，`| tail -3` 也不会把红显示成绿（2026-11-08 起由脚本自己保证，不用再记 `PIPESTATUS`）。
+  **退出码不可信**：接了管道之后拿到的是 `tail` 的 0。后台或管道跑检查，结束时**先读那一行**再继续（2026-11-14 实测：rebase 后的 fast 没读判据行，锚点红被当成绿，直到 full 才发现）。
 - **提交信息格式**：`type(scope): 摘要（#N）`；无 issue 的 retro 用 `（retro YYYY-MM-DD）`。
 - **新加守卫必须补一条变异**（`scripts/mutation_check.py` 的 `MUTATIONS`）：没有变异检验的守卫不算守卫。
 - 各档位做什么、依赖缺装、契约/前端/工作树的命令细节见 `docs/agents/engineering-cadence.md`；变更记录见根 `CHANGELOG.md`。
