@@ -648,9 +648,15 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "resolved_revisions_not_echoed",
         "src/minimax_h3_prompt/api/jobs.py",
-        '                        "resolved_at": now,\n'
-        '                        "revisions": recorded_revisions}).model_dump(mode="json")',
-        '                        "resolved_at": now}).model_dump(mode="json")',
+        '                resolved_update: dict[str, Any] = {\n'
+        '                    "status": "resolved", "decision": recorded_decision,\n'
+        '                    "resolved_at": now,\n'
+        '                    "revisions": recorded_revisions,\n'
+        '                }',
+        '                resolved_update: dict[str, Any] = {\n'
+        '                    "status": "resolved", "decision": recorded_decision,\n'
+        '                    "resolved_at": now,\n'
+        '                }',
         ("tests/test_api_action_items.py"
          "::test_resolved_item_echoes_the_revisions_it_was_resolved_with",),
         "待办不记决议载荷＝修订历史被静默丢掉，用户看不到自己上一轮说过什么"
@@ -1022,8 +1028,8 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "ref_asset_lock_off",
         "src/minimax_h3_prompt/workbench_store.py",
-        '        if session.brief.is_ref and session.status != "created":',
-        "        if False and session.brief.is_ref and session.status != \"created\":",
+        '        if route_uses_asset_ledger(session.brief) and session.status != "created":',
+        "        if False and route_uses_asset_ledger(session.brief) and session.status != \"created\":",
         ("tests/test_api_ref_assets.py::"
          "test_registration_after_start_is_locked_but_plain_upload_is_not",),
         "起跑锁失效＝素材循环开始后还能加删台账，已写好的资产图词与图脱钩（#255）",
@@ -1052,7 +1058,8 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "ref_brief_not_wired",
         "src/minimax_h3_prompt/api/jobs.py",
-        "        if not session.brief.is_ref:\n            return session.brief",
+        "        if not route_uses_asset_ledger(session.brief):\n"
+        "            return session.brief",
         "        if True:\n            return session.brief",
         ("tests/test_api_asset_loop.py::test_ref_stage1_sees_the_ledger_as_brief_refs",),
         "台账不喂给管线＝brief.refs 恒空，阶段 1 按不存在的参考素材写词、"
@@ -1102,11 +1109,11 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "reopen_clears_the_asset_subset",
         "src/minimax_h3_prompt/api/jobs.py",
-        "                target[\"status\"] = SEGMENT_STATUS_WAITING_VIDEO\n"
-        "                target[\"video_asset_id\"] = \"\"",
-        "                target[\"status\"] = SEGMENT_STATUS_WAITING_VIDEO\n"
-        "                target[\"video_asset_id\"] = \"\"\n"
-        "                target[\"assets\"] = []",
+        "                    target[\"status\"] = SEGMENT_STATUS_WAITING_VIDEO\n"
+        "                    target[\"video_asset_id\"] = \"\"",
+        "                    target[\"status\"] = SEGMENT_STATUS_WAITING_VIDEO\n"
+        "                    target[\"video_asset_id\"] = \"\"\n"
+        "                    target[\"assets\"] = []",
         ("tests/test_api_segment_ref_loop.py::test_ref_passed_segment_can_be_reopened",),
         "换一段顺手清子集＝用户只想换视频，段内参考素材被悄悄推倒重算（#258，"
         "spec §5.5「只换视频」）",
