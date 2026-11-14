@@ -423,6 +423,7 @@ const errorMessage = computed(() =>
           :session-id="data.session_id"
           :assets="data.assets ?? []"
           :mode="data.mode"
+          :director-mode="data.brief.director_mode ?? ''"
           :refs="data.brief.refs ?? []"
           :status="data.status"
           @refresh="invalidateSnapshot"

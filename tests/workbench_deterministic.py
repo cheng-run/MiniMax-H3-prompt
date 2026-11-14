@@ -89,6 +89,46 @@ DEFAULT_REPLIES: dict[str, str] = {
 # 而不是静默落进 ``unknown`` 让计数断言失去意义。
 _DIRECTOR_PLANNER_MARK = "Segment Planner（导演台分段规划师）"
 _DIRECTOR_WRITER_MARK = "本段编号：Segment "
+# r2v 写段与三字段写段共用同一个角色标题，靠请求里只有 r2v 才有的预算块分开
+# （``prompts.build_segment_request`` 的 ``【本段参考图预算】``）。分开是为了给 r2v
+# 一份六节外壳的合法回复：三字段回复会被 ``validate_director_segment`` 判缺段。
+_DIRECTOR_R2V_BUDGET_MARK = "【本段参考图预算】"
+_REF_SECTIONS_MARK = "参考生视频提示词的两节"
+
+
+def director_ref_sections_reply(request: str) -> str:
+    """导演台 r2v 定义块的确定性回复：按请求里的登记表逐张定义（英文两节）。
+
+    每张登记图都要被定义——``refdefs._guard_issues`` 的 ``PICTURE_UNUSED`` 会把漏定义
+    的图判成硬错、耗尽重写预算后抛。登记从**请求正文**现读，不写死张数。
+    """
+    numbers = re.findall(r"<Picture\s+(\d+)>\s*=", request)
+    definitions = "\n".join(
+        f"<Picture {number}> is a registered reference image for the scene."
+        for number in numbers)
+    retention = "\n".join(
+        f"<Picture {number}> fully_preserved." for number in numbers)
+    return (
+        "subject_definitions:\n"
+        f"{definitions or '<Picture 1> is a registered reference image.'}\n\n"
+        "retention_analysis:\n"
+        f"{retention or '<Picture 1> fully_preserved.'}"
+    )
+
+
+# r2v 写段回复：模型只写 summary / detailed_description / 两条音轨，定义块与时间轴
+# 注记由真实的 ``normalize_segment_output`` 注入（与桩管线同一分工）。
+_DIRECTOR_R2V_SEGMENT_REPLY = (
+    "summary:\n"
+    "target_video: 4 秒雨夜街口。\n\n"
+    "detailed_description:\n"
+    "[Shot 1] At 00:00.000, a medium shot of the subject <Picture 1> in the rainy "
+    "street, neon reflecting in the puddles.\n\n"
+    "overall_soundscape:\n"
+    "Rain on the pavement and steady footsteps.\n\n"
+    "non_diegetic_music:\n"
+    "Low sustained strings."
+)
 
 
 def director_plan_reply(request: str) -> str:
@@ -116,8 +156,12 @@ def role_of(messages: List[BaseMessage]) -> str:
     body = "\n".join(str(message.content) for message in messages)
     if _DIRECTOR_PLANNER_MARK in body:
         return "director_planner"
+    if _REF_SECTIONS_MARK in body:
+        return "director_ref_sections"
     if _DIRECTOR_WRITER_MARK in body:
-        return "director_segment_writer"
+        return ("director_segment_writer_r2v"
+                if _DIRECTOR_R2V_BUDGET_MARK in body
+                else "director_segment_writer")
     system = next(
         (str(message.content) for message in messages
          if getattr(message, "type", "") == "system"),
@@ -187,6 +231,10 @@ class DeterministicChatModel(BaseChatModel):
             # 用例显式给了 ``director_planner`` 回复时以它为准（坏回复测试）。
             reply = director_plan_reply(
                 "\n".join(str(message.content) for message in messages))
+        if role == "director_ref_sections" and role not in self.replies:
+            reply = director_ref_sections_reply(body)
+        if role == "director_segment_writer_r2v" and role not in self.replies:
+            reply = _DIRECTOR_R2V_SEGMENT_REPLY
         return ChatResult(
             generations=[ChatGeneration(message=AIMessage(content=reply))])
 

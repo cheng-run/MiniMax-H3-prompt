@@ -155,6 +155,13 @@ def test_t2v_and_r2v_do_not_get_a_start_image_todo(fake_app, mode):
     app, _root = fake_app
     with workbench_client(app) as client:
         session_id = _create_director(client, mode=mode)
+        if mode == "r2v":
+            # r2v 走素材台账：零 Picture 起不来（#268 把起跑闸门从 ref 扩到 r2v）。
+            seeded = client.post(
+                f"/api/v1/sessions/{session_id}/assets",
+                files={"file": ("cat.png", _png(FILM_SIZE), "image/png")},
+                data={"name": "橘猫"})
+            assert seeded.status_code == 201, seeded.text
         review = _start_stage1(client, session_id)
 
         resp = client.post(
@@ -162,7 +169,9 @@ def test_t2v_and_r2v_do_not_get_a_start_image_todo(fake_app, mode):
             json={"decision": "approve"})
 
         assert resp.status_code == 202, resp.text
-        assert resp.json() is not None, "这两种模式通过审查后应直接起阶段 2 任务"
+        assert resp.json() is not None, "这两种模式通过审查后应起任务"
+        # t2v 直接进阶段 2；r2v 先进素材循环（开场图来自台账），两者都不挂开场首帧。
+        assert resp.json()["kind"] == ("asset_loop" if mode == "r2v" else "advance")
         assert "director_start_image" not in {
             item["kind"] for item in _detail(client, session_id)["action_items"]}
 

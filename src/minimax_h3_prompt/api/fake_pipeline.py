@@ -447,6 +447,63 @@ def director_tailframe_prompt(segment: Any, start_image: str | Path) -> str:
     ])
 
 
+def director_ref_sections(registry: Any) -> Any:
+    """桩 r2v 全片定义块（D8-8 / #268）：确定性英文两节，每张登记图都被定义。
+
+    真实路径要走一次模型调用把阶段 1 的中文 ``subject_defs`` 改写成英文；桩只替
+    「谁写这句话」，产物形态与 ``refdefs.RefSections`` 完全一致（续跑缓存、登记表
+    比对与写段拼装都走真实代码）。语言按校验器口径写成英文，避免 ``BODY_NOT_ENGLISH``。
+    """
+    from ..director.refdefs import RefSections
+
+    rows = [(int(item[0]), str(item[1])) for item in registry]
+    definitions = "\n".join(
+        f"<Picture {number}> is a registered reference image for the scene."
+        for number, _name in rows)
+    retention = "\n".join(
+        f"<Picture {number}> fully_preserved." for number, _name in rows)
+    return RefSections(
+        subject_definitions=definitions,
+        retention_analysis=retention,
+        registry=tuple(rows),
+    )
+
+
+def director_segment_reply() -> str:
+    """桩 r2v 写段回复：只给模型写的那几节，定义块与时间轴注记由真实组装器注入。
+
+    ``<Picture 1>`` 是随手引用的登记图——单段桩片子的登记表至少有一张（起跑闸门
+    保证）；段内子集因此由真实的 ``compute_segment_scope`` 算出来，而不是桩另编。
+    """
+    return (
+        "summary:\n"
+        "target_video: 4 秒雨夜街口（桩管线）。\n\n"
+        "detailed_description:\n"
+        "[Shot 1] At 00:00.000, a medium shot of the subject <Picture 1> in the "
+        "rainy street, neon reflecting in the puddles.\n\n"
+        "overall_soundscape:\n"
+        "Rain on the pavement and steady footsteps (stub).\n\n"
+        "non_diegetic_music:\n"
+        "Low sustained strings (stub)."
+    )
+
+
+class StubChatModel:
+    """写段直调用的最小桩：``invoke`` 返回固定正文，不建客户端、不走网络。
+
+    形状按 ``run_direct_call`` 的唯一要求（``invoke(request, config=…)`` →
+    带 ``content`` 的对象）裁剪；用量字段缺省即 0（桩不该产生成本数字）。
+    """
+
+    def __init__(self, reply: str) -> None:
+        self._reply = reply
+
+    def invoke(self, request: Any, config: Any = None) -> Any:
+        from langchain_core.messages import AIMessage
+
+        return AIMessage(content=self._reply)
+
+
 def segment_plan(total_s: int) -> list[SegmentPlan]:
     """桩分段规划（D6-1）：把总时长拆成实测帧数表里的档位（4/5/6 秒）。
 
@@ -529,9 +586,12 @@ def stage2_summary(brief: Any) -> Any:
 __all__ = [
     "FAKE_PIPELINE_ENV",
     "H3_VIDEO_FPS",
+    "StubChatModel",
     "asset_prompt_text",
     "asset_proofread_verdict",
     "director_firstframe_prompt",
+    "director_ref_sections",
+    "director_segment_reply",
     "director_tailframe_prompt",
     "fake_pipeline_enabled",
     "frame_descriptions",

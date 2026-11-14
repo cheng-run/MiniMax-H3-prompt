@@ -287,3 +287,44 @@ describe('AssetsTab ref：语义名、台账与容量', () => {
     expect(wrapper.emitted('refresh')).toHaveLength(1)
   })
 })
+
+describe('AssetsTab 导演台 r2v：复用 ref 的台账界面（#268）', () => {
+  it('r2v 显示语义名输入与容量条，列表按台账渲染', async () => {
+    const wrapper = mount(AssetsTab, {
+      props: {
+        sessionId: 'sess-1',
+        mode: 'director',
+        directorMode: 'r2v',
+        status: 'created',
+        assets: [makeAsset({ name: '橘猫.png' })],
+        refs: [makeRef({ number: 1 })],
+      },
+    })
+    await settle()
+
+    expect(wrapper.find('input[name="name"]').exists()).toBe(true)
+    expect(wrapper.find('[aria-label="参考素材容量"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('橘猫')
+    expect(wrapper.text()).toContain('picture 1')
+  })
+
+  it('t2v/i2v/fl2v 没有台账：不显示语义名输入与容量条', async () => {
+    for (const directorMode of ['t2v', 'i2v', 'fl2v']) {
+      const wrapper = mount(AssetsTab, {
+        props: {
+          sessionId: 'sess-1',
+          mode: 'director',
+          directorMode,
+          status: 'created',
+          assets: [makeAsset({ name: '镜头.png' })],
+          refs: [],
+        },
+      })
+      await settle()
+
+      expect(wrapper.find('input[name="name"]').exists()).toBe(false)
+      expect(wrapper.find('[aria-label="参考素材容量"]').exists()).toBe(false)
+      expect(wrapper.text()).toContain('镜头.png')
+    }
+  })
+})

@@ -32,7 +32,7 @@ if TYPE_CHECKING:  # 只用于段级注入卡写入口的签名，运行时按�
     from ..ref_segments import RefSegmentJob
 
 from .. import step_machine
-from ..brief_parser import is_director_mode, is_ref_mode
+from ..brief_parser import is_director_mode, is_ref_mode, route_uses_asset_ledger
 from ..errors import error_code
 from ..kinds import KIND_PICTURE
 from ..segment_validation import segment_submission_problems
@@ -1314,8 +1314,9 @@ class JobRunner:
             return _BRANCH_DIRECTOR_DELIVERY
         if (kind == step_machine.ACTION_STAGE1_REVIEW
                 and decision == step_machine.DECISION_APPROVE):
-            # ref 通过审查先走素材循环（D7 §5.3）：它不是帧链，也不直接进阶段 2。
-            if session.brief.is_ref:
+            # 走素材台账的路线通过审查先走素材循环（D7 §5.3 / #268）：ref 与导演台
+            # r2v 的参考素材要逐件出词、交图、校对，跑完才轮到阶段 2（r2v 是规划）。
+            if route_uses_asset_ledger(session.brief):
                 return _BRANCH_ASSET_LOOP
             # 判据只有一份（D8 §6.4）：base 的帧链与导演台 i2v/fl2v 都从这里分流，
             # 只是落到不同的待办 kind。
@@ -1717,9 +1718,12 @@ class JobRunner:
             and str(item.get("decision")) == step_machine.DECISION_APPROVE
             for item in session.action_items)
         if reviewed and approved and not pending:
-            # 素材循环（D7 §5.3 / §14）：ref 在阶段 1 与阶段 2 之间多一档。判据只读
-            # 台账——重启后照样能重建「在等第几件」，不依赖 job 历史。
-            if (session.brief.is_ref
+            # 素材循环（D7 §5.3 / §14）：走台账的路线在阶段 1 与阶段 2 之间多一档。
+            # 判据只读台账——重启后照样能重建「在等第几件」，不依赖 job 历史。
+            # 导演台 r2v 也走这一档（#268）：它的阶段 2 是规划，规划要吃全片的英文
+            # 定义块，而定义块的素材来自素材循环（顺序不能倒）。t2v/i2v/fl2v 没有
+            # 台账，`_asset_step_of` 对空台账恒 DONE，不会给它们凭空多开一档。
+            if (route_uses_asset_ledger(session.brief)
                     and _asset_step_of(session.asset_ledger)[0] != ASSET_STEP_DONE):
                 return step_machine.STEP_ASSET_LOOP
             # 导演台的阶段 2 只做规划 + 写段；写完就该打包（#263）。zip 已落盘
@@ -1849,19 +1853,23 @@ class JobRunner:
             await asyncio.to_thread(self._cleanup, session_id, job_id)
 
     def _ref_brief(self, session: Any) -> Any:
-        """执行器交给管线的 Brief：ref 会话的 ``refs`` 从**素材台账**现造（D7 §5.3 / §10）。
+        """执行器交给管线的 Brief：走台账的会话的 ``refs`` 从**素材台账**现造（D7 §5.3 / §10）。
 
         工作台的参考素材不在 brief 文件里——创建口不收 refs，台账才是唯一真源
         （D7 §4.1）。阶段 1 的分镜表 Subject 标签与资产图提示词命名都要按台账语义名
         对齐，所以每个「把 brief 交给管线或写词」的执行点都必须走这里；漏一处，
-        真实 ref 会话就会在出词那一步对不上号。
+        真实会话就会在出词那一步对不上号。
+
+        路线判据是 ``route_uses_asset_ledger``：``ref`` 与导演台 ``r2v`` 都有台账；
+        后者没有开场首帧待办，开场图同样只能来自台账（#268）。t2v/i2v/fl2v 与 base
+        原样返回。
 
         只收 Picture：``RefItem.picture`` 是 ``<Picture N>`` 槽位，视频/音频没有这个
         编号（它们的段内子集是 #258 的事）。``path`` 留空——本地路径既不进 DTO 也不进
         管线输入。用 ``replace`` 而不是就地改：``_finish_stage2`` 会把 brief 写回会话
-        文件，就地加就是给台账造一份会变旧的副本。base 会话原样返回。
+        文件，就地加就是给台账造一份会变旧的副本。
         """
-        if not session.brief.is_ref:
+        if not route_uses_asset_ledger(session.brief):
             return session.brief
         pictures = sorted(
             (entry for entry in session.asset_ledger
@@ -2140,6 +2148,26 @@ class JobRunner:
             name=name, kind=str(entry["kind"]), number=number,
             path=relative, sha256=str(entry["sha256"]))
 
+    def _materialize_director_asset_ledger(
+        self, session: Any, directory: Path,
+    ) -> None:
+        """r2v 打包前把会话台账落成 ``asset-ledger.json``（与 CLI 同形的产物）。
+
+        ``director/pack.py`` 的 ``_picture_sources`` 只认这份文件：它按编号与语义名
+        找每张参考图的正本。工作台的登记住在会话状态里（``session.asset_ledger``），
+        不落这一份，r2v 打包会当场报「台账是空的」——而且只在真正打包时才炸。
+
+        条目形状走 ``_card_record``：注入卡与打包共用同一份「台账条目 → 盘上正本」
+        解析口，两处各拼一次路径就是「换布局时必有一处漏改」的老形态。
+        """
+        from ..asset_ledger import AssetLedger, save_asset_ledger
+
+        entries = tuple(
+            self._card_record(entry, directory) for entry in session.asset_ledger)
+        if not entries:
+            return
+        save_asset_ledger(directory, AssetLedger(entries=entries))
+
     def _execute_pack(self, session_id: str, job_id: str,
                       cancel_event: threading.Event) -> dict[str, Any]:
         """导演台打包 job（D8 §9.1 / #263）：段表 + 段词 → ``director/pack/`` + zip。
@@ -2182,6 +2210,10 @@ class JobRunner:
                 ])
                 skipped = True
             else:
+                if plan.mode == "r2v":
+                    # 打包器只认 ``asset-ledger.json``（CLI 的素材库台账形态）；
+                    # 工作台的登记住在会话状态里，不落这一份就「没有参考图可挂」。
+                    self._materialize_director_asset_ledger(session, directory)
                 _job, report = prepare_director_pack(
                     directory, plan, settings=settings,
                     continuity_mode=continuity_mode)
@@ -2411,6 +2443,52 @@ class JobRunner:
             "segments": rows,
         }
 
+    def _director_registry(self, session: Any) -> tuple[tuple[int, str], ...]:
+        """r2v 的素材登记表：``(全局编号, 语义名)``，编号与台账一致。
+
+        走 ``ref_asset_registry``（与 CLI/多参同一条取数口）并把 ``_ref_brief`` 交进去：
+        工作台会话的 brief 本身不带 ``refs``，台账才是唯一真源——不经过 ``_ref_brief``
+        这里会拿到空登记，规划师就看不清可挑的图。
+        """
+        from ..generation import ref_asset_registry
+
+        return tuple(
+            (item.picture, item.name)
+            for item in ref_asset_registry(
+                session.stage_state, self._ref_brief(session)))
+
+    def _director_ref_context(
+        self, session: Any, state: dict[str, Any], directory: Path, mode: str,
+    ) -> tuple[tuple[tuple[int, str], ...], Any]:
+        """r2v 的登记表与全片英文定义块：**只生成一次**，盘上那份登记一致就复用。
+
+        定义块是六节外壳的第 1、3 节，逐段重复；它在规划之前就位（规划吃它的闭包算
+        预算），改写素材是阶段 1 的中文 ``subject_defs``——直接复制进段就是半份空定义
+        （``refdefs`` 模块头记着 2026-11-01 的现场）。缓存判据包含登记表：台账变了，
+        旧定义里的编号/语义名就对不上，必须重写。
+
+        非 r2v 没有参考素材，返回空表与 ``None``（写段也不会用到）。
+        """
+        if mode != "r2v":
+            return (), None
+        from ..director import refdefs
+
+        registry = self._director_registry(session)
+        cached = refdefs.load_ref_sections(directory)
+        if (cached is not None and refdefs.has_sections(cached)
+                and cached.registry == registry):
+            return registry, cached
+        if self.fake_pipeline:
+            from .fake_pipeline import director_ref_sections
+
+            sections = director_ref_sections(registry)
+        else:
+            sections = refdefs.build_ref_sections(
+                material=str(state.get("subject_defs", "")),
+                registry=registry, llm=build_chat_model())
+        refdefs.save_ref_sections(directory, sections)
+        return registry, sections
+
     def _plan_director_project(
         self, session_id: str, job_id: str,
         cancel_event: threading.Event, session: Any, state: dict[str, Any],
@@ -2424,37 +2502,33 @@ class JobRunner:
             session_id, job_id, DIRECTOR_PLAN_NODE, "started",
             stage=step_machine.STEP_STAGE2)
         self._write_active_job(session_id, job_id, DIRECTOR_PLAN_NODE)
+        # r2v 的登记表与英文定义块在**规划之前**就位（#268）：规划师按登记编号挑图，
+        # 预算闭包读的也是这份定义块。桩模式同样生一份（确定性的英文两节）。
+        registry, sections = self._director_ref_context(
+            session, state, directory, mode)
+        subject_definitions = (sections.subject_definitions
+                               if sections is not None else "")
         if self.fake_pipeline:
             from .fake_pipeline import director_plan
 
             plan = director_plan(mode, session.brief.duration)
-            # 桩不规划预算：r2v 的素材循环/英文定义块/预算产出属于 #268。
-            context = _DirectorWriteContext(shot_table=shot_table)
+            budget = None
+            if mode == "r2v":
+                # 预算仍由**真实**的闭包/锚降级算出（桩只替规划师挑了哪几张）。
+                from ..director.planning import build_asset_budget
+
+                numbers = tuple(number for number, _name in registry)
+                budget = build_asset_budget(
+                    plan,
+                    {segment.index: numbers for segment in plan.segments},
+                    subject_definitions=subject_definitions, registry=registry)
+            context = _DirectorWriteContext(
+                shot_table=shot_table, sections=sections, registry=registry,
+                budget=budget)
         else:
             from ..director.pack import film_end_still
             from ..ui.wizard_director import prepare_film_end_description
 
-            registry: tuple[tuple[int, str], ...] = ()
-            sections = None
-            subject_definitions = ""
-            if mode == "r2v":
-                from ..director import refdefs
-                from ..generation import ref_asset_registry
-
-                registry = tuple(
-                    (item.picture, item.name)
-                    for item in ref_asset_registry(state, session.brief))
-                cached = refdefs.load_ref_sections(directory)
-                if (cached is not None and refdefs.has_sections(cached)
-                        and cached.registry == registry):
-                    sections = cached
-                    subject_definitions = cached.subject_definitions
-                else:
-                    # 定义块与素材循环是 #268 的接线：本票不生成它，也不拿中文
-                    # ``subject_defs`` 冒充英文定义块（那是半份空定义）。
-                    raise RuntimeError(
-                        "导演台 r2v 的全片英文定义块缺失：工作台在 #268 接线 r2v "
-                        "素材循环，本票不做规划与写段")
             film_end = (mode == "fl2v"
                         and film_end_still(directory) is not None)
             ok, description = prepare_film_end_description(directory)
@@ -2499,19 +2573,10 @@ class JobRunner:
         from ..director.pack import film_end_still
         from ..ui.wizard_director import prepare_film_end_description
 
-        sections = None
-        registry: tuple[tuple[int, str], ...] = ()
-        if mode == "r2v":
-            from ..director import refdefs
-            from ..generation import ref_asset_registry
-
-            registry = tuple(
-                (item.picture, item.name)
-                for item in ref_asset_registry(session.stage_state, session.brief))
-            cached = refdefs.load_ref_sections(directory)
-            if (cached is not None and refdefs.has_sections(cached)
-                    and cached.registry == registry):
-                sections = cached
+        # 定义块与登记表只从本会话的盘上事实取：缓存命中就复用；盘上没有（例如
+        # 段表已落盘、定义块被删）就重生成一次——续写段词没有定义块就是半份空定义。
+        registry, sections = self._director_ref_context(
+            session, session.stage_state, directory, mode)
         film_end = mode == "fl2v" and film_end_still(directory) is not None
         ok, description = prepare_film_end_description(directory)
         if not ok:
@@ -2547,7 +2612,7 @@ class JobRunner:
             session_id, job_id, DIRECTOR_WRITE_NODE, "started",
             stage=step_machine.STEP_STAGE2)
         self._write_active_job(session_id, job_id, DIRECTOR_WRITE_NODE)
-        if self.fake_pipeline:
+        if self.fake_pipeline and plan.mode != "r2v":
             from types import SimpleNamespace
 
             from .fake_pipeline import director_segment_prompt
@@ -2564,8 +2629,17 @@ class JobRunner:
                 context = self._director_resume_context(
                     directory, session, mode, str(state.get("shot_table") or ""))
             sections = context.sections
+            if self.fake_pipeline:
+                # r2v 的桩只替「谁写这段正文」：归一、六节校验、段内素材子集与
+                # ``assets-in-segment.json`` 落盘全部走真实写段路径。桩另写一份
+                # 子集就是「产物形状随开关变」，CI 也证明不了 #268 的接线。
+                from .fake_pipeline import StubChatModel, director_segment_reply
+
+                llm = StubChatModel(director_segment_reply())
+            else:
+                llm = build_chat_model()
             written = write_director_segments(
-                plan, llm=build_chat_model(), session_dir=directory,
+                plan, llm=llm, session_dir=directory,
                 shot_table=context.shot_table,
                 sections=(sections.as_mapping() if sections is not None else None),
                 registry=context.registry,

@@ -26,7 +26,7 @@ from typing import Any, BinaryIO, Callable, Literal, Sequence, cast
 from pydantic import BaseModel, Field, PrivateAttr
 
 from . import step_machine
-from .brief_parser import Brief, is_ref_mode
+from .brief_parser import Brief, route_uses_asset_ledger
 from .kinds import KIND_PICTURE, KINDS
 from .ref_capacity import (
     ASSET_KIND_TO_REFERENCE,
@@ -1501,7 +1501,7 @@ def _next_number(ledger: Sequence[dict[str, Any]], asset_kind: str) -> int:
 
 
 def _validate_semantic_name(name: str) -> None:
-    """ref 登记的语义名：只限长度。
+    """走台账的会话（ref / 导演台 r2v）登记的语义名：只限长度。
 
     「必填」不在这一层：带 ``name`` 才是登记，不带就是不记账的普通素材（#256/#258
     回交通道）。前端「上传参考素材」框的必填校验是界面规则，不是 API 规则。
@@ -2193,12 +2193,14 @@ class WorkbenchSessionStore:
             raise SessionCompleted("会话已完成，不能再推进。")
         if detail.status == "awaiting_human":
             raise ActionItemPending("会话停在人工待办上，请先提交决定。")
-        # ref 起跑门槛（D7 spec §4.3）：零素材可以建会话（停在 created），但参考素材
-        # 是阶段 1 分镜表 Subject 标签的来源，一张 Picture 都没有就没有可写的闭包。
-        if (is_ref_mode(detail.brief.mode)
+        # 素材台账的起跑门槛（D7 spec §4.3）：零素材可以建会话（停在 created），但参考
+        # 素材是阶段 1 分镜表 Subject 标签的来源，一张 Picture 都没有就没有可写的闭包。
+        # 判据走 ``route_uses_asset_ledger``：导演台 r2v 也用台账（它没有开场首帧待办，
+        # 开场图只能来自已登记的参考素材），t2v/i2v/fl2v 不受这条约束。
+        if (route_uses_asset_ledger(detail.brief)
                 and not any(ref.kind == KIND_PICTURE for ref in detail.brief.refs)):
             raise AssetRequired(
-                "先上传参考素材：ref 会话至少要有一张 Picture 才能起跑。")
+                "先上传参考素材：走素材台账的会话至少要有一张 Picture 才能起跑。")
 
     def session_directory(self, session_id: str) -> Path:
         """会话目录（执行器要在旁边写 ``active-job.json``）。"""
@@ -2323,12 +2325,13 @@ class WorkbenchSessionStore:
 
     @staticmethod
     def _ensure_asset_writable(session: SessionState) -> None:
-        """ref 台账的写入口径：起跑（离开 ``created``）即锁死**登记与撤销**。
+        """素材台账的写入口径：起跑（离开 ``created``）即锁死**登记与撤销**。
 
         只对「带语义名的登记」生效：不带语义名的上传是普通素材（素材图/段视频回交），
-        不在台账里、也不受这条约束。base 会话没有台账，整条判据对它是空操作。
+        不在台账里、也不受这条约束。没有台账的会话（base 与导演台 t2v/i2v/fl2v）整条
+        判据对它是空操作。
         """
-        if session.brief.is_ref and session.status != "created":
+        if route_uses_asset_ledger(session.brief) and session.status != "created":
             raise AssetLocked(
                 "参考素材只能在起跑前增删：会话已经开始，改台账会让已写好的资产图词"
                 "与图对不上。")
@@ -2500,16 +2503,16 @@ class WorkbenchSessionStore:
         # 判据时，改判据的人只会改到一处。
         self.ensure_upload_target(session_id)
         directory, session, derived, _legacy = self._load(session_id)
-        is_ref = session.brief.is_ref
+        uses_ledger = route_uses_asset_ledger(session.brief)
         semantic_name = semantic_name.strip()
         # **带语义名 = 登记参考素材；不带 = 普通素材**（用户 2026-11-13 裁定）。
         # 同一个端点也收素材图与段视频回交（#256/#258），那时会话早已离开 created；
         # 按「起跑就锁全部上传」会把这些回交一起锁死，所以台账约束只挂在登记这条路上。
         registering = bool(semantic_name)
         if registering:
-            if not is_ref:
+            if not uses_ledger:
                 raise AssetNameInvalid(
-                    "base 会话没有参考素材台账：语义名只对 ref 会话有效。")
+                    "这条路线没有参考素材台账：语义名只对 ref 与导演台 r2v 有效。")
             # 名字不合格不该陪一份 512 MiB 的字节流跑完整条通路。
             _validate_semantic_name(semantic_name)
         assets_dir = directory / ASSETS_DIRNAME
@@ -2679,16 +2682,18 @@ class WorkbenchSessionStore:
         directory, session, derived, legacy = self._load(session_id)
         if legacy:
             raise SessionLegacy("历史会话（legacy）只读，不能删除素材。")
-        if not session.brief.is_ref:
-            raise RouteMismatch("只有 ref 会话有参考素材台账；base 会话的素材不能删。")
+        if not route_uses_asset_ledger(session.brief):
+            raise RouteMismatch(
+                "这条路线没有参考素材台账：只有 ref 会话与导演台 r2v 的素材能删。")
         prefix, _, hash16 = asset_id.rpartition("/")
         if prefix != derived or _ASSET_ID_RE.match(hash16) is None:
             raise AssetNotFound(f"素材不存在：{asset_id}")
         with self._lock_for(session_id):
             # 锁内重读：起跑与另一次删除都可能刚好发生。
             directory, fresh, derived, _legacy = self._load(session_id)
-            if not fresh.brief.is_ref:
-                raise RouteMismatch("只有 ref 会话有参考素材台账；base 会话的素材不能删。")
+            if not route_uses_asset_ledger(fresh.brief):
+                raise RouteMismatch(
+                    "这条路线没有参考素材台账：只有 ref 会话与导演台 r2v 的素材能删。")
             ledger = [dict(entry) for entry in fresh.asset_ledger]
             remaining = [entry for entry in ledger
                          if str(entry["asset_id"]) != asset_id]

@@ -58,22 +58,22 @@ function buildAssets(outDir: string): Assets {
   return JSON.parse(stdout.trim()) as Assets
 }
 
-/** 从下载到的初始包复制一份最终包：改第 2 段的 prompt（交付时应补一条 rewrite）。 */
-function makeFinalPack(source: string, target: string): void {
+/** 从下载到的初始包复制一份最终包：改第 index 段的 prompt（交付时应补一条 rewrite）。 */
+function makeFinalPack(source: string, target: string, index = 1): void {
   const code = [
     'import json, sys, zipfile',
-    'src, dst = sys.argv[1], sys.argv[2]',
+    'src, dst, index = sys.argv[1], sys.argv[2], int(sys.argv[3])',
     'with zipfile.ZipFile(src) as archive:',
     '    members = {name: archive.read(name) for name in archive.namelist()}',
     'data = json.loads(members["timeline.json"].decode("utf-8"))',
     'rows = data["segments"]',
-    'rows[1]["prompt"] = str(rows[1].get("prompt") or "") + " 用户在导演台补了一句：雨更大了。"',
+    'rows[index]["prompt"] = str(rows[index].get("prompt") or "") + " 用户在导演台补了一句：雨更大了。"',
     'members["timeline.json"] = json.dumps(data, ensure_ascii=False).encode("utf-8")',
     'with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as archive:',
     '    for name, blob in members.items():',
     '        archive.writestr(name, blob)',
   ].join('\n')
-  execFileSync(python, ['-c', code, source, target], {
+  execFileSync(python, ['-c', code, source, target, String(index)], {
     cwd: repoRoot,
     env: { ...process.env, PYTHONPATH: resolve(repoRoot, 'src') },
   })
@@ -204,4 +204,151 @@ test('导演台三段：阶段 1 → 首帧 → 打包下载 → 两种段回交
   await page.getByRole('tab', { name: '产物' }).click()
   await expect(page.locator('[data-download="director/final.mmxpack.zip"]')).toBeVisible()
   await expect(page.locator('[data-download="director/final-film.json"]')).toBeVisible()
+})
+
+// ---------------------------------------------------------------------------
+// D8-8（#268）：r2v 复用 D7 的素材台账与素材循环
+// ---------------------------------------------------------------------------
+
+// 1×1 透明 PNG：服务端按魔数嗅探成 Picture（桩不读图）；每次追加一个唯一尾字节，
+// 否则台账按内容判重、第 2 件会以 asset_duplicate 被拒——那不是被测的东西。
+const R2V_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+)
+
+function r2vPng(seed: number, filename: string) {
+  return {
+    name: filename,
+    mimeType: 'image/png',
+    buffer: Buffer.concat([R2V_PNG, Buffer.from([seed % 256])]),
+  }
+}
+
+/** r2v 桩件：本段导出视频 + 整片视频，帧数从真实段表现算（单段 r2v 计划）。 */
+function buildR2vVideos(outDir: string): { export: number; total: number } {
+  mkdirSync(outDir, { recursive: true })
+  const code = [
+    'import json, sys',
+    'from pathlib import Path',
+    'from minimax_h3_prompt.api.fake_pipeline import director_plan, write_director_segment_video',
+    'out = Path(sys.argv[1])',
+    'plan = director_plan("r2v", 4.0)',
+    'write_director_segment_video(out / "seg1.mp4", plan.segments[0].export_frames)',
+    'write_director_segment_video(out / "film.mp4", plan.total_frames)',
+    'print(json.dumps({"export": plan.segments[0].export_frames, "total": plan.total_frames}))',
+  ].join('\n')
+  const stdout = execFileSync(python, ['-c', code, outDir], {
+    cwd: repoRoot,
+    env: { ...process.env, PYTHONPATH: resolve(repoRoot, 'src') },
+    encoding: 'utf-8',
+  })
+  return JSON.parse(stdout.trim()) as { export: number; total: number }
+}
+
+async function uploadR2vReference(
+  page: import('@playwright/test').Page,
+  name: string,
+  filename: string,
+  seed: number,
+): Promise<void> {
+  await page.locator('#asset-semantic-name').fill(name)
+  await page.locator('#asset-upload').setInputFiles(r2vPng(seed, filename))
+}
+
+test('导演台 r2v：台账素材 → 素材循环（被拒重开）→ 规划/打包 → 段视频 → 交付', async ({
+  page,
+}, testInfo) => {
+  // 素材循环 + 规划 + 打包 + 交付，比单页交互长得多。
+  test.setTimeout(300_000)
+  const outDir = testInfo.outputPath('r2v-assets')
+  const frames = buildR2vVideos(outDir)
+  expect(frames.total).toBe(frames.export)
+
+  // --- 建会话：零素材可以建，起不来（台账起跑闸门）---
+  await page.goto('/')
+  await page.getByRole('button', { name: '新建会话' }).click()
+  await page.locator('textarea[name="plot"]').fill('E2E 导演台 r2v 参考素材闭环')
+  await page.getByRole('radio', { name: '导演台（director）' }).check()
+  await page.locator('select[name="director_mode"]').selectOption('r2v')
+  await page.locator('input[name="director_node_id"]').fill('e2e-node-268')
+  await page.locator('input[name="duration"]').fill('4')
+  await page.getByRole('button', { name: '创建并开始' }).click()
+  await expect(page).toHaveURL(/\/sessions\/.+/)
+  await expect(page.getByRole('button', { name: '开始' })).toBeVisible({ timeout: 20_000 })
+
+  // --- 素材：语义名必填、编号按上传序（r2v 与 ref 同一份界面）---
+  await page.getByRole('tab', { name: '素材' }).click()
+  await uploadR2vReference(page, '橘猫', 'cat.png', 11)
+  await expect(page.locator('.asset-list .asset')).toHaveCount(1)
+  await uploadR2vReference(page, '台灯', 'lamp.png', 12)
+  await expect(page.locator('.asset-list')).toContainText('picture 2')
+
+  // --- 起跑 → 阶段 1 通过 → **直接进素材循环**（不挂开场首帧待办）---
+  await page.getByRole('tab', { name: '概览与进度' }).click()
+  await page.getByRole('button', { name: '开始' }).click()
+  await expect(page.getByText('等待人工').first()).toBeVisible({ timeout: 30_000 })
+  await page.getByRole('tab', { name: '审查与待办' }).click()
+  await expect(page.getByText('分场剧本（桩管线第 1 稿）')).toBeVisible()
+  await page.getByRole('button', { name: '通过' }).click()
+
+  await expect(page.getByRole('heading', { name: /第 1 件素材图 · 橘猫/ })).toBeVisible({
+    timeout: 30_000,
+  })
+  await expect(page.getByRole('heading', { name: '提交开场首帧' })).toHaveCount(0)
+
+  // 第 1 件被拒 → 同一位置重开 → 重交通过 → 第 2 件自动出现。
+  await page.locator('#asset-image-file').setInputFiles(r2vPng(21, 'cat-try-1.png'))
+  await page.getByRole('button', { name: '提交并校对' }).click()
+  await expect(page.getByRole('heading', { name: '校对结论：不通过' })).toBeVisible({
+    timeout: 30_000,
+  })
+  await page.locator('#asset-image-file').setInputFiles(r2vPng(22, 'cat-try-2.png'))
+  await page.getByRole('button', { name: '提交并校对' }).click()
+  await expect(page.getByRole('heading', { name: /第 2 件素材图 · 台灯/ })).toBeVisible({
+    timeout: 30_000,
+  })
+  await page.locator('#asset-image-file').setInputFiles(r2vPng(23, 'lamp-try-1.png'))
+  await page.getByRole('button', { name: '提交并校对' }).click()
+
+  // --- 规划 / 打包：单段，段内素材子集只读可见（重编号后的 Picture 号 + 语义名）---
+  await page.getByRole('tab', { name: '分段' }).click()
+  await expect(page.getByText('已通过 0 / 总数 1')).toBeVisible({ timeout: 60_000 })
+  await expect(page.locator('[data-segment-index="1"]')).toContainText('等待交视频')
+  await expect(page.locator('[data-segment-index="1"] [data-segment-assets]')).toContainText('橘猫')
+  // 只读：段表里没有任何手填素材的入口。
+  await expect(
+    page
+      .locator('[data-segment-index="1"] [data-segment-assets]')
+      .locator('input, textarea, select'),
+  ).toHaveCount(0)
+
+  // --- 交本段视频 → 只剩交付 ---
+  await submitSegmentVideo(page, 1, resolve(outDir, 'seg1.mp4'))
+  await expect(page.getByText('已通过 1 / 总数 1')).toBeVisible({ timeout: 30_000 })
+
+  // --- 打包下载 → 改一段 prompt 造成最终包 → 交付归档 ---
+  await page.getByRole('tab', { name: '产物' }).click()
+  const [download] = await Promise.all([
+    page.waitForEvent('download'),
+    page.locator('[data-download="director/initial.mmxpack.zip"]').click(),
+  ])
+  const initialPack = testInfo.outputPath('r2v-initial.mmxpack.zip')
+  await download.saveAs(initialPack)
+  const finalPack = testInfo.outputPath('r2v-final.mmxpack.zip')
+  makeFinalPack(initialPack, finalPack, 0)
+
+  await page.getByRole('tab', { name: '交付' }).click()
+  await page.locator('#delivery-film-upload').setInputFiles(resolve(outDir, 'film.mp4'))
+  await expect(page.getByText('已选：').first()).toBeVisible({ timeout: 30_000 })
+  await expect(page.locator('#delivery-film-upload')).toBeEnabled()
+  await page.locator('#delivery-pack-upload').setInputFiles(finalPack)
+  await expect(page.getByText('已选：')).toHaveCount(2, { timeout: 30_000 })
+  const submitDelivery = page.getByRole('button', {
+    name: '提交成片与最终包并归档',
+  })
+  await expect(submitDelivery).toBeEnabled({ timeout: 30_000 })
+  await submitDelivery.click()
+  await expect(page.getByText('已交付').first()).toBeVisible({ timeout: 30_000 })
+  await expect(page.locator('[data-delivery-result]')).toContainText('final.mmxpack.zip')
 })

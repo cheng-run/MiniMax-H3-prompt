@@ -215,6 +215,22 @@ def route_emits_asset_prompts(brief: Brief) -> bool:
     return is_ref_mode(brief.mode)
 
 
+def route_uses_asset_ledger(brief: Brief) -> bool:
+    """该 brief 的参考素材是否登记在**素材台账**里（D7 §4 / D8 §8.1）。
+
+    判据的**唯一真源**：``ref`` 整条路线，加上导演台的 ``r2v``——后者用 ``<Picture N>``
+    指称上传的素材，开场图也来自台账。导演台的 t2v/i2v/fl2v 没有参考素材，一句
+    ``is_ref or is_director`` 会把这些模式一起放行：起跑闸门要求先传图、上传口接受
+    语义名、素材循环凭空多跑几轮——每一处都会把「没有台账」这件事写反。
+
+    ``ref`` 专属的行为（段循环的「只换视频」、段内子集算法那条路线）**不从**这里派生：
+    导演台有自己的段循环与子集口径，混用会让两条产物形状错位。
+    """
+    if is_director_mode(brief.mode):
+        return brief.director_mode == "r2v"
+    return is_ref_mode(brief.mode)
+
+
 def director_frame_variant(brief: Brief) -> str:
     """该 brief 的**有效帧变体**：导演台按生成模式映射，其余路线用它自己的 ``variant``。
 
