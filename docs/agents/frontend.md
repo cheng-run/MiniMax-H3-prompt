@@ -22,7 +22,13 @@ npx pnpm@11.7.0 install        # 装依赖（下载由用户执行）
 npx --no-install vite build    # 或 npm script: build
 npx --no-install vitest run --coverage
 PW_CHANNEL=chrome npx --no-install playwright test   # 本机免下载 chromium 跑 E2E
+E2E_PORT=8123 PW_CHANNEL=chrome npx --no-install playwright test   # 并行会话各用各的端口
 ```
+
+- **端口默认 8000、可用 `E2E_PORT` 覆盖**（retro 2026-11-14）：本仓常并行开多个会话，
+  两个 E2E 同时默认 8000 时，后跑的那个会复用别人的服务（错的数据根/桩开关），
+  测试挂住且零输出。`serve-e2e.mjs` 把 `E2E_PORT` 透传给 API 的 `H3_PORT`；
+  `reuseExistingServer` 恒为 false，端口被占用时当场报错并点名。
 
 纯 Python 提交不跑前端：`scripts/check.sh frontend` 单独跑
 `eslint + prettier --check + vue-tsc + e2e 类型`，`scripts/check.sh fast` 只在「前端有改动」时

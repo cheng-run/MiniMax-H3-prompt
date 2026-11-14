@@ -20,6 +20,8 @@ const child = spawn(python, ['-m', 'minimax_h3_prompt.api'], {
     // 所有 E2E 共用这个 webServer：注入确定性桩管线，让 D4-3 的「创建即起跑」不用真实
     // 模型即可跑完整闭环。既有 spec 不起 job，因此这个开关对它们无副作用。
     MINIMAX_FAKE_PIPELINE: '1',
+    // 端口要与 playwright.config.ts 的 baseURL 同源；并行会话用 E2E_PORT 各用各的。
+    ...(process.env.E2E_PORT ? { H3_PORT: process.env.E2E_PORT } : {}),
   },
 })
 

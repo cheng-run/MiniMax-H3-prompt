@@ -8,6 +8,13 @@ import { defineConfig, devices } from '@playwright/test'
 // 复用系统已装的 Chrome、免下载，设 PW_CHANNEL=chrome 即可（同为 Chromium 内核）。
 const channel = process.env.PW_CHANNEL
 
+// E2E 的端口默认 8000，可由 E2E_PORT 覆盖（retro 2026-11-14）：本仓常并行开多个会话，
+// 两个 E2E 同时默认 8000 时，后跑的那个会**复用别人的服务**（错的数据根、错的桩开关），
+// 测试挂住且零输出。`reuseExistingServer` 因此恒为 false：端口被占用时当场点名报错，
+// 而不是静默连上一个不属于本次运行的服务。
+const port = process.env.E2E_PORT ?? '8000'
+const baseURL = `http://127.0.0.1:${port}`
+
 export default defineConfig({
   testDir: './e2e',
   timeout: 60_000,
@@ -16,7 +23,7 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   reporter: process.env.CI ? [['list'], ['html', { open: 'never' }]] : 'list',
   use: {
-    baseURL: 'http://127.0.0.1:8000',
+    baseURL,
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
   },
@@ -25,8 +32,8 @@ export default defineConfig({
   ],
   webServer: {
     command: 'node scripts/serve-e2e.mjs',
-    url: 'http://127.0.0.1:8000/api/v1/health',
-    reuseExistingServer: !process.env.CI,
+    url: `${baseURL}/api/v1/health`,
+    reuseExistingServer: false,
     timeout: 120_000,
   },
 })
