@@ -91,6 +91,7 @@ from ..workbench_store import (
     director_first_frame_prompt_name,
     director_segment_prompt_name,
     director_tailframe_prompt_name,
+    semantic_warning_of,
 )
 
 logger = logging.getLogger(__name__)
@@ -364,14 +365,6 @@ def _job_id_of(job: JobSummary | dict[str, Any]) -> str:
     return str(job.get("job_id", ""))
 
 
-def _segment_rejection_reason(end_hook: str, description: str) -> str:
-    """语义闸门拒绝的可读原因（D6 §5.4）：尾帧实际画面 + 本段要求，缺一则省略。"""
-    frame = description.strip() or "（读图没有给出描述）"
-    hook = end_hook.strip()
-    reason = f"尾帧未达到本段末态：{frame}"
-    return f"{reason}｜要求：{hook}" if hook else reason
-
-
 def _upsert_job(jobs: Any, job: dict[str, Any]) -> list[dict[str, Any]]:
     """按 job_id 覆盖或追加，并只保留最近 ``JOB_HISTORY_LIMIT`` 条。"""
     items = [_job_dict(item) for item in jobs if _job_id_of(item) != job["job_id"]]
@@ -446,7 +439,7 @@ def _director_segment_rows(
     规划产物**（``DirectorSegment`` 由类型派生），模型回复里另带的同类字段在
     ``parse_director_plan`` 那层就已被忽略。
 
-    既有行里的运行态（状态、段词产物、已交视频、拒绝原因）原样保留：重建快照不能
+    既有行里的运行态（状态、段词产物、已交视频、语义提示）原样保留：重建快照不能
     把「这一段已经通过了」抹掉——判据是磁盘上的段表 + 快照里的进度两份事实。
     """
     from ..director.frames import FPS
@@ -480,7 +473,8 @@ def _director_segment_rows(
                 or (f"{session_id}/{director_segment_prompt_name(segment.index)}"
                     if prompt_file.is_file() else "")),
             "video_asset_id": str(previous.get("video_asset_id") or ""),
-            "rejection_reason": str(previous.get("rejection_reason") or ""),
+            # 旧快照的被拒记录读成 semantic_warning（#270）：与 ``SegmentOut`` 同一份映射。
+            "semantic_warning": semantic_warning_of(previous),
             "assets": [
                 {
                     "number": int(entry.get("new", 0)),
@@ -640,10 +634,10 @@ class JobRunner:
                         f"第 {index} 段当前是 {target['status']}，只有已通过的段能换一段。")
 
                 if is_ref_mode(mode):
-                    # 换段只换视频：段词与段内子集不动，所以只清素材引用与拒绝原因。
+                    # 换段只换视频：段词与段内子集不动，所以只清素材引用与语义提示。
                     target["status"] = SEGMENT_STATUS_WAITING_VIDEO
                     target["video_asset_id"] = ""
-                    target["rejection_reason"] = ""
+                    target["semantic_warning"] = ""
                     # 每段恰好一个待办：同类未决旧项先收掉再挂新的（与段收尾同一条纪律）。
                     items = [
                         existing.model_dump(mode="json")
@@ -667,7 +661,7 @@ class JobRunner:
                         continue
                     row["status"] = SEGMENT_STATUS_PENDING
                     row["video_asset_id"] = ""
-                    row["rejection_reason"] = ""
+                    row["semantic_warning"] = ""
                 # 第 N 段之后的待办是**旧锚点**算出来的：清掉，让段 job 从第 N 段
                 # 重新判「缺哪份按需词 / 该挂哪种待办」。留着会让界面同时挂着两段的表单。
                 # 交付待办（#266）一并收掉：它建立在「全部段通过」之上，段被打回后那个
@@ -962,8 +956,8 @@ class JobRunner:
                             # 交上视频 → 异步校验排队；落盘后由 job 判三档结局。
                             row["status"] = SEGMENT_STATUS_VALIDATING
                             row["video_asset_id"] = submitted_video
-                            # 重新交回＝上一轮拒绝的原因不再适用（D6 §5.4）。
-                            row["rejection_reason"] = ""
+                            # 重新交回＝上一轮的语义提示不再适用（#270）。
+                            row["semantic_warning"] = ""
                     holder["segments"] = rows
                     recorded_decision = step_machine.DECISION_SUBMIT_VIDEO
                 elif target.kind == step_machine.ACTION_ASSET_IMAGE:
@@ -3453,18 +3447,24 @@ class JobRunner:
     def _execute_segment_validation(self, session_id: str, job_id: str,
                                     cancel_event: threading.Event,
                                     number: int) -> dict[str, Any]:
-        """剥尾帧 → 读图 → 与本段 ``end_hook`` 对照（D6 §5.4 / §8）。
+        """剥尾帧 → 读图 → 与本段 ``end_hook`` 对照，产出一句**语义提示**（#270）。
 
-        三种结局严格分开，**只有「通过」与「被拒」在这里返回**：
-        - 技术异常（文件读不到、读图服务不可用、判据回复不可解析）一律抛错，由 ``_run``
-          落 ``failed``——重试重跑同一次校验，不要求重交素材；
-        - 读图与末态不符返回 ``not_reached``，由收尾重建同一段的待办（不是 failed）。
+        语义检查从硬闸门降级为提示（ADR 0039）：``end_hook`` 是规划期的意图，不是成片的
+        验收判据。于是这里只有两种返回：
+
+        - 技术异常（剥尾帧失败、文件读不到、素材缺失）**抛错**，由 ``_run`` 落 ``failed``
+          ——下一段没有首帧锚，这是系统故障，重试重跑同一次校验、不要求重交素材；
+        - 其余一律返回（段照常 ``passed``）：读图与末态一致 → 空提示；有差异 → 「语义检查
+          提示」；读图或判据不可用 → 「语义检查未完成」。
 
         读图走唯一读图口 ``describe_bridge_frame``（内部 ``describe_image``）；桩管线把这
         一步连同判据一起桩掉，但**剥尾帧始终是真的**（cv2，无需模型）。
         """
         from ..tools.frame_auditor import describe_bridge_frame, extract_last_frame
-        from ..segment_validation import END_NOT_REACHED, END_REACHED
+        from ..segment_validation import (
+            semantic_warning_text,
+            validation_incomplete_text,
+        )
 
         directory = self.store.session_directory(session_id)
         session = load_session(directory)
@@ -3494,6 +3494,7 @@ class JobRunner:
             session_id, job_id, node, "started",
             stage=step_machine.STEP_SEGMENTING)
         self._write_active_job(session_id, job_id, node)
+        # 剥尾帧失败/文件读不到＝系统故障（下一段没有首帧锚），照旧抛错落 failed。
         tail = extract_last_frame(
             resource.path,
             directory / SEGMENTS_DIRNAME / SEGMENT_BRIDGE_DIRNAME
@@ -3502,22 +3503,36 @@ class JobRunner:
             sharpest=False)
         if cancel_event.is_set():
             raise JobCancelled(node)
+        tail_description = ""
+        semantic_warning = ""
         if self.fake_pipeline:
             from .fake_pipeline import judge_segment_end_hook, segment_tail_description
 
             tail_description = segment_tail_description(plan)
-            reached = judge_segment_end_hook(plan.end_hook, tail_description)
+            difference = judge_segment_end_hook(
+                plan.end_hook, tail_description, number)
+            if difference:
+                semantic_warning = semantic_warning_text(
+                    difference, plan.end_hook, tail_description)
         else:
-            # 读图返回可空；先落到独立变量再判空，否则 mypy 会按前一分支的 str 收窄。
-            described = describe_bridge_frame(tail)
-            if not described:
-                # 读图服务不可用＝系统故障，不是「用户的视频不合格」。
-                raise RuntimeError(f"第 {number} 段尾帧读图失败：视觉服务不可用")
-            tail_description = described
-            from ..model_factory import build_chat_model
-            from ..segment_validation import judge_end_hook
+            try:
+                # 读图返回可空；先落到独立变量再判空，否则 mypy 会按前一分支的 str 收窄。
+                described = describe_bridge_frame(tail)
+                if not described:
+                    raise RuntimeError("视觉服务不可用")
+                tail_description = described
+                from ..model_factory import build_chat_model
+                from ..segment_validation import judge_end_hook
 
-            reached = judge_end_hook(plan.end_hook, tail_description, build_chat_model())
+                difference = judge_end_hook(
+                    plan.end_hook, tail_description, build_chat_model())
+            except Exception as exc:  # noqa: BLE001 - 读图/判据不可用不阻断，降级成提示
+                # 语义检查做不成本身不是「视频不合格」：段照常通过，只附一句说明。
+                semantic_warning = validation_incomplete_text(str(exc))
+            else:
+                if difference:
+                    semantic_warning = semantic_warning_text(
+                        difference, plan.end_hook, tail_description)
         if cancel_event.is_set():
             raise JobCancelled(node)
         self._emit_progress(
@@ -3525,9 +3540,9 @@ class JobRunner:
             stage=step_machine.STEP_SEGMENTING)
         return {
             "number": number,
-            "outcome": END_REACHED if reached else END_NOT_REACHED,
+            # 空串＝无提示；非空＝段记录与段卡片上展示的语义提示正文。
+            "semantic_warning": semantic_warning,
             "description": tail_description,
-            # 拒绝原因要带上「本段要求」：收尾处据此给用户可读的原因（D6 §5.4）。
             "end_hook": plan.end_hook,
         }
 
@@ -3541,8 +3556,6 @@ class JobRunner:
         的帧锚可喂。这里只剩两件：技术档（resolve 同步判过，重判会漂）与「段词还在」
         ——段落定成 ``passed`` 的前提是这一段的产出与提交对得上。
         """
-        from ..segment_validation import END_REACHED
-
         row = next(
             (item for item in session.segments
              if int(item.get("index", 0)) == int(number)), None)
@@ -3568,7 +3581,8 @@ class JobRunner:
         self._emit_progress(
             session_id, job_id, node, "done", stage=step_machine.STEP_SEGMENTING)
         # ``description`` 留空：收尾据此跳过桥接帧锚的写入（ref 没有下段的帧锚）。
-        return {"number": number, "outcome": END_REACHED,
+        # 语义提示恒空：ref 不做尾帧对照，段词域内校验已在写段时做过（ADR 0011）。
+        return {"number": number, "semantic_warning": "",
                 "description": "", "end_hook": ""}
 
     def _execute_segment_assemble(self, session_id: str, job_id: str,
@@ -4274,7 +4288,7 @@ class JobRunner:
                 for row in rows:
                     if int(row["index"]) == number:
                         row["status"] = SEGMENT_STATUS_WAITING_VIDEO
-                        row["rejection_reason"] = ""
+                        row["semantic_warning"] = ""
             items = [
                 existing.model_dump(mode="json")
                 for existing in detail.action_items
@@ -4356,7 +4370,7 @@ class JobRunner:
             for row in rows:
                 if int(row["index"]) == number:
                     row["status"] = SEGMENT_STATUS_PASSED
-                    row["rejection_reason"] = ""
+                    row["semantic_warning"] = ""
             jobs = self._succeed_job(detail, job_id)
             if next_job is not None:
                 jobs = _upsert_job(jobs, _job_dict(next_job))
@@ -4553,101 +4567,62 @@ class JobRunner:
 
     def _finish_segment_validation(self, session_id: str, job_id: str,
                                    result: dict[str, Any]) -> JobSummary | None:
-        """段校验收尾：通过则落段状态并起下一段写词；被拒则重建待办（D6 §5.4）。
+        """段校验收尾：段一律 ``passed``，语义提示随段持久化（#270 / ADR 0039）。
 
-        - 通过：段转 ``passed``，**立刻持久化**；非末段把尾帧锚写进 state 并起下一段
-          写词 job；末段起拼接 job（D6 §9：不要求用户点任何按钮，也没有交付确认闸门）。
-        - 被拒：段转回 ``waiting_video``、**不落 passed**，重建同一段的待办并发
-          ``action_item.created``。用户的素材不合格不是系统故障，**不记 failed**。
+        语义检查不再是闸门：走到这里就说明剥尾帧成功（技术异常在校验里已抛成
+        ``failed``），段直接通过。非末段把尾帧锚写进 state 并起下一段写词 job；末段起
+        拼接 job（D6 §9：不要求用户点任何按钮，也没有交付确认闸门）。
+
+        语义提示（可能与计划末态有差异、或「语义检查未完成」）写进段记录后保留，段卡片
+        上仍可见，由人决定要不要自己重生成这一段——系统不再重建待办、不发
+        ``action_item.created``。
         """
-        from ..segment_validation import END_REACHED
-
         number = int(result["number"])
         description = str(result.get("description") or "")
-        passed = str(result.get("outcome")) == END_REACHED
+        semantic_warning = str(result.get("semantic_warning") or "")
 
-        if passed:
-            # 通过就一定有下一步：非末段接下一段写词，末段接拼接（D6 §5.3/§9）。
-            # 两者由 ``_segment_step`` 按已落盘的段状态分辨，这里只负责把 job 放出去。
-            next_job = JobSummary(
-                job_id=uuid.uuid4().hex, kind=JOB_KIND_SEGMENT, status="running",
-                started_at=_now())
-            next_status = step_machine.STATUS_RUNNING
+        # 通过就一定有下一步：非末段接下一段写词，末段接拼接（D6 §5.3/§9）。
+        # 两者由 ``_segment_step`` 按已落盘的段状态分辨，这里只负责把 job 放出去。
+        next_job = JobSummary(
+            job_id=uuid.uuid4().hex, kind=JOB_KIND_SEGMENT, status="running",
+            started_at=_now())
+        next_status = step_machine.STATUS_RUNNING
 
-            def _apply(detail: Any) -> dict[str, Any]:
-                rows = [row.model_dump() for row in detail.segments]
-                for row in rows:
-                    if int(row["index"]) == number:
-                        row["status"] = SEGMENT_STATUS_PASSED
-                        # 重交成功后不再展示上一轮的原因（D6 §5.4）。
-                        row["rejection_reason"] = ""
-                jobs = self._succeed_job(detail, job_id)
-                jobs = _upsert_job(jobs, _job_dict(next_job))
-                changes: dict[str, Any] = {
-                    "status": next_status,
-                    "jobs": jobs,
-                    "segments": rows,
-                }
-                # 尾帧锚在**锁内**基于当前 state 合并（D6 §5.4）：校验是慢速调用，开始前
-                # 读到的 state 到收尾时可能已被别的写者推进，整份写回会盖掉那些键。
-                # 段号取下一段的 0-based index（＝本段 1-based 段号），与
-                # ``segment_prompts._frame_anchor_note`` 的取法同源。
-                if number < len(rows) and description:
-                    anchor_state = detail.stage_state_snapshot()
-                    anchors = [
-                        entry for entry in
-                        anchor_state.get("bridge_frame_descriptions") or []
-                        if isinstance(entry, dict)]
-                    anchors.append({"segment": number, "description": description})
-                    anchor_state["bridge_frame_descriptions"] = anchors
-                    changes["stage_state"] = anchor_state
-                return changes
-
-            events = [EventDraft("job.succeeded", {"next": next_status}, job_id=job_id)]
-            events.append(EventDraft(
-                "job.started", {"kind": JOB_KIND_SEGMENT}, job_id=next_job.job_id))
-            self.store.mutate(session_id, _apply, events=events)
-            return next_job
-
-        # 具体原因随段状态与待办一起给到用户（D6 §5.4「被拒时看到具体原因」）。
-        reason = _segment_rejection_reason(
-            str(result.get("end_hook") or ""), description)
-        item = ActionItemOut(
-            item_id=uuid.uuid4().hex, kind=step_machine.ACTION_SEGMENT_VIDEO,
-            status="pending", created_at=_now(), segment_index=number,
-            reason=reason)
-
-        def _reject(detail: Any) -> dict[str, Any]:
-            jobs = self._succeed_job(detail, job_id)
+        def _apply(detail: Any) -> dict[str, Any]:
             rows = [row.model_dump() for row in detail.segments]
             for row in rows:
                 if int(row["index"]) == number:
-                    # 被拒的视频不算数：清掉素材 id，回到「等用户换一段视频重交」。
-                    row["status"] = SEGMENT_STATUS_WAITING_VIDEO
-                    row["video_asset_id"] = ""
-                    row["rejection_reason"] = reason
-            items = [
-                existing.model_dump(mode="json")
-                for existing in detail.action_items
-                if not (existing.kind == step_machine.ACTION_SEGMENT_VIDEO
-                        and existing.status == "pending")]
-            items.append(item.model_dump(mode="json"))
-            return {
-                "status": step_machine.STATUS_AWAITING_HUMAN,
+                    row["status"] = SEGMENT_STATUS_PASSED
+                    # 段通过后仍保留语义提示：偏差要让人看见并自行判断。
+                    row["semantic_warning"] = semantic_warning
+            jobs = self._succeed_job(detail, job_id)
+            jobs = _upsert_job(jobs, _job_dict(next_job))
+            changes: dict[str, Any] = {
+                "status": next_status,
                 "jobs": jobs,
                 "segments": rows,
-                "action_items": items,
             }
+            # 尾帧锚在**锁内**基于当前 state 合并（D6 §5.4）：校验是慢速调用，开始前
+            # 读到的 state 到收尾时可能已被别的写者推进，整份写回会盖掉那些键。
+            # 段号取下一段的 0-based index（＝本段 1-based 段号），与
+            # ``segment_prompts._frame_anchor_note`` 的取法同源。读图不可用时
+            # ``description`` 为空，这一段就没有文字锚（实际帧图仍是下一段的首帧）。
+            if number < len(rows) and description:
+                anchor_state = detail.stage_state_snapshot()
+                anchors = [
+                    entry for entry in
+                    anchor_state.get("bridge_frame_descriptions") or []
+                    if isinstance(entry, dict)]
+                anchors.append({"segment": number, "description": description})
+                anchor_state["bridge_frame_descriptions"] = anchors
+                changes["stage_state"] = anchor_state
+            return changes
 
-        self.store.mutate(session_id, _reject, events=[
-            EventDraft("job.succeeded",
-                       {"next": step_machine.STATUS_AWAITING_HUMAN}, job_id=job_id),
-            EventDraft("action_item.created",
-                       {"item_id": item.item_id, "kind": item.kind,
-                        "segment_index": number, "reason": reason},
-                       job_id=job_id),
-        ])
-        return None
+        events = [EventDraft("job.succeeded", {"next": next_status}, job_id=job_id)]
+        events.append(EventDraft(
+            "job.started", {"kind": JOB_KIND_SEGMENT}, job_id=next_job.job_id))
+        self.store.mutate(session_id, _apply, events=events)
+        return next_job
 
     def _finish_segment_assembly(self, session_id: str, job_id: str,
                                  film: Any) -> JobSummary | None:

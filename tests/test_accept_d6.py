@@ -132,6 +132,7 @@ def test_segment_rows_carry_planned_seconds_and_status():
              "prompt_artifact_id": "S/GEN001/segments/shot-02.md",
              "video_asset_id": ""},
             {"index": 1, "start_s": 0, "end_s": 9, "status": "passed",
+             "semantic_warning": "语义检查提示：左右顺序不同｜计划末态：右手在胸前",
              "prompt_artifact_id": "S/GEN001/segments/shot-01.md",
              "video_asset_id": "S/GEN001/ab"},
         ],
@@ -141,6 +142,9 @@ def test_segment_rows_carry_planned_seconds_and_status():
 
     assert [row["index"] for row in rows] == [1, 2]
     assert rows[0]["planned_seconds"] == 9
+    assert rows[0]["semantic_warning"].startswith("语义检查提示")
+    # 没有提示的段是空串，不是 None：报告表格直接渲染它。
+    assert rows[1]["semantic_warning"] == ""
     assert rows[1]["status"] == "waiting_video"
 
 
@@ -211,6 +215,7 @@ def test_render_report_lists_segments_and_never_prints_a_token():
         "segments": [
             {"index": 1, "start_s": 0, "end_s": 9, "planned_seconds": 9,
              "status": "passed", "prompt_path": "prompts/segment-01.md",
+             "semantic_warning": "语义检查提示：尾帧人物左右相反｜计划末态：右手在胸前",
              "gate_issues": [{"severity": "warning",
                               "code": "segment_video_duration_unknown_tier",
                               "message": "7–15s 档暂无样本"}],
@@ -229,6 +234,10 @@ def test_render_report_lists_segments_and_never_prints_a_token():
 
     assert "segment-01.md" in text and "segment-02.md" in text
     assert "9" in text and "7–15s" in text
+    # 语义提示进段表（ADR 0039）：它是证据，不是闸门。
+    assert "语义检查提示：尾帧人物左右相反" in text
+    assert "语义提示（不阻断）" in text
+    assert "ADR 0039" in text
     assert "未跑到 60 秒上限" in text
     assert "should-never-be-printed" not in text
 
@@ -308,6 +317,19 @@ def test_video_older_than_the_session_is_rejected():
 
     assert "_predates(video, created_at)" in source
     assert "不是本轮生成的" in source
+
+
+def test_technical_pass_without_passed_is_a_system_error_not_a_resubmit():
+    """技术档过了却没 passed：语义检查已不再阻断（ADR 0039），只能是服务端异常。
+
+    旧代码把它当「语义闸门拒绝」退回等待换视频，用户换多少段都没用（#270）。
+    """
+    import inspect
+
+    source = inspect.getsource(accept_d6.run_submit)
+
+    assert "语义检查已不再阻断" in source
+    assert "换一段视频重跑" not in source
 
 
 def test_resume_is_exclusive_with_prepare_and_submit(capsys):

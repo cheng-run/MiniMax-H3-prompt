@@ -347,12 +347,12 @@ def test_segment_rows_keep_existing_status_when_rebuilt(tmp_path):
     ))
     existing = [{"index": 1, "status": "waiting_video",
                  "prompt_artifact_id": "s/director/segment-01.md",
-                 "video_asset_id": "s/abc", "rejection_reason": "未过"}]
+                 "video_asset_id": "s/abc", "semantic_warning": "提示"}]
     row = _director_rows(plan, tmp_path, existing)[0]
     assert row["status"] == "waiting_video"
     assert row["prompt_artifact_id"] == "s/director/segment-01.md"
     assert row["video_asset_id"] == "s/abc"
-    assert row["rejection_reason"] == "未过"
+    assert row["semantic_warning"] == "提示"
     assert row["end_frame"] == 192
 
 

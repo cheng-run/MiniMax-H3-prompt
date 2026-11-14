@@ -16,6 +16,7 @@ from minimax_h3_prompt.session_store import SESSION_FILENAME, LEGACY_SCHEMA_VERS
 from minimax_h3_prompt.workbench_store import (
     IdempotencyConflict,
     IdempotencyRegistry,
+    SegmentOut,
     SessionLegacy,
     SessionNotFound,
     WorkbenchSessionStore,
@@ -370,3 +371,43 @@ def test_action_item_event_payload_rejects_non_string_slots():
             {"item_id": "i1", "kind": "segment_video", key: "s/a"})
         _validate_action_item_resolved(
             {"item_id": "i1", "decision": "approve", key: "s/a"})
+
+
+# ---------------------------------------------------------------------------
+# 段记录字段更名（#270）：旧快照的 rejection_reason 读成 semantic_warning
+# ---------------------------------------------------------------------------
+
+def test_segment_out_reads_legacy_rejection_reason_as_semantic_warning():
+    """旧键只读不写回：模型仍能打开旧快照，``model_dump`` 不再产出旧键。"""
+    segment = SegmentOut.model_validate({
+        "index": 1, "start_s": 0, "end_s": 6,
+        "rejection_reason": "尾帧未达到本段末态：人物还在走动",
+    })
+
+    assert segment.semantic_warning == "尾帧未达到本段末态：人物还在走动"
+    assert "rejection_reason" not in segment.model_dump()
+    assert segment.model_dump()["semantic_warning"] == "尾帧未达到本段末态：人物还在走动"
+
+
+def test_segment_out_new_key_wins_over_legacy_when_both_present():
+    """两个键都在时新键优先——迁移后的快照不会被旧值盖回去。"""
+    segment = SegmentOut.model_validate({
+        "index": 1, "start_s": 0, "end_s": 6,
+        "semantic_warning": "新提示", "rejection_reason": "旧原因",
+    })
+
+    assert segment.semantic_warning == "新提示"
+
+
+def test_segment_out_empty_new_key_is_not_overwritten_by_legacy():
+    """新键存在就以新键为准，哪怕它是空串：残留旧键不能被读回来。
+
+    写回只写新键，旧键只可能来自半迁移的快照；把它读回来会凭空给段挂一条过期的
+    「被拒」提示。导演台快照重建走同一份映射（``semantic_warning_of``），口径一致。
+    """
+    segment = SegmentOut.model_validate({
+        "index": 1, "start_s": 0, "end_s": 6,
+        "semantic_warning": "", "rejection_reason": "旧原因",
+    })
+
+    assert segment.semantic_warning == ""

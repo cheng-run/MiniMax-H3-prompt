@@ -27,7 +27,7 @@ function makeSegment(overrides: Partial<SegmentOut> = {}): SegmentOut {
     status: 'pending',
     prompt_artifact_id: '',
     video_asset_id: '',
-    rejection_reason: '',
+    semantic_warning: '',
     assets: [],
     ...overrides,
   }
@@ -139,23 +139,32 @@ describe('SegmentsTab 分段分区', () => {
     expect(text).toContain('unknown-status')
   })
 
-  it('语义闸门拒绝后显示具体原因，并保留重交表单', () => {
+  it('段通过后仍显示语义提示（计划末态 / 实际尾帧 / 差异点），不阻断流程', () => {
     const wrapper = mountTab({
       segments: [
         makeSegment({
-          status: 'waiting_video',
-          rejection_reason: '尾帧未达到本段末态：尾帧画面：人物还在走动｜要求：人物停在门口',
+          status: 'passed',
+          semantic_warning:
+            '语义检查提示：脚步没入画，计划要求双脚一前一后｜计划末态：人物停在门口，双脚一前一后｜尾帧画面：中景，脚未入画',
         }),
       ],
-      actionItems: [makeItem()],
     })
 
-    const text = wrapper.text()
-    expect(text).toContain('上次提交未通过')
-    expect(text).toContain('尾帧未达到本段末态')
-    expect(text).toContain('人物停在门口')
-    // 被拒的段仍可重交：待办表单还在。
-    expect(text).toContain('提交本段视频')
+    const warning = wrapper.find('[data-semantic-warning]')
+    expect(warning.exists()).toBe(true)
+    expect(warning.text()).toContain('语义检查提示')
+    expect(warning.text()).toContain('脚步没入画')
+    expect(warning.text()).toContain('计划末态')
+    expect(warning.text()).toContain('尾帧画面')
+    // 段已通过、没有重交表单：提示只是让人自行判断要不要重生成。
+    expect(wrapper.text()).toContain('已通过')
+    expect(wrapper.text()).not.toContain('提交本段视频')
+  })
+
+  it('无提示的段不渲染提示块', () => {
+    const wrapper = mountTab({ segments: [makeSegment({ status: 'passed' })] })
+
+    expect(wrapper.find('[data-semantic-warning]').exists()).toBe(false)
   })
 
   it('当前段高亮落在第一个未通过的段上；没有覆盖镜头时显示占位', () => {

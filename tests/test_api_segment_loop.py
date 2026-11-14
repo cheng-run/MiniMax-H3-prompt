@@ -1,12 +1,12 @@
-"""D6（#246）：长片段循环的对外面——第三个人工待办与三种结局。
+"""D6（#246/#270）：长片段循环的对外面——第三个人工待办与语义提示。
 
 钉住四件事：
 1. 规划完自动写第 1 段 → 挂出唯一的 ``segment_video`` 待办（载荷带段号），会话 await。
 2. resolve 只收 ``video_asset_id``；错配/外会话素材/非 mp4/技术档不合格一律 422
    ``segment_video_invalid``，会话仍可重传。
-3. 通过与拒绝严格分开：通过落 passed 并带着尾帧锚写下一段；被拒不落 passed、重建同一段
-   待办、发 ``action_item.created``、**不记 failed**。
-4. 技术失败落 failed，重试重跑同一次校验、**不要求重交素材**。
+3. 语义检查**只提示、不阻断**（#270 / ADR 0039）：有差异或读图不可用时段照样 ``passed``
+   并带 ``semantic_warning``，照常写下一段，不重建待办、不发新的段待办事件。
+4. 剥尾帧失败是系统故障：落 ``failed``，重试重跑同一次校验、**不要求重交素材**。
 
 模型桩走 ``workbench_deterministic``；写段与语义判据分别打桩在 ``segment_prompts`` 与
 ``segment_validation`` 同一函数上（不另开一条路）。
@@ -95,6 +95,14 @@ def _events(root: Path, session_id: str) -> list[dict]:
             for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def _segment_todo_events(events: list[dict], number: int) -> list[dict]:
+    """某一 (segment_video, 段号) 的 ``action_item.created`` 事件列表。"""
+    return [event for event in events
+            if event["type"] == "action_item.created"
+            and event["payload"].get("kind") == "segment_video"
+            and event["payload"].get("segment_index") == number]
+
+
 @pytest.fixture
 def loop_app(tmp_path, monkeypatch):
     """临时会话根 + 确定性模型；规划/写段打桩到返回固定段表与固定段正文。"""
@@ -139,6 +147,21 @@ def _to_first_segment_todo(client, session_id: str) -> dict:
 # 通过：落 passed、带尾帧锚写下一段
 # ---------------------------------------------------------------------------
 
+def test_segment_todo_event_carries_the_segment_number(loop_app):
+    """首次挂出的段待办事件带段号——不只快照里有（D7-1 AC1）。"""
+    app, _model, root, _captured = loop_app
+
+    with workbench_client(app) as client:
+        session_id = client.post(
+            "/api/v1/sessions", json=_brief_body()).json()["session_id"]
+        _to_first_segment_todo(client, session_id)
+
+    created = [event for event in _events(root, session_id)
+               if event["type"] == "action_item.created"]
+    assert created[-1]["payload"]["kind"] == "segment_video"
+    assert created[-1]["payload"]["segment_index"] == 1
+
+
 def test_pass_records_segment_and_writes_next_with_tail_anchor(
         loop_app, tmp_path, monkeypatch):
     app, _model, root, captured = loop_app
@@ -146,7 +169,7 @@ def test_pass_records_segment_and_writes_next_with_tail_anchor(
         frame_auditor, "describe_bridge_frame",
         lambda _path: "尾帧画面：人物已经停在门口，灯光昏黄")
     monkeypatch.setattr(
-        segment_validation, "judge_end_hook", lambda _hook, _desc, _llm: True)
+        segment_validation, "judge_end_hook", lambda _hook, _desc, _llm: "")
     video = write_h3_tier_mp4(tmp_path / "seg01.mp4", 6)
 
     with workbench_client(app) as client:
@@ -170,8 +193,8 @@ def test_pass_records_segment_and_writes_next_with_tail_anchor(
     segments = detail["segments"]
     assert segments[0]["status"] == "passed"
     assert segments[0]["video_asset_id"] == asset_id
-    # 通过后不残留上一轮被拒的原因。
-    assert segments[0]["rejection_reason"] == ""
+    # 无差异 → 不写语义提示。
+    assert segments[0]["semantic_warning"] == ""
     assert segments[1]["status"] == "waiting_video"
     assert [item["segment_index"] for item in _pending_segment_todos(detail)] == [2]
 
@@ -193,17 +216,69 @@ def test_pass_records_segment_and_writes_next_with_tail_anchor(
 
 
 # ---------------------------------------------------------------------------
-# 被拒：不落 passed、重建同一段待办、不记 failed
+# 语义差异：段照样通过、带提示、照常写下一段（不重建待办、不发新事件）
 # ---------------------------------------------------------------------------
 
-def test_reject_rebuilds_the_same_segment_todo_without_passing(
+def test_semantic_difference_passes_with_warning_and_writes_next(
         loop_app, tmp_path, monkeypatch):
-    app, _model, root, _captured = loop_app
+    app, _model, root, captured = loop_app
     monkeypatch.setattr(
-        frame_auditor, "describe_bridge_frame",
-        lambda _path: "尾帧画面：人物还在走动，没有停下")
+        frame_auditor, "describe_bridge_frame", lambda _path: "人物还在走动")
     monkeypatch.setattr(
-        segment_validation, "judge_end_hook", lambda _hook, _desc, _llm: False)
+        segment_validation, "judge_end_hook",
+        lambda _hook, _desc, _llm: "人物没有停在门口，还在向画面深处走")
+    video = write_h3_tier_mp4(tmp_path / "seg01.mp4", 6)
+
+    with workbench_client(app) as client:
+        session_id = client.post(
+            "/api/v1/sessions", json=_brief_body()).json()["session_id"]
+        detail = _to_first_segment_todo(client, session_id)
+        todo = _pending_segment_todos(detail)[0]
+        asset_id = _upload(client, session_id, video)
+        before = _segment_todo_events(_events(root, session_id), 1)
+
+        started = _resolve(client, session_id, todo["item_id"],
+                           {"video_asset_id": asset_id})
+        assert started.status_code == 202, started.text
+        job = _wait_job(client, session_id, started.json()["job_id"])
+        # 语义差异不是系统故障：job 成功、会话继续推进（不留在等人工）。
+        assert job["status"] == "succeeded"
+        detail = _wait_until(
+            client, session_id,
+            lambda body: body["status"] != "running" and any(
+                seg["status"] == "waiting_video" and seg["index"] == 2
+                for seg in body["segments"]))
+
+    seg = detail["segments"][0]
+    assert seg["status"] == "passed"
+    assert seg["video_asset_id"] == asset_id
+    warning = seg["semantic_warning"]
+    assert "语义检查提示" in warning
+    assert "人物没有停在门口，还在向画面深处走" in warning
+    assert "计划末态：人物停在门口" in warning
+    assert "尾帧画面：人物还在走动" in warning
+
+    # 下一段写词已起：段 2 转 waiting_video，且第 2 段正文真被写过。
+    assert 1 in captured
+    assert [item["segment_index"] for item in _pending_segment_todos(detail)] == [2]
+
+    # 不重建第 1 段待办、不发新的段待办事件（只有最初那一条）。
+    after = _segment_todo_events(_events(root, session_id), 1)
+    assert len(before) == 1 and len(after) == 1
+
+
+# ---------------------------------------------------------------------------
+# 读图/判据不可用：段照样通过，附「语义检查未完成」提示
+# ---------------------------------------------------------------------------
+
+def test_semantic_unavailable_passes_with_incomplete_notice(
+        loop_app, tmp_path, monkeypatch):
+    app, _model, _root, _captured = loop_app
+
+    def unavailable(_path):
+        raise RuntimeError("视觉服务不可用")
+
+    monkeypatch.setattr(frame_auditor, "describe_bridge_frame", unavailable)
     video = write_h3_tier_mp4(tmp_path / "seg01.mp4", 6)
 
     with workbench_client(app) as client:
@@ -217,63 +292,32 @@ def test_reject_rebuilds_the_same_segment_todo_without_passing(
                            {"video_asset_id": asset_id})
         assert started.status_code == 202, started.text
         job = _wait_job(client, session_id, started.json()["job_id"])
+        assert job["status"] == "succeeded", job
         detail = _wait_until(
             client, session_id,
-            lambda body: body["status"] == "awaiting_human"
-            and _pending_segment_todos(body))
+            lambda body: body["status"] != "running" and any(
+                seg["status"] == "waiting_video" and seg["index"] == 2
+                for seg in body["segments"]))
 
-    # 用户的素材不合格不是系统故障：job 成功（不 failed）、会话回到等人工。
-    assert job["status"] == "succeeded"
-    segments = detail["segments"]
-    assert segments[0]["status"] == "waiting_video"  # 被拒段不落 passed
-    assert segments[0]["video_asset_id"] == ""
-    pending = _pending_segment_todos(detail)
-    assert [item["segment_index"] for item in pending] == [1]
-    assert pending[0]["item_id"] != todo["item_id"]  # 重建，不是复用旧待办
-    # 被拒要有**具体**原因（D6 §5.4）：尾帧实际画面 + 本段末态要求，缺一不可。
-    reason = segments[0]["rejection_reason"]
-    assert "尾帧未达到本段末态" in reason
-    assert "人物还在走动" in reason
-    assert "人物停在门口" in reason
-    # 不许越过这一段去写第 2 段。
-    assert not (root / Path(session_id) / "segments" / "shot-02.md").exists()
-
-    events = _events(root, session_id)
-    types = [event["type"] for event in events]
-    assert types.count("action_item.created") >= 2  # 首次挂 + 重建
-    assert "job.failed" not in types
-    # 原因也随重建的待办事件发出（事件类型仍闭合，不新增类型）。
-    rebuilt = [event for event in events
-               if event["type"] == "action_item.created"][-1]
-    assert "尾帧未达到本段末态" in rebuilt["payload"].get("reason", "")
-    # 重建的待办事件同时带着段号：崩溃补齐后重放要说得清「在等第几段」（D7-1）。
-    assert rebuilt["payload"].get("segment_index") == 1
-
-
-def test_segment_todo_event_carries_the_segment_number(loop_app):
-    """首次挂出的段待办事件带段号——不只快照里有（D7-1 AC1）。"""
-    app, _model, root, _captured = loop_app
-
-    with workbench_client(app) as client:
-        session_id = client.post(
-            "/api/v1/sessions", json=_brief_body()).json()["session_id"]
-        _to_first_segment_todo(client, session_id)
-
-    created = [event for event in _events(root, session_id)
-               if event["type"] == "action_item.created"]
-    assert created[-1]["payload"]["kind"] == "segment_video"
-    assert created[-1]["payload"]["segment_index"] == 1
+    seg = detail["segments"][0]
+    assert seg["status"] == "passed"  # 不落 failed、也不退回收视频
+    assert seg["semantic_warning"].startswith("语义检查未完成：")
+    assert "视觉服务不可用" in seg["semantic_warning"]
 
 
 # ---------------------------------------------------------------------------
-# 失败：落 failed，重试不重交素材
+# 剥尾帧失败：落 failed，重试重跑同一次校验、不重交素材
 # ---------------------------------------------------------------------------
 
-def test_technical_failure_marks_failed_and_retry_needs_no_resubmit(
+def test_tailframe_failure_marks_failed_and_retry_needs_no_resubmit(
         loop_app, tmp_path, monkeypatch):
-    app, _model, root, _captured = loop_app
-    # 读图服务不可用 = 测不出事实 = 系统故障（failed），不是「用户的视频不合格」。
-    monkeypatch.setattr(frame_auditor, "describe_bridge_frame", lambda _path: None)
+    app, _model, _root, _captured = loop_app
+    original_extract = frame_auditor.extract_last_frame
+
+    def broken_extract(*_args, **_kwargs):
+        raise RuntimeError("剥尾帧失败：读不到视频文件")
+
+    monkeypatch.setattr(frame_auditor, "extract_last_frame", broken_extract)
     video = write_h3_tier_mp4(tmp_path / "seg01.mp4", 6)
 
     with workbench_client(app) as client:
@@ -295,13 +339,12 @@ def test_technical_failure_marks_failed_and_retry_needs_no_resubmit(
         # 素材 id 留在段上：重试重跑同一次校验，不要求重交。
         assert seg["status"] == "validating"
         assert seg["video_asset_id"] == asset_id
+        assert seg["semantic_warning"] == ""  # 没有落 passed，也不写提示
 
-        # 修好读图后直接重试（advance），不重新提交视频。
+        # 修好剥帧后直接重试（advance），不重新提交视频。
+        monkeypatch.setattr(frame_auditor, "extract_last_frame", original_extract)
         monkeypatch.setattr(
-            frame_auditor, "describe_bridge_frame",
-            lambda _path: "尾帧画面：人物停在门口")
-        monkeypatch.setattr(
-            segment_validation, "judge_end_hook", lambda _hook, _desc, _llm: True)
+            segment_validation, "judge_end_hook", lambda _hook, _desc, _llm: "")
         retried = client.post(f"/api/v1/sessions/{session_id}/jobs")
         assert retried.status_code == 202, retried.text
         _wait_job(client, session_id, retried.json()["job_id"])

@@ -543,7 +543,8 @@ def segment_prompt(
 
     桩不与真实写段抢道：真实路径 ``write_segment_v2`` 会调模型，桩模式
     ``build_chat_model`` 一调就抛。段号与末态声明从规划里现读，让每段正文不同、
-    段尾钩子可核对，但不做语义闸门的真判（那一步由 ``judge_segment_end_hook`` 桩掉）。
+    段尾钩子可核对，但不在这里做语义检查（那一步由 ``judge_segment_end_hook``
+    桩掉，只产出提示、不阻断段通过，ADR 0039）。
     """
     number = int(plan.index) + 1
     total = len(all_plans)
@@ -559,13 +560,16 @@ def segment_tail_description(plan: Any) -> str:
     return f"桩读图：第 {int(plan.index) + 1} 段尾帧，画面落在「{plan.end_hook}」。"
 
 
-def judge_segment_end_hook(end_hook: str, description: str) -> bool:
-    """桩语义判据（D6 #246）：桩管线里恒判「达到」，不建模型、不联网。
+def judge_segment_end_hook(end_hook: str, description: str, number: int) -> str:
+    """桩语义判据（#270）：第 1 段固定产出一条差异说明，其余段无提示。
 
-    被拒/失败两档是**真实闸门**才可能出现的结局；桩管线只保证闭环能走完（E2E/Playwright），
-    不靠它证明闸门有牙齿——那两条由真实路径的用例（打桩读图/判据）咬。
+    桩管线只保证「通过 + 提示」这条闭环在 CI 有确定性的端到端证据（段卡片显示提示、
+    会话仍能跑完拼接），不建模型、不联网。语义判据按 #270 只产出提示、不阻断流程——
+    「有差异也照常通过」正是这条桩要证明的行为，不是它证不了闸门有牙齿。
     """
-    return True
+    if int(number) == 1:
+        return "桩判据：第 1 段尾帧与本段末态有一处关键事实不一致（固定文案）"
+    return ""
 
 
 def stage2_summary(brief: Any) -> Any:

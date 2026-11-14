@@ -382,7 +382,7 @@ describe('SessionDetailView 分段分区', () => {
       status: 'pending',
       prompt_artifact_id: '',
       video_asset_id: '',
-      rejection_reason: '',
+      semantic_warning: '',
     },
     {
       index: 2,
@@ -394,7 +394,7 @@ describe('SessionDetailView 分段分区', () => {
       status: 'pending',
       prompt_artifact_id: '',
       video_asset_id: '',
-      rejection_reason: '',
+      semantic_warning: '',
     },
   ]
 
@@ -534,7 +534,7 @@ describe('SessionDetailView 分段分区', () => {
       status: 'passed',
       prompt_artifact_id: 'sess-1/segments/segment-01.md',
       video_asset_id: 'sess-1/aaaaaaaaaaaaaaaa',
-      rejection_reason: '',
+      semantic_warning: '',
       assets: [{ number: 1, name: '橘猫', original_number: 2 }],
     }
     server.use(
@@ -647,7 +647,7 @@ describe('SessionDetailView 导演台分段分区（#262）', () => {
                 status: 'pending',
                 prompt_artifact_id: 'sess-1/director/segment-01.md',
                 video_asset_id: '',
-                rejection_reason: '',
+                semantic_warning: '',
                 segment_type: 'opening',
                 guided: false,
                 start_frame: 0,

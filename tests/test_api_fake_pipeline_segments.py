@@ -216,6 +216,10 @@ def test_fake_pipeline_runs_the_three_segment_closed_loop(fake_app, tmp_path):
 
     assert [seg["status"] for seg in detail["segments"]] == ["passed"] * 3
     assert [seg["video_asset_id"] for seg in detail["segments"]] == submitted
+    # 桩判据对第 1 段固定产出一条差异说明：段照样通过、提示留在段上，后两段无提示。
+    # 这是「有差异也照常跑完整片」在 CI 里的确定性全闭环证据（#270 / ADR 0039）。
+    assert "语义检查提示" in detail["segments"][0]["semantic_warning"]
+    assert [seg["semantic_warning"] for seg in detail["segments"][1:]] == ["", ""]
 
     types = [event["type"] for event in _events(root, session_id)]
     # 十种事件闭合：段循环挤进既有事件，不新增类型（D6 §11）。

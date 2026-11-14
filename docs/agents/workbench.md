@@ -169,18 +169,21 @@
 - **`segmenting` 是阶段标签，不是会话状态**：会话仍用七态；「等用户交视频」是 `awaiting_human`。
 - **`segment_video` 是第三个人工待办**：每段一个，`segment_index` 带段号；resolve 只收
   `video_asset_id`（本会话已上传的 mp4 素材），与 `decision`/`frames` 错配一律 422
-  `segment_video_invalid`。语义闸门拒绝 → 不落 `passed`、重建同一段待办（不是 `failed`）；
-  技术异常 → `failed`，重试重跑同一次校验、素材不重交。
+  `segment_video_invalid`。语义检查**只产出提示、不阻断**（#270 / ADR 0039）：段照常
+  `passed`，提示以 `semantic_warning` 随段保留并在段卡片展示；技术异常（剥尾帧失败等）→
+  `failed`，重试重跑同一次校验、素材不重交。
 - **段状态住快照**：`session.segments[]` 的 `status`（`pending` / `waiting_video` /
   `validating` / `passed`）、`prompt_artifact_id`、`video_asset_id` 每段落定立刻落盘；
   `_segment_step` 用「第一条非 `passed` 的段」决定下一次 job 做规划/写词/校验/拼接，
   不靠 job 记录记账（15 段会挤爆 `JOB_HISTORY_LIMIT`）。
 - **写词逐段增量**：第 N+1 段的请求带第 N 段尾帧锚（`stage_state.bridge_frame_descriptions`），
   不能一次写完所有段。
-- **两道闸门没有 opt-out**：技术档在 resolve 时同步判（帧数档/时长/尺寸），语义在 job 内
-  读尾帧与 `end_hook` 对照。7–10 秒档不在 `H3_TIER_FRAMES` 实测表内，技术档只报
-  `segment_video_duration_unknown_tier` **warning**，不阻断；服务端只把 `error` 回给客户端，
-  warning 由验收驱动器用同一个函数本地复核后记录。
+- **技术档是硬闸门，语义检查只提示**（#270 / ADR 0039）：技术档在 resolve 时同步判
+  （帧数档/时长/尺寸）不合格即 422；语义在 job 内读尾帧与 `end_hook` 对照，结论只写成
+  `semantic_warning`，读图/判据不可用也不判失败。`end_hook` 是规划意图、不是成片判据，
+  段间衔接的唯一事实源是实际剥出的尾帧图。7–10 秒档不在 `H3_TIER_FRAMES` 实测表内，技术档
+  只报 `segment_video_duration_unknown_tier` **warning**，不阻断；服务端只把 `error` 回给
+  客户端，warning 由验收驱动器用同一个函数本地复核后记录。
 - **不读也不写 CLI 的段产出账**（`segments/shot-ledger.jsonl`，D6-AC12）：同一会话目录
   曾被 CLI 跑过时，进度只以工作台自己的段状态为准。
 
@@ -255,7 +258,7 @@ CI 侧由桩管线覆盖三段闭环（`tests/test_api_fake_pipeline_segments.py
 |---|---|
 | 作废区间 | 第 N..末段（`cascade.affected_segments`，**含第 N 段**——不作废 N 的通过行，陪跑会跳过它；不删 N 的缓存，重跑读到旧帧直接判通过）。只对「现在算通过」的段追加 `event=invalidate`，旧行原样保留 |
 | 删什么 | 插件段缓存里 `seg_XXXX.*` 整套（`cache.segment_cache_files`）+ 项目侧派生件：`director/tailframe-NN.md`（N..末段）、`director/frame-KK-last.png`（N-1..末段-1）。根目录与非 `seg_XXXX.*` 文件永不删 |
-| 快照 | 第 N..末段 → `pending`，清 `video_asset_id` / `rejection_reason`；第 1..N-1 段一行不动。下游段挂在待办里的旧锚点产物（`segment_video` / `director_segment_image`）一并收掉，由段 job 从第 N 段重挂 |
+| 快照 | 第 N..末段 → `pending`，清 `video_asset_id` / `semantic_warning`；第 1..N-1 段一行不动。下游段挂在待办里的旧锚点产物（`segment_video` / `director_segment_image`）一并收掉，由段 job 从第 N 段重挂 |
 | 之后 | 端点返回 **`null`**（没有立刻可返回的待办）：先起一个 `segment` job，走 #264 的按盘判据——被级联删掉的 `tailframe-NN.md` 重写，再挂 `segment_video`。前端提示「正在准备本段按需词」，刷新由快照/SSE 驱动 |
 | 缓存根 | 唯一读口 `Config.director_comfy_output_root()`，目录 `cache.cache_dir(...)`。**定位不到**（配置缺失/非法）→ 跳过删缓存、照常作废；**越界**（段文件符号链接、缓存目录本身是链接）→ 400 `cache_out_of_root`，一个文件都不删 |
 

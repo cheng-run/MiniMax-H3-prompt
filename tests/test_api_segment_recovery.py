@@ -119,12 +119,12 @@ def recovery_app(tmp_path, monkeypatch):
         return f"[Shot 1] At 00:00.000, segment {plan.index + 1} stub prompt.\n"
 
     monkeypatch.setattr(segment_prompts, "write_segment_v2", fake_write)
-    # 默认两档桩：读图给一句描述、语义判据判「达到」；被拒用例自己改回 False。
+    # 默认两档桩：读图给一句描述、语义判据无差异（空提示）；有差异用例自己改返回值。
     monkeypatch.setattr(
         frame_auditor, "describe_bridge_frame",
         lambda _path: "尾帧画面：人物已经停在门口，灯光昏黄")
     monkeypatch.setattr(
-        segment_validation, "judge_end_hook", lambda _hook, _desc, _llm: True)
+        segment_validation, "judge_end_hook", lambda _hook, _desc, _llm: "")
     return _new_app(root), root, writes
 
 
@@ -229,20 +229,21 @@ def test_restart_continues_at_third_segment_without_replaying_passed(
 
 
 # ---------------------------------------------------------------------------
-# 被拒：重启后仍是待交视频，不被当成已通过
+# 语义提示：有差异段照样通过，提示跨重启保留（#270）
 # ---------------------------------------------------------------------------
 
-def test_rejected_segment_is_still_waiting_after_restart(
+def test_semantic_warning_survives_restart(
         recovery_app, tmp_path, monkeypatch):
     app, root, _writes = recovery_app
     monkeypatch.setattr(
-        segment_validation, "judge_end_hook", lambda _hook, _desc, _llm: False)
+        segment_validation, "judge_end_hook",
+        lambda _hook, _desc, _llm: "人物还在走动，没有停在门口")
     with workbench_client(app) as client:
         session_id = client.post(
             "/api/v1/sessions", json=_brief_body()).json()["session_id"]
         detail = _to_first_segment_todo(client, session_id)
         todo = _pending_segment_todos(detail)[0]
-        video = write_h3_tier_mp4(tmp_path / "rejected.mp4", 4.0)
+        video = write_h3_tier_mp4(tmp_path / "warned.mp4", 4.0)
         uploaded = client.post(
             f"/api/v1/sessions/{session_id}/assets",
             files={"file": (video.name, video.read_bytes(), "video/mp4")})
@@ -252,34 +253,22 @@ def test_rejected_segment_is_still_waiting_after_restart(
             json={"video_asset_id": asset_id})
         assert started.status_code == 202, started.text
         _wait_job(client, session_id, started.json()["job_id"])
-        _wait_until(
+        detail = _wait_until(
             client, session_id,
             lambda body: body["status"] == "awaiting_human"
-            and [item["segment_index"] for item in _pending_segment_todos(body)] == [1])
-        # 被拒与重建待办在**同一次落盘**里：直接读快照，不经事件重放。
-        rejected = _read_session(root, session_id)
-        assert rejected["segments"][0]["status"] == "waiting_video"
-        assert rejected["segments"][0]["video_asset_id"] == ""
-        assert any(item["kind"] == "segment_video" and item["status"] == "pending"
-                   for item in rejected["action_items"])
+            and [item["segment_index"] for item in _pending_segment_todos(body)] == [2])
+        # 有差异不代表不合格：段照常通过，提示落进快照（直接读盘，不经事件重放）。
+        assert detail["segments"][0]["status"] == "passed"
+        assert "语义检查提示" in detail["segments"][0]["semantic_warning"]
+        assert "人物还在走动" in detail["segments"][0]["semantic_warning"]
+        snapshot = _read_session(root, session_id)
+        assert "语义检查提示" in snapshot["segments"][0]["semantic_warning"]
 
     with workbench_client(_new_app(root)) as restarted:
         detail = _detail(restarted, session_id)
-        assert detail["status"] == "awaiting_human"
-        assert detail["segments"][0]["status"] == "waiting_video"  # 不是 passed
-        assert detail["segments"][0]["video_asset_id"] == ""
-        assert [item["segment_index"] for item in _pending_segment_todos(detail)] == [1]
-        # 待办仍在：advance 会被闸门挡下，用户必须重交视频。
-        blocked = restarted.post(f"/api/v1/sessions/{session_id}/jobs")
-        assert blocked.status_code == 409
-        assert blocked.json()["code"] == "action_item_pending"
-
-        # 换一段合格视频后照常通过。
-        monkeypatch.setattr(
-            segment_validation, "judge_end_hook", lambda _hook, _desc, _llm: True)
-        _pass_segment(restarted, session_id, 1, 4.0, tmp_path)
-        detail = _detail(restarted, session_id)
+    # 重启后段仍是 passed、提示仍在（不因为只存运行态而丢）。
     assert detail["segments"][0]["status"] == "passed"
+    assert "语义检查提示" in detail["segments"][0]["semantic_warning"]
     assert [item["segment_index"] for item in _pending_segment_todos(detail)] == [2]
 
 

@@ -18,12 +18,13 @@ import secrets
 import stat
 import threading
 import zipfile
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Literal, Sequence, cast
 
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 from . import step_machine
 from .brief_parser import (
@@ -1232,6 +1233,19 @@ class SegmentAssetOut(BaseModel):
     original_number: int = 0
 
 
+def semantic_warning_of(row: Any) -> str:
+    """段记录里的语义提示：新键优先，旧快照的 ``rejection_reason`` 只读（#270 / ADR 0039）。
+
+    只读旧键、不写回；``SegmentOut`` 载入与导演台快照重建共用这一份映射，避免两处
+    各写一条 ``or`` 链——空串新键配着残留旧键时，两条链会给出不同结论。
+    """
+    if not isinstance(row, Mapping):
+        return ""
+    if "semantic_warning" in row:
+        return str(row.get("semantic_warning") or "")
+    return str(row.get("rejection_reason") or "")
+
+
 class SegmentOut(BaseModel):
     """长片的一个执行段（D6 spec §11）：规划完成后进会话快照，详情一次取到。
 
@@ -1250,8 +1264,9 @@ class SegmentOut(BaseModel):
     # 本段提示词产物与已回交视频素材：D6-2 起才会被填上。
     prompt_artifact_id: str = ""
     video_asset_id: str = ""
-    # 语义闸门拒绝时给用户看的**具体**原因（D6 §5.4）；重交或通过后清空。
-    rejection_reason: str = ""
+    # 段通过后给用户看的**语义提示**（#270 / ADR 0039）：计划末态 vs 实际尾帧的差异，
+    # 或「语义检查未完成」。它不是闸门——有它段照样 `passed`，由人决定要不要重生成。
+    semantic_warning: str = ""
     # 段内参考素材子集（D7 §10 / #258）：只有 ref 有，base 是空表；只读回显。
     assets: list[SegmentAssetOut] = Field(default_factory=list)
     # 导演台的帧执行契约（D8 §6.1）：**只加可选字段**，不另开第二套段模型。
@@ -1265,6 +1280,20 @@ class SegmentOut(BaseModel):
     segment_type: str | None = None
     guided: bool | None = None
     give_images: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _read_legacy_rejection_reason(cls, data: Any) -> Any:
+        """旧快照的 ``rejection_reason`` 读成 ``semantic_warning``（#270）。
+
+        只读旧键、不写回：``model_dump`` 只产出新键，下一次落盘旧键自然消失。已有会话
+        不会因为字段更名打不开，也不会把旧键重新写回快照。
+        """
+        if isinstance(data, dict) and "semantic_warning" not in data:
+            legacy = semantic_warning_of(data)
+            if legacy:
+                data = {**data, "semantic_warning": legacy}
+        return data
 
 
 class ArtifactInfo(BaseModel):

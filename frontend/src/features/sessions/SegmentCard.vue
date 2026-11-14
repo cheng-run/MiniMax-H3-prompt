@@ -373,14 +373,15 @@ async function submitVideo(): Promise<void> {
       preload="metadata"
     />
 
-    <!-- 语义闸门拒绝后段回到等待交视频（D6 §5.4）：把服务端给的具体原因摆出来，
-         否则用户只看到状态退回、不知道换哪一段。 -->
+    <!-- 语义提示（#270 / ADR 0039）：计划末态 vs 实际尾帧的差异，或「语义检查未完成」。
+         它不是闸门——段已通过，提示只是让人自行判断要不要重生成，所以段通过后仍展示。 -->
     <p
-      v-if="segment.status === 'waiting_video' && segment.rejection_reason"
-      class="segment__rejection"
-      role="alert"
+      v-if="segment.semantic_warning"
+      class="segment__semantic-warning"
+      data-semantic-warning
+      role="status"
     >
-      上次提交未通过：{{ segment.rejection_reason }}（请换一段视频重交）
+      {{ segment.semantic_warning }}
     </p>
 
     <!-- 第三个人工待办（D6 §8）：本段唯一的 segment_video 待办。提交只发 resolve，
@@ -467,9 +468,11 @@ async function submitVideo(): Promise<void> {
   margin: 0;
   font-variant-numeric: tabular-nums;
 }
-.segment__rejection {
+.segment__semantic-warning {
   margin: 0;
-  color: var(--color-error-text);
+  padding: var(--space-1) var(--space-2);
+  border-left: 3px solid var(--color-accent);
+  white-space: pre-wrap;
 }
 .injection-card {
   display: flex;

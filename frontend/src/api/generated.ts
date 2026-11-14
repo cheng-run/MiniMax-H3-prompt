@@ -754,13 +754,13 @@ export interface components {
              * @default
              */
             prompt_artifact_id: string;
-            /**
-             * Rejection Reason
-             * @default
-             */
-            rejection_reason: string;
             /** Segment Type */
             segment_type?: string | null;
+            /**
+             * Semantic Warning
+             * @default
+             */
+            semantic_warning: string;
             /** Shots In Segment */
             shots_in_segment?: number[];
             /** Start Frame */

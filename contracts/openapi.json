@@ -829,11 +829,6 @@
             "title": "Prompt Artifact Id",
             "type": "string"
           },
-          "rejection_reason": {
-            "default": "",
-            "title": "Rejection Reason",
-            "type": "string"
-          },
           "segment_type": {
             "anyOf": [
               {
@@ -844,6 +839,11 @@
               }
             ],
             "title": "Segment Type"
+          },
+          "semantic_warning": {
+            "default": "",
+            "title": "Semantic Warning",
+            "type": "string"
           },
           "shots_in_segment": {
             "items": {

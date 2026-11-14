@@ -986,17 +986,17 @@ MUTATIONS: tuple[Mutation, ...] = (
         "桩规划退回按 10 秒上限等分＝18 秒拆成 2×9 秒，段长不再是 H3 可生成档位（#250）",
     ),
     Mutation(
-        "end_hook_verdict_affirmative_first",
+        "end_hook_reply_negation_first",
         "src/minimax_h3_prompt/segment_validation.py",
-        "    if any(marker in low for marker in _NEGATIVE_MARKERS):\n"
-        "        return False\n"
-        "    if any(marker in low for marker in _AFFIRMATIVE_MARKERS):\n"
-        "        return True\n",
-        "    if any(marker in low for marker in _AFFIRMATIVE_MARKERS):\n"
-        "        return True\n"
-        "    if any(marker in low for marker in _NEGATIVE_MARKERS):\n"
-        "        return False\n",
-        ("tests/test_segment_validation.py::test_parse_end_hook_verdict",),
+        "    if any(marker in head for marker in _NO_CONFLICT_MARKERS):\n"
+        "        return \"\"\n"
+        "    if any(marker in head for marker in _CONFLICT_MARKERS):\n"
+        "        return detail or lines[0]\n",
+        "    if any(marker in head for marker in _CONFLICT_MARKERS):\n"
+        "        return detail or lines[0]\n"
+        "    if any(marker in head for marker in _NO_CONFLICT_MARKERS):\n"
+        "        return \"\"\n",
+        ("tests/test_segment_validation.py::test_parse_end_hook_reply",),
         "否定词后判＝「未达到」里含「达到」，不合格的尾帧被判成达到，"
         "语义闸门永不让用户换视频（#246）",
     ),

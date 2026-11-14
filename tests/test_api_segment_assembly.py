@@ -122,12 +122,12 @@ def loop_app(tmp_path, monkeypatch):
         segment_prompts, "write_segment_v2",
         lambda plan, all_plans, state, llm:
             f"[Shot 1] At 00:00.000, segment {plan.index + 1} stub prompt.\n")
-    # 语义闸门：尾帧读图与 end_hook 判据都放行（本票只关心拼接，不重测 #246 的三结局）。
+    # 语义检查：尾帧读图与 end_hook 判据都无差异（本票只关心拼接，不重测 #270 的提示档）。
     monkeypatch.setattr(
         frame_auditor, "describe_bridge_frame",
         lambda _path: "尾帧画面：人物停在门口，灯光昏黄")
     monkeypatch.setattr(
-        segment_validation, "judge_end_hook", lambda _hook, _desc, _llm: True)
+        segment_validation, "judge_end_hook", lambda _hook, _desc, _llm: "")
     app = create_app(sessions_root=root, runtime_config=RUNTIME)
     return app, root
 

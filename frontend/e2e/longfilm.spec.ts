@@ -71,4 +71,9 @@ test('长片 18 秒：建会话 → 段列表 → 交第 1 段 → 段进度前�
   await expect(page.getByText('已通过 1 / 总数 3')).toBeVisible({ timeout: 30_000 })
   await expect(page.locator('[data-segment-index="2"]')).toContainText('等待交视频')
   await expect(page.locator('[data-segment-index="1"]')).toContainText('已通过')
+  // 语义检查只提示、不阻断（#270 / ADR 0039）：桩判据对第 1 段固定产出一条差异说明，
+  // 段照样通过，提示仍挂在段卡片上。
+  await expect(page.locator('[data-segment-index="1"] [data-semantic-warning]')).toContainText(
+    '语义检查提示',
+  )
 })

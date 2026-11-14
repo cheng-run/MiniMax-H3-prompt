@@ -303,6 +303,9 @@ def segment_rows(detail: dict[str, Any]) -> list[dict[str, Any]]:
             "end_s": end,
             "planned_seconds": end - start,
             "status": str(segment.get("status") or ""),
+            # 语义检查只提示（ADR 0039）：段通过后这里会有「计划末态 vs 实际尾帧」
+            # 的差异说明，或「语义检查未完成」。它不是闸门，只是证据。
+            "semantic_warning": str(segment.get("semantic_warning") or ""),
             "prompt_artifact_id": str(segment.get("prompt_artifact_id") or ""),
             "video_asset_id": str(segment.get("video_asset_id") or ""),
         })
@@ -725,6 +728,7 @@ def _merge_segment_rows(facts: dict[str, Any],
             facts, int(row["index"]),
             start_s=row["start_s"], end_s=row["end_s"],
             planned_seconds=row["planned_seconds"], status=row["status"],
+            semantic_warning=row["semantic_warning"],
             prompt_artifact_id=row["prompt_artifact_id"],
             video_asset_id=row["video_asset_id"],
         )
@@ -784,8 +788,8 @@ def render_handoff(
             f"- 成片：`{final.get('path', '（尚未登记）')}`"
             f"（{final.get('bytes', '')} 字节）",
             "",
-            "段视频已全部回交并通过技术档与语义闸门，服务端已完成拼接。"
-            "证据见同目录 `report.md`。",
+            "段视频已全部回交并通过技术档，服务端已完成拼接。"
+            "语义检查只产出提示、不阻断（ADR 0039），提示见同目录 `report.md`。",
             "",
         ])
     rows = [row for row in facts.get("segments") or []
@@ -841,7 +845,8 @@ def render_handoff(
         "## 交回后会发生什么",
         "",
         "- 上传素材 → resolve `segment_video` 待办 → 同步技术档校验（帧数档/时长/尺寸）；",
-        "- 通过后剥尾帧、视觉模型读图判定是否达到本段 `end_hook`（语义闸门）；",
+        "- 通过技术档后剥尾帧、视觉模型读图生成「计划末态 vs 实际尾帧」的语义提示；"
+        "提示只展示、不阻断，段照样进入下一段（ADR 0039）；",
         "- 通过则自动写下一段提示词；全部通过后自动拼接 `final.mp4`。",
         "",
         "## 如实记录的三条边界",
@@ -1249,15 +1254,13 @@ def run_submit(
             (entry for entry in facts.get("segments") or []
              if int(entry.get("index") or 0) == index), {})
         if current_row.get("status") != "passed":
-            # 语义闸门拒绝：段回到 waiting_video、待办重建（服务端已完成这一步）。
-            _upsert_segment(facts, index, rejected_at=_utc_now())
-            facts["waiting_for"] = index
-            (out_dir / "handoff.md").write_text(
-                render_handoff(facts, index, out_dir), encoding="utf-8")
-            _persist_state(out_dir, facts)
-            print(f"[result] 第 {index} 段未通过语义闸门（end_hook 未达到），"
-                  f"换一段视频重跑", flush=True)
-            return EXIT_WAITING_USER
+            # 技术档 422 已经在 submit() 里按 SegmentRejected 处理；语义检查自 ADR 0039
+            # 起只提示、不再把段打回 waiting_video。所以走到这里仍是「技术档过了但没
+            # passed」，只能是服务端没按契约推进——系统异常，不能误导用户换视频。
+            raise AcceptanceError(
+                f"第 {index} 段技术档已通过但段状态是 "
+                f"{current_row.get('status')!r}（期望 passed）：语义检查已不再阻断，"
+                "这是服务端异常，不是素材问题")
         _upsert_segment(facts, index, passed_at=_utc_now())
 
         # 下一段提示词是惰性写的：等到它出现再写文件、更新 handoff。
@@ -1390,9 +1393,16 @@ def render_report(
     vision = config.get("vision") or {}
     segments = sorted(facts.get("segments") or [],
                       key=lambda row: int(row.get("index") or 0))
+
+    def _cell(value: Any) -> str:
+        """表格单元：竖线换成全角、换行压成空格，避免提示正文把表格撑坏。"""
+        text = "—" if value in (None, "") else str(value)
+        return text.replace("|", "｜").replace("\n", " ")
+
     segment_rows_text = "\n".join(
         f"| {row.get('index')} | {row.get('start_s')}–{row.get('end_s')} "
         f"| {row.get('planned_seconds')} | {row.get('status')} "
+        f"| {_cell(row.get('semantic_warning'))} "
         f"| `{row.get('prompt_path') or '（尚未写出）'}` "
         f"| {row.get('upload_ms') if row.get('upload_ms') is not None else '—'} / "
         f"{row.get('resolve_ms') if row.get('resolve_ms') is not None else '—'} / "
@@ -1409,10 +1419,12 @@ def render_report(
     rejections = [row for row in segments if row.get("rejected_at")]
     if rejections:
         gate_outcome = (
-            f"闸门在真实数据上拦到过 {len(rejections)} 次："
-            f"{[int(row['index']) for row in rejections]}（详见上表「被拒」列）")
+            f"技术档硬闸门在真实数据上拦到过 {len(rejections)} 次："
+            f"{[int(row['index']) for row in rejections]}（详见上表「技术档拒绝时刻」列）")
     elif segments:
-        gate_outcome = f"本次 {len(segments)} 段全部一次通过（技术档与语义闸门均未拦截）"
+        gate_outcome = (
+            f"本次 {len(segments)} 段全部一次通过（技术档硬闸门未拦截；"
+            "语义检查只提示、不阻断，见 ADR 0039）")
     else:
         gate_outcome = "尚未开始段循环"
     final = facts.get("final_film") or {}
@@ -1461,9 +1473,10 @@ def render_report(
         "",
         "## 分段与规划时长（由规划器决定，4–10 秒）",
         "",
-        "| 段号 | 起止（秒） | 规划秒数 | 状态 | 提示词 | 上传/交回/校验（毫秒） | 被拒时刻 |",
-        "|---|---|---|---|---|---|---|",
-        segment_rows_text or "| — | — | — | — | — | — | — |",
+        "| 段号 | 起止（秒） | 规划秒数 | 状态 | 语义提示（不阻断） | 提示词 "
+        "| 上传/交回/校验（毫秒） | 技术档拒绝时刻 |",
+        "|---|---|---|---|---|---|---|---|",
+        segment_rows_text or "| — | — | — | — | — | — | — | — |",
         "",
         "## 闸门记录",
         "",
