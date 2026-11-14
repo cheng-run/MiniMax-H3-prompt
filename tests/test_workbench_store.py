@@ -302,3 +302,71 @@ def test_concurrent_updates_do_not_lose_each_others_fields(tmp_path):
         (tmp_path / session_id / SESSION_FILENAME).read_text(encoding="utf-8"))
     assert raw["stage_state"]["script"] == "第99稿"
     assert final.revision == initial_revision + 200
+
+
+# ---------------------------------------------------------------------------
+# #253 复审：素材归属校验与待办载荷校验的共用抽法
+# ---------------------------------------------------------------------------
+
+def test_resolve_owned_media_keeps_each_entrys_code_and_message(tmp_path):
+    """段视频与交付包共用归属/类型校验，但错误码与文案必须各是各的（#253 复审）。
+
+    两个入口只差 ``error`` 与媒体类型；抽共用函数后最容易「顺手统一」文案——这条
+    用例逐字钉住两边的码与四句消息。
+    """
+    import io
+
+    from minimax_h3_prompt.workbench_store import ArchiveInvalid, SegmentVideoInvalid
+
+    store = _store(tmp_path)
+    session, _ = store.create(_brief(), fingerprint="body-1")
+    other, _ = store.create(_brief("另一个主题"), fingerprint="body-2")
+
+    # 非归属：前缀不是 URL 里那个会话，两边各自回自己的码。
+    for resolver, error in (
+        (store.resolve_video_asset, SegmentVideoInvalid),
+        (store.resolve_pack_asset, ArchiveInvalid),
+    ):
+        with pytest.raises(error) as excinfo:
+            resolver(session.session_id, f"{other.session_id}/{0:016d}")
+        assert excinfo.value.code == error.code
+        assert "不属于本会话" in str(excinfo.value)
+
+    # 类型不符：同一件 png，两边各自说「必须是 … 容器」。
+    png = io.BytesIO(b"\x89PNG\r\n\x1a\n" + b"\x00" * 256)
+    asset, _ = store.store_asset(session.session_id, png, filename="a.png")
+    with pytest.raises(SegmentVideoInvalid) as video_exc:
+        store.resolve_video_asset(session.session_id, asset.asset_id)
+    assert video_exc.value.code == "segment_video_invalid"
+    assert "本段视频必须是 mp4 容器" in str(video_exc.value)
+    with pytest.raises(ArchiveInvalid) as pack_exc:
+        store.resolve_pack_asset(session.session_id, asset.asset_id)
+    assert pack_exc.value.code == "archive_invalid"
+    assert "最终包必须是 zip 容器" in str(pack_exc.value)
+
+
+def test_action_item_event_payload_rejects_non_string_slots():
+    """四个素材槽（图槽 + 交付槽）在两种事件上都必须是字符串（D8 §7.1 / §12）。
+
+    两条校验合并成一个按**键名列表**参数化的函数后，键表仍是模块级常量；这条用例
+    逐个键钉住，漏一个键（或漏调一次）就会变红。
+    """
+    from minimax_h3_prompt.workbench_store import (
+        InvalidEventPayload,
+        _validate_action_item_created,
+        _validate_action_item_resolved,
+    )
+
+    keys = ("start_asset_id", "end_asset_id", "video_asset_id", "pack_asset_id")
+    for key in keys:
+        with pytest.raises(InvalidEventPayload):
+            _validate_action_item_created(
+                {"item_id": "i1", "kind": "segment_video", key: 123})
+        with pytest.raises(InvalidEventPayload):
+            _validate_action_item_resolved(
+                {"item_id": "i1", "decision": "approve", key: 123})
+        # 字符串值本身合法：共用函数不许把正常载荷也拒掉。
+        _validate_action_item_created(
+            {"item_id": "i1", "kind": "segment_video", key: "s/a"})
+        _validate_action_item_resolved(
+            {"item_id": "i1", "decision": "approve", key: "s/a"})

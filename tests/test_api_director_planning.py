@@ -518,3 +518,41 @@ def test_director_notes_uses_the_same_wording_as_the_planner(tmp_path):
     write_plan_json(plan_path(tmp_path), plan)
 
     assert _director_notes(tmp_path, 4.0) == [note]
+
+
+def test_target_frames_comes_from_a_single_helper(tmp_path, monkeypatch):
+    """目标帧只住 ``frames.target_frames_for``：详情页与规划器都跟着它走（#253 复审）。
+
+    把共用函数换成哨兵值：详情页说明与规划器的落位目标必须**同时**跟着变。任何一处
+    退回 ``round(total_s * FPS)``，这条哨兵就咬不住——两处各算一份时，用户在页面上
+    看到的目标会与规划时用的目标各说各话（「同一契约两处口径」）。
+    """
+    from minimax_h3_prompt.director import frames, planning
+    from minimax_h3_prompt.director.planning import write_plan_json
+    from minimax_h3_prompt.workbench_store import _director_notes
+
+    seen: list[float] = []
+
+    def sentinel(total_s: float) -> int:
+        seen.append(float(total_s))
+        return 999
+
+    monkeypatch.setattr(frames, "target_frames_for", sentinel)
+    monkeypatch.setattr(planning, "target_frames_for", sentinel)
+
+    write_plan_json(plan_path(tmp_path), DirectorPlan(
+        mode="t2v", total_frames=90, segments=(
+            DirectorSegment(
+                index=1, type="opening", guided=False, start_frame=0,
+                end_frame=90, declared_frames=90, export_frames=90,
+                summary="", end_hook="人物走进门廊", give_images=()),
+        )))
+    assert _director_notes(tmp_path, 4.0) == [frames.length_note(999, 90, 1)]
+    assert seen == [4.0]
+
+    seen.clear()
+    reply = ('{"segments": [{"start_s": 0, "end_s": 4, "type": "opening", '
+             '"summary": "门口", "end_hook": "她推门进来"}]}')
+    parsed = planning.parse_director_plan(reply, 4.0, mode="t2v")
+    assert seen == [4.0], "规划器没有向共用函数要目标帧"
+    assert parsed.total_frames > 96, "哨兵目标 999 没有被规划器采用"

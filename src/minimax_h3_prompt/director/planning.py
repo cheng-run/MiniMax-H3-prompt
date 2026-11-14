@@ -41,6 +41,7 @@ from .frames import (
     optional_images_for,
     segment_type_label,
     segment_types_for_mode,
+    target_frames_for,
     validate_segment_types,
 )
 # 关键帧读图块与 JSON 抓取都**复用 base/ref 那一份**（同一段文本、同一套宽容度）：
@@ -181,7 +182,7 @@ def parse_director_plan(text: str, total_s: float, *, mode: str) -> DirectorPlan
     if total_s <= 0:
         raise ValueError(f"视频总时长必须为正，实际 {total_s}")
     _require_mode_duration(mode, total_s)
-    total_frames = round(total_s * FPS)
+    total_frames = target_frames_for(total_s)
 
     data = _extract_json(text)
     if not isinstance(data, dict):
@@ -321,7 +322,7 @@ def plan_director_segments(shot_table: str, total_s: float, llm, *, mode: str,
     # 时长上限必须在调模型之前拦：i2v 单段时整片＝那一段，等模型答完再拒，用户为一次
     # 注定作废的规划付过钱（ADR 0026 修订版）。
     _require_mode_duration(mode, total_s)
-    total_frames = round(total_s * FPS)
+    total_frames = target_frames_for(total_s)
     frame_block = (
         f"\n{FRAME_CONTEXT_HEADER}\n{frame_context}\n"
         if frame_context.strip() else ""

@@ -131,7 +131,9 @@ _FIXED_ARTIFACT_SPECS: dict[str, ArtifactSpec] = {
     ARTIFACT_LAST_FRAME_PROMPT: ArtifactSpec("frame_prompt"),
     ARTIFACT_SUMMARY_MARKDOWN: ArtifactSpec("summary_markdown"),
     ARTIFACT_SUMMARY_JSON: ArtifactSpec("summary_json"),
-    # 媒体产物：名字 → Content-Type。目前只有成片；列表里的 kind 仍是 ``video``。
+    # 媒体产物：名字 → Content-Type。现有三件——成片 ``video/mp4``，导演台初始包与
+    # 最终包 ``application/zip``（kind 分别是 ``video`` / ``director_pack`` /
+    # ``director_final_pack``，产物分区要能分开「成片」「计划」「结论」）。
     ARTIFACT_FINAL_FILM: ArtifactSpec("video", "video/mp4"),
     # 注入卡是纯文本接线清单（1 MiB 上限与其余文本产物同一条口径）。
     ARTIFACT_INJECTION_CARD: ArtifactSpec("injection_card"),
@@ -798,26 +800,21 @@ def _validate_action_item_created(payload: dict[str, Any]) -> None:
     if reason is not None and not isinstance(reason, str):
         raise InvalidEventPayload(
             f"事件 payload 的 {_ACTION_ITEM_REASON_KEY!r} 必须是字符串：{reason!r}")
-    _validate_action_item_asset_keys(payload)
-    _validate_action_item_delivery_keys(payload)
+    _validate_action_item_string_keys(payload, _ACTION_ITEM_ASSET_KEYS)
+    _validate_action_item_string_keys(payload, _ACTION_ITEM_DELIVERY_KEYS)
 
 
-def _validate_action_item_asset_keys(payload: dict[str, Any]) -> None:
-    """图槽标识出现时必须是字符串（D8 §7.1）：半截值会在读详情时炸。"""
-    for key in _ACTION_ITEM_ASSET_KEYS:
-        value = payload.get(key)
-        if value is not None and not isinstance(value, str):
-            raise InvalidEventPayload(
-                f"事件 payload 的 {key!r} 必须是字符串：{value!r}")
+def _validate_action_item_string_keys(
+    payload: dict[str, Any], keys: tuple[str, ...],
+) -> None:
+    """素材槽标识出现时必须是字符串（D8 §7.1 / §12）：半截值会在读详情时炸。
 
-
-def _validate_action_item_delivery_keys(payload: dict[str, Any]) -> None:
-    """交付素材槽出现时必须是字符串（D8 §12 / #266）：与图槽同一条口径。
-
-    交付槽只在决议事件里出现（创建时用户还没交），但校验放在共用位置：两张事件
-    的形状随时可能被人扩展成「创建时就带候选」，那时这里已经咬得住。
+    图槽与交付槽形状相同、只是键表不同，合并成一个按**键名列表**参数化的校验。键表
+    仍是模块级常量（``_ACTION_ITEM_ASSET_KEYS`` / ``_ACTION_ITEM_DELIVERY_KEYS``），
+    这里只收一份，不重抄。交付槽只在决议事件里出现（创建时用户还没交），但校验放在
+    共用位置：两张事件的形状随时可能被人扩展成「创建时就带候选」，那时这里已经咬得住。
     """
-    for key in _ACTION_ITEM_DELIVERY_KEYS:
+    for key in keys:
         value = payload.get(key)
         if value is not None and not isinstance(value, str):
             raise InvalidEventPayload(
@@ -828,9 +825,9 @@ def _validate_action_item_resolved(payload: dict[str, Any]) -> None:
     _require_str(payload, "item_id")
     _require_choice(payload, "decision", _DECISIONS)
     # 决议事件也可能带图槽（导演台开场首帧）：与创建事件同一份校验。
-    _validate_action_item_asset_keys(payload)
+    _validate_action_item_string_keys(payload, _ACTION_ITEM_ASSET_KEYS)
     # 交付槽（成片/最终包）只在这条事件上出现，同样要挡住半截值。
-    _validate_action_item_delivery_keys(payload)
+    _validate_action_item_string_keys(payload, _ACTION_ITEM_DELIVERY_KEYS)
     # 修订载荷是可选的加字段（D4 spec §7）：写了就必须是 [{layer, text}, …]，
     # 否则重放时 ``ActionItemOut`` 会拿半截字典去建模型并在**读详情**时报错。
     revisions = payload.get("revisions")
@@ -1549,10 +1546,10 @@ def _director_notes(directory: Path, duration: float) -> list[str]:
 
     读的是盘上的 ``director/plan.json``，与续跑/写段同一个严格读回口；坏表在这里
     只降级成「没有说明」（详情端点不该因一张坏表 500，真正的拦阻由执行器做）。
-    目标帧从 brief 时长现算——``plan.json`` 的 ``total_frames`` 是**落位后**的实际值
-    （ADR 0025），不是目标。
+    目标帧走 ``director.frames.target_frames_for``——与规划器同一份口径；``plan.json``
+    的 ``total_frames`` 是**落位后**的实际值（ADR 0025），不是目标。
     """
-    from .director.frames import FPS, length_note
+    from .director.frames import length_note, target_frames_for
     from .director.planning import plan_path, read_plan_json
 
     path = plan_path(directory)
@@ -1562,7 +1559,7 @@ def _director_notes(directory: Path, duration: float) -> list[str]:
         plan = read_plan_json(path)
     except ValueError:
         return []
-    target = round(float(duration) * FPS)
+    target = target_frames_for(duration)
     # 文案与规划器同一份（``director.frames.length_note``）：这里只数无引导段数。
     note = length_note(
         target, plan.total_frames,
@@ -2436,18 +2433,10 @@ class WorkbenchSessionStore:
         同是视频但下游剥帧/拼接口径不同）。「什么算素材」仍只由 ``resolve_asset_media``
         判定一次，这里不另写命名规则。
         """
-        prefix, _, _hash16 = asset_id.rpartition("/")
-        if prefix != session_id:
-            raise SegmentVideoInvalid(f"段视频素材不属于本会话：{asset_id}")
-        try:
-            resource = self.resolve_asset_media(asset_id)
-        except WorkbenchError as exc:
-            # 不存在与不可读同码：能区分就等于给了一个探测他会话素材的 oracle。
-            raise SegmentVideoInvalid(f"段视频素材不存在：{asset_id}") from exc
-        if resource.media_type != "video/mp4":
-            raise SegmentVideoInvalid(
-                f"本段视频必须是 mp4 容器（收到 {resource.media_type}）：{asset_id}")
-        return resource
+        return self._resolve_owned_media(
+            session_id, asset_id, media_type="video/mp4",
+            error=SegmentVideoInvalid, noun="段视频素材",
+            label="本段视频", container="mp4")
 
     def resolve_pack_asset(self, session_id: str, asset_id: str) -> MediaResource:
         """把交付待办的 ``pack_asset_id`` 解析成本会话的 zip 素材（D8 §12 / #266）。
@@ -2456,16 +2445,33 @@ class WorkbenchSessionStore:
         ``application/zip``。缺件与类型不符都回 ``archive_invalid``——前端对这两种
         情形的出路相同（换一份包），分码只会让人以为要改代码。
         """
+        return self._resolve_owned_media(
+            session_id, asset_id, media_type="application/zip",
+            error=ArchiveInvalid, noun="最终包素材",
+            label="最终包", container="zip")
+
+    def _resolve_owned_media(
+        self, session_id: str, asset_id: str, *, media_type: str,
+        error: type[WorkbenchError], noun: str, label: str, container: str,
+    ) -> MediaResource:
+        """归属 + 媒体类型的单一声明：段视频与交付最终包共用，不各写一遍。
+
+        ``noun`` 进「不属于本会话 / 不存在」两句（主体是「素材」），``label`` 与
+        ``container`` 进类型不符那句（主体是「这一段」）。错误码从 ``error`` 传入，
+        两边的码与消息逐字保持不变——它们各自是 spec 的原文。
+        「前缀不属于本会话」回 ``error``：能区分就等于给了一个探测别人会话素材的 oracle。
+        """
         prefix, _, _hash16 = asset_id.rpartition("/")
         if prefix != session_id:
-            raise ArchiveInvalid(f"最终包素材不属于本会话：{asset_id}")
+            raise error(f"{noun}不属于本会话：{asset_id}")
         try:
             resource = self.resolve_asset_media(asset_id)
         except WorkbenchError as exc:
-            raise ArchiveInvalid(f"最终包素材不存在：{asset_id}") from exc
-        if resource.media_type != "application/zip":
-            raise ArchiveInvalid(
-                f"最终包必须是 zip 容器（收到 {resource.media_type}）：{asset_id}")
+            # 不存在与不可读同码：能区分就等于给了一个探测他会话素材的 oracle。
+            raise error(f"{noun}不存在：{asset_id}") from exc
+        if resource.media_type != media_type:
+            raise error(
+                f"{label}必须是 {container} 容器（收到 {resource.media_type}）：{asset_id}")
         return resource
 
     def store_asset(

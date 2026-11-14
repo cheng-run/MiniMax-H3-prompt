@@ -139,6 +139,17 @@ def align_frames(frames: int) -> int:
     return max(GRID_OFFSET, steps * GRID_STEP + GRID_OFFSET)
 
 
+def target_frames_for(total_s: float) -> int:
+    """总时长秒 → 目标总帧（``总秒数 × FPS``，四舍五入）。
+
+    这是**目标**，不是 ``plan.json`` 里落位后的 ``total_frames``：17k+5 对齐会让实际
+    落位与目标差几帧（ADR 0025），详情页说明正是拿两者做差。规划器与详情页都必须从
+    这一处取——两处各写一份 ``round(total_s * FPS)`` 时，改口径漏一处不报错，用户在
+    页面上看到的目标会与规划时用的目标各说各话（「同一契约两处口径」）。
+    """
+    return round(float(total_s) * FPS)
+
+
 def is_guided(segment_type: str) -> bool:
     """段类型 → 引导开关。未知类型**报错**，不回落（票面硬约束）。"""
     if segment_type not in SEGMENT_TYPES:

@@ -793,7 +793,7 @@ export interface components {
          *     表单**：前者是会话内资产（建好后上传），后者要等阶段 1 才有画幅可比。
          *
          *     导演台三个打包参数（节点 id / 段缓存名 / 段间引导模式）在创建时问齐，与 CLI
-         *     「会话开头问一次」是同一时点（``wizard_director.py:119-179``）。``director_mode``
+         *     「会话开头问一次」是同一时点（``wizard_director.ask_pack_settings``）。``director_mode``
          *     与 ``director_continuity_mode`` 用 ``None`` 表示「没给」：空串与省略在这两个字段
          *     上必须分开——引导模式省略要落默认 ``guide``，而不是落一个空串。
          */

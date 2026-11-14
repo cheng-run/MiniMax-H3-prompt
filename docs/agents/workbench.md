@@ -69,16 +69,20 @@
   `detail`，补齐后 `advance` 续拼，已通过段不重收。拼接口径是**路线属性**：base 裁
   第 2..N 段首帧（帧链段间共享首帧），ref 走 `STREAM_COPY_FIRST`（多参段彼此独立，
   裁首帧只会吃掉用户交的帧）。
-- 产物 content **按登记表的形态分支**（#225）：文本产物（登记表＝10 件文本固定名
-  `video-prompt.md` / `script.md` / `shot-table.md` / 两个帧提示词 / 两份摘要 /
+- 产物 content **按登记表的形态分支**（#225）：登记表共 **14 件固定名**——**11 件文本**
+  （`video-prompt.md` / `script.md` / `shot-table.md` / 两个帧提示词 / 两份摘要 /
   `injection-card.md` / `segments/order-card.md` / `segments/ref-shot-table.md`，
-  D4 §7 / D7 §9 / §11，加四条
-  模式 `segments/shot-NN.md` 与 `segments/segment-NN.md` → kind `segment_prompt`、
+  D4 §7 / D7 §9 / §11；加交付的成片记录 `director/final-film.json`，D8 §12），共用纯
+  文本 + 1 MiB 上限（超出 413）；**3 件媒体**——成片 `final.mp4`（`video/mp4`）、
+  导演台初始包 `director/initial.mmxpack.zip` 与最终包 `director/final.mmxpack.zip`
+  （`application/zip`，即 `archive` 形态）。3 件媒体都给字节 + 单段 Range，文本与媒体
+  **共用同一个 content 端点**、都答 `HEAD`（同头、无体）：「按什么形态读」只看登记表
+  里的 media_type，端点不分叉。另有四条**模式** `segments/shot-NN.md` 与
+  `segments/segment-NN.md` → kind `segment_prompt`、
   `assets/picture-NN.md` → kind `asset_prompt`、`segments/injection-card-NN.md` → kind
-  `segment_injection_card`，D6 §7 / D7 §7 / D7 §9 / D7 §10）共用纯文本 + 1 MiB 上限
-  （超出 413）；成片 `final.mp4`（第 11 件固定名，媒体形态）给字节 + 单段
-  Range；两者都答 `HEAD`（同头、无体）。「算不算产物」「按什么形态读」「清单从哪来」
-  三个判断只有一个入口 `workbench_store.artifact_spec`，端点与清单都不抄第二份白名单。
+  `segment_injection_card`（D6 §7 / D7 §7 / D7 §9 / D7 §10），以及导演台逐段产物。
+  「算不算产物」「按什么形态读」「清单从哪来」三个判断只有一个入口
+  `workbench_store.artifact_spec`，端点与清单都不抄第二份白名单。
 - **注入卡是只读产物、绝不进模型载荷**（D7 §9 / #257）：整片卡 `injection-card.md`
   （kind `injection_card`）在素材循环全部定稿之后、阶段 2 开始之前由
   `JobRunner._write_film_injection_card` 自动产出（入口只有 `_execute_stage2` 一处，

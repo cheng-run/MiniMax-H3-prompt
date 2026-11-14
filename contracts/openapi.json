@@ -892,7 +892,7 @@
         "type": "object"
       },
       "SessionCreate": {
-        "description": "建会话的 brief 一次性给全（spec §7；D7 §4.1 放开 ``ref``，D8 放开 ``director``）。\n\n``mode`` 只作普通字符串：三路线的合法性由 ``_validate_route_parameters`` 判，\n这样未知路线能拿到稳定的 ``director_mode_invalid``，而不是 pydantic 那份没有\n``code`` 的通用 422。``ref`` 的参考素材与 ``director`` 的开场首帧**都不进创建\n表单**：前者是会话内资产（建好后上传），后者要等阶段 1 才有画幅可比。\n\n导演台三个打包参数（节点 id / 段缓存名 / 段间引导模式）在创建时问齐，与 CLI\n「会话开头问一次」是同一时点（``wizard_director.py:119-179``）。``director_mode``\n与 ``director_continuity_mode`` 用 ``None`` 表示「没给」：空串与省略在这两个字段\n上必须分开——引导模式省略要落默认 ``guide``，而不是落一个空串。",
+        "description": "建会话的 brief 一次性给全（spec §7；D7 §4.1 放开 ``ref``，D8 放开 ``director``）。\n\n``mode`` 只作普通字符串：三路线的合法性由 ``_validate_route_parameters`` 判，\n这样未知路线能拿到稳定的 ``director_mode_invalid``，而不是 pydantic 那份没有\n``code`` 的通用 422。``ref`` 的参考素材与 ``director`` 的开场首帧**都不进创建\n表单**：前者是会话内资产（建好后上传），后者要等阶段 1 才有画幅可比。\n\n导演台三个打包参数（节点 id / 段缓存名 / 段间引导模式）在创建时问齐，与 CLI\n「会话开头问一次」是同一时点（``wizard_director.ask_pack_settings``）。``director_mode``\n与 ``director_continuity_mode`` 用 ``None`` 表示「没给」：空串与省略在这两个字段\n上必须分开——引导模式省略要落默认 ``guide``，而不是落一个空串。",
         "properties": {
           "canvases": {
             "additionalProperties": {

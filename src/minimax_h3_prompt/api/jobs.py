@@ -2956,8 +2956,7 @@ class JobRunner:
             status="pending", created_at=_now(), asset_index=number)
 
         def _apply(detail: Any) -> dict[str, Any]:
-            job = self._job_or_running(job_id, detail).model_copy(
-                update={"status": "succeeded", "finished_at": _now()})
+            jobs = self._succeed_job(detail, job_id)
             # 每件同时最多一个未决项：同类旧项先收掉再挂新的（与阶段 1 / 段循环同一条
             # 纪律）。严格串行也由这里兜住——新卡片出现时上一张必然已决议。
             items = [
@@ -2967,7 +2966,7 @@ class JobRunner:
             items.append(item.model_dump(mode="json"))
             return {
                 "status": step_machine.STATUS_AWAITING_HUMAN,
-                "jobs": _upsert_job(detail.jobs, _job_dict(job)),
+                "jobs": jobs,
                 "action_items": items,
             }
 
@@ -3013,9 +3012,7 @@ class JobRunner:
                 reason=reason)
 
         def _apply(detail: Any) -> dict[str, Any]:
-            job = self._job_or_running(job_id, detail).model_copy(
-                update={"status": "succeeded", "finished_at": _now()})
-            jobs = _upsert_job(detail.jobs, _job_dict(job))
+            jobs = self._succeed_job(detail, job_id)
             changes: dict[str, Any] = {
                 "asset_ledger": _settle_asset(
                     detail.asset_ledger_snapshot(), number, passed)}
@@ -3826,6 +3823,21 @@ class JobRunner:
         job = _find_job(detail.jobs, job_id)
         return job or JobSummary(job_id=job_id, status="running")
 
+    def _succeed_job(self, detail: Any, job_id: str, *,
+                     detail_text: str | None = None) -> list[dict[str, Any]]:
+        """把本任务标成 ``succeeded`` 并 upsert 回快照，返回新的 jobs 列表。
+
+        十几个收尾闭包逐字重复这三行（#253 复审：``_hang_director_todo`` /
+        ``_finish_director_finalize`` / ``_finish_pack`` 等）。status 与 finished_at
+        的写法一旦改口径，漏一处就是某个任务永远停在 running——单住这一处。
+        ``detail_text`` 只在需要把结论写进 job 详情的收尾上传。
+        """
+        update: dict[str, Any] = {"status": "succeeded", "finished_at": _now()}
+        if detail_text is not None:
+            update["detail"] = detail_text
+        job = self._job_or_running(job_id, detail).model_copy(update=update)
+        return _upsert_job(detail.jobs, _job_dict(job))
+
     def _save_progress(self, session_id: str, job_id: str,
                        stage_state: dict[str, Any], node: str, *,
                        elapsed_ms: int | None = None) -> None:
@@ -3865,8 +3877,7 @@ class JobRunner:
             status="pending", created_at=_now())
 
         def _apply(detail: Any) -> dict[str, Any]:
-            job = self._job_or_running(job_id, detail).model_copy(
-                update={"status": "succeeded", "finished_at": _now()})
+            jobs = self._succeed_job(detail, job_id)
             # 「恰好一条」是 AC5 的原话：同一种待办若有未决的旧项，先收掉再挂新的。
             items = [
                 existing.model_dump(mode="json") for existing in detail.action_items
@@ -3877,7 +3888,7 @@ class JobRunner:
             return {
                 "status": step_machine.STATUS_AWAITING_HUMAN,
                 "stage_state": stage_state,
-                "jobs": _upsert_job(detail.jobs, _job_dict(job)),
+                "jobs": jobs,
                 "action_items": items,
             }
 
@@ -4229,12 +4240,11 @@ class JobRunner:
             session_id, ARTIFACT_DIRECTOR_FINAL_FILM, job_id=job_id)
 
         def _apply(current: Any) -> dict[str, Any]:
-            job = self._job_or_running(job_id, current).model_copy(
-                update={"status": "succeeded", "finished_at": _now(),
-                        "detail": str(result.get("detail") or "")})
             return {
                 "status": step_machine.STATUS_COMPLETED,
-                "jobs": _upsert_job(current.jobs, _job_dict(job)),
+                "jobs": self._succeed_job(
+                    current, job_id,
+                    detail_text=str(result.get("detail") or "")),
             }
 
         self.store.mutate(session_id, _apply, events=[
@@ -4257,8 +4267,7 @@ class JobRunner:
             created_at=_now(), segment_index=number)
 
         def _apply(detail: Any) -> dict[str, Any]:
-            job = self._job_or_running(job_id, detail).model_copy(
-                update={"status": "succeeded", "finished_at": _now()})
+            jobs = self._succeed_job(detail, job_id)
             rows = [row.model_dump() for row in detail.segments]
             if waits_video:
                 for row in rows:
@@ -4273,7 +4282,7 @@ class JobRunner:
             items.append(item.model_dump(mode="json"))
             return {
                 "status": step_machine.STATUS_AWAITING_HUMAN,
-                "jobs": _upsert_job(detail.jobs, _job_dict(job)),
+                "jobs": jobs,
                 "segments": rows,
                 "action_items": items,
             }
@@ -4342,14 +4351,12 @@ class JobRunner:
             if next_job is None else None)
 
         def _apply(detail: Any) -> dict[str, Any]:
-            job = self._job_or_running(job_id, detail).model_copy(
-                update={"status": "succeeded", "finished_at": _now()})
             rows = [row.model_dump() for row in detail.segments]
             for row in rows:
                 if int(row["index"]) == number:
                     row["status"] = SEGMENT_STATUS_PASSED
                     row["rejection_reason"] = ""
-            jobs = _upsert_job(detail.jobs, _job_dict(job))
+            jobs = self._succeed_job(detail, job_id)
             if next_job is not None:
                 jobs = _upsert_job(jobs, _job_dict(next_job))
             changes: dict[str, Any] = {
@@ -4399,10 +4406,7 @@ class JobRunner:
                        else step_machine.STATUS_AWAITING_HUMAN)
 
         def _apply(current: Any) -> dict[str, Any]:
-            job = self._job_or_running(job_id, current).model_copy(
-                update={"status": "succeeded", "finished_at": _now(),
-                        "detail": detail})
-            jobs = _upsert_job(current.jobs, _job_dict(job))
+            jobs = self._succeed_job(current, job_id, detail_text=detail)
             if next_job is not None:
                 jobs = _upsert_job(jobs, _job_dict(next_job))
             return {
@@ -4446,9 +4450,7 @@ class JobRunner:
                        else step_machine.STATUS_COMPLETED)
 
         def _apply(detail: Any) -> dict[str, Any]:
-            job = self._job_or_running(job_id, detail).model_copy(
-                update={"status": "succeeded", "finished_at": _now()})
-            jobs = _upsert_job(detail.jobs, _job_dict(job))
+            jobs = self._succeed_job(detail, job_id)
             if next_job is not None:
                 jobs = _upsert_job(jobs, _job_dict(next_job))
             changes: dict[str, Any] = {
@@ -4489,9 +4491,7 @@ class JobRunner:
                        else step_machine.STATUS_AWAITING_HUMAN)
 
         def _apply(detail: Any) -> dict[str, Any]:
-            job = self._job_or_running(job_id, detail).model_copy(
-                update={"status": "succeeded", "finished_at": _now()})
-            jobs = _upsert_job(detail.jobs, _job_dict(job))
+            jobs = self._succeed_job(detail, job_id)
             if next_job is not None:
                 jobs = _upsert_job(jobs, _job_dict(next_job))
             return {
@@ -4521,8 +4521,7 @@ class JobRunner:
             status="pending", created_at=_now(), segment_index=number)
 
         def _apply(detail: Any) -> dict[str, Any]:
-            job = self._job_or_running(job_id, detail).model_copy(
-                update={"status": "succeeded", "finished_at": _now()})
+            jobs = self._succeed_job(detail, job_id)
             rows = [row.model_dump() for row in detail.segments]
             for row in rows:
                 if int(row["index"]) == number:
@@ -4537,7 +4536,7 @@ class JobRunner:
             items.append(item.model_dump(mode="json"))
             return {
                 "status": step_machine.STATUS_AWAITING_HUMAN,
-                "jobs": _upsert_job(detail.jobs, _job_dict(job)),
+                "jobs": jobs,
                 "segments": rows,
                 "action_items": items,
             }
@@ -4575,15 +4574,13 @@ class JobRunner:
             next_status = step_machine.STATUS_RUNNING
 
             def _apply(detail: Any) -> dict[str, Any]:
-                job = self._job_or_running(job_id, detail).model_copy(
-                    update={"status": "succeeded", "finished_at": _now()})
                 rows = [row.model_dump() for row in detail.segments]
                 for row in rows:
                     if int(row["index"]) == number:
                         row["status"] = SEGMENT_STATUS_PASSED
                         # 重交成功后不再展示上一轮的原因（D6 §5.4）。
                         row["rejection_reason"] = ""
-                jobs = _upsert_job(detail.jobs, _job_dict(job))
+                jobs = self._succeed_job(detail, job_id)
                 jobs = _upsert_job(jobs, _job_dict(next_job))
                 changes: dict[str, Any] = {
                     "status": next_status,
@@ -4620,8 +4617,7 @@ class JobRunner:
             reason=reason)
 
         def _reject(detail: Any) -> dict[str, Any]:
-            job = self._job_or_running(job_id, detail).model_copy(
-                update={"status": "succeeded", "finished_at": _now()})
+            jobs = self._succeed_job(detail, job_id)
             rows = [row.model_dump() for row in detail.segments]
             for row in rows:
                 if int(row["index"]) == number:
@@ -4637,7 +4633,7 @@ class JobRunner:
             items.append(item.model_dump(mode="json"))
             return {
                 "status": step_machine.STATUS_AWAITING_HUMAN,
-                "jobs": _upsert_job(detail.jobs, _job_dict(job)),
+                "jobs": jobs,
                 "segments": rows,
                 "action_items": items,
             }
@@ -4664,11 +4660,9 @@ class JobRunner:
             session_id, ARTIFACT_FINAL_FILM, job_id=job_id)
 
         def _apply(detail: Any) -> dict[str, Any]:
-            job = self._job_or_running(job_id, detail).model_copy(
-                update={"status": "succeeded", "finished_at": _now()})
             return {
                 "status": step_machine.STATUS_COMPLETED,
-                "jobs": _upsert_job(detail.jobs, _job_dict(job)),
+                "jobs": self._succeed_job(detail, job_id),
             }
 
         self.store.mutate(session_id, _apply, events=[
@@ -4683,11 +4677,9 @@ class JobRunner:
         全部段都已通过时不走这里——那时该做的是拼接（``SEGMENT_STEP_ASSEMBLE``）。
         """
         def _apply(detail: Any) -> dict[str, Any]:
-            job = self._job_or_running(job_id, detail).model_copy(
-                update={"status": "succeeded", "finished_at": _now()})
             return {
                 "status": step_machine.STATUS_AWAITING_HUMAN,
-                "jobs": _upsert_job(detail.jobs, _job_dict(job)),
+                "jobs": self._succeed_job(detail, job_id),
             }
 
         self.store.mutate(session_id, _apply, events=[
