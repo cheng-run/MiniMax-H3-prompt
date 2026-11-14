@@ -61,6 +61,20 @@ test('长片 18 秒：建会话 → 段列表 → 交第 1 段 → 段进度前�
   await expect(page.locator('[data-segment-index]')).toHaveCount(3)
   await expect(page.locator('[data-segment-index="1"]')).toContainText('等待交视频')
 
+  // #272：概览顶部的步骤带按 base 长片列出全部步骤；分段循环只显示 x/y，
+  // 不按段数展开（这里 3 段也只有一行）。
+  await page.getByRole('tab', { name: '概览与进度' }).click()
+  const band = page.getByRole('navigation', { name: '步骤带' })
+  await expect(band).toBeVisible()
+  await expect(band).toContainText('阶段 1')
+  await expect(band).toContainText('分段规划')
+  await expect(band).toContainText('拼接')
+  await expect(band.locator('[data-step]')).toHaveCount(7)
+  await expect(band.locator('[data-step="segment_loop"]')).toHaveAttribute('data-state', 'current')
+  await expect(band.locator('[data-step="segment_loop"]')).toContainText('0/3')
+
+  await segmentsTab.click()
+
   // 交第 1 段：上传桩造的 mp4（上传即选中）→ 提交。
   await page.locator('#segment-video-upload-1').setInputFiles(segmentVideo)
   const picker = page.locator('select[name="segment-video"]')
@@ -76,4 +90,8 @@ test('长片 18 秒：建会话 → 段列表 → 交第 1 段 → 段进度前�
   await expect(page.locator('[data-segment-index="1"] [data-semantic-warning]')).toContainText(
     '语义检查提示',
   )
+
+  // 步骤带的分段循环跟着前进到 1/3。
+  await page.getByRole('tab', { name: '概览与进度' }).click()
+  await expect(band.locator('[data-step="segment_loop"]')).toContainText('1/3')
 })

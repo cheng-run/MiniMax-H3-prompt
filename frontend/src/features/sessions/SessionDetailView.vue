@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, inject, ref, watch } from 'vue'
+import { computed, inject, onBeforeUnmount, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 
 import { ApiError, cancelSessionJob, getSession, startSessionJob } from '@/api/client'
@@ -18,9 +18,11 @@ import DirectorSegmentImageCard from './DirectorSegmentImageCard.vue'
 import DirectorStartImageCard from './DirectorStartImageCard.vue'
 import FrameSubmissionCard from './FrameSubmissionCard.vue'
 import { newIdempotencyKey } from './keys'
+import { buildProgress, type JobProgressView, type ProgressView } from './progress'
+import ProgressBand from './ProgressBand.vue'
 import ReviewTab from './ReviewTab.vue'
 import SegmentsTab from './SegmentsTab.vue'
-import { statusLabel, statusTone, stepLabel } from './status'
+import { nodeLabel, statusLabel, statusTone, stepLabel } from './status'
 import { SESSION_STREAM_FETCH, useSessionStream } from './useSessionStream'
 
 // 工作台单页（D4 spec §4）：四分区是页内 tab、不进 URL，刷新回概览。
@@ -83,6 +85,8 @@ const {
   connection,
   currentNode,
   currentStage,
+  currentNodeStartedAt,
+  lastDoneNode,
   start: startStream,
   stop: stopStream,
 } = useSessionStream({
@@ -150,6 +154,73 @@ function onTabKeydown(event: KeyboardEvent): void {
 }
 
 const status = computed(() => data.value?.status)
+
+// 步骤带（#272）：快照 + 流上进度 → 有序步骤。纯函数在 progress.ts，这里只负责
+// 喂参数与一个只在 running 时走动的秒表（已耗时是流上事件时间与「现在」的差）。
+const now = ref(Date.now())
+let clock: ReturnType<typeof setInterval> | null = null
+function startClock(): void {
+  if (clock === null) {
+    clock = setInterval(() => {
+      now.value = Date.now()
+    }, 1000)
+  }
+}
+function stopClock(): void {
+  if (clock !== null) {
+    clearInterval(clock)
+    clock = null
+  }
+}
+onBeforeUnmount(stopClock)
+watch(
+  status,
+  (value) => {
+    if (value === 'running') {
+      startClock()
+    } else {
+      stopClock()
+    }
+  },
+  { immediate: true },
+)
+
+// 流上进度只在有节点/上一步时才成立；done 之后节点名还在、但 started 时刻已清空，
+// 所以「status」由计时是否存在反推——不再另加一份业务状态。
+const streamProgress = computed<JobProgressView | null>(() => {
+  if (currentNode.value === null && lastDoneNode.value === null) {
+    return null
+  }
+  return {
+    stage: currentStage.value,
+    node: currentNode.value,
+    status: currentNodeStartedAt.value !== null ? 'started' : 'done',
+    startedAt: currentNodeStartedAt.value,
+    previousNode: lastDoneNode.value,
+  }
+})
+
+const progressView = computed<ProgressView>(() => {
+  const detail = data.value
+  if (!detail) {
+    return { steps: [], nodeLabel: null, previousLabel: null, elapsedMs: null }
+  }
+  return buildProgress({
+    route: detail.mode,
+    variant: detail.brief.variant,
+    duration: detail.brief.duration,
+    status: detail.status,
+    actionItems: detail.action_items ?? [],
+    artifacts: detail.artifacts ?? [],
+    segments: detail.segments ?? [],
+    progress: streamProgress.value,
+    now: now.value,
+  })
+})
+
+// 失败/取消/中断后步骤带仍按快照事实保留「走到了哪一步」（pure 函数里同一套推导），
+// 不在组件里另立第二份状态：状态徽章已经说明成败，步骤带只负责最后到达的位置。
+
 // 帧提交卡只在 frame_submission 待办仍 pending 时出现；决议后由快照移除。
 const pendingFrameItem = computed(
   () =>
@@ -184,8 +255,11 @@ const canRetry = computed(
   () => status.value === 'failed' || status.value === 'cancelled' || status.value === 'interrupted',
 )
 // 当前节点只是「最后一条进度信号」：快照里没有节点字段，断线后暂时没有它也不影响
-// 业务状态（业务状态永远来自快照）。
-const runningNode = computed(() => (status.value === 'running' ? currentNode.value : null))
+// 业务状态（业务状态永远来自快照）。节点名翻成中文再显示（#272），与步骤带同一份
+// 映射；未知节点回退原名，不隐藏。
+const runningNode = computed(() =>
+  status.value === 'running' && currentNode.value ? nodeLabel(currentNode.value) : null,
+)
 // 步骤标签来自同一条进度事件（stage）：素材循环期间这里显示「素材循环」，
 // 而状态徽章仍是七态之一（D7 §5.1：SSE 与徽章都不新增分支）。
 const runningStep = computed(() =>
@@ -293,6 +367,8 @@ const errorMessage = computed(() =>
         class="panel"
       >
         <ErrorNotice v-if="runError" :message="runError" />
+
+        <ProgressBand v-if="progressView.steps.length" :view="progressView" />
 
         <p v-if="connection === 'reconnecting'" role="status" class="muted">
           实时连接中断，正在重连…

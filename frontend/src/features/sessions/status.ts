@@ -62,3 +62,56 @@ export function stepLabel(step: string | null | undefined): string | null {
   }
   return STEP_LABELS[step] ?? null
 }
+
+// 内部节点名 → 中文标签的**唯一映射**（#272）：节点名来自 `job.progress` 的
+// `node`，取值与后端 `graph.pipeline._STAGE1_CHAIN` / `_STAGE2_CHAIN` 及各
+// `*_NODE` 常量同源。未知节点一律回退原名（不隐藏），所以这张表只补「认得出来的」。
+const NODE_LABELS: Record<string, string> = {
+  producer: '制片',
+  director: '导演',
+  creative_rt: '创意评审',
+  screenwriter: '编剧',
+  parallel_designers: '人物与场景设计',
+  art_director: '美术指导',
+  parallel_image_prompts: '资产图提示词',
+  storyboard: '分镜',
+  parallel_decisions: '镜头与一致性决策',
+  parallel_visual: '视听设计',
+  fl2va_frame_prompts: '首尾帧提示词',
+  parallel_sound: '声音设计',
+  prompt_engineer: '视频正文',
+  finalize: '终检',
+  asset_write: '素材出词',
+  asset_proofread: '素材校对',
+  segment_plan: '分段规划',
+  segment_assemble: '拼接',
+  director_plan: '段规划',
+  director_segment_write: '段写词',
+  director_pack: '打包',
+  director_delivery: '交付归档',
+}
+
+// 带段号的节点名（`segment_write-01`、`director_tailframe-03`）：段号进标签，
+// 让人看得出「卡在第几段」。模式与后端拼节点名的那几处逐字对应。
+const SUFFIXED_NODE_LABELS: { pattern: RegExp; label: (number: number) => string }[] = [
+  { pattern: /^segment_write-(\d+)$/, label: (number) => `第 ${number} 段写词` },
+  { pattern: /^segment_validate-(\d+)$/, label: (number) => `第 ${number} 段校验` },
+  { pattern: /^director_firstframe-(\d+)$/, label: (number) => `第 ${number} 段首帧词` },
+  { pattern: /^director_tailframe-(\d+)$/, label: (number) => `第 ${number} 段尾帧词` },
+  { pattern: /^director_finalize-(\d+)$/, label: (number) => `第 ${number} 段收尾` },
+]
+
+/** 进度节点 → 给人看的名字；未知节点回退原名（不隐藏，否则界面像卡死了）。 */
+export function nodeLabel(node: string): string {
+  const exact = NODE_LABELS[node]
+  if (exact) {
+    return exact
+  }
+  for (const { pattern, label } of SUFFIXED_NODE_LABELS) {
+    const match = pattern.exec(node)
+    if (match) {
+      return label(Number(match[1]))
+    }
+  }
+  return node
+}

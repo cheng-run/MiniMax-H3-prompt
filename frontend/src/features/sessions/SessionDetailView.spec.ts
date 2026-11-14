@@ -174,10 +174,18 @@ describe('SessionDetailView 运行控制（spec §6.3）', () => {
     const { wrapper } = await mountDetail(stream)
 
     stream.push(
-      'id: 4\nevent: job.progress\ndata: {"stage":"stage1","node":"storyboard","status":"started"}\n\n',
+      `id: 4\nevent: job.progress\ndata: ${JSON.stringify({
+        seq: 4,
+        type: 'job.progress',
+        at: new Date().toISOString(),
+        session_id: 'sess-1',
+        payload: { stage: 'stage1', node: 'storyboard', status: 'started' },
+      })}\n\n`,
     )
     await settle()
-    expect(wrapper.text()).toContain('storyboard')
+    // 「正在执行」行显示中文节点名（#272），不再直接给内部名。
+    expect(wrapper.text()).toContain('阶段 1 · 分镜')
+    expect(wrapper.text()).not.toContain('storyboard')
 
     const cancel = wrapper.findAll('button').find((b) => b.text() === '取消')!
     expect(cancel).toBeTruthy()
@@ -206,10 +214,16 @@ describe('SessionDetailView 运行控制（spec §6.3）', () => {
     expect(wrapper.text()).toContain('等待进度…')
 
     stream.push(
-      'id: 3\nevent: job.progress\ndata: {"stage":"stage1","node":"storyboard","status":"started"}\n\n',
+      `id: 3\nevent: job.progress\ndata: ${JSON.stringify({
+        seq: 3,
+        type: 'job.progress',
+        at: new Date().toISOString(),
+        session_id: 'sess-1',
+        payload: { stage: 'stage1', node: 'storyboard', status: 'started' },
+      })}\n\n`,
     )
     await settle()
-    expect(wrapper.text()).toContain('阶段 1 · storyboard')
+    expect(wrapper.text()).toContain('阶段 1 · 分镜')
     expect(wrapper.text()).not.toContain('等待进度…')
   })
 
@@ -696,5 +710,226 @@ describe('SessionDetailView 导演台分段分区（#262）', () => {
     const panel = wrapper.find('#workbench-panel-segments')
     expect(panel.text()).toContain('90 → 90')
     expect(panel.text()).toContain('差 6 帧')
+  })
+})
+
+// #272：概览顶部常驻步骤带。所有路线都渲染，但只列本路线实际步骤。
+describe('SessionDetailView 步骤带（#272）', () => {
+  const longBrief = { ...makeDetail().brief, duration: 18, variant: 'T2VA' }
+  const segments = Array.from({ length: 3 }, (_, index) => ({
+    index: index + 1,
+    start_s: index * 6,
+    end_s: (index + 1) * 6,
+    shots_in_segment: [index + 1],
+    summary: '',
+    end_hook: '',
+    status: index === 0 ? 'waiting_video' : 'pending',
+    prompt_artifact_id: '',
+    video_asset_id: '',
+    semantic_warning: '',
+  }))
+
+  it('长片等待交段：列出本路线全部步骤，分段循环当前并显示 x/y，不逐段展开', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({
+            status: 'awaiting_human',
+            brief: longBrief,
+            segments,
+            action_items: [
+              {
+                item_id: 'item-seg-1',
+                kind: 'segment_video',
+                status: 'pending',
+                created_at: '2026-11-11T00:00:00Z',
+                resolved_at: '',
+                reason: '',
+                segment_index: 1,
+              },
+            ],
+          }),
+        ),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    const band = wrapper.find('ol[aria-label="步骤进度"]')
+    expect(band.exists()).toBe(true)
+    expect(band.text()).toContain('阶段 1')
+    expect(band.text()).toContain('审查')
+    expect(band.text()).toContain('阶段 2')
+    expect(band.text()).toContain('分段规划')
+    expect(band.text()).toContain('分段循环')
+    expect(band.text()).toContain('拼接')
+    // T2VA 没有帧提交；步骤条目不按 3 段展开。
+    expect(band.text()).not.toContain('帧提交')
+    expect(wrapper.findAll('[data-step]')).toHaveLength(7)
+
+    const loop = wrapper.find('[data-step="segment_loop"]')
+    expect(loop.attributes('data-state')).toBe('current')
+    expect(loop.text()).toContain('0/3')
+  })
+
+  it('短视频只列短视频步骤：没有分段规划、分段循环或拼接', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({
+            status: 'awaiting_human',
+            action_items: [
+              {
+                item_id: 'item-1',
+                kind: 'stage1_review',
+                status: 'pending',
+                created_at: '2026-11-11T00:00:00Z',
+                resolved_at: '',
+                reason: '',
+              },
+            ],
+          }),
+        ),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    const band = wrapper.find('ol[aria-label="步骤进度"]')
+    expect(band.text()).toContain('阶段 1')
+    expect(band.text()).toContain('审查')
+    expect(band.text()).not.toContain('分段规划')
+    expect(band.text()).not.toContain('分段循环')
+    expect(band.text()).not.toContain('拼接')
+    expect(wrapper.find('[data-step="review"]').attributes('data-state')).toBe('current')
+  })
+
+  it('运行中显示中文节点名、已耗时与上一步', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(makeDetail({ status: 'running', current_job: makeJob() })),
+      ),
+    )
+    const stream = makeStreamFetch()
+    const { wrapper } = await mountDetail(stream)
+
+    const fiveSecondsAgo = new Date(Date.now() - 5_000).toISOString()
+    const sixSecondsAgo = new Date(Date.now() - 6_000).toISOString()
+    stream.push(
+      `id: 2\nevent: job.progress\ndata: ${JSON.stringify({
+        seq: 2,
+        type: 'job.progress',
+        at: sixSecondsAgo,
+        session_id: 'sess-1',
+        payload: { stage: 'stage1', node: 'storyboard', status: 'done' },
+      })}\n\n`,
+    )
+    stream.push(
+      `id: 3\nevent: job.progress\ndata: ${JSON.stringify({
+        seq: 3,
+        type: 'job.progress',
+        at: fiveSecondsAgo,
+        session_id: 'sess-1',
+        payload: { stage: 'stage1', node: 'producer', status: 'started' },
+      })}\n\n`,
+    )
+    await settle()
+
+    const band = wrapper.find('nav[aria-label="步骤带"]')
+    expect(band.text()).toContain('制片')
+    expect(band.text()).toContain('上一步：分镜')
+    expect(band.text()).toMatch(/已耗时 \d+ 秒/)
+    expect(wrapper.find('[data-step="stage1"]').attributes('data-state')).toBe('current')
+  })
+
+  it('刷新后服务端补发的旧进度也能撑起步骤带（#271 + #272）', async () => {
+    // 快照序号 4 就是订阅游标；游标之后没有事件，节点只能来自补发的 seq <= 4 的进度。
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({ status: 'running', current_job: makeJob(), last_event_seq: 4 }),
+        ),
+      ),
+    )
+    const stream = makeStreamFetch()
+    const { wrapper } = await mountDetail(stream)
+
+    const fiveSecondsAgo = new Date(Date.now() - 5_000).toISOString()
+    stream.push(
+      `id: 3\nevent: job.progress\ndata: ${JSON.stringify({
+        seq: 3,
+        type: 'job.progress',
+        at: fiveSecondsAgo,
+        session_id: 'sess-1',
+        payload: { stage: 'stage1', node: 'parallel_visual', status: 'started' },
+      })}\n\n`,
+    )
+    await settle()
+
+    const band = wrapper.find('nav[aria-label="步骤带"]')
+    expect(band.text()).toContain('视听设计')
+    expect(band.text()).toMatch(/已耗时 \d+ 秒/)
+    expect(wrapper.find('[data-step="stage1"]').attributes('data-state')).toBe('current')
+  })
+
+  it('刷新后只补发一条 done：步骤带只显示「上一步」，不把它同时当成当前（#272）', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({ status: 'running', current_job: makeJob(), last_event_seq: 4 }),
+        ),
+      ),
+    )
+    const stream = makeStreamFetch()
+    const { wrapper } = await mountDetail(stream)
+
+    const doneAt = new Date(Date.now() - 3_000).toISOString()
+    stream.push(
+      `id: 3\nevent: job.progress\ndata: ${JSON.stringify({
+        seq: 3,
+        type: 'job.progress',
+        at: doneAt,
+        session_id: 'sess-1',
+        payload: { stage: 'stage1', node: 'director', status: 'done' },
+      })}\n\n`,
+    )
+    await settle()
+
+    const band = wrapper.find('nav[aria-label="步骤带"]')
+    // 上一步是中文节点名，且它不再同时出现在「当前」那一句里。
+    expect(band.text()).toContain('上一步：导演')
+    expect(band.text()).not.toContain('当前：')
+    // 「正在执行」行也不该把已跑完的节点当成当前节点。
+    expect(wrapper.text()).toContain('等待进度…')
+    expect(wrapper.text()).not.toContain('阶段 1 · 导演')
+  })
+
+  it('失败会话步骤带保留最后状态，也不新增步骤带专属徽章', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({
+            status: 'failed',
+            brief: longBrief,
+            segments,
+            action_items: [
+              {
+                item_id: 'item-seg-1',
+                kind: 'segment_video',
+                status: 'pending',
+                created_at: '2026-11-11T00:00:00Z',
+                resolved_at: '',
+                reason: '',
+                segment_index: 1,
+              },
+            ],
+          }),
+        ),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    // 会话状态仍是七态之一（失败），步骤带自己不加第二个状态词。
+    expect(wrapper.text()).toContain('失败')
+    expect(wrapper.find('[data-step="segment_loop"]').attributes('data-state')).toBe('current')
+    expect(wrapper.find('ol[aria-label="步骤进度"]').text()).not.toContain('已失败')
   })
 })

@@ -55,6 +55,25 @@ function parsePayload(data: string): Record<string, unknown> | null {
   }
 }
 
+// 进度帧只认服务端的事件包封（`{seq, at, payload:{stage,node,…}}`）：`at` 用来算
+// 已耗时，payload 里才是节点与状态。扁平 payload 在产线上不存在，不为测试开后门。
+function readProgressFrame(data: string): {
+  payload: Record<string, unknown>
+  atMs: number | null
+} | null {
+  const envelope = parsePayload(data)
+  if (envelope === null) {
+    return null
+  }
+  const nested = envelope.payload
+  if (nested === null || typeof nested !== 'object') {
+    return null
+  }
+  const at = envelope.at
+  const atMs = typeof at === 'string' && !Number.isNaN(Date.parse(at)) ? Date.parse(at) : null
+  return { payload: nested as Record<string, unknown>, atMs }
+}
+
 export function useSessionStream(options: SessionStreamOptions) {
   const throttleMs = options.throttleMs ?? DEFAULT_THROTTLE_MS
   const reconnectDelayMs = options.reconnectDelayMs ?? DEFAULT_RECONNECT_MS
@@ -64,6 +83,10 @@ export function useSessionStream(options: SessionStreamOptions) {
   const currentNode = ref<string | null>(null)
   // 当前步骤标签（`job.progress` 的 stage）：纯展示，与节点名一样不是业务状态。
   const currentStage = ref<string | null>(null)
+  // 当前节点 started 事件的时刻（epoch ms）与最近一条 done 事件的节点名（#272）。
+  // 步骤带用它们算「已耗时」与「上一步」；同样只来自流，不写快照、不新增业务状态。
+  const currentNodeStartedAt = ref<number | null>(null)
+  const lastDoneNode = ref<string | null>(null)
   const lastEventId = ref<number | null>(null)
 
   let running = false
@@ -124,19 +147,37 @@ export function useSessionStream(options: SessionStreamOptions) {
         if (Number.isInteger(seq)) {
           lastProgressSeq = seq
         }
-        const payload = parsePayload(frame.data)
-        const node = payload?.node
-        if (typeof node === 'string' && node.length > 0) {
-          currentNode.value = node
-        }
-        const stage = payload?.stage
-        if (typeof stage === 'string' && stage.length > 0) {
-          currentStage.value = stage
+        const parsed = readProgressFrame(frame.data)
+        if (parsed !== null) {
+          const { payload, atMs } = parsed
+          const node = payload.node
+          const hasNode = typeof node === 'string' && node.length > 0
+          const stage = payload.stage
+          if (payload.status === 'started') {
+            if (hasNode) {
+              currentNode.value = node
+            }
+            if (typeof stage === 'string' && stage.length > 0) {
+              currentStage.value = stage
+            }
+            // 已耗时只从当前节点的 started 事件起算（#272）：刷新时补发的旧进度也走
+            // 这一支，所以「刷新后不丢」与「已耗时可信」是同一个来源。
+            currentNodeStartedAt.value = atMs
+          } else if (payload.status === 'done') {
+            // 节点跑完就不再是「当前」：只留「上一步」。否则刷新时补发的最后一条
+            // done 会同时显示成「当前」和「上一步」（#272），两句指着同一个节点。
+            currentNode.value = null
+            currentStage.value = null
+            currentNodeStartedAt.value = null
+            lastDoneNode.value = hasNode ? node : null
+          }
         }
       }
     } else if (FINISH_EVENTS.has(frame.event)) {
       currentNode.value = null
       currentStage.value = null
+      currentNodeStartedAt.value = null
+      lastDoneNode.value = null
     }
     scheduleInvalidate()
   }
@@ -279,6 +320,9 @@ export function useSessionStream(options: SessionStreamOptions) {
     generation += 1
     // 序号是**会话内**单调的：切会话时新的订阅从头算，旧会话的高序号不能当门槛。
     lastProgressSeq = null
+    // 计时与「上一步」同样是会话内的展示事实：切会话/停止时一并清掉。
+    currentNodeStartedAt.value = null
+    lastDoneNode.value = null
     abortController?.abort()
     abortController = null
     if (reconnectTimer !== null) {
@@ -297,5 +341,14 @@ export function useSessionStream(options: SessionStreamOptions) {
     onBeforeUnmount(stop)
   }
 
-  return { connection, currentNode, currentStage, lastEventId, start, stop }
+  return {
+    connection,
+    currentNode,
+    currentStage,
+    currentNodeStartedAt,
+    lastDoneNode,
+    lastEventId,
+    start,
+    stop,
+  }
 }

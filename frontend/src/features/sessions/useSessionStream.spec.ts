@@ -51,6 +51,25 @@ function frame(id: number, event: string, payload: Record<string, unknown> = {})
   return `id: ${id}\nevent: ${event}\ndata: ${JSON.stringify(payload)}\n\n`
 }
 
+// 服务端实际的事件包封（`Event.to_dict`）：payload 嵌在 `payload` 键下，时刻在 `at`。
+function envelopeFrame(
+  id: number,
+  event: string,
+  payload: Record<string, unknown>,
+  at: string,
+): string {
+  return `id: ${id}\nevent: ${event}\ndata: ${JSON.stringify({
+    seq: id,
+    type: event,
+    at,
+    session_id: 'sess-1',
+    payload,
+  })}\n\n`
+}
+
+// 进度包封的时刻：用例不依赖具体值，只要形状是真的。
+const PROGRESS_AT = '2026-11-14T07:00:00.000000+00:00'
+
 async function settle(ms = 15): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -105,8 +124,12 @@ describe('useSessionStream（失效信号模式）', () => {
 
     api.start()
     await settle(5)
-    stream.push(frame(1, 'job.progress', { node: 'storyboard', status: 'started' }))
-    stream.push(frame(2, 'job.progress', { node: 'storyboard', status: 'done' }))
+    stream.push(
+      envelopeFrame(1, 'job.progress', { node: 'storyboard', status: 'started' }, PROGRESS_AT),
+    )
+    stream.push(
+      envelopeFrame(2, 'job.progress', { node: 'storyboard', status: 'done' }, PROGRESS_AT),
+    )
     stream.push(frame(3, 'action_item.created', { item_id: 'i1', kind: 'stage1_review' }))
     await settle(30)
 
@@ -172,7 +195,14 @@ describe('useSessionStream（失效信号模式）', () => {
     expect(calls).toHaveLength(1)
     expect(api.lastEventId.value).toBe(50)
 
-    stream.push(frame(51, 'job.progress', { node: 'cinematographer', status: 'started' }))
+    stream.push(
+      envelopeFrame(
+        51,
+        'job.progress',
+        { node: 'cinematographer', status: 'started' },
+        PROGRESS_AT,
+      ),
+    )
     await settle(10)
     expect(api.lastEventId.value).toBe(51)
     api.stop()
@@ -197,7 +227,12 @@ describe('useSessionStream（失效信号模式）', () => {
 
     // 素材循环的进度事件带 stage=asset_loop（D7 §5.2）：界面上显示的是「素材循环」。
     stream.push(
-      frame(1, 'job.progress', { node: 'asset_write', stage: 'asset_loop', status: 'started' }),
+      envelopeFrame(
+        1,
+        'job.progress',
+        { node: 'asset_write', stage: 'asset_loop', status: 'started' },
+        PROGRESS_AT,
+      ),
     )
     await settle(5)
     expect(api.currentNode.value).toBe('asset_write')
@@ -228,7 +263,12 @@ describe('useSessionStream（失效信号模式）', () => {
     api.start()
     await settle(5)
     stream.push(
-      frame(7, 'job.progress', { node: 'storyboard', stage: 'stage1', status: 'started' }),
+      envelopeFrame(
+        7,
+        'job.progress',
+        { node: 'storyboard', stage: 'stage1', status: 'started' },
+        PROGRESS_AT,
+      ),
     )
     await settle(5)
     expect(api.currentNode.value).toBe('storyboard')
@@ -237,7 +277,12 @@ describe('useSessionStream（失效信号模式）', () => {
     expect(api.lastEventId.value).toBeNull()
 
     stream.push(
-      frame(10, 'job.progress', { node: 'cinematographer', stage: 'stage1', status: 'started' }),
+      envelopeFrame(
+        10,
+        'job.progress',
+        { node: 'cinematographer', stage: 'stage1', status: 'started' },
+        PROGRESS_AT,
+      ),
     )
     await settle(5)
     expect(api.currentNode.value).toBe('cinematographer')
@@ -260,11 +305,23 @@ describe('useSessionStream（失效信号模式）', () => {
     api.start()
     await settle(5)
     stream.push(
-      frame(5, 'job.progress', { node: 'storyboard', stage: 'stage1', status: 'started' }),
+      envelopeFrame(
+        5,
+        'job.progress',
+        { node: 'storyboard', stage: 'stage1', status: 'started' },
+        PROGRESS_AT,
+      ),
     )
     await settle(5)
     // 服务端在游标之后的批次之后补发一条更早的进度：序号更小，节点不回退。
-    stream.push(frame(3, 'job.progress', { node: 'producer', stage: 'stage1', status: 'started' }))
+    stream.push(
+      envelopeFrame(
+        3,
+        'job.progress',
+        { node: 'producer', stage: 'stage1', status: 'started' },
+        PROGRESS_AT,
+      ),
+    )
     await settle(5)
     expect(api.currentNode.value).toBe('storyboard')
     expect(api.lastEventId.value).toBe(5)
@@ -290,7 +347,12 @@ describe('useSessionStream（失效信号模式）', () => {
     api.start()
     await settle(5)
     first.push(
-      frame(40, 'job.progress', { node: 'storyboard', stage: 'stage1', status: 'started' }),
+      envelopeFrame(
+        40,
+        'job.progress',
+        { node: 'storyboard', stage: 'stage1', status: 'started' },
+        PROGRESS_AT,
+      ),
     )
     await settle(5)
     expect(api.currentNode.value).toBe('storyboard')
@@ -299,9 +361,142 @@ describe('useSessionStream（失效信号模式）', () => {
     session = 'sess-2'
     api.start()
     await settle(5)
-    second.push(frame(2, 'job.progress', { node: 'producer', stage: 'stage1', status: 'started' }))
+    second.push(
+      envelopeFrame(
+        2,
+        'job.progress',
+        { node: 'producer', stage: 'stage1', status: 'started' },
+        PROGRESS_AT,
+      ),
+    )
     await settle(5)
     expect(api.currentNode.value).toBe('producer')
+    api.stop()
+  })
+
+  it('服务端包封里的进度：节点/stage 从 payload 取，started 时刻与上一步单独暴露（#272）', async () => {
+    const stream = makeStream()
+    const { impl, queue } = makeFetch()
+    queue.push(stream.response)
+    const api = useSessionStream({
+      sessionId: () => 'sess-1',
+      onInvalidate: () => {},
+      fetchImpl: impl,
+      throttleMs: 5,
+      reconnectDelayMs: 5,
+    })
+
+    api.start()
+    await settle(5)
+    expect(api.currentNodeStartedAt.value).toBeNull()
+    expect(api.lastDoneNode.value).toBeNull()
+
+    const startedAt = '2026-11-14T07:48:39.557923+00:00'
+    stream.push(
+      envelopeFrame(
+        3,
+        'job.progress',
+        { stage: 'stage1', node: 'producer', status: 'started' },
+        startedAt,
+      ),
+    )
+    await settle(5)
+    // 生产形状是包封（payload 嵌套）；节点必须真能显示出来。
+    expect(api.currentNode.value).toBe('producer')
+    expect(api.currentStage.value).toBe('stage1')
+    expect(api.currentNodeStartedAt.value).toBe(Date.parse(startedAt))
+    expect(api.lastDoneNode.value).toBeNull()
+
+    const doneAt = '2026-11-14T07:48:47.780613+00:00'
+    stream.push(
+      envelopeFrame(
+        4,
+        'job.progress',
+        { stage: 'stage1', node: 'producer', status: 'done' },
+        doneAt,
+      ),
+    )
+    await settle(5)
+    expect(api.lastDoneNode.value).toBe('producer')
+    // done 之后节点不再是「当前」：否则刷新补发的最后一条 done 会同时挂成
+    // 「当前」和「上一步」（#272）。
+    expect(api.currentNode.value).toBeNull()
+    expect(api.currentStage.value).toBeNull()
+    // 节点跑完就没有「当前节点已耗时」了，下一跳 started 再重新起算。
+    expect(api.currentNodeStartedAt.value).toBeNull()
+
+    const nextAt = '2026-11-14T07:48:48.000000+00:00'
+    stream.push(
+      envelopeFrame(
+        5,
+        'job.progress',
+        { stage: 'stage1', node: 'director', status: 'started' },
+        nextAt,
+      ),
+    )
+    await settle(5)
+    expect(api.currentNode.value).toBe('director')
+    expect(api.currentNodeStartedAt.value).toBe(Date.parse(nextAt))
+    expect(api.lastDoneNode.value).toBe('producer')
+    api.stop()
+  })
+
+  it('任务收尾清空当前节点与计时；切会话不把上一场的上一步带过去', async () => {
+    const first = makeStream()
+    const second = makeStream()
+    const { impl, queue } = makeFetch()
+    queue.push(first.response, second.response)
+    let session = 'sess-1'
+    const api = useSessionStream({
+      sessionId: () => session,
+      onInvalidate: () => {},
+      fetchImpl: impl,
+      throttleMs: 5,
+      reconnectDelayMs: 5,
+    })
+
+    api.start()
+    await settle(5)
+    first.push(
+      envelopeFrame(
+        1,
+        'job.progress',
+        { stage: 'stage1', node: 'producer', status: 'started' },
+        '2026-11-14T07:48:39.000000+00:00',
+      ),
+    )
+    first.push(
+      envelopeFrame(
+        2,
+        'job.progress',
+        { stage: 'stage1', node: 'producer', status: 'done' },
+        '2026-11-14T07:48:47.000000+00:00',
+      ),
+    )
+    await settle(5)
+    expect(api.lastDoneNode.value).toBe('producer')
+
+    first.push(frame(3, 'job.succeeded', { next: 'awaiting_human' }))
+    await settle(5)
+    expect(api.currentNode.value).toBeNull()
+    expect(api.currentNodeStartedAt.value).toBeNull()
+    expect(api.lastDoneNode.value).toBeNull()
+
+    api.stop()
+    session = 'sess-2'
+    api.start()
+    await settle(5)
+    second.push(
+      envelopeFrame(
+        1,
+        'job.progress',
+        { stage: 'stage1', node: 'director', status: 'started' },
+        '2026-11-14T08:00:00.000000+00:00',
+      ),
+    )
+    await settle(5)
+    expect(api.currentNode.value).toBe('director')
+    expect(api.lastDoneNode.value).toBeNull()
     api.stop()
   })
 
