@@ -79,6 +79,23 @@ FAST_TESTS=(
   tests/test_spike_exe.py
 )
 
+# 变更集＝「工作区 ∪ 本分支相对 main 的已提交改动」（retro 2026-11-14）。
+# 为什么不能只看工作区：**提交后再跑 fast 是验收前的常见动作**，`git diff HEAD` 此时
+# 为空，类型/前端/契约守卫会静默跳过。#253 的复审代理因此拿到假绿，拆回 main 后 full
+# 才炸出 3 个 mypy 错。三点差集把本分支的提交也算进来；在 main 上它为空，只退化成
+# 工作区（与旧行为逐位相同）。CI 的浅检出可能没有 main 引用，同样回落。
+changed_paths() {
+  local base
+  base=$(git merge-base HEAD main 2>/dev/null || true)
+  {
+    if [ -n "$base" ]; then
+      git diff --name-only --diff-filter=ACMR "$base" HEAD -- "$@"
+    fi
+    git diff --name-only --diff-filter=ACMR HEAD -- "$@"
+    git ls-files --others --exclude-standard -- "$@"
+  } | sort -u
+}
+
 # lint 只查**改动过的** src/*.py：ruff 未入库，且全仓历史告警会一次性刷屏；
 # 改动文件的范围在提交/合并时最相关，也足以拦住新引入的机械错误。
 # ruff 未安装时打印提示并放行——安装由用户本人执行（uv add --dev ruff）。
@@ -96,9 +113,7 @@ lint_changed() {
   # 未跟踪文件也算「改动」（retro 2026-11-13）：`git diff HEAD` 看不见新建文件，
   # 于是每一个新加的 .py 都从 lint 与 mypy 底下溜过去，直到提交之后才第一次被看见
   # （实测：新建的 scripts/start_web.py 在盘上，check.sh fast 打印「没有改动」）。
-  files=$({ git diff --name-only --diff-filter=ACMR HEAD -- 'src' 'tests' 'scripts'
-            git ls-files --others --exclude-standard -- 'src' 'tests' 'scripts'; } \
-          | grep -E '\.py$' | sort -u || true)
+  files=$(changed_paths src tests scripts | grep -E '\.py$' || true)
   if [ -z "$files" ]; then
     echo "[check] lint: 没有改动的 src/tests/scripts 下的 .py，跳过"
     return 0
@@ -130,9 +145,7 @@ run_types() {
   # 错误，所以只查改动过的，不把整目录并进配置。
   local script_files
   # 同样要带上未跟踪文件（retro 2026-11-13）：新建的脚本在提交前也得过一遍类型。
-  script_files=$({ git diff --name-only --diff-filter=ACMR HEAD -- 'scripts'
-                   git ls-files --others --exclude-standard -- 'scripts'; } \
-                 | grep -E '\.py$' | sort -u || true)
+  script_files=$(changed_paths scripts | grep -E '\.py$' || true)
   if [ -n "$script_files" ]; then
     echo "[check] types: mypy（改动的 scripts）"
     # shellcheck disable=SC2086 - 文件名按行拆分是刻意的（路径不含空格是本仓约定）
@@ -145,9 +158,7 @@ run_types() {
 # mypy 全仓热缓存约 2.5s，只在 src 有改动时跑，其余提交不被拖慢。
 run_types_if_src_changed() {
   local files
-  files=$({ git diff --name-only --diff-filter=ACMR HEAD -- 'src'
-            git ls-files --others --exclude-standard -- 'src'; } \
-          | grep -E '\.py$' | sort -u || true)
+  files=$(changed_paths src | grep -E '\.py$' || true)
   [ -n "$files" ] || return 0
   run_types
 }
@@ -179,7 +190,7 @@ run_frontend_guard() {
     echo "[check] frontend: 跳过（前端依赖未安装或不完整：cd frontend && npx pnpm@11.7.0 install）"
     return 0
   fi
-  if [ "$force" != true ] && [ -z "$(git status --porcelain -- frontend)" ]; then
+  if [ "$force" != true ] && [ -z "$(changed_paths frontend)" ]; then
     echo "[check] frontend: 没有前端改动，跳过"
     return 0
   fi
@@ -260,7 +271,7 @@ run_fast() {
   run_frontend_guard false
   # 只有改了契约相关路径才跑：每次提交都导出会把快档拖慢，而契约漂移只可能由
   # src/契约/生成链的改动引入（整个 src 都算：路由的 schema 也可能来自 store 模型）。
-  if [ -n "$(git status --porcelain -- src/minimax_h3_prompt contracts frontend/src/api frontend/scripts 2>/dev/null)" ]; then
+  if [ -n "$(changed_paths src/minimax_h3_prompt contracts frontend/src/api frontend/scripts)" ]; then
     run_contract_guard
   fi
 }
