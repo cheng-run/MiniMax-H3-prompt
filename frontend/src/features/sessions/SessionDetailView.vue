@@ -209,10 +209,12 @@ const progressView = computed<ProgressView>(() => {
     route: detail.mode,
     variant: detail.brief.variant,
     duration: detail.brief.duration,
+    directorMode: detail.brief.director_mode ?? '',
     status: detail.status,
     actionItems: detail.action_items ?? [],
     artifacts: detail.artifacts ?? [],
     segments: detail.segments ?? [],
+    refs: detail.brief.refs ?? [],
     progress: streamProgress.value,
     now: now.value,
   })

@@ -4,8 +4,9 @@ import { fileURLToPath } from 'node:url'
 
 import { expect, test } from '@playwright/test'
 
-// D6-7（#250）：长片路径的浏览器证据。18 秒 → 3 段 × 6 秒（H3 只有 4/5/6 秒档），
-// 走「建会话 → 审查通过 → 段列表 → 交第 1 段 → 段进度前进」。
+// D6-7（#250 / #273）：长片路径的浏览器证据。18 秒 → 3 段 × 6 秒（H3 只有 4/5/6 秒档），
+// 走「建会话 → 审查通过 → 段列表 → 三段全部交完 → 自动拼接 → completed」，
+// 并联合断言语义提示只提示不阻断、步骤带的分段循环 x/y、final.mp4 产物与会话完成态。
 //
 // 真实浏览器 + 真实 FastAPI + 确定性桩管线（serve-e2e.mjs 注入 MINIMAX_FAKE_PIPELINE=1）。
 // 要交的 mp4 由桩管线自己用 ffmpeg 现造（不在这份 spec 里另写一套造件逻辑），这样
@@ -33,9 +34,10 @@ function writeStubSegmentVideo(out: string, seconds: number): void {
   })
 }
 
-test('长片 18 秒：建会话 → 段列表 → 交第 1 段 → 段进度前进', async ({ page }, testInfo) => {
-  // 第一段 6 秒（18 ÷ 3，H3 的 6 秒档 = 158 帧）；造件一次约 0.2s。
-  const segmentVideo = testInfo.outputPath('segment-01.mp4')
+test('长片 18 秒：建会话 → 段列表 → 三段全部交完 → 拼接 completed', async ({ page }, testInfo) => {
+  // 每段 6 秒（18 ÷ 3，H3 的 6 秒档 = 158 帧）；造件一次约 0.2s。
+  // 同一份文件可以交给不同段：服务端按内容哈希去重，不会写第二份素材。
+  const segmentVideo = testInfo.outputPath('segment-06.mp4')
   writeStubSegmentVideo(segmentVideo, 6)
 
   await page.goto('/')
@@ -75,23 +77,50 @@ test('长片 18 秒：建会话 → 段列表 → 交第 1 段 → 段进度前�
 
   await segmentsTab.click()
 
-  // 交第 1 段：上传桩造的 mp4（上传即选中）→ 提交。
-  await page.locator('#segment-video-upload-1').setInputFiles(segmentVideo)
-  const picker = page.locator('select[name="segment-video"]')
-  await expect(picker).not.toHaveValue('')
-  await page.getByRole('button', { name: '提交视频' }).click()
+  // 三段全部交完：上传桩造的 mp4（上传即选中）→ 提交，等进度前进到下一段。
+  for (const number of [1, 2, 3]) {
+    await expect(page.locator(`[data-segment-index="${number}"]`)).toContainText('等待交视频')
+    await page.locator(`#segment-video-upload-${number}`).setInputFiles(segmentVideo)
+    const picker = page.locator('select[name="segment-video"]')
+    await expect(picker).not.toHaveValue('')
+    await page.getByRole('button', { name: '提交视频' }).click()
+    await expect(page.getByText(`已通过 ${number} / 总数 3`)).toBeVisible({ timeout: 30_000 })
 
-  // 校验通过后进度前进：1/3 已通过，第 2 段挂出待交视频。
-  await expect(page.getByText('已通过 1 / 总数 3')).toBeVisible({ timeout: 30_000 })
-  await expect(page.locator('[data-segment-index="2"]')).toContainText('等待交视频')
-  await expect(page.locator('[data-segment-index="1"]')).toContainText('已通过')
-  // 语义检查只提示、不阻断（#270 / ADR 0039）：桩判据对第 1 段固定产出一条差异说明，
-  // 段照样通过，提示仍挂在段卡片上。
-  await expect(page.locator('[data-segment-index="1"] [data-semantic-warning]')).toContainText(
-    '语义检查提示',
-  )
+    if (number === 1) {
+      // 语义检查只提示、不阻断（#270 / ADR 0039）：桩判据对第 1 段固定产出一条差异说明，
+      // 段照样通过，提示仍挂在段卡片上。
+      await expect(page.locator('[data-segment-index="1"] [data-semantic-warning]')).toContainText(
+        '语义检查提示',
+      )
 
-  // 步骤带的分段循环跟着前进到 1/3。
+      // 步骤带的分段循环跟着前进到 1/3。
+      await page.getByRole('tab', { name: '概览与进度' }).click()
+      await expect(band.locator('[data-step="segment_loop"]')).toContainText('1/3')
+      await segmentsTab.click()
+    }
+  }
+
+  // 最后一段通过 → 服务端自动拼接 → 会话 completed，步骤带停在 3/3 且全部 done。
+  await expect(page.getByText('已完成').first()).toBeVisible({ timeout: 30_000 })
+  await expect(page.locator('[data-segment-index="3"]')).toContainText('已通过')
+
   await page.getByRole('tab', { name: '概览与进度' }).click()
-  await expect(band.locator('[data-step="segment_loop"]')).toContainText('1/3')
+  await expect(band.locator('[data-step="segment_loop"]')).toContainText('3/3')
+  await expect(band.locator('[data-step="segment_loop"]')).toHaveAttribute('data-state', 'done')
+  await expect(band.locator('[data-step="complete"]')).toHaveAttribute('data-state', 'done')
+
+  // final.mp4 真的产出了：产物分区可见，content 端点给出真 mp4（ftyp 容器）。
+  await page.getByRole('tab', { name: '产物' }).click()
+  const media = page.locator('section[aria-label="媒体产物"]')
+  await expect(media).toContainText('final.mp4')
+  await expect(media.locator('video')).toHaveCount(1)
+  const sessionId = page.url().split('/sessions/')[1]!
+  const film = await page.request.get(`/api/v1/artifacts/${sessionId}/final.mp4/content`)
+  expect(film.ok()).toBe(true)
+  expect(film.headers()['content-type']).toContain('video/mp4')
+  expect(
+    Buffer.from(await film.body())
+      .subarray(4, 8)
+      .toString('latin1'),
+  ).toBe('ftyp')
 })

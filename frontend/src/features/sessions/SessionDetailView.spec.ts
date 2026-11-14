@@ -933,3 +933,204 @@ describe('SessionDetailView 步骤带（#272）', () => {
     expect(wrapper.find('ol[aria-label="步骤进度"]').text()).not.toContain('已失败')
   })
 })
+
+// #273：步骤带覆盖 ref 与导演台两条路线——只列本路线步骤，状态由快照 + 流上进度推。
+describe('SessionDetailView 步骤带（#273：ref / 导演台）', () => {
+  const briefOf = (overrides: Partial<ReturnType<typeof makeDetail>['brief']>) => ({
+    ...makeDetail().brief,
+    ...overrides,
+  })
+
+  it('ref 等待交第 2 件素材：素材循环是当前步骤并显示 1/2', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({
+            mode: 'ref',
+            status: 'awaiting_human',
+            brief: briefOf({
+              mode: 'ref',
+              duration: 8,
+              refs: [
+                { asset_id: 'sess-1/a1', kind: 'picture', name: '橘猫', number: 1 },
+                { asset_id: 'sess-1/a2', kind: 'picture', name: '台灯', number: 2 },
+              ],
+            }),
+            action_items: [
+              {
+                item_id: 'item-asset-1',
+                kind: 'asset_image',
+                status: 'resolved',
+                created_at: '2026-11-11T00:00:00Z',
+                resolved_at: '2026-11-11T00:01:00Z',
+                reason: '',
+                asset_index: 1,
+              },
+              {
+                item_id: 'item-asset-2',
+                kind: 'asset_image',
+                status: 'pending',
+                created_at: '2026-11-11T00:01:00Z',
+                resolved_at: '',
+                reason: '',
+                asset_index: 2,
+              },
+            ],
+          }),
+        ),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    const band = wrapper.find('ol[aria-label="步骤进度"]')
+    expect(band.text()).toContain('素材循环')
+    expect(band.text()).toContain('分段循环')
+    expect(band.text()).not.toContain('帧提交')
+    expect(band.text()).not.toContain('分段规划')
+    expect(band.text()).not.toContain('拼接')
+    expect(wrapper.find('[data-step="asset_loop"]').attributes('data-state')).toBe('current')
+    expect(wrapper.find('[data-step="asset_loop"]').text()).toContain('1/2')
+  })
+
+  it('导演台 fl2v 等待开场帧：开场帧是当前步骤，列出打包与交付', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({
+            mode: 'director',
+            status: 'awaiting_human',
+            brief: briefOf({ mode: 'director', director_mode: 'fl2v', duration: 14 }),
+            artifacts: [
+              {
+                artifact_id: 'sess-1/script.md',
+                name: 'script.md',
+                kind: 'script',
+                bytes: 10,
+                created_at: '2026-11-11T00:00:00Z',
+              },
+            ],
+            action_items: [
+              {
+                item_id: 'item-review',
+                kind: 'stage1_review',
+                status: 'resolved',
+                created_at: '2026-11-11T00:00:00Z',
+                resolved_at: '2026-11-11T00:01:00Z',
+                reason: '',
+              },
+              {
+                item_id: 'item-start',
+                kind: 'director_start_image',
+                status: 'pending',
+                created_at: '2026-11-11T00:01:00Z',
+                resolved_at: '',
+                reason: '',
+              },
+            ],
+          }),
+        ),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    const band = wrapper.find('ol[aria-label="步骤进度"]')
+    expect(band.text()).toContain('开场帧')
+    expect(band.text()).toContain('打包')
+    expect(band.text()).toContain('段循环')
+    expect(band.text()).toContain('交付')
+    const byKey = Object.fromEntries(
+      wrapper
+        .findAll('[data-step]')
+        .map((step) => [step.attributes('data-step'), step.attributes('data-state')]),
+    )
+    expect(byKey.review).toBe('done')
+    expect(byKey.start_frame).toBe('current')
+    expect(byKey.pack).toBe('pending')
+  })
+
+  it('导演台 t2v 不列开场帧', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({
+            mode: 'director',
+            status: 'awaiting_human',
+            brief: briefOf({ mode: 'director', director_mode: 't2v' }),
+            action_items: [
+              {
+                item_id: 'item-review',
+                kind: 'stage1_review',
+                status: 'pending',
+                created_at: '2026-11-11T00:00:00Z',
+                resolved_at: '',
+                reason: '',
+              },
+            ],
+          }),
+        ),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    const band = wrapper.find('ol[aria-label="步骤进度"]')
+    expect(band.text()).not.toContain('开场帧')
+    expect(wrapper.find('[data-step="review"]').attributes('data-state')).toBe('current')
+  })
+
+  it('导演台运行中：段循环当前，当前节点翻成带段号的中文名', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({
+            mode: 'director',
+            status: 'running',
+            current_job: makeJob(),
+            brief: briefOf({ mode: 'director', director_mode: 'fl2v', duration: 14 }),
+            segments: Array.from({ length: 2 }, (_, index) => ({
+              index: index + 1,
+              start_s: index * 7,
+              end_s: (index + 1) * 7,
+              shots_in_segment: [index + 1],
+              summary: '',
+              end_hook: '',
+              status: index === 0 ? 'passed' : 'pending',
+              prompt_artifact_id: '',
+              video_asset_id: '',
+              semantic_warning: '',
+            })),
+          }),
+        ),
+      ),
+    )
+    const stream = makeStreamFetch()
+    const { wrapper } = await mountDetail(stream)
+
+    const fiveSecondsAgo = new Date(Date.now() - 5_000).toISOString()
+    const sixSecondsAgo = new Date(Date.now() - 6_000).toISOString()
+    stream.push(
+      `id: 2\nevent: job.progress\ndata: ${JSON.stringify({
+        seq: 2,
+        type: 'job.progress',
+        at: sixSecondsAgo,
+        session_id: 'sess-1',
+        payload: { stage: 'segmenting', node: 'director_firstframe-02', status: 'done' },
+      })}\n\n`,
+    )
+    stream.push(
+      `id: 3\nevent: job.progress\ndata: ${JSON.stringify({
+        seq: 3,
+        type: 'job.progress',
+        at: fiveSecondsAgo,
+        session_id: 'sess-1',
+        payload: { stage: 'segmenting', node: 'director_tailframe-02', status: 'started' },
+      })}\n\n`,
+    )
+    await settle()
+
+    const band = wrapper.find('nav[aria-label="步骤带"]')
+    expect(band.text()).toContain('第 2 段尾帧词')
+    expect(band.text()).toContain('上一步：第 2 段首帧词')
+    expect(wrapper.find('[data-step="segment_loop"]').attributes('data-state')).toBe('current')
+    expect(wrapper.find('[data-step="segment_loop"]').text()).toContain('1/2')
+  })
+})

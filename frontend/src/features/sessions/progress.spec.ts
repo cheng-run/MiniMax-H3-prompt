@@ -35,15 +35,53 @@ function segments(passed: number, total: number): ProgressInput['segments'] {
   }))
 }
 
+/** 素材循环的待办：`asset_index` 是这一件的件号（1 起）。 */
+function assetAction(
+  index: number,
+  status: 'pending' | 'resolved' = 'pending',
+): ProgressInput['actionItems'][number] {
+  return {
+    item_id: `item-asset-${index}-${status}`,
+    kind: 'asset_image',
+    status,
+    created_at: new Date(start).toISOString(),
+    resolved_at: status === 'resolved' ? new Date(start).toISOString() : '',
+    reason: '',
+    asset_index: index,
+  }
+}
+
+/** ref 台账摘要：只有 Picture 会进素材循环，视频/音频各占一行但不进循环。 */
+function refItems(pictures: number, kind: string = 'picture'): ProgressInput['refs'] {
+  return Array.from({ length: pictures }, (_, index) => ({
+    asset_id: `sess-1/asset-${index + 1}`,
+    kind,
+    name: `素材${index + 1}`,
+    number: index + 1,
+  }))
+}
+
+function artifact(kind: string, name: string): ProgressInput['artifacts'][number] {
+  return {
+    artifact_id: `sess-1/${name}`,
+    name,
+    kind,
+    bytes: 10,
+    created_at: new Date(start).toISOString(),
+  }
+}
+
 function input(overrides: Partial<ProgressInput> = {}): ProgressInput {
   return {
     route: 'base',
     variant: 'T2VA',
     duration: 5,
+    directorMode: '',
     status: 'awaiting_human',
     actionItems: [],
     artifacts: [],
     segments: [],
+    refs: [],
     progress: null,
     now: start,
     ...overrides,
@@ -320,9 +358,354 @@ describe('formatElapsed', () => {
   })
 })
 
-describe('buildProgress：路线边界', () => {
-  it('本票只做 base；ref 与导演台先返回空步骤（#273 补齐）', () => {
-    expect(buildProgress(input({ route: 'ref', duration: 8 })).steps).toEqual([])
-    expect(buildProgress(input({ route: 'director' })).steps).toEqual([])
+describe('buildProgress：帧链变体集合', () => {
+  it('I2VA / L2VA 与 FL2VA 一样列帧提交（契约允许这三档）', () => {
+    for (const variant of ['FL2VA', 'I2VA', 'L2VA']) {
+      const view = buildProgress(input({ variant, actionItems: actions('frame_submission') }))
+      expect(
+        view.steps.map((step) => step.label),
+        variant,
+      ).toContain('帧提交')
+    }
+  })
+
+  it('T2VA 不列帧提交', () => {
+    const view = buildProgress(input({ variant: 'T2VA', actionItems: actions('stage1_review') }))
+    expect(view.steps.map((step) => step.label)).not.toContain('帧提交')
+  })
+})
+
+describe('buildProgress：ref 路线', () => {
+  it('等待审查：只列 ref 路线步骤，素材循环显示 0/n', () => {
+    const view = buildProgress(
+      input({ route: 'ref', refs: refItems(2), actionItems: actions('stage1_review') }),
+    )
+
+    expect(view.steps.map((step) => step.label)).toEqual([
+      '阶段 1',
+      '审查',
+      '素材循环',
+      '阶段 2',
+      '分段循环',
+      '完成',
+    ])
+    expect(view.steps.map((step) => step.state)).toEqual([
+      'done',
+      'current',
+      'pending',
+      'pending',
+      'pending',
+      'pending',
+    ])
+    expect(view.steps.find((step) => step.key === 'asset_loop')?.detail).toBe('0/2')
+    // ref 没有帧提交、不是 base 的分段规划。
+    expect(view.steps.map((step) => step.label)).not.toContain('帧提交')
+    expect(view.steps.map((step) => step.label)).not.toContain('分段规划')
+  })
+
+  it('等待交第 2 件素材：素材循环是当前步骤，已完成 1/2', () => {
+    const view = buildProgress(
+      input({
+        route: 'ref',
+        refs: refItems(2),
+        actionItems: [assetAction(1, 'resolved'), assetAction(2, 'pending')],
+        artifacts: [artifact('asset_prompt', 'assets/picture-01.md')],
+      }),
+    )
+
+    expect(view.steps.find((step) => step.key === 'asset_loop')?.state).toBe('current')
+    expect(view.steps.find((step) => step.key === 'asset_loop')?.detail).toBe('1/2')
+  })
+
+  it('等待交第 1 件素材：还没完成任何一件，0/2', () => {
+    const view = buildProgress(
+      input({ route: 'ref', refs: refItems(2), actionItems: [assetAction(1, 'pending')] }),
+    )
+
+    expect(view.steps.find((step) => step.key === 'asset_loop')?.detail).toBe('0/2')
+  })
+
+  it('素材循环校对进行中：当前件已交但未定稿，不把它算作已通过', () => {
+    const view = buildProgress(
+      input({
+        route: 'ref',
+        status: 'running',
+        refs: refItems(2),
+        actionItems: [assetAction(1, 'resolved')],
+        progress: {
+          stage: 'asset_loop',
+          node: 'asset_proofread',
+          status: 'started',
+          startedAt: start,
+          previousNode: 'asset_write',
+        },
+      }),
+    )
+
+    expect(view.steps.find((step) => step.key === 'asset_loop')?.state).toBe('current')
+    expect(view.steps.find((step) => step.key === 'asset_loop')?.detail).toBe('0/2')
+  })
+
+  it('素材循环已收尾进入阶段 2：素材循环 2/2 完成，阶段 2 是当前步骤', () => {
+    const view = buildProgress(
+      input({
+        route: 'ref',
+        status: 'running',
+        refs: refItems(2),
+        actionItems: [assetAction(1, 'resolved'), assetAction(2, 'resolved')],
+        artifacts: [artifact('video_prompt', 'video-prompt.md')],
+      }),
+    )
+
+    const byKey = Object.fromEntries(view.steps.map((step) => [step.key, step.state]))
+    expect(byKey.asset_loop).toBe('done')
+    expect(byKey.stage2).toBe('current')
+    expect(view.steps.find((step) => step.key === 'asset_loop')?.detail).toBe('2/2')
+  })
+
+  it('只有视频/音频参考素材时素材循环的 n 只算 Picture', () => {
+    const view = buildProgress(
+      input({
+        route: 'ref',
+        refs: [...refItems(1, 'picture'), ...refItems(1, 'video'), ...refItems(1, 'audio')],
+        actionItems: [assetAction(1, 'pending')],
+      }),
+    )
+
+    expect(view.steps.find((step) => step.key === 'asset_loop')?.detail).toBe('0/1')
+  })
+
+  it('段循环：已通过 1/2，分段循环是当前步骤', () => {
+    const view = buildProgress(
+      input({
+        route: 'ref',
+        refs: refItems(2),
+        segments: segments(1, 2),
+        actionItems: [
+          assetAction(1, 'resolved'),
+          assetAction(2, 'resolved'),
+          ...actions('segment_video'),
+        ],
+        artifacts: [artifact('video_prompt', 'video-prompt.md')],
+      }),
+    )
+
+    const byKey = Object.fromEntries(view.steps.map((step) => [step.key, step.state]))
+    expect(byKey.asset_loop).toBe('done')
+    expect(byKey.stage2).toBe('done')
+    expect(byKey.segment_loop).toBe('current')
+    expect(view.steps.find((step) => step.key === 'segment_loop')?.detail).toBe('1/2')
+  })
+
+  it('已完成时全部步骤都是 done', () => {
+    const view = buildProgress(
+      input({
+        route: 'ref',
+        status: 'completed',
+        refs: refItems(2),
+        segments: segments(2, 2),
+        actionItems: [assetAction(1, 'resolved'), assetAction(2, 'resolved')],
+        artifacts: [artifact('video', 'final.mp4')],
+      }),
+    )
+
+    expect(view.steps.every((step) => step.state === 'done')).toBe(true)
+    expect(view.steps.find((step) => step.key === 'asset_loop')?.detail).toBe('2/2')
+    expect(view.steps.find((step) => step.key === 'segment_loop')?.detail).toBe('2/2')
+    expect(view.nodeLabel).toBeNull()
+  })
+
+  it('失败会话保留最后到达的步骤，不把未完成的步骤标成 done', () => {
+    const view = buildProgress(
+      input({
+        route: 'ref',
+        status: 'failed',
+        refs: refItems(2),
+        actionItems: [assetAction(1, 'resolved')],
+        artifacts: [artifact('asset_prompt', 'assets/picture-01.md')],
+      }),
+    )
+
+    const byKey = Object.fromEntries(view.steps.map((step) => [step.key, step.state]))
+    expect(byKey.asset_loop).toBe('current')
+    expect(byKey.stage2).toBe('pending')
+    expect(view.steps.find((step) => step.key === 'asset_loop')?.detail).toBe('1/2')
+  })
+})
+
+describe('buildProgress：导演台路线', () => {
+  it('fl2v 等待开场帧：列出开场帧且它是当前步骤', () => {
+    const view = buildProgress(
+      input({
+        route: 'director',
+        directorMode: 'fl2v',
+        actionItems: actions('director_start_image'),
+        artifacts: [artifact('script', 'script.md')],
+      }),
+    )
+
+    expect(view.steps.map((step) => step.label)).toEqual([
+      '阶段 1',
+      '审查',
+      '开场帧',
+      '阶段 2',
+      '打包',
+      '段循环',
+      '交付',
+      '完成',
+    ])
+    const byKey = Object.fromEntries(view.steps.map((step) => [step.key, step.state]))
+    expect(byKey.stage1).toBe('done')
+    expect(byKey.review).toBe('done')
+    expect(byKey.start_frame).toBe('current')
+  })
+
+  it('t2v 不列开场帧（只列本路线实际步骤）', () => {
+    const view = buildProgress(
+      input({ route: 'director', directorMode: 't2v', actionItems: actions('stage1_review') }),
+    )
+
+    expect(view.steps.map((step) => step.label)).not.toContain('开场帧')
+    expect(view.steps.map((step) => step.label)).toEqual([
+      '阶段 1',
+      '审查',
+      '阶段 2',
+      '打包',
+      '段循环',
+      '交付',
+      '完成',
+    ])
+  })
+
+  it('t2v 但快照里仍有开场帧待办时把它列出来', () => {
+    const view = buildProgress(
+      input({
+        route: 'director',
+        directorMode: 't2v',
+        actionItems: [
+          actions('director_start_image')[0]!,
+          {
+            ...actions('stage1_review', 'resolved')[0]!,
+            item_id: 'item-review',
+          },
+        ],
+      }),
+    )
+
+    expect(view.steps.map((step) => step.label)).toContain('开场帧')
+  })
+
+  it('打包中：打包是当前步骤', () => {
+    const view = buildProgress(
+      input({
+        route: 'director',
+        directorMode: 'fl2v',
+        status: 'running',
+        actionItems: [
+          { ...actions('stage1_review', 'resolved')[0]!, item_id: 'item-review' },
+          { ...actions('director_start_image', 'resolved')[0]!, item_id: 'item-start' },
+        ],
+        progress: {
+          stage: 'packing',
+          node: 'director_pack',
+          status: 'started',
+          startedAt: start,
+          previousNode: 'director_segment_write',
+        },
+      }),
+    )
+
+    const byKey = Object.fromEntries(view.steps.map((step) => [step.key, step.state]))
+    expect(byKey.stage2).toBe('done')
+    expect(byKey.pack).toBe('current')
+    expect(byKey.segment_loop).toBe('pending')
+  })
+
+  it('段循环：已通过 2/3，段循环是当前步骤并显示 x/y', () => {
+    const view = buildProgress(
+      input({
+        route: 'director',
+        directorMode: 'fl2v',
+        segments: segments(2, 3),
+        actionItems: [{ ...actions('segment_video')[0]!, item_id: 'item-seg' }],
+        artifacts: [artifact('director_pack', 'director/initial.mmxpack.zip')],
+      }),
+    )
+
+    const byKey = Object.fromEntries(view.steps.map((step) => [step.key, step.state]))
+    expect(byKey.pack).toBe('done')
+    expect(byKey.segment_loop).toBe('current')
+    expect(byKey.delivery).toBe('pending')
+    expect(view.steps.find((step) => step.key === 'segment_loop')?.detail).toBe('2/3')
+  })
+
+  it('全部段通过后等待交付：交付是当前步骤', () => {
+    const view = buildProgress(
+      input({
+        route: 'director',
+        directorMode: 'fl2v',
+        segments: segments(3, 3),
+        actionItems: [{ ...actions('director_delivery')[0]!, item_id: 'item-delivery' }],
+        artifacts: [artifact('director_pack', 'director/initial.mmxpack.zip')],
+      }),
+    )
+
+    const byKey = Object.fromEntries(view.steps.map((step) => [step.key, step.state]))
+    expect(byKey.segment_loop).toBe('done')
+    expect(byKey.delivery).toBe('current')
+  })
+
+  it('交付归档完成：会话已完成，全部步骤 done', () => {
+    const view = buildProgress(
+      input({
+        route: 'director',
+        directorMode: 'fl2v',
+        status: 'completed',
+        segments: segments(3, 3),
+        actionItems: [
+          { ...actions('director_delivery', 'resolved')[0]!, item_id: 'item-delivery' },
+        ],
+        artifacts: [
+          artifact('director_pack', 'director/initial.mmxpack.zip'),
+          artifact('director_final_pack', 'director/final.mmxpack.zip'),
+          artifact('video', 'final.mp4'),
+        ],
+      }),
+    )
+
+    expect(view.steps.every((step) => step.state === 'done')).toBe(true)
+    expect(view.steps.find((step) => step.key === 'segment_loop')?.detail).toBe('3/3')
+  })
+
+  it('等待审查时开场帧还排在待开始', () => {
+    const view = buildProgress(
+      input({
+        route: 'director',
+        directorMode: 'i2v',
+        actionItems: actions('stage1_review'),
+      }),
+    )
+
+    const byKey = Object.fromEntries(view.steps.map((step) => [step.key, step.state]))
+    expect(byKey.stage1).toBe('done')
+    expect(byKey.review).toBe('current')
+    expect(byKey.start_frame).toBe('pending')
+  })
+
+  it('失败会话保留最后状态', () => {
+    const view = buildProgress(
+      input({
+        route: 'director',
+        directorMode: 'fl2v',
+        status: 'failed',
+        segments: segments(1, 3),
+        artifacts: [artifact('director_pack', 'director/initial.mmxpack.zip')],
+      }),
+    )
+
+    const byKey = Object.fromEntries(view.steps.map((step) => [step.key, step.state]))
+    expect(byKey.pack).toBe('done')
+    expect(byKey.segment_loop).toBe('current')
+    expect(byKey.delivery).toBe('pending')
   })
 })

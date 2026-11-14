@@ -1,4 +1,4 @@
-import type { ActionItemOut, ArtifactInfo, SegmentOut, SessionDetail } from '@/api/client'
+import type { ActionItemOut, ArtifactInfo, RefOut, SegmentOut, SessionDetail } from '@/api/client'
 
 import { nodeLabel } from './status'
 
@@ -43,14 +43,18 @@ export interface JobProgressView {
 }
 
 export interface ProgressInput {
-  /** 路线：`base` / `ref` / `director`。本票只定义 base，其余返回空步骤（#273）。 */
+  /** 路线：`base` / `ref` / `director`（与 `SessionDetail.mode` 同源）。 */
   route: string
   variant: string
   duration: number
+  /** 导演台的生成模式（`brief.director_mode`）：`t2v` / `i2v` / `fl2v` / `r2v`。 */
+  directorMode: string
   status: SessionDetail['status']
   actionItems: ActionItemOut[]
   artifacts: ArtifactInfo[]
   segments: SegmentOut[]
+  /** 参考素材台账摘要（`brief.refs`）：素材循环的 `n` 从这里数 Picture。 */
+  refs: RefOut[]
   progress: JobProgressView | null
   /** 计算已耗时的「现在」（epoch ms）；由调用方给，保持函数纯。 */
   now: number
@@ -59,7 +63,16 @@ export interface ProgressInput {
 // 长片判据与后端 `step_machine.LONG_FORM_MIN_SECONDS` 同值（>10 秒，D6 §3）。
 // 步骤带只判「要不要列分段三步」，真正的路线判据仍由后端给。
 export const LONG_FORM_SECONDS = 10
-const FRAME_CHAIN_VARIANT = 'FL2VA'
+// 帧链变体集合与后端 `brief_parser.FRAME_VARIANTS` 同源（契约允许这三档）。
+// base 的创建界面只开 T2VA/FL2VA，但 I2VA/L2VA 是导演台 i2v/fl2v 的帧变体，
+// 会话读回时会出现在 `brief.variant` 上——判据不能只认 FL2VA。
+export const FRAME_VARIANTS = ['I2VA', 'FL2VA', 'L2VA'] as const
+const FRAME_VARIANT_SET: ReadonlySet<string> = new Set(FRAME_VARIANTS)
+// 导演台里需要开场首帧（i2v 首帧 / fl2v 首尾帧）的模式；t2v/r2v 没有这一格。
+const DIRECTOR_START_FRAME_MODES: ReadonlySet<string> = new Set(['i2v', 'fl2v'])
+// 素材循环只逐件处理 Picture（视频/音频没有 `assets/picture-NN.md`），
+// 与后端 `kinds.KIND_PICTURE` 同值。
+const KIND_PICTURE = 'picture'
 
 interface StepDefinition {
   key: string
@@ -87,6 +100,29 @@ const BASE_LONG_STEPS: StepDefinition[] = [
   { key: 'complete', label: '完成' },
 ]
 
+// ref：审查通过后先逐件定稿资产图（素材循环），再进阶段 2；分段循环一律存在
+// （单段也走同一套待办与拼接），拼接是段循环的内部收尾、不单独占一格。
+const REF_STEPS: StepDefinition[] = [
+  { key: 'stage1', label: '阶段 1' },
+  { key: 'review', label: '审查' },
+  { key: 'asset_loop', label: '素材循环' },
+  { key: 'stage2', label: '阶段 2' },
+  { key: 'segment_loop', label: '分段循环' },
+  { key: 'complete', label: '完成' },
+]
+
+// 导演台：审查后可能先收开场首帧，阶段 2 之后是打包，段循环走完停在交付闸门。
+const DIRECTOR_STEPS: StepDefinition[] = [
+  { key: 'stage1', label: '阶段 1' },
+  { key: 'review', label: '审查' },
+  { key: 'start_frame', label: '开场帧' },
+  { key: 'stage2', label: '阶段 2' },
+  { key: 'pack', label: '打包' },
+  { key: 'segment_loop', label: '段循环' },
+  { key: 'delivery', label: '交付' },
+  { key: 'complete', label: '完成' },
+]
+
 const STAGE_RANK: Record<string, number> = {
   stage1: 0,
   asset_loop: 1,
@@ -111,38 +147,80 @@ function hasResolved(items: ActionItemOut[], kind: string): boolean {
   return items.some((item) => item.kind === kind && item.status === 'resolved')
 }
 
-/** 当前步骤的 key——由流上 stage/node 优先，其次由快照事实推。 */
-function currentStepKey(input: {
-  hasFrameStep: boolean
-  longForm: boolean
-  status: SessionDetail['status']
-  actionItems: ActionItemOut[]
-  artifacts: ArtifactInfo[]
-  segments: SegmentOut[]
-  progress: JobProgressView | null
-}): string | null {
-  const { hasFrameStep, longForm, status, actionItems, artifacts, segments, progress } = input
-  const stageRank = rankOf(progress?.stage ?? null)
-  const node = progress?.node ?? ''
-  const completed = status === 'completed'
+/** 从快照与流上进度抽出三条路线共用的判定事实（不猜业务状态，只做分类）。 */
+interface RouteFacts {
+  completed: boolean
+  /** 流上进度只有「正在跑」时才算当前步骤：等待人工/失败后服务端补发的最后一条
+   *  往往是 done（节点已经跑完），照它走会把步骤带钉在上一跳，与快照事实打架。 */
+  progressActive: boolean
+  stage: string | null
+  node: string
+  stageRank: number
+  pendingReview: boolean
+  pendingFrame: boolean
+  pendingSegmentVideo: boolean
+  pendingAsset: boolean
+  pendingStart: boolean
+  pendingSegmentImage: boolean
+  pendingDelivery: boolean
+  hasStage1Review: boolean
+  hasResolvedReview: boolean
+  hasResolvedStart: boolean
+  scriptArtifact: boolean
+  videoPromptArtifact: boolean
+  directorPackArtifact: boolean
+  totalSegments: number
+  passedSegments: number
+}
 
-  if (completed) {
+function routeFacts(input: ProgressInput): RouteFacts {
+  const stage = input.progress?.stage ?? null
+  const node = input.progress?.node ?? ''
+  const completed = input.status === 'completed'
+  const progressActive =
+    input.progress !== null && (input.status === 'running' || input.progress.status === 'started')
+  return {
+    completed,
+    progressActive,
+    stage,
+    node,
+    stageRank: rankOf(stage),
+    pendingReview: isPending(input.actionItems, 'stage1_review'),
+    pendingFrame: isPending(input.actionItems, 'frame_submission'),
+    pendingSegmentVideo: isPending(input.actionItems, 'segment_video'),
+    pendingAsset: isPending(input.actionItems, 'asset_image'),
+    pendingStart: isPending(input.actionItems, 'director_start_image'),
+    pendingSegmentImage: isPending(input.actionItems, 'director_segment_image'),
+    pendingDelivery: isPending(input.actionItems, 'director_delivery'),
+    hasStage1Review: hasItem(input.actionItems, 'stage1_review'),
+    hasResolvedReview: hasResolved(input.actionItems, 'stage1_review'),
+    hasResolvedStart: hasResolved(input.actionItems, 'director_start_image'),
+    scriptArtifact: input.artifacts.some((artifact) => artifact.kind === 'script'),
+    videoPromptArtifact: input.artifacts.some((artifact) => artifact.kind === 'video_prompt'),
+    directorPackArtifact: input.artifacts.some((artifact) => artifact.kind === 'director_pack'),
+    totalSegments: input.segments.length,
+    passedSegments: input.segments.filter((segment) => segment.status === 'passed').length,
+  }
+}
+
+/** base 的当前步骤：由流上 stage/node 优先，其次由快照事实推。 */
+function baseCurrentKey(input: ProgressInput, facts: RouteFacts): string | null {
+  if (facts.completed) {
     return null // 全部 done，没有当前步骤
   }
-
-  // 流上进度只有「正在跑」时才算当前步骤：等待人工/失败后服务端补发的最后一条
-  // 往往是 done（节点已经跑完），照它走会把步骤带钉在上一跳，与快照事实打架。
-  const progressActive =
-    progress !== null && (status === 'running' || progress.status === 'started')
+  const { progressActive, stage, node, stageRank } = facts
+  const longForm = input.duration > LONG_FORM_SECONDS
+  const hasFrameStep = FRAME_VARIANT_SET.has(input.variant.toUpperCase())
+  const { totalSegments: total, passedSegments: passed } = facts
 
   if (progressActive && stageRank >= 0) {
-    if (progress.stage === 'stage1') {
+    if (stage === 'stage1') {
       return 'stage1'
     }
-    if (progress.stage === 'stage2') {
+    if (stage === 'stage2') {
       return 'stage2'
     }
-    if (progress.stage === 'segmenting') {
+    if (stage === 'segmenting') {
       if (node === 'segment_plan') {
         return 'segment_plan'
       }
@@ -153,37 +231,30 @@ function currentStepKey(input: {
     }
   }
 
-  const pendingReview = isPending(actionItems, 'stage1_review')
-  const pendingFrame = isPending(actionItems, 'frame_submission')
-  const pendingSegmentVideo = isPending(actionItems, 'segment_video')
-  const scriptArtifact = artifacts.some((artifact) => artifact.kind === 'script')
-  const videoArtifact = artifacts.some((artifact) => artifact.kind === 'video_prompt')
   const stage1Done =
     stageRank >= 2 ||
-    hasItem(actionItems, 'stage1_review') ||
-    scriptArtifact ||
-    pendingFrame ||
-    segments.length > 0
+    facts.hasStage1Review ||
+    facts.scriptArtifact ||
+    facts.pendingFrame ||
+    total > 0
   const reviewDone =
     stage1Done &&
-    !pendingReview &&
+    !facts.pendingReview &&
     (stageRank >= 2 ||
-      hasResolved(actionItems, 'stage1_review') ||
-      pendingFrame ||
-      pendingSegmentVideo ||
-      segments.length > 0 ||
-      videoArtifact)
-  const stage2Done = stageRank >= 4 || segments.length > 0 || videoArtifact
-  const passed = segments.filter((segment) => segment.status === 'passed').length
-  const total = segments.length
+      facts.hasResolvedReview ||
+      facts.pendingFrame ||
+      facts.pendingSegmentVideo ||
+      total > 0 ||
+      facts.videoPromptArtifact)
+  const stage2Done = stageRank >= 4 || total > 0 || facts.videoPromptArtifact
 
-  if (pendingReview) {
+  if (facts.pendingReview) {
     return 'review'
   }
-  if (hasFrameStep && pendingFrame) {
+  if (hasFrameStep && facts.pendingFrame) {
     return 'frame'
   }
-  if (pendingSegmentVideo) {
+  if (facts.pendingSegmentVideo) {
     return 'segment_loop'
   }
   if (total > 0) {
@@ -197,6 +268,133 @@ function currentStepKey(input: {
   }
   // running 且审查已过、段表还没落盘：多半在阶段 2（规划要等阶段 2 收尾）。
   return 'stage2'
+}
+
+/** ref 的当前步骤：阶段 1 → 审查 → 素材循环 → 阶段 2 → 分段循环 → 完成。 */
+function refCurrentKey(input: ProgressInput, facts: RouteFacts): string | null {
+  if (facts.completed) {
+    return null
+  }
+  const { progressActive, stage, stageRank } = facts
+  if (progressActive) {
+    if (stage === 'stage1') {
+      return 'stage1'
+    }
+    if (stage === 'asset_loop') {
+      return 'asset_loop'
+    }
+    if (stage === 'stage2') {
+      return 'stage2'
+    }
+    if (stage === 'segmenting') {
+      return 'segment_loop'
+    }
+  }
+  if (facts.pendingReview) {
+    return 'review'
+  }
+  if (facts.pendingAsset) {
+    return 'asset_loop'
+  }
+  if (facts.pendingSegmentVideo || facts.totalSegments > 0) {
+    return 'segment_loop'
+  }
+  // 阶段 2 已经开始（产物或流上最后一条阶段标签都算）。
+  if (facts.videoPromptArtifact || stageRank >= 2) {
+    return 'stage2'
+  }
+  // 素材循环动过（有件待办或已产出资产图词）同样证明阶段 1 与审查都已过去。
+  const assetLoopStarted =
+    input.actionItems.some((item) => item.kind === 'asset_image') ||
+    input.artifacts.some((artifact) => artifact.kind === 'asset_prompt')
+  const stage1Done =
+    stageRank >= 1 || facts.hasStage1Review || facts.scriptArtifact || assetLoopStarted
+  if (!stage1Done) {
+    return 'stage1'
+  }
+  return 'asset_loop'
+}
+
+/** 导演台的当前步骤：阶段 1 → 审查 → 开场帧 → 阶段 2 → 打包 → 段循环 → 交付 → 完成。 */
+function directorCurrentKey(facts: RouteFacts, hasStartFrame: boolean): string | null {
+  if (facts.completed) {
+    return null
+  }
+  const { progressActive, stage, node, stageRank } = facts
+  if (progressActive) {
+    if (stage === 'stage1') {
+      return 'stage1'
+    }
+    if (stage === 'stage2') {
+      return 'stage2'
+    }
+    if (stage === 'packing') {
+      return 'pack'
+    }
+    if (stage === 'segmenting') {
+      // 交付归档 job 也记 `segmenting` 阶段标签，用节点名分开。
+      return node === 'director_delivery' ? 'delivery' : 'segment_loop'
+    }
+  }
+  if (facts.pendingReview) {
+    return 'review'
+  }
+  if (hasStartFrame && facts.pendingStart) {
+    return 'start_frame'
+  }
+  if (facts.pendingSegmentImage || facts.pendingSegmentVideo) {
+    return 'segment_loop'
+  }
+  if (facts.pendingDelivery) {
+    return 'delivery'
+  }
+  if (facts.totalSegments > 0) {
+    // 全部段通过后只剩交付闸门（归档 job 跑的时候流上进度已经把它标成 delivery）。
+    return facts.passedSegments === facts.totalSegments ? 'delivery' : 'segment_loop'
+  }
+  if (facts.directorPackArtifact) {
+    // 打包已落盘、段表还没进快照：段循环马上开始。
+    return 'segment_loop'
+  }
+  const stage1Done = stageRank >= 1 || facts.hasStage1Review || facts.scriptArtifact
+  if (!stage1Done) {
+    return 'stage1'
+  }
+  if (!facts.hasResolvedReview) {
+    return 'review'
+  }
+  if (hasStartFrame && !facts.hasResolvedStart) {
+    return 'start_frame'
+  }
+  return 'stage2'
+}
+
+/** ref 的素材循环进度：n 只数 Picture（素材循环只逐件处理 Picture）。 */
+function refAssetProgress(
+  input: ProgressInput,
+  facts: RouteFacts,
+): { passed: number; total: number } {
+  const total = input.refs.filter((ref) => ref.kind === KIND_PICTURE).length
+  const items = input.actionItems.filter((item) => item.kind === 'asset_image')
+  const pending = items.find((item) => item.status === 'pending')
+  const lastResolved = items.reduce(
+    (max, item) => (item.status === 'resolved' ? Math.max(max, item.asset_index ?? 0) : max),
+    0,
+  )
+  let passed: number
+  if (pending) {
+    // 等待的这件还没交：已过件数就是它前面那几件。
+    passed = (pending.asset_index ?? 1) - 1
+  } else if (facts.videoPromptArtifact || facts.totalSegments > 0) {
+    // 已进阶段 2／段循环：素材循环整个收尾了。
+    passed = total
+  } else if (facts.progressActive && facts.node === 'asset_proofread') {
+    // 正在校对刚交的这一件：它已 resolve 但还没定稿，别算作已通过。
+    passed = Math.max(0, lastResolved - 1)
+  } else {
+    passed = lastResolved
+  }
+  return { passed: Math.min(passed, total), total }
 }
 
 /** 把「当前步骤」翻译成有序步骤上的三种状态；当前步骤之后（含）按顺序铺开。 */
@@ -220,36 +418,8 @@ function applyStates(
   }))
 }
 
-export function buildProgress(input: ProgressInput): ProgressView {
-  // 本票只接 base；ref / 导演台的步骤定义由 #273 补。返回空步骤＝组件不渲染，
-  // 比拿 base 的步骤冒充其他路线更诚实。
-  if (input.route !== 'base') {
-    return { steps: [], nodeLabel: null, previousLabel: null, elapsedMs: null }
-  }
-
-  const longForm = input.duration > LONG_FORM_SECONDS
-  const hasFrameStep = input.variant.toUpperCase() === FRAME_CHAIN_VARIANT
-  const definitions = (longForm ? BASE_LONG_STEPS : BASE_SHORT_STEPS).filter(
-    (step) => step.key !== 'frame' || hasFrameStep,
-  )
-
-  const currentKey = currentStepKey({
-    hasFrameStep,
-    longForm,
-    status: input.status,
-    actionItems: input.actionItems,
-    artifacts: input.artifacts,
-    segments: input.segments,
-    progress: input.progress,
-  })
-
-  const passed = input.segments.filter((segment) => segment.status === 'passed').length
-  const total = input.segments.length
-  const detailOf = (key: string): string =>
-    key === 'segment_loop' && total > 0 ? `${passed}/${total}` : ''
-
-  const steps = applyStates(definitions, currentKey, detailOf)
-
+/** 步骤的「当前节点 + 已耗时 + 上一步」：三条路线共用同一份出口。 */
+function finishView(input: ProgressInput, steps: ProgressStep[]): ProgressView {
   const progress = input.progress
   const running = input.status === 'running'
   const elapsedMs =
@@ -266,6 +436,47 @@ export function buildProgress(input: ProgressInput): ProgressView {
     previousLabel: !completed && progress?.previousNode ? nodeLabel(progress.previousNode) : null,
     elapsedMs,
   }
+}
+
+/** 段循环的 `x/y`（三条路线同一口径；没有段表时不显示）。 */
+function segmentDetail(facts: RouteFacts): string {
+  return facts.totalSegments > 0 ? `${facts.passedSegments}/${facts.totalSegments}` : ''
+}
+
+export function buildProgress(input: ProgressInput): ProgressView {
+  const facts = routeFacts(input)
+
+  if (input.route === 'ref') {
+    const currentKey = refCurrentKey(input, facts)
+    const asset = refAssetProgress(input, facts)
+    const detailOf = (key: string): string => {
+      if (key === 'asset_loop') {
+        return asset.total > 0 ? `${asset.passed}/${asset.total}` : ''
+      }
+      return key === 'segment_loop' ? segmentDetail(facts) : ''
+    }
+    return finishView(input, applyStates(REF_STEPS, currentKey, detailOf))
+  }
+
+  if (input.route === 'director') {
+    // 只列本路线实际步骤：开场首帧只在 i2v/fl2v（或快照里还留着这条待办）时出现。
+    const hasStartFrame =
+      DIRECTOR_START_FRAME_MODES.has(input.directorMode.toLowerCase()) ||
+      hasItem(input.actionItems, 'director_start_image')
+    const definitions = DIRECTOR_STEPS.filter((step) => step.key !== 'start_frame' || hasStartFrame)
+    const currentKey = directorCurrentKey(facts, hasStartFrame)
+    const detailOf = (key: string): string => (key === 'segment_loop' ? segmentDetail(facts) : '')
+    return finishView(input, applyStates(definitions, currentKey, detailOf))
+  }
+
+  const longForm = input.duration > LONG_FORM_SECONDS
+  const hasFrameStep = FRAME_VARIANT_SET.has(input.variant.toUpperCase())
+  const definitions = (longForm ? BASE_LONG_STEPS : BASE_SHORT_STEPS).filter(
+    (step) => step.key !== 'frame' || hasFrameStep,
+  )
+  const currentKey = baseCurrentKey(input, facts)
+  const detailOf = (key: string): string => (key === 'segment_loop' ? segmentDetail(facts) : '')
+  return finishView(input, applyStates(definitions, currentKey, detailOf))
 }
 
 /** 已耗时的中文写法：秒级直接给秒，分钟级补两位秒。 */
