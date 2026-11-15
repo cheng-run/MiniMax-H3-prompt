@@ -687,6 +687,43 @@ MUTATIONS: tuple[Mutation, ...] = (
         "组件抄产物文件名＝后端登记表改名后前端静默少显示（ADR 0034；2026-11-12 retro）",
     ),
     Mutation(
+        "frontend_progress_band_inside_overview",
+        "frontend/src/features/sessions/SessionDetailView.vue",
+        '''      <div class="progress-region">
+        <ProgressBand v-if="progressView.steps.length" :view="progressView" />
+        <p v-if="pendingHint" role="status" class="pending-hint">等待你操作：{{ pendingHint }}</p>
+      </div>
+
+      <!-- 概览与进度 -->
+      <section
+        v-if="ui.workbenchTab === 'overview'"
+        id="workbench-panel-overview"
+        role="tabpanel"
+        aria-labelledby="workbench-tab-overview"
+        class="panel"
+      >
+        <ErrorNotice v-if="runError" :message="runError" />''',
+        '''      <div class="progress-region">
+        <p v-if="pendingHint" role="status" class="pending-hint">等待你操作：{{ pendingHint }}</p>
+      </div>
+
+      <!-- 概览与进度 -->
+      <section
+        v-if="ui.workbenchTab === 'overview'"
+        id="workbench-panel-overview"
+        role="tabpanel"
+        aria-labelledby="workbench-tab-overview"
+        class="panel"
+      >
+        <ErrorNotice v-if="runError" :message="runError" />
+
+        <ProgressBand v-if="progressView.steps.length" :view="progressView" />''',
+        ("tests/test_frontend_progress_band.py"
+         "::test_step_band_and_pending_hint_render_above_all_panels",),
+        "步骤带移回概览 panel 内部＝切到分段/产物/审查就看不到当前进度"
+        "（spec #274 复检的直接成因；#251 真实验收实测）",
+    ),
+    Mutation(
         "fake_switch_ignored",
         "src/minimax_h3_prompt/api/app.py",
         "    fake = fake_pipeline_enabled()\n",

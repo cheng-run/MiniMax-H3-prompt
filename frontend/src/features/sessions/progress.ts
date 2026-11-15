@@ -479,6 +479,50 @@ export function buildProgress(input: ProgressInput): ProgressView {
   return finishView(input, applyStates(definitions, currentKey, detailOf))
 }
 
+// 待办 kind → 「等待你操作」那一行的中文说明（#276）。它和步骤带同层常驻，判据
+// 与步骤带用同一份 pending 事实（`status === 'pending'` + kind），不新增业务状态，
+// 也不另立一张待办表：kind 知识本来就集中在本模块，翻译留在这里免得漂成两份。
+// 需要段号/件号的 kind 从待办自带的索引取；素材的 Picture 语义名从 refs 台账取。
+const PENDING_HINTS: Record<string, (item: ActionItemOut, refs: RefOut[]) => string> = {
+  stage1_review: () => '审查阶段 1 结果',
+  frame_submission: () => '提交首帧/尾帧素材',
+  segment_video: (item) =>
+    item.segment_index ? `提交第 ${item.segment_index} 段视频` : '提交段视频',
+  asset_image: (item, refs) => {
+    const number = item.asset_index ?? 0
+    if (!number) {
+      return '交回素材图'
+    }
+    const name = refs.find((ref) => ref.kind === KIND_PICTURE && ref.number === number)?.name
+    return name ? `交回第 ${number} 件素材图 · ${name}` : `交回第 ${number} 件素材图`
+  },
+  director_start_image: () => '提交开场首帧',
+  director_segment_image: (item) =>
+    item.segment_index ? `提交第 ${item.segment_index} 段首帧图` : '提交段首帧图',
+  director_delivery: () => '交付成片与最终包',
+}
+
+// 未知 kind 的兜底文案：后端先加了一种人工待办、前端这版还不认识时，「等待你操作」
+// 整行不能消失——那会让用户以为无事可做，而会话其实正卡在一个没有入口的待办上。
+const UNKNOWN_PENDING_HINT = '有新的待办需要处理'
+
+/**
+ * 当前待办的中文说明；没有任何待处理的人工待办时为 null。
+ *
+ * 优先精确文案：任一已知 kind 处于 pending 就按它翻译；全是未知 kind 时回退一句
+ * 通用说明，**不返回 null**——未知待办同样是「等你操作」，整行消失等于静默丢提示。
+ */
+export function pendingActionHint(actionItems: ActionItemOut[], refs: RefOut[]): string | null {
+  const known = actionItems.find(
+    (entry) => entry.status === 'pending' && entry.kind in PENDING_HINTS,
+  )
+  if (known) {
+    return PENDING_HINTS[known.kind]!(known, refs)
+  }
+  const unknown = actionItems.find((entry) => entry.status === 'pending')
+  return unknown ? UNKNOWN_PENDING_HINT : null
+}
+
 /** 已耗时的中文写法：秒级直接给秒，分钟级补两位秒。 */
 export function formatElapsed(ms: number): string {
   const totalSeconds = Math.floor(Math.max(0, ms) / 1000)

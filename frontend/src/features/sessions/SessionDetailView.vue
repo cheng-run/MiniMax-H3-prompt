@@ -18,7 +18,12 @@ import DirectorSegmentImageCard from './DirectorSegmentImageCard.vue'
 import DirectorStartImageCard from './DirectorStartImageCard.vue'
 import FrameSubmissionCard from './FrameSubmissionCard.vue'
 import { newIdempotencyKey } from './keys'
-import { buildProgress, type JobProgressView, type ProgressView } from './progress'
+import {
+  buildProgress,
+  pendingActionHint,
+  type JobProgressView,
+  type ProgressView,
+} from './progress'
 import ProgressBand from './ProgressBand.vue'
 import ReviewTab from './ReviewTab.vue'
 import SegmentsTab from './SegmentsTab.vue'
@@ -223,6 +228,12 @@ const progressView = computed<ProgressView>(() => {
 // 失败/取消/中断后步骤带仍按快照事实保留「走到了哪一步」（pure 函数里同一套推导），
 // 不在组件里另立第二份状态：状态徽章已经说明成败，步骤带只负责最后到达的位置。
 
+// 「等待你操作」只读行（#276）：与步骤带同层常驻，判据是快照里是否有待处理的人工
+// 待办——与步骤带同一份事实，不新增业务状态。它只读，真正带副作用的操作仍在各分区。
+const pendingHint = computed(() =>
+  pendingActionHint(data.value?.action_items ?? [], data.value?.brief.refs ?? []),
+)
+
 // 帧提交卡只在 frame_submission 待办仍 pending 时出现；决议后由快照移除。
 const pendingFrameItem = computed(
   () =>
@@ -360,6 +371,14 @@ const errorMessage = computed(() =>
         </button>
       </div>
 
+      <!-- 步骤带与「等待你操作」只读行（#276）：上移到分区 tab 之外，成为详情页常驻
+           元素——切到分段/产物/审查等任一非概览分区都仍可见。取消按钮有副作用，
+           仍留在概览分区（见下），不上移。 -->
+      <div class="progress-region">
+        <ProgressBand v-if="progressView.steps.length" :view="progressView" />
+        <p v-if="pendingHint" role="status" class="pending-hint">等待你操作：{{ pendingHint }}</p>
+      </div>
+
       <!-- 概览与进度 -->
       <section
         v-if="ui.workbenchTab === 'overview'"
@@ -369,8 +388,6 @@ const errorMessage = computed(() =>
         class="panel"
       >
         <ErrorNotice v-if="runError" :message="runError" />
-
-        <ProgressBand v-if="progressView.steps.length" :view="progressView" />
 
         <p v-if="connection === 'reconnecting'" role="status" class="muted">
           实时连接中断，正在重连…
@@ -585,6 +602,17 @@ const errorMessage = computed(() =>
 }
 .panel {
   padding-top: var(--space-4);
+}
+/* 步骤带与「等待你操作」常驻在分区 tab 之下、各 panel 之上（#276）。 */
+.progress-region {
+  margin-top: var(--space-3);
+}
+.pending-hint {
+  margin: 0 0 var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border-left: 3px solid var(--color-focus);
+  color: var(--color-text);
+  font-size: 0.875rem;
 }
 .run-controls {
   display: flex;

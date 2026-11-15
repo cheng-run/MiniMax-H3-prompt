@@ -1134,3 +1134,106 @@ describe('SessionDetailView 步骤带（#273：ref / 导演台）', () => {
     expect(wrapper.find('[data-step="segment_loop"]').text()).toContain('1/2')
   })
 })
+
+// #276：步骤带上移为详情页常驻；「等待你操作」同层全局可见；取消仍只在概览分区。
+describe('SessionDetailView 步骤带与等待提示全局化（#276）', () => {
+  const longBrief = { ...makeDetail().brief, duration: 18, variant: 'T2VA' }
+  const segments = Array.from({ length: 3 }, (_, index) => ({
+    index: index + 1,
+    start_s: index * 6,
+    end_s: (index + 1) * 6,
+    shots_in_segment: [index + 1],
+    summary: '',
+    end_hook: '',
+    status: 'pending',
+    prompt_artifact_id: '',
+    video_asset_id: '',
+    semantic_warning: '',
+  }))
+
+  // 「等待你操作」用的同一条待办：多个用例都要它，抽一处免得改动时漏掉某一份。
+  const pendingSegmentVideo = (): NonNullable<
+    ReturnType<typeof makeDetail>['action_items']
+  >[number] => ({
+    item_id: 'item-seg-2',
+    kind: 'segment_video',
+    status: 'pending',
+    created_at: '2026-11-11T00:00:00Z',
+    resolved_at: '',
+    reason: '',
+    segment_index: 2,
+  })
+
+  async function clickTab(
+    wrapper: Awaited<ReturnType<typeof mountDetail>>['wrapper'],
+    label: string,
+  ) {
+    const tab = wrapper.findAll('[role="tab"]').find((item) => item.text() === label)!
+    await tab.trigger('click')
+    await settle()
+  }
+
+  it('切到任一分区，步骤带仍然渲染且当前步骤正确', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({
+            status: 'awaiting_human',
+            brief: longBrief,
+            segments,
+            action_items: [pendingSegmentVideo()],
+          }),
+        ),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    // 概览之外的分区：分段 / 产物 / 审查。步骤带不在概览 panel 里，切过去都仍在。
+    for (const label of ['审查与待办', '分段', '产物']) {
+      await clickTab(wrapper, label)
+      expect(wrapper.find('nav[aria-label="步骤带"]').exists()).toBe(true)
+      expect(wrapper.find('[data-step="segment_loop"]').attributes('data-state')).toBe('current')
+    }
+  })
+
+  it('存在待办时任何分区都显示只读「等待你操作」并说清第几段', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({
+            status: 'awaiting_human',
+            brief: longBrief,
+            segments,
+            action_items: [pendingSegmentVideo()],
+          }),
+        ),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    expect(wrapper.find('.pending-hint').text()).toBe('等待你操作：提交第 2 段视频')
+    for (const label of ['审查与待办', '分段', '产物']) {
+      await clickTab(wrapper, label)
+      expect(wrapper.find('.pending-hint').text()).toBe('等待你操作：提交第 2 段视频')
+    }
+  })
+
+  it('非概览分区不出现取消按钮：有副作用的写操作仍只在概览', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({ status: 'running', brief: longBrief, current_job: makeJob() }),
+        ),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    const hasCancel = () => wrapper.findAll('button').some((button) => button.text() === '取消')
+    expect(hasCancel()).toBe(true)
+
+    for (const label of ['审查与待办', '分段', '产物']) {
+      await clickTab(wrapper, label)
+      expect(hasCancel()).toBe(false)
+    }
+  })
+})

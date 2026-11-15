@@ -63,9 +63,8 @@ test('长片 18 秒：建会话 → 段列表 → 三段全部交完 → 拼接 
   await expect(page.locator('[data-segment-index]')).toHaveCount(3)
   await expect(page.locator('[data-segment-index="1"]')).toContainText('等待交视频')
 
-  // #272：概览顶部的步骤带按 base 长片列出全部步骤；分段循环只显示 x/y，
-  // 不按段数展开（这里 3 段也只有一行）。
-  await page.getByRole('tab', { name: '概览与进度' }).click()
+  // #276：步骤带已上移为详情页常驻，在「分段」分区就能直接读；不用先切回概览。
+  // base 长片列出全部步骤；分段循环只显示 x/y，不按段数展开（这里 3 段也只有一行）。
   const band = page.getByRole('navigation', { name: '步骤带' })
   await expect(band).toBeVisible()
   await expect(band).toContainText('阶段 1')
@@ -74,8 +73,6 @@ test('长片 18 秒：建会话 → 段列表 → 三段全部交完 → 拼接 
   await expect(band.locator('[data-step]')).toHaveCount(7)
   await expect(band.locator('[data-step="segment_loop"]')).toHaveAttribute('data-state', 'current')
   await expect(band.locator('[data-step="segment_loop"]')).toContainText('0/3')
-
-  await segmentsTab.click()
 
   // 三段全部交完：上传桩造的 mp4（上传即选中）→ 提交，等进度前进到下一段。
   for (const number of [1, 2, 3]) {
@@ -93,10 +90,8 @@ test('长片 18 秒：建会话 → 段列表 → 三段全部交完 → 拼接 
         '语义检查提示',
       )
 
-      // 步骤带的分段循环跟着前进到 1/3。
-      await page.getByRole('tab', { name: '概览与进度' }).click()
+      // 步骤带的分段循环跟着前进到 1/3（仍在分段分区，步骤带常驻）。
       await expect(band.locator('[data-step="segment_loop"]')).toContainText('1/3')
-      await segmentsTab.click()
     }
   }
 
@@ -104,7 +99,7 @@ test('长片 18 秒：建会话 → 段列表 → 三段全部交完 → 拼接 
   await expect(page.getByText('已完成').first()).toBeVisible({ timeout: 30_000 })
   await expect(page.locator('[data-segment-index="3"]')).toContainText('已通过')
 
-  await page.getByRole('tab', { name: '概览与进度' }).click()
+  // 仍在分段分区：步骤带常驻，完成态保留最终状态并显示全部步骤完成。
   await expect(band.locator('[data-step="segment_loop"]')).toContainText('3/3')
   await expect(band.locator('[data-step="segment_loop"]')).toHaveAttribute('data-state', 'done')
   await expect(band.locator('[data-step="complete"]')).toHaveAttribute('data-state', 'done')

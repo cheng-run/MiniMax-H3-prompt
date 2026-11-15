@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { buildProgress, formatElapsed, type ProgressInput } from './progress'
+import { buildProgress, formatElapsed, pendingActionHint, type ProgressInput } from './progress'
 
 const start = Date.UTC(2026, 10, 14, 2, 0, 0)
 
@@ -707,5 +707,44 @@ describe('buildProgress：导演台路线', () => {
     expect(byKey.pack).toBe('done')
     expect(byKey.segment_loop).toBe('current')
     expect(byKey.delivery).toBe('pending')
+  })
+})
+
+// #276：「等待你操作」那一行的中文说明——按 kind 翻译，段号/件号取待办自带索引。
+describe('pendingActionHint', () => {
+  it('按 kind 给出说清「哪一段、哪一步」的中文说明', () => {
+    expect(pendingActionHint(actions('stage1_review'), [])).toBe('审查阶段 1 结果')
+    expect(pendingActionHint(actions('frame_submission'), [])).toBe('提交首帧/尾帧素材')
+    expect(pendingActionHint(actions('director_start_image'), [])).toBe('提交开场首帧')
+    expect(pendingActionHint(actions('director_delivery'), [])).toBe('交付成片与最终包')
+  })
+
+  it('段号 / 件号进说明；素材语义名从 refs 台账取', () => {
+    const seg = [{ ...actions('segment_video')[0]!, segment_index: 3 }]
+    expect(pendingActionHint(seg, [])).toBe('提交第 3 段视频')
+
+    const segImg = [{ ...actions('director_segment_image')[0]!, segment_index: 2 }]
+    expect(pendingActionHint(segImg, [])).toBe('提交第 2 段首帧图')
+
+    const asset = assetAction(2)
+    const refs = [{ asset_id: 'sess-1/a2', kind: 'picture', name: '台灯', number: 2 }]
+    expect(pendingActionHint([asset], refs)).toBe('交回第 2 件素材图 · 台灯')
+    expect(pendingActionHint([asset], [])).toBe('交回第 2 件素材图')
+  })
+
+  it('没有待处理的人工待办时为 null（已决议的不算）', () => {
+    expect(pendingActionHint([], [])).toBeNull()
+    expect(pendingActionHint(actions('stage1_review', 'resolved'), [])).toBeNull()
+  })
+
+  it('未知 kind 的 pending 待办回退一句通用说明，不静默丢提示', () => {
+    // 后端先加了一种前端这版还不认识的待办：整行「等待你操作」不能消失，
+    // 否则会话卡在一个没有入口的待办上，用户却以为无事可做。
+    expect(pendingActionHint(actions('future_review'), [])).toBe('有新的待办需要处理')
+  })
+
+  it('同时存在已知与未知 pending 时，优先已知 kind 的精确文案', () => {
+    const items = [...actions('future_review'), ...actions('stage1_review')]
+    expect(pendingActionHint(items, [])).toBe('审查阶段 1 结果')
   })
 })
