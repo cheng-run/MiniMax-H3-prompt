@@ -1398,6 +1398,30 @@ MUTATIONS: tuple[Mutation, ...] = (
         "快档必须当场红（retro 2026-11-13）",
     ),
     Mutation(
+        "mutation_test_node_drift_detected",
+        "tests/test_api_asset_loop.py",
+        "def test_proofread_failure_reopens_the_same_item_and_leaves_the_prompt_untouched(",
+        "def test_proofread_failure_reopens_the_same_item_renamed(",
+        ("tests/test_mutation_anchors.py::test_every_referenced_test_node_exists",),
+        "用例改名而锚点没跟＝pytest 以「收集失败」收场、脚本却记「杀死」，"
+        "守卫早没了、报表仍全绿（retro 2026-11-15，#287 实测）",
+    ),
+    Mutation(
+        "decision_whitelist_inlined_again",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "                    elif decision in step_machine.EXPLICIT_ASSET_DECISIONS:",
+        "                    elif decision in (\n"
+        "                            step_machine.DECISION_REWORD_REROLL,\n"
+        "                            step_machine.DECISION_REROLL,\n"
+        "                            step_machine.DECISION_ACCEPT_IMAGE_FACTS,\n"
+        "                            step_machine.DECISION_KEEP_DESCRIPTION,\n"
+        "                            step_machine.DECISION_RESTORE_PROMPT):",
+        ("tests/test_decision_whitelists.py::"
+         "test_decision_whitelists_are_named_constants",),
+        "决议白名单写回表达式＝同一张表出现第二份副本，改一处漏一处不会报错"
+        "（retro 2026-11-15；#286 复审的事件/快照两处口径）",
+    ),
+    Mutation(
         "ref_concat_trims_first_frame",
         "src/minimax_h3_prompt/api/jobs.py",
         "        if session.brief.is_ref:\n"

@@ -343,6 +343,25 @@ _SETTLING_ASSET_DECISIONS = frozenset({
     step_machine.DECISION_KEEP_DESCRIPTION,
 })
 
+# 每种待办认哪几个决议值，各自只有**一份声明**（retro 2026-11-15）：写在比较表达式
+# 里的字面元组是同一张白名单的第二份副本，改一处、漏一处时不会报错——#286 复审抓到的
+# 正是这种分家（事件侧只抄了三个决议值，漏了两条定稿出路）。结构守卫
+# ``tests/test_decision_whitelists.py`` 咬住这条：白名单只能是具名常量。
+_STAGE1_REVIEW_DECISIONS = frozenset({
+    step_machine.DECISION_APPROVE,
+    step_machine.DECISION_REVISE,
+})
+_ASSET_EXTRA_DECISIONS = frozenset({
+    step_machine.DECISION_SUBMIT_EXTRAS,
+    step_machine.DECISION_NO_EXTRAS,
+})
+# 决议后直接跑阶段 2 的那几个决议值（approve 与帧提交）：`_run_decision` 里「跑哪条
+# 执行路径」与「收尾接哪条」两处判据共用这一份。
+_STAGE2_DECISIONS = frozenset({
+    step_machine.DECISION_APPROVE,
+    step_machine.DECISION_SUBMIT_FRAMES,
+})
+
 
 @dataclass(frozen=True)
 class _ImageFacts:
@@ -1276,9 +1295,7 @@ class JobRunner:
                 if target.kind == step_machine.ACTION_STAGE1_REVIEW:
                     # kind 与载荷强校验（D4 §9）：审查待办只认 approve/revise，
                     # 带了 frames 就是发错了端点之外的语义。
-                    if decision not in (
-                            step_machine.DECISION_APPROVE,
-                            step_machine.DECISION_REVISE):
+                    if decision not in _STAGE1_REVIEW_DECISIONS:
                         raise FrameInvalid(
                             "stage1_review 待办需要 approve 或 revise。")
                     if frames is not None:
@@ -1499,8 +1516,7 @@ class JobRunner:
                     # 与「没有，就这样」。文件本身不从这里交：上传端点带用户起的
                     # 语义名登记成台账行，这里只认一件已登记的视频/音频作为载荷，
                     # 免得「决议时才知道要交什么」变成又一条上传通路。
-                    if decision not in (step_machine.DECISION_SUBMIT_EXTRAS,
-                                        step_machine.DECISION_NO_EXTRAS):
+                    if decision not in _ASSET_EXTRA_DECISIONS:
                         raise AssetExtraInvalid(
                             "asset_extra 待办需要 decision=submit_extras 或 "
                             "decision=no_extras。")
@@ -2518,8 +2534,7 @@ class JobRunner:
         帧链通过审查不走到这里（那条分支没有任务，见 ``resolve`` 的 ``frame_gate``）。
         """
         try:
-            if decision in (step_machine.DECISION_APPROVE,
-                            step_machine.DECISION_SUBMIT_FRAMES):
+            if decision in _STAGE2_DECISIONS:
                 result = await asyncio.to_thread(
                     self._execute_stage2, session_id, job_id, cancel_event)
             else:
@@ -2533,8 +2548,7 @@ class JobRunner:
             await asyncio.to_thread(
                 self._finish_failed, session_id, job_id, error_code(exc), str(exc))
         else:
-            if decision in (step_machine.DECISION_APPROVE,
-                            step_machine.DECISION_SUBMIT_FRAMES):
+            if decision in _STAGE2_DECISIONS:
                 next_job = await asyncio.to_thread(
                     self._finish_stage2, session_id, job_id, result)
                 if next_job is not None:
