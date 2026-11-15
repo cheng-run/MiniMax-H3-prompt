@@ -134,6 +134,8 @@
     忽略 `source`。
   - **四态**（`status`）：`pending`（已派生、还没交图，**没有正本**）/ `registered`
     （交回了、还没校对过）/ `passed`（定稿）/ `abandoned`（显式放弃，永远没有图）。
+    四选里的前两选（改词再掷、原词再掷）退回 `pending`，后两选（按图改文案、保留原描述）
+    与校对通过转 `passed`；读图不可用也转 `passed` 并附注原因。恢复与改词不改台账状态。
   - **派生与对账是同一处**：阶段 1 收尾的写入里按资产图词落齐 N 行（`derived_asset_rows`
     → `merge_derived_rows`），清单与词缺件、多件、改名都硬失败并点名（仍是
     `AssetPromptMissing`）。**阶段 1 每次成功收尾都重新派生**（修订重跑会换掉清单，
@@ -171,7 +173,12 @@
 | 第 N 件出词 | job `asset_loop` | `asset_loop` | `assets/picture-NN.md`（kind `asset_prompt`）；挂 `asset_image` 待办 |
 | 第 N 件交图 | 待办 `asset_image` | — | 载荷 `asset_id`；会话 `awaiting_human` |
 | 第 N 件放弃 | 待办 `asset_image` | — | `decision=abandon_asset`（不带 `asset_id`）：该行转 `abandoned`，不落图 |
-| 第 N 件校对 | job `asset_loop` | `asset_loop` | 读图（`describe_image`）对照这一件的词；通过转 `passed`，不通过回 `pending`。结论随卡带 `vision_model`（调用点取视觉配置里的模型名，#292） |
+| 第 N 件校对 | job `asset_loop` | `asset_loop` | 读图（`describe_image`）对照这一件的词；**只有偏差**决定通过（补漏不阻断）：无偏差转 `passed`，有偏差回 `pending` 并重开同件卡。卡片带人读报告 `reason`、结构化清单 `proofread` 与并列字段 `vision_model`（#292） |
+| 第 N 件改词再掷 | job `asset_reword` | `asset_loop` | `decision=reword_reroll`（默认）：按结构化偏差做加法改写，锁死条目缺失即不落盘；成功落 `assets/picture-NN.md` 与一行资产轮次账。台账仍 `pending`，重开同件卡 |
+| 第 N 件原词再掷 | job `asset_loop` | `asset_loop` | `decision=reroll`：词与描述都不动，台账退回 `pending`；作业按 `round>0` 只重开同件卡，不重出初稿 |
+| 第 N 件按图改文案 | job `asset_loop`（末件接 `advance`） | `asset_loop` | `decision=accept_image_facts`：偏差定点替换＋补漏并入**素材画面事实**，生图词逐字不动，台账转 `passed`；接着出下一件的词（或补交口／阶段 2） |
+| 第 N 件保留原描述 | job `asset_loop`（末件接 `advance`） | `asset_loop` | `decision=keep_description`：偏差一处不动、只并入补漏，台账转 `passed`；接着出下一件的词（或补交口／阶段 2） |
+| 第 N 件恢复原文 | job `asset_restore` | `asset_loop` | `decision=restore_prompt`：阶段 1 原文覆盖写回，diff 进任务详情；台账与轮次账都不动 |
 | 补交口 | 待办 `asset_extra` | `asset_extra` | 循环结束后、阶段 2 之前：`submit_extras`（载荷 `asset_id`）或 `no_extras`（「没有，就这样」） |
 | 阶段 2 | job | `stage2` | 补交口落定后自动接上（注入卡是 #257） |
 
@@ -184,12 +191,35 @@
   （`unsettled_picture_entries`，与推进度同一份；位置锁也用它判「循环走完没有」）；
   每件同时最多一个未决
   `asset_image`。已放弃的行被跳过——否则放弃一件会把循环永远停在那件上。
-- **没有放行键，但有放弃出口**（#279 / #282）：`asset_image` 的决议只有交图与
-  `abandon_asset` 两种，**没有「就这样吧」**——校对不通过时用 `rewrite_asset_prompt`
-  按差异清单改词、覆盖同一份 `assets/picture-NN.md`，同一件号重开待办（`reason`
-  带差异清单）。放弃把该行标 `abandoned`、不落图、不进注入卡与段内子集，并在待办
-  `reason` 与事件里点名后果（分镜表与段词里的指称变成无图指称）；**不自动改写已定稿
-  的文本**。台账只记轮次与状态，历史不靠多份文件。
+- **校对不通过是裁决，不是闸门**（ADR 0040）：`asset_image` 卡按件给一次四选——
+  `reword_reroll`（默认）／`reroll`／`accept_image_facts`／`keep_description`；前两选
+  退回 `pending` 并重开同件卡，后两选转 `passed` 并接下一件（或补交口／阶段 2）。四条
+  都不带图，同一张卡一次只认一个动作。**校对作业不再改写生图词**：词是指令、图是既成
+  事实；读图结论只产出人读报告与结构化清单。四选与恢复都落在既有
+  `action_item.resolved` 上，重开卡仍用 `action_item.created`，事件类型保持十种闭合。
+  工作台默认与 CLI **有意不同**（CLI 默认「按图改文案」），别把 CLI 的默认搬过来。
+- **放弃是独立出口，不属于四选**（#279 / #282）：`abandon_asset` 把该行标 `abandoned`、
+  不落图、不进注入卡与段内子集，并在待办 `reason` 与事件里点名后果（分镜表与段词里的
+  指称变成无图指称）；**不自动改写已定稿的文本**。台账只记轮次与状态，历史不靠多份文件。
+- **改词是加法改写，落痕在轮次账**（#288）：`reword_reroll` 起 `asset_reword` 作业，
+  按卡片上的结构化偏差清单（`ActionItemOut.proofread`）改写，**不从 `reason` 反解析**；
+  产出必须逐字包含**锁死清单**每一条，任一条缺失即整次不落盘、卡片挂「模型想删掉 X」
+  待裁项。成功才写 `assets/picture-NN.md` 并追加一行 `asset-rounds.jsonl`
+  （`trigger=regen_ai_reword`，改前改后全文）。失败/取消不落成会话 `failed`，
+  词保持原样、卡片重开写明原因。
+- **补漏只在定稿那一刻并入、按观察去重**（#289）：`accept_image_facts` 在素材画面事实里
+  做定点替换（`merge_asset_description`；失锚/多处命中不猜，列入「没有落笔」），
+  `keep_description` 只并补漏；两者都不碰生图词。校对通过（无偏差）同样在收尾时并入。
+  重掷中途的图不并入——那些细节还没定下来。去重判据是观察文本逐字已在描述里；
+  条数不设上限，补漏永不阻断。
+- **恢复阶段 1 原文只修无账差异**（#291）：详情读取现算 `asset_restore_candidate`——
+  这一件未定稿＋盘上词与阶段 1 原文不一致＋轮次账里没有这一件的记录，三条同时成立才给
+  `ActionItemOut.restore_available` 与 `restore_diff`；`restore_prompt` 起
+  `asset_restore` 作业，覆盖写回并打印 diff，台账状态与轮次账都不动。有账＝合法改写，
+  不出现这个动作；作业按盘复算同一份判据，不满足就一个字节都不写。
+- **读图不可用照常定稿**（#290）：视觉客户端不可用、`describe_image` 抛错、结论解析失败
+  三种形态都转 `passed`，卡片与任务详情写「校对未完成：环节——原因」；不重试、不挂新卡、
+  不改写、不写轮次账。`vision_model` 能读到配置时照常带上。
 - **交图标识住台账条目**（`proofread_asset_id`）：崩在「已交图、未校对」之间时，
   恢复跑校对而不是要求重交；判过即清。
 - **补交口是阻塞决定点**（#279 / #284）：循环走完后、阶段 2 之前挂 `asset_extra`
