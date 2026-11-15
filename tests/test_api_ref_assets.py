@@ -144,6 +144,8 @@ def test_ref_upload_registers_a_ledger_entry_with_sniffed_kind(tmp_path):
         "asset_id": f"{session_id}/{digest[:16]}",
         # 四态与来路（#279）：上传建立的行是 uploaded，还没校对过是 registered。
         "status": "registered", "source": "uploaded",
+        # 生图档位（#292）：用户上传的行没有「按哪一档撰写」这回事，读成未知。
+        "image_model": None, "image_model_label": None,
     }]
     # 台账住会话状态（ADR 0032），不另写 asset-ledger.json。
     raw = json.loads(_session_file(tmp_path, session_id).read_text("utf-8"))

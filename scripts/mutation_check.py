@@ -1279,22 +1279,39 @@ MUTATIONS: tuple[Mutation, ...] = (
         "asset_loop_reopens_the_wrong_number",
         "src/minimax_h3_prompt/api/jobs.py",
         "                status=\"pending\", created_at=_now(), asset_index=number,\n"
-        "                reason=reason)",
+        "                reason=reason, vision_model=vision_model or None)",
         "                status=\"pending\", created_at=_now(), asset_index=number + 1,\n"
-        "                reason=reason)",
+        "                reason=reason, vision_model=vision_model or None)",
         ("tests/test_api_asset_loop.py::"
          "test_proofread_failure_reopens_the_same_item_and_leaves_the_prompt_untouched",),
         "重开的件号错位＝用户被要求交下一件的图，而第 N 件永远定不了稿（#256）",
     ),
     Mutation(
+        "proofread_vision_model_not_replayed",
+        "src/minimax_h3_prompt/workbench_store.py",
+        "                    for key in _ACTION_ITEM_PROOFREAD_KEYS:\n"
+        "                        if isinstance(payload.get(key), str):\n"
+        "                            item[key] = payload[key]",
+        "                    for key in ():\n"
+        "                        if isinstance(payload.get(key), str):\n"
+        "                            item[key] = payload[key]",
+        ("tests/test_api_asset_loop.py::"
+         "test_the_proofread_report_survives_snapshot_replay",),
+        "重放不补读图模型名＝刷新一次，校对结论那一行的模型就退回「未知」（#292）",
+    ),
+    Mutation(
         "ref_brief_not_wired",
         "src/minimax_h3_prompt/api/jobs.py",
-        "        if not route_uses_asset_ledger(session.brief):\n"
-        "            return session.brief",
-        "        if True:\n            return session.brief",
-        ("tests/test_api_asset_loop.py::test_ref_stage1_sees_the_ledger_as_brief_refs",),
-        "台账不喂给管线＝brief.refs 恒空，阶段 1 按不存在的参考素材写词、"
-        "出词那一步按语义名对不上号（#256，spec §5.3）",
+        "        if session.brief.is_ref:\n"
+        "            return session.brief\n"
+        "        # r2v 的阶段 1 还没跑素材循环",
+        "        if False:\n"
+        "            return session.brief\n"
+        "        # r2v 的阶段 1 还没跑素材循环",
+        ("tests/test_api_asset_loop.py::"
+         "test_ref_stage1_never_sees_the_ledger_as_brief_refs",),
+        "阶段 1 把台账注入 refs＝``ref_asset_registry`` 走「用户登记为准」那支、"
+        "设计师清单被绕过，素材集合回到用户预置（#279，spec §台账与进度）",
     ),
     Mutation(
         "film_injection_card_never_written",
@@ -1488,8 +1505,10 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "proofread_unavailable_hangs_instead_of_settling",
         "src/minimax_h3_prompt/api/jobs.py",
-        '                    "passed": True, "reason": _unproofread_reason(exc)}',
-        '                    "passed": False, "reason": _unproofread_reason(exc)}',
+        '                    "passed": True, "reason": _unproofread_reason(exc),\n'
+        '                    "vision_model": vision_model}',
+        '                    "passed": False, "reason": _unproofread_reason(exc),\n'
+        '                    "vision_model": vision_model}',
         ("tests/test_api_asset_loop.py::"
          "test_a_failed_reading_call_settles_the_item_and_names_the_step",
          "tests/test_api_asset_loop.py::"

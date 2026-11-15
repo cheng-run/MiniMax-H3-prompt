@@ -358,6 +358,57 @@ describe('AssetsTab ref 三态（#283）', () => {
   })
 })
 
+describe('AssetsTab 生图档位（#292）', () => {
+  it('台账每一行显示自己的档位；旧行缺字段时说「未知」', async () => {
+    const refs = [
+      derivedRef(1, '红裙女孩', {
+        image_model: 'qwen',
+        image_model_label: 'Qwen-Image 2.1',
+      }),
+      derivedRef(2, '旧木船', { image_model: 'moss', image_model_label: 'MOSS-Image' }),
+      derivedRef(3, '码头'), // #292 之前落的行：没有档位字段。
+    ]
+    const wrapper = mount(AssetsTab, {
+      props: {
+        sessionId: 'sess-1',
+        mode: 'ref',
+        status: 'awaiting_human',
+        phase: 'asset_loop',
+        assets: [],
+        refs,
+      },
+    })
+    await settle()
+
+    const labels = wrapper.findAll('[data-testid="asset-model-label"]')
+    expect(labels.map((label) => label.text())).toEqual([
+      '生图档：Qwen-Image 2.1',
+      '生图档：MOSS-Image',
+      '生图档：未知',
+    ])
+  })
+
+  it('视频/音频行没有「生图档」这回事，不摆这一行', async () => {
+    const wrapper = mount(AssetsTab, {
+      props: {
+        sessionId: 'sess-1',
+        mode: 'ref',
+        status: 'awaiting_human',
+        phase: 'after',
+        assets: [],
+        refs: [
+          derivedRef(1, '红裙女孩', { image_model: 'qwen', image_model_label: 'Qwen-Image 2.1' }),
+          makeRef({ kind: 'video', number: 1, name: '片头', status: 'passed' }),
+          makeRef({ kind: 'audio', number: 1, name: '旁白', status: 'passed' }),
+        ],
+      },
+    })
+    await settle()
+
+    expect(wrapper.findAll('[data-testid="asset-model-label"]')).toHaveLength(1)
+  })
+})
+
 describe('AssetsTab ref 容量条（#283 AC4）', () => {
   it('任一档超限即红，并点名超的是哪一档', async () => {
     const pictures = Array.from({ length: 10 }, (_, index) =>

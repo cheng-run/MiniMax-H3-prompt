@@ -22,7 +22,9 @@ import pytest
 
 from minimax_h3_prompt import model_factory
 from minimax_h3_prompt.api.app import create_app
+from minimax_h3_prompt.config import config
 from minimax_h3_prompt.graph import pipeline
+from minimax_h3_prompt.image_config import IMAGE_MODEL_LABELS
 from minimax_h3_prompt.session_store import SESSION_FILENAME
 from minimax_h3_prompt.tools import reference_auditor
 from minimax_h3_prompt.workbench_store import artifact_spec
@@ -59,21 +61,33 @@ class _RewriteStub:
         return self.reply
 
 
-def _stage1_state(prompts: dict[str, str]) -> dict:
-    """阶段 1 的固定 state：剧本、分镜表与逐件资产图提示词（按语义名命名）。"""
+def _stage1_state(prompts: dict[str, str],
+                  models: dict[str, str] | None = None) -> dict:
+    """阶段 1 的固定 state：剧本、分镜表与逐件资产图提示词（按语义名命名）。
+
+    ``models`` 给某几件写下出词时的档位判定（``image_routing`` 的形状：四键对象）；
+    没给的那一件就是 #292 之前的旧条目（没有 ``image_model``，读成「未知」）。
+    """
+    models = models or {}
+    entries = []
+    for name, text in prompts.items():
+        entry = {
+            "name": name,
+            "positive_prompt": text,
+            "negative_prompt": "",
+            # 锁死清单必须是正文片段（对照器按字面收窄偏差）。
+            "locked_features": [text],
+        }
+        if name in models:
+            entry["image_model"] = {
+                "model": models[name], "source": "auto",
+                "keyword": "", "evidence": "",
+            }
+        entries.append(entry)
     return {
         "script": "分场剧本：橘猫蹲在窗台，台灯亮着。",
         "shot_table": "[Shot 1] At 00:00.000, a medium shot of the cat by the lamp.",
-        "character_image_prompts": [
-            {
-                "name": name,
-                "positive_prompt": text,
-                "negative_prompt": "",
-                # 锁死清单必须是正文片段（对照器按字面收窄偏差）。
-                "locked_features": [text],
-            }
-            for name, text in prompts.items()
-        ],
+        "character_image_prompts": entries,
     }
 
 
@@ -325,6 +339,49 @@ def test_derived_rows_follow_script_order_not_prompt_order(harness, monkeypatch)
         (LAMP, 1), (CAT, 2)]
 
 
+def test_derived_rows_carry_their_image_model_and_display_label(harness, monkeypatch):
+    """#292：每件派生素材把**这一件**的生图档位落进台账，详情响应同时给键与显示名。
+
+    档位的唯一事实源是阶段 1 条目上的 ``image_model``（``image_routing``）；显示名由
+    服务端按全仓那一份映射渲染，前端直接显示——两件分属两档，正好钉住「逐件取，
+    不按类套一张表」。
+    """
+    monkeypatch.setattr(
+        pipeline, "run_stage1",
+        lambda brief, config, **kwargs: (
+            _stage1_state({
+                CAT: "一只橘色短毛猫蹲在木质窗台，尾巴绕住前爪。",
+                LAMP: "一盏黄铜台灯立在书桌右角，灯罩是墨绿色。",
+            }, {CAT: "qwen", LAMP: "moss"}), None, None))
+    body = _to_first_card(harness)
+
+    rows = {ref["number"]: ref for ref in body["brief"]["refs"]}
+    assert rows[1]["image_model"] == "qwen"
+    assert rows[1]["image_model_label"] == IMAGE_MODEL_LABELS["qwen"]
+    assert rows[2]["image_model"] == "moss"
+    assert rows[2]["image_model_label"] == IMAGE_MODEL_LABELS["moss"]
+    # 台账行自己也带着键（详情是台账的摘要，不是读详情时现算的）。
+    assert [entry["image_model"] for entry in harness.ledger()] == ["qwen", "moss"]
+
+
+def test_ledger_rows_without_a_recorded_model_stay_unknown(harness):
+    """#292：旧台账行没有档位字段时，详情给空串（界面说「未知」），不编造一档。
+
+    判的是**台账**缺字段这一档（#292 之前落的行），不是「条目没有记录」——后者按
+    ``image_prompt_variants`` 的同一条历史读法读成 Z-Image（那时只有这一档）。
+    """
+    _to_first_card(harness)
+    path = harness.root / Path(harness.session_id) / SESSION_FILENAME
+    snapshot = json.loads(path.read_text(encoding="utf-8"))
+    for entry in snapshot["asset_ledger"]:
+        entry.pop("image_model", None)
+    path.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+
+    rows = harness.detail()["brief"]["refs"]
+    assert [(ref["image_model"], ref["image_model_label"])
+            for ref in rows] == [(None, None), (None, None)]
+
+
 def test_base_session_approval_still_goes_straight_to_stage2(harness, monkeypatch):
     """base 一字不变：通过审查直接跑阶段 2，不出现素材循环。"""
     monkeypatch.setattr(
@@ -436,6 +493,8 @@ def test_proofread_failure_reopens_the_same_item_and_leaves_the_prompt_untouched
     assert "偏差" in pending[0]["reason"]
     assert "尾巴绕住前爪" in pending[0]["reason"]
     assert "尾巴垂在窗台边缘" in pending[0]["reason"]
+    # #292：结论行注明是谁读的图——取视觉客户端同一份配置的模型名，不另立常量。
+    assert pending[0]["vision_model"] == config.vision_model.model
 
     # 盘上那一份一个字节都不动：头部、正文、换行全部原样。
     assert harness.artifact_text("assets/picture-01.md") == before
@@ -486,6 +545,8 @@ def test_omissions_without_deviations_settle_the_item_and_stay_visible(harness):
     assert resolved["status"] == "resolved"
     assert "[补漏]" in resolved["reason"]
     assert "毛线球" in resolved["reason"]
+    # #292：读图模型名随补报告落在同一张已决议卡片上。
+    assert resolved["vision_model"] == config.vision_model.model
 
     # 待办报告接口与详情是同一份快照，都要看得到。
     listed = harness.client.get(
@@ -533,6 +594,8 @@ def _settle_as_unproofread(harness, item: dict, before: str,
     assert reason.startswith("校对未完成："), reason
     assert step in reason, "原因要点名是哪一步失败"
     assert cause in reason, "原因要带原始错误摘要"
+    # #292：不可用时照报配置里的那一档——它仍是排查「该谁来读」的线索。
+    assert resolved["vision_model"] == config.vision_model.model
     # 待办报告接口与详情是同一份快照，都要看得到。
     listed = harness.client.get(
         f"/api/v1/sessions/{harness.session_id}/action-items").json()
@@ -606,9 +669,10 @@ def test_an_unavailable_vision_client_settles_the_item_and_names_the_step(
 
 
 def test_the_proofread_report_survives_snapshot_replay(harness):
-    """快照落后事件流时，补漏报告由 ``action_item.resolved`` 事件重放补回（#287）。
+    """快照落后事件流时，补漏报告与读图模型名由 ``action_item.resolved`` 重放补回。
 
-    事件类型仍是十种闭合集合里那一条：只给既有 payload 多一个 ``reason`` 键。
+    事件类型仍是十种闭合集合里那一条：只给既有 payload 多 ``reason`` 与
+    ``vision_model`` 两个键（前一条 #287，后一条 #292）。
     """
     body = _to_first_card(harness)
     item = [entry for entry in body["action_items"]
@@ -628,6 +692,7 @@ def test_the_proofread_report_survives_snapshot_replay(harness):
                     and event["payload"].get("item_id") == item["item_id"]
                     and event["payload"].get("reason")][-1]
     assert report_event["payload"]["reason"].count("毛线球") == 1
+    assert report_event["payload"]["vision_model"] == config.vision_model.model
 
     # 手工制造「事件已写、快照没跟上」：抹掉快照里的报告，把尾号退到那条事件之前。
     path = harness.root / Path(harness.session_id) / SESSION_FILENAME
@@ -636,11 +701,14 @@ def test_the_proofread_report_survives_snapshot_replay(harness):
     for entry in snapshot["action_items"]:
         if entry["item_id"] == item["item_id"]:
             entry["reason"] = ""
+            entry["vision_model"] = ""
     path.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
 
     replayed = [entry for entry in harness.detail()["action_items"]
                 if entry["item_id"] == item["item_id"]][0]
     assert "毛线球" in replayed["reason"], "事件重放没有把补漏报告补回"
+    assert replayed["vision_model"] == config.vision_model.model, \
+        "事件重放没有把读图模型名补回（刷新后那一行会退回「未知」）"
     # 报告事件不是第二次决议：决议时间仍记第一次交图的那一刻。
     assert replayed["resolved_at"] == [entry for entry in body["action_items"]
                                        if entry["item_id"] == item["item_id"]][0][

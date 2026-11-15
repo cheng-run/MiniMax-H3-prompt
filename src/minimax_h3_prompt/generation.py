@@ -1048,12 +1048,55 @@ def image_prompt_variants(
     牌子。旧条目没有这个字段时按历史的 Z-Image 读（那时只有这一档）。
     """
     variants: list[ImagePromptVariant] = []
-    # 类别 → (产物键, 设计键) 取 ``graph.state.ASSET_KIND_FIELDS`` 的唯一声明（issue #88）：
-    # 这里再抄一份，加第四类资产时就是「节点写了、出口读不到」的静默漏。
-    # 循环变量叫 ``field_key`` 而不是 ``field``：本模块顶部从 dataclasses 导入了
-    # ``field``，同名循环变量会在循环体里遮蔽它（ruff F402），将来在体内建 dataclass
-    # 字段时就会拿到字符串下标而不是工厂函数。
-    for kind, (field_key, design_field) in ASSET_KIND_FIELDS.items():
+    for kind, name, item in _image_prompt_entries(state):
+        design_field = ASSET_KIND_FIELDS[kind][1]
+        positive = str(item.get("positive_prompt") or state.get(design_field, ""))
+        if not positive.strip():
+            # 资产键与设计正文都空＝这一类无货可交，跳过而不是构造非法对象——
+            # 向导展示会对任意精简 state 调到这里（issue #40），缺料不是错误。
+            continue
+        # profile 行与画布都取**这一条自己的模型档**（issue #146）：条目上的
+        # ``image_model`` 是出词时写下的判定，与正文后来改成什么样无关；没有记录的
+        # 旧条目按当时唯一存在的 Z-Image 档读。
+        # 尺寸**无条件**取读取口：条目里混进的 width/height 一律不认（四键契约外的
+        # 残留/幻觉不许压过用户选定，复审点名）。
+        model = canonical_image_model(_entry_image_model(item) or DEFAULT_IMAGE_MODEL)
+        default = IMAGE_PROFILE_DEFAULTS[model]
+        canvas_width, canvas_height = image_canvas_size(model, canvases)
+        variants.append(ImagePromptVariant(
+            name=name,
+            # 来源是 ``ASSET_KIND_FIELDS`` 的键（纯数据表），运行时范围有限。
+            kind=cast(Literal["character", "prop", "scene"], kind),
+            positive_prompt=positive,
+            negative_prompt=str(item.get("negative_prompt", "")),
+            profile_id=str(item.get("profile_id", default.profile_id)),
+            prompt_node_id=str(item.get("prompt_node_id", default.prompt_node_id)),
+            width=canvas_width,
+            height=canvas_height,
+            profile_status=str(item.get("profile_status", "candidate")),
+            # 旧条目残留的 instructions 在这里被忽略（字段已删，2026-10-24）：
+            # 产物不再有「操作说明」出口，读旧会话也不会把它带回来。
+            # 锁死清单（issue #53）照抄条目；旧条目没有这一键 → 空表（读口宽容，
+            # 与旧 dict 形状同一口径：旧会话照旧可读，只是不收窄判据）。
+            locked_features=tuple(str(x) for x in item.get("locked_features") or ()),
+        ))
+    return tuple(variants)
+
+
+def _image_prompt_entries(
+    state: Mapping[str, Any],
+) -> list[tuple[str, str, dict[str, Any]]]:
+    """资产条目遍历：``(类别, 语义名, 条目)``，三种旧形状在这里一次归一。
+
+    ``image_prompt_variants``（产物出口）与 ``asset_image_models``（台账档位）必须读
+    同一份条目：两处各写一遍遍历，加第四类资产或改条目读法时总有一处静默漏。类别 →
+    state 键仍取 ``ASSET_KIND_FIELDS`` 的唯一声明（issue #88）。
+
+    旧形状两种：**dict 形状**（#40 之前的会话，只取 ``zimage`` 一条）与整键缺失
+    （回退设计正文）。两种都归一成「一条无语义名的空条目」，由调用方按设计正文兜底。
+    """
+    rows: list[tuple[str, str, dict[str, Any]]] = []
+    for kind, (field_key, _design_field) in ASSET_KIND_FIELDS.items():
         label = KIND_LABELS[kind]
         raw = state.get(field_key)
         if isinstance(raw, list):
@@ -1065,43 +1108,39 @@ def image_prompt_variants(
             z = raw.get("zimage", {})
             if isinstance(z, str):
                 z = {"positive_prompt": z}
-            entries = [dict(z, name=z.get("name", label))] if z else [{"name": label, "positive_prompt": ""}]
+            entries = ([dict(z, name=z.get("name", label))] if z
+                       else [{"name": label, "positive_prompt": ""}])
         else:
             entries = [{"name": label, "positive_prompt": ""}]
         for item in entries:
             if isinstance(item, str):
                 item = {"name": label, "positive_prompt": item}
-            positive = str(item.get("positive_prompt") or state.get(design_field, ""))
-            if not positive.strip():
-                # 资产键与设计正文都空＝这一类无货可交，跳过而不是构造非法对象——
-                # 向导展示会对任意精简 state 调到这里（issue #40），缺料不是错误。
-                continue
-            # profile 行与画布都取**这一条自己的模型档**（issue #146）：条目上的
-            # ``image_model`` 是出词时写下的判定，与正文后来改成什么样无关；没有记录的
-            # 旧条目按当时唯一存在的 Z-Image 档读。
-            # 尺寸**无条件**取读取口：条目里混进的 width/height 一律不认（四键契约外的
-            # 残留/幻觉不许压过用户选定，复审点名）。
-            model = canonical_image_model(_entry_image_model(item) or DEFAULT_IMAGE_MODEL)
-            default = IMAGE_PROFILE_DEFAULTS[model]
-            canvas_width, canvas_height = image_canvas_size(model, canvases)
-            variants.append(ImagePromptVariant(
-                name=str(item.get("name", "") or label),
-                # 来源是 ``ASSET_KIND_FIELDS`` 的键（纯数据表），运行时范围有限。
-                kind=cast(Literal["character", "prop", "scene"], kind),
-                positive_prompt=positive,
-                negative_prompt=str(item.get("negative_prompt", "")),
-                profile_id=str(item.get("profile_id", default.profile_id)),
-                prompt_node_id=str(item.get("prompt_node_id", default.prompt_node_id)),
-                width=canvas_width,
-                height=canvas_height,
-                profile_status=str(item.get("profile_status", "candidate")),
-                # 旧条目残留的 instructions 在这里被忽略（字段已删，2026-10-24）：
-                # 产物不再有「操作说明」出口，读旧会话也不会把它带回来。
-                # 锁死清单（issue #53）照抄条目；旧条目没有这一键 → 空表（读口宽容，
-                # 与旧 dict 形状同一口径：旧会话照旧可读，只是不收窄判据）。
-                locked_features=tuple(str(x) for x in item.get("locked_features") or ()),
-            ))
-    return tuple(variants)
+            rows.append((kind, str(item.get("name", "") or label), item))
+    return rows
+
+
+def asset_image_models(
+    brief: Brief, state: Mapping[str, Any],
+) -> dict[str, str]:
+    """语义名 → 生图档位键（阶段 1 条目上的 ``image_model``，``image_routing`` 唯一事实源）。
+
+    素材台账的派生行要把「这条词按哪一档的纪律写成」一起落进台账（#292）：用户在
+    工作台交图时据此知道贴进哪个 ComfyUI 节点。**取数与产物出口同源**——同一次出词里
+    人物可能按 Qwen 写、道具按 MOSS 写，另算一遍迟早与产物上的档位分家。
+
+    与 ``image_prompt_variants`` 的「同一份条目」还包括同一条跳过规则：资产键与设计
+    正文都空的那类没有产物，也不该在台账上凭空多一个档位。
+    """
+    if not route_emits_asset_prompts(brief):
+        return {}
+    models: dict[str, str] = {}
+    for kind, name, item in _image_prompt_entries(state):
+        design_field = ASSET_KIND_FIELDS[kind][1]
+        if not str(item.get("positive_prompt") or state.get(design_field, "")).strip():
+            continue
+        models[name] = canonical_image_model(
+            _entry_image_model(item) or DEFAULT_IMAGE_MODEL)
+    return models
 
 
 def asset_prompts_for(brief: Brief, state: Mapping[str, Any]) -> tuple[ImagePromptVariant, ...]:
@@ -1449,7 +1488,8 @@ __all__ = [
     "composition_set", "composition_hint", "canvas_family", "canvas_display",
     "RatioPreset", "CANVAS_RATIO_PRESETS",
     "asset_prompts_for", "fl2va_bundle_from_dict", "generation_directory",
-    "ref_asset_registry", "derived_asset_registry", "render_generation",
+    "ref_asset_registry", "derived_asset_registry", "asset_image_models",
+    "render_generation",
     "strip_foreign_frames",
     "render_fl2va_frame_markdown", "render_fl2va_markdown", "result_from_state", "variant_frame_names",
     "scene_requirement_groups", "validate_fl2va_bundle",

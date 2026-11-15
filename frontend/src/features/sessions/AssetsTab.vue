@@ -98,6 +98,8 @@ interface RowView {
   number?: number
   /** 台账四态之一；不上台账的形态为空串（没有登记这回事）。 */
   status: string
+  /** 本件生图档位的显示名（#292）；空串＝旧台账行没有记录，界面说「未知」。 */
+  image_model_label: string
 }
 
 const listed = computed<RowView[]>(() => {
@@ -109,6 +111,7 @@ const listed = computed<RowView[]>(() => {
       kind: ref.kind,
       number: ref.number,
       status: ref.status,
+      image_model_label: ref.image_model_label ?? '',
     }))
   }
   return props.assets.map((asset) => ({
@@ -117,6 +120,7 @@ const listed = computed<RowView[]>(() => {
     name: asset.name,
     kind: asset.kind,
     status: '',
+    image_model_label: '',
   }))
 })
 
@@ -404,6 +408,16 @@ async function onReopen(assetId: string): Promise<void> {
               · 时长 {{ durations[item.asset_id] ?? '—'
               }}{{ durations[item.asset_id] ? ' 秒' : '' }}
             </template>
+          </span>
+          <!-- 每一行都看得见自己的生图档位（#292）：12 件里一眼找到该用哪一档的那张。
+               只对 Picture 显示——视频/音频没有「生图档」这回事；旧台账行没有记录时
+               说「未知」，不编造。 -->
+          <span
+            v-if="usesLedger && item.kind === 'picture'"
+            class="muted"
+            data-testid="asset-model-label"
+          >
+            生图档：{{ item.image_model_label || '未知' }}
           </span>
           <button
             v-if="isCurrent(item)"

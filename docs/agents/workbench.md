@@ -120,7 +120,13 @@
   状态、不发事件**，残片由启动清理收拾（`store.cleanup_assets`）。
 - **参考素材台账**（D7-2 / #255；D7 修订 #279）住 `SessionState.asset_ledger`（会话文件是
   唯一真源，ADR 0032），不另写 `asset-ledger.json`：`name / kind / number / asset_id /
-  sha256 / round / status / source`。
+  sha256 / round / status / source / image_model`。
+  - **生图档位**（`image_model`，#292）只在**派生行**上：值是档位键（`qwen` / `moss` /
+    `z_image`），源自阶段 1 条目上的同名判定（`image_routing` 是唯一事实源）。它和 state
+    条目上是同名**不同层**的字段——条目上存 `{model, source, keyword, evidence}` 对象，
+    台账行上只存键；别把台账行交给 `model_of`。显示名不在台账里存第二份：详情响应按
+    `image_config.IMAGE_MODEL_LABELS` 现渲染成 `RefOut.image_model_label`，卡片与素材
+    分区都读这一个字段。没有这个键的旧行（或用户上传的 r2v 行）读成「未知」。
   - **两种来源**（`source`）回答的是「这件素材是谁提供的」：ref 恒 `derived`（阶段 1
     收尾按资产图词派生）、导演台 r2v 恒 `uploaded`（创建时用户上传建立）；没有这个键
     的旧行读成 `uploaded`。**它不参与判定**：起跑门槛按 `brief.director_mode == "r2v"`
@@ -165,7 +171,7 @@
 | 第 N 件出词 | job `asset_loop` | `asset_loop` | `assets/picture-NN.md`（kind `asset_prompt`）；挂 `asset_image` 待办 |
 | 第 N 件交图 | 待办 `asset_image` | — | 载荷 `asset_id`；会话 `awaiting_human` |
 | 第 N 件放弃 | 待办 `asset_image` | — | `decision=abandon_asset`（不带 `asset_id`）：该行转 `abandoned`，不落图 |
-| 第 N 件校对 | job `asset_loop` | `asset_loop` | 读图（`describe_image`）对照这一件的词；通过转 `passed`，不通过回 `pending` |
+| 第 N 件校对 | job `asset_loop` | `asset_loop` | 读图（`describe_image`）对照这一件的词；通过转 `passed`，不通过回 `pending`。结论随卡带 `vision_model`（调用点取视觉配置里的模型名，#292） |
 | 补交口 | 待办 `asset_extra` | `asset_extra` | 循环结束后、阶段 2 之前：`submit_extras`（载荷 `asset_id`）或 `no_extras`（「没有，就这样」） |
 | 阶段 2 | job | `stage2` | 补交口落定后自动接上（注入卡是 #257） |
 

@@ -113,6 +113,17 @@
               }
             ],
             "title": "Video Asset Id"
+          },
+          "vision_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vision Model"
           }
         },
         "required": [
@@ -667,6 +678,28 @@
           "asset_id": {
             "title": "Asset Id",
             "type": "string"
+          },
+          "image_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Model"
+          },
+          "image_model_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Model Label"
           },
           "kind": {
             "title": "Kind",

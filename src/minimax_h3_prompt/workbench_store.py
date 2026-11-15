@@ -33,6 +33,8 @@ from .brief_parser import (
     route_uses_asset_ledger_fields,
 )
 from .kinds import KIND_PICTURE, KINDS
+from .image_config import image_model_label
+from .image_routing import ENTRY_KEY as IMAGE_MODEL_KEY
 from .ref_capacity import (
     ASSET_KIND_TO_REFERENCE,
     ReferenceCapacityError,
@@ -870,9 +872,13 @@ _ACTION_ITEM_ASSET_KEYS: tuple[str, ...] = ("start_asset_id", "end_asset_id")
 # 分开声明，是因为重放侧的处理不同——图槽在两个事件（created/resolved）上都补，
 # 交付槽只在 resolved 上补（待办创建时用户还没交）。两份键表都不许手抄。
 _ACTION_ITEM_DELIVERY_KEYS: tuple[str, ...] = ("video_asset_id", "pack_asset_id")
+# 校对结论附带的读图模型名（#292）：只出现在素材校对那两种事件上（不通过的重开卡、
+# 通过后的补报告）。它随事件走，快照落后时靠重放补回来——否则刷新后「读图模型」那一行
+# 会静默变成「未知」，把「没记」和「没读到」混成同一件事。
+_ACTION_ITEM_PROOFREAD_KEYS: tuple[str, ...] = ("vision_model",)
 _ACTION_ITEM_PAYLOAD_KEYS: tuple[str, ...] = (
     *_ACTION_ITEM_INDEX_KEYS, _ACTION_ITEM_REASON_KEY, *_ACTION_ITEM_ASSET_KEYS,
-    *_ACTION_ITEM_DELIVERY_KEYS)
+    *_ACTION_ITEM_DELIVERY_KEYS, *_ACTION_ITEM_PROOFREAD_KEYS)
 
 
 def _validate_action_item_created(payload: dict[str, Any]) -> None:
@@ -892,6 +898,7 @@ def _validate_action_item_created(payload: dict[str, Any]) -> None:
             f"事件 payload 的 {_ACTION_ITEM_REASON_KEY!r} 必须是字符串：{reason!r}")
     _validate_action_item_string_keys(payload, _ACTION_ITEM_ASSET_KEYS)
     _validate_action_item_string_keys(payload, _ACTION_ITEM_DELIVERY_KEYS)
+    _validate_action_item_string_keys(payload, _ACTION_ITEM_PROOFREAD_KEYS)
 
 
 def _validate_action_item_string_keys(
@@ -916,8 +923,10 @@ def _validate_action_item_resolved(payload: dict[str, Any]) -> None:
     _require_choice(payload, "decision", _DECISIONS)
     # 决议事件也可能带图槽（导演台开场首帧）：与创建事件同一份校验。
     _validate_action_item_string_keys(payload, _ACTION_ITEM_ASSET_KEYS)
-    # 交付槽（成片/最终包）只在这条事件上出现，同样要挡住半截值。
+    # 交付槽（成片/最终包）只在这条事件上出现，同样要挡住半截值；读图模型名随
+    # 「补报告」也走这条事件（#292）。
     _validate_action_item_string_keys(payload, _ACTION_ITEM_DELIVERY_KEYS)
+    _validate_action_item_string_keys(payload, _ACTION_ITEM_PROOFREAD_KEYS)
     # 补报告（#287）：素材校对定稿后，补漏清单随同一条事件回写进已决议的卡片。
     # 出现时必须是字符串——重放侧会把它原样放进待办的 ``reason``。
     reason = payload.get(_ACTION_ITEM_REASON_KEY)
@@ -1233,6 +1242,11 @@ def _replay_snapshot(
                     for key in _ACTION_ITEM_DELIVERY_KEYS:
                         if isinstance(payload.get(key), str):
                             item[key] = payload[key]
+                    # 读图模型名（#292）：通过后的「补报告」只带 reason 与它，重放要
+                    # 把它补回去，否则刷新一次「读图模型」那行就退回「未知」。
+                    for key in _ACTION_ITEM_PROOFREAD_KEYS:
+                        if isinstance(payload.get(key), str):
+                            item[key] = payload[key]
         # artifact.created：产物清单从目录现扫（_artifacts），没有快照字段要补。
     return status, jobs, action_items
 
@@ -1255,6 +1269,14 @@ class RefOut(BaseModel):
     # ``mode`` 反推。
     status: str = ""
     source: str = ""
+    # 生图档位（#292）：``image_model`` 是键（``qwen`` / ``moss`` / ``z_image``），
+    # ``image_model_label`` 是显示名。**显示名只在这里渲染一次**（映射住
+    # ``image_config.IMAGE_MODEL_LABELS``）：卡片与素材分区都读这一个字段，前端不许
+    # 再抄一份名字表——那样改一档的称呼就会只在其中一处生效。
+    # 用 ``None`` 缺省（不是空串，同 ``ActionItemOut`` 的图槽口径）：旧台账行没有这个
+    # 键，``None`` 说的是「没有记录」，界面显示「未知」而不编造；也让契约里保持可选。
+    image_model: str | None = None
+    image_model_label: str | None = None
 
 
 class VideoOutputOut(BaseModel):
@@ -1336,6 +1358,10 @@ class ActionItemOut(BaseModel):
     pack_asset_id: str | None = None
     # 被拒原因/校对差异等给人看的文本：段循环被拒、素材校对不通过时填（D7 §6.3）。
     reason: str = ""
+    # 本次读图结论是哪个视觉模型给的（#292）：只出现在素材校对那两种卡上（不通过的
+    # 重开卡、通过后的补报告）。用 ``None`` 缺省（同图槽口径）：其余待办没有这一项，
+    # 也让契约里保持可选；``None`` ＝读图模型未知，界面照实说「未知」。
+    vision_model: str | None = None
 
 
 class SegmentAssetOut(BaseModel):
@@ -1663,11 +1689,19 @@ def _ledger_entry(name: str, asset_kind: str, number: int, asset_id: str,
     }
 
 
-def _derived_picture_entry(name: str, number: int) -> dict[str, Any]:
+def _derived_picture_entry(name: str, number: int,
+                           image_model: str = "") -> dict[str, Any]:
     """阶段 1 派生的一件 Picture：**还没交回来**（``pending``）、没有正本（id 与哈希留空）。
 
     正本要等素材循环里交图并定稿才落进这一行（``jobs._settle_asset``）。先塞一个占位
     ``asset_id`` 会让下游把它当成一条能读的素材，卡上出现一个打不开的槽。
+
+    生图档位（#292）随行落进台账：``image_model`` 在这里存的是**档位键**（如 ``qwen``），
+    而 state 条目上的同名字段是 ``{model, source, keyword, evidence}`` 判定对象
+    （``image_routing``）。两者同名不同层，**别把台账行交给 ``model_of``**——它要的是
+    判定对象。取数住 ``generation.asset_image_models``：条目上没有记录时按历史 Z-Image
+    读（与产物出口同一条读法）；名字根本不在那里（用户登记的 ref）才留空串，前端显示
+    「未知」而不编造。
     """
     return {
         "name": name,
@@ -1678,6 +1712,7 @@ def _derived_picture_entry(name: str, number: int) -> dict[str, Any]:
         "round": 0,
         "status": ASSET_LEDGER_STATUS_PENDING,
         "source": ASSET_LEDGER_SOURCE_DERIVED,
+        IMAGE_MODEL_KEY: image_model,
     }
 
 
@@ -1736,10 +1771,15 @@ def derived_asset_rows(brief: Brief,
     取数与对账都住 ``generation.derived_asset_registry``（缺件/多件/改名在那里硬失败），
     编号口径与 ``ref_asset_registry`` 同源——两处各排一次就会「台账写 2、分镜表写 1」。
     这一步**会抛** ``AssetPromptMissing``：调用方要么让它中止阶段 1，要么先别落盘。
-    """
-    from .generation import derived_asset_registry
 
-    return [_derived_picture_entry(ref.name, ref.picture)
+    生图档位（``image_model``，#292）与名字走同一份条目：取数住
+    ``generation.asset_image_models``（``image_routing`` 是唯一事实源），这里不再
+    按名字各算一遍。
+    """
+    from .generation import asset_image_models, derived_asset_registry
+
+    models = asset_image_models(brief, state)
+    return [_derived_picture_entry(ref.name, ref.picture, models.get(ref.name, ""))
             for ref in derived_asset_registry(brief, state)]
 
 
@@ -1801,11 +1841,25 @@ def _brief_out(brief: Brief,
         ),
         # brief.refs 属于 CLI 文件流程（带本地路径的那套登记），工作台的参考素材
         # 只能从台账来（spec §4.1）：这里统一按台账回显，不让两套登记混进同一个字段。
-        refs=[RefOut(name=str(entry["name"]), kind=str(entry["kind"]),
-                     number=int(entry["number"]), asset_id=str(entry["asset_id"]),
-                     status=str(entry.get("status") or ""),
-                     source=_ledger_source(entry))
-              for entry in _ledger_order(ledger)],
+        refs=[_ref_out(entry) for entry in _ledger_order(ledger)],
+    )
+
+
+def _ref_out(entry: Mapping[str, Any]) -> RefOut:
+    """台账一行 → 详情响应里的摘要（含生图档位，#292）。
+
+    ``image_model`` 是档位键，``image_model_label`` 是**唯一一次**的显示名渲染：空值
+    （旧台账行没有记录）两者都给 ``None``、由界面说「未知」；非空值写入时已过
+    ``image_routing`` 的值域校验，这里再遇到错值就该响，不静默换成「未知」掩盖坏数据。
+    """
+    model = str(entry.get(IMAGE_MODEL_KEY) or "")
+    return RefOut(
+        name=str(entry["name"]), kind=str(entry["kind"]),
+        number=int(entry["number"]), asset_id=str(entry["asset_id"]),
+        status=str(entry.get("status") or ""),
+        source=_ledger_source(entry),
+        image_model=model or None,
+        image_model_label=image_model_label(model) if model else None,
     )
 
 

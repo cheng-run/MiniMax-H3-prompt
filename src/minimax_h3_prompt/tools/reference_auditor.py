@@ -146,6 +146,15 @@ def _read_without_stream(messages: list, cause: str) -> str:
     return text
 
 
+def vision_model_name() -> str:
+    """本次读图会用的视觉模型名（``config.vision_model.model``）。
+
+    取数住构造客户端的同一处：换档时「配了什么」与「卡上写谁读的图」不会分家。
+    只读配置，不建客户端——桩管线也要能报这个名字而不碰模型（#292）。
+    """
+    return str(config.vision_model.model)
+
+
 def describe_image(path: str | Path, instruction: str | None = None) -> str:
     """用视觉模型描述一张参考图（角色/场景外观），供人工确认。
 

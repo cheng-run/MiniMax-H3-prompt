@@ -450,6 +450,8 @@ export interface components {
             status: string;
             /** Video Asset Id */
             video_asset_id?: string | null;
+            /** Vision Model */
+            vision_model?: string | null;
         };
         /**
          * ActionItemResolve
@@ -706,6 +708,10 @@ export interface components {
         RefOut: {
             /** Asset Id */
             asset_id: string;
+            /** Image Model */
+            image_model?: string | null;
+            /** Image Model Label */
+            image_model_label?: string | null;
             /** Kind */
             kind: string;
             /** Name */

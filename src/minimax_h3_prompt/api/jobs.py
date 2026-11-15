@@ -410,6 +410,19 @@ def _read_image_for_proofread(path: Path, request: str) -> Any:
         raise ProofreadUnavailable(PROOFREAD_STEP_PARSE, exc) from exc
 
 
+def _vision_model_name() -> str:
+    """本次读图用的视觉模型名（#292）；取不到就给空串，界面说「未知」。
+
+    读图模块本身导不进来也是 #290 认的「客户端不可用」之一，那时模型名同样取不到——
+    一个展示用的标签不该把校对判成任务故障（结论本身会写「校对未完成：原因」）。
+    """
+    try:
+        from ..tools.reference_auditor import vision_model_name
+        return vision_model_name()
+    except Exception:  # noqa: BLE001 - 标签取不到不是快照损坏
+        return ""
+
+
 def _abandon_asset_note(name: str) -> str:
     """放弃一件的代价说明（#279 US10）：放弃的是图，**不是那些文字**。
 
@@ -3281,6 +3294,9 @@ class JobRunner:
                             stage=step_machine.STEP_ASSET_LOOP)
         if cancel_event.is_set():
             raise JobCancelled(ASSET_PROOFREAD_NODE)
+        # 读图模型名在**调用点**取（#292）：结论里注明「是谁读的这张图」，用户才判得了
+        # 这次结论该不该信。不可用时也照报——配置里配的是哪一档，仍是排查的线索。
+        vision_model = _vision_model_name()
         try:
             reading = _read_image_for_proofread(
                 path, build_proofread_request(current, locked))
@@ -3292,7 +3308,8 @@ class JobRunner:
             self._emit_progress(session_id, job_id, ASSET_PROOFREAD_NODE, "done",
                                 stage=step_machine.STEP_ASSET_LOOP)
             return {"step": ASSET_STEP_PROOFREAD, "number": number, "name": name,
-                    "passed": True, "reason": _unproofread_reason(exc)}
+                    "passed": True, "reason": _unproofread_reason(exc),
+                    "vision_model": vision_model}
         report = compare_descriptions(current, reading, locked)
         if cancel_event.is_set():
             raise JobCancelled(ASSET_PROOFREAD_NODE)
@@ -3303,7 +3320,8 @@ class JobRunner:
         self._emit_progress(session_id, job_id, ASSET_PROOFREAD_NODE, "done",
                             stage=step_machine.STEP_ASSET_LOOP)
         return {"step": ASSET_STEP_PROOFREAD, "number": number, "name": name,
-                "passed": report.is_clean(), "reason": reason}
+                "passed": report.is_clean(), "reason": reason,
+                "vision_model": vision_model}
 
     def _execute_asset_proofread_fake(self, session_id: str, job_id: str,
                                       cancel_event: threading.Event,
@@ -3313,6 +3331,9 @@ class JobRunner:
         结论必须确定性且两条路都覆盖：第 1 件第一轮不通过、其余通过（判据是台账
         轮次，不是调用次数——重跑/续跑不能换结论）。桩**不改写任何词**：它与真实
         路径同形，只换「谁判」，台账转移仍在 ``_finish_asset_proofread`` 那一份代码里。
+
+        读图模型名照报（#292）：只读配置、不建客户端。浏览器里的形状因此与真实路径
+        一致——桩模式唯一的谎言是「结论是假的」，不该再搭上一个「这一格是空的」。
         """
         from .fake_pipeline import asset_proofread_verdict
 
@@ -3340,7 +3361,8 @@ class JobRunner:
         self._emit_progress(session_id, job_id, ASSET_PROOFREAD_NODE, "done",
                             stage=step_machine.STEP_ASSET_LOOP)
         return {"step": ASSET_STEP_PROOFREAD, "number": number, "name": name,
-                "passed": passed, "reason": reason}
+                "passed": passed, "reason": reason,
+                "vision_model": _vision_model_name()}
 
     def _finish_asset_write(self, session_id: str, job_id: str,
                             result: dict[str, Any]) -> None:
@@ -3424,6 +3446,8 @@ class JobRunner:
         number = int(result["number"])
         passed = bool(result["passed"])
         reason = str(result["reason"])
+        # 读图模型名（#292）：随结论一起落到卡上（不通过的重开卡 / 通过后的补报告）。
+        vision_model = str(result.get("vision_model") or "")
         # 下一个任务的 kind 由「这一件定稿之后的台账」决定。这里按磁盘快照先算一次，
         # 只为选路（继续写词 / 转阶段 2）；``_apply`` 里会按 mutate 的快照**再算一次**
         # 作为真正写盘的台账——锁内那次才是权威值。两次都调 ``_settle_asset``，规则
@@ -3475,7 +3499,7 @@ class JobRunner:
             item = ActionItemOut(
                 item_id=uuid.uuid4().hex, kind=step_machine.ACTION_ASSET_IMAGE,
                 status="pending", created_at=_now(), asset_index=number,
-                reason=reason)
+                reason=reason, vision_model=vision_model or None)
 
         def _apply(detail: Any) -> dict[str, Any]:
             jobs = self._succeed_job(detail, job_id)
@@ -3503,10 +3527,10 @@ class JobRunner:
                 if items is None:
                     items = [entry.model_dump(mode="json")
                              for entry in detail.action_items]
-                # 只添 reason，其余字段（决议值、决议时间、素材槽）原样保留：这不是
-                # 第二次决议，是给已决议的卡片补一段结论。
+                # 只添 reason 与读图模型名（#292），其余字段（决议值、决议时间、素材槽）
+                # 原样保留：这不是第二次决议，是给已决议的卡片补一段结论。
                 changes["action_items"] = [
-                    ({**entry, "reason": reason}
+                    ({**entry, "reason": reason, "vision_model": vision_model or None}
                      if entry.get("item_id") == report_item_id else entry)
                     for entry in items]
             elif items is not None:
@@ -3524,20 +3548,23 @@ class JobRunner:
             created_payload: dict[str, Any] = {
                 "item_id": item.item_id, "kind": item.kind}
             if item.kind == step_machine.ACTION_ASSET_IMAGE:
-                # 校差不通过才有这两个键：件号与差异清单是重开卡片要读的。
+                # 校差不通过才有这几个键：件号、差异清单与读图模型是重开卡片要读的。
                 created_payload["asset_index"] = number
                 created_payload["reason"] = reason
+                if vision_model:
+                    created_payload["vision_model"] = vision_model
             events.append(EventDraft(
                 "action_item.created", created_payload, job_id=job_id))
         if report_item_id:
             # 补报告也走 ``action_item.resolved``（事件类型保持十种闭合集合）。重放侧
-            # 只补 reason，已决议的卡片不再改决议时间——它记的是人按下那一刻。
-            events.append(EventDraft(
-                "action_item.resolved",
-                {"item_id": report_item_id,
-                 "decision": step_machine.DECISION_SUBMIT_IMAGE,
-                 "reason": reason},
-                job_id=job_id))
+            # 只补 reason 与读图模型名，已决议的卡片不再改决议时间——它记的是人按下那一刻。
+            payload: dict[str, Any] = {
+                "item_id": report_item_id,
+                "decision": step_machine.DECISION_SUBMIT_IMAGE,
+                "reason": reason}
+            if vision_model:
+                payload["vision_model"] = vision_model
+            events.append(EventDraft("action_item.resolved", payload, job_id=job_id))
         self.store.mutate(session_id, _apply, events=events)
         return next_job
 

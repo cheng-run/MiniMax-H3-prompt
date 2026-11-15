@@ -131,6 +131,51 @@ describe('AssetImageCard 词与已定稿', () => {
   })
 })
 
+describe('AssetImageCard 生图档位与读图模型（#292）', () => {
+  it('显示本件的生图档位：直接用服务端渲染好的显示名', async () => {
+    const wrapper = mountCard(
+      makeItem(),
+      [],
+      [
+        makeRef({
+          name: '台灯',
+          number: 2,
+          image_model: 'qwen',
+          image_model_label: 'Qwen-Image 2.1',
+        }),
+      ],
+    )
+    await settle()
+
+    // 前端不另写名字表：卡片照着详情里的显示名念，改档的称呼只需服务端改一处。
+    expect(wrapper.get('[data-testid="asset-image-model"]').text()).toContain(
+      '生图档：Qwen-Image 2.1',
+    )
+  })
+
+  it('台账行没有档位字段时显示「未知」，不编造一档', async () => {
+    const wrapper = mountCard(makeItem(), [], [makeRef({ number: 2, name: '台灯' })])
+    await settle()
+
+    expect(wrapper.get('[data-testid="asset-image-model"]').text()).toContain('生图档：未知')
+  })
+
+  it('校对结论行注明本次读图模型；缺字段时说「未知」', async () => {
+    const withModel = mountCard(makeItem({ reason: '[偏差] 1 处', vision_model: 'qwen3.7-plus' }))
+    await settle()
+    expect(withModel.get('[data-testid="proofread-vision-model"]').text()).toContain(
+      '读图模型：qwen3.7-plus',
+    )
+
+    // 旧会话 / 没读到模型：同一行说「未知」，不是空着让人以为是加载中。
+    const withoutModel = mountCard(makeItem({ reason: '[偏差] 1 处' }))
+    await settle()
+    expect(withoutModel.get('[data-testid="proofread-vision-model"]').text()).toContain(
+      '读图模型：未知',
+    )
+  })
+})
+
 describe('AssetImageCard 提交', () => {
   it('上传生成结果 → 用返回的素材标识决议 → 通知父组件刷新', async () => {
     let uploads = 0

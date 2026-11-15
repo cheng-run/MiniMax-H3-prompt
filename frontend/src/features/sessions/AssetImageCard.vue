@@ -38,6 +38,12 @@ const pictureRefs = computed(() =>
 const semanticName = computed(
   () => pictureRefs.value.find((ref) => ref.number === number.value)?.name ?? '未命名',
 )
+// 本件的生图档位（#292）：显示名由服务端按**全仓唯一一份映射**渲染（`image_model_label`），
+// 这里只负责显示，不另写一份名字表。旧台账行没有这个字段时显示「未知」——不编造一档，
+// 用户才敢照着它去挑 ComfyUI 节点。
+const imageModelLabel = computed(
+  () => pictureRefs.value.find((ref) => ref.number === number.value)?.image_model_label || '未知',
+)
 // 按状态数，不按编号比：有了 `abandoned` 之后，「编号小于当前」里可能夹着放弃件，
 // 把放弃件念成「已定稿」等于替用户宣布一张不存在的图已经交了。
 const passedRefs = computed(() => pictureRefs.value.filter((ref) => ref.status === 'passed'))
@@ -200,6 +206,8 @@ async function confirmAbandon(): Promise<void> {
 <template>
   <section class="asset-card">
     <h2>第 {{ number }} 件素材图 · {{ semanticName }}</h2>
+    <!-- 生图档位（#292）：这条词按哪一档的纪律写成，用户据此知道贴进哪个 ComfyUI 节点。 -->
+    <p class="muted" data-testid="asset-image-model">生图档：{{ imageModelLabel }}</p>
     <p class="muted">
       已定稿 {{ passedRefs.length }} / 共 {{ pictureRefs.length }} 件<template
         v-if="abandonedRefs.length"
@@ -234,6 +242,10 @@ async function confirmAbandon(): Promise<void> {
     <section v-if="item.reason" class="diff" aria-label="校对差异">
       <h3>校对结论：不通过</h3>
       <pre class="diff__text">{{ item.reason }}</pre>
+      <!-- 本次读图是哪个视觉模型给的结论（#292）：换过档之后，用户要判得了这条结论该不该信。 -->
+      <p class="muted" data-testid="proofread-vision-model">
+        读图模型：{{ item.vision_model || '未知' }}
+      </p>
       <p class="muted">按上面的差异改词后重新生成一张，再交回这一件。</p>
     </section>
 
