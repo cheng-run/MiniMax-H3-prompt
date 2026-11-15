@@ -84,6 +84,40 @@ const submitting = ref(false)
 const submitError = ref<string | null>(null)
 const submitted = ref(false)
 
+// 放弃这一件（#279 US9 / #282）：模型怎么都画不出来时的出口。代价只有一句，但必须
+// 在点下去之前看得到——所以先展开确认，不点确认不发请求。
+const confirmingAbandon = ref(false)
+const abandoning = ref(false)
+const abandonError = ref<string | null>(null)
+const abandonNote = ref<string | null>(null)
+
+// 与服务端 ``_abandon_asset_note`` 同一句代价（服务端把它写进已决议待办的 reason
+// 与事件流）：放弃的是图，不是那些文字。确认前用现在时说明「会发生什么」，
+// 成功后的回执才用服务端那句完成时。
+const abandonCost = computed(
+  () =>
+    `放弃的是「${semanticName.value}」这一件图，不是那些文字：分镜表与段词里对` +
+    `「${semanticName.value}」的指称会变成无图指称（照抄接线时这一格没有参考图可填）。` +
+    '已经定稿的文本不会被自动改写。',
+)
+// 决议响应是 ``JobSummary``，不带这句话；回执镜像服务端原句（事件流里可查）。
+const abandonReceipt = computed(
+  () =>
+    `已放弃「${semanticName.value}」这一件：分镜表与段词里对「${semanticName.value}」` +
+    '的指称会变成无图指称（照抄接线时这一格没有参考图可填）。' +
+    '已经定稿的文本不会被自动改写。',
+)
+
+// 卡片随快照换件：上一件的回执与确认态不能带到下一件上。
+watch(
+  () => props.item.item_id,
+  () => {
+    confirmingAbandon.value = false
+    abandonNote.value = null
+    abandonError.value = null
+  },
+)
+
 function onFileChange(event: Event): void {
   const input = event.target as HTMLInputElement
   selectedFile.value = input.files?.[0] ?? null
@@ -117,6 +151,30 @@ async function submit(): Promise<void> {
     submitError.value = errorMessage(error, '提交失败，请稍后重试。')
   } finally {
     submitting.value = false
+  }
+}
+
+async function confirmAbandon(): Promise<void> {
+  if (abandoning.value) {
+    return
+  }
+  abandoning.value = true
+  abandonError.value = null
+  try {
+    // 不带 asset_id：放弃与交图是互斥的两种决议（服务端也会拒两者同时提交）。
+    await resolveActionItem(
+      props.sessionId,
+      props.item.item_id,
+      { decision: 'abandon_asset' },
+      newIdempotencyKey(),
+    )
+    abandonNote.value = abandonReceipt.value
+    confirmingAbandon.value = false
+    emit('submitted')
+  } catch (error) {
+    abandonError.value = errorMessage(error, '放弃失败，请稍后重试。')
+  } finally {
+    abandoning.value = false
   }
 }
 </script>
@@ -174,6 +232,38 @@ async function submit(): Promise<void> {
     </form>
 
     <p v-if="submitted" role="status" class="muted">已提交，正在读图校对…</p>
+
+    <!-- 放弃这一件（#279 US9）：模型怎么都画不出来时的出口。代价放在确认里，
+         点「放弃这一件」之前不铺开，但确认按钮旁边一定看得见。 -->
+    <section class="abandon" aria-label="放弃这一件">
+      <Button
+        v-if="!confirmingAbandon"
+        type="button"
+        variant="secondary"
+        :disabled="submitting || abandoning"
+        @click="confirmingAbandon = true"
+      >
+        放弃这一件
+      </Button>
+      <div v-else class="abandon__confirm">
+        <p class="abandon__cost">{{ abandonCost }}</p>
+        <div class="actions">
+          <Button type="button" :disabled="abandoning" @click="confirmAbandon">
+            {{ abandoning ? '正在放弃…' : '确认放弃' }}
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            :disabled="abandoning"
+            @click="confirmingAbandon = false"
+          >
+            取消
+          </Button>
+        </div>
+      </div>
+      <ErrorNotice v-if="abandonError" :message="abandonError" />
+      <p v-if="abandonNote" role="status" class="muted abandon__note">{{ abandonNote }}</p>
+    </section>
   </section>
 </template>
 
@@ -232,6 +322,27 @@ async function submit(): Promise<void> {
 .actions {
   display: flex;
   justify-content: flex-end;
+  gap: var(--space-2);
+}
+.abandon {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-border);
+}
+.abandon__confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.abandon__cost {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+.abandon__note {
+  margin: 0;
 }
 .field-error {
   margin: 0;

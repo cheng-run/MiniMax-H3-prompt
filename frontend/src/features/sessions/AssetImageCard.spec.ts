@@ -174,3 +174,104 @@ describe('AssetImageCard 提交', () => {
     expect(requests).toBe(0)
   })
 })
+
+describe('AssetImageCard 放弃这一件', () => {
+  it('先把代价摊在确认里，确认后才发决议（只带 decision，不带 asset_id）', async () => {
+    const bodies: unknown[] = []
+    const keys: (string | null)[] = []
+    server.use(
+      http.post(resolveUrl, async ({ request }) => {
+        bodies.push(await request.json())
+        keys.push(request.headers.get('idempotency-key'))
+        return HttpResponse.json(
+          { job_id: 'job-1', kind: 'asset_loop', status: 'running', started_at: '' },
+          { status: 202 },
+        )
+      }),
+    )
+    const wrapper = mountCard()
+    await settle()
+
+    // 点之前不吓人：代价还没铺开，也没有发请求。
+    const abandon = wrapper.findAll('button').find((button) => button.text() === '放弃这一件')!
+    expect(abandon).toBeTruthy()
+    expect(wrapper.text()).not.toContain('无图指称')
+    expect(bodies).toHaveLength(0)
+
+    await abandon.trigger('click')
+    expect(bodies).toHaveLength(0)
+    // 后果在点「确认放弃」之前可见（#279 US10）：这一件是第 2 件「台灯」。
+    expect(wrapper.text()).toContain('分镜表与段词里对「台灯」的指称会变成无图指称')
+    expect(wrapper.text()).toContain('已经定稿的文本不会被自动改写')
+
+    const confirm = wrapper.findAll('button').find((button) => button.text() === '确认放弃')!
+    await confirm.trigger('click')
+    await settle()
+
+    expect(bodies).toEqual([{ decision: 'abandon_asset' }])
+    expect(keys[0]).toBeTruthy()
+    expect(wrapper.emitted('submitted')).toHaveLength(1)
+    // 回执用服务端原句（镜像），确认面板收起、按钮回到可再点状态。
+    expect(wrapper.text()).toContain('已放弃「台灯」这一件')
+    expect(wrapper.findAll('button').some((button) => button.text() === '确认放弃')).toBe(false)
+  })
+
+  it('取消不发请求，代价收起', async () => {
+    let requests = 0
+    server.use(
+      http.post(resolveUrl, () => {
+        requests += 1
+        return HttpResponse.json({}, { status: 202 })
+      }),
+    )
+    const wrapper = mountCard()
+    await settle()
+
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '放弃这一件')!
+      .trigger('click')
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '取消')!
+      .trigger('click')
+
+    expect(requests).toBe(0)
+    expect(wrapper.text()).not.toContain('无图指称')
+    expect(wrapper.findAll('button').some((button) => button.text() === '放弃这一件')).toBe(true)
+  })
+
+  it('放弃失败时显示后端文案，不伪装成功', async () => {
+    server.use(
+      http.post(resolveUrl, () =>
+        HttpResponse.json(
+          {
+            type: 'about:blank',
+            title: '素材图待办载荷不合法',
+            status: 422,
+            code: 'asset_image_invalid',
+            detail: '素材台账里没有第 2 件参考素材。',
+            instance: '',
+          },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const wrapper = mountCard()
+    await settle()
+
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '放弃这一件')!
+      .trigger('click')
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '确认放弃')!
+      .trigger('click')
+    await settle()
+
+    expect(wrapper.text()).toContain('素材台账里没有第 2 件参考素材。')
+    expect(wrapper.emitted('submitted')).toBeUndefined()
+    expect(wrapper.text()).not.toContain('已放弃「台灯」这一件')
+  })
+})

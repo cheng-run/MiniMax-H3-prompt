@@ -5,25 +5,26 @@ import {
   ApiError,
   assetMediaUrl,
   deleteSessionAsset,
+  reopenSessionAsset,
   uploadSessionAsset,
   type Asset,
   type RefOut,
 } from '@/api/client'
 import ErrorNotice from '@/components/ui/ErrorNotice.vue'
 
-import { REF_KIND_LABELS, capacityRows } from './refCapacity'
+import { newIdempotencyKey } from './keys'
+import { REF_KIND_LABELS, REF_STATUS_LABELS, capacityRows } from './refCapacity'
+import type { AssetPhase } from './refCapacity'
 
-// 素材分区（D4 spec §9 / D7 spec §4.2 / D8-8 #268）：复用 D3 的上传/列表/预览。
+// 素材分区（D4 spec §9 / D7 spec §4.2 / D7 修订 #279 / #283）。
 //
-// 两种形态共用这一块，但语义不同：
+// 三种形态共用这一块，但语义不同：
 // - 不走台账（base）：帧/素材上传，只增不删，不带语义名，没有容量条（D4-AC13 原样保留）。
-// - 走台账（ref 与导演台 r2v）：上传必须带语义名（会话内唯一），列表按**素材台账**
-//   （`brief.refs`）显示语义名/类型/编号，容量按 9/3/3/12 即时判红，起跑前可删。
-//   判据只看 `mode` 与 `director_mode`：导演台只有 r2v 用台账，t2v/i2v/fl2v 没有
-//   参考素材，给它们开语义名输入会让后端 422 变成「界面先放行、提交才报错」。
-//
-// 列表来自父组件的会话快照：不走台账用 `assets`（目录现扫），走台账用 `refs`（台账），
-// 缩略图/字节/时长仍从 `assets` 按 asset_id join。本组件不维护第二份列表。
+// - 导演台 r2v：起跑前由用户上传建立台账（#279「路线差异」），语义名输入与删除照旧。
+// - ref：素材集合由阶段 1 派生，上传发生在素材循环的待办卡上。这里是**只读台账**——
+//   三态分别回答「这片要几件、现在到哪一步、还差谁」，不提供改名改号入口（语义名与
+//   编号来自资产图词，改一个字符就会让分镜表标签对不上）。唯一的写操作是循环进行中
+//   对已定稿行的「换一张图」（#282）：打回这一件重交，语义名与编号仍然不动。
 const props = withDefaults(
   defineProps<{
     sessionId: string
@@ -32,52 +33,106 @@ const props = withDefaults(
     directorMode?: string
     refs?: RefOut[]
     status?: string
+    /** ref 的三态（#283）：父组件按「清单已派生 + 台账还有没有未定稿件」算好传入。 */
+    phase?: AssetPhase | ''
+    /** 正在等用户交图的那一件（父组件从 pending 的 `asset_image` 待办取）。 */
+    currentNumber?: number | null
   }>(),
-  { mode: 'base', directorMode: '', refs: () => [], status: 'created' },
+  {
+    mode: 'base',
+    directorMode: '',
+    refs: () => [],
+    status: 'created',
+    phase: '',
+    currentNumber: null,
+  },
 )
 
-const emit = defineEmits<{ refresh: [] }>()
+const emit = defineEmits<{ refresh: []; gotoReview: [] }>()
 
+const isRef = computed(() => props.mode === 'ref')
 const usesLedger = computed(
-  () => props.mode === 'ref' || (props.mode === 'director' && props.directorMode === 'r2v'),
+  () => isRef.value || (props.mode === 'director' && props.directorMode === 'r2v'),
 )
-// 起跑锁（D7 §4.3）：走台账的会话离开 created 后不能再增删参考素材。base 不受限——
-// 帧提交上传发生在 awaiting_human，那是既有链路。
+// 起跑锁（D7 §4.3 / #282 位置锁）：走台账的会话离开 created 后不能再增删参考素材。
+// ref 的上传改由循环里的待办卡负责，这个锁只影响 r2v 的删除与上传框。
 const locked = computed(() => usesLedger.value && props.status !== 'created')
-const rows = computed(() => capacityRows(props.refs))
-const overCapacity = computed(() => rows.value.some((row) => row.over))
+
+// 父组件没给 phase 时按快照兜底：有台账行就当循环中，否则当还没派生。
+const phase = computed<AssetPhase>(
+  () => props.phase || (props.refs.length ? 'asset_loop' : 'created'),
+)
+// created 态连容量条都不出现：那时台账还空着，「0/9」只会让人以为要自己凑够 9 张。
+const showLedger = computed(() => !isRef.value || phase.value !== 'created')
+
+// 已放弃的行永远不会有正本（#279）：算进用量会让容量条凭空变红。
+const counted = computed(() => props.refs.filter((ref) => ref.status !== 'abandoned'))
+const rows = computed(() => capacityRows(counted.value))
+const overRows = computed(() => rows.value.filter((row) => row.over))
+const overCapacity = computed(() => overRows.value.length > 0)
+// 超限要说明超的是哪一档（#283 AC4）：只说「超了」用户不知道该减图还是减视频。
+const capacityHint = computed(() =>
+  overRows.value.map((row) => `${row.label} ${row.used}/${row.cap}`).join('、'),
+)
 
 const semanticName = ref('')
 const uploading = ref(false)
 const uploadError = ref<string | null>(null)
 const deleting = ref<string | null>(null)
 const deleteError = ref<string | null>(null)
+const reopening = ref<string | null>(null)
+const reopenError = ref<string | null>(null)
 // 视频/音频时长由元素自己的 loadedmetadata 给出；jsdom 里不触发，显示为「—」。
 const durations = reactive<Record<string, number>>({})
 
-interface ListedAsset {
+interface RowView {
+  /** 列表键：台账行在还未交图时没有 asset_id，用「类型-编号」才是稳定键。 */
+  key: string
   asset_id: string
   name: string
-  /** 走台账（ref / 导演台 r2v）是官方三型（picture/video/audio），其余是嗅探类型（image/video/audio）。 */
+  /** 走台账（ref / 导演台 r2v）是官方三型（picture/video/audio），其余是嗅探类型。 */
   kind: string
   number?: number
+  /** 台账四态之一；不上台账的形态为空串（没有登记这回事）。 */
+  status: string
 }
 
-const listed = computed<ListedAsset[]>(() => {
+const listed = computed<RowView[]>(() => {
   if (usesLedger.value) {
     return props.refs.map((ref) => ({
+      key: `${ref.kind}-${ref.number}`,
       asset_id: ref.asset_id,
       name: ref.name,
       kind: ref.kind,
       number: ref.number,
+      status: ref.status,
     }))
   }
   return props.assets.map((asset) => ({
+    key: asset.asset_id,
     asset_id: asset.asset_id,
     name: asset.name,
     kind: asset.kind,
+    status: '',
   }))
 })
+
+const pictureRows = computed(() =>
+  props.refs
+    .filter((ref) => ref.kind === 'picture')
+    .slice()
+    .sort((left, right) => left.number - right.number),
+)
+// 「当前件」= 待办卡上那一件（父组件从 pending 的 `asset_image` 待办取件号）。
+// 不从台账反推「第一件没定稿的」：审查还没通过、正在读图校对时台账里同样有未定稿行，
+// 但那两种情况都没有卡片在等你——按台账推会凭空多出一个「等你交图」。
+const currentNumber = computed(() => props.currentNumber ?? null)
+const passedCount = computed(
+  () => pictureRows.value.filter((ref) => ref.status === 'passed').length,
+)
+const abandonedCount = computed(
+  () => pictureRows.value.filter((ref) => ref.status === 'abandoned').length,
+)
 
 const assetById = computed(() => new Map(props.assets.map((asset) => [asset.asset_id, asset])))
 
@@ -90,6 +145,23 @@ function kindLabel(kind: string): string {
     return REF_KIND_LABELS[kind]
   }
   return kind
+}
+
+/** 一行的状态文案：定稿/放弃/校对中都是台账事实，剩下交给「当前件是不是它」。 */
+function statusText(item: RowView): string {
+  if (isCurrent(item)) {
+    return '正在等你交图'
+  }
+  // 「待交」是台账的静态状态，但队列里排在后面的那几件并不是现在要交的——
+  // 统一说「还没轮到」，免得三行都写着「待交」让人不知道该交哪一张。
+  if (item.status === 'pending') {
+    return '还没轮到'
+  }
+  return REF_STATUS_LABELS[item.status] ?? item.status
+}
+
+function isCurrent(item: RowView): boolean {
+  return isRef.value && item.number !== undefined && item.number === currentNumber.value
 }
 
 function errorMessage(error: unknown): string {
@@ -148,19 +220,83 @@ async function onDelete(assetId: string): Promise<void> {
     deleting.value = null
   }
 }
+
+/** 「换一张图」只对循环中已定稿的那一行出现（#279 US11 / #282）：循环走完后
+ *  注入卡与段内子集已经用掉那份台账快照，后端同样会拒，页面不摆一个必然失败的键。 */
+function canReopen(item: RowView): boolean {
+  return isRef.value && phase.value === 'asset_loop' && item.status === 'passed'
+}
+
+/** 两种 409 的出路不同（路线/时机不对 vs 这一行没有可换的图），失败时按后端
+ *  `problem.detail` 说话；缺文案时才按错误码兜底，不统一成「操作失败」。 */
+function reopenErrorMessage(error: unknown): string {
+  if (error instanceof ApiError) {
+    const detail = error.problem?.detail
+    if (detail) {
+      return detail
+    }
+    if (error.problem?.code === 'asset_reopen_unsupported') {
+      return '这个会话或这个时机不能换图：只有素材循环进行中的 ref 会话可以换。'
+    }
+    if (error.problem?.code === 'asset_not_reopenable') {
+      return '这一件没有可换的图：已放弃或还没定稿的那一件不在可换范围。'
+    }
+    return error.message
+  }
+  return '请求失败，请稍后重试。'
+}
+
+async function onReopen(assetId: string): Promise<void> {
+  if (reopening.value !== null) {
+    return
+  }
+  reopening.value = assetId
+  reopenError.value = null
+  try {
+    await reopenSessionAsset(props.sessionId, assetId, newIdempotencyKey())
+    emit('refresh')
+  } catch (error) {
+    reopenError.value = reopenErrorMessage(error)
+  } finally {
+    reopening.value = null
+  }
+}
 </script>
 
 <template>
   <section class="assets">
     <h2>素材</h2>
-    <p v-if="usesLedger" class="muted">
-      参考素材（ref 与导演台
-      r2v）：语义名必填、会话内唯一；类型由内容判定，编号按同类上传序自动分配。
+
+    <!-- ref 三态（#283）：created 只给引导文案，没有上传框——起跑不需要先有素材。 -->
+    <template v-if="isRef">
+      <p v-if="!showLedger" class="muted" data-testid="assets-guidance">
+        起跑不需要先交图：阶段 1 完成后这里会列出本片需要的 N
+        件参考素材（件数、语义名与编号都由流程定）。
+      </p>
+      <template v-else>
+        <p class="muted" data-testid="assets-summary">
+          <template v-if="pictureRows.length">
+            本片共 {{ pictureRows.length }} 件参考素材：已定稿 {{ passedCount }} 件<template
+              v-if="abandonedCount"
+              >、已放弃 {{ abandonedCount }} 件</template
+            >。
+          </template>
+          <template v-else>
+            本片没有参考素材：阶段 1 的资产清单是空的，素材循环直接走完。
+          </template>
+        </p>
+        <p class="muted" data-testid="assets-readonly">
+          语义名与编号只读：它们由阶段 1 的资产图词决定。交图在「审查与待办」的待办卡上逐件进行。
+        </p>
+      </template>
+    </template>
+    <p v-else-if="usesLedger" class="muted">
+      参考素材（导演台 r2v）：语义名必填、会话内唯一；类型由内容判定，编号按同类上传序自动分配。
     </p>
     <p v-else class="muted">图片可用作首/尾帧；视频与音频作为本会话素材。素材只增不删。</p>
 
-    <!-- 容量条（D7 §4.2 / §8）：任一档超限即红；数字镜像 ref_capacity.py。 -->
-    <ul v-if="usesLedger" class="capacity" aria-label="参考素材容量">
+    <!-- 容量条（D7 §4.2 / §8）：任一档超限即红，并点名超的是哪一档。 -->
+    <ul v-if="showLedger && usesLedger" class="capacity" aria-label="参考素材容量">
       <li
         v-for="row in rows"
         :key="row.kind"
@@ -171,11 +307,11 @@ async function onDelete(assetId: string): Promise<void> {
         {{ row.label }} {{ row.used }}/{{ row.cap }}
       </li>
     </ul>
-    <p v-if="overCapacity" class="capacity-hint" role="status">
-      已超过官方单次请求上限：精简要上传的素材，超出的那一件上传会被拒绝。
+    <p v-if="showLedger && overCapacity" class="capacity-hint" role="status">
+      已超过官方单次请求上限：{{ capacityHint }}；超出的那一件提交会被拒绝。
     </p>
 
-    <div class="upload">
+    <div v-if="!isRef" class="upload">
       <template v-if="usesLedger">
         <label class="upload__label" for="asset-semantic-name">语义名</label>
         <input
@@ -198,24 +334,33 @@ async function onDelete(assetId: string): Promise<void> {
       <span v-if="uploading" role="status" class="muted">正在上传…</span>
     </div>
 
-    <p v-if="locked" class="muted" data-testid="assets-locked">
+    <p v-if="locked && !isRef" class="muted" data-testid="assets-locked">
       会话已起跑：参考素材不能再增删（已写好的资产图词基于当时的台账）。
     </p>
 
     <ErrorNotice v-if="uploadError" :message="uploadError" />
     <ErrorNotice v-if="deleteError" :message="deleteError" />
+    <ErrorNotice v-if="reopenError" :message="reopenError" data-testid="reopen-error" />
 
-    <p v-if="!listed.length" class="muted">本会话还没有素材。</p>
-    <ul v-else class="asset-list">
-      <li v-for="item in listed" :key="item.asset_id" class="asset">
+    <p v-if="!listed.length && !isRef" class="muted">本会话还没有素材。</p>
+    <ul v-else-if="listed.length" class="asset-list">
+      <li
+        v-for="item in listed"
+        :key="item.key"
+        class="asset"
+        :data-kind="item.kind"
+        :data-number="item.number ?? undefined"
+        :data-status="item.status || undefined"
+        :data-current="isCurrent(item) ? 'true' : undefined"
+      >
         <div class="asset__preview">
           <img
-            v-if="mediaKind(item.kind) === 'image'"
+            v-if="mediaKind(item.kind) === 'image' && item.asset_id"
             :src="assetMediaUrl(item.asset_id)"
             :alt="item.name"
           />
           <video
-            v-else-if="mediaKind(item.kind) === 'video'"
+            v-else-if="mediaKind(item.kind) === 'video' && item.asset_id"
             :src="assetMediaUrl(item.asset_id)"
             controls
             muted
@@ -223,27 +368,56 @@ async function onDelete(assetId: string): Promise<void> {
             @loadedmetadata="onDurationLoaded($event, item.asset_id)"
           />
           <audio
-            v-else-if="mediaKind(item.kind) === 'audio'"
+            v-else-if="mediaKind(item.kind) === 'audio' && item.asset_id"
             :src="assetMediaUrl(item.asset_id)"
             controls
             preload="metadata"
             @loadedmetadata="onDurationLoaded($event, item.asset_id)"
           />
+          <!-- 台账里还没有正本的行（待交/已放弃）：不画一个打不开的槽。 -->
+          <p v-else-if="isRef && item.status === 'abandoned'" class="muted">已放弃：这一件没有图</p>
+          <p v-else-if="isRef && item.status" class="muted">尚无图</p>
           <p v-else class="muted">无法预览的素材类型：{{ item.kind }}</p>
         </div>
         <div class="asset__meta">
-          <strong>{{ item.name }}</strong>
+          <div class="asset__title">
+            <strong>{{ item.name }}</strong>
+            <!-- 状态徽标只在 ref 出现：r2v 的 `registered` 只是「起跑前传过」，说成
+                 「校对中」会让人以为流程在读图。 -->
+            <span v-if="isRef && item.status" class="asset__status" :data-status="item.status">
+              {{ statusText(item) }}
+            </span>
+          </div>
           <span class="muted">
             <template v-if="usesLedger">
               {{ kindLabel(item.kind) }} · {{ item.kind }} {{ item.number }}
             </template>
             <template v-else>{{ item.kind }}</template>
-            · {{ assetById.get(item.asset_id)?.bytes ?? 0 }} 字节
+            <template v-if="item.asset_id">
+              · {{ assetById.get(item.asset_id)?.bytes ?? 0 }} 字节
+            </template>
             <template v-if="mediaKind(item.kind) === 'video' || mediaKind(item.kind) === 'audio'">
               · 时长 {{ durations[item.asset_id] ?? '—'
               }}{{ durations[item.asset_id] ? ' 秒' : '' }}
             </template>
           </span>
+          <button
+            v-if="isCurrent(item)"
+            type="button"
+            class="asset__goto"
+            @click="emit('gotoReview')"
+          >
+            去交这一件
+          </button>
+          <button
+            v-if="canReopen(item)"
+            type="button"
+            class="asset__reopen"
+            :disabled="reopening !== null"
+            @click="onReopen(item.asset_id)"
+          >
+            {{ reopening === item.asset_id ? '正在打回…' : '换一张图' }}
+          </button>
           <button
             v-if="usesLedger && !locked"
             type="button"
@@ -318,6 +492,9 @@ async function onDelete(assetId: string): Promise<void> {
   border-radius: var(--radius-md);
   background: var(--color-surface);
 }
+.asset[data-current='true'] {
+  border-color: var(--color-focus);
+}
 .asset__preview {
   flex: 0 0 160px;
 }
@@ -334,7 +511,27 @@ async function onDelete(assetId: string): Promise<void> {
   align-items: flex-start;
   gap: var(--space-1);
 }
-.asset__delete {
+.asset__title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.asset__status {
+  padding: 0 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 0.8125rem;
+}
+.asset__status[data-status='passed'] {
+  border-color: var(--color-focus);
+}
+.asset__status[data-status='abandoned'] {
+  color: var(--color-text-muted);
+  text-decoration: line-through;
+}
+.asset__delete,
+.asset__goto,
+.asset__reopen {
   cursor: pointer;
 }
 .muted {

@@ -11,6 +11,7 @@ import {
   getSession,
   listSessions,
   resetSessionToken,
+  reopenSessionAsset,
   startSessionJob,
 } from './client'
 import type { SessionCreate, SessionDetail, SessionSummary } from './client'
@@ -311,5 +312,35 @@ describe('api client 会话资源', () => {
     expect(artifactContentUrl('主题 摘要/GEN001/summary-zh.md')).toBe(
       'http://localhost/api/v1/artifacts/%E4%B8%BB%E9%A2%98%20%E6%91%98%E8%A6%81/GEN001/summary-zh.md/content',
     )
+  })
+
+  // 换一张图（#279 US11 / #282）：素材标识含会话斜杠，生成客户端把它编码成 %2F，
+  // 服务端解码后按 {asset_id:path} 路由；幂等键挡双击。
+  it('reopenSessionAsset 把素材标识编码进路径并带幂等键', async () => {
+    let seenUrl = ''
+    let seenKey: string | null = null
+    server.use(
+      http.post('http://localhost/api/v1/sessions/sess-1/assets/:assetId/reopen', ({ request }) => {
+        seenUrl = request.url
+        seenKey = request.headers.get('idempotency-key')
+        return HttpResponse.json({
+          item_id: 'item-reopen',
+          kind: 'asset_image',
+          status: 'pending',
+          created_at: '2026-11-15T00:00:00Z',
+          resolved_at: '',
+          reason: '',
+          asset_index: 1,
+        })
+      }),
+    )
+
+    const item = await reopenSessionAsset('sess-1', 'sess-1/aaaaaaaaaaaaaaaa', 'reopen-key-1')
+
+    expect(seenUrl).toBe(
+      'http://localhost/api/v1/sessions/sess-1/assets/sess-1%2Faaaaaaaaaaaaaaaa/reopen',
+    )
+    expect(seenKey).toBe('reopen-key-1')
+    expect(item.asset_index).toBe(1)
   })
 })

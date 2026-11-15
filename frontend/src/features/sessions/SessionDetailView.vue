@@ -234,6 +234,27 @@ const pendingHint = computed(() =>
   pendingActionHint(data.value?.action_items ?? [], data.value?.brief.refs ?? []),
 )
 
+// 素材分区的三态（#283）：清单还没派生 / 循环里逐件交 / 循环走完。判据全是快照事实，
+// 不新增业务状态——`stage1_review` 待办与派生落行是同一次写入（#279），它出现即
+// 「清单已派生」；剩下的只看台账还有没有既没定稿也没放弃的 Picture。
+// 「空台账 + 未派生」与「本片确实 0 件」因此能分开（#279 的唯一分界）。
+const assetPhase = computed<'created' | 'asset_loop' | 'after'>(() => {
+  const detail = data.value
+  if (!detail || detail.status === 'created') {
+    return 'created'
+  }
+  const refs = detail.brief.refs ?? []
+  const derived =
+    refs.length > 0 || (detail.action_items ?? []).some((item) => item.kind === 'stage1_review')
+  if (!derived) {
+    return 'created'
+  }
+  const unsettled = refs.some(
+    (ref) => ref.kind === 'picture' && ref.status !== 'passed' && ref.status !== 'abandoned',
+  )
+  return unsettled ? 'asset_loop' : 'after'
+})
+
 // 帧提交卡只在 frame_submission 待办仍 pending 时出现；决议后由快照移除。
 const pendingFrameItem = computed(
   () =>
@@ -248,6 +269,9 @@ const pendingAssetItem = computed(
       (item) => item.kind === 'asset_image' && item.status === 'pending',
     ) ?? null,
 )
+// 素材分区要指出「就是这一件在等你」（#283）：件号取待办本身，不从台账反推——
+// 审查还没通过、正在读图校对时台账里也有未定稿行，但那两种情况都没有卡片可指。
+const pendingAssetNumber = computed(() => pendingAssetItem.value?.asset_index ?? null)
 // 导演台开场首帧卡（D8 §4.4 / §7.1）：i2v / fl2v 审查通过后一个待办收两张图。
 // 它不是 base 的 frame_submission——两条路线各自一个 kind，界面也各一张卡。
 const pendingDirectorStartItem = computed(
@@ -521,7 +545,10 @@ const errorMessage = computed(() =>
           :director-mode="data.brief.director_mode ?? ''"
           :refs="data.brief.refs ?? []"
           :status="data.status"
+          :phase="assetPhase"
+          :current-number="pendingAssetNumber"
           @refresh="invalidateSnapshot"
+          @goto-review="selectTab('review')"
         />
       </section>
 

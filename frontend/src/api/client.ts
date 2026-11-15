@@ -387,3 +387,30 @@ export async function reopenSegment(
   }
   return data ?? null
 }
+
+/**
+ * 把一件**已定稿**的参考素材打回，重挂这一件的交图待办（#279 US11 / #282）。
+ *
+ * 只在素材循环进行中、且这一件已经定稿时才成立：路线不是 ref（导演台 r2v 的件是
+ * 起跑前传的参考图）、循环已结束、已放弃或还没定稿，服务端一律 409
+ * （`asset_reopen_unsupported` / `asset_not_reopenable`），由统一错误拦截抛
+ * `ApiError`，组件按 `problem.detail` 说话。`assetId` 与媒体地址同形
+ * （`<会话标识>/<哈希>`），生成客户端会把斜杠编码成 `%2F`，服务端解码后按
+ * `{asset_id:path}` 路由。返回按这一件重挂出的 `ActionItemOut`。
+ */
+export async function reopenSessionAsset(
+  sessionId: string,
+  assetId: string,
+  idempotencyKey?: string,
+): Promise<ActionItemOut> {
+  const { data } = await apiClient.POST('/api/v1/sessions/{session_id}/assets/{asset_id}/reopen', {
+    params: {
+      path: { session_id: sessionId, asset_id: assetId },
+      ...(idempotencyKey ? { header: { 'Idempotency-Key': idempotencyKey } } : {}),
+    },
+  })
+  if (data === undefined) {
+    throw new ApiError(0, null)
+  }
+  return data
+}

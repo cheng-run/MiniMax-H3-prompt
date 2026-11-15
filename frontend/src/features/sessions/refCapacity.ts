@@ -21,6 +21,24 @@ export const REF_KIND_LABELS = {
 
 export type RefKind = keyof typeof REF_KIND_LABELS
 
+// 台账四态的显示名（#279）：`pending` 是「阶段 1 派生了这一件、还没交回来」，
+// 与「已登记」不是同一件事——素材分区要能一眼看出还差几张。
+export const REF_STATUS_LABELS: Record<string, string> = {
+  pending: '待交',
+  registered: '校对中',
+  passed: '已定稿',
+  abandoned: '已放弃',
+}
+
+// 素材分区的三态（#283）：清单还没派生 / 循环里逐件交 / 循环走完。
+// 三个状态不是新增的业务状态，而是「台账 + 阶段 1 是否收尾」的推导结果。
+export type AssetPhase = 'created' | 'asset_loop' | 'after'
+
+/** 这一行还会不会再变成一张图：定稿与放弃都不会。 */
+export function isRefSettled(ref: { status: string }): boolean {
+  return ref.status === 'passed' || ref.status === 'abandoned'
+}
+
 export interface CapacityRow {
   kind: RefKind | 'files'
   label: string
@@ -29,7 +47,10 @@ export interface CapacityRow {
   over: boolean
 }
 
-/** 按台账算四档用量；任一档超过上限即 `over`（素材分区据此变红）。 */
+/** 按台账算四档用量；任一档超过上限即 `over`（素材分区据此变红）。
+ *
+ * 调用方负责先滤掉**已放弃**的行：它们永远不会交出正本，算进用量会让容量条凭空变红。
+ */
 export function capacityRows(refs: ReadonlyArray<{ kind: string }>): CapacityRow[] {
   const kinds: RefKind[] = ['picture', 'video', 'audio']
   const rows: CapacityRow[] = kinds.map((kind) => {
