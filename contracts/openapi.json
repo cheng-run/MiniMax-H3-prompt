@@ -676,6 +676,16 @@
           "number": {
             "title": "Number",
             "type": "integer"
+          },
+          "source": {
+            "default": "",
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "default": "",
+            "title": "Status",
+            "type": "string"
           }
         },
         "required": [

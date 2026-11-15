@@ -143,10 +143,6 @@ class Harness:
         assert resp.status_code == 201, resp.text
         return resp.json()
 
-    def register_pictures(self) -> None:
-        self.upload(_png(1), "cat.png", name=CAT)
-        self.upload(_png(2), "lamp.png", name=LAMP)
-
     def start_stage1(self) -> dict:
         self.advance()
         return self.wait_until(
@@ -253,7 +249,6 @@ def _events(root: Path, session_id: str) -> list[dict]:
 def test_stage1_approval_on_ref_opens_the_first_asset_card(harness):
     """ref 通过审查不直接进阶段 2：先出第 1 件的词、落产物、挂 ``asset_image`` 待办。"""
     harness.create()
-    harness.register_pictures()
     harness.start_stage1()
 
     harness.approve_stage1()
@@ -278,11 +273,13 @@ def test_stage1_approval_on_ref_opens_the_first_asset_card(harness):
     assert "一只橘色短毛猫蹲在木质窗台" in text
     assert "一盏黄铜台灯" not in text, "第 1 件不该拿到第 2 件的词"
 
-    # 台账：只登记、不定稿，轮次还是 0。
+    # 台账：阶段 1 收尾就落齐、一件都还没交（``pending``），来源是流程派生、轮次 0。
     entries = harness.ledger()
-    assert [(entry["name"], entry["number"], entry["round"], entry["status"])
-            for entry in entries] == [
-        (CAT, 1, 0, "registered"), (LAMP, 2, 0, "registered")]
+    assert [(entry["name"], entry["number"], entry["round"], entry["status"],
+             entry["source"]) for entry in entries] == [
+        (CAT, 1, 0, "pending", "derived"), (LAMP, 2, 0, "pending", "derived")]
+    assert [entry["asset_id"] for entry in entries] == ["", ""], "没交回就没有正本"
+    assert harness.on_disk()["asset_manifest_derived"] is True
 
     # 进度事件用 ``asset_loop`` 这个阶段标签，节点是出词（阶段 1 的进度另算）。
     progress = [event for event in _events(harness.root, harness.session_id)
@@ -297,6 +294,33 @@ def test_stage1_approval_on_ref_opens_the_first_asset_card(harness):
     assert len(created) == 1
     assert created[0]["payload"]["asset_index"] == 1
     assert "reason" not in created[0]["payload"]
+
+
+def test_derived_rows_follow_script_order_not_prompt_order(harness, monkeypatch):
+    """编号＝剧本出场序（#279）：资产图词里的枚举顺序不作数。
+
+    出词节点按类别枚举条目，叙事顺序只写在剧本里。两处各排一次，台账编号就会与分镜表
+    的 ``<Subject N>``／``<Picture N>`` 错位——那种错位在段内子集里才发作。
+    """
+    def script_order(brief, config, **kwargs):
+        return ({
+            # 剧本先写台灯、后写橘猫；资产图词列表是**反的**。
+            "script": "分场剧本：台灯亮着，橘猫蹲在窗台。",
+            "shot_table": "[Shot 1] At 00:00.000, a desk lamp by the window.",
+            "character_image_prompts": [
+                {"name": LAMP, "positive_prompt": "一盏黄铜台灯。",
+                 "negative_prompt": "", "locked_features": []},
+                {"name": CAT, "positive_prompt": "一只橘色短毛猫。",
+                 "negative_prompt": "", "locked_features": []},
+            ],
+        }, None, None)
+
+    monkeypatch.setattr(pipeline, "run_stage1", script_order)
+    harness.create()
+    harness.start_stage1()
+
+    assert [(entry["name"], entry["number"]) for entry in harness.ledger()] == [
+        (LAMP, 1), (CAT, 2)]
 
 
 def test_base_session_approval_still_goes_straight_to_stage2(harness, monkeypatch):
@@ -333,7 +357,6 @@ CAT_DEVIATION = _claims(
 
 def _to_first_card(harness) -> dict:
     harness.create()
-    harness.register_pictures()
     harness.start_stage1()
     harness.approve_stage1()
     return harness.wait_until(
@@ -365,7 +388,10 @@ def test_proofread_pass_settles_the_item_and_writes_the_next(harness):
 
     entries = harness.ledger()
     assert [(entry["name"], entry["number"], entry["round"], entry["status"])
-            for entry in entries] == [(CAT, 1, 1, "passed"), (LAMP, 2, 0, "registered")]
+            for entry in entries] == [(CAT, 1, 1, "passed"), (LAMP, 2, 0, "pending")]
+    # 定稿的那一件才认下正本（#279）：派生时 id 是空的，交回并通过才有。
+    assert entries[0]["asset_id"] == image["asset_id"]
+    assert entries[1]["asset_id"] == ""
     assert "proofread_asset_id" not in entries[0], "定稿后不该留着待校对的图"
 
     text = harness.artifact_text("assets/picture-02.md")
@@ -416,8 +442,9 @@ def test_proofread_failure_reopens_the_same_item_with_the_diff(harness):
     assert "尾巴垂在窗台边缘" in harness.rewrite.requests[0]
 
     entries = harness.ledger()
+    # 第 1 件打回后回到 registered（交过、没过）；第 2 件还没轮到，仍是派生的 pending。
     assert [(entry["round"], entry["status"]) for entry in entries] == [
-        (1, "registered"), (0, "registered")]
+        (1, "registered"), (0, "pending")]
     assert "proofread_asset_id" not in entries[0]
     # 台账只记轮次与状态：重开的是同一件，不产生第二份产物文件。
     assert entries[0]["number"] == 1
@@ -580,8 +607,8 @@ def test_recovery_rebuilds_the_current_card_from_the_ledger(harness):
                              for entry in snapshot["action_items"]))
     pending = harness.pending("asset_image")
     assert [entry["asset_index"] for entry in pending] == [1]
-    # 件号不是从 job 历史推的：台账里第 1 件还没定稿，重开的就是它。
-    assert harness.ledger()[0]["status"] == "registered"
+    # 件号不是从 job 历史推的：台账里第 1 件还没定稿（派生后一件都没交），重开的就是它。
+    assert harness.ledger()[0]["status"] == "pending"
     assert "一只橘色短毛猫蹲在木质窗台" in harness.artifact_text("assets/picture-01.md")
 
 
@@ -683,14 +710,18 @@ def test_missing_asset_prompt_fails_loudly_instead_of_borrowing_another_name():
 
 
 # ---------------------------------------------------------------------------
-# 接线：执行器交给管线的 brief.refs 来自素材台账（spec §5.3 / §10）
+# 接线：ref 的阶段 1 **不**注入台账 refs（#279）——注入了派生就被堵回去
 # ---------------------------------------------------------------------------
 
-def test_ref_stage1_sees_the_ledger_as_brief_refs(harness, monkeypatch):
-    """ref 会话的 brief.refs 由台账现造（语义名 = 分镜表 Subject 标签的来源）。
+def test_ref_stage1_never_sees_the_ledger_as_brief_refs(harness, monkeypatch):
+    """首跑与修订重跑都不注入 refs。
 
-    工作台创建口不收 refs（#255），台账是唯一真源；不接这一处，真实 ref 会话的
-    资产图提示词就永远与上传的语义名对不上号。
+    ``generation.ref_asset_registry`` 有一条「``brief.refs`` 非空就以用户登记为准」的
+    支路，且它排在路线守卫之前：阶段 1 一旦拿到注入的 refs，编号/名字/顺序全由台账
+    决定、设计师清单被绕过——素材集合又回到「用户预置」，正是 #279 要拆的死锁。
+
+    修订重跑必须一起钉：漏掉那两处，「审查后改一句」会重新吃回注入 refs，而首跑路径
+    的用例全绿（这正是本仓「接线在别处」的典型形态）。
     """
     seen: list[object] = []
 
@@ -707,17 +738,27 @@ def test_ref_stage1_sees_the_ledger_as_brief_refs(harness, monkeypatch):
 
     monkeypatch.setattr(pipeline, "run_stage1", record_stage1)
     harness.create()
-    harness.register_pictures()
-    # 视频/音频不占 <Picture N> 槽位，不进 refs（它们的段内子集是 #258 的事）。
+    # 台账里**已经有一件定稿的 Picture** 再跑阶段 1：这是最容易吃回注入的真实现场
+    # ——审查后修订会把阶段 1 再跑一遍，而那时台账早已有 passed 行。台账空着时两种
+    # 写法都返回空 refs，守卫就是摆设（变异检验会报「存活」）。
+    harness.upload(_png(1), "cat.png", name=CAT)
     harness.upload(_mp4(5), "clip.mp4", name="配乐")
+    harness.client.app.state.session_store.mutate(
+        harness.session_id,
+        lambda _detail: {"asset_ledger": [
+            ({**entry, "status": "passed"} if entry["kind"] == "picture" else entry)
+            for entry in _detail.asset_ledger_snapshot()]})
     harness.start_stage1()
 
-    refs = [(ref.picture, ref.name, ref.description, ref.path)
-            for ref in seen[0].refs]
-    assert refs == [(1, CAT, "", ""), (2, LAMP, "", "")]
+    assert seen[0].refs == [], "阶段 1 拿到了注入的 refs：派生会被「用户登记为准」堵回去"
+    # 派生落行：件数与名字来自阶段 1 的资产图词，与 refs 无关。视频/音频行不参与派生，
+    # 原样留着（它们由循环之后的补交口管，#284）。
+    assert [(entry["kind"], entry["name"], entry["status"])
+            for entry in harness.ledger()] == [
+        ("picture", CAT, "pending"), ("picture", LAMP, "pending"),
+        ("video", "配乐", "registered")]
 
-    # 修订重跑（设定级，走 ``_rerun_stage1``）用的是同一条接线：重跑的还是阶段 1，
-    # Subject 标签不能因为重跑一次就丢了。
+    # 修订重跑（设定级，走 ``_rerun_stage1``）：重跑的还是阶段 1，同样不许注入。
     item = harness.pending("stage1_review")[0]
     resp = harness.client.post(
         f"/api/v1/sessions/{harness.session_id}/action-items/{item['item_id']}/resolve",
@@ -728,8 +769,7 @@ def test_ref_stage1_sees_the_ledger_as_brief_refs(harness, monkeypatch):
         lambda snapshot: len(seen) > 1 and any(
             entry["kind"] == "stage1_review" and entry["status"] == "pending"
             for entry in snapshot["action_items"]))
-    assert [(ref.picture, ref.name, ref.path) for ref in seen[-1].refs] == [
-        (1, CAT, ""), (2, LAMP, "")]
+    assert seen[-1].refs == [], "修订重跑又把台账 refs 注入回阶段 1 了"
 
     # base 会话原样返回：refs 仍为空，台账不参与。
     seen.clear()
@@ -741,12 +781,20 @@ def test_ref_stage1_sees_the_ledger_as_brief_refs(harness, monkeypatch):
     assert seen[0].refs == []
 
 
-def test_missing_asset_prompt_fails_the_write_job_and_names_the_asset(harness, monkeypatch):
-    """名字对不上：出词 job 失败并点名缺哪一件，不静默拿别人的词。"""
+def test_manifest_and_prompts_mismatch_fails_stage1_and_names_both_sides(
+        harness, monkeypatch):
+    """清单与资产图词对不上：阶段 1 收尾当场硬失败，并同时点名两边。
+
+    「落行与对账是同一处」（#279）：清单里有、词里没有（缺件），或词里有、清单里没有
+    （多件／改名），都不许落进台账——错位的词进了台账，素材循环会按名字去要一件不存在
+    的资产，而错的是哪一张不会有第二个信号。文案要同时给出「现有」与「缺失」，人才能
+    看出该改哪一边。
+    """
     def mismatched(brief, config, **kwargs):
         return ({
             "script": "分场剧本：一位撑伞的女子走过街口。",
             "shot_table": "[Shot 1] At 00:00.000, a woman with an umbrella.",
+            "character_asset_manifest": [CAT, LAMP],
             "character_image_prompts": [{
                 "name": "人物", "positive_prompt": "一位撑黑伞的成年女性。",
                 "negative_prompt": "", "locked_features": ["撑黑伞"]}],
@@ -754,20 +802,20 @@ def test_missing_asset_prompt_fails_the_write_job_and_names_the_asset(harness, m
 
     monkeypatch.setattr(pipeline, "run_stage1", mismatched)
     harness.create()
-    harness.register_pictures()
-    harness.start_stage1()
-
-    harness.approve_stage1()
+    # 零素材起跑（#279）：不再需要先上传图片。
+    harness.advance()
     body = harness.wait_until(lambda snapshot: snapshot["status"] == "failed")
 
     failures = [event["payload"] for event in _events(harness.root, harness.session_id)
                 if event["type"] == "job.failed"]
     assert failures, "失败没有落成 job.failed 事件"
     detail = failures[-1]["detail"]
-    assert f"「{CAT}」" in detail, detail
-    assert "人物" in detail, "报错要点名现有的名字，人才知道该怎么改"
+    assert CAT in detail and LAMP in detail, "缺失的那两件要逐一点名"
+    assert "人物" in detail, "现有的名字也要点名，人才知道该怎么改"
+    # 失败时一件都不许落进台账：半份清单比没有清单更难收拾。
+    assert harness.ledger() == []
+    assert harness.on_disk().get("asset_manifest_derived") in (False, None)
+    assert not any(item["kind"] == "stage1_review" for item in body["action_items"])
     assert not (harness.root / Path(harness.session_id)
                 / "assets" / "picture-01.md").exists()
-    assert [item for item in body["action_items"]
-            if item["kind"] == "asset_image"] == []
 

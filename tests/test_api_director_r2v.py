@@ -83,6 +83,18 @@ def _refs(client: TestClient, session_id: str) -> list[tuple[int, str]]:
     return [(ref["number"], ref["name"]) for ref in detail["brief"]["refs"]]
 
 
+def _settle_pictures(app, session_id: str) -> None:
+    """把台账里的 Picture 置成「已定稿」（#279）。
+
+    规划期读到的台账是**素材循环走完之后**的那一份（全 passed）：段内子集与英文定义块
+    只按已定稿的件算，否则会算出没有正本的槽。只为一张登记表跑整条循环不值当，这里
+    直接造出那个现场。
+    """
+    app.state.session_store.mutate(session_id, lambda detail: {"asset_ledger": [
+        ({**entry, "status": "passed"} if entry["kind"] == "picture" else entry)
+        for entry in detail.asset_ledger_snapshot()]})
+
+
 def _session_file(tmp_path: Path, session_id: str) -> Path:
     return tmp_path / Path(session_id) / SESSION_FILENAME
 
@@ -245,6 +257,7 @@ def test_ref_sections_are_generated_once_and_cached_until_registry_changes(
         session_id = _create(client)["session_id"]
         first = _upload(client, session_id, _png(1), "cat.png", name=CAT).json()
         _upload(client, session_id, _png(2), "lamp.png", name=LAMP)
+        _settle_pictures(app, session_id)
         directory = root / Path(session_id)
         session = load_session(directory)
 
@@ -298,6 +311,7 @@ def test_planner_request_sees_the_ledger_and_the_english_definitions(
         session_id = _create(client)["session_id"]
         _upload(client, session_id, _png(1), "cat.png", name=CAT)
         _upload(client, session_id, _png(2), "lamp.png", name=LAMP)
+        _settle_pictures(app, session_id)
         directory = root / Path(session_id)
         session = load_session(directory)
         shot_table = (

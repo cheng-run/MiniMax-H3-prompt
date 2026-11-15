@@ -58,6 +58,8 @@ function refItems(pictures: number, kind: string = 'picture'): ProgressInput['re
     kind,
     name: `素材${index + 1}`,
     number: index + 1,
+    status: 'passed',
+    source: 'derived',
   }))
 }
 
@@ -727,7 +729,16 @@ describe('pendingActionHint', () => {
     expect(pendingActionHint(segImg, [])).toBe('提交第 2 段首帧图')
 
     const asset = assetAction(2)
-    const refs = [{ asset_id: 'sess-1/a2', kind: 'picture', name: '台灯', number: 2 }]
+    const refs = [
+      {
+        asset_id: 'sess-1/a2',
+        kind: 'picture',
+        name: '台灯',
+        number: 2,
+        status: 'passed',
+        source: 'derived',
+      },
+    ]
     expect(pendingActionHint([asset], refs)).toBe('交回第 2 件素材图 · 台灯')
     expect(pendingActionHint([asset], [])).toBe('交回第 2 件素材图')
   })

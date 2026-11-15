@@ -680,6 +680,16 @@ export interface components {
             name: string;
             /** Number */
             number: number;
+            /**
+             * Source
+             * @default
+             */
+            source: string;
+            /**
+             * Status
+             * @default
+             */
+            status: string;
         };
         /** RevisionIn */
         RevisionIn: {

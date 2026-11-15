@@ -55,6 +55,7 @@ from ..workbench_store import (
     ASSETS_DIRNAME,
     ASSET_LEDGER_STATUS_PASSED,
     ASSET_LEDGER_STATUS_REGISTERED,
+    ASSET_LEDGER_SOURCE_DERIVED,
     ASSET_PROOFREAD_KEY,
     SEGMENTS_DIRNAME,
     ActionItemNotFound,
@@ -88,6 +89,8 @@ from ..workbench_store import (
     WorkbenchError,
     WorkbenchSessionStore,
     bridge_frame_name,
+    derived_asset_rows,
+    merge_derived_rows,
     director_briefing_name,
     director_first_frame_prompt_name,
     director_segment_prompt_name,
@@ -988,7 +991,16 @@ class JobRunner:
                         raise AssetImageInvalid(
                             f"素材台账里没有第 {number} 件参考素材。")
                     # 归属与类型（不属于本会话 / 非图片）都在这里判，一律 422。
-                    self.store.resolve_image_asset(session_id, submitted)
+                    path = self.store.resolve_image_asset(session_id, submitted)
+                    # **派生行**的正本来自这里（D7 修订 #279）：派生时 ``asset_id`` 是空
+                    # 的，而段规划、注入卡要按编号取文件、还要核对 SHA256（CONTEXT.md
+                    # 「素材台账」记哈希的理由是文件名可变引用）。
+                    # 上传行（导演台 r2v）**不动**：它的正本是用户起跑前传的原图，不是
+                    # 素材循环里交回的校对图（#268 的打包据此挂开场图）。
+                    if str(current_entry.get("source") or "") == ASSET_LEDGER_SOURCE_DERIVED:
+                        current_entry["asset_id"] = submitted
+                        current_entry["sha256"] = hashlib.sha256(
+                            path.read_bytes()).hexdigest()
                     # 先落盘再接校对：崩在两者之间时，恢复能重跑校对而不是要求重交
                     # （用户已经交过一次的图不该再交一遍）。
                     current_entry[ASSET_PROOFREAD_KEY] = submitted
@@ -1692,6 +1704,10 @@ class JobRunner:
         长片在阶段 2 成功之后、段表落盘之前是第三档（``segmenting``）。
         """
         directory = self.store.session_directory(session_id)
+        # 续跑/恢复都在这里：阶段 1 已收尾却还没派生清单的会话，先把台账补齐再看进度
+        # （#279「任何入口看到阶段 1 已完成但未派生就补齐」）。漏掉它，空台账会被
+        # ``_asset_step_of`` 读成「全部定稿」，整条素材循环被静默跳过。
+        self.store.ensure_asset_manifest_derived(session_id)
         session = load_session(directory)
         if session is None:
             return step_machine.STEP_STAGE1
@@ -1845,7 +1861,7 @@ class JobRunner:
         finally:
             await asyncio.to_thread(self._cleanup, session_id, job_id)
 
-    def _ref_brief(self, session: Any) -> Any:
+    def _ref_brief(self, session: Any, *, passed_only: bool = True) -> Any:
         """执行器交给管线的 Brief：走台账的会话的 ``refs`` 从**素材台账**现造（D7 §5.3 / §10）。
 
         工作台的参考素材不在 brief 文件里——创建口不收 refs，台账才是唯一真源
@@ -1861,12 +1877,22 @@ class JobRunner:
         编号（它们的段内子集是 #258 的事）。``path`` 留空——本地路径既不进 DTO 也不进
         管线输入。用 ``replace`` 而不是就地改：``_finish_stage2`` 会把 brief 写回会话
         文件，就地加就是给台账造一份会变旧的副本。
+
+        只收**已定稿**（``status == passed``）的行（D7 修订 #279）：台账里还有 ``pending``
+        （刚派生、没交回）与 ``abandoned``（已放弃）两种没有正本的行，把它们塞进 refs
+        会让段内子集算出一格没有图的槽——而下游看不出那一格本来就该是空的。
+
+        ``passed_only=False`` 只给 r2v 的阶段 1 用：那时它的台账还是用户上传建立的一批
+        ``registered`` 行（素材循环尚未开始），按「已定稿」过滤会把它们全滤掉。派生行
+        不会出现在 r2v 上（``brief.is_ref`` 才派生），所以放宽这一档不会漏进没图的槽。
         """
         if not route_uses_asset_ledger(session.brief):
             return session.brief
         pictures = sorted(
             (entry for entry in session.asset_ledger
-             if str(entry.get("kind")) == KIND_PICTURE),
+             if (str(entry.get("kind")) == KIND_PICTURE
+                 and (not passed_only
+                      or entry.get("status") == ASSET_LEDGER_STATUS_PASSED))),
             key=lambda entry: int(entry["number"]))
         from ..brief_parser import RefItem
 
@@ -1874,6 +1900,25 @@ class JobRunner:
             RefItem(picture=int(entry["number"]), name=str(entry["name"]),
                     description="", path="")
             for entry in pictures])
+
+    def _stage1_brief(self, session: Any) -> Any:
+        """阶段 1 交给管线的 Brief：**ref 路线不注入 refs**（D7 修订 #279 §台账与进度）。
+
+        为什么必须分开：``generation.ref_asset_registry`` 有一条「``brief.refs`` 非空就以
+        用户登记为准」的支路，而它排在 ``route_emits_asset_prompts`` 守卫**之前**。阶段 1
+        一旦拿到注入的 refs，编号、名字、顺序就全由台账决定、设计师清单被彻底绕过——
+        素材集合又回到「用户预置」，正是 #279 要拆的那个死锁。四个阶段 1 执行点（真实/桩
+        × 首跑/修订重跑）都必须走这里：漏掉修订那两处，「审查后改一句」会重新吃回注入
+        refs，而首跑路径的用例全绿。
+
+        r2v 仍按台账注入（#279「导演台不动」）：它的素材是用户上传的，阶段 1 必须按那些
+        语义名写词，否则素材循环按名字取不到词。
+        """
+        if session.brief.is_ref:
+            return session.brief
+        # r2v 的阶段 1 还没跑素材循环，台账里是上传建立的 registered 行——这一档不能按
+        # 「已定稿」过滤，否则阶段 1 一件素材都看不到（#279 实测：r2v 桩闭环当场断）。
+        return self._ref_brief(session, passed_only=False)
 
     def _execute_stage1(self, session_id: str, job_id: str,
                         cancel_event: threading.Event) -> dict[str, Any]:
@@ -1949,7 +1994,7 @@ class JobRunner:
         else:
             _emit_node_started(0)
             final_state = dict(run_stage1(
-                self._ref_brief(session), self.config, initial_state=state,
+                self._stage1_brief(session), self.config, initial_state=state,
                 resume_from_node=resume_from, on_step_done=on_step_done)[0])
             _close_open_node()
 
@@ -1981,8 +2026,8 @@ class JobRunner:
             self._emit_progress(session_id, job_id, name, "done")
         final_state = stage1_state(
             # 桩与真实两路只在「怎么跑」上不同，「交给管线的 brief 从哪来」必须同源；
-            # #259 扩桩支持 ref 素材循环时从这里接（桩 state 目前不产资产图提示词）。
-            self._ref_brief(session), dict(session.stage_state))
+            # 阶段 1 的路线分叉（ref 不注入 refs）也走同一个入口，否则桩上永远测不到它。
+            self._stage1_brief(session), dict(session.stage_state))
         self._write_stage1_artifacts(session_id, job_id, final_state)
         return final_state
 
@@ -2111,7 +2156,13 @@ class JobRunner:
         derivation = resolve_video_output(
             session.brief.video_output, session.brief.canvases)
         ledger = AssetLedger(entries=tuple(
-            self._card_record(entry, directory) for entry in session.asset_ledger))
+            self._card_record(entry, directory)
+            # 只取已定稿的 Picture 行（#279「下游只取已定稿」）：注入卡是给人照抄的接线
+            # 清单，一张被放弃或还没交的图写进去，抄下来就是一个填不上的槽。视频/音频
+            # 没有这件语义（它们在循环之后补交），原样保留。
+            for entry in session.asset_ledger
+            if (str(entry.get("kind")) != KIND_PICTURE
+                or entry.get("status") == ASSET_LEDGER_STATUS_PASSED)))
         text = render_injection_card(
             ledger, derivation.params, notes=derivation.notes,
             session_dir=directory)
@@ -3154,6 +3205,11 @@ class JobRunner:
         for entry in session.asset_ledger:
             if str(entry.get("kind")) != KIND_PICTURE:
                 continue
+            # 只取已定稿（#279）：``pending`` 行没有正本、``abandoned`` 行永远不会有，
+            # 让它们进 ref_meta 就会在段内子集里算出一格没有图的槽——接线卡上多一个
+            # 空位，而规划器看不出那一格本来就该是空的。
+            if entry.get("status") != ASSET_LEDGER_STATUS_PASSED:
+                continue
             number = int(entry["number"])
             ref_meta.append((number, str(entry.get("name") or ""), ""))
             try:
@@ -3676,7 +3732,7 @@ class JobRunner:
         session = load_session(directory)
         if session is None:
             raise RuntimeError(f"会话文件读不到：{session_id}")
-        brief = self._ref_brief(session)
+        brief = self._stage1_brief(session)
         state = dict(session.stage_state)
         chain = list(_STAGE1_CHAIN)
         setting_entries = [entry for entry in entries if entry["layer"] in LAYER_SPECS]
@@ -3714,8 +3770,8 @@ class JobRunner:
         # 每轮修订重跑完成都把审查面刷新一遍（spec §7 / §14 风险表）：审查看到的
         # 必须是这一稿，而不是上一轮意见之前的旧稿。
         self._write_stage1_artifacts(session_id, job_id, state)
-        # 修订重跑用的是派生的 brief（带台账 refs）；回执里交回原样，避免任何人顺手
-        # 把它写回会话文件（台账是唯一真源）。
+        # 修订重跑用的是阶段 1 的 brief（ref 路线不带 refs，见 ``_stage1_brief``）；回执里
+        # 交回原样，避免任何人顺手把它写回会话文件（台账是唯一真源）。
         return {"state": state, "brief": session.brief}
 
     def _execute_revise_fake(self, session_id: str, job_id: str,
@@ -3735,7 +3791,7 @@ class JobRunner:
         self._emit_progress(session_id, job_id, _STAGE1_CHAIN[0], "started")
         if cancel_event.is_set():
             raise JobCancelled(_STAGE1_CHAIN[0])
-        state = stage1_state(self._ref_brief(session), dict(session.stage_state))
+        state = stage1_state(self._stage1_brief(session), dict(session.stage_state))
         self._emit_progress(session_id, job_id, _STAGE1_CHAIN[-1], "done")
         self._write_stage1_artifacts(session_id, job_id, state)
         return {"state": state, "brief": session.brief}
@@ -3889,6 +3945,25 @@ class JobRunner:
         item = ActionItemOut(
             item_id=uuid.uuid4().hex, kind=step_machine.ACTION_STAGE1_REVIEW,
             status="pending", created_at=_now())
+        # 资产清单的派生与「落齐 N 行」跟 stage1_review 待办**同一次 mutate**（#279
+        # 「资产清单的派生与落盘」）：分两次写就会出现「阶段 1 已收尾、台账还空着」的
+        # 中间态，而那个中间态与「本片确实没有素材」长得一模一样。派生是幂等的——
+        # 修订重跑会再次走到这里，已派生的会话直接跳过（`None`），不动循环里交过的件号。
+        session = load_session(self.store.session_directory(session_id))
+        if session is None:
+            raise RuntimeError(f"会话文件读不到：{session_id}")
+        derive = (not session.asset_manifest_derived) and session.brief.is_ref
+        derived_rows: list[dict[str, Any]] | None = None
+        if derive:
+            # 对账在落盘**之前**：清单与资产图词对不上是阶段 1 的结论不合格，整条
+            # 阶段 1 失败并点名（不落半份台账、不挂审查待办）。放在 mutate 里抛会让
+            # 异常越过 ``_run`` 的 else 分支、job 永远停在 running。
+            try:
+                derived_rows = derived_asset_rows(session.brief, stage_state)
+            except Exception as exc:  # noqa: BLE001 - 阶段 1 的结论坏了＝这个 job 失败
+                logger.exception("阶段 1 资产清单对账失败：%s / %s", session_id, job_id)
+                self._finish_failed(session_id, job_id, error_code(exc), str(exc))
+                return
 
         def _apply(detail: Any) -> dict[str, Any]:
             jobs = self._succeed_job(detail, job_id)
@@ -3899,12 +3974,17 @@ class JobRunner:
                         and existing.status == "pending")
             ]
             items.append(item.model_dump(mode="json"))
-            return {
+            changes: dict[str, Any] = {
                 "status": step_machine.STATUS_AWAITING_HUMAN,
                 "stage_state": stage_state,
                 "jobs": jobs,
                 "action_items": items,
             }
+            if derived_rows is not None:
+                changes["asset_ledger"] = merge_derived_rows(
+                    detail.asset_ledger_snapshot(), derived_rows)
+                changes["asset_manifest_derived"] = True
+            return changes
 
         self.store.mutate(session_id, _apply, events=[
             EventDraft("job.succeeded",

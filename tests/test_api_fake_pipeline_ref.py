@@ -43,7 +43,6 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 REF_SECONDS = 20.0
 SEGMENT_SECONDS = 10
 CAT = "橘猫"
-LAMP = "台灯"
 
 
 def _png(seed: int = 0) -> bytes:
@@ -155,13 +154,18 @@ def test_fake_ref_closed_loop_rejects_then_settles(fake_app, tmp_path):
             "style": "写实", "language": "Chinese", "plot": "雨夜旧信的多参闭环"})
         assert created.status_code == 201, created.text
         session_id = created.json()["session_id"]
-        _upload(client, session_id, _png(1), "cat.png", "image/png", name=CAT)
-        _upload(client, session_id, _png(2), "lamp.png", "image/png", name=LAMP)
 
+        # 零素材起跑（#279）：件数与语义名由阶段 1 派生，不再先传两张图。
         started = client.post(f"/api/v1/sessions/{session_id}/jobs")
         assert started.status_code == 202, started.text
         detail = _wait_until(
             client, session_id, lambda body: _pending(body, "stage1_review"))
+        # 派生落行：桩默认造两件，来源 derived、状态 pending（一件都还没交）。
+        refs = detail["brief"]["refs"]
+        assert [(ref["kind"], ref["number"], ref["status"], ref["source"])
+                for ref in refs] == [
+            ("picture", 1, "pending", "derived"), ("picture", 2, "pending", "derived")]
+        first_name, second_name = (ref["name"] for ref in refs)
         review = _pending(detail, "stage1_review")[0]
         client.post(
             f"/api/v1/sessions/{session_id}/action-items/{review['item_id']}/resolve",
@@ -176,7 +180,7 @@ def test_fake_ref_closed_loop_rejects_then_settles(fake_app, tmp_path):
         assert artifacts["assets/picture-01.md"]["kind"] == "asset_prompt"
         word = (root / Path(session_id) / "assets" / "picture-01.md").read_text(
             encoding="utf-8")
-        assert CAT in word and "桩管线固定词" in word, "桩词仍走真实落盘路径"
+        assert first_name in word and "桩管线固定词" in word, "桩词仍走真实落盘路径"
 
         # 第 1 次交图 → 校对不通过 → 同一件号重开，差异清单提到词与图的差别。
         first_image = _upload(client, session_id, _png(11), "cat-1.png", "image/png")
@@ -228,13 +232,13 @@ def test_fake_ref_closed_loop_rejects_then_settles(fake_app, tmp_path):
         artifacts = {item["name"]: item for item in detail["artifacts"]}
         assert artifacts["injection-card.md"]["kind"] == "injection_card"
         card = (root / Path(session_id) / "injection-card.md").read_text(encoding="utf-8")
-        assert CAT in card and LAMP in card, "注入卡按台账列出两件素材"
+        assert first_name in card and second_name in card, "注入卡按台账列出两件素材"
         assert [(seg["index"], seg["start_s"], seg["end_s"])
                 for seg in detail["segments"]] == [(1, 0, 10), (2, 10, 20)]
         # 严格串行：第 1 段写完就停下来收视频，第 2 段还是待写（pending）。
         assert [seg["status"] for seg in detail["segments"]] == ["waiting_video", "pending"]
-        assert [asset["name"] for asset in detail["segments"][0]["assets"]] == [CAT]
-        assert [asset["name"] for asset in detail["segments"][1]["assets"]] == [LAMP]
+        assert [asset["name"] for asset in detail["segments"][0]["assets"]] == [first_name]
+        assert [asset["name"] for asset in detail["segments"][1]["assets"]] == [second_name]
         assert artifacts["segments/segment-01.md"]["kind"] == "segment_prompt"
         assert "segments/order-card.md" in artifacts
         assert "segments/ref-shot-table.md" in artifacts
@@ -277,6 +281,72 @@ def test_fake_ref_closed_loop_rejects_then_settles(fake_app, tmp_path):
     assert set(types) <= set(EVENT_TYPES)
     assert len(EVENT_TYPES) == 10
     assert "job.failed" not in types
+
+
+# ---------------------------------------------------------------------------
+# 桩的件数旋钮（#279）：零资产与「出词节点故意漏一件」
+# ---------------------------------------------------------------------------
+
+def test_fake_dropped_asset_fails_stage1_and_names_both_sides(fake_app, monkeypatch):
+    """``MINIMAX_FAKE_ASSET_DROP`` 漏掉第 1 件：阶段 1 收尾对账硬失败并点名两边。
+
+    「落行与对账是同一处」：清单里那一件还在、资产图词里没有（缺件），错位的词不许进
+    台账。文案要同时给出「现有」与「缺失」，人才知道该改哪一边。
+    """
+    monkeypatch.setenv("MINIMAX_FAKE_ASSET_DROP", "1")
+    app, root = fake_app
+
+    with workbench_client(app) as client:
+        created = client.post("/api/v1/sessions", json={
+            "mode": "ref", "variant": "T2VA", "duration": REF_SECONDS,
+            "style": "写实", "language": "Chinese", "plot": "桩漏一件"})
+        session_id = created.json()["session_id"]
+        started = client.post(f"/api/v1/sessions/{session_id}/jobs")
+        assert started.status_code == 202, started.text
+        detail = _wait_until(client, session_id, lambda body: body["status"] == "failed")
+
+    failures = [event["payload"] for event in _events(root, session_id)
+                if event["type"] == "job.failed"]
+    assert failures, "对账失败没有落成 job.failed 事件"
+    text = failures[-1]["detail"]
+    assert "桩素材1" in text, "缺失的那一件要点名"
+    assert "桩素材2" in text, "现有的名字也要点名"
+    # 半份台账比没有台账更难收拾：失败时一件都不落。
+    assert detail["brief"]["refs"] == []
+    assert [item for item in detail["action_items"]
+            if item["kind"] == "stage1_review"] == []
+
+
+def test_fake_zero_assets_derives_nothing_and_moves_on(fake_app, monkeypatch):
+    """``MINIMAX_FAKE_ASSET_COUNT=0``：派生 0 行、标记为真，流程照常往下走。
+
+    纯风景片没有参考素材是**合法结论**（#279 US17）：不许报错，也不许把「本片没有
+    素材」与「清单没派生」混成一个状态。4 秒＝单段直出，整条推进不需要模型。
+    """
+    monkeypatch.setenv("MINIMAX_FAKE_ASSET_COUNT", "0")
+    app, _root = fake_app
+
+    with workbench_client(app) as client:
+        created = client.post("/api/v1/sessions", json={
+            "mode": "ref", "variant": "T2VA", "duration": 4.0,
+            "style": "写实", "language": "Chinese", "plot": "没有参考素材的风景片"})
+        session_id = created.json()["session_id"]
+        started = client.post(f"/api/v1/sessions/{session_id}/jobs")
+        assert started.status_code == 202, started.text
+        detail = _wait_until(
+            client, session_id, lambda body: _pending(body, "stage1_review"))
+        review = _pending(detail, "stage1_review")[0]
+        client.post(
+            f"/api/v1/sessions/{session_id}/action-items/{review['item_id']}/resolve",
+            json={"decision": "approve"})
+        # 素材循环空转：直接进阶段 2 与单段，停在收段视频那一格。
+        detail = _wait_until(
+            client, session_id, lambda body: _pending(body, "segment_video"))
+
+    assert detail["brief"]["refs"] == []
+    assert [item for item in detail["action_items"]
+            if item["kind"] == "asset_image"] == []
+    assert detail["status"] == "awaiting_human"
 
 
 # ---------------------------------------------------------------------------

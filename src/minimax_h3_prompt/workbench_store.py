@@ -1193,6 +1193,12 @@ class RefOut(BaseModel):
     kind: str
     number: int
     asset_id: str
+    # 每一行走到哪一步（#279 台账四态）与来路：素材分区要能显示「待办 / 已定稿 /
+    # 已放弃」，而「已被放弃、顺序还在后面的件」在待办列表里根本不存在——前端拿待办
+    # 反推不出来，只能由台账直接回显。``source`` 让「流程派生」与「用户上传」不必靠
+    # ``mode`` 反推。
+    status: str = ""
+    source: str = ""
 
 
 class VideoOutputOut(BaseModel):
@@ -1548,10 +1554,18 @@ def _check_ref_capacity(entries: Sequence[dict[str, Any]], *, where: str) -> Non
         raise RefCapacityExceeded(str(exc)) from exc
 
 
-# 台账条目的初始状态（D7 §6.4）。素材循环（#256）会把轮次与「已定稿」写进同一条目：
-# ``registered`` = 已登记、还没出词或上一轮被拒；``passed`` = 校对通过、该件定稿。
+# 台账条目的状态（D7 修订 spec #279 / §台账与进度）。``pending`` 是 #279 新增的第四档
+# 之前的第一档：阶段 1 收尾就把本片要的 N 件一次落齐，那时一件都还没交回来。**这一行
+# 的存在只说明流程派生了这一件**，交没交看状态（CONTEXT.md「素材台账」的 _Avoid_）。
+ASSET_LEDGER_STATUS_PENDING = "pending"
 ASSET_LEDGER_STATUS_REGISTERED = "registered"
 ASSET_LEDGER_STATUS_PASSED = "passed"
+
+# 台账条目的来源（同一 spec）：``derived`` ＝流程按阶段 1 的资产图词派生，``uploaded``
+# ＝用户上传（导演台 r2v 的全部、以及 #279 之前 ref 的预上传）。判「这件该不该由流程
+# 派生」看来源，不靠 ``mode`` 反推——路线名答的是另一个问题。
+ASSET_LEDGER_SOURCE_DERIVED = "derived"
+ASSET_LEDGER_SOURCE_UPLOADED = "uploaded"
 
 # 素材循环把「用户刚交的那张图」暂存在台账条目上，而不是 stage_state：会话文件是唯一
 # 真源（ADR 0032），而 ``stage_state`` 只保存白名单里的键——写进去会在下次保存时被
@@ -1561,8 +1575,9 @@ ASSET_PROOFREAD_KEY = "proofread_asset_id"
 
 
 def _ledger_entry(name: str, asset_kind: str, number: int, asset_id: str,
-                  sha256: str) -> dict[str, Any]:
-    """一条素材台账记录（D7 §6.4 的七字段）。
+                  sha256: str,
+                  source: str = ASSET_LEDGER_SOURCE_UPLOADED) -> dict[str, Any]:
+    """一条素材台账记录（D7 §6.4 的七字段 + 来源）。
 
     ``kind`` 落**官方三型**（picture / video / audio）而不是嗅探结果的
     image/video/audio：台账是参考素材的账，``<Picture N>`` 与分镜表标签都按这套词表
@@ -1576,7 +1591,63 @@ def _ledger_entry(name: str, asset_kind: str, number: int, asset_id: str,
         "sha256": sha256,
         "round": 0,
         "status": ASSET_LEDGER_STATUS_REGISTERED,
+        "source": source,
     }
+
+
+def _derived_picture_entry(name: str, number: int) -> dict[str, Any]:
+    """阶段 1 派生的一件 Picture：**还没交回来**（``pending``）、没有正本（id 与哈希留空）。
+
+    正本要等素材循环里交图并定稿才落进这一行（``jobs._settle_asset``）。先塞一个占位
+    ``asset_id`` 会让下游把它当成一条能读的素材，卡上出现一个打不开的槽。
+    """
+    return {
+        "name": name,
+        "kind": KIND_PICTURE,
+        "number": number,
+        "asset_id": "",
+        "sha256": "",
+        "round": 0,
+        "status": ASSET_LEDGER_STATUS_PENDING,
+        "source": ASSET_LEDGER_SOURCE_DERIVED,
+    }
+
+
+def _ledger_source(entry: Mapping[str, Any]) -> str:
+    """条目的来源；**没有这个键的旧行一律读成 uploaded**。
+
+    台账在 #279 之前只有上传一条来路，旧行缺 ``source`` 是当时的事实而不是损坏。
+    缺键时返回空串会让前端把每一件历史素材显示成「来源不明」，而真相是确定的。
+    """
+    source = str(entry.get("source") or "")
+    return source or ASSET_LEDGER_SOURCE_UPLOADED
+
+
+def derived_asset_rows(brief: Brief,
+                       state: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """阶段 1 收尾要落进台账的 N 行（编号＝剧本出场序，来源 ``derived``）。
+
+    取数与对账都住 ``generation.derived_asset_registry``（缺件/多件/改名在那里硬失败），
+    编号口径与 ``ref_asset_registry`` 同源——两处各排一次就会「台账写 2、分镜表写 1」。
+    这一步**会抛** ``AssetPromptMissing``：调用方要么让它中止阶段 1，要么先别落盘。
+    """
+    from .generation import derived_asset_registry
+
+    return [_derived_picture_entry(ref.name, ref.picture)
+            for ref in derived_asset_registry(brief, state)]
+
+
+def merge_derived_rows(ledger: Sequence[dict[str, Any]],
+                       rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把派生结果并进现有台账：**Picture 行整段替换**，视频/音频行原样保留。
+
+    替换而不是追加：ref 的 Picture 件数与名字从此由阶段 1 说了算，#279 之前预上传的
+    那些行描述的是另一个集合；两套并存会撞号，素材循环还会按旧名去要词。视频/音频不
+    属于派生集合（它们在循环之后补交，#284），删掉就是静默丢用户的素材。
+    """
+    kept = [dict(entry) for entry in ledger
+            if str(entry.get("kind")) != KIND_PICTURE]
+    return _renumber_ledger([*kept, *rows])
 
 
 def _next_number(ledger: Sequence[dict[str, Any]], asset_kind: str) -> int:
@@ -1625,7 +1696,9 @@ def _brief_out(brief: Brief,
         # brief.refs 属于 CLI 文件流程（带本地路径的那套登记），工作台的参考素材
         # 只能从台账来（spec §4.1）：这里统一按台账回显，不让两套登记混进同一个字段。
         refs=[RefOut(name=str(entry["name"]), kind=str(entry["kind"]),
-                     number=int(entry["number"]), asset_id=str(entry["asset_id"]))
+                     number=int(entry["number"]), asset_id=str(entry["asset_id"]),
+                     status=str(entry.get("status") or ""),
+                     source=_ledger_source(entry))
               for entry in _ledger_order(ledger)],
     )
 
@@ -2015,14 +2088,17 @@ class WorkbenchSessionStore:
         # 每会话一把进程内互斥锁，覆盖「读快照 → 改字段 → 整份写回」。执行器的进度写
         # （worker 线程）与取消请求（请求线程）会并发落到同一个会话文件；没有这把锁，
         # 先读到快照的一方会把另一方刚写的字段覆盖回旧值（#217 复审）。它是
-        # ``threading.Lock`` 而不是 ``asyncio.Lock``：调用方在 ``asyncio.to_thread``
+        # ``threading.RLock`` 而不是 ``asyncio.Lock``：调用方在 ``asyncio.to_thread``
         # 的线程里，跨线程加锁只能靠线程原语。
+        # **可重入**（#279）：有条写路径在 ``mutate`` 的临界区里还要走一次
+        # 「补齐派生清单」（``_start`` → ``_resume_step``）。普通 Lock 在那里自锁——
+        # 2026-11-15 全量实测：job 卡死、会话永远停在 running。跨线程互斥不变。
         self._locks_guard = threading.Lock()
-        self._session_locks: dict[str, threading.Lock] = {}
+        self._session_locks: dict[str, Any] = {}
 
-    def _lock_for(self, session_id: str) -> threading.Lock:
+    def _lock_for(self, session_id: str) -> Any:
         with self._locks_guard:
-            return self._session_locks.setdefault(session_id, threading.Lock())
+            return self._session_locks.setdefault(session_id, threading.RLock())
 
     def _resolve(self, session_id: str) -> Path:
         """把 ``session_id`` 解析成会话目录；越界、绝对路径、``..`` 一律 404。"""
@@ -2136,7 +2212,36 @@ class WorkbenchSessionStore:
         """
         with self._lock_for(session_id):
             self._replay_if_needed(session_id)
+            self._ensure_manifest_derived_unlocked(session_id)
             return self._detail_unlocked(session_id)
+
+    def ensure_asset_manifest_derived(self, session_id: str) -> None:
+        """阶段 1 已完成却还没派生时补齐；**幂等**（#279「任何入口都补齐」）。
+
+        续跑、恢复、重新进页面三条入口都会看到同一个中间态：阶段 1 已经收尾、台账却
+        还是空的。没有这一步，素材循环（判据是「台账还没走完」）会把「清单漏落了一次
+        盘」读成「本片没有素材」，整条参考素材静默消失。已有 derived 行就一行不动——
+        修订重跑会再次走到这里，重排会推翻已经在循环里交过的件号。
+        """
+        with self._lock_for(session_id):
+            self._ensure_manifest_derived_unlocked(session_id)
+
+    def _ensure_manifest_derived_unlocked(self, session_id: str) -> None:
+        """``ensure_asset_manifest_derived`` 的锁内形态（详情读取已持锁，不能再取一次）。"""
+        directory, session, derived, legacy = self._load(session_id)
+        # 历史会话只读；r2v 与 base 不派生（r2v 的台账由上传建立，见 #279「路线差异」）。
+        if legacy or session.asset_manifest_derived or not session.brief.is_ref:
+            return
+        # 「阶段 1 已完成」看**待办存在**，与 ``_resume_step`` 同一判据：阶段 1 收尾一定
+        # 挂一条 stage1_review，而最终 state 里没有 ``_progress`` 这类续跑元数据。
+        if not any(str(item.get("kind")) == step_machine.ACTION_STAGE1_REVIEW
+                   for item in session.action_items):
+            return
+        rows = derived_asset_rows(session.brief, session.stage_state)
+        self._state_with(
+            directory, session, derived,
+            asset_ledger=merge_derived_rows(session.asset_ledger, rows),
+            asset_manifest_derived=True).save()
 
     def _detail_unlocked(self, session_id: str) -> SessionDetail:
         directory, session, derived, legacy = self._load(session_id)
@@ -2201,6 +2306,7 @@ class WorkbenchSessionStore:
         variant_downgraded: str | None = None,
         segments: Sequence[dict[str, Any]] | None = None,
         asset_ledger: Sequence[dict[str, Any]] | None = None,
+        asset_manifest_derived: bool | None = None,
     ) -> SessionState:
         """以现有快照为底，覆盖调用方点名要改的字段。"""
         return SessionState(
@@ -2232,6 +2338,9 @@ class WorkbenchSessionStore:
             asset_ledger=(
                 tuple(asset_ledger) if asset_ledger is not None
                 else session.asset_ledger),
+            asset_manifest_derived=(
+                session.asset_manifest_derived if asset_manifest_derived is None
+                else bool(asset_manifest_derived)),
         )
 
     def list_sessions(
@@ -2279,16 +2388,20 @@ class WorkbenchSessionStore:
             raise SessionCompleted("会话已完成，不能再推进。")
         if detail.status == "awaiting_human":
             raise ActionItemPending("会话停在人工待办上，请先提交决定。")
-        # 素材台账的起跑门槛（D7 spec §4.3）：零素材可以建会话（停在 created），但参考
-        # 素材是阶段 1 分镜表 Subject 标签的来源，一张 Picture 都没有就没有可写的闭包。
-        # 判据走 ``route_uses_asset_ledger``：导演台 r2v 也用台账（它没有开场首帧待办，
-        # 开场图只能来自已登记的参考素材），t2v/i2v/fl2v 不受这条约束。
+        # 素材台账的起跑门槛（D7 修订 spec #279 §4.3）：**只剩导演台 r2v**。ref 路线的
+        # 素材集合改由阶段 1 派生（零素材起跑正是 #279 要解的死锁：没素材不能起跑 →
+        # 不起跑就没有词 → 没有词就生成不出素材）。r2v 的开场首帧必须是一张真实存在
+        # 的图，没有等效的自动派生，预上传在那里仍有正当理由。
+        #
+        # 判据不写成「ref 一律放行」：``route_uses_asset_ledger_fields`` 把 ref 与 r2v
+        # 混在同一个谓词里，将来若给 ref 重开预上传，那种写法会静默回归成「没有也能跑」。
         if (route_uses_asset_ledger_fields(
                 mode=detail.brief.mode,
                 director_mode=detail.brief.director_mode)
+                and detail.brief.director_mode == "r2v"
                 and not any(ref.kind == KIND_PICTURE for ref in detail.brief.refs)):
             raise AssetRequired(
-                "先上传参考素材：走素材台账的会话至少要有一张 Picture 才能起跑。")
+                "先上传参考素材：导演台 r2v 至少要有一张 Picture 才能起跑。")
 
     def session_directory(self, session_id: str) -> Path:
         """会话目录（执行器要在旁边写 ``active-job.json``）。"""
@@ -2863,7 +2976,8 @@ class WorkbenchSessionStore:
         取消请求）来自不同线程，两次文件读之间别人可能已经写过。把读也放进临界区，
         「找 job → 改字段 → 写回」才是原子的（#217 复审：取消标记曾被下一次进度写盖掉）。
         可覆盖的字段是 ``status`` / ``stage_state`` / ``jobs`` / ``action_items`` /
-        ``brief`` / ``variant_downgraded`` / ``segments``（#219 起阶段 2 收尾要把生效
+        ``brief`` / ``variant_downgraded`` / ``segments`` / ``asset_ledger`` /
+        ``asset_manifest_derived``（#219 起阶段 2 收尾要把生效
         变体与降级事实一起写回，绕开会话锁用 ``update_session_file`` 会把并发写盖掉；
         D6 起段状态也是快照字段，每次段通过立刻落盘）。
 
@@ -2893,6 +3007,7 @@ class WorkbenchSessionStore:
                 variant_downgraded=changes.get("variant_downgraded"),
                 segments=changes.get("segments"),
                 asset_ledger=changes.get("asset_ledger"),
+                asset_manifest_derived=changes.get("asset_manifest_derived"),
                 last_event_seq=(
                     appended[-1].seq if appended else session.last_event_seq),
             ).save()
@@ -2966,6 +3081,9 @@ __all__ = [
     "AssetDuplicate", "AssetImageInvalid", "AssetLocked", "AssetNameInvalid",
     "AssetRequired",
     "ASSET_PROMPT_KIND", "ASSET_LEDGER_STATUS_PASSED", "ASSET_PROOFREAD_KEY",
+    "ASSET_LEDGER_STATUS_PENDING", "ASSET_LEDGER_STATUS_REGISTERED",
+    "ASSET_LEDGER_SOURCE_DERIVED", "ASSET_LEDGER_SOURCE_UPLOADED",
+    "derived_asset_rows", "merge_derived_rows",
     "RefCapacityExceeded", "RouteMismatch", "CacheOutOfRoot",
     "ArtifactInfo", "ArtifactNotFound", "ArtifactTooLarge", "BriefOut",
     "EVENT_TYPES", "EVENTS_FILENAME", "Event", "EventDraft", "EventLog",

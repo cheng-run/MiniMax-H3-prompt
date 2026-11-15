@@ -18,8 +18,18 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ..segment_planner import SegmentPlan
 
+from ..kinds import ASSET_KIND_FIELDS, ASSET_MANIFEST_FIELDS
+
 # 开关名是启动日志里要被点名的那一个，调用方从常量取，不重抄字符串。
 FAKE_PIPELINE_ENV = "MINIMAX_FAKE_PIPELINE"
+# 桩阶段 1 造几件资产（D7 修订 #279）：素材集合改由阶段 1 定之后，桩不能再从
+# ``brief.refs`` 数件数——阶段 1 的 ref 路线已经拿不到 refs，照旧读会造出 0 件，
+# 整条素材循环与 E2E 直接断（假绿：跑完了但一条素材都没经过）。
+FAKE_ASSET_COUNT_ENV = "MINIMAX_FAKE_ASSET_COUNT"
+FAKE_ASSET_COUNT_DEFAULT = 2
+# 故意让「出词节点」漏掉第 K 件（1 起，逗号分隔可多件）：清单里还在、资产图词里没有，
+# 用来造出对账失败（缺件）的真实样例。阶段 1 收尾的对账必须当场硬失败并点名。
+FAKE_ASSET_DROP_ENV = "MINIMAX_FAKE_ASSET_DROP"
 # H3 产物是 736×1280@24fps（帧数表与尺寸同住 ``tools.preflight``）；桩造的视频要与
 # 真实产物同档，否则段校验判它不合格——那时只剩「放宽闸门」一条路，而那是 CI 假绿。
 H3_VIDEO_FPS = 24
@@ -151,6 +161,48 @@ def _frame_bundle(brief: Any, round_no: int) -> dict[str, Any] | None:
     }
 
 
+def fake_asset_count() -> int:
+    """桩阶段 1 造几件资产：``MINIMAX_FAKE_ASSET_COUNT``（默认 2，0 合法）。
+
+    坏值**直接报错**，不回落默认：这个旋钮是用来造「零资产」与「漏一件」样例的，
+    静默回落会让那条用例悄悄测回默认那档，绿得毫无意义（本仓「绝不静默降级」）。
+    """
+    raw = os.environ.get(FAKE_ASSET_COUNT_ENV, "").strip()
+    if not raw:
+        return FAKE_ASSET_COUNT_DEFAULT
+    try:
+        count = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"{FAKE_ASSET_COUNT_ENV} 必须是非负整数，收到 {raw!r}") from exc
+    if count < 0:
+        raise ValueError(
+            f"{FAKE_ASSET_COUNT_ENV} 必须是非负整数，收到 {raw!r}")
+    return count
+
+
+def fake_asset_drops() -> tuple[int, ...]:
+    """桩「出词节点」故意漏掉的件号（1 起）；默认空。坏值同样直接报错。"""
+    raw = os.environ.get(FAKE_ASSET_DROP_ENV, "").strip()
+    if not raw:
+        return ()
+    drops: list[int] = []
+    for part in raw.split(","):
+        text = part.strip()
+        if not text:
+            continue
+        try:
+            number = int(text)
+        except ValueError as exc:
+            raise ValueError(
+                f"{FAKE_ASSET_DROP_ENV} 只收逗号分隔的件号，收到 {raw!r}") from exc
+        if number < 1:
+            raise ValueError(
+                f"{FAKE_ASSET_DROP_ENV} 的件号从 1 起，收到 {raw!r}")
+        drops.append(number)
+    return tuple(drops)
+
+
 def asset_prompt_text(name: str) -> str:
     """桩资产图词：按语义名固定成一句可直接复制的画面描述（D7-6）。
 
@@ -190,6 +242,23 @@ def rewrite_asset_prompt_text(current: str) -> str:
             + "\n\n修订（按校对差异）：外套改为米色，伞改为黑色长柄伞。")
 
 
+def _fake_assets(brief: Any, refs: list[Any]) -> list[tuple[int, str]]:
+    """桩阶段 1 造出的资产：``(编号, 语义名)``，编号＝剧本出场序。
+
+    ref 路线的素材集合**由阶段 1 自己定**（D7 修订 #279）：件数取
+    ``MINIMAX_FAKE_ASSET_COUNT``，名字按编号起。r2v 仍按用户上传的 ``brief.refs``
+    造（它的台账本来就是上传建立的），不产资产图词的路线一件都不造。
+    """
+    from ..brief_parser import route_emits_asset_prompts
+
+    if not route_emits_asset_prompts(brief):
+        return []
+    if getattr(brief, "is_ref", False):
+        return [(number, f"桩素材{number}")
+                for number in range(1, fake_asset_count() + 1)]
+    return [(int(ref.picture), str(ref.name)) for ref in refs]
+
+
 def stage1_state(brief: Any, previous: dict[str, Any] | None = None) -> dict[str, Any]:
     """固定阶段 1 的 state；轮次与用户意见从 ``previous`` 里现读。
 
@@ -204,6 +273,9 @@ def stage1_state(brief: Any, previous: dict[str, Any] | None = None) -> dict[str
     ]
     round_no = len(revisions) + 1
     refs = sorted(getattr(brief, "refs", ()) or (), key=lambda item: item.picture)
+    from ..brief_parser import route_emits_asset_prompts
+
+    assets = _fake_assets(brief, refs)
     script_lines = [
         f"# 分场剧本（桩管线第 {round_no} 稿）",
         "",
@@ -212,19 +284,19 @@ def stage1_state(brief: Any, previous: dict[str, Any] | None = None) -> dict[str
         "分场 1：雨夜街口，人物撑伞走过积水，霓虹在积水里反光。",
         "分场 2：人物停在旧楼门前，收起伞，抬头看向窗内的灯。",
     ]
-    if refs:
+    if assets:
         script_lines += ["", "参考素材：", *[
-            f"- <Picture {ref.picture}> {ref.name}" for ref in refs]]
+            f"- <Picture {number}> {name}" for number, name in assets]]
     if revisions:
         script_lines += ["", "本轮修订：", *[f"- {text}" for text in revisions]]
     shot_lines = [f"# 分镜镜头表（桩管线第 {round_no} 稿）", ""]
-    if refs:
+    if assets:
         # 多参分镜表按台账语义名与 `<Picture N>` 写（D7 §10）：素材循环与段内子集
         # 都靠这个名字对号，桩不另编一套指称。
         shot_lines += [
             f"[Shot {index}] At 00:{2 * index:02d}.000, a medium shot featuring "
-            f"{ref.name} <Picture {ref.picture}>, neon reflecting in the puddles."
-            for index, ref in enumerate(refs, 1)]
+            f"{name} <Picture {number}>, neon reflecting in the puddles."
+            for index, (number, name) in enumerate(assets, 1)]
     else:
         shot_lines += [
             "[Shot 1] At 00:00.000, a medium shot of the woman under a black umbrella "
@@ -246,13 +318,23 @@ def stage1_state(brief: Any, previous: dict[str, Any] | None = None) -> dict[str
         "sound_design": "对白表：无对白。环境声：雨声与脚步声（桩管线）。",
         "music": "non_diegetic_music：低频弦乐铺底（桩管线）。",
     }
-    if refs:
+    if route_emits_asset_prompts(brief):
         # 资产图词一件一份，语义名是台账与阶段 1 之间的唯一对号键（D7 §7）：出词
         # job 用真实的 ``asset_prompt_for`` 按名字取，取不到就硬失败而不是拿邻件顶替。
-        update["character_image_prompts"] = [
-            {"name": ref.name, "positive_prompt": asset_prompt_text(ref.name),
+        # 三类提示词键都**显式**写：整键缺失在 ``image_prompt_variants`` 里是「旧会话」，
+        # 会回退设计正文凭空造出道具／场景条目，对账就会算出「多件」。
+        drops = set(fake_asset_drops())
+        update[ASSET_KIND_FIELDS["character"][0]] = [
+            {"name": name, "positive_prompt": asset_prompt_text(name),
              "negative_prompt": "", "locked_features": []}
-            for ref in refs]
+            for number, name in assets if number not in drops]
+        update[ASSET_KIND_FIELDS["prop"][0]] = []
+        update[ASSET_KIND_FIELDS["scene"][0]] = []
+        # 设计端清单（机器口径）照样列全：漏件只发生在**出词节点**（``MINIMAX_FAKE_ASSET_DROP``
+        # 就是照这个形态造样卡的），清单里那一件还在——阶段 1 收尾的对账因此能点名缺件。
+        update[ASSET_MANIFEST_FIELDS["character"]] = [name for _n, name in assets]
+        update[ASSET_MANIFEST_FIELDS["prop"]] = []
+        update[ASSET_MANIFEST_FIELDS["scene"]] = []
     bundle = _frame_bundle(brief, round_no)
     if bundle is not None:
         update["fl2va_prompt_bundle"] = bundle

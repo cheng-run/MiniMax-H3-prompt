@@ -79,7 +79,6 @@ def harness(tmp_path, monkeypatch):
 def _complete_asset_loop(harness) -> dict:
     """走完整条素材循环（两件逐件交图、校对通过），返回停下来的详情快照。"""
     harness.create()
-    harness.register_pictures()
     harness.start_stage1()
     harness.approve_stage1()
     for number in (1, 2):

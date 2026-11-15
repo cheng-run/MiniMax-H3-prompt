@@ -34,6 +34,8 @@ function makeRef(overrides: Partial<RefOut> = {}): RefOut {
     kind: 'picture',
     number: 1,
     asset_id: 'sess-1/aaaaaaaaaaaaaaaa',
+    status: 'pending',
+    source: 'derived',
     ...overrides,
   }
 }

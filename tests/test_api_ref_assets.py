@@ -142,6 +142,8 @@ def test_ref_upload_registers_a_ledger_entry_with_sniffed_kind(tmp_path):
     assert refs == [{
         "name": "橘猫", "kind": "picture", "number": 1,
         "asset_id": f"{session_id}/{digest[:16]}",
+        # 四态与来路（#279）：上传建立的行是 uploaded，还没校对过是 registered。
+        "status": "registered", "source": "uploaded",
     }]
     # 台账住会话状态（ADR 0032），不另写 asset-ledger.json。
     raw = json.loads(_session_file(tmp_path, session_id).read_text("utf-8"))
@@ -300,6 +302,95 @@ def test_ref_capacity_counts_ledger_entries_only(tmp_path):
     assert len(detail["assets"]) == 10
 
 
+# ---------------------------------------------------------------------------
+# 资产清单派生与会话标记（#279 修订「资产清单的派生与落盘」）
+# ---------------------------------------------------------------------------
+
+def _stage1_state() -> dict:
+    """固定的阶段 1 产物：两件资产，剧本里先写橘猫、后写台灯。"""
+    return {
+        "script": "分场剧本：橘猫蹲在窗台，台灯亮着。",
+        "shot_table": "[Shot 1] At 00:00.000, a cat sitting by the window.",
+        "character_image_prompts": [
+            {"name": "橘猫", "positive_prompt": "一只橘色短毛猫。",
+             "negative_prompt": "", "locked_features": []},
+            {"name": "台灯", "positive_prompt": "一盏黄铜台灯。",
+             "negative_prompt": "", "locked_features": []},
+        ],
+    }
+
+
+def _wait_until(client: TestClient, session_id: str, predicate, timeout: float = 15.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        body = client.get(f"/api/v1/sessions/{session_id}").json()
+        if predicate(body):
+            return body
+        time.sleep(0.02)
+    raise AssertionError(f"详情没有在 {timeout}s 内满足条件：{session_id}")
+
+
+def test_created_ref_session_is_not_marked_as_derived(tmp_path):
+    """空台账 + 未派生 ≠ 阶段 1 已完成：没跑阶段 1 的会话不许被标成「本片没有素材」。
+
+    两个状态在台账上都是空的，分开它们的只有这一个标记；读成已派生，素材循环就会被
+    整条跳过（`_asset_step_of` 对空台账恒判「走完了」）。
+    """
+    client = _client(tmp_path)
+    session_id = _create(client)["session_id"]
+
+    client.get(f"/api/v1/sessions/{session_id}")
+
+    raw = json.loads(_session_file(tmp_path, session_id).read_text("utf-8"))
+    assert raw["asset_ledger"] == []
+    assert raw["asset_manifest_derived"] is False
+
+
+def test_derivation_is_idempotent_and_backfills_on_session_read(tmp_path, monkeypatch):
+    """派生幂等；「阶段 1 已完成但未派生」的会话重进页面就补齐（#279）。
+
+    补齐不是可有可无的兜底：漏落一次盘之后，空台账会被读成「本片确实没有素材」，
+    用户手里那几件参考素材就静默消失了。三条入口（续跑/恢复/重进页面）都走同一个
+    幂等口，所以第二次补出来的台账必须与第一次逐字相同。
+    """
+    from minimax_h3_prompt.graph import pipeline
+
+    monkeypatch.setattr(
+        pipeline, "run_stage1",
+        lambda brief, config, **kwargs: (_stage1_state(), None, None))
+    with workbench_client(create_app(sessions_root=tmp_path)) as client:
+        session_id = _create(client)["session_id"]
+        started = client.post(f"/api/v1/sessions/{session_id}/jobs")
+        assert started.status_code == 202, started.text
+        _wait_until(client, session_id, lambda body: any(
+            item["kind"] == "stage1_review" and item["status"] == "pending"
+            for item in body["action_items"]))
+
+        raw = json.loads(_session_file(tmp_path, session_id).read_text("utf-8"))
+        assert raw["asset_manifest_derived"] is True
+        assert [(entry["name"], entry["number"], entry["status"], entry["source"])
+                for entry in raw["asset_ledger"]] == [
+            ("橘猫", 1, "pending", "derived"), ("台灯", 2, "pending", "derived")]
+        derived = raw["asset_ledger"]
+
+        # 造出「阶段 1 已完成、清单没派生」的崩溃窗口，再重进页面。
+        store = client.app.state.session_store
+        store.mutate(session_id, lambda _detail: {
+            "asset_ledger": [], "asset_manifest_derived": False})
+        detail = client.get(f"/api/v1/sessions/{session_id}").json()
+        assert [(ref["name"], ref["number"], ref["status"], ref["source"])
+                for ref in detail["brief"]["refs"]] == [
+            ("橘猫", 1, "pending", "derived"), ("台灯", 2, "pending", "derived")]
+
+        # 幂等：再读几次不多行、件号与状态都不动。
+        for _ in range(3):
+            client.get(f"/api/v1/sessions/{session_id}")
+        again = json.loads(_session_file(tmp_path, session_id).read_text("utf-8"))
+        assert again["asset_ledger"] == derived
+
+
 def test_base_session_upload_with_a_name_is_rejected(tmp_path):
     """base 没有素材台账：带语义名是 ref 专属动作，响亮拒绝而不是静默忽略。
 
@@ -345,9 +436,36 @@ def test_registration_after_start_is_locked_but_plain_upload_is_not(tmp_path):
     assert len(detail["assets"]) == 2
 
 
-def test_ref_session_without_pictures_cannot_start(tmp_path):
+def test_ref_session_starts_with_zero_pictures(tmp_path, monkeypatch):
+    """零素材就能起跑（#279 修订 §4.3）：素材集合改由阶段 1 派生。
+
+    旧判据要求的「先上传一张 Picture」是死锁的前半截——没素材不能起跑 → 不起跑就没有
+    词 → 没有词就生成不出素材。这里只钉起跑闸门放行（job 被受理），阶段 1 本身另有
+    用例覆盖，所以把管线换成不会真发请求的桩。
+    """
+    from minimax_h3_prompt.graph import pipeline
+
+    monkeypatch.setattr(
+        pipeline, "run_stage1",
+        lambda brief, config, **kwargs: ({}, None, None))
     client = _client(tmp_path)
     session_id = _create(client)["session_id"]
+
+    resp = client.post(f"/api/v1/sessions/{session_id}/jobs")
+
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["kind"] == "advance"
+
+
+def test_director_r2v_still_requires_a_picture_to_start(tmp_path):
+    """导演台 r2v 不动（#279「路线差异」）：开场首帧必须是真实存在的图，没有等效派生。"""
+    client = _client(tmp_path)
+    created = client.post("/api/v1/sessions", json={
+        "mode": "director", "variant": "T2VA", "duration": 4.0,
+        "style": "写实", "language": "Chinese", "plot": "雨夜旧信",
+        "director_mode": "r2v", "director_node_id": "node-r2v"})
+    assert created.status_code == 201, created.text
+    session_id = created.json()["session_id"]
 
     resp = client.post(f"/api/v1/sessions/{session_id}/jobs")
 

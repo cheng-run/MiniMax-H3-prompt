@@ -952,8 +952,22 @@ describe('SessionDetailView 步骤带（#273：ref / 导演台）', () => {
               mode: 'ref',
               duration: 8,
               refs: [
-                { asset_id: 'sess-1/a1', kind: 'picture', name: '橘猫', number: 1 },
-                { asset_id: 'sess-1/a2', kind: 'picture', name: '台灯', number: 2 },
+                {
+                  asset_id: 'sess-1/a1',
+                  kind: 'picture',
+                  name: '橘猫',
+                  number: 1,
+                  status: 'passed',
+                  source: 'derived',
+                },
+                {
+                  asset_id: 'sess-1/a2',
+                  kind: 'picture',
+                  name: '台灯',
+                  number: 2,
+                  status: 'passed',
+                  source: 'derived',
+                },
               ],
             }),
             action_items: [

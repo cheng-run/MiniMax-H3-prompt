@@ -9,6 +9,7 @@ from pathlib import Path
 from collections.abc import Mapping
 from typing import Any, Literal, NamedTuple, cast
 
+from .asset_manifest import name_set_mismatch
 from .asset_proofread import proofread_descriptions
 from .brief_parser import (
     Brief,
@@ -24,7 +25,7 @@ from .image_config import (
     canonical_image_model,
 )
 from .image_routing import model_of as _entry_image_model
-from .kinds import ASSET_KIND_FIELDS
+from .kinds import ASSET_KIND_FIELDS, ASSET_MANIFEST_FIELDS
 from .text_patterns import SHA256_HEX as _SHA256
 from .tools.theme_guard import (
     _CONFLICTING_OUTDOOR_TERMS,
@@ -1197,6 +1198,51 @@ def ref_asset_registry(state: Mapping[str, Any], brief: Brief) -> list[RefItem]:
     ], state, brief)
 
 
+def derived_asset_registry(
+    brief: Brief, state: Mapping[str, Any],
+) -> list[RefItem]:
+    """阶段 1 收尾时本片要的 N 件资产：编号＝剧本出场序，且与设计端清单**对账**。
+
+    D7 修订（#279）把素材集合从输入改成产出：件数与名字由阶段 1 定，这一份就是台账的
+    落行依据。编号不另排一遍——直接取 ``ref_asset_registry`` 的派生支路，工作台的编号与
+    分镜表 ``<Subject N>``／``<Picture N>`` 因此同源（两处各排一次就会出现「台账写 2、
+    分镜表写 1」这种只在真实会话里才看得见的错位）。
+
+    对账与落行是同一处（spec「落行与对账是同一处」）：清单里有、资产图词里没有（缺件），
+    词里有、清单里没有（多件或改名），都在这里硬失败并点名两边。错位的词一旦进了台账，
+    素材循环就会按名字去要一件不存在的资产，而错的是哪一张不会有第二个信号
+    （``AssetPromptMissing`` 的「不静默降级」口径，异常类型沿用）。
+
+    清单三键都缺失时**不校验**：那是 #279 之前的会话，设计端根本没被要求过清单块，
+    拿「没问过」当「答案是零」会把旧会话整条判死（与 ``_manifest_names`` 同一口径）。
+    """
+    refs = ref_asset_registry(state, brief)
+    manifest = _state_manifest_names(state)
+    if manifest is None:
+        return refs
+    produced = [item.name for item in refs]
+    mismatch = name_set_mismatch(manifest, produced)
+    if mismatch:
+        raise AssetPromptMissing(
+            f"阶段 1 的资产清单与资产图提示词对不上：{mismatch}；"
+            f"清单为 {manifest}，资产图提示词为 {produced}。")
+    return refs
+
+
+def _state_manifest_names(state: Mapping[str, Any]) -> list[str] | None:
+    """三类设计端清单合并成一个名字序列；三键都缺失 → ``None``（旧会话，不校验）。
+
+    键从 ``ASSET_MANIFEST_FIELDS`` 现取，不另抄一份字面量：加第四类资产时漏一处就是
+    「节点写了、这里读不到」的静默漏（#56 复审的老形态）。
+    """
+    if not any(key in state for key in ASSET_MANIFEST_FIELDS.values()):
+        return None
+    names: list[str] = []
+    for key in ASSET_MANIFEST_FIELDS.values():
+        names.extend(str(name) for name in (state.get(key) or []))
+    return names
+
+
 def _with_merged_descriptions(refs: list[RefItem], state: Mapping[str, Any],
                               brief: Brief) -> list[RefItem]:
     """素材画面事实覆盖（issue #44 AC3）：描述取校对记录的合并结果。
@@ -1403,7 +1449,7 @@ __all__ = [
     "composition_set", "composition_hint", "canvas_family", "canvas_display",
     "RatioPreset", "CANVAS_RATIO_PRESETS",
     "asset_prompts_for", "fl2va_bundle_from_dict", "generation_directory",
-    "ref_asset_registry", "render_generation",
+    "ref_asset_registry", "derived_asset_registry", "render_generation",
     "strip_foreign_frames",
     "render_fl2va_frame_markdown", "render_fl2va_markdown", "result_from_state", "variant_frame_names",
     "scene_requirement_groups", "validate_fl2va_bundle",

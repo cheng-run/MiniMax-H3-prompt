@@ -72,6 +72,20 @@ MUTATIONS: tuple[Mutation, ...] = (
         "（2026-11-14，#253 复审拿到假绿）",
     ),
     Mutation(
+        "ref_stage1_brief_injects_ledger_refs",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "        if session.brief.is_ref:\n"
+        "            return session.brief\n"
+        "        # r2v 的阶段 1 还没跑素材循环",
+        "        if session.brief.is_ref:\n"
+        "            return self._ref_brief(session, passed_only=False)\n"
+        "        # r2v 的阶段 1 还没跑素材循环",
+        ("tests/test_api_asset_loop.py::"
+         "test_ref_stage1_never_sees_the_ledger_as_brief_refs",),
+        "阶段 1 拿回注入的 refs ＝ ``ref_asset_registry`` 走「用户登记为准」，"
+        "设计师清单被绕过、素材集合退回用户预置（D7 修订 #279 的死锁原形）",
+    ),
+    Mutation(
         "usage_off",
         "src/minimax_h3_prompt/model_factory.py",
         "        ),\n        max_retries=_LLM_MAX_RETRIES,\n        streaming=True,\n"

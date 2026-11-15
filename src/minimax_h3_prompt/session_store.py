@@ -480,6 +480,12 @@ class SessionState:
     # **住会话状态而不是另写 asset-ledger.json**：会话文件是唯一真源（ADR 0032），
     # 另开一份文件就会出现「台账与快照各说各话」的两处口径。旧会话没有这个键 → 空表。
     asset_ledger: tuple[dict[str, Any], ...] = ()
+    # 「资产清单已派生」（D7 修订 spec #279 / CONTEXT.md 同名词条）：本片的资产清单已按
+    # 阶段 1 的结果落齐，件数就以台账为准（零件也算落齐）。**它分开的是「台账是空的」
+    # 与「清单还没派生」**——两种情形台账都空，靠台账本身分不出来（漏落一次盘就会静默
+    # 跳过整条素材循环）。它不是台账的字段：台账答「有哪几件、各走到哪一步」，这个标记
+    # 答「这份清单算不算数」，塞一行占位就是拿同一个问题问两遍。
+    asset_manifest_derived: bool = False
 
     @property
     def awaiting_frames(self) -> bool:
@@ -524,6 +530,7 @@ class SessionState:
             payload["action_items"] = [dict(item) for item in self.action_items]
             payload["segments"] = [dict(item) for item in self.segments]
             payload["asset_ledger"] = [dict(item) for item in self.asset_ledger]
+            payload["asset_manifest_derived"] = bool(self.asset_manifest_derived)
         atomic_write_text(
             target, json.dumps(payload, ensure_ascii=False, indent=2))
         return target
@@ -537,7 +544,8 @@ def save_session(directory: str | Path, brief: Brief, stage_state: dict[str, Any
                  last_event_seq: int = 0,
                  jobs: tuple[dict[str, Any], ...] = (),
                  action_items: tuple[dict[str, Any], ...] = (),
-                 asset_ledger: tuple[dict[str, Any], ...] = ()) -> Path:
+                 asset_ledger: tuple[dict[str, Any], ...] = (),
+                 asset_manifest_derived: bool = False) -> Path:
     """保存或更新会话；directory 为 generation 目录。"""
     session = SessionState(
         Path(directory), brief, stage_state, status,
@@ -548,6 +556,7 @@ def save_session(directory: str | Path, brief: Brief, stage_state: dict[str, Any
         jobs=tuple(jobs),
         action_items=tuple(action_items),
         asset_ledger=tuple(asset_ledger),
+        asset_manifest_derived=bool(asset_manifest_derived),
     )
     return session.save()
 
@@ -610,6 +619,9 @@ def load_session(directory: str | Path) -> SessionState | None:
         action_items=_dict_tuple(raw, "action_items"),
         segments=_dict_tuple(raw, "segments"),
         asset_ledger=_dict_tuple(raw, "asset_ledger"),
+        # 旧会话没有这个键 → False（＝「没派生过」）。绝不能读成 True：那会把「阶段 1
+        # 还没走完」当成「本片确实没有素材」，整条素材循环被静默跳过。
+        asset_manifest_derived=bool(raw.get("asset_manifest_derived", False)),
     )
 
 
