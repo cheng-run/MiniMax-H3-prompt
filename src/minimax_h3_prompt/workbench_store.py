@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import base64
+import difflib
 import hashlib
 import json
 import logging
@@ -204,7 +205,10 @@ def director_tailframe_prompt_name(position: int) -> str:
 # 资产图词（D7 §7）：素材循环里每件参考素材一份 ``assets/picture-NN.md``，与台账
 # 图片编号同号。改词重出**覆盖**同一份文件——历史靠台账轮次与待办决议表达。
 ASSET_PROMPT_KIND = "asset_prompt"
-_ASSET_PROMPT_FILENAME = r"picture-\d{2}\.md"
+# 名字函数与登记模式从同一份位宽常量拼（同 ``bridge_frame_name`` 的纪律）：各写一份
+# 格式串时，改了一处就会让「清单里有、读的时候说没有」。
+_ASSET_PROMPT_NUMBER_DIGITS = 2
+_ASSET_PROMPT_FILENAME = rf"picture-\d{{{_ASSET_PROMPT_NUMBER_DIGITS}}}\.md"
 _ASSET_PROMPT_SPEC = ArtifactSpec(ASSET_PROMPT_KIND)
 # 段级注入卡（D7 §9 / #257）：每段一份 ``segments/injection-card-NN.md``，与段词同号。
 # 段循环没跑到该段时没有这份文件——页面按产物存在与否显示，不做空卡。
@@ -280,6 +284,23 @@ def segment_injection_card_name(position: int) -> str:
     时，改一处就会让产物清单里没有刚写的卡。
     """
     return f"{SEGMENTS_DIRNAME}/injection-card-{position:02d}.md"
+
+
+def asset_prompt_name(number: int) -> str:
+    """第 ``number`` 件的资产图词产物名（``assets/picture-NN.md``，与台账同号）。"""
+    digits = _ASSET_PROMPT_NUMBER_DIGITS
+    return f"{ASSETS_DIRNAME}/picture-{int(number):0{digits}d}.md"
+
+
+def parse_asset_prompt(text: str) -> str:
+    """从资产图词产物正文取回词本体（头部是给人看的标签，不参与校对与改写）。
+
+    头部固定四行 + 一个空行。找不到分隔行时整篇当词——那时产物是旧形态，宁可多带
+    一段标签也不要丢掉词。读的写的是同一份格式：渲染在 ``api.jobs``，解析住这里，
+    因为工作台的详情读取（恢复动作的差异判定）也要用同一条规则。
+    """
+    _head, separator, body = str(text).partition("\n\n")
+    return body if separator else str(text)
 
 
 def artifact_spec(name: str) -> ArtifactSpec | None:
@@ -811,6 +832,8 @@ _DECISIONS = frozenset({
     # 校对不通过的两条出路（#288）：默认的「改词强化原意再掷」与原词再掷。
     step_machine.DECISION_REWORD_REROLL,
     step_machine.DECISION_REROLL,
+    # 把被旧逻辑改坏的词救回阶段 1 原文（#291）：第五个决议值，仍走同一条 resolve。
+    step_machine.DECISION_RESTORE_PROMPT,
     # 素材循环里的第二种决议（#279 §循环的边界动作 / #282）：放弃这一件。
     step_machine.DECISION_ABANDON_ASSET,
     # 补交口的两种决议（#279 §补交口 / #284）：交完了，或者明确「没有，就这样」。
@@ -1437,6 +1460,13 @@ class ActionItemOut(BaseModel):
     # 重开卡、通过后的补报告）。用 ``None`` 缺省（同图槽口径）：其余待办没有这一项，
     # 也让契约里保持可选；``None`` ＝读图模型未知，界面照实说「未知」。
     vision_model: str | None = None
+    # 恢复阶段 1 原文（#291）：只在「未定稿 ＋ 盘上词与原文不一致 ＋ 轮次账里没有这一件
+    # 的记录」时由**详情读取**现算（见 ``asset_restore_candidate``），不写进快照——
+    # 它是盘上事实的派生值，旧会话（快照里根本没有这两个键）也必须能拿到。
+    # 用 ``None`` 缺省（同图槽口径）：不是所有待办都有这一项，也让契约里保持可选，
+    # 存量客户端与夹具不必为无关 kind 补两个键。``restore_diff`` 是改前改后的统一 diff。
+    restore_available: bool | None = None
+    restore_diff: str | None = None
 
 
 class SegmentAssetOut(BaseModel):
@@ -1818,6 +1848,76 @@ def unsettled_picture_entries(
         key=lambda entry: int(entry["number"]))
 
 
+def asset_restore_candidate(
+    directory: str | Path,
+    *,
+    brief: Brief,
+    stage_state: Mapping[str, Any],
+    ledger: Sequence[Mapping[str, Any]],
+    number: int,
+) -> tuple[str, str]:
+    """「恢复阶段 1 原文」可用时返回 ``(改前改后 diff, 阶段 1 原文)``，否则两空串（#291）。
+
+    三个条件**同时**成立才给恢复动作（spec #286「恢复动作」）：
+
+    1. 这一件还没定稿（``pending`` / ``registered`` 之类）——已定稿或已放弃的件没有
+       「再掷一次」的下文，恢复对它们没有意义；
+    2. 盘上 ``assets/picture-NN.md`` 的词与阶段 1 原文不是逐字一致；
+    3. 资产轮次账里**没有**这一件的任何记录。有账＝合法改写（用户认可的、或改词作业
+       落过痕的），一键抹掉它就是删历史——这一条正是「无账差异」的判据。
+
+    阶段 1 原文与出词同一个取数口（``generation.asset_prompt_for``），不另读一份：
+    两处各取一次的场合，恢复出来的「原文」会与当时写下去的那份慢慢分家。
+
+    轮次账坏行或阶段 1 没有这一件的词时**不给恢复**（空串）并留警告：详情读取不该
+    因为一张坏账 500，但「读不懂账」绝不能冒充「无账」——那会让人一键抹掉合法改写。
+    """
+    entry = next(
+        (dict(row) for row in ledger
+         if (str(row.get("kind")) == KIND_PICTURE
+             and int(row.get("number", 0)) == int(number))), None)
+    if entry is None or str(entry.get("status")) in (
+            ASSET_LEDGER_STATUS_PASSED, ASSET_LEDGER_STATUS_ABANDONED):
+        return "", ""
+    name = str(entry.get("name") or "")
+    path = Path(directory) / asset_prompt_name(number)
+    if not name or not path.is_file():
+        return "", ""
+
+    from .asset_loop import read_asset_rounds
+
+    try:
+        if read_asset_rounds(directory, name=name):
+            return "", ""
+    except ValueError:
+        logger.warning("资产轮次账读不了，不提供恢复动作：%s", directory, exc_info=True)
+        return "", ""
+
+    from .generation import AssetPromptMissing, asset_prompt_for
+
+    try:
+        original = str(asset_prompt_for(brief, stage_state, name).positive_prompt)
+    except AssetPromptMissing:
+        logger.warning("阶段 1 没有为「%s」写资产图提示词，不提供恢复动作", name)
+        return "", ""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return "", ""
+    current = parse_asset_prompt(text)
+    if current.strip() == original.strip():
+        return "", ""
+    return _restore_diff(current, original), original
+
+
+def _restore_diff(before: str, after: str) -> str:
+    """改前（盘上）→ 改后（阶段 1 原文）的统一 diff；两种文本都按行比。"""
+    return "\n".join(difflib.unified_diff(
+        before.splitlines(), after.splitlines(),
+        fromfile="改前（磁盘上的生图词）", tofile="改后（阶段 1 原文）",
+        lineterm=""))
+
+
 def asset_extra_pending(items: Sequence[Mapping[str, Any]]) -> bool:
     """补交待办是否还在等用户（#279 §补交口 / #284）。
 
@@ -1962,6 +2062,28 @@ def _director_notes(directory: Path, duration: float) -> list[str]:
         target, plan.total_frames,
         sum(1 for segment in plan.segments if not segment.guided))
     return [note] if note else []
+
+
+def _with_restore_candidate(
+    item: ActionItemOut, directory: Path, session: SessionState,
+) -> ActionItemOut:
+    """给未决的素材交图卡补上「恢复阶段 1 原文」的可用性与 diff（#291）。
+
+    只在**详情读取**里算、不写进快照：旧逻辑改坏的那间会话，卡片是旧代码挂出来的，
+    快照里没有这两个键；只在建卡时算的话，那些会话永远看不到这个出口（`#291` 要救的
+    正是它们）。派生值还有一个好处：恢复完成、盘上词与原文一致之后，下一次读详情自然
+    就不再出现这个动作，不需要任何回写。
+    """
+    if (item.kind != step_machine.ACTION_ASSET_IMAGE or item.status != "pending"
+            or item.asset_index is None):
+        return item
+    diff, _original = asset_restore_candidate(
+        directory, brief=session.brief, stage_state=session.stage_state,
+        ledger=session.asset_ledger, number=int(item.asset_index))
+    if not diff:
+        return item
+    return item.model_copy(
+        update={"restore_available": True, "restore_diff": diff})
 
 
 def _artifact_info(session_id: str, name: str, path: Path) -> ArtifactInfo:
@@ -2482,8 +2604,10 @@ class WorkbenchSessionStore:
         directory, session, derived, legacy = self._load(session_id)
         summary = self._summary(derived, session, legacy)
         jobs = [JobSummary.model_validate(item) for item in session.jobs]
-        action_items = [ActionItemOut.model_validate(item)
-                        for item in session.action_items]
+        action_items = [
+            _with_restore_candidate(item, directory, session)
+            for item in (ActionItemOut.model_validate(entry)
+                         for entry in session.action_items)]
         current_job = next(
             (job for job in reversed(jobs) if job.status == "running"), None)
         detail = SessionDetail(
@@ -3370,6 +3494,7 @@ __all__ = [
     "AssetReopenUnsupported", "AssetNotReopenable",
     "AssetRequired",
     "ASSET_PROMPT_KIND", "ASSET_LEDGER_STATUS_PASSED", "ASSET_PROOFREAD_KEY",
+    "asset_prompt_name", "parse_asset_prompt", "asset_restore_candidate",
     "ASSET_LEDGER_STATUS_PENDING", "ASSET_LEDGER_STATUS_REGISTERED",
     "ASSET_LEDGER_STATUS_ABANDONED",
     "ASSET_LEDGER_SOURCE_DERIVED", "ASSET_LEDGER_SOURCE_UPLOADED",

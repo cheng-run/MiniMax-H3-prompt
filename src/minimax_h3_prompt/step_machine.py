@@ -183,6 +183,11 @@ DECISION_ABANDON_ASSET = "abandon_asset"
 # ``reroll`` 是「原词再掷」：生图词与描述一个字都不动，只重开卡片。
 DECISION_REWORD_REROLL = "reword_reroll"
 DECISION_REROLL = "reroll"
+# 把被旧逻辑改坏的词救回来（#291 / spec #286「恢复动作」）：以**阶段 1 原文**覆盖写回
+# 生图词。它只在「未定稿 ＋ 盘上词与原文不一致 ＋ 轮次账里没有这一件的记录」时出现——
+# 有账＝用户自己认可的合法改写，一键抹掉它就是在删历史。所以它不是校对四选之一：
+# 四选回答「下一轮怎么来」，它回答「这一版词本来就不该被改」。
+DECISION_RESTORE_PROMPT = "restore_prompt"
 # 补交口的两种决议（#279 §补交口 / #284）。``submit_extras`` 只说明「我交完了」，
 # 具体交了哪些视频/音频看台账——那一次上传已经带语义名登记进去了，决议不重抄一份；
 # ``no_extras`` 就是卡片上那个「没有，就这样」，它必须是能点下去的答案，否则补交口
@@ -387,6 +392,7 @@ __all__ = [
     "DECISION_NO_EXTRAS",
     "DECISION_REROLL",
     "DECISION_REVISE",
+    "DECISION_RESTORE_PROMPT",
     "DECISION_REWORD_REROLL",
     "DECISION_SUBMIT_EXTRAS",
     "DECISION_SUBMIT_FRAMES",

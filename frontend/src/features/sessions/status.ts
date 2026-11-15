@@ -85,6 +85,7 @@ const NODE_LABELS: Record<string, string> = {
   asset_write: '素材出词',
   asset_proofread: '素材校对',
   asset_reword: '素材改词',
+  asset_restore: '恢复原文',
   segment_plan: '分段规划',
   segment_assemble: '拼接',
   director_plan: '段规划',

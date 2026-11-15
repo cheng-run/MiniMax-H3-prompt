@@ -52,7 +52,6 @@ from ..workbench_store import (
     ARTIFACT_SUMMARY_JSON,
     ARTIFACT_SUMMARY_MARKDOWN,
     ARTIFACT_VIDEO_PROMPT,
-    ASSETS_DIRNAME,
     ASSET_LEDGER_STATUS_ABANDONED,
     ASSET_LEDGER_STATUS_PASSED,
     ASSET_LEDGER_STATUS_PENDING,
@@ -96,6 +95,9 @@ from ..workbench_store import (
     WorkbenchError,
     WorkbenchSessionStore,
     asset_extras_settled,
+    asset_prompt_name,
+    asset_restore_candidate,
+    parse_asset_prompt,
     bridge_frame_name,
     derived_asset_rows,
     merge_derived_rows,
@@ -187,8 +189,10 @@ ASSET_WRITE_NODE = "asset_write"
 ASSET_PROOFREAD_NODE = "asset_proofread"
 # 改词作业的进度节点名（#288）：进度带据此显示「素材改词」，前端 status.ts 同一张映射。
 ASSET_REWORD_NODE = "asset_reword"
-# 资产图词的落点模板（与 ``workbench_store`` 的模式产物同号：两位件号）。
-ASSET_PROMPT_FILENAME = ASSETS_DIRNAME + "/picture-{number:02d}.md"
+# 恢复阶段 1 原文（#291）：单独一个 job kind，与改词分开——它一次模型都不调，只把
+# 阶段 1 那份词覆盖写回；任务列表里混在 ``asset_reword`` 里会让人以为又花了一次钱。
+JOB_KIND_ASSET_RESTORE = "asset_restore"
+ASSET_RESTORE_NODE = "asset_restore"
 
 # advance 没有请求体；幂等键绑定的「请求摘要」是一个常量，同 key 重发永远算同一份命令。
 _JOB_FINGERPRINT = hashlib.sha256(b"advance").hexdigest()
@@ -331,7 +335,11 @@ def _settle_asset(
 
 
 def _render_asset_prompt(number: int, name: str, prompt: str) -> str:
-    """资产图词产物正文：头部写语义名/类型/编号，空行以下是可直接复制的词（D7 §7）。"""
+    """资产图词产物正文：头部写语义名/类型/编号，空行以下是可直接复制的词（D7 §7）。
+
+    解析侧是 ``workbench_store.parse_asset_prompt``（详情读取也要用同一条规则），
+    两份格式靠这个空行对齐。
+    """
     return "\n".join([
         f"# 资产图提示词 · 第 {number} 件",
         f"- 语义名：{name}",
@@ -341,16 +349,6 @@ def _render_asset_prompt(number: int, name: str, prompt: str) -> str:
         str(prompt).strip(),
         "",
     ])
-
-
-def _parse_asset_prompt(text: str) -> str:
-    """从产物正文取回词本体（头部是给人看的标签，不参与校对与改写）。
-
-    头部固定四行 + 一个空行。找不到分隔行时整篇当词——那时产物是旧形态，宁可多带
-    一段标签也不要丢掉词。
-    """
-    _head, separator, body = str(text).partition("\n\n")
-    return body if separator else str(text)
 
 
 def _proofread_payload(report: Any) -> dict[str, list[dict[str, str]]]:
@@ -1052,6 +1050,10 @@ class JobRunner:
             # 沿用素材循环那条「按盘判步骤」的路（``round > 0`` 时它只重开卡片）。
             reword = (branch == _BRANCH_ASSET_LOOP
                       and decision == step_machine.DECISION_REWORD_REROLL)
+            # 恢复阶段 1 原文（#291）：一次覆盖写盘，仍然走后台作业（与改词同形），
+            # 因为「作业做了什么」要有一条可查的记录，而 job 的 detail 就是改前改后 diff。
+            restore = (branch == _BRANCH_ASSET_LOOP
+                       and decision == step_machine.DECISION_RESTORE_PROMPT)
             abandon_name, abandon_kind = (
                 await asyncio.to_thread(self._abandon_preview, session_id, item_id)
                 if abandon else ("", ""))
@@ -1059,6 +1061,8 @@ class JobRunner:
                 kind = abandon_kind
             elif reword:
                 kind = JOB_KIND_ASSET_REWORD
+            elif restore:
+                kind = JOB_KIND_ASSET_RESTORE
             elif branch == _BRANCH_ASSET_LOOP:
                 # 素材循环的两个 job 都记 ``asset_loop``（D7 §6.2）：前端/排障按 kind
                 # 就能把「出词」「校对」与外层的推进任务分开。
@@ -1285,11 +1289,23 @@ class JobRunner:
                                 "要么选改词再掷／原词再掷。")
                         holder["number"] = int(number)
                         recorded_decision = decision
+                    elif decision == step_machine.DECISION_RESTORE_PROMPT:
+                        # 恢复阶段 1 原文（#291）：台账**不动**、轮次账**不动**、一次模型
+                        # 都不调。真正的三个条件在作业里按盘现算（与卡片上出现它的判据
+                        # 同一份 ``asset_restore_candidate``）——用户点了之后盘上词可能
+                        # 已被别处改过，那时候宁可不写，也不许抹掉一次合法改写。
+                        if asset_id is not None:
+                            raise AssetImageInvalid(
+                                "恢复阶段 1 原文与交图不能同时提交：它只把盘上的词"
+                                "改回阶段 1 那一份，不认图。")
+                        holder["number"] = int(number)
+                        recorded_decision = decision
                     else:
                         if decision is not None:
                             raise AssetImageInvalid(
                                 "asset_image 待办只接受 asset_id、decision=abandon_asset、"
-                                "decision=reword_reroll 或 decision=reroll。")
+                                "decision=reword_reroll、decision=reroll 或 "
+                                "decision=restore_prompt。")
                         submitted = str(asset_id or "").strip()
                         if not submitted:
                             raise AssetImageInvalid(
@@ -1580,11 +1596,13 @@ class JobRunner:
                     if branch == _BRANCH_FRAMES
                     else step_machine.DECISION_SUBMIT_VIDEO
                     if branch == _BRANCH_SEGMENT_VIDEO
-                    # 校对不通过的两条出路是**显式** decision 取值（#288），与交图/放弃
-                    # 不同，不靠载荷分型——事件里照抄请求里的那一个词。
+                    # 校对不通过的两条出路与恢复原文都是**显式** decision 取值
+                    # （#288 / #291），与交图/放弃不同，不靠载荷分型——事件里照抄
+                    # 请求里的那一个词。
                     else decision
                     if decision in (step_machine.DECISION_REWORD_REROLL,
-                                    step_machine.DECISION_REROLL)
+                                    step_machine.DECISION_REROLL,
+                                    step_machine.DECISION_RESTORE_PROMPT)
                     else step_machine.DECISION_ABANDON_ASSET
                     if abandon
                     else step_machine.DECISION_SUBMIT_IMAGE
@@ -1651,6 +1669,10 @@ class JobRunner:
                 # 不代表「这条任务要做什么」，塞进去会让「跨件改词」变成一个盘上事实
                 # 说不清的落点。件号由锁内的 ``_decide`` 写进 holder。
                 coroutine = self._run_asset_reword(
+                    session_id, job.job_id, event, int(holder["number"]))
+            elif restore:
+                # 恢复原文与改词同形：自己的执行入口、件号来自锁内 ``_decide``。
+                coroutine = self._run_asset_restore(
                     session_id, job.job_id, event, int(holder["number"]))
             elif branch in (_BRANCH_SEGMENT_VIDEO, _BRANCH_ASSET_LOOP,
                           _BRANCH_ASSET_EXTRA,
@@ -3283,7 +3305,7 @@ class JobRunner:
             raise RuntimeError(f"会话文件读不到：{session_id}")
         entry = self._picture_entry(session.asset_ledger, number)
         name = str(entry["name"])
-        artifact_name = ASSET_PROMPT_FILENAME.format(number=number)
+        artifact_name = asset_prompt_name(number)
 
         self._emit_progress(session_id, job_id, ASSET_WRITE_NODE, "started",
                             stage=step_machine.STEP_ASSET_LOOP)
@@ -3347,10 +3369,10 @@ class JobRunner:
         if not submitted:
             raise RuntimeError(f"第 {number} 件没有待校对的素材图标识")
         path = self.store.resolve_image_asset(session_id, submitted)
-        artifact_name = ASSET_PROMPT_FILENAME.format(number=number)
+        artifact_name = asset_prompt_name(number)
         text = (self.store.session_directory(session_id)
                 / artifact_name).read_text(encoding="utf-8")
-        current = _parse_asset_prompt(text)
+        current = parse_asset_prompt(text)
         # 锁死清单是判偏差的唯一判据（#53）：没声明就不收窄，与 CLI 同一口径。
         variant = asset_prompt_for(session.brief, session.stage_state, name)
         locked = tuple(variant.locked_features)
@@ -3708,9 +3730,9 @@ class JobRunner:
         entry = self._picture_entry(session.asset_ledger, number)
         name = str(entry["name"])
         directory = self.store.session_directory(session_id)
-        artifact_name = ASSET_PROMPT_FILENAME.format(number=number)
+        artifact_name = asset_prompt_name(number)
         text = (directory / artifact_name).read_text(encoding="utf-8")
-        current = _parse_asset_prompt(text)
+        current = parse_asset_prompt(text)
         variant = asset_prompt_for(session.brief, session.stage_state, name)
         locked = tuple(variant.locked_features)
         card = self._latest_asset_card(session, number)
@@ -3823,6 +3845,139 @@ class JobRunner:
             job_detail = f"改写会删掉锁死条目「{'、'.join(missing)}」，没有落盘"
         else:
             job_detail = note or "这次没有改词"
+        item = ActionItemOut(
+            item_id=uuid.uuid4().hex, kind=step_machine.ACTION_ASSET_IMAGE,
+            status="pending", created_at=_now(), asset_index=number,
+            reason=reason, proofread=proofread_out,
+            vision_model=vision_model or None)
+
+        def _apply(detail: Any) -> dict[str, Any]:
+            return {
+                "status": step_machine.STATUS_AWAITING_HUMAN,
+                "jobs": self._succeed_job(detail, job_id, detail_text=job_detail),
+                "action_items": [
+                    existing.model_dump(mode="json") for existing in detail.action_items
+                    if not (existing.kind == step_machine.ACTION_ASSET_IMAGE
+                            and existing.status == "pending")
+                ] + [item.model_dump(mode="json")],
+            }
+
+        created_payload: dict[str, Any] = {
+            "item_id": item.item_id, "kind": item.kind, "asset_index": number}
+        if reason:
+            created_payload["reason"] = reason
+        if proofread_out is not None:
+            created_payload["proofread"] = proofread_out.model_dump(mode="json")
+        if vision_model:
+            created_payload["vision_model"] = vision_model
+        self.store.mutate(session_id, _apply, events=[
+            EventDraft("job.succeeded",
+                       {"next": step_machine.STATUS_AWAITING_HUMAN}, job_id=job_id),
+            EventDraft("action_item.created", created_payload, job_id=job_id),
+        ])
+
+    async def _run_asset_restore(self, session_id: str, job_id: str,
+                                 cancel_event: threading.Event, number: int) -> None:
+        """恢复阶段 1 原文的后台执行（#291）：与改词同形的分派入口。
+
+        失败不落成会话 failed：词保持原样、卡片重开并写明原因（与改词同一条口径）。
+        """
+        try:
+            result = await asyncio.to_thread(
+                self._execute_asset_restore, session_id, job_id, cancel_event, number)
+        except JobCancelled as exc:
+            await asyncio.to_thread(
+                self._finish_cancelled, session_id, job_id, exc.node)
+        except Exception as exc:  # noqa: BLE001 - 任务失败要落成 job 状态
+            logger.exception("恢复原文作业失败：%s / %s", session_id, job_id)
+            await asyncio.to_thread(
+                self._finish_failed, session_id, job_id, error_code(exc), str(exc))
+        else:
+            await asyncio.to_thread(
+                self._finish_asset_restore, session_id, job_id, result)
+        finally:
+            await asyncio.to_thread(self._cleanup, session_id, job_id)
+
+    def _execute_asset_restore(self, session_id: str, job_id: str,
+                               cancel_event: threading.Event,
+                               number: int) -> dict[str, Any]:
+        """把盘上的词覆盖写回阶段 1 原文（#291）：一次都不调视觉或改写模型。
+
+        判据与「卡片上出不出现这个动作」是**同一份** ``asset_restore_candidate``：
+        决议之后盘上的词可能已经变了（别处恢复过、用户手工改过），点下去那一刻看到的
+        diff 不再是事实。不满足三条件时**一个字节都不写**，把原因带回收尾——宁可不恢复，
+        也不许抹掉一次合法改写（有轮次账记录的改写）。
+        """
+        session = load_session(self.store.session_directory(session_id))
+        if session is None:
+            raise RuntimeError(f"会话文件读不到：{session_id}")
+        entry = self._picture_entry(session.asset_ledger, number)
+        name = str(entry["name"])
+        directory = self.store.session_directory(session_id)
+        card = self._latest_asset_card(session, number)
+
+        self._emit_progress(session_id, job_id, ASSET_RESTORE_NODE, "started",
+                            stage=step_machine.STEP_ASSET_LOOP)
+        if cancel_event.is_set():
+            raise JobCancelled(ASSET_RESTORE_NODE)
+
+        result: dict[str, Any] = {
+            "number": number, "name": name, "diff": "", "note": "",
+            "restored": False,
+            # 没写成时卡片要保住旧的差异报告与「谁读的图」（#292）：那不是这次的结果，
+            # 是这一件当前仍要面对的那份结论。
+            "reason_before": str(card.get("reason") or ""),
+            "proofread": (dict(card["proofread"])
+                          if isinstance(card.get("proofread"), dict) else None),
+            "vision_model": str(card.get("vision_model") or ""),
+        }
+        diff, original = asset_restore_candidate(
+            directory, brief=session.brief, stage_state=session.stage_state,
+            ledger=session.asset_ledger, number=number)
+        if not diff:
+            result["note"] = (
+                "现在没有可恢复的差异：盘上的生图词已与阶段 1 原文一致，或这一件"
+                "有轮次账记录，或它已不在可恢复的状态。这次没有写盘。")
+            self._emit_progress(session_id, job_id, ASSET_RESTORE_NODE, "done",
+                                stage=step_machine.STEP_ASSET_LOOP)
+            return result
+        if cancel_event.is_set():
+            raise JobCancelled(ASSET_RESTORE_NODE)
+
+        self.store.write_text_artifact(
+            session_id, asset_prompt_name(number),
+            _render_asset_prompt(number, name, original), job_id=job_id)
+        result["diff"] = diff
+        result["restored"] = True
+        self._emit_progress(session_id, job_id, ASSET_RESTORE_NODE, "done",
+                            stage=step_machine.STEP_ASSET_LOOP)
+        return result
+
+    def _finish_asset_restore(self, session_id: str, job_id: str,
+                              result: dict[str, Any]) -> None:
+        """恢复收尾（#291）：重开同一件号的卡片，台账状态与轮次账都不动。
+
+        恢复成功时新卡**不带旧差异报告**：那份报告引用的句子属于被改坏的那版词，恢复之后
+        它在词里根本不存在——留着就是 #286 事故 3 的那种自相矛盾卡片。没写成时保留旧报告
+        并附上这次为什么没写，用户仍能在同一张卡上选别的出路。
+        """
+        number = int(result["number"])
+        diff = str(result.get("diff") or "")
+        note = str(result.get("note") or "")
+        restored = bool(result.get("restored"))
+        reason_before = str(result.get("reason_before") or "")
+        proofread = result.get("proofread")
+        proofread_out = (ProofreadConclusionOut.model_validate(proofread)
+                         if isinstance(proofread, dict) else None)
+        vision_model = str(result.get("vision_model") or "")
+        if restored:
+            reason = ""
+            proofread_out = None
+            vision_model = ""
+            job_detail = diff
+        else:
+            reason = f"{reason_before}\n\n{note}".strip() if reason_before else note
+            job_detail = note or "这次没有恢复"
         item = ActionItemOut(
             item_id=uuid.uuid4().hex, kind=step_machine.ACTION_ASSET_IMAGE,
             status="pending", created_at=_now(), asset_index=number,

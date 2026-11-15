@@ -117,6 +117,36 @@ async function chooseExit(decision: 'reword_reroll' | 'reroll'): Promise<void> {
   }
 }
 
+// 恢复阶段 1 原文（#291）：被旧逻辑改坏的词可以从阶段 1 原文救回来。服务端只在
+// 「未定稿 ＋ 盘上词与原文不一致 ＋ 轮次账里没有这一件的记录」时给这个动作——
+// 有账＝合法改写，不该一键抹掉。它不属于校对四选：四选回答「下一轮怎么来」，
+// 它回答「这一版词本来就不该被改」。
+const restoring = ref(false)
+const restoreError = ref<string | null>(null)
+
+async function restore(): Promise<void> {
+  if (restoring.value) {
+    return
+  }
+  restoring.value = true
+  restoreError.value = null
+  try {
+    // 不带 asset_id：它只把盘上的词改回阶段 1 那一份，不认图。覆盖写盘在后台作业里，
+    // 完成后这张卡会重开（旧的差异报告属于被改坏的那版词，不再适用）。
+    await resolveActionItem(
+      props.sessionId,
+      props.item.item_id,
+      { decision: 'restore_prompt' },
+      newIdempotencyKey(),
+    )
+    emit('submitted')
+  } catch (error) {
+    restoreError.value = errorMessage(error, '恢复失败，请稍后重试。')
+  } finally {
+    restoring.value = false
+  }
+}
+
 // 放弃这一件（#279 US9 / #282）：模型怎么都画不出来时的出口。代价只有一句，但必须
 // 在点下去之前看得到——所以先展开确认，不点确认不发请求。
 const confirmingAbandon = ref(false)
@@ -265,6 +295,29 @@ async function confirmAbandon(): Promise<void> {
       <pre v-else class="prompt__text">{{ prompt }}</pre>
     </div>
 
+    <!-- 恢复阶段 1 原文（#291）：只在「无轮次账记录的差异」上出现，所以放在校对四选
+         之外——它不是一条出路，是把被改坏的词救回去。diff 由服务端算好带下来。 -->
+    <section v-if="item.restore_available" class="restore" aria-label="恢复阶段 1 原文">
+      <h3>盘上的生图词与阶段 1 原文不一致，且没有改写记录</h3>
+      <p class="muted">
+        这一版词不是任何一次改写留下的（资产轮次账里没有这一件的记录），可能是旧逻辑
+        改坏的。可以把它整篇恢复成阶段 1 写好的那一份——台账状态不变，也不花模型调用。
+      </p>
+      <pre class="diff__text">{{ item.restore_diff }}</pre>
+      <div class="actions">
+        <Button
+          type="button"
+          variant="secondary"
+          data-testid="asset-restore"
+          :disabled="restoring || submitting || abandoning"
+          @click="restore"
+        >
+          {{ restoring ? '正在恢复…' : '恢复阶段 1 原文' }}
+        </Button>
+      </div>
+      <ErrorNotice v-if="restoreError" :message="restoreError" />
+    </section>
+
     <section v-if="item.reason" class="diff" aria-label="校对差异">
       <h3>校对结论：不通过</h3>
       <pre class="diff__text">{{ item.reason }}</pre>
@@ -402,6 +455,15 @@ async function confirmAbandon(): Promise<void> {
   border: 1px solid var(--color-error-text);
   border-radius: var(--radius-md);
   background: var(--color-error-bg);
+}
+.restore {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
 }
 .exits {
   display: flex;

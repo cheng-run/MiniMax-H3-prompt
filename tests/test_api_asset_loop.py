@@ -979,13 +979,18 @@ def test_recovery_runs_the_proofread_again_when_the_image_is_already_on_the_ledg
 
 
 def test_asset_prompt_round_trips_through_the_artifact_header():
-    """产物正文的头四行是给人看的标签，取回来必须还是同一份词（改写要用它当底本）。"""
-    from minimax_h3_prompt.api.jobs import _parse_asset_prompt, _render_asset_prompt
+    """产物正文的头四行是给人看的标签，取回来必须还是同一份词（改写要用它当底本）。
+
+    解析住在 ``workbench_store``（详情读取的恢复判定也要用同一条规则），渲染仍在
+    ``api.jobs``：两侧靠那个空行对齐。
+    """
+    from minimax_h3_prompt.api.jobs import _render_asset_prompt
+    from minimax_h3_prompt.workbench_store import parse_asset_prompt
 
     rendered = _render_asset_prompt(3, "橘猫", "一只橘色短毛猫。\n尾巴绕住前爪。")
     assert rendered.startswith("# 资产图提示词 · 第 3 件")
     assert "- 语义名：橘猫" in rendered and "- 类型：Picture" in rendered
-    assert _parse_asset_prompt(rendered).strip() == "一只橘色短毛猫。\n尾巴绕住前爪。"
+    assert parse_asset_prompt(rendered).strip() == "一只橘色短毛猫。\n尾巴绕住前爪。"
 
 
 def test_missing_asset_prompt_fails_loudly_instead_of_borrowing_another_name():
@@ -1563,3 +1568,184 @@ def test_reroll_reopens_the_card_without_touching_any_text(harness):
     assert [(entry["status"], entry["round"]) for entry in harness.ledger()] == [
         ("pending", 1), ("pending", 0)]
 
+
+
+# ---------------------------------------------------------------------------
+# 恢复阶段 1 原文（#291 / spec #286「恢复动作」）
+# ---------------------------------------------------------------------------
+
+# 旧逻辑按图改写后的样子：锁死条目「尾巴绕住前爪」被换成了图里的实况。
+BROKEN_PROMPT = "一只橘色短毛猫蹲在木质窗台，尾巴垂在窗台边缘。"
+
+
+def _simulate_old_rewrite(harness, prompt: str = BROKEN_PROMPT,
+                          number: int = 1, name: str = CAT) -> None:
+    """模拟旧逻辑那次覆盖改写：盘上的词被改了，却没落轮次账（#286 事故 5）。"""
+    from minimax_h3_prompt.api.jobs import _render_asset_prompt
+
+    path = (harness.root / Path(harness.session_id)
+            / "assets" / f"picture-{number:02d}.md")
+    path.write_text(_render_asset_prompt(number, name, prompt), encoding="utf-8")
+
+
+def _pending_card(harness) -> dict:
+    cards = [item for item in harness.detail()["action_items"]
+             if item["kind"] == "asset_image" and item["status"] == "pending"]
+    assert len(cards) == 1, f"未决素材卡不是恰好一张：{cards}"
+    return cards[0]
+
+
+def _disk_prompt(harness, number: int = 1) -> str:
+    from minimax_h3_prompt.workbench_store import parse_asset_prompt
+
+    return parse_asset_prompt(
+        harness.artifact_text(f"assets/picture-{number:02d}.md")).strip()
+
+
+def test_restore_prompt_is_a_declared_decision_value():
+    """恢复动作是决议值（常量与闭合表两处），仍走既有的 resolve 端点。"""
+    from minimax_h3_prompt import step_machine
+    from minimax_h3_prompt.workbench_store import _DECISIONS
+
+    assert step_machine.DECISION_RESTORE_PROMPT == "restore_prompt"
+    assert step_machine.DECISION_RESTORE_PROMPT in _DECISIONS
+
+
+def test_restore_action_appears_only_for_an_untracked_diff(harness):
+    """三条件同时成立才出现：未定稿 ＋ 盘上词与原文不一致 ＋ 轮次账里没有记录。"""
+    _to_first_card(harness)
+    # 第一轮：盘上的词就是阶段 1 原文——没有差异，不该出现恢复动作。
+    assert not _pending_card(harness)["restore_available"]
+
+    _simulate_old_rewrite(harness)
+    card = _pending_card(harness)
+    assert card["restore_available"] is True
+    # diff 是「改前（盘上）→ 改后（阶段 1 原文）」，两边都要看得见。
+    assert BROKEN_PROMPT in card["restore_diff"]
+    assert CAT_PROMPT in card["restore_diff"]
+    assert "-" in card["restore_diff"] and "+" in card["restore_diff"]
+    # 它不是校对四选之一：卡片的 reason / 结构化结论一个字都不因它变化。
+    assert card["reason"] == ""
+    assert card["proofread"] is None
+
+
+def test_restore_writes_back_the_stage1_original_without_touching_the_ledger(harness):
+    """点击后：盘上词与阶段 1 原文逐字一致；台账状态、轮次与轮次账都不动。"""
+    _body = _to_first_card(harness)
+    _simulate_old_rewrite(harness)
+    card = _pending_card(harness)
+    assert card["restore_available"] is True
+
+    resp = _resolve(harness, card, {"decision": "restore_prompt"})
+    assert resp.status_code == 202, resp.text
+    job = resp.json()
+    assert job["kind"] == "asset_restore"
+    assert job["status"] == "running"
+
+    harness.wait_until(
+        lambda snapshot: _disk_prompt(harness) == CAT_PROMPT
+        and any(entry["kind"] == "asset_image"
+                and entry["status"] == "pending"
+                and entry["asset_index"] == 1
+                for entry in snapshot["action_items"]))
+
+    # 盘上的词逐字回到阶段 1 原文；产物头部仍在（同一份产物覆盖写）。
+    assert _disk_prompt(harness) == CAT_PROMPT
+    assert "第 1 件" in harness.artifact_text("assets/picture-01.md")
+
+    # 台账状态与轮次都不动；恢复不是一轮交图，也不落轮次账。
+    assert [(entry["status"], entry["round"]) for entry in harness.ledger()] == [
+        ("pending", 0), ("pending", 0)]
+    assert not (harness.root / Path(harness.session_id)
+                / "asset-rounds.jsonl").exists()
+    # 不调视觉模型、不调改写模型。
+    assert harness.read_calls == []
+    assert harness.rewrite.requests == []
+
+    # job 的 detail 就是改前改后 diff（作业做了什么，事后查得到）。
+    detail = harness.client.get(
+        f"/api/v1/sessions/{harness.session_id}/jobs/{job['job_id']}").json()
+    assert detail["status"] == "succeeded"
+    assert BROKEN_PROMPT in detail["detail"] and CAT_PROMPT in detail["detail"]
+
+    # 恢复之后盘上词与原文一致：恢复动作自然不再出现；旧差异报告属于被改坏的那版词，
+    # 也跟着收走（新卡不带 reason）。
+    reopened = _pending_card(harness)
+    assert not reopened["restore_available"]
+    assert reopened["reason"] == ""
+    assert reopened["asset_index"] == 1
+
+
+def test_restore_action_hides_when_the_round_log_has_a_record(harness):
+    """有轮次账记录＝合法改写，恢复动作不出现；硬发决议也不写盘。"""
+    from minimax_h3_prompt.asset_loop import TRIGGER_REGEN_AI_REWORD, log_asset_round
+
+    _to_first_card(harness)
+    _simulate_old_rewrite(harness)
+    directory = harness.root / Path(harness.session_id)
+    log_asset_round(
+        directory, name=CAT, kind="picture", trigger=TRIGGER_REGEN_AI_REWORD,
+        feedback="按偏差改词", prompt_before=CAT_PROMPT,
+        prompt_after=BROKEN_PROMPT)
+
+    card = _pending_card(harness)
+    assert not card["restore_available"], "有账的差异不该给一键抹掉的入口"
+
+    # 绕过界面直接发决议：作业照常起，但一个字节都不写（判据同一份）。
+    resp = _resolve(harness, card, {"decision": "restore_prompt"})
+    assert resp.status_code == 202, resp.text
+    job = resp.json()
+    harness.wait_idle()
+    assert _disk_prompt(harness) == BROKEN_PROMPT
+    detail = harness.client.get(
+        f"/api/v1/sessions/{harness.session_id}/jobs/{job['job_id']}").json()
+    assert detail["status"] == "succeeded"
+    assert "没有可恢复的差异" in detail["detail"]
+
+    # 一张轮次账记录还是那一张：恢复没有往账本里写第二行。
+    rounds = [json.loads(line) for line in (directory / "asset-rounds.jsonl")
+              .read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(rounds) == 1
+
+
+def test_restore_action_never_appears_on_settled_items(harness):
+    """已定稿（passed）或已放弃（abandoned）的件不给恢复动作，哪怕盘上有差异。"""
+    from minimax_h3_prompt.workbench_store import (
+        ASSET_LEDGER_STATUS_ABANDONED,
+        ASSET_LEDGER_STATUS_PASSED,
+    )
+
+    _to_first_card(harness)
+    _simulate_old_rewrite(harness)
+    store = harness.client.app.state.session_store
+
+    for status in (ASSET_LEDGER_STATUS_PASSED, ASSET_LEDGER_STATUS_ABANDONED):
+        store.mutate(
+            harness.session_id,
+            lambda detail, _status=status: {"asset_ledger": [
+                ({**entry, "status": _status}
+                 if str(entry.get("kind")) == "picture"
+                 and int(entry.get("number", 0)) == 1 else entry)
+                for entry in detail.asset_ledger_snapshot()]})
+        pending = [item for item in harness.detail()["action_items"]
+                   if item["kind"] == "asset_image" and item["status"] == "pending"]
+        assert pending, "这一步只是把台账标成已结算，卡片仍在"
+        assert not pending[0]["restore_available"]
+
+
+def test_restore_prompt_rejects_a_submitted_image(harness):
+    """恢复原文与交图互斥：同时提交一律 422，且没有把待办决议掉。"""
+    _to_first_card(harness)
+    _simulate_old_rewrite(harness)
+    card = _pending_card(harness)
+    image = harness.upload(_png(9), "gen-cat.png")
+
+    body = _assert_problem(
+        _resolve(harness, card, {"decision": "restore_prompt",
+                                 "asset_id": image["asset_id"]}),
+        422, "asset_image_invalid")
+    # 载荷互斥在路由层就拦下（asset_id 只能单独提交或配它自己那几档 decision）：
+    # 恢复原文不认图，带上 asset_id 一定是发错了。
+    assert "asset_id" in body["detail"]
+    assert [entry["item_id"] for entry in harness.pending("asset_image")] == [
+        card["item_id"]]

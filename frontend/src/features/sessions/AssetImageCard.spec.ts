@@ -439,3 +439,70 @@ describe('AssetImageCard 放弃这一件', () => {
     expect(wrapper.text()).not.toContain('已放弃「台灯」这一件')
   })
 })
+
+describe('AssetImageCard 恢复阶段 1 原文（#291）', () => {
+  const diff =
+    '--- 改前（磁盘上的生图词）\n+++ 改后（阶段 1 原文）\n-一盏黄铜台灯立在书桌右角，灯罩是墨绿色。\n+一盏黄铜台灯立在书桌右角，灯罩是米白色。'
+
+  it('无账差异时出现恢复动作并展示改前改后 diff', async () => {
+    const wrapper = mountCard(makeItem({ restore_available: true, restore_diff: diff }))
+    await settle()
+
+    expect(wrapper.text()).toContain('恢复阶段 1 原文')
+    // diff 由服务端算好带下来：改前改后两行都要看得见。
+    expect(wrapper.text()).toContain('一盏黄铜台灯立在书桌右角，灯罩是墨绿色。')
+    expect(wrapper.text()).toContain('一盏黄铜台灯立在书桌右角，灯罩是米白色。')
+    expect(wrapper.find('[data-testid="asset-restore"]').exists()).toBe(true)
+  })
+
+  it('不出现时没有任何恢复入口（默认字段为 false）', async () => {
+    const wrapper = mountCard(makeItem())
+    await settle()
+
+    expect(wrapper.text()).not.toContain('恢复阶段 1 原文')
+    expect(wrapper.find('[data-testid="asset-restore"]').exists()).toBe(false)
+  })
+
+  it('恢复不是校对四选之一：四选的个数与文案不因它变化', async () => {
+    const plain = mountCard(makeItem({ reason: '[偏差] 1 处：灯罩颜色不符' }))
+    await settle()
+    const withRestore = mountCard(
+      makeItem({
+        reason: '[偏差] 1 处：灯罩颜色不符',
+        restore_available: true,
+        restore_diff: diff,
+      }),
+    )
+    await settle()
+
+    const exitTexts = (wrapper: ReturnType<typeof mountCard>) =>
+      wrapper
+        .findAll('button')
+        .map((button) => button.text())
+        .filter((text) => text === '改词强化原意再掷（默认）' || text === '原词再掷')
+
+    expect(exitTexts(withRestore)).toEqual(exitTexts(plain))
+    expect(exitTexts(withRestore)).toHaveLength(2)
+  })
+
+  it('点恢复发 restore_prompt（不带 asset_id），请求返回后通知父组件', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(resolveUrl, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json(
+          { job_id: 'job-restore', kind: 'asset_restore', status: 'running', started_at: '' },
+          { status: 202 },
+        )
+      }),
+    )
+    const wrapper = mountCard(makeItem({ restore_available: true, restore_diff: diff }))
+    await settle()
+
+    await wrapper.find('[data-testid="asset-restore"]').trigger('click')
+    await settle()
+
+    expect(bodies).toEqual([{ decision: 'restore_prompt' }])
+    expect(wrapper.emitted('submitted')).toHaveLength(1)
+  })
+})

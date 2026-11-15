@@ -1544,6 +1544,18 @@ MUTATIONS: tuple[Mutation, ...] = (
         "读图不可用改回挂卡＝一次服务波动就把这一件打回重交，用户白等一轮且"
         "「没交图」与「没校对」混成同一个状态（#290，spec #286「读图不可用」）",
     ),
+    Mutation(
+        "restore_ignores_the_round_log",
+        "src/minimax_h3_prompt/workbench_store.py",
+        "        if read_asset_rounds(directory, name=name):\n"
+        '            return "", ""',
+        "        if False:\n"
+        '            return "", ""',
+        ("tests/test_api_asset_loop.py::"
+         "test_restore_action_hides_when_the_round_log_has_a_record",),
+        "恢复不看资产轮次账＝用户认可的合法改写会被一键抹成阶段 1 初稿，"
+        "而卡片上没有任何提示（#291，spec #286 US23「无账差异」判据）",
+    ),
 )
 
 

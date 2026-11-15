@@ -441,6 +441,10 @@ export interface components {
              * @default
              */
             resolved_at: string;
+            /** Restore Available */
+            restore_available?: boolean | null;
+            /** Restore Diff */
+            restore_diff?: string | null;
             /** Revisions */
             revisions?: components["schemas"]["RevisionOut"][];
             /** Segment Index */
@@ -465,7 +469,9 @@ export interface components {
          *     - ``asset_image`` 收 ``asset_id``（这一件资产图的生成结果，普通素材上传得到），
          *       或 ``decision="abandon_asset"`` 放弃这一件（#282：模型怎么都画不出来时的出口），
          *       或 ``decision="reword_reroll"`` / ``"reroll"``（#288 校对不通过的两条出路：前者是
-         *       默认的加法改词——独立作业跑；后者是原词再掷，只重开卡片）；
+         *       默认的加法改词——独立作业跑；后者是原词再掷，只重开卡片），
+         *       或 ``decision="restore_prompt"``（#291：把被旧逻辑改坏的词恢复成阶段 1 原文，
+         *       只在「无轮次账记录的差异」上被接受）；
          *     - ``asset_extra`` 收 ``decision="submit_extras"`` 与 ``asset_id``（补交的
          *       视频/音频里最后认可的那一件；文件本身走上传端点、带用户起的语义名登记），
          *       或 ``decision="no_extras"`` 明确「没有，就这样」（#284）；
@@ -481,7 +487,7 @@ export interface components {
             /** Confirm Aspect Mismatch */
             confirm_aspect_mismatch?: boolean | null;
             /** Decision */
-            decision?: ("approve" | "revise" | "submit_start_image" | "submit_segment_image" | "submit_delivery" | "abandon_asset" | "submit_extras" | "no_extras" | "reword_reroll" | "reroll") | null;
+            decision?: ("approve" | "revise" | "submit_start_image" | "submit_segment_image" | "submit_delivery" | "abandon_asset" | "submit_extras" | "no_extras" | "reword_reroll" | "reroll" | "restore_prompt") | null;
             /** End Asset Id */
             end_asset_id?: string | null;
             frames?: components["schemas"]["FrameSelection"] | null;
