@@ -92,5 +92,6 @@ cat build-exe/selfcheck-data/selfcheck.log
 
 ## 本地跑前后端 + 关服务（Windows）
 
+- **E2E 与已运行服务撞数据根会起不来**：`serve-e2e.mjs` 默认拿仓库根当数据根；本机已有服务占着同一个根时，会因 Windows 命名互斥体报 `[启动失败] 同一个数据目录已经有一个服务在运行`（退出码 3，2026-11-15 #274 实测）。不要杀别人的服务，给 E2E 一个独立数据根：`H3_DATA_ROOT=<仓内 .scratch 下绝对路径> E2E_PORT=8134 PW_CHANNEL=chrome npx --no-install playwright test`，跑完删掉该目录。
 - 后端：`python -m minimax_h3_prompt.api` 绑 `127.0.0.1:8000`；前端 dev：`npx vite` 监听 `localhost:5173`（注意是 `::1`，直连 `127.0.0.1:5173` 会拒）。
 - **`pkill -f` 杀不掉 uvicorn/node 子进程**（Git Bash 下只杀外壳）：用 `netstat -ano | grep ':8000 .*LISTENING'` 拿 PID，再 `powershell -Command "Stop-Process -Id <PID> -Force"`。杀不掉时对着**旧进程**的响应排错会得出假结论（实测被旧服务误导过一次）。

@@ -3,6 +3,7 @@
 生成 MiniMax H3 视频生成提示词并把长视频拆成可逐段执行的工具。
 项目术语与架构见 `CONTEXT.md`；动手前先读它。
 skills 文档里说的 `GLOSSARY.md` 即本仓 `CONTEXT.md`——新词条一律写进 `CONTEXT.md`。
+查代码用 Grep 工具（或 `rg`），不要用 Git Bash 的 `grep -r`——本仓中文路径/中文模式下它会静默 0 命中（2026-11-15 实测）。
 
 ## Agent skills
 
