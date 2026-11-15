@@ -1302,6 +1302,12 @@
                   "type": "string"
                 }
               },
+              "image/png": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
               "text/plain": {
                 "schema": {
                   "type": "string"
@@ -1351,6 +1357,12 @@
           "206": {
             "content": {
               "application/zip": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "image/png": {
                 "schema": {
                   "format": "binary",
                   "type": "string"

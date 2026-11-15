@@ -58,7 +58,7 @@
 | 整片提示词 / 中文摘要 | `video-prompt.md` / `summary-zh.md` |
 | 关键帧图与读图 | `frames/`（含 `source.json`）；读图结果进 `frame_images` / `fl2va_frame_descriptions`（state） |
 | 段表 / 段提示词 | `segments/plan.json` / `segments/shot-NN.md` |
-| 桥接帧 | `bridge_frames/`（段间 `-start`，末段核验 `shot-NN-end`） |
+| 桥接帧 | CLI 历史布局：会话根 `bridge_frames/`（段间 `-start`，末段核验 `shot-NN-end`；**不登记为产物**）；工作台：`segments/bridge_frames/shot-NN-start.png`（登记为产物，kind `bridge_frame`，段卡片按段号取图） |
 | 段产出账 / 闸门遭遇 | `segments/shot-ledger.jsonl` / `segments/gate-log.jsonl` |
 | 成片 | `final.mp4` |
 
@@ -185,7 +185,8 @@ _Avoid_: 镜头表；把它与**多参分镜表**当成同一件产物（后者�
 
 **尾帧桥接（bridge frame）**:
 把上一执行段的输出视频剥出尾帧图片，作为下一段 H3 的 `first_frame` 参考输入，保证两段画面连续。参考帧**不进成片时间线**——成片用各段视频自身的帧拼接，剥帧选第几帧不影响成片是否跳接。首尾帧链自 #98 起恒取末帧，所以这句只在多参侧成立（多参没有接缝帧）。
-_Avoid_: 首帧参考、接帧
+**两种落点，口径不同（#277）**：CLI 历史布局落在会话根 `bridge_frames/`，**不登记为产物**；工作台落在 `segments/bridge_frames/shot-NN-start.png`，**登记为会话产物**（kind `bridge_frame`、媒体类型 `image/png`），清单、内容端点、Range 与下载都走既有产物机制，「分段」分区第 N 段（N ≥ 2）的卡片显示上一段那张图。名字里的 `NN` 是**剥帧段号**：它同时是第 NN 段的尾帧与第 NN+1 段的起点图，所以前端第 N 段取 N−1。
+_Avoid_: 首帧参考、接帧；以为工作台里的桥接帧还是「目录里的野生文件」（它是登记产物）、或以为 CLI 老会话的产物清单会因此多出一批图（历史布局不纳入登记）
 
 **尾帧剥离（extract tail frame)**:
 从段视频尾部剥一帧图，两种取帧口径共用一个原语（`tools/frame_auditor.extract_last_frame`，issue #98）。**首尾帧链的桥接帧恒取末帧**（`sharpest=False`）：末帧锐度低于阈值时只打印「本段末可能有运动模糊，下一段识别可能不稳」的告警，照旧用末帧。为什么不能按「最锐利」选：段尾按新纪律落定时，最后五帧的锐度是一条平盘，取最大等于随机（2026-10-26 实测 100.9/100.8/100.0/99.8/101.9）；而桥接帧是下一段的第一帧输入、成片又在接缝处裁下一段首帧，取到倒数第几帧直接决定「回退了几帧」与「该裁几帧」——随机取帧让这两件事都不可确定。**「最后 5 帧取最锐利」仍是默认口径**（`sharpest=True`，默认值未变），它归**多参段首末帧语义核验**：那条判的是「接近尾部的画面」，挑一张更锐利的邻近帧不改判据。两种口径都在整窗锐度低于阈值时告警，也都规避生成末帧的压缩伪影／运动模糊导致下一段人物识别失败。

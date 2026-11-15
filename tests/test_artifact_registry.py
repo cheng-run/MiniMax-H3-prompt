@@ -287,6 +287,105 @@ def test_segment_prompt_is_text_while_final_mp4_stays_media(workbench):
 
 
 # ---------------------------------------------------------------------------
+# 桥接帧（#277）：上一段视频剥出的尾帧是登记产物，清单/读取走同一套机制
+# ---------------------------------------------------------------------------
+
+# 名字里的段号是**剥帧段号**：它同时是第 NN 段的尾帧与第 NN+1 段的起点图。
+BRIDGE_FRAME = "segments/bridge_frames/shot-01-start.png"
+
+# 只需 PNG 魔数：媒体产物按登记表给 Content-Type，不嗅探内容（与成片同一条口径）。
+BRIDGE_PNG = b"\x89PNG\r\n\x1a\n" + b"bridge-frame-bytes"
+
+
+def _write_bridge_frame(directory: Path, name: str = BRIDGE_FRAME) -> Path:
+    path = directory / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(BRIDGE_PNG)
+    return path
+
+
+def test_bridge_frame_is_listed_with_its_kind(workbench):
+    app, _root = workbench
+    with workbench_client(app) as client:
+        session_id, directory = _new_session(client)
+        _write_bridge_frame(directory)
+
+        detail = client.get(f"/api/v1/sessions/{session_id}").json()
+        listed = client.get(f"/api/v1/sessions/{session_id}/artifacts").json()
+
+    by_name = {item["name"]: item for item in detail["artifacts"]}
+    assert by_name[BRIDGE_FRAME]["kind"] == "bridge_frame"
+    assert by_name[BRIDGE_FRAME]["artifact_id"] == f"{session_id}/{BRIDGE_FRAME}"
+    assert by_name[BRIDGE_FRAME]["bytes"] == len(BRIDGE_PNG)
+    assert {item["name"] for item in listed} == {BRIDGE_FRAME}
+
+
+BRIDGE_FRAME_NEIGHBOURS = (
+    # 同目录下的非模式文件：目录不是白名单。
+    "segments/bridge_frames/notes.txt",
+    "segments/bridge_frames/shot-1-start.png",
+    "segments/bridge_frames/shot-001-start.png",
+    "segments/bridge_frames/shot-01-start.png.bak",
+    # 模式外的 sibling：段规划文件与历史布局都不登记。
+    "segments/plan.json",
+    "bridge_frames/shot-01-start.png",
+)
+
+
+def test_files_outside_the_bridge_pattern_are_neither_listed_nor_readable(workbench):
+    app, _root = workbench
+    with workbench_client(app) as client:
+        session_id, directory = _new_session(client)
+        for name in BRIDGE_FRAME_NEIGHBOURS:
+            path = directory / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(BRIDGE_PNG)
+
+        listed = client.get(f"/api/v1/sessions/{session_id}/artifacts").json()
+        responses = {
+            name: client.get(f"/api/v1/artifacts/{session_id}/{name}/content")
+            for name in BRIDGE_FRAME_NEIGHBOURS
+        }
+
+    assert listed == []
+    for name, resp in responses.items():
+        assert resp.status_code == 404, name
+        assert resp.json()["code"] == "artifact_not_found", name
+
+
+def test_bridge_frame_content_returns_png_bytes_and_supports_range(workbench):
+    app, _root = workbench
+    with workbench_client(app) as client:
+        session_id, directory = _new_session(client)
+        _write_bridge_frame(directory)
+
+        whole = client.get(f"/api/v1/artifacts/{session_id}/{BRIDGE_FRAME}/content")
+        ranged = client.get(
+            f"/api/v1/artifacts/{session_id}/{BRIDGE_FRAME}/content",
+            headers={"Range": "bytes=0-7"})
+        # 越界 Range 仍是 416，与成片同一条口径（不是另开一条读取路径）。
+        unsatisfiable = client.get(
+            f"/api/v1/artifacts/{session_id}/{BRIDGE_FRAME}/content",
+            headers={"Range": f"bytes={len(BRIDGE_PNG)}-"})
+        missing = client.get(
+            f"/api/v1/artifacts/{session_id}/segments/bridge_frames/shot-09-start.png/content")
+
+    assert whole.status_code == 200, whole.text
+    assert whole.headers["content-type"] == "image/png"
+    assert whole.headers["accept-ranges"] == "bytes"
+    assert whole.content == BRIDGE_PNG
+
+    assert ranged.status_code == 206
+    assert ranged.headers["content-type"] == "image/png"
+    assert ranged.headers["content-range"] == f"bytes 0-7/{len(BRIDGE_PNG)}"
+    assert ranged.content == BRIDGE_PNG[:8]
+
+    assert unsatisfiable.status_code == 416
+    assert missing.status_code == 404
+    assert missing.json()["code"] == "artifact_not_found"
+
+
+# ---------------------------------------------------------------------------
 # 写入口与登记入口（D6 的执行器将来要靠它落段提示词）
 # ---------------------------------------------------------------------------
 

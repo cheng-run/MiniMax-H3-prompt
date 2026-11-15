@@ -978,6 +978,7 @@ export interface operations {
                 };
                 content: {
                     "application/zip": string;
+                    "image/png": string;
                     "text/plain": string;
                     "video/mp4": string;
                 };
@@ -1001,6 +1002,7 @@ export interface operations {
                 };
                 content: {
                     "application/zip": string;
+                    "image/png": string;
                     "video/mp4": string;
                 };
             };

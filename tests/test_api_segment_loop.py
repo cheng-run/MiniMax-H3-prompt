@@ -213,6 +213,14 @@ def test_pass_records_segment_and_writes_next_with_tail_anchor(
     listed = {entry["name"]: entry["kind"] for entry in detail["artifacts"]}
     assert listed["segments/shot-01.md"] == "segment_prompt"
     assert listed["segments/shot-02.md"] == "segment_prompt"
+    # 剥出来的尾帧是正规产物（#277）：第 2 段的起点图必须能在清单里找到，
+    # 内容端点也能读出同一份字节。
+    assert listed["segments/bridge_frames/shot-01-start.png"] == "bridge_frame"
+    bridge = client.get(
+        f"/api/v1/artifacts/{session_id}/segments/bridge_frames/shot-01-start.png/content")
+    assert bridge.status_code == 200
+    assert bridge.headers["content-type"] == "image/png"
+    assert bridge.content.startswith(PNG_MAGIC)
 
 
 # ---------------------------------------------------------------------------

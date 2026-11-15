@@ -281,3 +281,17 @@ describe('ArtifactsTab 导演包与简报（#263）', () => {
     expect(writeText).toHaveBeenCalledWith('用 runSelection 只勾第 1 段；导出 192 帧。')
   })
 })
+
+describe('产物分区不重复显示桥接帧（#277）', () => {
+  it('bridge_frame 只住分段分区，不在产物分区出现', async () => {
+    const { wrapper } = await mountTab([
+      ...ARTIFACTS,
+      makeArtifact('segments/bridge_frames/shot-01-start.png', 'bridge_frame'),
+    ])
+
+    // 同一张图在段卡片上已经有一份：这里再出现就成了两个来源。
+    expect(wrapper.text()).not.toContain('shot-01-start.png')
+    // 其余产物照常分组显示，没有被一起吞掉。
+    expect(wrapper.get('[data-group="intermediate"]').text()).toContain('剧本')
+  })
+})

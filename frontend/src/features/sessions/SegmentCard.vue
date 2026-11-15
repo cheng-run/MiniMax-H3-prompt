@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 
 import {
   ApiError,
+  artifactContentUrl,
   assetMediaUrl,
   getArtifactContent,
   reopenSegment,
@@ -34,6 +35,9 @@ const props = defineProps<{
   // 清单里有才传——词是按段产出的，还没轮到的段没有这两份文件。
   firstFramePromptArtifact?: ArtifactInfo | null
   tailframePromptArtifact?: ArtifactInfo | null
+  // 本段起点图（#277）：第 N 段（N ≥ 2）传上一段剥出的尾帧。产物清单里有这张图
+  // 才传——它还没落盘时不渲染空卡（与按需词、注入卡同一条约定）。
+  startFrameArtifact?: ArtifactInfo | null
   // 路线能力（D7 §5.5 / #258；D8 §11 / #265）：ref 与导演台的已通过段都能「换一段」，
   // base 不开这条边（中间段换掉会断掉下一段的帧锚）。
   canResubmit: boolean
@@ -327,6 +331,38 @@ async function submitVideo(): Promise<void> {
     <p class="segment__shots">覆盖镜头：{{ shotsLabel(segment.shots_in_segment) }}</p>
     <p class="segment__summary">{{ segment.summary }}</p>
 
+    <!-- 本段起点图（#277）：上一段视频剥出的尾帧就是本段的 <Picture 1>。缩略图与
+         下载都由浏览器向 content 端点取（Cookie 鉴权，与产物分区同一约定）。 -->
+    <section v-if="startFrameArtifact" class="start-frame" data-start-frame aria-label="本段起点图">
+      <h3>本段起点图</h3>
+      <img
+        class="start-frame__image"
+        :src="artifactContentUrl(startFrameArtifact.artifact_id)"
+        :alt="`第 ${segment.index} 段起点图（上一段尾帧）`"
+        loading="lazy"
+      />
+      <div class="start-frame__actions">
+        <a
+          class="start-frame__link"
+          :href="artifactContentUrl(startFrameArtifact.artifact_id)"
+          target="_blank"
+          rel="noopener"
+        >
+          查看原图
+        </a>
+        <a
+          class="start-frame__link"
+          :href="artifactContentUrl(startFrameArtifact.artifact_id)"
+          :download="startFrameArtifact.name.split('/').pop() ?? startFrameArtifact.name"
+        >
+          下载这张图
+        </a>
+      </div>
+      <p class="start-frame__hint">
+        把它接到 H3 节点的首帧输入，就是本段提示词里的 <code>&lt;Picture 1&gt;</code>。
+      </p>
+    </section>
+
     <!-- 段内参考素材（D7 §10 / #258）：只读回显段内重编号后的 Picture 号与语义名。
          子集由规划期算好（闭包 → 撤一致性锚 → 从 1 重编号），这里没有任何手改入口。 -->
     <p v-if="segment.assets?.length" class="segment__assets" data-segment-assets>
@@ -482,6 +518,35 @@ async function submitVideo(): Promise<void> {
 .injection-card h3 {
   margin: 0;
   font-size: 0.95rem;
+}
+.start-frame {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.start-frame h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+.start-frame__image {
+  align-self: flex-start;
+  max-width: 100%;
+  max-height: 16rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: #000;
+}
+.start-frame__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.start-frame__link {
+  color: var(--color-accent);
+}
+.start-frame__hint {
+  margin: 0;
+  color: var(--color-text-muted);
 }
 .prompt {
   display: flex;

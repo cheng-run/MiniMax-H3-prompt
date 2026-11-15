@@ -716,3 +716,57 @@ describe('SegmentsTab 导演台按需词（#264）', () => {
     expect(wrapper.find('[data-prompt-kind]').exists()).toBe(false)
   })
 })
+
+describe('SegmentsTab 本段起点图（#277）', () => {
+  function startFrameSegments(): SegmentOut[] {
+    return [
+      makeSegment({ index: 1, start_s: 0, end_s: 6 }),
+      makeSegment({ index: 2, start_s: 6, end_s: 12 }),
+      makeSegment({ index: 3, start_s: 12, end_s: 18 }),
+    ]
+  }
+
+  it('第 2 段显示上一段尾帧的缩略图、打开/下载入口与 <Picture 1> 说明', async () => {
+    const wrapper = mountTab({
+      segments: startFrameSegments(),
+      artifacts: [makeArtifact('segments/bridge_frames/shot-01-start.png', 'bridge_frame')],
+    })
+    await settle()
+
+    const cards = wrapper.findAll('[data-segment-index]')
+    const block = cards[1].find('[data-start-frame]')
+    expect(block.exists()).toBe(true)
+    expect(block.text()).toContain('把它接到 H3 节点的首帧输入')
+    expect(block.text()).toContain('<Picture 1>')
+    // 缩略图由浏览器直接向 content 端点取（Cookie 鉴权，与产物分区同一约定）。
+    const image = block.find('img')
+    expect(image.exists()).toBe(true)
+    expect(image.attributes('src')).toContain('/artifacts/')
+    // 打开 + 下载两个入口都在。
+    const links = block.findAll('a')
+    expect(links.length).toBeGreaterThanOrEqual(2)
+    expect(links.some((link) => link.text().includes('下载'))).toBe(true)
+
+    // 第 1 段的起点是用户自己交的开场帧，没有这一块。
+    expect(cards[0].find('[data-start-frame]').exists()).toBe(false)
+  })
+
+  it('按剥帧段号差一位取图：第 3 段取 shot-02，不取 shot-03', async () => {
+    const wrapper = mountTab({
+      segments: startFrameSegments(),
+      artifacts: [makeArtifact('segments/bridge_frames/shot-02-start.png', 'bridge_frame')],
+    })
+    await settle()
+
+    const cards = wrapper.findAll('[data-segment-index]')
+    expect(cards[1].find('[data-start-frame]').exists()).toBe(false) // 第 2 段要 shot-01
+    expect(cards[2].find('[data-start-frame]').exists()).toBe(true) // 第 3 段要 shot-02
+  })
+
+  it('文件还没落盘时不渲染空卡', async () => {
+    const wrapper = mountTab({ segments: startFrameSegments(), artifacts: [] })
+    await settle()
+
+    expect(wrapper.find('[data-start-frame]').exists()).toBe(false)
+  })
+})

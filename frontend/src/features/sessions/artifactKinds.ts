@@ -48,9 +48,10 @@ const DELIVERABLE_KINDS = new Set([
 // 但分开一个 kind——页面要能说清「哪一份是计划、哪一份是结论」。
 const ARCHIVE_KINDS = new Set(['director_pack', 'director_final_pack'])
 const MEDIA_KINDS = new Set(['video', 'audio', 'director_pack', 'director_final_pack'])
-// 段级注入卡只住「分段」分区、与段词同屏（D7 §9）：它不属于产物分区的任何一组，
-// 这是**有意**不显示，不是漏登记。
-const SEGMENT_LOCAL_KINDS = new Set(['segment_injection_card'])
+// 段级注入卡与桥接帧只住「分段」分区、与段词同屏（D7 §9 / #257；#277）：它们不属于
+// 产物分区的任何一组，这是**有意**不显示，不是漏登记——同一张图要是在两个分区各出现
+// 一次，就有了两个来源。
+const SEGMENT_LOCAL_KINDS = new Set(['segment_injection_card', 'bridge_frame'])
 
 export function artifactGroup(artifact: ArtifactInfo): ArtifactGroup | null {
   if (SEGMENT_LOCAL_KINDS.has(artifact.kind)) {
@@ -141,6 +142,17 @@ export function archiveDownloadLabel(kind: string): string {
  */
 export function segmentInjectionCardName(position: number): string {
   return `segments/injection-card-${String(position).padStart(2, '0')}.md`
+}
+
+/**
+ * 桥接帧的产物名（#277）：与后端 `bridge_frame_name` 同形，段号两位。
+ *
+ * **段号是剥帧段号**：`shot-NN-start.png` 同时是第 NN 段的尾帧与第 NN+1 段的起点图，
+ * 所以分段分区第 N 段（N ≥ 2）取的是 N−1 那一张。映射只在 SegmentsTab 一处做；
+ * 组件里再拼一份格式串，登记表改名时它会静默取不到图。
+ */
+export function bridgeFrameName(segmentNumber: number): string {
+  return `segments/bridge_frames/shot-${String(segmentNumber).padStart(2, '0')}-start.png`
 }
 
 /**

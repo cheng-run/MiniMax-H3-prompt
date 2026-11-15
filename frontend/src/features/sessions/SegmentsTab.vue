@@ -4,6 +4,7 @@ import { computed } from 'vue'
 import type { ActionItemOut, ArtifactInfo, Asset, SegmentOut } from '@/api/client'
 
 import {
+  bridgeFrameName,
   directorFirstFramePromptName,
   directorTailframePromptName,
   segmentInjectionCardName,
@@ -74,6 +75,16 @@ function firstFramePromptFor(index: number): ArtifactInfo | null {
 function tailframePromptFor(index: number): ArtifactInfo | null {
   return artifactsByName.value.get(directorTailframePromptName(index)) ?? null
 }
+
+// 本段起点图（#277）：第 N 段（N ≥ 2）的起点就是第 N−1 段视频剥出的尾帧。产物名的
+// 段号是**剥帧段号**，这个「差一位」只在这里折算一次；第 1 段的起点是用户自己交的
+// 开场帧，没有这张图。
+function startFrameFor(index: number): ArtifactInfo | null {
+  if (index < 2) {
+    return null
+  }
+  return artifactsByName.value.get(bridgeFrameName(index - 1)) ?? null
+}
 </script>
 
 <template>
@@ -103,6 +114,7 @@ function tailframePromptFor(index: number): ArtifactInfo | null {
           :card-artifact="cardFor(segment.index)"
           :first-frame-prompt-artifact="firstFramePromptFor(segment.index)"
           :tailframe-prompt-artifact="tailframePromptFor(segment.index)"
+          :start-frame-artifact="startFrameFor(segment.index)"
           :can-resubmit="canResubmit"
           :is-director="isDirector"
           @refresh="emit('refresh')"

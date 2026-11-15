@@ -100,6 +100,47 @@ MUTATIONS: tuple[Mutation, ...] = (
         "「算不算产物」出现第二份判据",
     ),
     Mutation(
+        "artifact_bridge_frame_pattern_off",
+        "src/minimax_h3_prompt/workbench_store.py",
+        '_BRIDGE_FRAME_SUFFIX = "-start.png"',
+        '_BRIDGE_FRAME_SUFFIX = "-begin.png"',
+        ("tests/test_artifact_registry.py::test_bridge_frame_is_listed_with_its_kind",
+         "tests/test_artifact_registry.py::"
+         "test_bridge_frame_content_returns_png_bytes_and_supports_range"),
+        "桥接帧模式失效＝剥出的尾帧既不出现在清单里也读不出来，"
+        "段卡片按产物名永远取不到本段起点图（#277）",
+    ),
+    Mutation(
+        "frontend_bridge_frame_name_drifts",
+        "frontend/src/features/sessions/artifactKinds.ts",
+        "padStart(2, '0')}-start.png`",
+        "padStart(2, '0')}-begin.png`",
+        ("tests/test_frontend_bridge_frame.py::"
+         "test_frontend_bridge_frame_name_matches_the_backend",),
+        "前端桥接帧名与后端登记表漂移＝段卡片按名字永远取不到起点图，"
+        "两端各自绿着（#277 复审 F5）",
+    ),
+    Mutation(
+        "frontend_bridge_frame_leaves_the_segment_panel",
+        "frontend/src/features/sessions/artifactKinds.ts",
+        "const SEGMENT_LOCAL_KINDS = new Set(['segment_injection_card', 'bridge_frame'])",
+        "const SEGMENT_LOCAL_KINDS = new Set(['segment_injection_card'])",
+        ("tests/test_frontend_bridge_frame.py::"
+         "test_bridge_frame_is_registered_as_a_segment_local_kind",),
+        "桥接帧不再被标成分段本地 kind＝同一张图同时出现在分段与产物两个分区，"
+        "现有组件用例仍绿（#277 复审 F6）",
+    ),
+    Mutation(
+        "frontend_segment_start_frame_off_by_one",
+        "frontend/src/features/sessions/SegmentsTab.vue",
+        "bridgeFrameName(index - 1)",
+        "bridgeFrameName(index)",
+        ("tests/test_frontend_bridge_frame.py::"
+         "test_segments_tab_maps_the_start_frame_to_the_previous_segment",),
+        "段卡片取本段尾帧而不是上一段剥帧＝第 N 段的起点图错一位（segment-NN-start.png 的"
+        "语义就是这样断的；#277 复审 F7）",
+    ),
+    Mutation(
         "session_detail_leaks_stage_state",
         "src/minimax_h3_prompt/workbench_store.py",
         "    artifacts: list[ArtifactInfo] = Field(default_factory=list)\n"

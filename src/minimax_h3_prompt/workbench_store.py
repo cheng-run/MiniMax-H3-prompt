@@ -209,6 +209,40 @@ _ASSET_PROMPT_SPEC = ArtifactSpec(ASSET_PROMPT_KIND)
 SEGMENT_INJECTION_CARD_KIND = "segment_injection_card"
 _SEGMENT_INJECTION_CARD_FILENAME = r"injection-card-\d{2}\.md"
 _SEGMENT_INJECTION_CARD_SPEC = ArtifactSpec(SEGMENT_INJECTION_CARD_KIND)
+# 桥接帧（D6 §7 / #277）：上一段视频剥出的尾帧落在这里，登记成 ``image/png`` 产物后
+# 清单、内容端点、Range 与下载全部由既有机制获得，段卡片按段号来取。
+# **名字里的段号是剥帧段号**：它同时是第 NN 段的尾帧与第 NN+1 段的起点图，前端第 N
+# 段取 N−1 那张。CLI 历史布局（会话根 ``bridge_frames/``）不在这条模式里，老会话
+# 的产物清单因此不变。
+BRIDGE_FRAME_KIND = "bridge_frame"
+BRIDGE_FRAMES_DIRNAME = "bridge_frames"
+_BRIDGE_FRAMES_PATH = f"{SEGMENTS_DIRNAME}/{BRIDGE_FRAMES_DIRNAME}"
+# 落盘命名与登记模式共用前后缀与段号位宽：名字函数与正则都从这几个常量拼，改一处
+# 两边一起动。各写一份格式串时，改了一处就会让「清单里有、读的时候说没有」。
+_BRIDGE_FRAME_PREFIX = "shot-"
+_BRIDGE_FRAME_SUFFIX = "-start.png"
+_BRIDGE_FRAME_DIGITS = 2
+_BRIDGE_FRAME_SPEC = ArtifactSpec(BRIDGE_FRAME_KIND, "image/png")
+
+
+def bridge_frame_name(segment_number: int) -> str:
+    """第 ``segment_number`` 段尾帧的桥接帧产物名（同时是第 +1 段的起点图）。
+
+    落盘（``jobs._execute_segment_validation``）与用例都从这一处取名；
+    「登记模式」与「写到哪个名字」各写一遍时，产物清单里就会没有刚落的图。
+    """
+    return (
+        f"{_BRIDGE_FRAMES_PATH}/"
+        f"{_BRIDGE_FRAME_PREFIX}"
+        f"{segment_number:0{_BRIDGE_FRAME_DIGITS}d}"
+        f"{_BRIDGE_FRAME_SUFFIX}"
+    )
+
+
+_BRIDGE_FRAME_FILENAME = (
+    re.escape(_BRIDGE_FRAME_PREFIX)
+    + rf"\d{{{_BRIDGE_FRAME_DIGITS}}}"
+    + re.escape(_BRIDGE_FRAME_SUFFIX))
 # 目录名与文件名模式分开存：解析（名字 → 规格）与扫描（去哪个目录找）都从这一份
 # 取；写死在两处时，改一处就会让「清单里有、读取说没有」。
 #
@@ -219,6 +253,9 @@ ASSETS_DIRNAME = "assets"
 _PATTERN_ARTIFACT_SPECS: tuple[tuple[str, str, ArtifactSpec], ...] = (
     (SEGMENTS_DIRNAME, _SEGMENT_PROMPT_FILENAME, _SEGMENT_PROMPT_SPEC),
     (SEGMENTS_DIRNAME, _SEGMENT_INJECTION_CARD_FILENAME, _SEGMENT_INJECTION_CARD_SPEC),
+    # 桥接帧（#277）：目录在 ``segments/`` 之下，命名规则与 ``bridge_frame_name``
+    # 共用同一份前后缀常量；同目录下的其他文件（``notes.txt``）不算产物。
+    (_BRIDGE_FRAMES_PATH, _BRIDGE_FRAME_FILENAME, _BRIDGE_FRAME_SPEC),
     (ASSETS_DIRNAME, _ASSET_PROMPT_FILENAME, _ASSET_PROMPT_SPEC),
     # 导演台段词（#262）：``director/plan.json`` 不在这条模式里，所以它不是产物。
     (DIRECTOR_DIRNAME, _DIRECTOR_SEGMENT_PROMPT_FILENAME,
@@ -272,11 +309,18 @@ def _media_spec(name: str) -> ArtifactSpec | None:
 
 
 # 媒体表保留给路由的契约声明（``ARTIFACT_MEDIA_TYPES.values()``）：数据仍只有上面
-# 那一张表，这里只是按形态筛一遍。
+# 那两张表，这里只是按形态筛一遍。固定名与模式产物都要进（#277）：漏掉模式产物时
+# 桥接帧的 ``image/png`` 不会出现在内容端点的契约里，前端拿到的类型声明就少一档。
+# 模式条目的键是「目录/文件名模式」，只用于取值与诊断，不参与名字解析。
 ARTIFACT_MEDIA_TYPES: dict[str, str] = {
     name: spec.media_type for name, spec in _FIXED_ARTIFACT_SPECS.items()
     if spec.media_type is not None
 }
+ARTIFACT_MEDIA_TYPES.update({
+    f"{dirname}/{filename_pattern}": spec.media_type
+    for dirname, filename_pattern, spec in _PATTERN_ARTIFACT_SPECS
+    if spec.media_type is not None
+})
 
 # 文本内容读取的上限（spec §10）：1 MiB，超出回 413 artifact_too_large。
 ARTIFACT_MAX_BYTES = 1024 * 1024

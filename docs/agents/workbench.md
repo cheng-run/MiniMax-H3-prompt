@@ -46,6 +46,9 @@
 - **新增人工待办 kind 必须同票接前端卡**：`SessionDetailView` 的 pending 判据 + 一个组件 + vitest。
   没有卡的 `awaiting_human` 在浏览器里是无入口的死端——后端验收全绿、用户却无处交东西。
   #261 的 `director_start_image` 就这样被复审抓回过一次；复审 Standards 轴按这条查。
+  还要接 `frontend/src/features/sessions/progress.ts` 的「等待你操作」提示
+  （`pendingActionHint`）：未知 kind 只会退化成一句通用文案，说清「哪一段、哪一步」的精确
+  文案必须同票补上，否则细节静默丢失。
 - **`stage_state` 不出 API**（D4）：阶段 1 的中间产物落成登记表里的产物，前端经 content 端点读正文；
   快照、待办载荷与错误体都不带 state 内部键。revise 重跑原地更新文件，产物清单是「显示哪些文件」的唯一事实。
 - **产物分区不按变体判断**：登记表里有哪几件就显示哪几件（T2VA 两件、帧链多两帧词）；
@@ -88,7 +91,12 @@
   `segments/shot-NN.md` 与
   `segments/segment-NN.md` → kind `segment_prompt`、
   `assets/picture-NN.md` → kind `asset_prompt`、`segments/injection-card-NN.md` → kind
-  `segment_injection_card`（D6 §7 / D7 §7 / D7 §9 / D7 §10），以及导演台逐段产物。
+  `segment_injection_card`（D6 §7 / D7 §7 / D7 §9 / D7 §10），以及导演台逐段产物；
+  桥接帧 `segments/bridge_frames/shot-NN-start.png` → kind `bridge_frame`、
+  `image/png`（#277）同样是模式条目（每段一张），并且是模式条目里**唯一带 media_type
+  的一种**——其余模式条目都是纯文本。
+  桥接帧与段级注入卡同组（`artifactKinds.ts` 的 `SEGMENT_LOCAL_KINDS`）：**只住分段分区、
+  不进产物分区**——同一张图若在两个分区各出现一次，就有了两个来源。
   「算不算产物」「按什么形态读」「清单从哪来」三个判断只有一个入口
   `workbench_store.artifact_spec`，端点与清单都不抄第二份白名单。
 - **注入卡是只读产物、绝不进模型载荷**（D7 §9 / #257）：整片卡 `injection-card.md`

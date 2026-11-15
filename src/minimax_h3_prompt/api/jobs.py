@@ -87,6 +87,7 @@ from ..workbench_store import (
     VideoUnreadable,
     WorkbenchError,
     WorkbenchSessionStore,
+    bridge_frame_name,
     director_briefing_name,
     director_first_frame_prompt_name,
     director_segment_prompt_name,
@@ -151,8 +152,6 @@ DIRECTOR_STEP_DELIVERY = "director_delivery"
 SEGMENT_WRITE_NODE = "segment_write"
 SEGMENT_VALIDATE_NODE = "segment_validate"
 SEGMENT_ASSEMBLE_NODE = "segment_assemble"
-# 尾帧剥出的落点目录（不是产物：登记表只认 ``segments/shot-NN.md``）。
-SEGMENT_BRIDGE_DIRNAME = "bridge_frames"
 
 # 素材循环（D7 spec §5.3 / §6.2）：出词与校对是**两个独立 job**，都记这个 kind；
 # 中间隔着持久化的 ``asset_image`` 待办（不是阻塞线程）。
@@ -3495,10 +3494,11 @@ class JobRunner:
             stage=step_machine.STEP_SEGMENTING)
         self._write_active_job(session_id, job_id, node)
         # 剥尾帧失败/文件读不到＝系统故障（下一段没有首帧锚），照旧抛错落 failed。
+        # 落点是登记产物（kind ``bridge_frame``）：命名走 ``bridge_frame_name``，
+        # 与「算不算产物」的模式共用一处，产物清单因此自动收录这张图。
         tail = extract_last_frame(
             resource.path,
-            directory / SEGMENTS_DIRNAME / SEGMENT_BRIDGE_DIRNAME
-            / f"shot-{number:02d}-start.png",
+            directory / bridge_frame_name(number),
             # 首尾帧链恒取末帧（issue #98）：取到倒数第几帧决定下一段回退几帧。
             sharpest=False)
         if cancel_event.is_set():
