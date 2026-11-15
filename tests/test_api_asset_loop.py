@@ -1571,6 +1571,221 @@ def test_reroll_reopens_the_card_without_touching_any_text(harness):
 
 
 # ---------------------------------------------------------------------------
+# 四选的另外两条出路（#289）：按图改文案 / 明知故犯保留原描述
+# ---------------------------------------------------------------------------
+
+CAT_FACTS = CAT_PROMPT.replace("尾巴绕住前爪", "尾巴垂在窗台边缘，没绕住前爪")
+OMISSION_CLAIM = ("项圈", "", "脖子上有一圈红色项圈")
+
+
+def _parse_prompt(text: str) -> str:
+    """产物正文 → 词本体（与 ``workbench_store.parse_asset_prompt`` 同口径，用例独立取）。"""
+    _head, separator, body = str(text).partition("\n\n")
+    return body if separator else str(text)
+
+
+def _facts_record(harness, name: str = CAT) -> dict:
+    """会话文件里的素材画面事实记录（下游 ``proofread_descriptions`` 取的就是它）。"""
+    rows = harness.on_disk().get("stage_state", {}).get("asset_proofreads") or {}
+    return dict(rows.get(name) or {})
+
+
+def _job(harness, job_id: str) -> dict:
+    return harness.client.get(
+        f"/api/v1/sessions/{harness.session_id}/jobs/{job_id}").json()
+
+
+def _resolved_card(harness, number: int = 1) -> dict:
+    cards = [entry for entry in harness.detail()["action_items"]
+             if entry["kind"] == "asset_image" and entry["status"] == "resolved"
+             and entry["asset_index"] == number]
+    return cards[-1] if cards else {}
+
+
+def test_settle_exits_are_declared_decision_values():
+    """两条定稿出路都是决议值（常量与闭合表两处），事件类型仍是十种闭合集合。"""
+    from minimax_h3_prompt import step_machine
+    from minimax_h3_prompt.workbench_store import EVENT_TYPES, _DECISIONS
+
+    assert step_machine.DECISION_ACCEPT_IMAGE_FACTS == "accept_image_facts"
+    assert step_machine.DECISION_KEEP_DESCRIPTION == "keep_description"
+    assert {step_machine.DECISION_ACCEPT_IMAGE_FACTS,
+            step_machine.DECISION_KEEP_DESCRIPTION} <= _DECISIONS
+    assert len(EVENT_TYPES) == 10
+
+
+def test_accept_image_facts_rewrites_only_the_description(harness):
+    """按图改文案：描述里那处换成图中实见、本件定稿、生图词逐字不动。"""
+    _body, card, before = _to_failed_first_card(harness)
+
+    resp = _resolve(harness, card, {"decision": "accept_image_facts"})
+    assert resp.status_code == 202, resp.text
+    job = resp.json()
+
+    harness.wait_until(
+        lambda snapshot: any(entry["kind"] == "asset_image"
+                             and entry["status"] == "pending"
+                             and entry["asset_index"] == 2
+                             for entry in snapshot["action_items"]))
+
+    # 文本落点：描述被定点替换，生图词一个字节都没动。
+    record = _facts_record(harness)
+    assert record["status"] == "done"
+    assert record["description"] == CAT_FACTS
+    assert record["deviations"][0]["prompt_quote"] == "尾巴绕住前爪"
+    assert harness.artifact_text("assets/picture-01.md") == before
+    # 下游取材口读到的就是它（不是把词换了源）。
+    assert record["description"] != _parse_prompt(before)
+
+    # 台账：本件定稿、轮次 +1（不通过那一轮已经记过一次，所以是 2）；下一件的卡已经出现。
+    assert [(entry["status"], entry["round"]) for entry in harness.ledger()] == [
+        ("passed", 2), ("pending", 0)]
+
+    # 「已按图补入 N 条」在卡片消失后仍读得到：已决议卡片的 reason 与这次任务的详情。
+    resolved = _resolved_card(harness)
+    assert resolved["decision"] == "accept_image_facts"
+    assert "已按图补入 0 条" in resolved["reason"]
+    assert "生图词逐字未改" in resolved["reason"]
+    assert "已按图补入 0 条" in _job(harness, job["job_id"])["detail"]
+    # 结论随事件走：重放能把这段话补回已决议的卡片（事件类型不新增）。
+    resolved_event = [event for event in _events(harness.root, harness.session_id)
+                      if event["type"] == "action_item.resolved"
+                      and event["payload"].get("item_id") == card["item_id"]][0]
+    assert "已按图补入 0 条" in resolved_event["payload"]["reason"]
+
+    # 校对与定稿都不叫改写模型，也不写轮次账（词没被改过）。
+    assert harness.rewrite.requests == []
+    assert not (harness.root / Path(harness.session_id) / "asset-rounds.jsonl").exists()
+
+
+def test_keep_description_keeps_the_wording_and_only_adds_the_facts(harness):
+    """明知故犯保留原描述：偏差一处不动、只并入补漏，本件定稿。"""
+    body = _to_first_card(harness)
+    item = [entry for entry in body["action_items"]
+            if entry["kind"] == "asset_image" and entry["status"] == "pending"][0]
+    image = harness.upload(_png(9), "gen-cat.png")
+    harness.readings.append(_claims(("尾巴", "尾巴绕住前爪", "尾巴垂在窗台边缘，没绕住前爪"),
+                                    OMISSION_CLAIM))
+    assert harness.submit_image(item, image["asset_id"]).status_code == 202
+    body = harness.wait_until(
+        lambda snapshot: any(entry["kind"] == "asset_image"
+                             and entry["status"] == "pending"
+                             and entry["asset_index"] == 1
+                             and entry["reason"]
+                             for entry in snapshot["action_items"]))
+    card = [entry for entry in body["action_items"]
+            if entry["kind"] == "asset_image" and entry["status"] == "pending"][0]
+    assert card["proofread"]["omissions"] == [
+        {"aspect": "项圈", "fact": "脖子上有一圈红色项圈"}]
+
+    resp = _resolve(harness, card, {"decision": "keep_description"})
+    assert resp.status_code == 202, resp.text
+
+    harness.wait_until(
+        lambda snapshot: any(entry["kind"] == "asset_image"
+                             and entry["status"] == "pending"
+                             and entry["asset_index"] == 2
+                             for entry in snapshot["action_items"]))
+    record = _facts_record(harness)
+    # 原描述逐字保留（偏差没被改），补漏以「；」并进尾部。
+    assert record["description"] == f"{CAT_PROMPT}；脖子上有一圈红色项圈"
+    assert CAT_PROMPT in record["description"]
+    assert "尾巴垂在窗台边缘" not in record["description"]
+    assert record["omissions"] == ["脖子上有一圈红色项圈"]
+    assert [(entry["status"], entry["round"]) for entry in harness.ledger()] == [
+        ("passed", 2), ("pending", 0)]
+
+    resolved = _resolved_card(harness)
+    assert resolved["decision"] == "keep_description"
+    assert "已按图补入 1 条" in resolved["reason"]
+
+
+def test_a_fact_observed_again_is_not_merged_twice(harness):
+    """补漏按观察去重：同一句第二次定稿不重复并进描述（同一句不出现两次）。"""
+    body = _to_first_card(harness)
+    item = [entry for entry in body["action_items"]
+            if entry["kind"] == "asset_image" and entry["status"] == "pending"][0]
+    first = harness.upload(_png(9), "gen-cat.png")
+    harness.readings.append(_claims(OMISSION_CLAIM))
+    assert harness.submit_image(item, first["asset_id"]).status_code == 202
+    # 只有补漏、没有偏差 → 这一件已经定稿（补漏不阻挡），描述里已并入那条事实。
+    harness.wait_until(
+        lambda snapshot: any(entry["kind"] == "asset_image"
+                             and entry["status"] == "pending"
+                             and entry["asset_index"] == 2
+                             for entry in snapshot["action_items"]))
+    assert _facts_record(harness)["description"] == f"{CAT_PROMPT}；脖子上有一圈红色项圈"
+    assert [(entry["status"], entry["round"]) for entry in harness.ledger()] == [
+        ("passed", 1), ("pending", 0)]
+
+    # 换一张图重走一遍同一件：同一句补漏再出现一次，描述里仍只出现一次。
+    asset_id = next(entry["asset_id"] for entry in harness.ledger()
+                    if entry["number"] == 1)
+    reopen = harness.client.post(
+        f"/api/v1/sessions/{harness.session_id}/assets/{asset_id}/reopen")
+    assert reopen.status_code == 200, reopen.text
+    body = harness.wait_until(
+        lambda snapshot: any(entry["kind"] == "asset_image"
+                             and entry["status"] == "pending"
+                             and entry["asset_index"] == 1
+                             for entry in snapshot["action_items"]))
+    card = [entry for entry in body["action_items"]
+            if entry["kind"] == "asset_image" and entry["status"] == "pending"][0]
+    second = harness.upload(_png(10), "gen-cat-2.png")
+    harness.readings.append(_claims(OMISSION_CLAIM))
+    assert harness.submit_image(card, second["asset_id"]).status_code == 202
+    # 这一轮只有补漏（无偏差）→ 直接定稿，描述里那条事实仍然只有一份。
+    harness.wait_until(
+        lambda snapshot: any(entry["kind"] == "asset_image"
+                             and entry["status"] == "pending"
+                             and entry["asset_index"] == 2
+                             for entry in snapshot["action_items"]))
+    assert _facts_record(harness)["description"].count("脖子上有一圈红色项圈") == 1
+
+
+def test_rerolling_does_not_merge_the_facts(harness):
+    """重掷中途不并入补漏：原词再掷之后描述仍是空的（图还没定下来）。"""
+    body = _to_first_card(harness)
+    item = [entry for entry in body["action_items"]
+            if entry["kind"] == "asset_image" and entry["status"] == "pending"][0]
+    image = harness.upload(_png(9), "gen-cat.png")
+    harness.readings.append(_claims(("尾巴", "尾巴绕住前爪", "尾巴垂在窗台边缘，没绕住前爪"),
+                                    OMISSION_CLAIM))
+    assert harness.submit_image(item, image["asset_id"]).status_code == 202
+    body = harness.wait_until(
+        lambda snapshot: any(entry["kind"] == "asset_image"
+                             and entry["status"] == "pending"
+                             and entry["asset_index"] == 1
+                             and entry["reason"]
+                             for entry in snapshot["action_items"]))
+    card = [entry for entry in body["action_items"]
+            if entry["kind"] == "asset_image" and entry["status"] == "pending"][0]
+
+    resp = _resolve(harness, card, {"decision": "reroll"})
+    assert resp.status_code == 202, resp.text
+    harness.wait_until(
+        lambda snapshot: any(entry["kind"] == "asset_image"
+                             and entry["status"] == "pending"
+                             and entry["asset_index"] == 1
+                             and not entry["reason"]
+                             for entry in snapshot["action_items"]))
+
+    assert _facts_record(harness) == {}, "重掷中途把补漏写进了描述"
+    assert [(entry["status"], entry["round"]) for entry in harness.ledger()] == [
+        ("pending", 1), ("pending", 0)]
+
+
+def test_settle_exits_reject_a_submitted_image(harness):
+    """定稿出路与交图互斥：一次决议只能是其中一件事（422）。"""
+    _body, card, _before = _to_failed_first_card(harness)
+    image = harness.upload(_png(11), "gen-cat-3.png")
+
+    _assert_problem(
+        _resolve(harness, card, {"decision": "accept_image_facts",
+                                 "asset_id": image["asset_id"]}),
+        422, "asset_image_invalid")
+
+
 # 恢复阶段 1 原文（#291 / spec #286「恢复动作」）
 # ---------------------------------------------------------------------------
 

@@ -334,6 +334,134 @@ def _settle_asset(
     return updated
 
 
+# 校对不通过后**定稿**的两条出路（#289）：只有它们会把补漏并进素材画面事实、把这一件
+# 记成 ``passed``；重掷的两条一个字都不碰（spec #286「并入发生在定稿那一刻」）。
+# 判据只有这一份：锁外的预演与锁内的落盘都读它，两处各写一份时改一处就会让
+# 「重掷中途也并入」这种错误在另一边静默通过。
+_SETTLING_ASSET_DECISIONS = frozenset({
+    step_machine.DECISION_ACCEPT_IMAGE_FACTS,
+    step_machine.DECISION_KEEP_DESCRIPTION,
+})
+
+
+@dataclass(frozen=True)
+class _ImageFacts:
+    """定稿那条出路的合并结果（#289）：写进素材画面事实的描述 + 本次落笔的清单。
+
+    ``description`` 是唯一的正文产物（写进 ``state[PROOFREADS_KEY][语义名]``）；
+    生图词**不在**这里——它逐字不动，压根没有「改写后的词」这个字段。
+    """
+
+    description: str
+    adjudications: tuple[Any, ...]
+    facts: tuple[str, ...]
+    skipped: tuple[str, ...]
+
+
+def _merge_image_facts(
+    description: str,
+    prompt_body: str,
+    name: str,
+    conclusion: Mapping[str, Any] | None,
+    *,
+    apply_deviations: bool,
+) -> _ImageFacts:
+    """按图改文案／保留原描述的合并（#289）：纯函数，全部落在**素材画面事实**上。
+
+    ``apply_deviations`` 是两条出路的唯一差别：按图改文案做定点替换（引文那一处换成
+    图中实见），保留原描述一个字都不动偏差。补漏两者都并入，且只在**定稿那一刻**
+    做——重掷中途的图还没定下来，它的细节不该写进描述（spec #286「补漏的归宿」）。
+
+    合并本身复用 ``merge_asset_description``（定点替换 + 尾部「；」追加），这里只做
+    三件它不管的事：挑底本、补漏去重、失锚引文的留痕。**失锚不静默**：工作台的四选
+    是按件一次（没有 CLI 那种逐条补锚的问答），那一处没落进描述就列进 ``skipped``，
+    由卡片与任务详情说出来——猜一处改了算会改错地方，静默丢掉则偏差没纠。
+    """
+    from ..asset_proofread import (
+        DECISION_REWRITE,
+        Adjudication,
+        Deviation,
+        merge_asset_description,
+    )
+
+    base = str(description).strip() or str(prompt_body).strip()
+    merged = base
+    applied: list[Any] = []
+    skipped: list[str] = []
+    deviations = (conclusion or {}).get("deviations") or []
+    for row in (deviations if apply_deviations else ()):
+        if not isinstance(row, Mapping):
+            continue
+        adjudication = Adjudication(
+            Deviation(str(row.get("aspect") or ""), str(row.get("prompt_quote") or ""),
+                      str(row.get("observed") or "")),
+            DECISION_REWRITE)
+        try:
+            merged = merge_asset_description(merged, [adjudication], [], name=name)
+        except ValueError as exc:
+            # 引文在这一版描述里已经不在了（上一轮已经按图改过）、或多处命中：
+            # 那一条不落笔，但**说出来**。
+            skipped.append(f"{adjudication.deviation.aspect or adjudication.deviation.prompt_quote}"
+                           f"（{exc}）")
+            continue
+        applied.append(adjudication)
+    facts: list[str] = []
+    for row in (conclusion or {}).get("omissions") or []:
+        fact = str((row or {}).get("fact") or "").strip() if isinstance(row, Mapping) else ""
+        # 去重判据是**逐字**出现（spec #286「补漏的归宿与去重」）：同一件反复校对时
+        # 同一句话不许并进第二遍。判据不猜语义——漏判只是少一条可见事实，
+        # 错并一条冗余事实倒会污染描述主体。
+        if not fact or fact in merged or fact in facts:
+            continue
+        facts.append(fact)
+        merged = f"{merged}；{fact}"
+    return _ImageFacts(merged, tuple(applied), tuple(facts), tuple(skipped))
+
+
+def _image_facts_note(result: _ImageFacts, *, apply_deviations: bool) -> str:
+    """定稿出路的结果文案：卡片 ``reason`` 与任务 ``detail`` 共用这一句（#289）。
+
+    卡片决议后就从界面上消失了，「已按图补入 N 条」没有第二处可展示——所以它必须
+    落在**已决议的卡片**与**这次决议的任务**上（快照与事件都读得到）。
+    """
+    if apply_deviations:
+        text = (f"已按图改文案：{len(result.adjudications)} 处偏差按图中实见改在"
+                f"素材画面事实里；已按图补入 {len(result.facts)} 条。生图词逐字未改。")
+    else:
+        text = (f"已按明知故犯保留原描述：描述里的偏差一处未动；"
+                f"已按图补入 {len(result.facts)} 条。生图词逐字未改。")
+    if result.skipped:
+        text += ("\n这几处没有落笔（引文在这一版描述里已找不到或多处命中）："
+                 + "；".join(result.skipped))
+    return text
+
+
+def _apply_image_facts(
+    stage_state: dict[str, Any], preview: Mapping[str, Any],
+) -> dict[str, Any]:
+    """把定稿出路的合并结果写进**素材画面事实**（#289）。
+
+    落点只有这一处：``state[asset_proofreads][语义名]``——下游写视频提示词时
+    （``generation._with_merged_descriptions`` → ``proofread_descriptions``）取的就是
+    它。生图词产物一个字都不写：词是指令、描述才跟图。
+    """
+    from ..asset_proofread import PROOFREADS_KEY, STATUS_DONE, ProofreadRecord, proofread_rows
+
+    result = preview["result"]
+    name = str(preview["name"])
+    records = proofread_rows(stage_state)
+    records[name] = ProofreadRecord(
+        name=name,
+        sha256=str(preview["sha256"]),
+        status=STATUS_DONE,
+        description=result.description,
+        adjudications=tuple(result.adjudications),
+        omissions=tuple(result.facts),
+    ).to_dict()
+    stage_state[PROOFREADS_KEY] = records
+    return stage_state
+
+
 def _render_asset_prompt(number: int, name: str, prompt: str) -> str:
     """资产图词产物正文：头部写语义名/类型/编号，空行以下是可直接复制的词（D7 §7）。
 
@@ -1050,6 +1178,17 @@ class JobRunner:
             # 沿用素材循环那条「按盘判步骤」的路（``round > 0`` 时它只重开卡片）。
             reword = (branch == _BRANCH_ASSET_LOOP
                       and decision == step_machine.DECISION_REWORD_REROLL)
+            # 四选的后两条（#289）：**定稿**出路。它们要合并素材画面事实、把这一件
+            # 记成 ``passed``，然后接下一件（或进补交口／阶段 2）。预演给出合并结果、
+            # 结果文案与下一个任务的 kind——事件在 ``mutate`` 之前就要构造好，
+            # 文案只能在这里算（锁内的 ``_decide`` 用同一份结果落盘）。
+            settles_facts = (branch == _BRANCH_ASSET_LOOP
+                             and decision in _SETTLING_ASSET_DECISIONS)
+            settle_preview: dict[str, Any] = {}
+            settle_kind = ""
+            if settles_facts:
+                settle_preview, settle_kind = await asyncio.to_thread(
+                    self._settle_preview, session_id, item_id, str(decision))
             # 恢复阶段 1 原文（#291）：一次覆盖写盘，仍然走后台作业（与改词同形），
             # 因为「作业做了什么」要有一条可查的记录，而 job 的 detail 就是改前改后 diff。
             restore = (branch == _BRANCH_ASSET_LOOP
@@ -1061,6 +1200,8 @@ class JobRunner:
                 kind = abandon_kind
             elif reword:
                 kind = JOB_KIND_ASSET_REWORD
+            elif settles_facts:
+                kind = settle_kind
             elif restore:
                 kind = JOB_KIND_ASSET_RESTORE
             elif branch == _BRANCH_ASSET_LOOP:
@@ -1075,7 +1216,10 @@ class JobRunner:
             # 与任务相关的落盘都跳过——契约里那一段的 202 是「已受理、无执行」。
             job = None if gate_branch else JobSummary(
                 job_id=uuid.uuid4().hex, kind=kind,
-                status="running", started_at=_now())
+                status="running", started_at=_now(),
+                # 定稿出路的结果落在任务详情里（#289）：卡片决议后从界面消失，
+                # 「已按图补入 N 条」在任务列表上仍读得到。
+                detail=str(settle_preview.get("note") or ""))
             # 新待办的 id 先生成：``action_item.created`` 事件要和决议在**同一次**
             # 落盘里写出，不能等 _decide 返回后再补一条事件。
             created_item_id = uuid.uuid4().hex
@@ -1279,16 +1423,39 @@ class JobRunner:
                         holder["reason"] = _abandon_asset_note(name)
                         recorded_decision = step_machine.DECISION_ABANDON_ASSET
                     elif decision in (step_machine.DECISION_REWORD_REROLL,
-                                      step_machine.DECISION_REROLL):
-                        # 校对不通过的两条出路（#288）：台账**不动**（这一件仍是未交图
-                        # ``pending``，四态语义不变）。改词与原词再掷都不带图——用户是
-                        # 在选「下一轮怎么来」，不是又交了一张。
+                                      step_machine.DECISION_REROLL,
+                                      step_machine.DECISION_ACCEPT_IMAGE_FACTS,
+                                      step_machine.DECISION_KEEP_DESCRIPTION):
+                        # 校对不通过的**四选**（#288 前两选 / #289 后两选）。四条都
+                        # 不带图——用户是在选「下一轮怎么来」或「这一件怎么定」，
+                        # 不是又交了一张。
                         if asset_id is not None:
                             raise AssetImageInvalid(
-                                "重掷出路与交图不能同时提交：要么交一张图，"
-                                "要么选改词再掷／原词再掷。")
+                                "出路的决议与交图不能同时提交：要么交一张图，"
+                                "要么在四条出路上选一条。")
                         holder["number"] = int(number)
                         recorded_decision = decision
+                        # 定稿的两条（#289）：补漏在**这一刻**并入素材画面事实；
+                        # 重掷的两条不碰任何文本（``_SETTLING_ASSET_DECISIONS`` 是
+                        # 判据的唯一一份：预演与落盘都读它）。
+                        if decision in _SETTLING_ASSET_DECISIONS:
+                            if not settle_preview:
+                                # 预演是这决议的输入之一（锁外算、锁内落盘）：
+                                # 走到这里却没有它＝接线断了，不许静默定稿。
+                                raise RuntimeError(
+                                    "内部不一致：定稿出路没有预演结果")
+                            # 详情快照不带 stage_state：素材画面事实的底本要从会话状态
+                            # 读（与帧提交那一支同一处取法）。
+                            settled_session = load_session(
+                                self.store.session_directory(session_id))
+                            if settled_session is None:
+                                raise RuntimeError(
+                                    f"会话文件读不到：{session_id}")
+                            stage_state = _apply_image_facts(
+                                dict(settled_session.stage_state), settle_preview)
+                            holder["asset_ledger"] = _settle_asset(
+                                ledger, number, True)
+                            holder["reason"] = str(settle_preview.get("note") or "")
                     elif decision == step_machine.DECISION_RESTORE_PROMPT:
                         # 恢复阶段 1 原文（#291）：台账**不动**、轮次账**不动**、一次模型
                         # 都不调。真正的三个条件在作业里按盘现算（与卡片上出现它的判据
@@ -1303,9 +1470,9 @@ class JobRunner:
                     else:
                         if decision is not None:
                             raise AssetImageInvalid(
-                                "asset_image 待办只接受 asset_id、decision=abandon_asset、"
-                                "decision=reword_reroll、decision=reroll 或 "
-                                "decision=restore_prompt。")
+                                "asset_image 待办只接受 asset_id，或 decision 为 "
+                                "abandon_asset／reword_reroll／reroll／"
+                                "accept_image_facts／keep_description／restore_prompt 之一。")
                         submitted = str(asset_id or "").strip()
                         if not submitted:
                             raise AssetImageInvalid(
@@ -1614,6 +1781,10 @@ class JobRunner:
                 # 放弃的代价要进事件（#279 US10）：事后翻事件流的人也得看得出
                 # 「这一格为什么没有图」，不能只剩一个 ``abandoned`` 状态值。
                 resolved_payload["reason"] = _abandon_asset_note(abandon_name)
+            if settles_facts:
+                # 定稿出路的结果也进事件（#289）：快照落后时重放要能把
+                # 「已按图补入 N 条」补回已决议的卡片（事件类型仍是十种闭合集合）。
+                resolved_payload["reason"] = str(settle_preview.get("note") or "")
             if frames is not None:
                 # 帧槽载荷是用户输入的一部分（D4 §9）：重放与排障要看出用户当时
                 # 选了哪两个素材。审查待办没有这一项，就不写空对象进事件。
@@ -1763,6 +1934,76 @@ class JobRunner:
             entry["status"] = ASSET_LEDGER_STATUS_ABANDONED
         return (name, JOB_KIND_ASSET_LOOP
                 if _asset_step_of(ledger)[0] != ASSET_STEP_DONE else "advance")
+
+    def _image_facts_preview(self, session: Any, session_id: str, number: int,
+                             conclusion: Mapping[str, Any] | None, *,
+                             apply_deviations: bool) -> dict[str, Any]:
+        """这一件定稿时素材画面事实会变成什么（#289）：合并结果 + sha256 + 语义名。
+
+        生图词**不参与合并**：唯一会变的是素材画面事实，词只作为「没有既有描述时的
+        底本」被读进来（``workbench_store.parse_asset_prompt`` 剥掉产物头部）。
+        """
+        from ..asset_proofread import proofread_rows
+
+        entry = next(
+            (row for row in session.asset_ledger
+             if str(row.get("kind")) == KIND_PICTURE
+             and int(row.get("number", 0)) == int(number)), None)
+        if entry is None:
+            raise AssetImageInvalid(f"素材台账里没有第 {number} 件参考素材。")
+        submitted = str(entry.get(ASSET_PROOFREAD_KEY) or "").strip()
+        # 校对不通过的这一轮已经把「待校对」标记收回去了（``_settle_asset``），台账上
+        # 留下的是这一行最后试过的那张图（``asset_id``）：定稿的底本就是它。
+        submitted = submitted or str(entry.get("asset_id") or "").strip()
+        if not submitted:
+            raise AssetImageInvalid(
+                f"第 {number} 件还没有交过图，没有可以定稿的校对结论。")
+        path = self.store.resolve_image_asset(session_id, submitted)
+        name = str(entry.get("name") or "")
+        text = (self.store.session_directory(session_id)
+                / asset_prompt_name(number)).read_text(encoding="utf-8")
+        records = proofread_rows(dict(session.stage_state))
+        previous_row = records.get(name)
+        previous = (str(previous_row.get("description") or "")
+                    if isinstance(previous_row, Mapping) else "")
+        return {
+            "number": int(number), "name": name,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "result": _merge_image_facts(
+                previous, parse_asset_prompt(text), name, conclusion,
+                apply_deviations=apply_deviations),
+        }
+
+    def _settle_preview(self, session_id: str, item_id: str,
+                        decision: str) -> tuple[dict[str, Any], str]:
+        """「按图改文案／保留原描述」的只读预演：合并结果 + 下一个任务的 kind（#289）。
+
+        为什么在锁外先算一遍：事件要在 ``mutate`` 之前构造好，而定稿的去向（继续出
+        下一件的词 / 直接进补交口或阶段 2）决定任务 kind 的记法。决议本身在锁内由
+        同一份预览落盘：会话此刻停在人工待办上、没有别的写者，预演与实际落盘看到
+        的是同一份盘面（``_abandon_preview`` 同一取舍）。
+        """
+        session = load_session(self.store.session_directory(session_id))
+        if session is None:
+            raise RuntimeError(f"会话文件读不到：{session_id}")
+        target = next(
+            (item for item in session.action_items
+             if str(item.get("item_id")) == item_id), None)
+        number = int((target or {}).get("asset_index") or 0)
+        if not number:
+            raise AssetImageInvalid(f"这条待办缺件号，无法定稿：{item_id}")
+        raw = (target or {}).get("proofread")
+        apply_deviations = decision == step_machine.DECISION_ACCEPT_IMAGE_FACTS
+        payload = self._image_facts_preview(
+            session, session_id, number,
+            dict(raw) if isinstance(raw, Mapping) else None,
+            apply_deviations=apply_deviations)
+        payload["note"] = _image_facts_note(
+            payload["result"], apply_deviations=apply_deviations)
+        ledger = _settle_asset(
+            [dict(row) for row in session.asset_ledger], number, True)
+        return payload, (JOB_KIND_ASSET_LOOP
+                         if _asset_step_of(ledger)[0] != ASSET_STEP_DONE else "advance")
 
     def _director_frame_tolerance(self) -> int | None:
         """配置里的帧容差；拿不到就交 ``None`` 给 companion 用代码默认值。
@@ -3337,7 +3578,8 @@ class JobRunner:
         读图走**唯一入口** ``describe_image``（不另建视觉客户端）。通过（无偏差）→
         定稿；有偏差 → 同一件号重开卡片，``reason`` 是人读差异清单。补漏不参与通过
         判定，但仍照常出现在清单里，并随 ``reason`` 写进刚决议的那张卡
-        （``_finish_asset_proofread``）——通过之后卡片不再回来，那是它唯一的可见面。
+        （``_finish_asset_proofread``）——通过之后卡片不再回来，那是它唯一的可见面；
+        补漏本身在定稿那一刻并入素材画面事实（同一个收尾函数里做）。
 
         校对**不改写生图词**：词是指令、图是既成事实（#286 / ADR 0039）。「按差异
         覆盖写回 ``assets/picture-NN.md``」与资产轮次账的那条路径已整体删除。
@@ -3528,7 +3770,9 @@ class JobRunner:
 
         **通过的这一件若带着补漏/忽略条目，报告写进刚决议那张卡**（#287）：通过＝
         卡片不会再回来，那张卡是补漏唯一的可见面（``reason`` 在详情与待办报告里都读
-        得到；#289 会在此之后追加「已按图补入 N 条」）。事件类型不新增——仍是既有的
+        得到；#289 起同一段 ``reason`` 还追加「已按图补入 N 条」）。**补漏也在这一刻
+        并入素材画面事实**（与四选的两条定稿出路同一份合并）——它是「定稿那一刻」的
+        另一半，不并入就等于通过的图带来的事实永久没人用。事件类型不新增——仍是既有的
         ``action_item.resolved``，只多一个 ``reason`` 键。
         """
         number = int(result["number"])
@@ -3545,6 +3789,21 @@ class JobRunner:
             raise RuntimeError(f"会话文件读不到：{session_id}")
         settled = _settle_asset(session.asset_ledger, number, passed)
         step, _ = _asset_step_of(settled)
+        # 补漏在**定稿那一刻**并入，通过也是定稿（spec #286 US12）：通过的卡不会再回来，
+        # 不并入就是永久丢掉那几条事实。与四选的两条定稿出路走同一份合并
+        # （``_merge_image_facts``），不新写第二处。没有补漏就什么都不写——不凭空给
+        # 每一件落一条描述记录。
+        facts_preview: dict[str, Any] | None = None
+        if passed:
+            conclusion = result.get("proofread")
+            candidate = self._image_facts_preview(
+                session, session_id, number,
+                dict(conclusion) if isinstance(conclusion, Mapping) else None,
+                apply_deviations=False)
+            if candidate["result"].facts:
+                facts_preview = candidate
+                note = _image_facts_note(candidate["result"], apply_deviations=False)
+                reason = f"{reason}\n\n{note}".strip() if reason.strip() else note
         # 刚被这张卡决议的那一项：同一件号可能有多条历史决议（打回后又交），取最后一条。
         # 只在通过且报告非空时才找——不通过的报告由新卡自己带着，不需要回写旧卡。
         report_item_id = ""
@@ -3600,6 +3859,14 @@ class JobRunner:
             changes: dict[str, Any] = {
                 "asset_ledger": _settle_asset(
                     detail.asset_ledger_snapshot(), number, passed)}
+            if facts_preview is not None:
+                # 素材画面事实与定稿同一笔落盘：分两次写会出现「这一件已定稿、
+                # 描述里还没有那几条补漏」的中间态（下游写段词时读到的就是它）。
+                fresh = load_session(self.store.session_directory(session_id))
+                if fresh is None:
+                    raise RuntimeError(f"会话文件读不到：{session_id}")
+                changes["stage_state"] = _apply_image_facts(
+                    dict(fresh.stage_state), facts_preview)
             items: list[dict[str, Any]] | None = None
             if next_job is not None:
                 changes["status"] = step_machine.STATUS_RUNNING

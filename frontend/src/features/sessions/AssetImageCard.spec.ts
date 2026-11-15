@@ -440,6 +440,115 @@ describe('AssetImageCard 放弃这一件', () => {
   })
 })
 
+describe('AssetImageCard 四选的后两条：按图改文案／保留原描述（#289）', () => {
+  const failed = () =>
+    makeItem({
+      reason: '[偏差] 1 处（描述与图不符）：\n  - 灯罩：描述「墨绿色灯罩」→ 图中「米白色灯罩」',
+      proofread: {
+        deviations: [{ aspect: '灯罩', prompt_quote: '墨绿色灯罩', observed: '米白色灯罩' }],
+        omissions: [
+          { aspect: '桌面', fact: '桌角有一圈水渍' },
+          { aspect: '窗户', fact: '窗框是白色的' },
+        ],
+      },
+    })
+
+  it('四条出路齐备，定稿两条的文案说清「只改描述、不改生图词」', async () => {
+    const wrapper = mountCard(failed())
+    await settle()
+
+    const labels = wrapper.findAll('button').map((button) => button.text())
+    expect(labels).toContain('改词强化原意再掷（默认）')
+    expect(labels).toContain('原词再掷')
+    expect(labels).toContain('按图改文案（只改描述）')
+    expect(labels).toContain('明知故犯保留原描述')
+    // 四选之外的第五个动作（放弃）仍在，但它不属于校对四选。
+    expect(labels).toContain('放弃这一件')
+
+    expect(wrapper.text()).toContain('生图词逐字不动')
+    expect(wrapper.text()).toContain('当场定稿')
+    // 补漏条数在选之前就要看得见：并入发生在定稿那一刻，而定稿后这张卡就不在了。
+    expect(wrapper.get('[data-testid="asset-facts-count"]').text()).toContain(
+      '本次校对的 2 条补漏会在定稿时按图补入描述',
+    )
+  })
+
+  it('按图改文案发 accept_image_facts（不带图、请求立即返回）', async () => {
+    const bodies: unknown[] = []
+    let uploads = 0
+    server.use(
+      http.post(uploadUrl, () => {
+        uploads += 1
+        return HttpResponse.json({}, { status: 201 })
+      }),
+      http.post(resolveUrl, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json(
+          { job_id: 'job-3', kind: 'asset_loop', status: 'running', started_at: '' },
+          { status: 202 },
+        )
+      }),
+    )
+    const wrapper = mountCard(failed())
+    await settle()
+
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '按图改文案（只改描述）')!
+      .trigger('click')
+    await settle()
+
+    expect(uploads).toBe(0)
+    expect(bodies).toEqual([{ decision: 'accept_image_facts' }])
+    expect(wrapper.emitted('submitted')).toHaveLength(1)
+  })
+
+  it('保留原描述发 keep_description（不带图、请求立即返回）', async () => {
+    const bodies: unknown[] = []
+    let uploads = 0
+    server.use(
+      http.post(uploadUrl, () => {
+        uploads += 1
+        return HttpResponse.json({}, { status: 201 })
+      }),
+      http.post(resolveUrl, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json(
+          { job_id: 'job-4', kind: 'asset_loop', status: 'running', started_at: '' },
+          { status: 202 },
+        )
+      }),
+    )
+    const wrapper = mountCard(failed())
+    await settle()
+
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '明知故犯保留原描述')!
+      .trigger('click')
+    await settle()
+
+    expect(uploads).toBe(0)
+    expect(bodies).toEqual([{ decision: 'keep_description' }])
+    expect(wrapper.emitted('submitted')).toHaveLength(1)
+  })
+
+  it('没有补漏时不显示条数那一行（不编造一个 0 条）', async () => {
+    const wrapper = mountCard(
+      makeItem({
+        reason: '[偏差] 1 处',
+        proofread: {
+          deviations: [{ aspect: '灯罩', prompt_quote: '墨绿色灯罩', observed: '米白色灯罩' }],
+          omissions: [],
+        },
+      }),
+    )
+    await settle()
+
+    expect(wrapper.find('[data-testid="asset-facts-count"]').exists()).toBe(false)
+  })
+})
+
 describe('AssetImageCard 恢复阶段 1 原文（#291）', () => {
   const diff =
     '--- 改前（磁盘上的生图词）\n+++ 改后（阶段 1 原文）\n-一盏黄铜台灯立在书桌右角，灯罩是墨绿色。\n+一盏黄铜台灯立在书桌右角，灯罩是米白色。'

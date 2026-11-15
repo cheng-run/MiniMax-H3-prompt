@@ -1545,6 +1545,34 @@ MUTATIONS: tuple[Mutation, ...] = (
         "「没交图」与「没校对」混成同一个状态（#290，spec #286「读图不可用」）",
     ),
     Mutation(
+        "facts_merged_mid_flight",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "_SETTLING_ASSET_DECISIONS = frozenset({\n"
+        "    step_machine.DECISION_ACCEPT_IMAGE_FACTS,\n"
+        "    step_machine.DECISION_KEEP_DESCRIPTION,\n"
+        "})",
+        "_SETTLING_ASSET_DECISIONS = frozenset({\n"
+        "    step_machine.DECISION_ACCEPT_IMAGE_FACTS,\n"
+        "    step_machine.DECISION_KEEP_DESCRIPTION,\n"
+        "    step_machine.DECISION_REROLL,\n"
+        "})",
+        ("tests/test_api_asset_loop.py::test_rerolling_does_not_merge_the_facts",),
+        "重掷中途也并入补漏＝还没定下来的图把细节写进描述，下一轮按新图重交时"
+        "描述里留着上一张图的事实（#289，spec #286「并入发生在定稿那一刻」）",
+    ),
+    Mutation(
+        "facts_not_deduped",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "        if not fact or fact in merged or fact in facts:\n"
+        "            continue",
+        "        if not fact:\n"
+        "            continue",
+        ("tests/test_api_asset_loop.py::"
+         "test_a_fact_observed_again_is_not_merged_twice",),
+        "补漏不去重＝同一件反复校对把同一句话并进描述十遍（#289，"
+        "spec #286「去重判据：观察文本已逐字出现则跳过」）",
+    ),
+    Mutation(
         "restore_ignores_the_round_log",
         "src/minimax_h3_prompt/workbench_store.py",
         "        if read_asset_rounds(directory, name=name):\n"

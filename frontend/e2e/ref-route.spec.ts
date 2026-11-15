@@ -1,13 +1,14 @@
 import { execFileSync } from 'node:child_process'
-import { dirname, resolve } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { expect, test } from '@playwright/test'
 
 // D7 修订（#279 / #285）：ref 多参路线的浏览器全闭环证据。
 //
-// 零素材建会话 → 起跑 → 阶段 1 派生 N 件 → 素材循环（第 1 件校对不通过后同一位置
-// 重交、通过后「换一张图」再走一遍；第 2 件放弃）→ 补交口选「没有，就这样」→
+// 零素材建会话 → 起跑 → 阶段 1 派生 N 件 → 素材循环（第 1 件校对不通过后**改词再掷**、
+// 用改过的词重交定稿，再「换一张图」走一遍；第 2 件放弃）→ 补交口选「没有，就这样」→
 // 注入卡 → 段 ×2 → 逐段交视频 → 拼接 → completed → 换一段。
 //
 // 与修订前的差别：起跑前不再上传任何素材（素材集合是阶段 1 的产出），容量条改在
@@ -84,7 +85,13 @@ async function submitAssetImage(
   await page.getByRole('button', { name: '提交并校对' }).click()
 }
 
-test('多参 20 秒：零素材起跑 → 派生两件 → 循环（拒→重交→换图→放弃）→ 补交口 → 注入卡 → 两段拼接 → 换一段', async ({
+/** 会话目录：数据根（``H3_DATA_ROOT``，未设则仓库根）下的 ``output/sessions/<标识>``。 */
+function sessionDirectory(sessionId: string): string {
+  const root = process.env.H3_DATA_ROOT ? resolve(process.env.H3_DATA_ROOT) : repoRoot
+  return join(root, 'output', 'sessions', sessionId)
+}
+
+test('多参 20 秒：零素材起跑 → 派生两件 → 循环（拒→改词再掷→重交→换图→放弃）→ 补交口 → 注入卡 → 两段拼接 → 换一段', async ({
   page,
 }, testInfo) => {
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
@@ -114,7 +121,7 @@ test('多参 20 秒：零素材起跑 → 派生两件 → 循环（拒→重交
   await page.getByRole('button', { name: '复制词' }).click()
   await expect(page.getByRole('button', { name: '已复制' })).toBeVisible()
 
-  // 交图 → 校对不通过：同一位置重开，差异清单出现（没有放行键）。
+  // 交图 → 校对不通过：同一位置重开，差异清单与四条出路都出现。
   await submitAssetImage(page, 201, 'asset-1-try-1.png')
   await expect(page.getByRole('heading', { name: '校对结论：不通过' })).toBeVisible({
     timeout: 30_000,
@@ -125,7 +132,46 @@ test('多参 20 秒：零素材起跑 → 派生两件 → 循环（拒→重交
     page.getByRole('heading', { name: new RegExp(`第 1 件素材图 · ${ASSET_ONE}`) }),
   ).toBeVisible()
 
-  // 重交 → 通过 → 第 2 件自动出现。
+  // 四选齐备（#289）：两掷两定，任何一条都能让这一件往前走。
+  const exits = page.locator('[aria-label="校对不通过后的出路"]')
+  await expect(exits.getByRole('button', { name: '改词强化原意再掷（默认）' })).toBeVisible()
+  await expect(exits.getByRole('button', { name: '原词再掷' })).toBeVisible()
+  await expect(exits.getByRole('button', { name: '按图改文案（只改描述）' })).toBeVisible()
+  await expect(exits.getByRole('button', { name: '明知故犯保留原描述' })).toBeVisible()
+
+  // 默认出路：按偏差清单做加法改词（后台作业），卡片带着新词重开。
+  await page.getByRole('button', { name: '改词强化原意再掷（默认）' }).click()
+  await expect(page.getByRole('heading', { name: '校对结论：不通过' })).toHaveCount(0, {
+    timeout: 30_000,
+  })
+  await expect(page.getByText('（桩管线改词）')).toBeVisible({ timeout: 30_000 })
+  await expect(
+    page.getByRole('heading', { name: new RegExp(`第 1 件素材图 · ${ASSET_ONE}`) }),
+  ).toBeVisible()
+
+  // 改写留痕（spec #286 US21/US28）：会话下真的有一本资产轮次账，且记的就是这一轮。
+  // 账与产物是同一次作业里前后两笔写的，界面可能先看到新词——所以按「账出现」轮询，
+  // 而不是拿一次读盘的结果当结论。URL 里的会话标识是百分号编码的，落盘路径要用
+  // 解码后的形态（中文语义名与会话主题都在里面）。
+  const sessionId = page.url().split('/sessions/')[1]!
+  const roundsPath = join(sessionDirectory(decodeURIComponent(sessionId)), 'asset-rounds.jsonl')
+  const readRounds = (): { name: string; trigger: string; prompt_after: string }[] => {
+    try {
+      return readFileSync(roundsPath, 'utf-8')
+        .split('\n')
+        .filter((line) => line.trim())
+        .map((line) => JSON.parse(line) as { name: string; trigger: string; prompt_after: string })
+    } catch {
+      return []
+    }
+  }
+  await expect.poll(() => readRounds().length, { timeout: 30_000 }).toBeGreaterThan(0)
+  const rounds = readRounds()
+  expect(rounds.some((row) => row.name === ASSET_ONE)).toBe(true)
+  expect(rounds[rounds.length - 1]!.trigger).toBe('regen_ai_reword')
+  expect(rounds[rounds.length - 1]!.prompt_after).toContain('（桩管线改词）')
+
+  // 用改过的词重交 → 通过 → 第 2 件自动出现。
   await submitAssetImage(page, 202, 'asset-1-try-2.png')
   await expect(
     page.getByRole('heading', { name: new RegExp(`第 2 件素材图 · ${ASSET_TWO}`) }),
@@ -210,7 +256,6 @@ test('多参 20 秒：零素材起跑 → 派生两件 → 循环（拒→重交
   await expect(page.getByRole('tabpanel')).not.toContainText(ASSET_TWO)
 
   // -- 逐段交视频（按快照里的段长现造）→ 拼接 ------------------------------------
-  const sessionId = page.url().split('/sessions/')[1]!
   const detail = (await (await page.request.get(`/api/v1/sessions/${sessionId}`)).json()) as {
     segments: { index: number; start_s: number; end_s: number }[]
   }

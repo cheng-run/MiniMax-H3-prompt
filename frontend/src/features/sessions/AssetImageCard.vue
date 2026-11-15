@@ -18,10 +18,10 @@ import { assetPromptName } from './artifactKinds'
 import { newIdempotencyKey } from './keys'
 import { useClipboardCopy } from './useClipboardCopy'
 
-// 素材待办卡（D7 spec §4.4 / #256）：第 N 件 → 词全文（可复制）→ 上传生成结果。
-//
-// 一次只显示一件（系统严格串行），卡片随快照换件；**没有放行键**——不通过只有
-// 「按差异改词后重交」这一条路，所以页面上刻意不提供「就这样吧」。
+// 素材待办卡（D7 spec §4.4 / #256 / #286 / #289）：第 N 件 → 词全文（可复制）→ 上传
+// 生成结果。校对不通过时给**四条**出路（两掷两定），任何一条都让这一件往前走；
+// 「放弃这一件」是另一个动作，不属于这四选。
+// 一次只显示一件（系统严格串行），卡片随快照换件。
 const props = defineProps<{
   sessionId: string
   item: ActionItemOut
@@ -93,13 +93,20 @@ const submitting = ref(false)
 const submitError = ref<string | null>(null)
 const submitted = ref(false)
 
-// 校对不通过后的两条出路（#288）：默认是「改词强化原意再掷」——它只做加法，
-// 生图词按偏差清单把没画出来的细节写显式；「原词再掷」一个字都不动，只重开卡片。
-// 方向必须是「让设计被画对」，所以默认键不指向「让设计迁就图」。
-const rerolling = ref<'reword_reroll' | 'reroll' | null>(null)
-const rerollError = ref<string | null>(null)
+// 校对不通过后的四条出路（#288 前两条 / #289 后两条）。前两条是**重掷**：这一件退回
+// 未交图、同一件号重开卡片；后两条是**定稿**：这一件当场落定，进下一件。
+//
+// 默认仍是「改词强化原意再掷」——它只做加法，方向是让设计被画对。四条都不带
+// ``asset_id``：选的是「下一轮怎么来」或「这一件怎么定」，不是又交了一张图。
+type AssetExit = 'reword_reroll' | 'reroll' | 'accept_image_facts' | 'keep_description'
 
-async function chooseExit(decision: 'reword_reroll' | 'reroll'): Promise<void> {
+const rerolling = ref<AssetExit | null>(null)
+const rerollError = ref<string | null>(null)
+// 本次校对的补漏条数（#289）：卡片要在人做选择之前说清「选这两条会并入几条」，
+// 因为并入发生在定稿那一刻，而定稿之后这张卡就不再出现。
+const omissionCount = computed(() => props.item.proofread?.omissions?.length ?? 0)
+
+async function chooseExit(decision: AssetExit): Promise<void> {
   if (rerolling.value) {
     return
   }
@@ -350,6 +357,35 @@ async function confirmAbandon(): Promise<void> {
         </Button>
         <p class="muted exits__hint">
           原词再掷：生图词与描述一个字都不动，只把这一件的交图卡重开，用同一份词再生成一张。
+        </p>
+        <!-- 定稿的两条（#289）：文本落点是**素材画面事实**（写段词时读的那份描述），
+             生图词逐字不动——词是指令、图是既成事实。 -->
+        <Button
+          type="button"
+          variant="secondary"
+          :disabled="rerolling !== null || submitting || abandoning"
+          @click="chooseExit('accept_image_facts')"
+        >
+          {{ rerolling === 'accept_image_facts' ? '正在按图改文案…' : '按图改文案（只改描述）' }}
+        </Button>
+        <p class="muted exits__hint">
+          按图改文案：把描述里与图不符的那几处改成图里的实见，补漏一并并入素材画面事实；
+          <strong>生图词逐字不动</strong>，这一件当场定稿。
+        </p>
+        <Button
+          type="button"
+          variant="secondary"
+          :disabled="rerolling !== null || submitting || abandoning"
+          @click="chooseExit('keep_description')"
+        >
+          {{ rerolling === 'keep_description' ? '正在保留…' : '明知故犯保留原描述' }}
+        </Button>
+        <p class="muted exits__hint">
+          保留原描述：偏差一处不改，只把这轮的补漏并入素材画面事实；生图词逐字不动，
+          这一件当场定稿。
+        </p>
+        <p v-if="omissionCount" class="muted exits__hint" data-testid="asset-facts-count">
+          本次校对的 {{ omissionCount }} 条补漏会在定稿时按图补入描述（同一句不会重复并入）。
         </p>
         <ErrorNotice v-if="rerollError" :message="rerollError" />
       </div>

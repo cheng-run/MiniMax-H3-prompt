@@ -167,7 +167,7 @@
         "type": "object"
       },
       "ActionItemResolve": {
-        "description": "决议载荷（spec §7 / D4 §9 / D6 §8 / D7 §6.3 / D8 §7.1）。\n\n五类人工待办各收一种载荷：\n- ``stage1_review`` 收 ``decision``（approve/revise，revise 带 ``revisions``）；\n- ``frame_submission`` 收 ``frames``；\n- ``segment_video`` 收 ``video_asset_id``（本段视频素材）；\n- ``asset_image`` 收 ``asset_id``（这一件资产图的生成结果，普通素材上传得到），\n  或 ``decision=\"abandon_asset\"`` 放弃这一件（#282：模型怎么都画不出来时的出口），\n  或 ``decision=\"reword_reroll\"`` / ``\"reroll\"``（#288 校对不通过的两条出路：前者是\n  默认的加法改词——独立作业跑；后者是原词再掷，只重开卡片），\n  或 ``decision=\"restore_prompt\"``（#291：把被旧逻辑改坏的词恢复成阶段 1 原文，\n  只在「无轮次账记录的差异」上被接受）；\n- ``asset_extra`` 收 ``decision=\"submit_extras\"`` 与 ``asset_id``（补交的\n  视频/音频里最后认可的那一件；文件本身走上传端点、带用户起的语义名登记），\n  或 ``decision=\"no_extras\"`` 明确「没有，就这样」（#284）；\n- ``director_start_image`` 收 ``decision=\"submit_start_image\"`` 与\n  ``start_asset_id``（必填）/``end_asset_id``（可选）/``confirm_aspect_mismatch``。\n\nkind 与载荷的错配由服务端判成 422（``frame_invalid`` / ``segment_video_invalid`` /\n``asset_image_invalid``，不是 pydantic 的通用 422）。",
+        "description": "决议载荷（spec §7 / D4 §9 / D6 §8 / D7 §6.3 / D8 §7.1）。\n\n五类人工待办各收一种载荷：\n- ``stage1_review`` 收 ``decision``（approve/revise，revise 带 ``revisions``）；\n- ``frame_submission`` 收 ``frames``；\n- ``segment_video`` 收 ``video_asset_id``（本段视频素材）；\n- ``asset_image`` 收 ``asset_id``（这一件资产图的生成结果，普通素材上传得到），\n  或 ``decision=\"abandon_asset\"`` 放弃这一件（#282：模型怎么都画不出来时的出口），\n  或 ``decision=\"reword_reroll\"`` / ``\"reroll\"``（#288 校对不通过的两条出路：前者是\n  默认的加法改词——独立作业跑；后者是原词再掷，只重开卡片），\n  或 ``decision=\"accept_image_facts\"`` / ``\"keep_description\"``（#289 四选的另外\n  两条：按图改文案只改素材画面事实、生图词不动，本件定稿；明知故犯保留原描述\n  只并入补漏，本件定稿），\n  或 ``decision=\"restore_prompt\"``（#291：把被旧逻辑改坏的词恢复成阶段 1 原文，\n  只在「无轮次账记录的差异」上被接受）；\n- ``asset_extra`` 收 ``decision=\"submit_extras\"`` 与 ``asset_id``（补交的\n  视频/音频里最后认可的那一件；文件本身走上传端点、带用户起的语义名登记），\n  或 ``decision=\"no_extras\"`` 明确「没有，就这样」（#284）；\n- ``director_start_image`` 收 ``decision=\"submit_start_image\"`` 与\n  ``start_asset_id``（必填）/``end_asset_id``（可选）/``confirm_aspect_mismatch``。\n\nkind 与载荷的错配由服务端判成 422（``frame_invalid`` / ``segment_video_invalid`` /\n``asset_image_invalid``，不是 pydantic 的通用 422）。",
         "properties": {
           "asset_id": {
             "anyOf": [
@@ -205,6 +205,8 @@
                   "no_extras",
                   "reword_reroll",
                   "reroll",
+                  "accept_image_facts",
+                  "keep_description",
                   "restore_prompt"
                 ],
                 "type": "string"

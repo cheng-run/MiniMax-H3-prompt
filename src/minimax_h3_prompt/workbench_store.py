@@ -832,6 +832,9 @@ _DECISIONS = frozenset({
     # 校对不通过的两条出路（#288）：默认的「改词强化原意再掷」与原词再掷。
     step_machine.DECISION_REWORD_REROLL,
     step_machine.DECISION_REROLL,
+    # 四选的另外两条（#289）：按图改文案与明知故犯保留原描述。后两条让这一件定稿。
+    step_machine.DECISION_ACCEPT_IMAGE_FACTS,
+    step_machine.DECISION_KEEP_DESCRIPTION,
     # 把被旧逻辑改坏的词救回阶段 1 原文（#291）：第五个决议值，仍走同一条 resolve。
     step_machine.DECISION_RESTORE_PROMPT,
     # 素材循环里的第二种决议（#279 §循环的边界动作 / #282）：放弃这一件。

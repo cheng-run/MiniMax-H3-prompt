@@ -168,8 +168,8 @@ DECISION_SUBMIT_FRAMES = "submit_frames"
 # 段视频回交同理：请求体里靠 ``video_asset_id`` 分型，决议事件用这个词说明「这段视频
 # 是被交上来的」。它只进内部事件与待办回显，不是接口上的 decision 取值。
 DECISION_SUBMIT_VIDEO = "submit_video"
-# 资产图交回同理：请求体里靠 ``asset_id`` 分型。素材校对仍然没有「就这样吧」的放行
-# （spec §6.3）——降级只能靠改词。
+# 资产图交回同理：请求体里靠 ``asset_id`` 分型。校对不通过时的出口是下面的四选
+# （重掷两档、定稿两档），每条都让这一件往前走——没有一条叫「就这样吧」。
 DECISION_SUBMIT_IMAGE = "submit_image"
 # 素材循环的第二种决议（#279 §循环的边界动作 / #282）：**放弃这一件**。
 # 「没有放行键」不等于「没有出口」：某一件模型怎么都画不出来时，卡片本身会变成死锁。
@@ -183,6 +183,13 @@ DECISION_ABANDON_ASSET = "abandon_asset"
 # ``reroll`` 是「原词再掷」：生图词与描述一个字都不动，只重开卡片。
 DECISION_REWORD_REROLL = "reword_reroll"
 DECISION_REROLL = "reroll"
+# 校对不通过后的另外两条出路（#289，spec #286「四选出路」的后两选）。它们都是**定稿**：
+# 台账记 ``passed``，补漏在**这一刻**并入素材画面事实，**生图词逐字不动**
+# （词是指令，图是既成事实；按图改的是描述，不是设计）。
+# ``accept_image_facts``：按图改文案——偏差处定点替换成图中实见，再把补漏并入；
+# ``keep_description``：明知故犯保留原描述——只有补漏并入，其余一个字不改。
+DECISION_ACCEPT_IMAGE_FACTS = "accept_image_facts"
+DECISION_KEEP_DESCRIPTION = "keep_description"
 # 把被旧逻辑改坏的词救回来（#291 / spec #286「恢复动作」）：以**阶段 1 原文**覆盖写回
 # 生图词。它只在「未定稿 ＋ 盘上词与原文不一致 ＋ 轮次账里没有这一件的记录」时出现——
 # 有账＝用户自己认可的合法改写，一键抹掉它就是在删历史。所以它不是校对四选之一：
@@ -388,7 +395,9 @@ __all__ = [
     "ADVANCEABLE_STATUSES",
     "Action",
     "DECISION_ABANDON_ASSET",
+    "DECISION_ACCEPT_IMAGE_FACTS",
     "DECISION_APPROVE",
+    "DECISION_KEEP_DESCRIPTION",
     "DECISION_NO_EXTRAS",
     "DECISION_REROLL",
     "DECISION_REVISE",
