@@ -1269,6 +1269,17 @@ MUTATIONS: tuple[Mutation, ...] = (
         "桩计划退回单段＝E2E 再走不到切镜段图槽与两种按需词，却仍然全绿"
         "（#266，spec §19「桩管线覆盖到导演台」）",
     ),
+    Mutation(
+        "frontend_freshness_never_rebuilds",
+        "scripts/start_web.py",
+        "    if newest is None or newest > dist_index.stat().st_mtime:\n"
+        "        return BUILD_REASON_SOURCE_NEWER\n",
+        "    if False:\n        return BUILD_REASON_SOURCE_NEWER\n",
+        ("tests/test_start_web_freshness.py::"
+         "test_source_newer_than_the_build_triggers_a_rebuild",),
+        "新鲜度判据恒不重建＝源码改了照样复用旧界面，对着已不存在的 bug 排查"
+        "（#275 / #274 §A 的现场）",
+    ),
 )
 
 

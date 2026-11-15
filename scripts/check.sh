@@ -76,6 +76,7 @@ FAST_TESTS=(
   # 变更集本身是守卫的守卫（retro 2026-11-14）：它错了，mypy/前端/契约三条会静默跳过。
   tests/test_check_changed_paths.py
   tests/test_script_line_endings.py
+  tests/test_start_web_freshness.py
   tests/test_adr_guard.py
   tests/test_doc_pointer_shape.py
   tests/test_spike_exe.py

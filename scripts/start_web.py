@@ -22,14 +22,32 @@ import urllib.error
 import urllib.request
 import webbrowser
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
-DIST_INDEX = ROOT / "frontend" / "dist" / "index.html"
-NODE_MODULES = ROOT / "frontend" / "node_modules"
+FRONTEND_ROOT = ROOT / "frontend"
 DEV_PORT = 8000
 HEALTH_PATH = "/api/v1/health"
 PROBE_TIMEOUT_S = 1.5
+
+# 「前端源码树」的范围。列 glob 而不是写死一长串文件：`src/**/*` 递归收全部页面与组件，
+# 新增文件不必回来改这里；少列一种反而会让改动静默不触发重建。
+# 依赖清单（spec #274 §A）也算源码树：只跑 `pnpm install` 换了依赖树、dist 仍是按旧依赖
+# 构建的产物，脚本却判「新鲜」——浏览器里就跑在与磁盘代码不匹配的运行时上。
+# `eslint` / `prettier` / `vitest` / `playwright` 的配置不参与 vite 构建，故意不收。
+SOURCE_TREE_PATTERNS: tuple[str, ...] = (
+    "index.html",
+    "vite.config.ts",
+    "package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    "tsconfig*.json",
+    "src/**/*",
+)
+
+BUILD_REASON_FORCED = "显式要求强制重建"
+BUILD_REASON_DIST_MISSING = "前端产物缺失"
+BUILD_REASON_SOURCE_NEWER = "检测到前端源码较新"
 
 
 def _probe(url: str) -> bool:
@@ -41,26 +59,87 @@ def _probe(url: str) -> bool:
         return False
 
 
-def _build_frontend(rebuild: bool) -> None:
-    """缺产物才构建；显式 ``--rebuild`` 强制重来。
+def _newest_source_mtime(frontend_root: Path) -> float | None:
+    """前端源码树里最新的文件 mtime；一个文件都没找到时返回 None。"""
+    newest: float | None = None
+    for pattern in SOURCE_TREE_PATTERNS:
+        for path in frontend_root.glob(pattern):
+            if not path.is_file():
+                continue
+            mtime = path.stat().st_mtime
+            if newest is None or mtime > newest:
+                newest = mtime
+    return newest
 
-    ``node_modules`` 缺失时不自动安装——依赖下载按用户口径必须由人执行，这里只给
-    可操作提示。``--no-install`` 也保证不会悄悄联网拉包。
+
+def build_reason(
+    frontend_root: Path, dist_index: Path, *, rebuild: bool
+) -> str | None:
+    """要不要重建前端产物、为什么；``None`` 表示产物新鲜、不必构建。
+
+    判据用 mtime 而不是 git HEAD：用户常在脏工作区上跑，HEAD 没变而源码已经改过，
+    按 HEAD 判会静默给出旧界面（#274 验收实际撞到的形态）。mtime 判错的唯一方向是
+    「多重建一次」（约 1 秒），可接受；反过来「源码改了还说产物新」不可接受，所以
+    找不到任何源码文件时也按需要构建处理。
     """
-    if DIST_INDEX.is_file() and not rebuild:
-        return
-    if not NODE_MODULES.is_dir():
-        raise SystemExit(
-            f"[启动失败] 缺前端依赖：{NODE_MODULES}\n"
-            "先在 frontend/ 目录执行 npx pnpm@11.7.0 install（下载需你本人执行）"
-        )
+    if rebuild:
+        return BUILD_REASON_FORCED
+    if not dist_index.is_file():
+        return BUILD_REASON_DIST_MISSING
+    newest = _newest_source_mtime(frontend_root)
+    if newest is None or newest > dist_index.stat().st_mtime:
+        return BUILD_REASON_SOURCE_NEWER
+    return None
+
+
+def _vite_build(frontend_root: Path) -> Callable[[], int]:
+    """默认构建器：找得到 npx 才构建，找不到明确报错；返回进程退出码。"""
     npx = shutil.which("npx")
     if npx is None:
         raise SystemExit("[启动失败] 找不到 npx（Node 未安装或不在 PATH）")
-    print("[build] 构建前端产物 frontend/dist ...", flush=True)
-    proc = subprocess.run([npx, "--no-install", "vite", "build"], cwd=str(ROOT / "frontend"))
-    if proc.returncode != 0:
-        raise SystemExit(f"[启动失败] 前端构建退出码 {proc.returncode}")
+
+    def run() -> int:
+        return subprocess.run(
+            [npx, "--no-install", "vite", "build"], cwd=str(frontend_root)
+        ).returncode
+
+    return run
+
+
+def _build_frontend(
+    rebuild: bool,
+    *,
+    frontend_root: Path = FRONTEND_ROOT,
+    dist_index: Path | None = None,
+    node_modules: Path | None = None,
+    build: Callable[[], int] | None = None,
+) -> None:
+    """按新鲜度决定要不要重建前端；显式 ``--rebuild`` 强制重来。
+
+    ``node_modules`` 缺失时**不自动安装**——依赖下载按用户口径必须由人执行，这里只给
+    可操作提示并以非零码退出。源码与产物都新鲜时不构建、不打印，免得每次启动刷一行
+    无用的话。``build`` 是执行构建的接缝，测试注入假构建器，不真跑 Vite。
+    """
+    if dist_index is None:
+        dist_index = frontend_root / "dist" / "index.html"
+    if node_modules is None:
+        node_modules = frontend_root / "node_modules"
+
+    reason = build_reason(frontend_root, dist_index, rebuild=rebuild)
+    if reason is None:
+        return
+    if not node_modules.is_dir():
+        raise SystemExit(
+            f"[启动失败] 缺前端依赖：{node_modules}\n"
+            "先在 frontend/ 目录执行 npx pnpm@11.7.0 install（下载需你本人执行）"
+        )
+    if build is None:
+        build = _vite_build(frontend_root)
+    print(f"[build] {reason}，重新构建前端产物 ...", flush=True)
+    code = build()
+    if code != 0:
+        raise SystemExit(f"[启动失败] 前端构建退出码 {code}")
+    print("[build] 已重新构建前端产物", flush=True)
 
 
 def _open_browser(url: str) -> None:

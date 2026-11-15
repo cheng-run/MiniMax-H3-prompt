@@ -71,6 +71,15 @@ cat build-exe/selfcheck-data/selfcheck.log
   `git diff` 为空（2026-11-10 #225 retro 实测）。现已补 `*.vue`/`*.html` 的 `eol=lf`；
   老工作区要 `git add --renormalize .` 或重新检出才会换成 LF。
 - **`openapi-fetch` 0.13 的中间件只能事后注册**：`createClient({ middleware: [...] })` 不报错也不生效（被当作 fetch 选项透传），必须 `client.use(middleware)`。2026-11-10 #223 实测：中间件写好、用例照红，翻 `node_modules/openapi-fetch/dist/index.js` 才定位。
+- **拉下前端改动后直接一键启动会静默复用旧产物**（#251 的 18 秒 FL2V 验收现场；#275 修复）：
+  `frontend/dist`
+  落后于源码时，浏览器加载的是上一次构建的界面，脚本一声不吭——对着旧页面排查一个已经
+  修掉的 bug。`scripts/start_web.py` 现已按 mtime 自检：源码（入口 HTML、构建配置、包清单、
+  依赖清单 `pnpm-lock.yaml` / `pnpm-workspace.yaml`、`tsconfig*.json`、`src/**/*`）比
+  `frontend/dist/index.html` 新或产物缺失就重建并打印一行
+  原因；`--rebuild` 仍强制重建；依赖缺失只提示 `cd frontend && npx pnpm@11.7.0 install` 并
+  非零退出，不自动下载。冻结打包（`scripts/build_exe.py`）**不**接入这套判断，始终从当前
+  源码构建。
 - **工作树里 vitest 报 `Vitest failed to find the current suite`**：工作树的
   `frontend/node_modules` 是指向主树的目录联接，`node_modules/.vite` 缓存因此两棵树
   共用——一个根跑过之后另一个根再用会拿到错的分析结果，全部用例 0 test 失败。清掉
