@@ -22,7 +22,8 @@ export const REF_KIND_LABELS = {
 export type RefKind = keyof typeof REF_KIND_LABELS
 
 // 台账四态的显示名（#279）：`pending` 是「阶段 1 派生了这一件、还没交回来」，
-// 与「已登记」不是同一件事——素材分区要能一眼看出还差几张。
+// `registered` 是「交回了、还没校对过」（校对没过会回 `pending` 等重交，不是一个
+// 长期态）——两件事不能都说成「已登记」。
 export const REF_STATUS_LABELS: Record<string, string> = {
   pending: '待交',
   registered: '校对中',

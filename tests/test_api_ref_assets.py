@@ -302,6 +302,43 @@ def test_ref_capacity_counts_ledger_entries_only(tmp_path):
     assert len(detail["assets"]) == 10
 
 
+def test_abandoned_rows_do_not_count_against_ref_capacity(tmp_path):
+    """放弃件不进容量计数（#279 复审）：它永远没有正本，算进来会让两侧判据分家。
+
+    9 行里放弃 2 件后只剩 7 件会真的上传；再交 2 件（共 9 件在用）仍合法，第 10 件
+    才超限并被点名。修复前这里按 9 整行判，第 8 件就被 422 拒掉，而界面（``AssetsTab``
+    与补交口同口径）显示的是 7/9 全绿。
+    """
+    client = _client(tmp_path)
+    session_id = _create(client)["session_id"]
+    for index in range(9):
+        assert _upload(client, session_id, _png(index), f"{index}.png",
+                       name=f"图{index}").status_code == 201
+
+    # 放弃是循环里的动作；这里只验容量口径，直接把两行改成 abandoned 更直接。
+    path = _session_file(tmp_path, session_id)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    for entry in raw["asset_ledger"][:2]:
+        entry["status"] = "abandoned"
+        entry["asset_id"] = ""
+        entry["sha256"] = ""
+    path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+
+    eighth = _upload(client, session_id, _png(50), "a.png", name="补图甲")
+    ninth = _upload(client, session_id, _png(51), "b.png", name="补图乙")
+    tenth = _upload(client, session_id, _png(52), "c.png", name="补图丙")
+    detail = client.get(f"/api/v1/sessions/{session_id}").json()
+
+    assert eighth.status_code == 201, eighth.text
+    assert ninth.status_code == 201, ninth.text
+    body = _assert_problem(tenth, 422, "ref_capacity_exceeded")
+    # 第 10 张仍要报 422 并点名图档：排除放弃件不是把上限整个关掉。
+    assert "图 10 个 > 9 个" in body["detail"]
+    assert "「补图丙」" in body["detail"]
+    # 台账行仍在（放弃不等于删行）：9 旧 + 2 新 = 11 行，但计入容量的只有 9 件。
+    assert len(detail["brief"]["refs"]) == 11
+
+
 # ---------------------------------------------------------------------------
 # 资产清单派生与会话标记（#279 修订「资产清单的派生与落盘」）
 # ---------------------------------------------------------------------------
@@ -408,17 +445,125 @@ def test_base_session_upload_with_a_name_is_rejected(tmp_path):
     assert detail["assets"] == []
 
 
+def _stage1_state_three() -> dict:
+    """第三稿：多了一件「旧信」（模拟修订后清单增减）。"""
+    state = _stage1_state()
+    state["character_image_prompts"].append(
+        {"name": "旧信", "positive_prompt": "一封摊开的旧信。",
+         "negative_prompt": "", "locked_features": []})
+    return state
+
+
+def _resolve_item(client: TestClient, session_id: str, item_id: str,
+                  body: dict):
+    return client.post(
+        f"/api/v1/sessions/{session_id}/action-items/{item_id}/resolve", json=body)
+
+
+def _pending_review(body: dict, *, excluding: str = "") -> dict | None:
+    for item in body["action_items"]:
+        if (item["kind"] == "stage1_review" and item["status"] == "pending"
+                and item["item_id"] != excluding):
+            return item
+    return None
+
+
+def test_revise_reruns_stage1_and_the_ledger_follows_the_new_manifest(
+        tmp_path, monkeypatch):
+    """修订重跑后重新派生（#279 复审）：台账跟着最新清单走，不留在旧集合上。
+
+    首跑派生 2 件；用户改创意后阶段 1 再跑一遍、清单变 3 件。跳过派生会让台账停在旧
+    集合上，对账硬失败失效，症状退化成后面出词时「阶段 1 没有为「旧名」写提示词」。
+    """
+    from minimax_h3_prompt.graph import pipeline
+
+    states = [_stage1_state(), _stage1_state_three()]
+    calls = {"n": 0}
+
+    def fake_run_stage1(brief, config, **kwargs):
+        # 真节点只覆盖自己负责的键，其余原样带走（``user_revisions`` 就在里面：
+        # 修订清单丢了，收尾的 mark_revision_applied 会当场报「清单里没有这条修订」）。
+        state = {**dict(kwargs.get("initial_state") or {}),
+                 **states[min(calls["n"], len(states) - 1)]}
+        calls["n"] += 1
+        return state, None, None
+
+    monkeypatch.setattr(pipeline, "run_stage1", fake_run_stage1)
+    with workbench_client(create_app(sessions_root=tmp_path)) as client:
+        session_id = _create(client)["session_id"]
+        assert client.post(f"/api/v1/sessions/{session_id}/jobs").status_code == 202
+        first = _wait_until(client, session_id,
+                            lambda body: _pending_review(body) is not None)
+        item = _pending_review(first)
+        assert item is not None
+
+        started = _resolve_item(client, session_id, item["item_id"], {
+            "decision": "revise",
+            "revisions": [{"layer": "剧情", "text": "结尾改成清晨"}],
+        })
+        assert started.status_code == 202, started.text
+        revised = _wait_until(
+            client, session_id,
+            lambda body: _pending_review(body, excluding=item["item_id"]) is not None)
+        refs = [(ref["name"], ref["number"]) for ref in revised["brief"]["refs"]]
+
+    assert refs == [("橘猫", 1), ("台灯", 2), ("旧信", 3)]
+
+
+def test_revise_manifest_mismatch_fails_loudly_and_keeps_the_old_ledger(
+        tmp_path, monkeypatch):
+    """重派生也走同一条对账：新清单与资产图词对不上就硬失败点名，不落半份台账。"""
+    from minimax_h3_prompt.graph import pipeline
+
+    broken = _stage1_state()
+    # 设计端清单多了一件「旧信」，资产图词里没有它——这是改名/漏写时的真实形态。
+    broken["character_asset_manifest"] = ["橘猫", "台灯", "旧信"]
+    states = [_stage1_state(), broken]
+    calls = {"n": 0}
+
+    def fake_run_stage1(brief, config, **kwargs):
+        # 真节点只覆盖自己负责的键，其余原样带走（``user_revisions`` 就在里面：
+        # 修订清单丢了，收尾的 mark_revision_applied 会当场报「清单里没有这条修订」）。
+        state = {**dict(kwargs.get("initial_state") or {}),
+                 **states[min(calls["n"], len(states) - 1)]}
+        calls["n"] += 1
+        return state, None, None
+
+    monkeypatch.setattr(pipeline, "run_stage1", fake_run_stage1)
+    with workbench_client(create_app(sessions_root=tmp_path)) as client:
+        session_id = _create(client)["session_id"]
+        assert client.post(f"/api/v1/sessions/{session_id}/jobs").status_code == 202
+        first = _wait_until(client, session_id,
+                            lambda body: _pending_review(body) is not None)
+        item = _pending_review(first)
+        assert item is not None
+
+        started = _resolve_item(client, session_id, item["item_id"], {
+            "decision": "revise",
+            "revisions": [{"layer": "剧情", "text": "结尾改成清晨"}],
+        })
+        assert started.status_code == 202, started.text
+        failed = _wait_until(client, session_id,
+                             lambda body: body["status"] == "failed")
+        last = failed["jobs"][-1]
+        raw = json.loads(_session_file(tmp_path, session_id).read_text("utf-8"))
+
+    assert last["error_code"] == "AssetPromptMissing"
+    assert "旧信" in last["detail"]
+    # 失败的那次不落半份台账：仍是首跑的 2 件。
+    assert [entry["name"] for entry in raw["asset_ledger"]] == ["橘猫", "台灯"]
+
+
 # ---------------------------------------------------------------------------
 # 起跑锁与起跑门槛（spec §4.3 / AC4）
 # ---------------------------------------------------------------------------
 
-def test_registration_after_start_only_accepts_the_current_item(tmp_path):
-    """位置锁（#282）：起跑后带语义名的登记只放行**当前待办那一件**。
+def test_registration_after_start_refuses_named_pictures(tmp_path):
+    """位置锁（#279 复审 / spec §12）：起跑后带语义名的 **Picture** 上传一律 409。
 
-    旧判据是时间锁（起跑即全锁死）。#279 把素材集合改成阶段 1 派生之后，循环里交图
-    本来就是流程的一部分——锁的对象因此从「什么时候」换成「哪一件」：别的名字一律
-    409，且文案点名当前是第几件（只说「不能登记」等于让用户猜该交哪一件）。
-    不带语义名的普通上传（素材图/段视频回交）本来就不进台账，仍然不受影响。
+    交图只剩素材待办卡这一条路：那条路会置校对键、触发读图校对，而这一个上传口
+    只负责循环之后的视频/音频补交。从这里放进一张 Picture，台账上就会出现一条
+    「有 asset_id、却没人校过」的行。普通上传（素材图/段视频回交）不受影响。
     """
     client = _client(tmp_path)
     session_id = _create(client)["session_id"]
@@ -432,30 +577,29 @@ def test_registration_after_start_only_accepts_the_current_item(tmp_path):
     detail = client.get(f"/api/v1/sessions/{session_id}").json()
 
     body = _assert_problem(blocked, 409, "asset_locked")
-    assert "第 1 件" in body["detail"] and "甲" in body["detail"]
+    # 文案要把用户指到待办卡，而不是只说「不许」。
+    assert "素材待办卡" in body["detail"] and "校对" in body["detail"]
     assert plain.status_code == 201, plain.text
     # 被拒的那次不落行；普通上传也不进台账：refs 里仍是起跑前登记的那两件。
     assert [ref["name"] for ref in detail["brief"]["refs"]] == ["甲", "乙"]
     assert len(detail["assets"]) == 3
 
 
-def test_registration_after_start_of_the_current_name_is_accepted(tmp_path):
-    """当前那一件自己的名字放行：位置锁回答「这一件能不能交」，不是「一律不许」。
+def test_registration_after_start_of_the_current_name_is_refused_too(tmp_path):
+    """「当前件」也不例外：带语义名的 Picture 永远不走这个上传口。
 
-    上传行（导演台 r2v 与起跑前的预上传）的图连同资产图词一起已经定下了这一件的
-    描述，起跑后再换一张就是「事后推翻已写好的词」——所以这里只放行文件落盘，
-    台账一行不动（编号仍为空）。派生行的「交图」在素材循环里有另一条用例。
+    上一版在这条路上放行、只把文件落盘（台账不动），结果是用户以为交了一张图、
+    系统却既没校对也没记账。现在两条路都不通，去处只有待办卡。
     """
     client = _client(tmp_path)
     session_id = _create(client)["session_id"]
     _upload(client, session_id, _png(1), "a.png", name="甲")
     client.app.state.session_store.update(session_id, status="running")
 
-    allowed = _upload(client, session_id, _png(2), "a2.png", name="甲")
+    blocked = _upload(client, session_id, _png(2), "a2.png", name="甲")
     detail = client.get(f"/api/v1/sessions/{session_id}").json()
 
-    assert allowed.status_code == 201, allowed.text
-    assert allowed.json()["number"] is None, "位置锁放行不等于新增一行台账"
+    _assert_problem(blocked, 409, "asset_locked")
     assert [(ref["name"], ref["number"]) for ref in detail["brief"]["refs"]] == [("甲", 1)]
 
 

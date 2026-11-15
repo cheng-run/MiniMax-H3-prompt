@@ -12,6 +12,7 @@ import AssetImageCard from './AssetImageCard.vue'
 enableAutoUnmount(afterEach)
 
 const sessionId = 'sess-1'
+const sessionUrl = 'http://localhost/api/v1/sessions/sess-1'
 const resolveUrl = 'http://localhost/api/v1/sessions/sess-1/action-items/item-asset/resolve'
 const uploadUrl = 'http://localhost/api/v1/sessions/sess-1/assets'
 
@@ -40,8 +41,9 @@ function makeRef(overrides: Partial<RefOut> = {}): RefOut {
   }
 }
 
+// 严格串行：当前件之前的那一件必然已定稿（状态按台账真实值给，不靠编号推）。
 const refs: RefOut[] = [
-  makeRef(),
+  makeRef({ status: 'passed' }),
   makeRef({ name: '台灯', number: 2, asset_id: 'sess-1/bbbbbbbbbbbbbbbb' }),
   makeRef({ name: '旧信', number: 3, asset_id: 'sess-1/cccccccccccccccc' }),
 ]
@@ -62,9 +64,9 @@ async function settle(): Promise<void> {
   await flushPromises()
 }
 
-function mountCard(item = makeItem(), artifacts: ArtifactInfo[] = []) {
+function mountCard(item = makeItem(), artifacts: ArtifactInfo[] = [], ledger: RefOut[] = refs) {
   return mount(AssetImageCard, {
-    props: { sessionId, item, refs, artifacts },
+    props: { sessionId, item, refs: ledger, artifacts },
   })
 }
 
@@ -91,6 +93,25 @@ describe('AssetImageCard 词与已定稿', () => {
     expect(copy).toBeTruthy()
     // 没有放行键：这个词不通过时只能改词重交。
     expect(wrapper.findAll('button').some((button) => button.text() === '通过')).toBe(false)
+  })
+
+  it('前序放弃件不算已定稿：只数 status=passed 的行', async () => {
+    const wrapper = mountCard(
+      makeItem({ asset_index: 3 }),
+      [],
+      [
+        makeRef({ name: '橘猫', number: 1, status: 'abandoned' }),
+        makeRef({ name: '台灯', number: 2, status: 'passed' }),
+        makeRef({ name: '旧信', number: 3, status: 'pending' }),
+      ],
+    )
+    await settle()
+
+    expect(wrapper.text()).toContain('已定稿 1 / 共 3 件')
+    expect(wrapper.text()).toContain('其中已放弃 1 件')
+    expect(wrapper.text()).toContain('已定稿：台灯')
+    // 放弃件不该被念成已定稿（按编号比就会把它算进去）。
+    expect(wrapper.text()).not.toContain('已定稿：橘猫')
   })
 
   it('不通过时把差异清单摆出来，并明说要把同一件重交', async () => {
@@ -188,6 +209,21 @@ describe('AssetImageCard 放弃这一件', () => {
           { status: 202 },
         )
       }),
+      // 决议后回读快照：回执优先用服务端写进已决议待办的 reason（与事件流同源）。
+      http.get(sessionUrl, () =>
+        HttpResponse.json({
+          action_items: [
+            {
+              item_id: 'item-asset',
+              kind: 'asset_image',
+              status: 'resolved',
+              created_at: '2026-11-13T00:00:00Z',
+              resolved_at: '2026-11-13T00:01:00Z',
+              reason: '服务端记下的放弃代价：这一格没有图可填。',
+            },
+          ],
+        }),
+      ),
     )
     const wrapper = mountCard()
     await settle()
@@ -211,9 +247,31 @@ describe('AssetImageCard 放弃这一件', () => {
     expect(bodies).toEqual([{ decision: 'abandon_asset' }])
     expect(keys[0]).toBeTruthy()
     expect(wrapper.emitted('submitted')).toHaveLength(1)
-    // 回执用服务端原句（镜像），确认面板收起、按钮回到可再点状态。
-    expect(wrapper.text()).toContain('已放弃「台灯」这一件')
+    // 回执用服务端写进已决议待办的那句（不是前端再抄一遍）；确认面板收起。
+    expect(wrapper.text()).toContain('服务端记下的放弃代价')
     expect(wrapper.findAll('button').some((button) => button.text() === '确认放弃')).toBe(false)
+  })
+
+  it('快照读不到时，回执退回本地镜像的那句', async () => {
+    server.use(
+      http.post(resolveUrl, () =>
+        HttpResponse.json(
+          { job_id: 'job-1', kind: 'asset_loop', status: 'running', started_at: '' },
+          { status: 202 },
+        ),
+      ),
+      http.get(sessionUrl, () => HttpResponse.error()),
+    )
+    const wrapper = mountCard()
+    await settle()
+
+    const abandon = wrapper.findAll('button').find((button) => button.text() === '放弃这一件')!
+    await abandon.trigger('click')
+    const confirm = wrapper.findAll('button').find((button) => button.text() === '确认放弃')!
+    await confirm.trigger('click')
+    await settle()
+
+    expect(wrapper.text()).toContain('已放弃「台灯」这一件')
   })
 
   it('取消不发请求，代价收起', async () => {

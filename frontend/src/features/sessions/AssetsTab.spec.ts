@@ -219,6 +219,26 @@ describe('AssetsTab ref 三态（#283）', () => {
     expect(wrapper.emitted('gotoReview')).toHaveLength(1)
   })
 
+  it('当前件带着上轮差异时，说的是「校对没过」而不是「等你交图」', async () => {
+    const wrapper = mount(AssetsTab, {
+      props: {
+        sessionId: 'sess-1',
+        mode: 'ref',
+        status: 'awaiting_human',
+        phase: 'asset_loop',
+        currentNumber: 1,
+        currentReason: '[偏差] 1 处：灯罩颜色不符',
+        assets: [],
+        refs: [derivedRef(1, '红裙女孩')],
+      },
+    })
+    await settle()
+
+    const row = wrapper.find('.asset-list .asset')
+    expect(row.text()).toContain('校对没过，等你重交')
+    expect(row.text()).not.toContain('正在等你交图')
+  })
+
   it('已交图待校对的那件显示「校对中」，且不再算「在等你交」', async () => {
     const wrapper = mount(AssetsTab, {
       props: {

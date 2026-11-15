@@ -4,6 +4,7 @@ import { computed, ref, watch } from 'vue'
 import {
   ApiError,
   getArtifactContent,
+  getSession,
   resolveActionItem,
   uploadSessionAsset,
   type ActionItemOut,
@@ -37,8 +38,10 @@ const pictureRefs = computed(() =>
 const semanticName = computed(
   () => pictureRefs.value.find((ref) => ref.number === number.value)?.name ?? '未命名',
 )
-// 严格串行：当前件之前的编号必然已定稿（不通过时重开的还是同一个件号）。
-const settled = computed(() => pictureRefs.value.filter((ref) => ref.number < number.value))
+// 按状态数，不按编号比：有了 `abandoned` 之后，「编号小于当前」里可能夹着放弃件，
+// 把放弃件念成「已定稿」等于替用户宣布一张不存在的图已经交了。
+const passedRefs = computed(() => pictureRefs.value.filter((ref) => ref.status === 'passed'))
+const abandonedRefs = computed(() => pictureRefs.value.filter((ref) => ref.status === 'abandoned'))
 
 const artifactName = computed(() => assetPromptName(number.value))
 const promptArtifact = computed(
@@ -100,13 +103,28 @@ const abandonCost = computed(
     `「${semanticName.value}」的指称会变成无图指称（照抄接线时这一格没有参考图可填）。` +
     '已经定稿的文本不会被自动改写。',
 )
-// 决议响应是 ``JobSummary``，不带这句话；回执镜像服务端原句（事件流里可查）。
+// 决议响应是 ``JobSummary``，不带这句话；回执优先取服务端写进已决议待办的 ``reason``
+// （与事件流里那句同源），取不到才退回下面这份镜像——两份各写一遍时，改了一处就会
+// 让「界面上说的代价」与「事件里记的代价」慢慢分家。
 const abandonReceipt = computed(
   () =>
     `已放弃「${semanticName.value}」这一件：分镜表与段词里对「${semanticName.value}」` +
     '的指称会变成无图指称（照抄接线时这一格没有参考图可填）。' +
     '已经定稿的文本不会被自动改写。',
 )
+
+/** 已决议待办上的服务端原句；读不到（网络/刷新失败）时返回 null，由调用方兜底。 */
+async function serverAbandonReason(): Promise<string | null> {
+  try {
+    const detail = await getSession(props.sessionId)
+    const resolved = (detail.action_items ?? []).find(
+      (entry) => entry.item_id === props.item.item_id,
+    )
+    return resolved?.reason?.trim() || null
+  } catch {
+    return null
+  }
+}
 
 // 卡片随快照换件：上一件的回执与确认态不能带到下一件上。
 watch(
@@ -168,7 +186,7 @@ async function confirmAbandon(): Promise<void> {
       { decision: 'abandon_asset' },
       newIdempotencyKey(),
     )
-    abandonNote.value = abandonReceipt.value
+    abandonNote.value = (await serverAbandonReason()) ?? abandonReceipt.value
     confirmingAbandon.value = false
     emit('submitted')
   } catch (error) {
@@ -183,11 +201,17 @@ async function confirmAbandon(): Promise<void> {
   <section class="asset-card">
     <h2>第 {{ number }} 件素材图 · {{ semanticName }}</h2>
     <p class="muted">
-      已定稿 {{ settled.length }} / 共 {{ pictureRefs.length }} 件。
-      <template v-if="settled.length">
-        已定稿：{{ settled.map((ref) => ref.name).join('、') }}。
+      已定稿 {{ passedRefs.length }} / 共 {{ pictureRefs.length }} 件<template
+        v-if="abandonedRefs.length"
+        >（其中已放弃 {{ abandonedRefs.length }} 件）</template
+      >。
+      <template v-if="passedRefs.length">
+        已定稿：{{ passedRefs.map((ref) => ref.name).join('、') }}。
       </template>
     </p>
+    <!-- 同一件号重开的两种情况：第一轮还没交（没有差异）与校对没过、等你重交。
+         后者在这一格说清楚，用户不会以为「刚交的那张已经算数」。 -->
+    <p v-if="item.reason" class="muted">这一件上一轮没通过校对：按下面的差异改词后重交。</p>
 
     <div class="prompt">
       <div class="prompt__head">

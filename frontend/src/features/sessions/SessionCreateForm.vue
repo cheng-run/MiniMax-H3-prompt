@@ -194,7 +194,8 @@ async function onSubmit(): Promise<void> {
         </label>
       </div>
       <p v-if="isRef" class="field-hint">
-        多参会话不选帧变体；建好后在素材分区上传参考素材（语义名必填）才能开始。
+        多参会话不选帧变体；零素材就能开始——阶段 1 会列出本片需要的参考素材，建好后在
+        素材循环的待办卡上逐件交回（系统读图校对，通过才定稿）。
       </p>
       <p v-if="isDirector" class="field-hint">
         导演台走段循环；阶段 1 审查通过后先交开场首帧，再规划与打包。

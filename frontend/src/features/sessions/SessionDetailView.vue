@@ -26,6 +26,7 @@ import {
   type ProgressView,
 } from './progress'
 import ProgressBand from './ProgressBand.vue'
+import { isRefSettled } from './refCapacity'
 import ReviewTab from './ReviewTab.vue'
 import SegmentsTab from './SegmentsTab.vue'
 import { nodeLabel, statusLabel, statusTone, stepLabel } from './status'
@@ -250,9 +251,7 @@ const assetPhase = computed<'created' | 'asset_loop' | 'after'>(() => {
   if (!derived) {
     return 'created'
   }
-  const unsettled = refs.some(
-    (ref) => ref.kind === 'picture' && ref.status !== 'passed' && ref.status !== 'abandoned',
-  )
+  const unsettled = refs.some((ref) => ref.kind === 'picture' && !isRefSettled(ref))
   return unsettled ? 'asset_loop' : 'after'
 })
 
@@ -270,9 +269,6 @@ const pendingAssetItem = computed(
       (item) => item.kind === 'asset_image' && item.status === 'pending',
     ) ?? null,
 )
-// 素材分区要指出「就是这一件在等你」（#283）：件号取待办本身，不从台账反推——
-// 审查还没通过、正在读图校对时台账里也有未定稿行，但那两种情况都没有卡片可指。
-const pendingAssetNumber = computed(() => pendingAssetItem.value?.asset_index ?? null)
 // 素材视频/音频补交待办卡（#279 §补交口 / #284）：循环走完之后的阻塞决定点，
 // 「没有，就这样」也是能点下去的答案。它排在素材图卡之后、阶段 2 之前。
 const pendingAssetExtraItem = computed(
@@ -281,6 +277,9 @@ const pendingAssetExtraItem = computed(
       (item) => item.kind === 'asset_extra' && item.status === 'pending',
     ) ?? null,
 )
+// 素材分区要指出「就是这一件在等你」（#283）：件号取待办本身，不从台账反推——
+// 审查还没通过、正在读图校对时台账里也有未定稿行，但那两种情况都没有卡片可指。
+const pendingAssetNumber = computed(() => pendingAssetItem.value?.asset_index ?? null)
 // 导演台开场首帧卡（D8 §4.4 / §7.1）：i2v / fl2v 审查通过后一个待办收两张图。
 // 它不是 base 的 frame_submission——两条路线各自一个 kind，界面也各一张卡。
 const pendingDirectorStartItem = computed(
@@ -564,6 +563,7 @@ const errorMessage = computed(() =>
           :status="data.status"
           :phase="assetPhase"
           :current-number="pendingAssetNumber"
+          :current-reason="pendingAssetItem?.reason ?? ''"
           @refresh="invalidateSnapshot"
           @goto-review="selectTab('review')"
         />

@@ -1192,14 +1192,14 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "asset_position_lock_off",
         "src/minimax_h3_prompt/workbench_store.py",
-        "        remaining = unsettled_picture_entries(ledger)\n"
-        "        if not remaining:",
-        "        remaining = []\n"
-        "        if not remaining:",
+        "        if not route_uses_asset_ledger(session.brief) or session.status == \"created\":\n"
+        "            return",
+        "        if True:\n"
+        "            return",
         ("tests/test_api_ref_assets.py::"
-         "test_registration_after_start_only_accepts_the_current_item",),
-        "位置锁整体失效＝起跑后什么名字都能登记，循环正等着的那一件反而交不进去"
-        "（#282，spec #279「只许往当前待办那一件交」）",
+         "test_registration_after_start_refuses_named_pictures",),
+        "位置锁整体失效＝起跑后带语义名的图能绕过待办卡直接登记，台账上出现没人校过的正本"
+        "（#279 复审，spec §12「ref 的上传口只剩视频/音频补交」）",
     ),
     Mutation(
         "asset_extra_gate_not_blocking",
@@ -1211,6 +1211,16 @@ MUTATIONS: tuple[Mutation, ...] = (
          "test_restart_keeps_the_gate_and_rehangs_it_after_a_crash_like_snapshot",),
         "补交口不拦＝循环走完（含零资产）直接进阶段 2，视频/音频补交这一步被静默跳过"
         "（#284，spec #279「它是阻塞的：不解掉就不进阶段 2」）",
+    ),
+    Mutation(
+        "asset_extra_step_reused_as_loop",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "                return step_machine.STEP_ASSET_EXTRA",
+        "                return step_machine.STEP_ASSET_LOOP",
+        ("tests/test_api_asset_extra.py::"
+         "test_the_extras_gate_is_its_own_step_between_loop_and_stage2",),
+        "补交档复用素材循环＝进度条在补交口仍写「素材循环」，用户看不出循环已走完"
+        "（#279 §步骤机）",
     ),
     Mutation(
         "asset_extra_capacity_not_recomputed",
@@ -1226,11 +1236,44 @@ MUTATIONS: tuple[Mutation, ...] = (
         "asset_loop_settles_a_rejected_item",
         "src/minimax_h3_prompt/api/jobs.py",
         "            row[\"status\"] = (ASSET_LEDGER_STATUS_PASSED if passed\n"
-        "                             else ASSET_LEDGER_STATUS_REGISTERED)",
+        "                             else ASSET_LEDGER_STATUS_PENDING)",
         "            row[\"status\"] = ASSET_LEDGER_STATUS_PASSED",
         ("tests/test_api_asset_loop.py::"
          "test_proofread_failure_reopens_the_same_item_with_the_diff",),
         "不通过也落定＝校对结论只是建议，下一件会照样推进，差异清单永远无人处理（#256）",
+    ),
+    Mutation(
+        "asset_loop_submit_not_marked_registered",
+        "src/minimax_h3_prompt/api/jobs.py",
+        '                        current_entry["status"] = ASSET_LEDGER_STATUS_REGISTERED',
+        "                        pass",
+        ("tests/test_api_asset_loop.py::"
+         "test_submitting_an_image_marks_the_row_registered_until_proofread",),
+        "交图不置 registered＝「交回了、还没校对」那一段在台账上看不见，"
+        "与「还没交」混成同一个状态（#279 复审，spec「台账与进度」）",
+    ),
+    Mutation(
+        "asset_capacity_counts_abandoned_rows",
+        "src/minimax_h3_prompt/workbench_store.py",
+        "        for entry in entries\n"
+        "        if str(entry.get(\"status\")) != ASSET_LEDGER_STATUS_ABANDONED\n"
+        "    ]",
+        "        for entry in entries\n"
+        "    ]",
+        ("tests/test_api_ref_assets.py::"
+         "test_abandoned_rows_do_not_count_against_ref_capacity",),
+        "放弃件算进容量＝界面显示 7/9 全绿、上传却 422，同一份台账在两处读出两个数字"
+        "（#279 复审）",
+    ),
+    Mutation(
+        "asset_manifest_derived_only_once",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "        derive = session.brief.is_ref",
+        "        derive = (not session.asset_manifest_derived) and session.brief.is_ref",
+        ("tests/test_api_ref_assets.py::"
+         "test_revise_reruns_stage1_and_the_ledger_follows_the_new_manifest",),
+        "修订重跑不重派生＝台账停在旧清单上，对账硬失败失效，退化成出词时"
+        "「阶段 1 没有为「旧名」写提示词」（#279 复审）",
     ),
     Mutation(
         "asset_loop_reopens_the_wrong_number",

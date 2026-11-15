@@ -12,6 +12,8 @@ import {
 import Button from '@/components/ui/Button.vue'
 import ErrorNotice from '@/components/ui/ErrorNotice.vue'
 
+import { REF_KIND_LABELS } from './refCapacity'
+
 // 素材视频/音频补交待办卡（#279 §补交口 / #284）。
 //
 // 它是素材循环之后、阶段 2 之前的**阻塞**决定点：交完了，或者明确「没有，就这样」。
@@ -28,22 +30,33 @@ const props = defineProps<{
 
 const emit = defineEmits<{ submitted: []; uploaded: [] }>()
 
-const KIND_ORDER: Record<string, number> = { video: 0, audio: 1 }
-const KIND_LABELS: Record<string, string> = { video: 'Video', audio: 'Audio' }
+// 官方三型的顺序就是 `REF_KIND_LABELS` 的键序（picture < video < audio）：另写一张
+// `{video: 0, audio: 1}` 只会在加第四型时漏一处。标签原文仍要英文（`<Video N>` 是
+// 请求里的写法），由 kind 首字母大写得到——`REF_KIND_LABELS` 是给人看的中文名。
+const KIND_ORDER = Object.keys(REF_KIND_LABELS)
+
+function kindRank(kind: string): number {
+  const index = KIND_ORDER.indexOf(kind)
+  return index < 0 ? KIND_ORDER.length : index
+}
+
+function tagName(kind: string): string {
+  return kind.charAt(0).toUpperCase() + kind.slice(1)
+}
 
 // 台账里已经登记过的补交件：刷新页面后仍然能看到，也让「完成补交」在重载后可用。
 const settledExtras = computed(() =>
   props.refs
     .filter((ref) => ref.kind === 'video' || ref.kind === 'audio')
     .slice()
-    .sort((a, b) => (KIND_ORDER[a.kind] ?? 9) - (KIND_ORDER[b.kind] ?? 9) || a.number - b.number),
+    .sort((a, b) => kindRank(a.kind) - kindRank(b.kind) || a.number - b.number),
 )
 
 const uploaded = ref<Asset[]>([])
 const targetAssetId = computed(
   () => uploaded.value.at(-1)?.asset_id ?? settledExtras.value.at(-1)?.asset_id ?? '',
 )
-const extraLabel = (ref: RefOut): string => `<${KIND_LABELS[ref.kind] ?? ref.kind} ${ref.number}>`
+const extraLabel = (ref: RefOut): string => `<${tagName(ref.kind)} ${ref.number}>`
 
 const semanticName = ref('')
 const selectedFile = ref<File | null>(null)

@@ -121,14 +121,18 @@
 - **参考素材台账**（D7-2 / #255；D7 修订 #279）住 `SessionState.asset_ledger`（会话文件是
   唯一真源，ADR 0032），不另写 `asset-ledger.json`：`name / kind / number / asset_id /
   sha256 / round / status / source`。
-  - **两种来源**（`source`）：ref 恒 `derived`（阶段 1 收尾按资产图词派生）、导演台 r2v
-    恒 `uploaded`（创建时用户上传建立）。`asset_required` 门槛与容量校验按来源字段判，
-    不靠 `mode` 反推；没有这个键的旧行读成 `uploaded`。
+  - **两种来源**（`source`）回答的是「这件素材是谁提供的」：ref 恒 `derived`（阶段 1
+    收尾按资产图词派生）、导演台 r2v 恒 `uploaded`（创建时用户上传建立）；没有这个键
+    的旧行读成 `uploaded`。**它不参与判定**：起跑门槛按 `brief.director_mode == "r2v"`
+    判（回答「哪条路线需要预置素材」，有意不用台账来源），容量校验按 `kind` 计数、
+    忽略 `source`。
   - **四态**（`status`）：`pending`（已派生、还没交图，**没有正本**）/ `registered`
     （交回了、还没校对过）/ `passed`（定稿）/ `abandoned`（显式放弃，永远没有图）。
   - **派生与对账是同一处**：阶段 1 收尾的写入里按资产图词落齐 N 行（`derived_asset_rows`
     → `merge_derived_rows`），清单与词缺件、多件、改名都硬失败并点名（仍是
-    `AssetPromptMissing`）。派生口幂等，续跑 / 恢复 / 重进页面都补齐。
+    `AssetPromptMissing`）。**阶段 1 每次成功收尾都重新派生**（修订重跑会换掉清单，
+    不重派生会让台账停在旧集合上）；「按标记补齐」那一档（续跑 / 恢复 / 重进页面）
+    仍是幂等的，标记本身只回答「本片清单算不算数」。
   - **「资产清单已派生」是会话顶层字段**（`SessionState.asset_manifest_derived`）：
     空台账 + 未派生 ＝ 阶段 1 没走完；空台账 + 已派生 ＝ 本片确实没有素材。两者不是
     一回事，混成一个状态会让一次漏落盘静默跳过整条素材循环。
@@ -137,12 +141,13 @@
     （422 `ref_capacity_exceeded`）；**不带语义名 = 普通素材**——ref 与 base 一致，
     不记账、不编号、不占容量、不受登记锁（它就是素材图与段视频回交的通道）。
     base 会话带语义名 → 422 `asset_name_invalid`（没有台账可登记）。
-  - **登记锁是位置锁，不是时间锁**（#279 / #282）：起跑后带语义名的登记仍然可以发生，
-    但只放行**当前待办那一件**（名字要一字不差），其余 409 `asset_locked` 并点名当前
-    是第几件；补交口未落定时额外放行视频/音频（Picture 仍拒）；待办一落定就不再接受
-    增补。撤销仍是**时间锁**：起跑后不许删行（`DELETE /sessions/{id}/assets/{asset_id}`，
-    台账外 → 404 `asset_not_found`，base 调用 → 409 `route_mismatch`）——删行会与阶段 1
-    写下的清单对不上。详情里的 `brief.refs` 就是台账摘要（含 `status` 与 `source`）。
+  - **登记锁是位置锁，不是时间锁**（#279 / #282 / #284）：起跑后带语义名的 **Picture**
+    一律 409 `asset_locked`，文案指向**素材待办卡**（交图只能走那条路：它会置校对键并
+    触发读图校对，从这里进来的图没人校过）；**Video / Audio** 只在补交待办未落定时
+    放行，循环中与落定后都拒。不带语义名的普通上传不受影响。撤销仍是**时间锁**：
+    起跑后不许删行（`DELETE /sessions/{id}/assets/{asset_id}`，台账外 → 404
+    `asset_not_found`，base 调用 → 409 `route_mismatch`）——删行会与阶段 1 写下的清单
+    对不上。详情里的 `brief.refs` 就是台账摘要（含 `status` 与 `source`）。
   - **换一张图**：`POST /sessions/{id}/assets/{asset_id}/reopen` 把一件已定稿的 ref 素材
     退回 `pending` 并重挂同件号 `asset_image` 待办。三道判据——只对 ref、只在素材循环
     没走完时、只对 `passed` 行（`abandoned` / 未定稿 → 409 `asset_not_reopenable`，
@@ -151,7 +156,8 @@
 
 ## 素材循环（D7-3，ADR 见 D7 的「ref 多参进工作台」）
 
-`ref` 在阶段 1 与阶段 2 之间多一档 `asset_loop`（阶段标签，不是会话状态）。
+`ref` 在阶段 1 与阶段 2 之间多两档阶段标签：`asset_loop`（逐件交图/校对）与
+`asset_extra`（循环走完后的补交口）。两者都是阶段标签，不是会话状态。
 
 | 步骤 | 类型 | 阶段标签 | 产物/状态 |
 |---|---|---|---|
@@ -159,16 +165,18 @@
 | 第 N 件出词 | job `asset_loop` | `asset_loop` | `assets/picture-NN.md`（kind `asset_prompt`）；挂 `asset_image` 待办 |
 | 第 N 件交图 | 待办 `asset_image` | — | 载荷 `asset_id`；会话 `awaiting_human` |
 | 第 N 件放弃 | 待办 `asset_image` | — | `decision=abandon_asset`（不带 `asset_id`）：该行转 `abandoned`，不落图 |
-| 第 N 件校对 | job `asset_loop` | `asset_loop` | 读图（`describe_image`）对照这一件的词；通过转 `passed` |
-| 补交口 | 待办 `asset_extra` | — | 循环结束后、阶段 2 之前：`submit_extras`（载荷 `asset_id`）或 `no_extras`（「没有，就这样」） |
+| 第 N 件校对 | job `asset_loop` | `asset_loop` | 读图（`describe_image`）对照这一件的词；通过转 `passed`，不通过回 `pending` |
+| 补交口 | 待办 `asset_extra` | `asset_extra` | 循环结束后、阶段 2 之前：`submit_extras`（载荷 `asset_id`）或 `no_extras`（「没有，就这样」） |
 | 阶段 2 | job | `stage2` | 补交口落定后自动接上（注入卡是 #257） |
 
 - **ref 通过审查不直接进阶段 2**：`resolve` 的 approve 分支按 `brief.is_ref` 分叉，
-  `_resume_step` 在「阶段 1 已 approve」与「阶段 2」之间插入 `asset_loop`；base 一字不变。
+  `_resume_step` 在「阶段 1 已 approve」与「阶段 2」之间插入 `asset_loop`，循环走完
+  再插一档 `asset_extra`；base 一字不变。
 - **素材集合是产出，不是输入**（#279）：起跑前不收图，件数 / 语义名 / 编号都来自阶段 1
   的资产图词；零资产合法（派生 0 行、循环空转、直接到补交口）。
 - **严格串行、一次一件**：当前件＝台账里**第一条既未定稿也未放弃的 Picture**
-  （`unsettled_picture_entries`，与推进度、位置锁同一份判据）；每件同时最多一个未决
+  （`unsettled_picture_entries`，与推进度同一份；位置锁也用它判「循环走完没有」）；
+  每件同时最多一个未决
   `asset_image`。已放弃的行被跳过——否则放弃一件会把循环永远停在那件上。
 - **没有放行键，但有放弃出口**（#279 / #282）：`asset_image` 的决议只有交图与
   `abandon_asset` 两种，**没有「就这样吧」**——校对不通过时用 `rewrite_asset_prompt`
@@ -182,7 +190,8 @@
   待办。视频/音频走既有上传端点但**必须带用户起的语义名**（设计师只给 Picture 命名），
   编号按 kind 分桶（`<Video N>` / `<Audio N>`，不占 Picture 号段）；两种答案都要能
   点下去——`submit_extras`（载荷 `asset_id`，指认最后交的那一件）与 `no_extras`
-  （「没有，就这样」）。未落定时 `_resume_step` 停在 `asset_loop`，进不了阶段 2；
+  （「没有，就这样」）。未落定时 `_resume_step` 停在 `asset_extra`（不是复用的 `asset_loop`：进度条要能看出
+  循环已走完），进不了阶段 2；
   落定后容量按当时台账现算，注入卡与段内子集以这份快照为准，此后不再接受增补。
 - **注入卡只取已定稿**：`_write_film_injection_card` 只收 `passed` 的 Picture 行
   （被放弃或还没交的图写进去，抄下来就是一个填不上的槽）；视频/音频原样保留。

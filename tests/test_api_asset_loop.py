@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -442,9 +443,9 @@ def test_proofread_failure_reopens_the_same_item_with_the_diff(harness):
     assert "尾巴垂在窗台边缘" in harness.rewrite.requests[0]
 
     entries = harness.ledger()
-    # 第 1 件打回后回到 registered（交过、没过）；第 2 件还没轮到，仍是派生的 pending。
+    # 第 1 件打回后回到 pending（「交过、没过，等重交」）；第 2 件还没轮到，也是 pending。
     assert [(entry["round"], entry["status"]) for entry in entries] == [
-        (1, "registered"), (0, "pending")]
+        (1, "pending"), (0, "pending")]
     assert "proofread_asset_id" not in entries[0]
     # 台账只记轮次与状态：重开的是同一件，不产生第二份产物文件。
     assert entries[0]["number"] == 1
@@ -673,7 +674,10 @@ def test_recovery_runs_the_proofread_again_when_the_image_is_already_on_the_ledg
         _asset_step_of,
         _settle_asset,
     )
-    from minimax_h3_prompt.workbench_store import ASSET_LEDGER_STATUS_PASSED
+    from minimax_h3_prompt.workbench_store import (
+        ASSET_LEDGER_STATUS_PASSED,
+        ASSET_LEDGER_STATUS_PENDING,
+    )
 
     ledger = [
         {"name": "橘猫", "kind": "picture", "number": 1, "round": 0,
@@ -697,6 +701,12 @@ def test_recovery_runs_the_proofread_again_when_the_image_is_already_on_the_ledg
 
     done = _settle_asset(settled, 2, True)
     assert _asset_step_of(done)[0] == "done"
+
+    # 不通过回 ``pending``（spec #279：registered 只覆盖「交回了、还没校对过」那一段）：
+    # 一份已被判不通过的图不该继续挂在 registered 上。
+    rejected = _settle_asset(ledger, 1, False)
+    assert rejected[0]["status"] == ASSET_LEDGER_STATUS_PENDING
+    assert rejected[0]["round"] == 1
 
 
 def test_asset_prompt_round_trips_through_the_artifact_header():
@@ -916,29 +926,59 @@ def test_abandon_cannot_carry_an_image_and_is_not_an_approval(harness):
         first["item_id"]]
 
 
-def test_position_lock_takes_only_the_current_item(harness):
-    """位置锁（#282）：起跑后带语义名的登记只认当前待办那一件。
+def test_position_lock_sends_every_named_picture_upload_to_the_card(harness):
+    """位置锁（#279 复审 / spec §12）：循环里带语义名的 Picture 全拒，去处是待办卡。
 
-    派生行没有自己的正本，所以「命中当前件」＝把这张图绑到这一行（交图）；换成别的
-    名字则 409 并点名当前是第几件。普通上传（素材图回交）不进台账，不受影响。
+    上一版放行「当前件」那一次，只把文件落盘、台账不动——用户以为交了一张图，系统
+    却既没校对也没记账。现在连当前件自己的名字也 409，文案指向素材待办卡。
     """
     _to_first_card(harness)
 
-    allowed = harness.upload(_png(41), "cat-again.png", name=CAT)
-    assert allowed["number"] == 1, "放行的登记落到当前件的件号上"
-    entries = harness.ledger()
-    assert entries[0]["asset_id"] == allowed["asset_id"]
-    assert entries[0]["status"] == "pending", "没读图校对之前不算交回"
+    for seed, name in ((41, CAT), (42, LAMP)):
+        blocked = harness.client.post(
+            f"/api/v1/sessions/{harness.session_id}/assets",
+            files={"file": ("named.png", _png(seed), "application/octet-stream")},
+            data={"name": name})
+        body = _assert_problem(blocked, 409, "asset_locked")
+        assert "素材待办卡" in body["detail"] and "校对" in body["detail"]
 
-    blocked = harness.client.post(
-        f"/api/v1/sessions/{harness.session_id}/assets",
-        files={"file": ("lamp.png", _png(42), "application/octet-stream")},
-        data={"name": LAMP})
-    body = _assert_problem(blocked, 409, "asset_locked")
-    assert "第 1 件" in body["detail"] and CAT in body["detail"]
+    entries = harness.ledger()
+    assert entries[0]["asset_id"] == "", "被拒的上传不许悄悄绑到台账行上"
+    assert entries[0]["status"] == "pending"
 
     plain = harness.upload(_png(43), "gen.png")
     assert plain["number"] is None, "不带语义名的上传不进台账"
+
+
+def test_submitting_an_image_marks_the_row_registered_until_proofread(harness, monkeypatch):
+    """交图决议即 ``registered``（spec #279「台账与进度」：交回了、还没校对过）。
+
+    读图卡在这里等放行，是为了在校对**真的还没出结论**的那一刻读台账；不挡的话，
+    这条转移会被紧接着的校对结论盖过去，「registered 存在过」就测不到了。
+    """
+    body = _to_first_card(harness)
+    item = [entry for entry in body["action_items"]
+            if entry["kind"] == "asset_image" and entry["status"] == "pending"][0]
+    image = harness.upload(_png(91), "gen-cat.png")
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocked_describe(path, instruction=None):
+        started.set()
+        assert release.wait(10), "用例没有放行读图"
+        return CLEAN
+
+    monkeypatch.setattr(reference_auditor, "describe_image", blocked_describe)
+    assert harness.submit_image(item, image["asset_id"]).status_code == 202
+    assert started.wait(10), "校对任务没有读到图"
+    entries = harness.ledger()
+    assert entries[0]["status"] == "registered", "交回、未校对的那一段必须可见"
+
+    release.set()
+    harness.wait_until(lambda snapshot: harness.ledger()[0]["status"] == "passed")
+    # 下一件（第 2 件）的出词 job 会立刻接上，所以只等这一条转移落定，不等整条链停。
+    assert harness.ledger()[0]["status"] == "passed"
 
 
 def test_reopening_a_passed_item_inside_the_loop_rehangs_its_card(harness):
@@ -1003,7 +1043,7 @@ def test_reopening_an_abandoned_item_is_refused(harness):
     body = _to_first_card(harness)
     first = [entry for entry in body["action_items"]
              if entry["kind"] == "asset_image" and entry["status"] == "pending"][0]
-    # 先交一张、校对不通过（行回到 registered，asset_id 还指着那张图），再放弃。
+    # 先交一张、校对不通过（行退回 pending、asset_id 还指着那张图），再放弃。
     rejected = harness.upload(_png(71), "gen-cat.png")
     harness.readings.append(CAT_DEVIATION)
     assert harness.submit_image(first, rejected["asset_id"]).status_code == 202

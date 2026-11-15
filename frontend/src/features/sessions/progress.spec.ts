@@ -387,6 +387,7 @@ describe('buildProgress：ref 路线', () => {
       '阶段 1',
       '审查',
       '素材循环',
+      '素材补交',
       '阶段 2',
       '分段循环',
       '完成',
@@ -394,6 +395,7 @@ describe('buildProgress：ref 路线', () => {
     expect(view.steps.map((step) => step.state)).toEqual([
       'done',
       'current',
+      'pending',
       'pending',
       'pending',
       'pending',
@@ -463,6 +465,43 @@ describe('buildProgress：ref 路线', () => {
     expect(byKey.asset_loop).toBe('done')
     expect(byKey.stage2).toBe('current')
     expect(view.steps.find((step) => step.key === 'asset_loop')?.detail).toBe('2/2')
+  })
+
+  it('循环走完先落在补交档：补交待办 pending 时当前步骤是素材补交', () => {
+    const view = buildProgress(
+      input({
+        route: 'ref',
+        refs: refItems(2),
+        actionItems: [
+          assetAction(1, 'resolved'),
+          assetAction(2, 'resolved'),
+          ...actions('asset_extra'),
+        ],
+      }),
+    )
+
+    const byKey = Object.fromEntries(view.steps.map((step) => [step.key, step.state]))
+    expect(byKey.asset_loop).toBe('done')
+    expect(byKey.asset_extra).toBe('current')
+    expect(byKey.stage2).toBe('pending')
+  })
+
+  it('补交落定之后不再退回素材循环：下一步是阶段 2', () => {
+    const view = buildProgress(
+      input({
+        route: 'ref',
+        refs: refItems(2),
+        actionItems: [
+          assetAction(1, 'resolved'),
+          assetAction(2, 'resolved'),
+          ...actions('asset_extra', 'resolved'),
+        ],
+      }),
+    )
+
+    const byKey = Object.fromEntries(view.steps.map((step) => [step.key, step.state]))
+    expect(byKey.asset_extra).toBe('done')
+    expect(byKey.stage2).toBe('current')
   })
 
   it('只有视频/音频参考素材时素材循环的 n 只算 Picture', () => {

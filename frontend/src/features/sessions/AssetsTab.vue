@@ -37,6 +37,8 @@ const props = withDefaults(
     phase?: AssetPhase | ''
     /** 正在等用户交图的那一件（父组件从 pending 的 `asset_image` 待办取）。 */
     currentNumber?: number | null
+    /** 当前件带上轮的校对差异＝「交过但没过，等你重交」，不是「还没交」。 */
+    currentReason?: string
   }>(),
   {
     mode: 'base',
@@ -45,6 +47,7 @@ const props = withDefaults(
     status: 'created',
     phase: '',
     currentNumber: null,
+    currentReason: '',
   },
 )
 
@@ -58,10 +61,10 @@ const usesLedger = computed(
 // ref 的上传改由循环里的待办卡负责，这个锁只影响 r2v 的删除与上传框。
 const locked = computed(() => usesLedger.value && props.status !== 'created')
 
-// 父组件没给 phase 时按快照兜底：有台账行就当循环中，否则当还没派生。
-const phase = computed<AssetPhase>(
-  () => props.phase || (props.refs.length ? 'asset_loop' : 'created'),
-)
+// phase 由父组件按快照算好传入（SessionDetailView 的 `assetPhase`）。子组件不再按行数
+// 猜第二遍：两份判据在「已派生但 0 件」与「还没派生」上会分家，正好是 #279 用
+// `asset_manifest_derived` 才分开的那两态。空串＝父组件没给（base 不上台账）。
+const phase = computed<AssetPhase>(() => (props.phase === '' ? 'created' : props.phase))
 // created 态连容量条都不出现：那时台账还空着，「0/9」只会让人以为要自己凑够 9 张。
 const showLedger = computed(() => !isRef.value || phase.value !== 'created')
 
@@ -150,7 +153,8 @@ function kindLabel(kind: string): string {
 /** 一行的状态文案：定稿/放弃/校对中都是台账事实，剩下交给「当前件是不是它」。 */
 function statusText(item: RowView): string {
   if (isCurrent(item)) {
-    return '正在等你交图'
+    // `pending` 一个状态盖两种处境：第一轮还没交，与校对没过、等你按差异重交。
+    return props.currentReason ? '校对没过，等你重交' : '正在等你交图'
   }
   // 「待交」是台账的静态状态，但队列里排在后面的那几件并不是现在要交的——
   // 统一说「还没轮到」，免得三行都写着「待交」让人不知道该交哪一张。

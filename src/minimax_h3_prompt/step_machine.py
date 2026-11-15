@@ -96,10 +96,16 @@ STEP_SEGMENTING = "segmenting"
 # ref 在阶段 1 与阶段 2 之间的素材循环（D7 spec §5.2）：同样是阶段标签而不是会话状态。
 # 注入卡不单独占一档（它是进阶段 2 前的最后一件产物）。
 STEP_ASSET_LOOP = "asset_loop"
+# 素材循环走完、阶段 2 开头之间的**补交档**（#279 §补交口 / #284）：一次阻塞的人工
+# 决定（交完了 / 没有）。它与 ``asset_loop`` 分开占一档，是因为两者回答的问题不同——
+# 前者在逐件定稿，后者在问「还要不要补视频/音频」；复用 ``asset_loop`` 会让进度条
+# 在补交口仍显示「素材循环」，用户看不出循环已经走完。
+STEP_ASSET_EXTRA = "asset_extra"
 
 # 进度事件允许的 stage 取值从这份声明派生（``workbench_store._PROGRESS_STAGES``），
 # 加阶段时不再改第二份表。顺序即导演台的实际执行顺序。
-STEPS = (STEP_STAGE1, STEP_ASSET_LOOP, STEP_STAGE2, STEP_PACKING, STEP_SEGMENTING)
+STEPS = (STEP_STAGE1, STEP_ASSET_LOOP, STEP_ASSET_EXTRA, STEP_STAGE2, STEP_PACKING,
+         STEP_SEGMENTING)
 
 # 长片是产品阈值（D6 spec §3：>10 秒），不是领域概念；判定只在这一处，执行器与
 # 界面不各写一个 ``duration > 10``。
@@ -402,6 +408,7 @@ __all__ = [
     "STATUS_RUNNING",
     "STEP_STAGE1",
     "STEP_ASSET_LOOP",
+    "STEP_ASSET_EXTRA",
     "STEP_STAGE2",
     "STEP_SEGMENTING",
     "STEPS",

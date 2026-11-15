@@ -148,6 +148,30 @@ def test_zero_asset_ref_gets_the_extras_gate_and_stage2_waits(
     assert harness.stage2_calls == []
 
 
+def test_the_extras_gate_is_its_own_step_between_loop_and_stage2(
+        harness, monkeypatch):
+    """补交档单独占一步（#279 §步骤机）：循环走完时 ``_resume_step`` 落在 ``asset_extra``。
+
+    复用 ``asset_loop`` 会让进度条在补交口仍写「素材循环」——循环其实已经走完，
+    那段文字会把「逐件交图」和「要不要补视频/音频」两件事混成一件。
+    """
+    from minimax_h3_prompt import step_machine
+
+    _zero_asset_stage1(monkeypatch)
+    body = _to_extras_gate(harness)
+    runner = harness.client.app.state.job_runner
+
+    assert runner._resume_step(harness.session_id) == step_machine.STEP_ASSET_EXTRA
+    steps = step_machine.STEPS
+    assert (steps.index(step_machine.STEP_ASSET_LOOP)
+            < steps.index(step_machine.STEP_ASSET_EXTRA)
+            < steps.index(step_machine.STEP_STAGE2))
+    # 落定之后不再回到这一档（接着走哪一步由既有用例覆盖，这里只管补交档的进出）。
+    assert _resolve_extra(harness, _extra_item(body),
+                          {"decision": "no_extras"}).status_code == 202
+    assert runner._resume_step(harness.session_id) != step_machine.STEP_ASSET_EXTRA
+
+
 def test_extras_gate_is_announced_by_an_action_item_created_event(
         harness, monkeypatch):
     """挂待办走既有 ``action_item.created``（十种事件闭集不扩）。"""

@@ -313,8 +313,11 @@ def _settle_asset(
                 updated.append(row)
                 continue
             row["round"] = int(row.get("round", 0)) + 1
+            # 通过 → 定稿；**不通过回 ``pending``**（#279 复审）：``registered`` 的定义是
+            # 「交回了、还没校对过」，一份已被判不通过的图不该继续挂在那个状态上——
+            # 否则「交过没过」与「还没来得及校对」在台账上长得一模一样。
             row["status"] = (ASSET_LEDGER_STATUS_PASSED if passed
-                             else ASSET_LEDGER_STATUS_REGISTERED)
+                             else ASSET_LEDGER_STATUS_PENDING)
             # 交上去的那张已经判过：清掉它，下一轮重新交图才算数。
             row.pop(ASSET_PROOFREAD_KEY, None)
         updated.append(row)
@@ -766,6 +769,10 @@ class JobRunner:
                     return ActionItemOut.model_validate(cached), True
 
             # 件号先只读预判一次，供待办与事件用；权威判定在下面的会话锁内。
+            # 两处不会分叉：``brief.refs`` 就是台账的回显（``_brief_out`` 现造），而
+            # 编号只在 ``created`` 期删除时重排——本端点要求已起跑，同一会话的换图
+            # 又被上面那把 ``asyncio.Lock`` 串行化，所以锁内查到的 ``number`` 与这里
+            # 读到的是同一行（事件载荷因此不必事后再改一次）。
             before = await asyncio.to_thread(self.store.get_session, session_id)
             preview = next(
                 (int(ref.number) for ref in before.brief.refs
@@ -1174,6 +1181,10 @@ class JobRunner:
                         # 先落盘再接校对：崩在两者之间时，恢复能重跑校对而不是要求重交
                         # （用户已经交过一次的图不该再交一遍）。
                         current_entry[ASSET_PROOFREAD_KEY] = submitted
+                        # 交回即 ``registered``（spec #279「台账与进度」）：这个状态回答
+                        # 「交回了、还没校对过」。校对没过会在 ``_settle_asset`` 里退回
+                        # ``pending``，等用户按差异重交。
+                        current_entry["status"] = ASSET_LEDGER_STATUS_REGISTERED
                         holder["asset_ledger"] = ledger
                         recorded_decision = step_machine.DECISION_SUBMIT_IMAGE
                 elif target.kind == step_machine.ACTION_ASSET_EXTRA:
@@ -1837,9 +1848,14 @@ class JobRunner:
                         self._execute_asset_write,
                         session_id, job_id, cancel_event, number)
                 else:
-                    # 循环已全部定稿：`_resume_step` 在这一格给的是补交口（#284），
-                    # 收尾时挂 ``asset_extra`` 待办、等人决定要不要补交视频/音频。
-                    result = {"step": ASSET_STEP_DONE}
+                    # ``_resume_step`` 只在台账还有未定稿件时给 ``asset_loop``；走到
+                    # DONE 说明两处判据分家了——宁可炸也不要静默跳过整个循环。
+                    raise RuntimeError(
+                        f"素材循环的落点与台账不一致：{session_id} / {asset_step}")
+            elif step == step_machine.STEP_ASSET_EXTRA:
+                # 补交档没有慢调用：这一档的任务只负责把 ``asset_extra`` 待办挂出来
+                # （真正要交的视频/音频走上传端点，见 #284）。
+                result = {"step": ASSET_STEP_DONE}
             elif step == step_machine.STEP_PACKING:
                 result = await asyncio.to_thread(
                     self._execute_pack, session_id, job_id, cancel_event)
@@ -1894,14 +1910,14 @@ class JobRunner:
             if step == step_machine.STEP_STAGE2:
                 next_job = await asyncio.to_thread(
                     self._finish_stage2, session_id, job_id, result)
+            elif step == step_machine.STEP_ASSET_EXTRA:
+                await asyncio.to_thread(
+                    self._finish_asset_extra_gate, session_id, job_id)
+                next_job = None
             elif step == step_machine.STEP_ASSET_LOOP:
                 if result["step"] == ASSET_STEP_PROOFREAD:
                     next_job = await asyncio.to_thread(
                         self._finish_asset_proofread, session_id, job_id, result)
-                elif result["step"] == ASSET_STEP_DONE:
-                    await asyncio.to_thread(
-                        self._finish_asset_extra_gate, session_id, job_id)
-                    next_job = None
                 else:
                     await asyncio.to_thread(
                         self._finish_asset_write, session_id, job_id, result)
@@ -2000,12 +2016,12 @@ class JobRunner:
                     and _asset_step_of(session.asset_ledger)[0] != ASSET_STEP_DONE):
                 return step_machine.STEP_ASSET_LOOP
             # 补交口（#279 §补交口 / #284）：ref 的循环走完不等于可以进阶段 2——还有
-            # 一次「要不要补交视频/音频」的决定。返回 ``asset_loop`` 是让 ``_run`` 走
-            # 「循环已完成」那一支去挂待办（阶段 2 的入口仍只有一处）。这条判据也
-            # 兜住「待办还没挂出来就崩了」的会话：重启后照样停在补交口，而不是跳过。
+            # 一次「要不要补交视频/音频」的决定。它单独占 ``STEP_ASSET_EXTRA`` 一档
+            # （不是复用的 ``asset_loop``）：进度条要能看出「循环已走完、正在问补交」。
+            # 这条判据也兜住「待办还没挂出来就崩了」的会话：重启后照样停在补交口。
             if (session.brief.is_ref
                     and not asset_extras_settled(session.action_items)):
-                return step_machine.STEP_ASSET_LOOP
+                return step_machine.STEP_ASSET_EXTRA
             # 导演台的阶段 2 只做规划 + 写段；写完就该打包（#263）。zip 已落盘
             # 之后进入段循环（#264）——判据全在磁盘（段表 + 每段段词 + zip），
             # 重启后照样知道「该打包还是该跑段」。
@@ -3304,8 +3320,8 @@ class JobRunner:
         挂出来的会话（重启/崩溃恢复）。两处挂的是**同一种待办**——判据只有「补交口
         还没落定」一条，所以不需要第二个中间状态。
 
-        ``_resume_step`` 只在补交口未落定时给出 ``asset_loop``，到这里时待办必然还没
-        决议过；「不再重复问」由那条判据保证，不在这里再判一次（两处各判一次时，
+        ``_resume_step`` 只在补交口未落定时给出 ``STEP_ASSET_EXTRA``，到这里时待办必然
+        还没决议过；「不再重复问」由那条判据保证，不在这里再判一次（两处各判一次时，
         改一处就会让另一处把已落定的会话重新困住）。
         """
         item = ActionItemOut(
@@ -4275,12 +4291,16 @@ class JobRunner:
             status="pending", created_at=_now())
         # 资产清单的派生与「落齐 N 行」跟 stage1_review 待办**同一次 mutate**（#279
         # 「资产清单的派生与落盘」）：分两次写就会出现「阶段 1 已收尾、台账还空着」的
-        # 中间态，而那个中间态与「本片确实没有素材」长得一模一样。派生是幂等的——
-        # 修订重跑会再次走到这里，已派生的会话直接跳过（`None`），不动循环里交过的件号。
+        # 中间态，而那个中间态与「本片确实没有素材」长得一模一样。
+        #
+        # **每次成功收尾都重新派生**（#279 复审）：用户在 ``stage1_review`` 上选「修订」
+        # 改创意后，阶段 1 会再跑一遍，清单可能改名/增减；跳过派生会让台账停在旧集合上，
+        # 对账硬失败失效，错误退化成后面出词时「阶段 1 没有为「旧名」写提示词」。此刻
+        # 审查待办还没批准、素材循环尚未开始，整段替换 Picture 行是安全的。
         session = load_session(self.store.session_directory(session_id))
         if session is None:
             raise RuntimeError(f"会话文件读不到：{session_id}")
-        derive = (not session.asset_manifest_derived) and session.brief.is_ref
+        derive = session.brief.is_ref
         derived_rows: list[dict[str, Any]] | None = None
         if derive:
             # 对账在落盘**之前**：清单与资产图词对不上是阶段 1 的结论不合格，整条

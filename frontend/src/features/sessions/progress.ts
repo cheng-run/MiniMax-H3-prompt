@@ -100,12 +100,14 @@ const BASE_LONG_STEPS: StepDefinition[] = [
   { key: 'complete', label: '完成' },
 ]
 
-// ref：审查通过后先逐件定稿资产图（素材循环），再进阶段 2；分段循环一律存在
-// （单段也走同一套待办与拼接），拼接是段循环的内部收尾、不单独占一格。
+// ref：审查通过后先逐件定稿资产图（素材循环），再问一次要不要补交视频/音频
+// （补交档，#284），然后进阶段 2；分段循环一律存在（单段也走同一套待办与拼接），
+// 拼接是段循环的内部收尾、不单独占一格。
 const REF_STEPS: StepDefinition[] = [
   { key: 'stage1', label: '阶段 1' },
   { key: 'review', label: '审查' },
   { key: 'asset_loop', label: '素材循环' },
+  { key: 'asset_extra', label: '素材补交' },
   { key: 'stage2', label: '阶段 2' },
   { key: 'segment_loop', label: '分段循环' },
   { key: 'complete', label: '完成' },
@@ -126,6 +128,9 @@ const DIRECTOR_STEPS: StepDefinition[] = [
 const STAGE_RANK: Record<string, number> = {
   stage1: 0,
   asset_loop: 1,
+  // 补交档夹在两者之间（#284）；用小数是为了不动既有的整数比较（它们问的是
+  // 「阶段 2 开始了吗 / 阶段 1 结束了吗」，两者都不该被这一档改变）。
+  asset_extra: 1.5,
   stage2: 2,
   packing: 3,
   segmenting: 4,
@@ -160,6 +165,8 @@ interface RouteFacts {
   pendingFrame: boolean
   pendingSegmentVideo: boolean
   pendingAsset: boolean
+  pendingExtra: boolean
+  hasExtraItem: boolean
   pendingStart: boolean
   pendingSegmentImage: boolean
   pendingDelivery: boolean
@@ -189,6 +196,8 @@ function routeFacts(input: ProgressInput): RouteFacts {
     pendingFrame: isPending(input.actionItems, 'frame_submission'),
     pendingSegmentVideo: isPending(input.actionItems, 'segment_video'),
     pendingAsset: isPending(input.actionItems, 'asset_image'),
+    pendingExtra: isPending(input.actionItems, 'asset_extra'),
+    hasExtraItem: hasItem(input.actionItems, 'asset_extra'),
     pendingStart: isPending(input.actionItems, 'director_start_image'),
     pendingSegmentImage: isPending(input.actionItems, 'director_segment_image'),
     pendingDelivery: isPending(input.actionItems, 'director_delivery'),
@@ -283,6 +292,9 @@ function refCurrentKey(input: ProgressInput, facts: RouteFacts): string | null {
     if (stage === 'asset_loop') {
       return 'asset_loop'
     }
+    if (stage === 'asset_extra') {
+      return 'asset_extra'
+    }
     if (stage === 'stage2') {
       return 'stage2'
     }
@@ -296,11 +308,20 @@ function refCurrentKey(input: ProgressInput, facts: RouteFacts): string | null {
   if (facts.pendingAsset) {
     return 'asset_loop'
   }
+  if (facts.pendingExtra) {
+    return 'asset_extra'
+  }
   if (facts.pendingSegmentVideo || facts.totalSegments > 0) {
     return 'segment_loop'
   }
   // 阶段 2 已经开始（产物或流上最后一条阶段标签都算）。
   if (facts.videoPromptArtifact || stageRank >= 2) {
+    return 'stage2'
+  }
+  // 补交待办出现过且已不在等（不 pending）＝循环走完、补交也落定了：下一步就是
+  // 阶段 2，即便阶段 2 的产物还没落盘。没有这一条会退回「素材循环」，看起来像
+  // 循环又活过来了。
+  if (facts.hasExtraItem) {
     return 'stage2'
   }
   // 素材循环动过（有件待办或已产出资产图词）同样证明阶段 1 与审查都已过去。
