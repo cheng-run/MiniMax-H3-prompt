@@ -918,6 +918,12 @@ def _validate_action_item_resolved(payload: dict[str, Any]) -> None:
     _validate_action_item_string_keys(payload, _ACTION_ITEM_ASSET_KEYS)
     # 交付槽（成片/最终包）只在这条事件上出现，同样要挡住半截值。
     _validate_action_item_string_keys(payload, _ACTION_ITEM_DELIVERY_KEYS)
+    # 补报告（#287）：素材校对定稿后，补漏清单随同一条事件回写进已决议的卡片。
+    # 出现时必须是字符串——重放侧会把它原样放进待办的 ``reason``。
+    reason = payload.get(_ACTION_ITEM_REASON_KEY)
+    if reason is not None and not isinstance(reason, str):
+        raise InvalidEventPayload(
+            f"事件 payload 的 {_ACTION_ITEM_REASON_KEY!r} 必须是字符串：{reason!r}")
     # 修订载荷是可选的加字段（D4 spec §7）：写了就必须是 [{layer, text}, …]，
     # 否则重放时 ``ActionItemOut`` 会拿半截字典去建模型并在**读详情**时报错。
     revisions = payload.get("revisions")
@@ -1201,14 +1207,23 @@ def _replay_snapshot(
             revisions = payload.get("revisions")
             for item in action_items:
                 if item.get("item_id") == payload["item_id"]:
-                    item.update({"status": "resolved",
-                                 "decision": payload["decision"],
-                                 "resolved_at": event.at,
-                                 # 修订历史只从这条事件补（D4 spec §7）：快照落后时
-                                 # 也要能回显用户当时说了什么。
-                                 "revisions": (
-                                     [dict(entry) for entry in revisions]
-                                     if isinstance(revisions, list) else [])})
+                    # 同一件可能再落一条「补报告」的决议事件（#287：校对定稿后把
+                    # 补漏清单写进刚决议那张卡）。已决议的卡片不重记决议时间——
+                    # 它记的是人按下那一刻，补报告不是第二次决议。
+                    already_resolved = item.get("status") == "resolved"
+                    update: dict[str, Any] = {
+                        "status": "resolved",
+                        "decision": payload["decision"],
+                        # 修订历史只从这条事件补（D4 spec §7）：快照落后时
+                        # 也要能回显用户当时说了什么。
+                        "revisions": (
+                            [dict(entry) for entry in revisions]
+                            if isinstance(revisions, list) else [])}
+                    if not already_resolved:
+                        update["resolved_at"] = event.at
+                    if isinstance(payload.get(_ACTION_ITEM_REASON_KEY), str):
+                        update[_ACTION_ITEM_REASON_KEY] = payload[_ACTION_ITEM_REASON_KEY]
+                    item.update(update)
                     # 图槽标识（D8 §7.1）：一个待办收两张图，重放要把两个槽都补回来。
                     for key in _ACTION_ITEM_ASSET_KEYS:
                         if isinstance(payload.get(key), str):

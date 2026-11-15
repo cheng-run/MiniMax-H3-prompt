@@ -405,13 +405,19 @@ def test_proofread_pass_settles_the_item_and_writes_the_next(harness):
     assert "一只橘色短毛猫蹲在木质窗台" in instruction
 
 
-def test_proofread_failure_reopens_the_same_item_with_the_diff(harness):
-    """不通过：同一件号重开、差异清单进 reason，并按差异改词覆盖同一份产物。"""
+def test_proofread_failure_reopens_the_same_item_and_leaves_the_prompt_untouched(
+        harness):
+    """不通过：同一件号重开、差异清单进 reason；**生图词与校对前逐字一致**（#287）。
+
+    判完只给裁决，不替人改设计：词是指令、图是既成事实（#286 / ADR 0039 口径）。
+    改写模型一次都不许叫——叫了即使不落盘也是白花钱，还说明防线只剩一层。
+    """
     body = _to_first_card(harness)
     item = [entry for entry in body["action_items"]
             if entry["kind"] == "asset_image" and entry["status"] == "pending"][0]
     image = harness.upload(_png(9), "gen-cat.png")
     harness.readings.append(CAT_DEVIATION)
+    before = harness.artifact_text("assets/picture-01.md")
 
     resp = harness.submit_image(item, image["asset_id"])
     assert resp.status_code == 202, resp.text
@@ -430,17 +436,12 @@ def test_proofread_failure_reopens_the_same_item_with_the_diff(harness):
     assert "尾巴绕住前爪" in pending[0]["reason"]
     assert "尾巴垂在窗台边缘" in pending[0]["reason"]
 
-    # 词被改写并覆盖同一份产物：头部还在，正文换成改写结果，没有第二份文件。
-    text = harness.artifact_text("assets/picture-01.md")
-    assert "第 1 件" in text and CAT in text
-    assert "改写后的资产图词" in text
-    assert "尾巴绕住前爪" not in text.split("\n\n", 1)[1]
+    # 盘上那一份一个字节都不动：头部、正文、换行全部原样。
+    assert harness.artifact_text("assets/picture-01.md") == before
     assert not (harness.root / Path(harness.session_id)
-                / "assets" / "picture-02.md").exists()
-
-    # 改写意见就是差异清单本身（不是一句「不通过」）。
-    assert len(harness.rewrite.requests) == 1
-    assert "尾巴垂在窗台边缘" in harness.rewrite.requests[0]
+                / "asset-rounds.jsonl").exists(), "校对不许落轮次账"
+    # 改写模型一次都没叫：差异清单只是给人看的，不是给模型当 feedback 的。
+    assert harness.rewrite.requests == []
 
     entries = harness.ledger()
     # 第 1 件打回后回到 pending（「交过、没过，等重交」）；第 2 件还没轮到，也是 pending。
@@ -449,6 +450,90 @@ def test_proofread_failure_reopens_the_same_item_with_the_diff(harness):
     assert "proofread_asset_id" not in entries[0]
     # 台账只记轮次与状态：重开的是同一件，不产生第二份产物文件。
     assert entries[0]["number"] == 1
+
+
+def test_omissions_without_deviations_settle_the_item_and_stay_visible(harness):
+    """只有补漏、没有偏差：这一件直接定稿，补漏条目写进**刚决议那张卡**的 reason。
+
+    通过＝卡片不会再回来，那张卡是补漏唯一的可见面（`GET /action-items` 与详情都读
+    同一个字段）。#289 会在这条 reason 之后追加「已按图补入 N 条」。
+    """
+    body = _to_first_card(harness)
+    item = [entry for entry in body["action_items"]
+            if entry["kind"] == "asset_image" and entry["status"] == "pending"][0]
+    image = harness.upload(_png(9), "gen-cat.png")
+    before = harness.artifact_text("assets/picture-01.md")
+    # 空引文＝「图里有而描述没有」：补漏一条，偏差零条。
+    harness.readings.append(_claims(("道具", "", "窗台边还有一只毛线球")))
+
+    resp = harness.submit_image(item, image["asset_id"])
+    assert resp.status_code == 202, resp.text
+
+    body = harness.wait_until(
+        lambda snapshot: any(entry["kind"] == "asset_image"
+                             and entry["status"] == "pending"
+                             and entry["asset_index"] == 2
+                             for entry in snapshot["action_items"]))
+    # 补漏不阻断：这一件定稿、轮次 +1，循环照常接下一件。
+    entries = harness.ledger()
+    assert [(entry["round"], entry["status"]) for entry in entries] == [
+        (1, "passed"), (0, "pending")]
+    assert harness.artifact_text("assets/picture-01.md") == before
+
+    resolved = [entry for entry in body["action_items"]
+                if entry["item_id"] == item["item_id"]][0]
+    assert resolved["status"] == "resolved"
+    assert "[补漏]" in resolved["reason"]
+    assert "毛线球" in resolved["reason"]
+
+    # 待办报告接口与详情是同一份快照，都要看得到。
+    listed = harness.client.get(
+        f"/api/v1/sessions/{harness.session_id}/action-items").json()
+    listed_item = [entry for entry in listed
+                   if entry["item_id"] == item["item_id"]][0]
+    assert "毛线球" in listed_item["reason"]
+
+
+def test_the_proofread_report_survives_snapshot_replay(harness):
+    """快照落后事件流时，补漏报告由 ``action_item.resolved`` 事件重放补回（#287）。
+
+    事件类型仍是十种闭合集合里那一条：只给既有 payload 多一个 ``reason`` 键。
+    """
+    body = _to_first_card(harness)
+    item = [entry for entry in body["action_items"]
+            if entry["kind"] == "asset_image" and entry["status"] == "pending"][0]
+    image = harness.upload(_png(9), "gen-cat.png")
+    harness.readings.append(_claims(("道具", "", "窗台边还有一只毛线球")))
+    assert harness.submit_image(item, image["asset_id"]).status_code == 202
+    body = harness.wait_until(
+        lambda snapshot: any(entry["kind"] == "asset_image"
+                             and entry["status"] == "pending"
+                             and entry["asset_index"] == 2
+                             for entry in snapshot["action_items"]))
+
+    events = _events(harness.root, harness.session_id)
+    report_event = [event for event in events
+                    if event["type"] == "action_item.resolved"
+                    and event["payload"].get("item_id") == item["item_id"]
+                    and event["payload"].get("reason")][-1]
+    assert report_event["payload"]["reason"].count("毛线球") == 1
+
+    # 手工制造「事件已写、快照没跟上」：抹掉快照里的报告，把尾号退到那条事件之前。
+    path = harness.root / Path(harness.session_id) / SESSION_FILENAME
+    snapshot = json.loads(path.read_text(encoding="utf-8"))
+    snapshot["last_event_seq"] = report_event["seq"] - 1
+    for entry in snapshot["action_items"]:
+        if entry["item_id"] == item["item_id"]:
+            entry["reason"] = ""
+    path.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+
+    replayed = [entry for entry in harness.detail()["action_items"]
+                if entry["item_id"] == item["item_id"]][0]
+    assert "毛线球" in replayed["reason"], "事件重放没有把补漏报告补回"
+    # 报告事件不是第二次决议：决议时间仍记第一次交图的那一刻。
+    assert replayed["resolved_at"] == [entry for entry in body["action_items"]
+                                       if entry["item_id"] == item["item_id"]][0][
+                                           "resolved_at"]
 
 
 def test_last_item_pass_opens_the_extras_gate_before_stage2(harness, monkeypatch):
@@ -628,11 +713,12 @@ def test_recovery_rebuilds_the_current_card_from_the_ledger(harness):
     assert "一只橘色短毛猫蹲在木质窗台" in harness.artifact_text("assets/picture-01.md")
 
 
-def test_recovery_keeps_the_rewritten_prompt_of_a_rejected_round(harness):
-    """打回一轮之后恢复：重开卡片**不许**把词悄悄换回阶段 1 的初稿。"""
+def test_recovery_keeps_the_prompt_of_a_rejected_round(harness):
+    """打回一轮之后恢复：重开卡片**不许**动盘上的词（#287 起它本来就没被改过）。"""
     body = _to_first_card(harness)
     item = [entry for entry in body["action_items"]
             if entry["kind"] == "asset_image" and entry["status"] == "pending"][0]
+    before = harness.artifact_text("assets/picture-01.md")
     harness.readings.append(CAT_DEVIATION)
     harness.submit_image(item, harness.upload(_png(9), "gen-cat.png")["asset_id"])
     harness.wait_until(
@@ -640,7 +726,7 @@ def test_recovery_keeps_the_rewritten_prompt_of_a_rejected_round(harness):
                              and entry["status"] == "pending"
                              and entry["reason"]
                              for entry in snapshot["action_items"]))
-    assert "改写后的资产图词" in harness.artifact_text("assets/picture-01.md")
+    assert harness.artifact_text("assets/picture-01.md") == before
 
     store = harness.client.app.state.session_store
 
@@ -659,9 +745,8 @@ def test_recovery_keeps_the_rewritten_prompt_of_a_rejected_round(harness):
                              and entry["status"] == "pending"
                              for entry in snapshot["action_items"]))
 
-    text = harness.artifact_text("assets/picture-01.md")
-    assert "改写后的资产图词" in text, "重开卡片把改过的词换回了初稿"
-    assert "尾巴绕住前爪" not in text.split("\n\n", 1)[1]
+    assert harness.artifact_text("assets/picture-01.md") == before, (
+        "重开卡片动了盘上的词")
     assert harness.ledger()[0]["round"] == 1
 
 

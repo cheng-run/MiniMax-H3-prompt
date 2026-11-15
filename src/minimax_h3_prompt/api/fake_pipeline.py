@@ -217,29 +217,20 @@ def asset_prompt_text(name: str) -> str:
 def asset_proofread_verdict(
     number: int, first_number: int, round_no: int,
 ) -> tuple[bool, str]:
-    """桩校对结论：**第 1 件的第一轮**不通过，其余一律通过（D7-6）。
+    """桩校对结论：**第 1 件的第一轮**不通过，其余一律通过（D7-6 / #287）。
 
     必须确定性：随机或按调用次数会在重跑/续跑时换结论，E2E 就时红时绿。判据用台账
     轮次（``round == 0`` 才是第一轮，与 ``_settle_asset`` 的转移规则同源），不数调用。
     差异清单要提到「词里是什么、图里是什么」，否则卡片上的红框没有内容可读。
+    桩**不改写任何词**（#287）：不通过只让这一件退回重交，与真实路径同形。
     """
     if number != first_number or round_no > 0:
         return True, ""
     return False, (
         "差异清单（桩管线）：词里写的是「米色风衣、黑色长柄伞」，"
         "图里人物穿深灰外套、撑透明塑料伞——外套颜色与伞的材质不一致。"
-        "按差异改词后重新生成一张，再交回这一件。"
+        "重新生成一张，再交回这一件。"
     )
-
-
-def rewrite_asset_prompt_text(current: str) -> str:
-    """桩改写：按差异把修订句追加到原词尾部（不建模型、确定性）。
-
-    与真实 ``rewrite_asset_prompt`` 的区别只在「谁写」：产物仍是同一份
-    ``assets/picture-NN.md`` 的覆盖写，用户手里的下一版词看得到这次改了什么。
-    """
-    return (str(current).rstrip()
-            + "\n\n修订（按校对差异）：外套改为米色，伞改为黑色长柄伞。")
 
 
 def _fake_assets(brief: Any, refs: list[Any]) -> list[tuple[int, str]]:
@@ -683,7 +674,6 @@ __all__ = [
     "frame_descriptions",
     "judge_segment_end_hook",
     "ref_segment_video_frames",
-    "rewrite_asset_prompt_text",
     "segment_plan",
     "segment_prompt",
     "segment_tail_description",

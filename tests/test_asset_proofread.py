@@ -83,6 +83,18 @@ def test_claim_without_quote_becomes_omission_candidate():
     assert report.deviations == ()
 
 
+def test_omissions_alone_do_not_make_the_report_dirty():
+    """补漏不参与通过判定（#287）：图里多出来的细节照常列出，但它不是「不干净」。
+
+    身份板这类细节密集的图，任何一张都会带出词里没有的东西；若补漏也算不通过，
+    这件在结构上永远过不了（#286 事故 2）。干净＝**没有偏差**。
+    """
+    report = compare_descriptions(
+        _PROMPT, Reading(claims=(Claim("腕表", "", "左腕银色腕表"),)))
+    assert len(report.omissions) == 1, "补漏仍要照常产出，只是不再阻断"
+    assert report.is_clean()
+
+
 def test_unanchored_quote_stays_a_deviation_not_an_omission():
     """引文对不上原文的失锚条目仍算偏差（它是「不符」不是「没有」）——
     降级成补漏会把互相矛盾的事实并进描述（红裙+蓝裙同现）；静默丢弃则是「无人纠」。

@@ -1239,7 +1239,7 @@ MUTATIONS: tuple[Mutation, ...] = (
         "                             else ASSET_LEDGER_STATUS_PENDING)",
         "            row[\"status\"] = ASSET_LEDGER_STATUS_PASSED",
         ("tests/test_api_asset_loop.py::"
-         "test_proofread_failure_reopens_the_same_item_with_the_diff",),
+         "test_proofread_failure_reopens_the_same_item_and_leaves_the_prompt_untouched",),
         "不通过也落定＝校对结论只是建议，下一件会照样推进，差异清单永远无人处理（#256）",
     ),
     Mutation(
@@ -1283,7 +1283,7 @@ MUTATIONS: tuple[Mutation, ...] = (
         "                status=\"pending\", created_at=_now(), asset_index=number + 1,\n"
         "                reason=reason)",
         ("tests/test_api_asset_loop.py::"
-         "test_proofread_failure_reopens_the_same_item_with_the_diff",),
+         "test_proofread_failure_reopens_the_same_item_and_leaves_the_prompt_untouched",),
         "重开的件号错位＝用户被要求交下一件的图，而第 N 件永远定不了稿（#256）",
     ),
     Mutation(
@@ -1472,6 +1472,18 @@ MUTATIONS: tuple[Mutation, ...] = (
          "test_source_newer_than_the_build_triggers_a_rebuild",),
         "新鲜度判据恒不重建＝源码改了照样复用旧界面，对着已不存在的 bug 排查"
         "（#275 / #274 §A 的现场）",
+    ),
+    Mutation(
+        "proofread_omissions_block_settling",
+        "src/minimax_h3_prompt/asset_proofread.py",
+        "        return not self.deviations",
+        "        return not self.deviations and not self.omissions",
+        ("tests/test_asset_proofread.py::"
+         "test_omissions_alone_do_not_make_the_report_dirty",
+         "tests/test_api_asset_loop.py::"
+         "test_omissions_without_deviations_settle_the_item_and_stay_visible"),
+        "补漏重新参与通过判定＝细节密集的身份板永远定不了稿，素材循环在结构上"
+        "死锁（#286 事故 2 / #287）",
     ),
 )
 

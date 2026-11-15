@@ -197,6 +197,10 @@ def test_fake_ref_closed_loop_rejects_then_settles(fake_app, tmp_path):
         reopened = [item for item in _pending(detail, "asset_image")
                     if item["asset_index"] == 1][0]
         assert "差异" in reopened["reason"] and "伞" in reopened["reason"]
+        # 不通过只给裁决，不改词（#287）：桩与真实路径同形，盘上那一份逐字未动。
+        assert (root / Path(session_id) / "assets" / "picture-01.md").read_text(
+            encoding="utf-8") == word, "桩校对改写了生图词"
+        assert not (root / Path(session_id) / "asset-rounds.jsonl").exists()
         # 不通过不是「落定」：台账轮次 +1、状态仍未通过。
         ledger = (root / Path(session_id) / "session-state.json").read_text(
             encoding="utf-8")

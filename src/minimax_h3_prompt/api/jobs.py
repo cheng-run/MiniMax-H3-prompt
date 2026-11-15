@@ -3169,19 +3169,22 @@ class JobRunner:
     def _execute_asset_proofread(self, session_id: str, job_id: str,
                                  cancel_event: threading.Event,
                                  number: int) -> dict[str, Any]:
-        """读用户交的图并校对（D7 §6.2）：通过 → 定稿；不通过 → 按差异改词。
+        """读用户交的图并校对（D7 §6.2 / #287）：只产裁决，**不动盘上的词**。
 
-        读图走**唯一入口** ``describe_image``（不另建视觉客户端）。不通过时用
-        ``rewrite_asset_prompt`` 把差异清单当 feedback 重写这一件的词、覆盖同一份
-        产物——用户没有「就这样吧」可点，**改词是唯一的降级通道**（spec §6.3）。
+        读图走**唯一入口** ``describe_image``（不另建视觉客户端）。通过（无偏差）→
+        定稿；有偏差 → 同一件号重开卡片，``reason`` 是人读差异清单。补漏不参与通过
+        判定，但仍照常出现在清单里，并随 ``reason`` 写进刚决议的那张卡
+        （``_finish_asset_proofread``）——通过之后卡片不再回来，那是它唯一的可见面。
 
-        桩模式（``fake_pipeline``）只把这个 job 的「读图与改写」换成固定结论，台账
-        转移、待办重开与产物覆盖仍由收尾的同一份代码走——CI 里两条分支都要真的跑到。
+        校对**不改写生图词**：词是指令、图是既成事实（#286 / ADR 0039）。「按差异
+        覆盖写回 ``assets/picture-NN.md``」与资产轮次账的那条路径已整体删除。
+
+        桩模式（``fake_pipeline``）只把这个 job 的「读图」换成固定结论，台账转移、
+        待办重开仍由收尾的同一份代码走——CI 里两条分支都要真的跑到。
         """
         if self.fake_pipeline:
             return self._execute_asset_proofread_fake(
                 session_id, job_id, cancel_event, number)
-        from ..asset_loop import rewrite_asset_prompt
         from ..asset_proofread import (
             build_proofread_request,
             compare_descriptions,
@@ -3189,7 +3192,6 @@ class JobRunner:
             render_proofread_report,
         )
         from ..generation import asset_prompt_for
-        from ..model_factory import build_chat_model
         from ..tools.reference_auditor import describe_image
 
         session = load_session(self.store.session_directory(session_id))
@@ -3218,33 +3220,25 @@ class JobRunner:
         report = compare_descriptions(current, reading, locked)
         if cancel_event.is_set():
             raise JobCancelled(ASSET_PROOFREAD_NODE)
-        if report.is_clean():
-            self._emit_progress(session_id, job_id, ASSET_PROOFREAD_NODE, "done",
-                                stage=step_machine.STEP_ASSET_LOOP)
-            return {"step": ASSET_STEP_PROOFREAD, "number": number, "name": name,
-                    "passed": True, "reason": ""}
-
-        reason = render_proofread_report(report)
-        rewritten = rewrite_asset_prompt(current, reason, build_chat_model())
-        self.store.write_text_artifact(
-            session_id, artifact_name,
-            _render_asset_prompt(number, name, rewritten), job_id=job_id)
+        # 三种条目全空时渲染结果只有一句「无偏差、无补漏」，不值得写进卡片的 reason。
+        reason = (render_proofread_report(report)
+                  if (report.deviations or report.omissions or report.exempted)
+                  else "")
         self._emit_progress(session_id, job_id, ASSET_PROOFREAD_NODE, "done",
                             stage=step_machine.STEP_ASSET_LOOP)
         return {"step": ASSET_STEP_PROOFREAD, "number": number, "name": name,
-                "passed": False, "reason": reason}
+                "passed": report.is_clean(), "reason": reason}
 
     def _execute_asset_proofread_fake(self, session_id: str, job_id: str,
                                       cancel_event: threading.Event,
                                       number: int) -> dict[str, Any]:
-        """桩校对（#259）：伪造读图结论，**不调 ``describe_image``**、不建模型。
+        """桩校对（#259 / #287）：伪造读图结论，**不调 ``describe_image``**、不建模型。
 
         结论必须确定性且两条路都覆盖：第 1 件第一轮不通过、其余通过（判据是台账
-        轮次，不是调用次数——重跑/续跑不能换结论）。不通过时照真实路径覆盖同一份
-        ``assets/picture-NN.md``，只是改写由桩完成；台账转移仍在 ``_finish_asset_proofread``
-        那一份代码里，桩不另写一套收尾。
+        轮次，不是调用次数——重跑/续跑不能换结论）。桩**不改写任何词**：它与真实
+        路径同形，只换「谁判」，台账转移仍在 ``_finish_asset_proofread`` 那一份代码里。
         """
-        from .fake_pipeline import asset_proofread_verdict, rewrite_asset_prompt_text
+        from .fake_pipeline import asset_proofread_verdict
 
         session = load_session(self.store.session_directory(session_id))
         if session is None:
@@ -3267,15 +3261,6 @@ class JobRunner:
                             stage=step_machine.STEP_ASSET_LOOP)
         if cancel_event.is_set():
             raise JobCancelled(ASSET_PROOFREAD_NODE)
-        if not passed:
-            artifact_name = ASSET_PROMPT_FILENAME.format(number=number)
-            text = (self.store.session_directory(session_id)
-                    / artifact_name).read_text(encoding="utf-8")
-            current = _parse_asset_prompt(text)
-            self.store.write_text_artifact(
-                session_id, artifact_name,
-                _render_asset_prompt(number, name, rewrite_asset_prompt_text(current)),
-                job_id=job_id)
         self._emit_progress(session_id, job_id, ASSET_PROOFREAD_NODE, "done",
                             stage=step_machine.STEP_ASSET_LOOP)
         return {"step": ASSET_STEP_PROOFREAD, "number": number, "name": name,
@@ -3354,6 +3339,11 @@ class JobRunner:
 
         去向只看台账（``_asset_step_of``）：全部定稿时起一个普通 ``advance`` 任务，
         由 ``_resume_step`` 落到阶段 2——阶段 2 的入口仍只有那一处。
+
+        **通过的这一件若带着补漏/忽略条目，报告写进刚决议那张卡**（#287）：通过＝
+        卡片不会再回来，那张卡是补漏唯一的可见面（``reason`` 在详情与待办报告里都读
+        得到；#289 会在此之后追加「已按图补入 N 条」）。事件类型不新增——仍是既有的
+        ``action_item.resolved``，只多一个 ``reason`` 键。
         """
         number = int(result["number"])
         passed = bool(result["passed"])
@@ -3367,6 +3357,22 @@ class JobRunner:
             raise RuntimeError(f"会话文件读不到：{session_id}")
         settled = _settle_asset(session.asset_ledger, number, passed)
         step, _ = _asset_step_of(settled)
+        # 刚被这张卡决议的那一项：同一件号可能有多条历史决议（打回后又交），取最后一条。
+        # 只在通过且报告非空时才找——不通过的报告由新卡自己带着，不需要回写旧卡。
+        report_item_id = ""
+        if passed and reason.strip():
+            resolved = [
+                entry for entry in session.action_items
+                if (str(entry.get("kind")) == step_machine.ACTION_ASSET_IMAGE
+                    and int(entry.get("asset_index") or 0) == number
+                    and str(entry.get("status")) == "resolved")]
+            if resolved:
+                report_item_id = str(resolved[-1].get("item_id") or "")
+            else:
+                # 决议记录丢了（旧会话/快照损坏）：报告没有可落的卡片，但别静默吞掉。
+                logger.warning(
+                    "第 %s 件校对通过，但找不到刚决议的 asset_image 待办：%s",
+                    number, session_id)
         next_job: JobSummary | None = None
         item: ActionItemOut | None = None
         if passed:
@@ -3400,6 +3406,7 @@ class JobRunner:
             changes: dict[str, Any] = {
                 "asset_ledger": _settle_asset(
                     detail.asset_ledger_snapshot(), number, passed)}
+            items: list[dict[str, Any]] | None = None
             if next_job is not None:
                 changes["status"] = step_machine.STATUS_RUNNING
                 changes["jobs"] = _upsert_job(jobs, _job_dict(next_job))
@@ -3416,6 +3423,17 @@ class JobRunner:
                 items.append(item.model_dump(mode="json"))
                 changes["status"] = step_machine.STATUS_AWAITING_HUMAN
                 changes["jobs"] = jobs
+            if report_item_id:
+                if items is None:
+                    items = [entry.model_dump(mode="json")
+                             for entry in detail.action_items]
+                # 只添 reason，其余字段（决议值、决议时间、素材槽）原样保留：这不是
+                # 第二次决议，是给已决议的卡片补一段结论。
+                changes["action_items"] = [
+                    ({**entry, "reason": reason}
+                     if entry.get("item_id") == report_item_id else entry)
+                    for entry in items]
+            elif items is not None:
                 changes["action_items"] = items
             return changes
 
@@ -3435,6 +3453,15 @@ class JobRunner:
                 created_payload["reason"] = reason
             events.append(EventDraft(
                 "action_item.created", created_payload, job_id=job_id))
+        if report_item_id:
+            # 补报告也走 ``action_item.resolved``（事件类型保持十种闭合集合）。重放侧
+            # 只补 reason，已决议的卡片不再改决议时间——它记的是人按下那一刻。
+            events.append(EventDraft(
+                "action_item.resolved",
+                {"item_id": report_item_id,
+                 "decision": step_machine.DECISION_SUBMIT_IMAGE,
+                 "reason": reason},
+                job_id=job_id))
         self.store.mutate(session_id, _apply, events=events)
         return next_job
 

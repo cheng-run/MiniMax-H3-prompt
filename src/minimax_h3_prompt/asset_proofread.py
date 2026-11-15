@@ -139,8 +139,13 @@ class ProofreadReport:
     exempted: tuple[Claim, ...] = ()
 
     def is_clean(self) -> bool:
-        """没有要人裁、要并入的东西即为干净——被忽略的条目不算「不干净」（它们不需动作）。"""
-        return not self.deviations and not self.omissions
+        """只有**偏差**才会让这一件退回重交（#287）。
+
+        补漏与忽略条目都不参与通过判定：补漏是「图里有而描述没有」的增量事实，
+        任何一张细节密集的图都会带出几条，算进「不干净」就等于给这一件判了无期
+        （#286 事故 2）；忽略条目本来就不需要动作。补漏仍照常产出、照常展示。
+        """
+        return not self.deviations
 
 
 def _locked_hit(quote: str, locked: Sequence[str]) -> bool:
