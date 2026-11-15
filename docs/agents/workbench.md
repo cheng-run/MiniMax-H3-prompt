@@ -126,7 +126,9 @@
     条目上是同名**不同层**的字段——条目上存 `{model, source, keyword, evidence}` 对象，
     台账行上只存键；别把台账行交给 `model_of`。显示名不在台账里存第二份：详情响应按
     `image_config.IMAGE_MODEL_LABELS` 现渲染成 `RefOut.image_model_label`，卡片与素材
-    分区都读这一个字段。没有这个键的旧行（或用户上传的 r2v 行）读成「未知」。
+    分区都读这一个字段。没有这个键的旧行（或用户上传的 r2v 行）**回落到阶段 1 条目**
+    （同一份 `generation.asset_image_models`）：验收现场整批旧会话的台账行都缺这个字段，
+    只读台账会让 12 件全显示「未知」（#294）。两处都没有记录才读成「未知」，不编造一档。
   - **两种来源**（`source`）回答的是「这件素材是谁提供的」：ref 恒 `derived`（阶段 1
     收尾按资产图词派生）、导演台 r2v 恒 `uploaded`（创建时用户上传建立）；没有这个键
     的旧行读成 `uploaded`。**它不参与判定**：起跑门槛按 `brief.director_mode == "r2v"`

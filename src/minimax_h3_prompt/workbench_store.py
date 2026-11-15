@@ -1993,7 +1993,17 @@ def _validate_semantic_name(name: str) -> None:
 
 
 def _brief_out(brief: Brief,
-               ledger: Sequence[dict[str, Any]] = ()) -> BriefOut:
+               ledger: Sequence[dict[str, Any]] = (),
+               *,
+               stage_state: Mapping[str, Any] | None = None) -> BriefOut:
+    # 档位回落表（#294）：只有台账行缺字段时才用到，按语义名取阶段 1 的判定。
+    # 取数走 ``generation.asset_image_models``（``image_routing`` 是唯一事实源），
+    # 不在这里另算一遍；懒导入避开模块级循环（generation 也依赖本模块的常量）。
+    stage_models: dict[str, str] = {}
+    if stage_state:
+        from .generation import asset_image_models
+
+        stage_models = asset_image_models(brief, stage_state)
     return BriefOut(
         mode=brief.mode,
         variant=brief.variant,
@@ -2019,18 +2029,24 @@ def _brief_out(brief: Brief,
         ),
         # brief.refs 属于 CLI 文件流程（带本地路径的那套登记），工作台的参考素材
         # 只能从台账来（spec §4.1）：这里统一按台账回显，不让两套登记混进同一个字段。
-        refs=[_ref_out(entry) for entry in _ledger_order(ledger)],
+        # 档位的回落（#294）：旧台账行没有 ``image_model``，按语义名从阶段 1 条目取
+        # （与资产图词产物出口同一份 ``asset_image_models``）；取不到才是「未知」。
+        refs=[_ref_out(entry, fallback_model=stage_models.get(str(entry["name"]), ""))
+              for entry in _ledger_order(ledger)],
     )
 
 
-def _ref_out(entry: Mapping[str, Any]) -> RefOut:
-    """台账一行 → 详情响应里的摘要（含生图档位，#292）。
+def _ref_out(entry: Mapping[str, Any], *, fallback_model: str = "") -> RefOut:
+    """台账一行 → 详情响应里的摘要（含生图档位，#292 / #294）。
 
-    ``image_model`` 是档位键，``image_model_label`` 是**唯一一次**的显示名渲染：空值
-    （旧台账行没有记录）两者都给 ``None``、由界面说「未知」；非空值写入时已过
+    ``image_model`` 是档位键，``image_model_label`` 是**唯一一次**的显示名渲染。
+    **台账优先**：那是「这条词当年按哪一档的纪律写成」的记录。台账行没有这个字段时
+    退回 ``fallback_model``——旧会话（#292 之前派生）的行没有它，但阶段 1 条目里
+    有判定；只认台账会让整批旧会话显示「未知」，用户就不知道该贴进哪个节点（#294）。
+    两处都没有时才给 ``None``、由界面说「未知」——不编造一档。非空值写入时已过
     ``image_routing`` 的值域校验，这里再遇到错值就该响，不静默换成「未知」掩盖坏数据。
     """
-    model = str(entry.get(IMAGE_MODEL_KEY) or "")
+    model = str(entry.get(IMAGE_MODEL_KEY) or "") or str(fallback_model or "")
     return RefOut(
         name=str(entry["name"]), kind=str(entry["kind"]),
         number=int(entry["number"]), asset_id=str(entry["asset_id"]),
@@ -2615,7 +2631,8 @@ class WorkbenchSessionStore:
             (job for job in reversed(jobs) if job.status == "running"), None)
         detail = SessionDetail(
             **summary.model_dump(),
-            brief=_brief_out(session.brief, session.asset_ledger),
+            brief=_brief_out(session.brief, session.asset_ledger,
+                             stage_state=session.stage_state),
             last_event_seq=session.last_event_seq,
             current_job=current_job,
             jobs=jobs,

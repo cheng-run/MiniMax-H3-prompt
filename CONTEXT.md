@@ -279,7 +279,7 @@ _Avoid_: 素材清单（不含可复测要求）、拿 `pending` 行读成「素
 _Avoid_: 关键帧（那是首尾帧链的锚定概念）、拿素材图指设计阶段产物
 
 **生图档位（image model tier）**:
-一条资产图词按哪一档的写词纪律写成、该贴进哪个 ComfyUI 节点。三档：`qwen`（Qwen-Image 2.1）/ `moss`（MOSS-Image）/ `z_image`（Z-Image Turbo）。判定住 state 条目的 `image_model`（`{model, source, keyword, evidence}`，`image_routing` 是唯一事实源，按资产**逐件**判而不是按类套一张表）；工作台的素材台账行只带**键**（`image_model`），显示名由 `image_config.IMAGE_MODEL_LABELS` 在详情响应里现渲染一次（`RefOut.image_model_label`），卡片与素材分区都读那一份，前端不另写名字表。没有记录的旧行读成「未知」；旧条目没有判定时按历史的 Z-Image 读（那时只有这一档）。
+一条资产图词按哪一档的写词纪律写成、该贴进哪个 ComfyUI 节点。三档：`qwen`（Qwen-Image 2.1）/ `moss`（MOSS-Image）/ `z_image`（Z-Image Turbo）。判定住 state 条目的 `image_model`（`{model, source, keyword, evidence}`，`image_routing` 是唯一事实源，按资产**逐件**判而不是按类套一张表）；工作台的素材台账行只带**键**（`image_model`），显示名由 `image_config.IMAGE_MODEL_LABELS` 在详情响应里现渲染一次（`RefOut.image_model_label`），卡片与素材分区都读那一份，前端不另写名字表。没有记录的旧行读成「未知」；旧条目没有判定时按历史的 Z-Image 读（那时只有这一档）。旧会话的台账行缺这个字段时，详情按语义名**回落到阶段 1 条目**取档位（同一份 `asset_image_models`），两处都没有才是「未知」。
 _Avoid_: 把档位当成 CLI 的「生图模型配置」（配置只是默认分配，逐件的判定在条目上）、在卡片里另写一份名字表、拿台账行去调 `image_routing.model_of`（它要的是判定对象，不是键）
 
 **素材画面事实（asset description）**:

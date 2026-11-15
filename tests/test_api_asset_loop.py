@@ -369,11 +369,13 @@ def test_derived_rows_carry_their_image_model_and_display_label(harness, monkeyp
     assert [entry["image_model"] for entry in harness.ledger()] == ["qwen", "moss"]
 
 
-def test_ledger_rows_without_a_recorded_model_stay_unknown(harness):
-    """#292：旧台账行没有档位字段时，详情给空串（界面说「未知」），不编造一档。
+def test_ledger_rows_without_a_recorded_model_fall_back_to_the_stage1_record(harness):
+    """#294：旧台账行（#292 之前派生的）没有档位字段时，按语义名从阶段 1 条目回落。
 
-    判的是**台账**缺字段这一档（#292 之前落的行），不是「条目没有记录」——后者按
-    ``image_prompt_variants`` 的同一条历史读法读成 Z-Image（那时只有这一档）。
+    验收现场（`0a011b20`）的整批旧会话都是这个形状：台账行没有 ``image_model``，
+    而阶段 1 条目里每条都有判定。只读台账会让 12 件全部显示「未知」，用户不知道该
+    贴进哪个 ComfyUI 节点。条目上也没有记录时才按历史读成 Z-Image（那时只有这一档，
+    与 ``image_prompt_variants`` 同一条读法）。
     """
     _to_first_card(harness)
     path = harness.root / Path(harness.session_id) / SESSION_FILENAME
@@ -384,7 +386,32 @@ def test_ledger_rows_without_a_recorded_model_stay_unknown(harness):
 
     rows = harness.detail()["brief"]["refs"]
     assert [(ref["image_model"], ref["image_model_label"])
-            for ref in rows] == [(None, None), (None, None)]
+            for ref in rows] == [
+        ("z_image", IMAGE_MODEL_LABELS["z_image"]),
+        ("z_image", IMAGE_MODEL_LABELS["z_image"]),
+    ]
+
+
+def test_a_row_absent_from_the_stage1_record_stays_unknown(harness):
+    """#294：两处都没有记录才是真「未知」——不编造一档。
+
+    台账行缺字段、阶段 1 条目里也没有这个语义名（改名、外部登记的素材）时，
+    回落表里查不到，详情给空值，界面说「未知」。
+    """
+    _to_first_card(harness)
+    path = harness.root / Path(harness.session_id) / SESSION_FILENAME
+    snapshot = json.loads(path.read_text(encoding="utf-8"))
+    for entry in snapshot["asset_ledger"]:
+        entry.pop("image_model", None)
+    stage_state = snapshot["stage_state"]
+    for key in ("character_image_prompts", "prop_image_prompts", "scene_image_prompts"):
+        stage_state[key] = [row for row in (stage_state.get(key) or [])
+                            if row.get("name") != LAMP]
+    path.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+
+    rows = {ref["number"]: ref for ref in harness.detail()["brief"]["refs"]}
+    assert rows[1]["image_model"] == "z_image"
+    assert (rows[2]["image_model"], rows[2]["image_model_label"]) == (None, None)
 
 
 def test_base_session_approval_still_goes_straight_to_stage2(harness, monkeypatch):
