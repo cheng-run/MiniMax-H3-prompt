@@ -414,7 +414,11 @@ def _merge_image_facts(
         if not fact or fact in merged or fact in facts:
             continue
         facts.append(fact)
-        merged = f"{merged}；{fact}"
+    if facts:
+        # 尾部并入走**既有的纯函数**（spec #286「不新写合并逻辑」）：它只追加、不改写
+        # 既有文字，与上面的定点替换共用同一份「；」分隔口径。去重仍是本函数的活——
+        # 同一件反复校对时，同一句话不许并进第二遍。
+        merged = merge_asset_description(merged, [], facts, name=name)
     return _ImageFacts(merged, tuple(applied), tuple(facts), tuple(skipped))
 
 
@@ -1422,22 +1426,24 @@ class JobRunner:
                         # 后果当场讲清（#279 US10）：放弃的是图，**不是那些文字**。
                         holder["reason"] = _abandon_asset_note(name)
                         recorded_decision = step_machine.DECISION_ABANDON_ASSET
-                    elif decision in (step_machine.DECISION_REWORD_REROLL,
-                                      step_machine.DECISION_REROLL,
-                                      step_machine.DECISION_ACCEPT_IMAGE_FACTS,
-                                      step_machine.DECISION_KEEP_DESCRIPTION):
-                        # 校对不通过的**四选**（#288 前两选 / #289 后两选）。四条都
-                        # 不带图——用户是在选「下一轮怎么来」或「这一件怎么定」，
-                        # 不是又交了一张。
+                    elif decision in step_machine.EXPLICIT_ASSET_DECISIONS:
+                        # 显式决议值这一族（``EXPLICIT_ASSET_DECISIONS``，唯一一份）：
+                        # 校对四选（#288 前两选 / #289 后两选）与恢复原文（#291）。
+                        # 它们都**不带图**——用户是在选「下一轮怎么来」「这一件怎么定」
+                        # 或「这一版词本来就不该被改」，不是又交了一张。
                         if asset_id is not None:
                             raise AssetImageInvalid(
-                                "出路的决议与交图不能同时提交：要么交一张图，"
-                                "要么在四条出路上选一条。")
+                                "这些决议与交图不能同时提交：要么交一张图，"
+                                "要么在四条出路／恢复原文里选一条。")
                         holder["number"] = int(number)
                         recorded_decision = decision
-                        # 定稿的两条（#289）：补漏在**这一刻**并入素材画面事实；
-                        # 重掷的两条不碰任何文本（``_SETTLING_ASSET_DECISIONS`` 是
-                        # 判据的唯一一份：预演与落盘都读它）。
+                        # 恢复原文（#291）到此为止：台账与轮次账都不动、一次模型都不调。
+                        # 真正的三个判据在作业里按盘现算（与卡片上出现它的判据同一份
+                        # ``asset_restore_candidate``）——盘上词可能已被别处改过，那时
+                        # 宁可不写，也不许抹掉一次合法改写。
+                        # 定稿的两条（#289）在这里多走一步：补漏在**这一刻**并入素材
+                        # 画面事实。重掷的两条与恢复原文一个字都不碰——判据的唯一一份
+                        # 是 ``_SETTLING_ASSET_DECISIONS``（预演与落盘都读它）。
                         if decision in _SETTLING_ASSET_DECISIONS:
                             if not settle_preview:
                                 # 预演是这决议的输入之一（锁外算、锁内落盘）：
@@ -1456,17 +1462,6 @@ class JobRunner:
                             holder["asset_ledger"] = _settle_asset(
                                 ledger, number, True)
                             holder["reason"] = str(settle_preview.get("note") or "")
-                    elif decision == step_machine.DECISION_RESTORE_PROMPT:
-                        # 恢复阶段 1 原文（#291）：台账**不动**、轮次账**不动**、一次模型
-                        # 都不调。真正的三个条件在作业里按盘现算（与卡片上出现它的判据
-                        # 同一份 ``asset_restore_candidate``）——用户点了之后盘上词可能
-                        # 已被别处改过，那时候宁可不写，也不许抹掉一次合法改写。
-                        if asset_id is not None:
-                            raise AssetImageInvalid(
-                                "恢复阶段 1 原文与交图不能同时提交：它只把盘上的词"
-                                "改回阶段 1 那一份，不认图。")
-                        holder["number"] = int(number)
-                        recorded_decision = decision
                     else:
                         if decision is not None:
                             raise AssetImageInvalid(
@@ -1763,13 +1758,12 @@ class JobRunner:
                     if branch == _BRANCH_FRAMES
                     else step_machine.DECISION_SUBMIT_VIDEO
                     if branch == _BRANCH_SEGMENT_VIDEO
-                    # 校对不通过的两条出路与恢复原文都是**显式** decision 取值
-                    # （#288 / #291），与交图/放弃不同，不靠载荷分型——事件里照抄
-                    # 请求里的那一个词。
+                    # 校对四选与恢复原文都是**显式** decision 取值（#288 / #289 / #291），
+                    # 与交图/放弃不同，不靠载荷分型——事件里照抄请求里的那一个词。
+                    # 白名单只有 ``EXPLICIT_ASSET_DECISIONS`` 一份：这里漏一条，事件流
+                    # 与重放就会把定稿出路记成 ``submit_image``（快照仍是对的）。
                     else decision
-                    if decision in (step_machine.DECISION_REWORD_REROLL,
-                                    step_machine.DECISION_REROLL,
-                                    step_machine.DECISION_RESTORE_PROMPT)
+                    if decision in step_machine.EXPLICIT_ASSET_DECISIONS
                     else step_machine.DECISION_ABANDON_ASSET
                     if abandon
                     else step_machine.DECISION_SUBMIT_IMAGE

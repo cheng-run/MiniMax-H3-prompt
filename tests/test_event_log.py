@@ -218,6 +218,49 @@ def test_action_item_payload_fields_must_be_well_typed(tmp_path, payload):
         log.append([EventDraft("action_item.created", payload)])
 
 
+@pytest.mark.parametrize("proofread", [
+    # 结论不是对象：改词作业按它驱动，形状错了会被读成「没有偏差」。
+    "deviations",
+    ["deviations"],
+    # 两张清单必须都是列表：写成字符串/对象会变成逐字符或逐键迭代。
+    {"deviations": "x", "omissions": []},
+    {"deviations": [], "omissions": {}},
+    # 条目必须是对象、字段必须逐一是字符串：缺字段＝改词作业读到空串（#288）。
+    {"deviations": ["尾巴"], "omissions": []},
+    {"deviations": [{"aspect": "尾巴", "prompt_quote": "尾巴绕住前爪"}], "omissions": []},
+    {"deviations": [], "omissions": [{"aspect": "项圈"}]},
+    {"deviations": [], "omissions": [{"aspect": "项圈", "fact": 3}]},
+])
+def test_proofread_conclusion_must_be_well_shaped(tmp_path, proofread):
+    """结构化校对结论的形状是改词作业的输入契约，坏形状必须在写事件时就拒掉（#288）。"""
+    log = _log(_directory(tmp_path))
+
+    with pytest.raises(InvalidEventPayload):
+        log.append([EventDraft("action_item.created", {
+            "item_id": "i1", "kind": "asset_image", "asset_index": 1,
+            "proofread": proofread})])
+
+
+def test_a_well_shaped_proofread_conclusion_is_accepted(tmp_path):
+    """合法形状放行：空清单与齐备条目都收，且原样落盘（校验不许收窄合法载荷）。"""
+    directory = _directory(tmp_path)
+    proofread = {
+        "deviations": [{"aspect": "尾巴", "prompt_quote": "尾巴绕住前爪",
+                        "observed": "尾巴垂在窗台边缘"}],
+        "omissions": [{"aspect": "项圈", "fact": "脖子上有一圈红色项圈"}],
+    }
+    log = _log(directory)
+
+    log.append([EventDraft("action_item.created", {
+        "item_id": "i1", "kind": "asset_image", "asset_index": 1,
+        "proofread": proofread})])
+    log.append([EventDraft("action_item.created", {
+        "item_id": "i2", "kind": "asset_image", "asset_index": 2,
+        "proofread": {"deviations": [], "omissions": []}})])
+
+    assert _lines(directory)[0]["payload"]["proofread"] == proofread
+
+
 def test_payload_may_carry_extra_fields(tmp_path):
     """加字段可以：向前兼容的读者不该因为新字段而拒绝一条合法事件。"""
     directory = _directory(tmp_path)

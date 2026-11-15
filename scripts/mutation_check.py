@@ -1573,6 +1573,57 @@ MUTATIONS: tuple[Mutation, ...] = (
         "spec #286「去重判据：观察文本已逐字出现则跳过」）",
     ),
     Mutation(
+        "proofread_conclusion_shape_unchecked",
+        "src/minimax_h3_prompt/workbench_store.py",
+        "    if value is None:\n"
+        "        return\n"
+        "    if not isinstance(value, dict):",
+        "    if True:\n"
+        "        return\n"
+        "    if not isinstance(value, dict):",
+        ("tests/test_event_log.py::test_proofread_conclusion_must_be_well_shaped",),
+        "校对结论形状不校验＝半截结论照旧进事件流，重放后改词作业读到空串/非列表"
+        "就静默改错方向（#288，spec #286「结构化偏差清单」）",
+    ),
+    Mutation(
+        "decision_whitelist_drops_settling_exits",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "                    if decision in step_machine.EXPLICIT_ASSET_DECISIONS",
+        "                    if decision in (step_machine.DECISION_REWORD_REROLL,\n"
+        "                                    step_machine.DECISION_REROLL,\n"
+        "                                    step_machine.DECISION_RESTORE_PROMPT)",
+        ("tests/test_api_asset_loop.py::"
+         "test_settling_exits_record_their_real_decision_in_events_and_replay",),
+        "事件侧白名单漏掉两条定稿出路＝真实决议被记成 submit_image，"
+        "快照与事件流/重放从那一刻分家（#286 复审 A 的原样复现）",
+    ),
+    Mutation(
+        "asset_receipt_takes_any_kind",
+        "frontend/src/features/sessions/AssetsTab.vue",
+        "    if (item.kind !== 'asset_image' || item.status !== 'resolved') {\n"
+        "      continue\n"
+        "    }",
+        "    if (item.status !== 'resolved') {\n"
+        "      continue\n"
+        "    }",
+        ("src/features/sessions/AssetsTab.spec.ts"
+         "::没有已决议回执（只有待决卡或空 reason）时不显示",),
+        "回执不认待办种类＝补交口的「交完了」会被当成素材卡回执印在素材分区，"
+        "而那张卡说的是另一件事（#286 复审 F）",
+        runner="vitest",
+    ),
+    Mutation(
+        "asset_receipt_takes_the_first_card",
+        "frontend/src/features/sessions/AssetsTab.vue",
+        "    if (latest === null || (item.resolved_at ?? '') >= (latest.resolved_at ?? '')) {",
+        "    if (latest === null) {",
+        ("src/features/sessions/AssetsTab.spec.ts"
+         "::换件之后回执跟着最新一张走，不把上一件的说明串到这一件上",),
+        "回执停在第一张已决议卡上＝换件后显示上一件的结果，用户以为这一件也是那样定的"
+        "（#286 复审 F：按 resolved_at 取最新一张）",
+        runner="vitest",
+    ),
+    Mutation(
         "restore_ignores_the_round_log",
         "src/minimax_h3_prompt/workbench_store.py",
         "        if read_asset_rounds(directory, name=name):\n"

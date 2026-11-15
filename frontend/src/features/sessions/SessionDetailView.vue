@@ -564,6 +564,7 @@ const errorMessage = computed(() =>
           :phase="assetPhase"
           :current-number="pendingAssetNumber"
           :current-reason="pendingAssetItem?.reason ?? ''"
+          :action-items="data.action_items ?? []"
           @refresh="invalidateSnapshot"
           @goto-review="selectTab('review')"
         />

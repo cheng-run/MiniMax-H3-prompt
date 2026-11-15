@@ -7,6 +7,7 @@ import {
   deleteSessionAsset,
   reopenSessionAsset,
   uploadSessionAsset,
+  type ActionItemOut,
   type Asset,
   type RefOut,
 } from '@/api/client'
@@ -39,6 +40,8 @@ const props = withDefaults(
     currentNumber?: number | null
     /** 当前件带上轮的校对差异＝「交过但没过，等你重交」，不是「还没交」。 */
     currentReason?: string
+    /** 会话的全部待办（快照原样）：回执从这里取最近一张已决议的素材卡。 */
+    actionItems?: ActionItemOut[]
   }>(),
   {
     mode: 'base',
@@ -48,6 +51,7 @@ const props = withDefaults(
     phase: '',
     currentNumber: null,
     currentReason: '',
+    actionItems: () => [],
   },
 )
 
@@ -140,6 +144,62 @@ const passedCount = computed(
 const abandonedCount = computed(
   () => pictureRows.value.filter((ref) => ref.status === 'abandoned').length,
 )
+
+// 决议值的人话标签（#286 复审 F）：回执要说得清「这一件是怎么定下来的」。
+// 只覆盖素材卡会出现的那几档；未知值原样显示，不隐藏也不编造。
+const DECISION_LABELS: Record<string, string> = {
+  accept_image_facts: '按图改文案',
+  keep_description: '保留原描述',
+  reword_reroll: '改词再掷',
+  reroll: '原词再掷',
+  restore_prompt: '恢复原文',
+  abandon_asset: '放弃这一件',
+  submit_image: '交图',
+}
+
+interface ReceiptView {
+  /** 换件后回执不串件：键取自决议本身，不是「当前这一件」。 */
+  key: string
+  number: number | null
+  name: string
+  decisionLabel: string
+  reason: string
+}
+
+// 最近一张已决议素材卡的回执（#286 复审 F）：已决议的卡不再渲染，`job.detail` 只在
+// 概览分区可见——「已按图补入 N 条」「校对未完成：…」「放弃说明」这些**事后**事实
+// 在界面上原本没有落点，用户只看到选择前的预测文案。服务端写进已决议待办的那句
+// `reason` 就是回执本体，这里原样显示，不在前端重写一份。
+// 只认 `asset_image`：补交口的 reason 属于另一件事；件号与语义名一起显示，
+// 因为「回执说的是哪一件」不能靠用户自己记。
+const receipt = computed<ReceiptView | null>(() => {
+  let latest: ActionItemOut | null = null
+  for (const item of props.actionItems) {
+    if (item.kind !== 'asset_image' || item.status !== 'resolved') {
+      continue
+    }
+    if (!(item.reason ?? '').trim()) {
+      continue
+    }
+    // 按 `resolved_at` 取最新：补报告走同一条事件（#287）但不动决议时间，
+    // 所以这里的比较口径就是「人按下那一刻」。同刻取后出现的。
+    if (latest === null || (item.resolved_at ?? '') >= (latest.resolved_at ?? '')) {
+      latest = item
+    }
+  }
+  if (latest === null) {
+    return null
+  }
+  const number = latest.asset_index ?? null
+  const name = pictureRows.value.find((ref) => ref.number === number)?.name ?? ''
+  return {
+    key: latest.item_id,
+    number,
+    name,
+    decisionLabel: DECISION_LABELS[latest.decision ?? ''] ?? latest.decision ?? '',
+    reason: (latest.reason ?? '').trim(),
+  }
+})
 
 const assetById = computed(() => new Map(props.assets.map((asset) => [asset.asset_id, asset])))
 
@@ -296,6 +356,17 @@ async function onReopen(assetId: string): Promise<void> {
         <p class="muted" data-testid="assets-readonly">
           语义名与编号只读：它们由阶段 1 的资产图词决定。交图在「审查与待办」的待办卡上逐件进行。
         </p>
+        <!-- 最近一件已决议素材卡的回执（#286 复审 F）：结果写在卡上，而卡换件后就不再
+             渲染——不在这里留一句，「已按图补入 N 条」「校对未完成」就只剩决策前的
+             预测文案可看。件号与语义名钉住它说的是哪一件。 -->
+        <article v-if="receipt" class="receipt" data-testid="asset-receipt">
+          <p class="receipt__title">
+            上一件已决议：第 {{ receipt.number }} 件<template v-if="receipt.name"
+              >「{{ receipt.name }}」</template
+            ><template v-if="receipt.decisionLabel">（{{ receipt.decisionLabel }}）</template>
+          </p>
+          <pre class="receipt__text">{{ receipt.reason }}</pre>
+        </article>
       </template>
     </template>
     <p v-else-if="usesLedger" class="muted">
@@ -484,6 +555,23 @@ async function onReopen(assetId: string): Promise<void> {
   margin: 0;
   color: var(--color-error-text);
   font-size: 0.875rem;
+}
+.receipt {
+  margin: 0;
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+.receipt__title {
+  margin: 0 0 var(--space-1);
+  font-weight: 600;
+}
+.receipt__text {
+  margin: 0;
+  white-space: pre-wrap;
+  font: inherit;
+  color: var(--color-text-muted);
 }
 .upload {
   display: flex;

@@ -757,3 +757,105 @@ describe('AssetsTab 换一张图（#279 US11 / #282）', () => {
     expect(wrapper.emitted('refresh')).toBeUndefined()
   })
 })
+
+// ---------------------------------------------------------------------------
+// 已决议素材卡的回执（#286 复审 F）
+// ---------------------------------------------------------------------------
+
+function makeItem(overrides: Partial<ActionItemOut> = {}): ActionItemOut {
+  return {
+    item_id: 'item-1',
+    kind: 'asset_image',
+    status: 'resolved',
+    created_at: '2026-11-15T00:00:00Z',
+    resolved_at: '2026-11-15T00:01:00Z',
+    reason: '',
+    decision: 'accept_image_facts',
+    asset_index: 1,
+    ...overrides,
+  }
+}
+
+describe('AssetsTab 已决议素材卡的回执', () => {
+  it('最近一张已决议卡的非空 reason 带件号、语义名与决议标签显示出来', () => {
+    const wrapper = mount(AssetsTab, {
+      props: {
+        sessionId: 'sess-1',
+        assets: [],
+        mode: 'ref',
+        phase: 'asset_loop',
+        refs: [derivedRef(1, '橘猫', { status: 'passed' }), derivedRef(2, '台灯')],
+        actionItems: [
+          makeItem({
+            reason: '已按图改文案：1 处偏差按图中实见改在素材画面事实里；已按图补入 1 条。',
+          }),
+        ],
+      },
+    })
+
+    const receipt = wrapper.find('[data-testid="asset-receipt"]')
+    expect(receipt.exists()).toBe(true)
+    expect(receipt.text()).toContain('第 1 件')
+    expect(receipt.text()).toContain('「橘猫」')
+    expect(receipt.text()).toContain('（按图改文案）')
+    expect(receipt.text()).toContain('已按图补入 1 条')
+  })
+
+  it('没有已决议回执（只有待决卡或空 reason）时不显示', () => {
+    const wrapper = mount(AssetsTab, {
+      props: {
+        sessionId: 'sess-1',
+        assets: [],
+        mode: 'ref',
+        phase: 'asset_loop',
+        refs: [derivedRef(1, '橘猫')],
+        actionItems: [
+          makeItem({ item_id: 'pending-1', status: 'pending', reason: '差异报告' }),
+          makeItem({ item_id: 'empty-1', reason: '   ' }),
+          // 别的种类的待办不提供回执：「补交口」说的是另一件事。
+          makeItem({ item_id: 'extra-1', kind: 'asset_extra', reason: '交完了' }),
+        ],
+      },
+    })
+
+    expect(wrapper.find('[data-testid="asset-receipt"]').exists()).toBe(false)
+  })
+
+  it('换件之后回执跟着最新一张走，不把上一件的说明串到这一件上', () => {
+    const wrapper = mount(AssetsTab, {
+      props: {
+        sessionId: 'sess-1',
+        assets: [],
+        mode: 'ref',
+        phase: 'asset_loop',
+        refs: [
+          derivedRef(1, '橘猫', { status: 'passed' }),
+          derivedRef(2, '台灯', { status: 'passed' }),
+        ],
+        actionItems: [
+          makeItem({
+            item_id: 'item-1',
+            asset_index: 1,
+            resolved_at: '2026-11-15T00:01:00Z',
+            reason: '第 1 件的回执：已按图补入 1 条。',
+          }),
+          makeItem({
+            item_id: 'item-2',
+            asset_index: 2,
+            decision: 'keep_description',
+            resolved_at: '2026-11-15T00:05:00Z',
+            reason: '第 2 件的回执：已按图补入 2 条。',
+          }),
+        ],
+      },
+    })
+
+    const receipt = wrapper.find('[data-testid="asset-receipt"]')
+    expect(receipt.text()).toContain('第 2 件')
+    expect(receipt.text()).toContain('「台灯」')
+    expect(receipt.text()).toContain('保留原描述')
+    expect(receipt.text()).toContain('第 2 件的回执')
+    expect(receipt.text()).not.toContain('第 1 件')
+    expect(receipt.text()).not.toContain('第 1 件的回执')
+  })
+})

@@ -64,8 +64,11 @@ ACTION_FRAME_SUBMISSION = "frame_submission"
 # 第三个人工待办（D6 spec §8）：长片每段一次「交本段视频」。每段恰好一个，载荷带段号；
 # 等待期间会话是 ``awaiting_human``。同样复用既有 ``action_item.created``。
 ACTION_SEGMENT_VIDEO = "segment_video"
-# 第四个人工待办（D7 spec §6.3）：素材循环里每件参考素材一次「交这张生成的资产图」。
-# 载荷只有 ``asset_id``，决定只有 ``submit_image``——**没有放行键**（降级只能靠改词）。
+# 第四个人工待办（D7 spec §6.3 / D7 修订 #279 / #282）：素材循环里每件参考素材一次
+# 「交这张生成的资产图」。两种载荷形态：交图（``asset_id``）与放弃这一件
+# （``decision=abandon_asset``，不带图）。校对不通过时另有五档**显式决议值**
+# （四选出路 + 恢复原文，见下面的 ``EXPLICIT_ASSET_DECISIONS``）——它们回答的是
+# 「下一轮怎么来 / 这一件怎么定」，**都不是放行键**：没有「降低标准直接通过」这一档。
 ACTION_ASSET_IMAGE = "asset_image"
 # 第五个人工待办（D8 spec §5.6 / §7）：导演台 i2v/fl2v 在阶段 1 审查通过之后、规划之前
 # 收开场首帧（必填）与全片尾帧（可选）。它不是 base 的 ``frame_submission``——串用会让
@@ -195,6 +198,17 @@ DECISION_KEEP_DESCRIPTION = "keep_description"
 # 有账＝用户自己认可的合法改写，一键抹掉它就是在删历史。所以它不是校对四选之一：
 # 四选回答「下一轮怎么来」，它回答「这一版词本来就不该被改」。
 DECISION_RESTORE_PROMPT = "restore_prompt"
+# 上面这五档（校对四选 + 恢复原文）是 ``asset_image`` 待办的**显式决议值**：请求里
+# 原样给出那个词，不靠载荷分型。这一份声明是唯一的一份——事件构造与锁内落盘两处
+# 都从它派生。曾经事件侧只抄了三条（漏掉两条定稿出路），事件流与重放把真实决议记成
+# ``submit_image``，而快照里的值是对的：同一件事两处口径，从那一刻分家（#286 复审）。
+EXPLICIT_ASSET_DECISIONS: tuple[str, ...] = (
+    DECISION_REWORD_REROLL,
+    DECISION_REROLL,
+    DECISION_ACCEPT_IMAGE_FACTS,
+    DECISION_KEEP_DESCRIPTION,
+    DECISION_RESTORE_PROMPT,
+)
 # 补交口的两种决议（#279 §补交口 / #284）。``submit_extras`` 只说明「我交完了」，
 # 具体交了哪些视频/音频看台账——那一次上传已经带语义名登记进去了，决议不重抄一份；
 # ``no_extras`` 就是卡片上那个「没有，就这样」，它必须是能点下去的答案，否则补交口

@@ -1700,6 +1700,45 @@ def test_keep_description_keeps_the_wording_and_only_adds_the_facts(harness):
     assert "已按图补入 1 条" in resolved["reason"]
 
 
+@pytest.mark.parametrize("decision", ["accept_image_facts", "keep_description"])
+def test_settling_exits_record_their_real_decision_in_events_and_replay(
+        harness, decision):
+    """定稿出路的真实决议值要进事件流，重放后仍是它（#286 复审 A）。
+
+    事件构造曾经只认三条显式决议（改词再掷／原词再掷／恢复原文），两条定稿出路
+    被静默记成 ``submit_image``：快照里的值是对的，事件流与重放却在说另一件事。
+    白名单收进 ``step_machine.EXPLICIT_ASSET_DECISIONS`` 后两处同源。
+    """
+    _body, card, _before = _to_failed_first_card(harness)
+
+    resp = _resolve(harness, card, {"decision": decision})
+    assert resp.status_code == 202, resp.text
+
+    harness.wait_until(
+        lambda snapshot: any(entry["kind"] == "asset_image"
+                             and entry["status"] == "pending"
+                             and entry["asset_index"] == 2
+                             for entry in snapshot["action_items"]))
+    resolved_event = [event for event in _events(harness.root, harness.session_id)
+                      if event["type"] == "action_item.resolved"
+                      and event["payload"].get("item_id") == card["item_id"]][-1]
+    assert resolved_event["payload"]["decision"] == decision, \
+        "事件流把定稿出路记成了别的决议值（同一件事两处口径，重放会跟着失真）"
+
+    # 手工制造「事件已写、快照落后」：把快照里的决议值故意写坏，重放必须盖回真实值。
+    path = harness.root / Path(harness.session_id) / SESSION_FILENAME
+    snapshot = json.loads(path.read_text(encoding="utf-8"))
+    snapshot["last_event_seq"] = resolved_event["seq"] - 1
+    for entry in snapshot["action_items"]:
+        if entry["item_id"] == card["item_id"]:
+            entry["decision"] = "submit_image"
+    path.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+
+    replayed = [entry for entry in harness.detail()["action_items"]
+                if entry["item_id"] == card["item_id"]][0]
+    assert replayed["decision"] == decision, "事件重放没有把真实决议值补回"
+
+
 def test_a_fact_observed_again_is_not_merged_twice(harness):
     """补漏按观察去重：同一句第二次定稿不重复并进描述（同一句不出现两次）。"""
     body = _to_first_card(harness)
