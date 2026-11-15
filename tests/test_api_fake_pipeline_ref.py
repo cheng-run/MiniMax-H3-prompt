@@ -319,10 +319,13 @@ def test_fake_dropped_asset_fails_stage1_and_names_both_sides(fake_app, monkeypa
     text = failures[-1]["detail"]
     assert "桩素材1" in text, "缺失的那一件要点名"
     assert "桩素材2" in text, "现有的名字也要点名"
-    # 半份台账比没有台账更难收拾：失败时一件都不落。
+    # 半份台账比没有台账更难收拾：失败时一件都不落，派生标记也不能置真。
     assert detail["brief"]["refs"] == []
     assert [item for item in detail["action_items"]
             if item["kind"] == "stage1_review"] == []
+    raw = json.loads(
+        (root / Path(session_id) / "session-state.json").read_text(encoding="utf-8"))
+    assert raw["asset_manifest_derived"] is False
 
 
 def test_fake_zero_assets_derives_nothing_and_moves_on(fake_app, monkeypatch):
@@ -332,7 +335,7 @@ def test_fake_zero_assets_derives_nothing_and_moves_on(fake_app, monkeypatch):
     素材」与「清单没派生」混成一个状态。4 秒＝单段直出，整条推进不需要模型。
     """
     monkeypatch.setenv("MINIMAX_FAKE_ASSET_COUNT", "0")
-    app, _root = fake_app
+    app, root = fake_app
 
     with workbench_client(app) as client:
         created = client.post("/api/v1/sessions", json={
@@ -364,6 +367,11 @@ def test_fake_zero_assets_derives_nothing_and_moves_on(fake_app, monkeypatch):
     assert [item for item in detail["action_items"]
             if item["kind"] == "asset_image"] == []
     assert detail["status"] == "awaiting_human"
+    # 0 件与「没派生」必须能分开（#279）：空台账 + 标记为真 ＝ 本片确实没有素材；
+    # 只看台账的话，一次漏落盘也会长得一模一样。
+    raw = json.loads(
+        (root / Path(session_id) / "session-state.json").read_text(encoding="utf-8"))
+    assert raw["asset_manifest_derived"] is True
 
 
 # ---------------------------------------------------------------------------

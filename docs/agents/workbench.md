@@ -118,17 +118,36 @@
   `.json` 边车（显示名、类型、字节、首次创建时间），清单靠目录现扫 + 命名规则——
   `.tmp-*` 不是素材，列表看不见，只在启动时删；同内容不写第二份。上传**不改会话
   状态、不发事件**，残片由启动清理收拾（`store.cleanup_assets`）。
-- **参考素材台账**（D7-2 / #255）住 `SessionState.asset_ledger`（会话文件是唯一真源，
-  ADR 0032），不另写 `asset-ledger.json`：`name / kind / number / asset_id / sha256 /
-  round / status`。同一个上传端点的两种用法只差一个判据：**带语义名 = 登记参考素材**
-  ——会话内唯一、类型由嗅探定、同类编号从 1 起、容量按台账同步判 9 图 / 3 视频 /
-  3 音频 / 12 文件（422 `ref_capacity_exceeded`）、**起跑（离开 `created`）即锁登记**
-  （409 `asset_locked`）；**不带语义名 = 普通素材**——ref 与 base 一致，不记账、不编号、
-  不占容量、不受起跑锁，它就是素材图与段视频回交的通道（#256/#258）。base 会话带语义名
-  → 422 `asset_name_invalid`（没有台账可登记）。删除是
-  `DELETE /sessions/{id}/assets/{asset_id}`，只撤销台账登记（台账外 → 404
-  `asset_not_found`，base 调用 → 409 `route_mismatch`）；详情里的 `brief.refs` 就是
-  台账摘要。
+- **参考素材台账**（D7-2 / #255；D7 修订 #279）住 `SessionState.asset_ledger`（会话文件是
+  唯一真源，ADR 0032），不另写 `asset-ledger.json`：`name / kind / number / asset_id /
+  sha256 / round / status / source`。
+  - **两种来源**（`source`）：ref 恒 `derived`（阶段 1 收尾按资产图词派生）、导演台 r2v
+    恒 `uploaded`（创建时用户上传建立）。`asset_required` 门槛与容量校验按来源字段判，
+    不靠 `mode` 反推；没有这个键的旧行读成 `uploaded`。
+  - **四态**（`status`）：`pending`（已派生、还没交图，**没有正本**）/ `registered`
+    （交回了、还没校对过）/ `passed`（定稿）/ `abandoned`（显式放弃，永远没有图）。
+  - **派生与对账是同一处**：阶段 1 收尾的写入里按资产图词落齐 N 行（`derived_asset_rows`
+    → `merge_derived_rows`），清单与词缺件、多件、改名都硬失败并点名（仍是
+    `AssetPromptMissing`）。派生口幂等，续跑 / 恢复 / 重进页面都补齐。
+  - **「资产清单已派生」是会话顶层字段**（`SessionState.asset_manifest_derived`）：
+    空台账 + 未派生 ＝ 阶段 1 没走完；空台账 + 已派生 ＝ 本片确实没有素材。两者不是
+    一回事，混成一个状态会让一次漏落盘静默跳过整条素材循环。
+  - 同一上传端点的两种用法只差一个判据：**带语义名 = 登记参考素材**——会话内唯一、
+    类型由嗅探定、同类编号从 1 起、容量按台账同步判 9 图 / 3 视频 / 3 音频 / 12 文件
+    （422 `ref_capacity_exceeded`）；**不带语义名 = 普通素材**——ref 与 base 一致，
+    不记账、不编号、不占容量、不受登记锁（它就是素材图与段视频回交的通道）。
+    base 会话带语义名 → 422 `asset_name_invalid`（没有台账可登记）。
+  - **登记锁是位置锁，不是时间锁**（#279 / #282）：起跑后带语义名的登记仍然可以发生，
+    但只放行**当前待办那一件**（名字要一字不差），其余 409 `asset_locked` 并点名当前
+    是第几件；补交口未落定时额外放行视频/音频（Picture 仍拒）；待办一落定就不再接受
+    增补。撤销仍是**时间锁**：起跑后不许删行（`DELETE /sessions/{id}/assets/{asset_id}`，
+    台账外 → 404 `asset_not_found`，base 调用 → 409 `route_mismatch`）——删行会与阶段 1
+    写下的清单对不上。详情里的 `brief.refs` 就是台账摘要（含 `status` 与 `source`）。
+  - **换一张图**：`POST /sessions/{id}/assets/{asset_id}/reopen` 把一件已定稿的 ref 素材
+    退回 `pending` 并重挂同件号 `asset_image` 待办。三道判据——只对 ref、只在素材循环
+    没走完时、只对 `passed` 行（`abandoned` / 未定稿 → 409 `asset_not_reopenable`，
+    路线或时机不对 → 409 `asset_reopen_unsupported`）；会话有任务在跑时 409
+    `session_busy`。重开不改写词、保留轮次。
 
 ## 素材循环（D7-3，ADR 见 D7 的「ref 多参进工作台」）
 
@@ -136,32 +155,53 @@
 
 | 步骤 | 类型 | 阶段标签 | 产物/状态 |
 |---|---|---|---|
-| 阶段 1 | job | `stage1` | `script.md` / `shot-table.md`；审查待办 `stage1_review` |
+| 阶段 1 | job | `stage1` | `script.md` / `shot-table.md`；审查待办 `stage1_review`；**同一次收尾写入派生台账 N 行**（`pending` / `derived`），并置会话「资产清单已派生」 |
 | 第 N 件出词 | job `asset_loop` | `asset_loop` | `assets/picture-NN.md`（kind `asset_prompt`）；挂 `asset_image` 待办 |
 | 第 N 件交图 | 待办 `asset_image` | — | 载荷 `asset_id`；会话 `awaiting_human` |
+| 第 N 件放弃 | 待办 `asset_image` | — | `decision=abandon_asset`（不带 `asset_id`）：该行转 `abandoned`，不落图 |
 | 第 N 件校对 | job `asset_loop` | `asset_loop` | 读图（`describe_image`）对照这一件的词；通过转 `passed` |
-| 阶段 2 | job | `stage2` | 全部图片定稿后自动接上（注入卡是 #257） |
+| 补交口 | 待办 `asset_extra` | — | 循环结束后、阶段 2 之前：`submit_extras`（载荷 `asset_id`）或 `no_extras`（「没有，就这样」） |
+| 阶段 2 | job | `stage2` | 补交口落定后自动接上（注入卡是 #257） |
 
 - **ref 通过审查不直接进阶段 2**：`resolve` 的 approve 分支按 `brief.is_ref` 分叉，
   `_resume_step` 在「阶段 1 已 approve」与「阶段 2」之间插入 `asset_loop`；base 一字不变。
-- **严格串行、一次一件**：当前件号＝台账里**最大连续通过编号 + 1**（台账是唯一真源，
-  重启后照样重建）；每件同时最多一个未决 `asset_image`。
-- **没有放行键**：`asset_image` 的唯一决议是 `asset_id`；校对不通过时用
-  `rewrite_asset_prompt` 按差异清单改词、**覆盖同一份** `assets/picture-NN.md`，
-  同一件号重开待办（`reason` 带差异清单）。台账只记轮次与状态，历史不靠多份文件。
+- **素材集合是产出，不是输入**（#279）：起跑前不收图，件数 / 语义名 / 编号都来自阶段 1
+  的资产图词；零资产合法（派生 0 行、循环空转、直接到补交口）。
+- **严格串行、一次一件**：当前件＝台账里**第一条既未定稿也未放弃的 Picture**
+  （`unsettled_picture_entries`，与推进度、位置锁同一份判据）；每件同时最多一个未决
+  `asset_image`。已放弃的行被跳过——否则放弃一件会把循环永远停在那件上。
+- **没有放行键，但有放弃出口**（#279 / #282）：`asset_image` 的决议只有交图与
+  `abandon_asset` 两种，**没有「就这样吧」**——校对不通过时用 `rewrite_asset_prompt`
+  按差异清单改词、覆盖同一份 `assets/picture-NN.md`，同一件号重开待办（`reason`
+  带差异清单）。放弃把该行标 `abandoned`、不落图、不进注入卡与段内子集，并在待办
+  `reason` 与事件里点名后果（分镜表与段词里的指称变成无图指称）；**不自动改写已定稿
+  的文本**。台账只记轮次与状态，历史不靠多份文件。
 - **交图标识住台账条目**（`proofread_asset_id`）：崩在「已交图、未校对」之间时，
   恢复跑校对而不是要求重交；判过即清。
+- **补交口是阻塞决定点**（#279 / #284）：循环走完后、阶段 2 之前挂 `asset_extra`
+  待办。视频/音频走既有上传端点但**必须带用户起的语义名**（设计师只给 Picture 命名），
+  编号按 kind 分桶（`<Video N>` / `<Audio N>`，不占 Picture 号段）；两种答案都要能
+  点下去——`submit_extras`（载荷 `asset_id`，指认最后交的那一件）与 `no_extras`
+  （「没有，就这样」）。未落定时 `_resume_step` 停在 `asset_loop`，进不了阶段 2；
+  落定后容量按当时台账现算，注入卡与段内子集以这份快照为准，此后不再接受增补。
+- **注入卡只取已定稿**：`_write_film_injection_card` 只收 `passed` 的 Picture 行
+  （被放弃或还没交的图写进去，抄下来就是一个填不上的槽）；视频/音频原样保留。
 - **资产图词按语义名取**（`generation.asset_prompt_for` → 阶段 1 的
   `asset_prompts_for`）：名字对不上是硬失败（`AssetPromptMissing`），不拿相邻件的词顶替。
+  派生的清单与词在同一处对账，缺件 / 多件 / 改名都当场点名。
 - **台账 → 管线的 brief.refs 只有一处**（`JobRunner._ref_brief`）：工作台的参考素材不在
-  brief 文件里，阶段 1/2 与修订重跑交给管线的 `brief.refs` 都由台账现造（只收 Picture，
-  `path` 留空）；漏接一处，分镜表 Subject 标签与资产图提示词命名就与上传的语义名脱钩。
-  派生出来的 refs **不写回会话文件**（台账是唯一真源）；base 会话原样返回。
-- 桩管线**覆盖到 ref 素材循环**（#259）：`MINIMAX_FAKE_PIPELINE=1` 下阶段 1 按台账
-  语义名产出资产图词，校对 job 伪造结论（不调 `describe_image`、不建模型）——第 1 件
-  的第一轮固定不通过、其余通过（判据是台账轮次，重跑不换结论）。桩只换「谁写/谁判」，
-  产物落盘、台账转移与待办重开都走真实那一份代码。开关关掉时没有任何一条路径会伪造
-  结论：出词走 `asset_prompt_for`，名字对不上就硬失败。
+  brief 文件里，阶段 2 与修订重跑交给管线的 `brief.refs` 都由台账现造（只收 Picture、
+  且**只收已定稿**，`path` 留空）。阶段 1 **不注入 refs**（派生已经取代了「用户登记为
+  准」那一支），导演台 r2v 的阶段 1 例外（它的台账是用户上传建立的）。漏接一处，
+  分镜表 Subject 标签与资产图提示词命名就与台账语义名脱钩。派生出来的 refs **不写回
+  会话文件**（台账是唯一真源）；base 会话原样返回。
+- 桩管线**覆盖到 ref 素材循环**（#259 / #279）：`MINIMAX_FAKE_PIPELINE=1` 下阶段 1 用
+  `MINIMAX_FAKE_ASSET_COUNT`（默认 2、0 合法）按编号造 `桩素材N` 与资产图词，
+  `MINIMAX_FAKE_ASSET_DROP` 让出词节点故意漏件（清单还在、词里没有 → 对账硬失败）；
+  校对 job 伪造结论（不调 `describe_image`、不建模型）——第 1 件的第一轮固定不通过、
+  其余通过（判据是台账轮次，重跑不换结论）。桩只换「谁写/谁判」，产物落盘、台账转移
+  与待办重开都走真实那一份代码。开关关掉时没有任何一条路径会伪造结论：出词走
+  `asset_prompt_for`，名字对不上就硬失败。
 
 ## 长片分段陪跑（D6，ADR 0036）
 

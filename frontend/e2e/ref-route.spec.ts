@@ -4,15 +4,19 @@ import { fileURLToPath } from 'node:url'
 
 import { expect, test } from '@playwright/test'
 
-// D7-6（#259）：ref 多参路线的浏览器全闭环证据。
+// D7 修订（#279 / #285）：ref 多参路线的浏览器全闭环证据。
 //
-// 建 ref 会话 → 传两件素材（含容量闸）→ 起跑 → 阶段 1 → 素材循环（第 1 件被拒后同一
-// 位置重开、第 2 件一次通过）→ 整片注入卡 → 段 ×2 → 逐段交视频 → 拼接 → completed →
-// 换一段回到待办。全程无终端操作。
+// 零素材建会话 → 起跑 → 阶段 1 派生 N 件 → 素材循环（第 1 件校对不通过后同一位置
+// 重交、通过后「换一张图」再走一遍；第 2 件放弃）→ 补交口选「没有，就这样」→
+// 注入卡 → 段 ×2 → 逐段交视频 → 拼接 → completed → 换一段。
+//
+// 与修订前的差别：起跑前不再上传任何素材（素材集合是阶段 1 的产出），容量条改在
+// 补交口落定后按台账现算；「放弃这一件」「换一张图」都走 #283 的真界面按钮。
 //
 // 真实浏览器 + 真实 FastAPI + 确定性桩管线（serve-e2e.mjs 注入 MINIMAX_FAKE_PIPELINE=1）。
-// 要交的 mp4 由桩管线自己用 ffmpeg 现造（不在这份 spec 里另写造件逻辑）；素材图是
-// 1×1 PNG，桩不读图，但上传/归属/容量每一环都是真的。
+// 桩默认派生 2 件（MINIMAX_FAKE_ASSET_COUNT），第 1 件的第一轮校对必不通过——件号与
+// 轮次是确定性的。要交的 mp4 由桩管线自己用 ffmpeg 现造；素材图是 1×1 PNG，桩不读图，
+// 但上传/归属/容量每一环都是真的。
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(here, '..', '..')
 const python = resolve(
@@ -23,7 +27,9 @@ const python = resolve(
 
 const PLOT = 'E2E 多参参考素材闭环'
 const REF_SECONDS = 20 // >15 秒拆两段；每段 10 秒（H3 单段 4–15 秒档内）
-const SEGMENT_SECONDS = 10
+const ASSET_COUNT = 2
+const ASSET_ONE = '桩素材1'
+const ASSET_TWO = '桩素材2'
 
 // 1×1 透明 PNG：服务端按魔数嗅探成 Picture，内容对桩没有意义（桩不读图）。
 const PNG = Buffer.from(
@@ -31,8 +37,8 @@ const PNG = Buffer.from(
   'base64',
 )
 
-// ref 台账按内容判重：每次上传追加一个唯一尾字节（嗅探只看魔数），否则第 2 件
-// 会以 asset_duplicate 被拒——那是「同一内容登记两次」，不是被测的容量闸。
+// 上传按内容判重：每次追加一个唯一尾字节（嗅探只看魔数），否则重交会以
+// asset_duplicate 被拒——那是「同一内容登记两次」，不是被测的循环。
 function pngFile(seed: number, filename: string) {
   return {
     name: filename,
@@ -62,131 +68,169 @@ async function createRefSession(page: import('@playwright/test').Page, plot: str
   await page.getByRole('radio', { name: /多参参考素材/ }).check()
   await expect(page.locator('select[name="variant"]')).toHaveCount(0)
   await page.locator('input[name="duration"]').fill(String(REF_SECONDS))
+  // 「创建并开始」：ref 零素材直接起跑（#279 删掉了 asset_required 门槛）。
   await page.getByRole('button', { name: '创建并开始' }).click()
   await expect(page).toHaveURL(/\/sessions\/.+/)
   return page.url()
 }
 
-async function uploadReference(
+/** 交一张生成结果并等结果落定：不通过时卡片留在同一件，通过时换下一件。 */
+async function submitAssetImage(
   page: import('@playwright/test').Page,
-  name: string,
-  filename: string,
   seed: number,
+  filename: string,
 ): Promise<void> {
-  await page.locator('#asset-semantic-name').fill(name)
-  await page.locator('#asset-upload').setInputFiles(pngFile(seed, filename))
+  await page.locator('#asset-image-file').setInputFiles(pngFile(seed, filename))
+  await page.getByRole('button', { name: '提交并校对' }).click()
 }
 
-test('多参 20 秒：容量闸 → 素材循环（被拒重开）→ 注入卡 → 两段拼接 → 换一段', async ({
+test('多参 20 秒：零素材起跑 → 派生两件 → 循环（拒→重交→换图→放弃）→ 补交口 → 注入卡 → 两段拼接 → 换一段', async ({
   page,
 }, testInfo) => {
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
 
-  // -- 容量闸（D7 §8）：9 图是硬上限，第 10 张同步 422，不等到跑起来才炸 --------
-  await createRefSession(page, 'E2E 容量闸门')
-  await page.getByRole('tab', { name: '素材' }).click()
-  for (let index = 1; index <= 9; index += 1) {
-    await uploadReference(page, `容量图${index}`, `cap-${index}.png`, index)
-    await expect(page.locator('.asset-list .asset')).toHaveCount(index)
-  }
-  await expect(page.locator('[aria-label="参考素材容量"] li[data-kind="picture"]')).toContainText(
-    '图 9/9',
-  )
-  await uploadReference(page, '容量图10', 'cap-10.png', 10)
-  await expect(page.getByRole('alert').filter({ hasText: '上限' })).toBeVisible()
-  await expect(page.locator('.asset-list .asset')).toHaveCount(9)
-
-  // -- 正式会话：两件素材、阶段 1、素材循环 ------------------------------------
+  // -- 零素材建会话并起跑：阶段 1 自己定「这片要哪几件」 --------------------------
   await createRefSession(page, PLOT)
-  // 零素材可以建会话但起不来（D7 §4.3）：详情页停在 created，等「开始」。
-  await expect(page.getByRole('button', { name: '开始' })).toBeVisible({ timeout: 20_000 })
-
-  await page.getByRole('tab', { name: '素材' }).click()
-  await uploadReference(page, '橘猫', 'cat.png', 101)
-  await expect(page.locator('.asset-list .asset')).toHaveCount(1)
-  await uploadReference(page, '台灯', 'lamp.png', 102)
-  await expect(page.locator('.asset-list .asset')).toHaveCount(2)
-  await expect(page.locator('.asset-list')).toContainText('橘猫')
-  await expect(page.locator('.asset-list')).toContainText('picture 1')
-  await expect(page.locator('.asset-list')).toContainText('picture 2')
-
-  await page.getByRole('tab', { name: '概览与进度' }).click()
-  await page.getByRole('button', { name: '开始' }).click()
   await expect(page.getByText('等待人工').first()).toBeVisible({ timeout: 30_000 })
 
+  // 清单已派生（#279）：起跑前一张图都没交过，素材分区已经有 N 行，且没有上传框。
+  await page.getByRole('tab', { name: '素材' }).click()
+  await expect(page.locator('.asset-list .asset')).toHaveCount(ASSET_COUNT, { timeout: 20_000 })
+  await expect(page.getByTestId('assets-summary')).toContainText(`本片共 ${ASSET_COUNT} 件参考素材`)
+  await expect(page.locator('.asset[data-number="1"]')).toContainText(ASSET_ONE)
+  await expect(page.locator('.asset[data-number="2"]')).toContainText(ASSET_TWO)
+  await expect(page.getByRole('tabpanel').locator('input')).toHaveCount(0)
+
+  // -- 审查通过 → 第 1 件的待办卡 ------------------------------------------------
   await page.getByRole('tab', { name: '审查与待办' }).click()
   await expect(page.getByText('分场剧本（桩管线第 1 稿）')).toBeVisible()
   await page.getByRole('button', { name: '通过' }).click()
 
   // 第 1 件：出词卡可见、词可复制。
-  await expect(page.getByRole('heading', { name: /第 1 件素材图 · 橘猫/ })).toBeVisible({
-    timeout: 30_000,
-  })
+  await expect(
+    page.getByRole('heading', { name: new RegExp(`第 1 件素材图 · ${ASSET_ONE}`) }),
+  ).toBeVisible({ timeout: 30_000 })
   await expect(page.getByText('桩管线固定词')).toBeVisible()
   await page.getByRole('button', { name: '复制词' }).click()
   await expect(page.getByRole('button', { name: '已复制' })).toBeVisible()
 
   // 交图 → 校对不通过：同一位置重开，差异清单出现（没有放行键）。
-  await page.locator('#asset-image-file').setInputFiles(pngFile(201, 'cat-try-1.png'))
-  await page.getByRole('button', { name: '提交并校对' }).click()
+  await submitAssetImage(page, 201, 'asset-1-try-1.png')
   await expect(page.getByRole('heading', { name: '校对结论：不通过' })).toBeVisible({
     timeout: 30_000,
   })
   await expect(page.locator('[aria-label="校对差异"]')).toContainText('差异清单')
   await expect(page.locator('[aria-label="校对差异"]')).toContainText('伞')
-  await expect(page.getByRole('heading', { name: /第 1 件素材图 · 橘猫/ })).toBeVisible()
+  await expect(
+    page.getByRole('heading', { name: new RegExp(`第 1 件素材图 · ${ASSET_ONE}`) }),
+  ).toBeVisible()
 
   // 重交 → 通过 → 第 2 件自动出现。
-  await page.locator('#asset-image-file').setInputFiles(pngFile(202, 'cat-try-2.png'))
-  await page.getByRole('button', { name: '提交并校对' }).click()
-  await expect(page.getByRole('heading', { name: /第 2 件素材图 · 台灯/ })).toBeVisible({
+  await submitAssetImage(page, 202, 'asset-1-try-2.png')
+  await expect(
+    page.getByRole('heading', { name: new RegExp(`第 2 件素材图 · ${ASSET_TWO}`) }),
+  ).toBeVisible({ timeout: 30_000 })
+
+  // -- 换一张图（循环内、同一件重开）：第 1 件退回待交，重走一次校对 ---------------
+  await page.getByRole('tab', { name: '素材' }).click()
+  const firstRow = page.locator('.asset[data-number="1"]')
+  await expect(firstRow).toHaveAttribute('data-status', 'passed')
+  await expect(firstRow).toContainText('已定稿')
+  await firstRow.getByRole('button', { name: '换一张图' }).click()
+  // 重开后第 1 件重新成为当前件（第 2 件的卡片被收走）。
+  await expect(firstRow).toHaveAttribute('data-status', 'pending', { timeout: 20_000 })
+  await expect(firstRow).toHaveAttribute('data-current', 'true')
+
+  await page.getByRole('tab', { name: '审查与待办' }).click()
+  await expect(
+    page.getByRole('heading', { name: new RegExp(`第 1 件素材图 · ${ASSET_ONE}`) }),
+  ).toBeVisible({ timeout: 30_000 })
+  await submitAssetImage(page, 203, 'asset-1-try-3.png')
+  await expect(
+    page.getByRole('heading', { name: new RegExp(`第 2 件素材图 · ${ASSET_TWO}`) }),
+  ).toBeVisible({ timeout: 30_000 })
+
+  // -- 放弃第 2 件：确认里摊开代价，确认后卡片消失 --------------------------------
+  await page.getByRole('button', { name: '放弃这一件' }).click()
+  await expect(page.locator('[aria-label="放弃这一件"]')).toContainText(
+    `放弃的是「${ASSET_TWO}」这一件图`,
+  )
+  await expect(page.locator('[aria-label="放弃这一件"]')).toContainText(
+    '已经定稿的文本不会被自动改写',
+  )
+  await page.getByRole('button', { name: '确认放弃' }).click()
+
+  // -- 补交口（循环后、阶段 2 前）：明确选「没有，就这样」 -------------------------
+  await expect(page.getByRole('heading', { name: '素材视频 / 音频补交' })).toBeVisible({
+    timeout: 30_000,
+  })
+  await page.getByRole('button', { name: '没有，就这样' }).click()
+  await expect(page.getByRole('heading', { name: '素材视频 / 音频补交' })).toHaveCount(0, {
     timeout: 30_000,
   })
 
-  // 第 2 件一次通过 → 素材循环收尾 → 阶段 2 → 两段。
-  await page.locator('#asset-image-file').setInputFiles(pngFile(203, 'lamp-try-1.png'))
-  await page.getByRole('button', { name: '提交并校对' }).click()
-  await expect(page.getByRole('heading', { name: /第 2 件素材图 · 台灯/ })).toHaveCount(0, {
-    timeout: 30_000,
-  })
+  // 补交口落定后容量按台账现算（#279 §8）：放弃件不计入，1 件定稿图、0 视频/音频。
+  await page.getByRole('tab', { name: '素材' }).click()
+  const secondRow = page.locator('.asset[data-number="2"]')
+  await expect(secondRow).toHaveAttribute('data-status', 'abandoned')
+  await expect(secondRow).toContainText('已放弃')
+  await expect(secondRow.locator('img')).toHaveCount(0)
+  await expect(page.getByTestId('assets-summary')).toContainText('已定稿 1 件')
+  await expect(page.getByTestId('assets-summary')).toContainText('已放弃 1 件')
+  const capacity = page.locator('[aria-label="参考素材容量"]')
+  await expect(capacity.locator('li[data-kind="picture"]')).toContainText('图 1/9')
+  await expect(capacity.locator('li[data-kind="video"]')).toContainText('视频 0/3')
+  await expect(capacity.locator('li[data-kind="audio"]')).toContainText('音频 0/3')
+  await expect(capacity.locator('li[data-kind="files"]')).toContainText('文件 1/12')
 
-  // 整片注入卡进产物分区：只读、可复制、没有编辑入口。
+  // -- 整片注入卡进产物分区：只读、可复制，且只含已定稿的那一件 --------------------
   await page.getByRole('tab', { name: '产物' }).click()
   const deliverable = page.locator('section[aria-label="交付文本"]')
   await expect(deliverable).toContainText('injection-card.md', { timeout: 30_000 })
-  await expect(deliverable).toContainText('橘猫')
-  await expect(deliverable).toContainText('台灯')
+  await expect(deliverable).toContainText(ASSET_ONE)
+  // 放弃件没有图，写进卡就是一个填不上的槽（#279 US16）。
+  await expect(deliverable).not.toContainText(ASSET_TWO)
   await expect(deliverable.locator('textarea, input')).toHaveCount(0)
   await expect(
     deliverable.locator('article', { hasText: 'injection-card.md' }).getByRole('button'),
   ).toHaveText('复制')
 
-  // 段分区：两段、段内参考素材只读、第 1 段等交视频。
+  // -- 段分区：两段、段内参考素材只读且不含放弃件，第 1 段等交视频 ------------------
   await page.getByRole('tab', { name: '分段' }).click()
   await expect(page.getByText('已通过 0 / 总数 2')).toBeVisible({ timeout: 30_000 })
   await expect(page.locator('[data-segment-index]')).toHaveCount(2)
   await expect(page.locator('[data-segment-index="1"]')).toContainText('等待交视频')
-  await expect(page.locator('[data-segment-index="1"] [data-segment-assets]')).toContainText(
-    '本段参考素材',
+  const segmentAssets = page.locator('[data-segment-index="1"] [data-segment-assets]')
+  await expect(segmentAssets).toContainText('本段参考素材')
+  await expect(segmentAssets).toContainText(ASSET_ONE)
+  // 定义逐段重复：两段都带同一个 Subject 的接线，但放弃件不进任何一段的子集。
+  await expect(page.locator('[data-segment-index="2"] [data-segment-assets]')).toContainText(
+    ASSET_ONE,
   )
-  await expect(page.locator('[data-segment-index="1"] [data-segment-assets]')).toContainText('橘猫')
+  await expect(page.getByRole('tabpanel')).not.toContainText(ASSET_TWO)
 
-  // -- 逐段交视频（桩管线现造的 10 秒段）→ 拼接 -------------------------------
-  for (const number of [1, 2]) {
-    const video = testInfo.outputPath(`ref-segment-${number}.mp4`)
-    writeStubRefSegmentVideo(video, SEGMENT_SECONDS)
-    await page.locator(`#segment-video-upload-${number}`).setInputFiles(video)
+  // -- 逐段交视频（按快照里的段长现造）→ 拼接 ------------------------------------
+  const sessionId = page.url().split('/sessions/')[1]!
+  const detail = (await (await page.request.get(`/api/v1/sessions/${sessionId}`)).json()) as {
+    segments: { index: number; start_s: number; end_s: number }[]
+  }
+  expect(detail.segments).toHaveLength(2)
+  for (const segment of detail.segments) {
+    const video = testInfo.outputPath(`ref-segment-${segment.index}.mp4`)
+    writeStubRefSegmentVideo(video, segment.end_s - segment.start_s)
+    await page.locator(`#segment-video-upload-${segment.index}`).setInputFiles(video)
     const picker = page.locator('select[name="segment-video"]')
     await expect(picker).not.toHaveValue('')
     await page.getByRole('button', { name: '提交视频' }).click()
-    await expect(page.getByText(`已通过 ${number} / 总数 2`)).toBeVisible({ timeout: 30_000 })
+    await expect(page.getByText(`已通过 ${segment.index} / 总数 2`)).toBeVisible({
+      timeout: 30_000,
+    })
   }
 
   // 成片可读：媒体产物里有 final.mp4，content 端点给出真 mp4（ftyp 容器）。
   await expect(page.getByText('已完成').first()).toBeVisible({ timeout: 30_000 })
   await page.getByRole('tab', { name: '产物' }).click()
   await expect(page.locator('section[aria-label="媒体产物"] video')).toHaveCount(1)
-  const sessionId = page.url().split('/sessions/')[1]!
   const film = await page.request.get(`/api/v1/artifacts/${sessionId}/final.mp4/content`)
   expect(film.ok()).toBe(true)
   expect(film.headers()['content-type']).toContain('video/mp4')
@@ -202,5 +246,7 @@ test('多参 20 秒：容量闸 → 素材循环（被拒重开）→ 注入卡 
   await expect(page.locator('[data-segment-index="1"]')).toContainText('等待交视频', {
     timeout: 30_000,
   })
-  await expect(page.locator('[data-segment-index="1"] [data-segment-assets]')).toContainText('橘猫')
+  await expect(page.locator('[data-segment-index="1"] [data-segment-assets]')).toContainText(
+    ASSET_ONE,
+  )
 })
