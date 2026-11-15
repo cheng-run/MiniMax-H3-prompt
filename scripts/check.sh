@@ -12,7 +12,8 @@
 # 用法：
 #   scripts/check.sh          # 快档（默认）：结构守卫 + 改动文件的 lint
 #   scripts/check.sh fast
-#   scripts/check.sh full     # 全量测试 + 前端/契约守卫 + 变异检验（交验收、推送前跑）
+#   scripts/check.sh full     # 全量测试 + 前端守卫（lint/类型/vitest）+ 契约 + 变异（交验收、推送前跑）
+#   scripts/check.sh frontend # 强制跑 eslint + prettier --check + vue-tsc + e2e 类型 + vitest
 #   scripts/check.sh lint     # 全量 src 的 ruff（装了才跑）
 #   scripts/check.sh mutate   # 守卫变异检验（不需要额外依赖）
 #   scripts/check.sh types    # mypy（装了才跑；先只查叶子模块）
@@ -181,7 +182,8 @@ frontend_ready() {
   [ -e "$frontend/node_modules/.bin/eslint" ] \
       && [ -e "$frontend/node_modules/.bin/vue-tsc" ] \
       && [ -e "$frontend/node_modules/.bin/prettier" ] \
-      && [ -e "$frontend/node_modules/.bin/tsc" ]
+      && [ -e "$frontend/node_modules/.bin/tsc" ] \
+      && [ -e "$frontend/node_modules/.bin/vitest" ]
 }
 
 run_frontend_guard() {
@@ -206,6 +208,23 @@ run_frontend_guard() {
   # e2e 不在主 tsconfig 的 include 里（配置/规格文件的类型由 Playwright 转译，不做
   # 类型检查）：retro 2026-11-10 补独立 tsconfig.e2e.json，别让 e2e 成为类型盲区。
   ( cd "$frontend" && ./node_modules/.bin/tsc --noEmit -p tsconfig.e2e.json )
+}
+
+# 前端单测（retro 2026-11-15）：CI 的 frontend-quality 跑 `pnpm run coverage`（含 vitest），
+# 本地 `full` 原先只做 lint/typecheck——组件用例红着，`full` 仍会绿。2026-11-15 spec #274
+# 的 217 条前端用例就是人工另跑才看到的。vitest 约 3 秒，只放进 full/frontend 档；
+# fast 档留在秒级且避开工作树共用 `node_modules/.vite` 缓存的已知坑。
+run_frontend_tests() {
+  local root frontend
+  root=$(git rev-parse --show-toplevel)
+  frontend="$root/frontend"
+  if ! frontend_ready "$frontend"; then
+    echo "[check] frontend-tests: 跳过（前端依赖未安装或不完整：" \
+         "cd frontend && npx pnpm@11.7.0 install）"
+    return 0
+  fi
+  echo "[check] frontend-tests: vitest run（与 CI 的 pnpm run coverage 同一批用例）"
+  ( cd "$frontend" && ./node_modules/.bin/vitest run )
 }
 
 # 契约守卫（retro 2026-11-10）：OpenAPI 与前端生成类型的 drift 原先只在 CI 有，
@@ -312,12 +331,14 @@ case "$MODE" in
     # full 是交验收/推送前的最后一关：前端与契约漂移必须在这里一起看到，不能留着
     # 等 CI 才红（2026-11-10 实测：full 绿而 CI 的前端/契约 job 红）。
     run_frontend_guard true
+    run_frontend_tests
     run_contract_guard
     # 变异放最后：它最慢，前面的红先停，不白等两分钟。
     run_mutations
     ;;
   frontend)
     run_frontend_guard true
+    run_frontend_tests
     ;;
   lint)
     if ! ruff_available; then
