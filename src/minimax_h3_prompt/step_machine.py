@@ -176,6 +176,13 @@ DECISION_SUBMIT_IMAGE = "submit_image"
 # 它是循环内的动作，代价（分镜表与段词里的指称变成无图指称）当场讲清，已定稿的文本
 # 一个字都不改——放弃的是图，不是那些文字。
 DECISION_ABANDON_ASSET = "abandon_asset"
+# 校对不通过后的两条出路（#288，spec #286「四选出路」的前两选）。它们都是**重掷**：
+# 台账退回未交图（``pending``），同一件号的交图卡重开。
+# ``reword_reroll`` 是默认出路——它按结构化偏差清单让模型做**加法**改写，把没画出来的
+# 细节写显式；它是独立作业（``asset_reword``），不在决议请求里同步跑。
+# ``reroll`` 是「原词再掷」：生图词与描述一个字都不动，只重开卡片。
+DECISION_REWORD_REROLL = "reword_reroll"
+DECISION_REROLL = "reroll"
 # 补交口的两种决议（#279 §补交口 / #284）。``submit_extras`` 只说明「我交完了」，
 # 具体交了哪些视频/音频看台账——那一次上传已经带语义名登记进去了，决议不重抄一份；
 # ``no_extras`` 就是卡片上那个「没有，就这样」，它必须是能点下去的答案，否则补交口
@@ -378,7 +385,9 @@ __all__ = [
     "DECISION_ABANDON_ASSET",
     "DECISION_APPROVE",
     "DECISION_NO_EXTRAS",
+    "DECISION_REROLL",
     "DECISION_REVISE",
+    "DECISION_REWORD_REROLL",
     "DECISION_SUBMIT_EXTRAS",
     "DECISION_SUBMIT_FRAMES",
     "DECISION_SUBMIT_IMAGE",

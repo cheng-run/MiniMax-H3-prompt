@@ -430,6 +430,7 @@ export interface components {
             kind: string;
             /** Pack Asset Id */
             pack_asset_id?: string | null;
+            proofread?: components["schemas"]["ProofreadConclusionOut"] | null;
             /**
              * Reason
              * @default
@@ -462,7 +463,9 @@ export interface components {
          *     - ``frame_submission`` 收 ``frames``；
          *     - ``segment_video`` 收 ``video_asset_id``（本段视频素材）；
          *     - ``asset_image`` 收 ``asset_id``（这一件资产图的生成结果，普通素材上传得到），
-         *       或 ``decision="abandon_asset"`` 放弃这一件（#282：模型怎么都画不出来时的出口）；
+         *       或 ``decision="abandon_asset"`` 放弃这一件（#282：模型怎么都画不出来时的出口），
+         *       或 ``decision="reword_reroll"`` / ``"reroll"``（#288 校对不通过的两条出路：前者是
+         *       默认的加法改词——独立作业跑；后者是原词再掷，只重开卡片）；
          *     - ``asset_extra`` 收 ``decision="submit_extras"`` 与 ``asset_id``（补交的
          *       视频/音频里最后认可的那一件；文件本身走上传端点、带用户起的语义名登记），
          *       或 ``decision="no_extras"`` 明确「没有，就这样」（#284）；
@@ -478,7 +481,7 @@ export interface components {
             /** Confirm Aspect Mismatch */
             confirm_aspect_mismatch?: boolean | null;
             /** Decision */
-            decision?: ("approve" | "revise" | "submit_start_image" | "submit_segment_image" | "submit_delivery" | "abandon_asset" | "submit_extras" | "no_extras") | null;
+            decision?: ("approve" | "revise" | "submit_start_image" | "submit_segment_image" | "submit_delivery" | "abandon_asset" | "submit_extras" | "no_extras" | "reword_reroll" | "reroll") | null;
             /** End Asset Id */
             end_asset_id?: string | null;
             frames?: components["schemas"]["FrameSelection"] | null;
@@ -696,6 +699,60 @@ export interface components {
             msg: string;
             /** Type */
             type: string;
+        };
+        /**
+         * ProofreadConclusionOut
+         * @description 校对结论的结构化形态（#288）：偏差与补漏两张清单。
+         *
+         *     人读的报告仍是待办的 ``reason``；这里供「改词再掷」消费。读图模型名是待办上的
+         *     并列字段 ``vision_model``（#292），不塞进这张清单——它是「谁给的结论」，不是
+         *     结论本身。缺省空清单而不是 ``None``：一张没有偏差的结论是合法值。
+         */
+        ProofreadConclusionOut: {
+            /** Deviations */
+            deviations?: components["schemas"]["ProofreadDeviationOut"][];
+            /** Omissions */
+            omissions?: components["schemas"]["ProofreadOmissionOut"][];
+        };
+        /**
+         * ProofreadDeviationOut
+         * @description 一条结构化偏差（#288）：描述原文 ``prompt_quote`` 与图中实见 ``observed``。
+         *
+         *     与 ``asset_proofread.Deviation`` 同形是**契约与领域件的两侧**，不是别名：领域件可以
+         *     随判据演化，对外契约只承诺这三项。改词作业按它驱动，不从 ``reason`` 渲染文本反解析。
+         */
+        ProofreadDeviationOut: {
+            /**
+             * Aspect
+             * @default
+             */
+            aspect: string;
+            /**
+             * Observed
+             * @default
+             */
+            observed: string;
+            /**
+             * Prompt Quote
+             * @default
+             */
+            prompt_quote: string;
+        };
+        /**
+         * ProofreadOmissionOut
+         * @description 一条结构化补漏（#288）：图里有 ``fact`` 而描述没有 ``aspect`` 那一项。
+         */
+        ProofreadOmissionOut: {
+            /**
+             * Aspect
+             * @default
+             */
+            aspect: string;
+            /**
+             * Fact
+             * @default
+             */
+            fact: string;
         };
         /**
          * RefOut

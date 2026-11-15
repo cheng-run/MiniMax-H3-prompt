@@ -263,7 +263,9 @@ class ActionItemResolve(BaseModel):
     - ``frame_submission`` 收 ``frames``；
     - ``segment_video`` 收 ``video_asset_id``（本段视频素材）；
     - ``asset_image`` 收 ``asset_id``（这一件资产图的生成结果，普通素材上传得到），
-      或 ``decision="abandon_asset"`` 放弃这一件（#282：模型怎么都画不出来时的出口）；
+      或 ``decision="abandon_asset"`` 放弃这一件（#282：模型怎么都画不出来时的出口），
+      或 ``decision="reword_reroll"`` / ``"reroll"``（#288 校对不通过的两条出路：前者是
+      默认的加法改词——独立作业跑；后者是原词再掷，只重开卡片）；
     - ``asset_extra`` 收 ``decision="submit_extras"`` 与 ``asset_id``（补交的
       视频/音频里最后认可的那一件；文件本身走上传端点、带用户起的语义名登记），
       或 ``decision="no_extras"`` 明确「没有，就这样」（#284）；
@@ -277,7 +279,7 @@ class ActionItemResolve(BaseModel):
     decision: Literal[
         "approve", "revise", "submit_start_image", "submit_segment_image",
         "submit_delivery", "abandon_asset", "submit_extras",
-        "no_extras"] | None = None
+        "no_extras", "reword_reroll", "reroll"] | None = None
     revisions: list[RevisionIn] = Field(default_factory=list)
     frames: FrameSelection | None = None
     # 段视频待办（D6 §8）：本会话已上传的 mp4 素材 id。`Decision` 载荷互斥由路由先拦。

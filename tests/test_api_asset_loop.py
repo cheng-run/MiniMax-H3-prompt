@@ -53,9 +53,14 @@ class _RewriteStub:
     def __init__(self, reply: str = "改写后的资产图词") -> None:
         self.reply = reply
         self.requests: list[str] = []
+        # 卡住模型调用用（#288「请求立即返回、作业在后台跑」）：置上之后 invoke 会等到
+        # 用例放开才返回，用例因此能在作业仍在跑时读进度事件。
+        self.gate: threading.Event | None = None
 
     def invoke(self, request, config=None):
         self.requests.append(str(request))
+        if self.gate is not None:
+            self.gate.wait(10)
         for callback in (config or {}).get("callbacks") or []:
             callback.on_llm_new_token("…")
         return self.reply
@@ -1349,4 +1354,212 @@ def test_reopen_unknown_asset_is_not_found(harness):
     _assert_problem(
         _reopen(harness, f"{harness.session_id}/0123456789abcdef"),
         404, "asset_not_found")
+
+
+# ---------------------------------------------------------------------------
+# 校对不通过的两条出路（#288）：默认改词再掷（后台作业）与原词再掷
+# ---------------------------------------------------------------------------
+
+CAT_PROMPT = "一只橘色短毛猫蹲在木质窗台，尾巴绕住前爪。"
+# 加法改写的桩回复：**逐字带上锁死条目**再补一句（守卫要能看见「原文还在」）。
+REWORDED_PROMPT = CAT_PROMPT + "尾巴在前爪上方绕一圈，压住爪背。"
+
+
+def test_reword_exits_are_declared_decision_values():
+    """两条出路都是决议值（闭合表与常量两处），仍走既有的 resolve 端点。"""
+    from minimax_h3_prompt import step_machine
+    from minimax_h3_prompt.workbench_store import _DECISIONS
+
+    assert step_machine.DECISION_REWORD_REROLL == "reword_reroll"
+    assert step_machine.DECISION_REROLL == "reroll"
+    assert {step_machine.DECISION_REWORD_REROLL, step_machine.DECISION_REROLL} <= _DECISIONS
+
+
+def _to_failed_first_card(harness) -> tuple[dict, dict, str]:
+    """走到「第 1 件校对不通过、卡片带着差异清单重开」这一步。"""
+    body = _to_first_card(harness)
+    item = [entry for entry in body["action_items"]
+            if entry["kind"] == "asset_image" and entry["status"] == "pending"][0]
+    image = harness.upload(_png(9), "gen-cat.png")
+    harness.readings.append(CAT_DEVIATION)
+    assert harness.submit_image(item, image["asset_id"]).status_code == 202
+    body = harness.wait_until(
+        lambda snapshot: any(entry["kind"] == "asset_image"
+                             and entry["status"] == "pending"
+                             and entry["asset_index"] == 1
+                             and entry["reason"]
+                             for entry in snapshot["action_items"]))
+    card = [entry for entry in body["action_items"]
+            if entry["kind"] == "asset_image" and entry["status"] == "pending"][0]
+    return body, card, harness.artifact_text("assets/picture-01.md")
+
+
+def _wait_for(predicate, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    raise AssertionError("条件没有在限时内满足")
+
+
+def test_proofread_failure_carries_a_structured_conclusion(harness):
+    """不通过重开的卡片带结构化偏差清单：改词作业按它驱动，不从 reason 反解析。"""
+    _body, card, _before = _to_failed_first_card(harness)
+
+    assert card["proofread"] == {
+        "deviations": [{
+            "aspect": "尾巴",
+            "prompt_quote": "尾巴绕住前爪",
+            "observed": "尾巴垂在窗台边缘，没绕住前爪",
+        }],
+        "omissions": [],
+    }
+    # 同一份结论随 ``action_item.created`` 走：重放能补回（事件类型不新增）。
+    created = [event for event in _events(harness.root, harness.session_id)
+               if event["type"] == "action_item.created"
+               and event["payload"].get("item_id") == card["item_id"]][0]
+    assert created["payload"]["proofread"]["deviations"][0]["prompt_quote"] == "尾巴绕住前爪"
+
+
+def test_structured_conclusion_survives_snapshot_replay(harness):
+    """快照丢掉整条待办时，结构化结论由创建事件重放补回（#288）。"""
+    _body, card, _before = _to_failed_first_card(harness)
+    created = [event for event in _events(harness.root, harness.session_id)
+               if event["type"] == "action_item.created"
+               and event["payload"].get("item_id") == card["item_id"]][0]
+
+    path = harness.root / Path(harness.session_id) / SESSION_FILENAME
+    snapshot = json.loads(path.read_text(encoding="utf-8"))
+    snapshot["last_event_seq"] = created["seq"] - 1
+    snapshot["action_items"] = [
+        entry for entry in snapshot["action_items"]
+        if entry["item_id"] != card["item_id"]]
+    path.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+
+    replayed = [entry for entry in harness.detail()["action_items"]
+                if entry["item_id"] == card["item_id"]][0]
+    assert replayed["proofread"]["deviations"][0]["prompt_quote"] == "尾巴绕住前爪"
+
+
+def test_reword_reroll_runs_as_a_background_job_and_only_adds(harness):
+    """默认出路：请求立即返回、改词在后台跑；成功后词已更新且锁死条目逐字仍在。"""
+    _body, card, before = _to_failed_first_card(harness)
+    harness.rewrite.reply = REWORDED_PROMPT
+    harness.rewrite.gate = threading.Event()
+
+    resp = _resolve(harness, card, {"decision": "reword_reroll"})
+    assert resp.status_code == 202, resp.text
+    job = resp.json()
+    assert job["kind"] == "asset_reword"
+    assert job["status"] == "running"
+
+    # 决议请求已返回，模型调用却还被闸着：改词确实是后台作业，不是同步跑完再回包。
+    _wait_for(lambda: bool(harness.rewrite.requests))
+    assert not harness.rewrite.gate.is_set()
+    assert "尾巴绕住前爪" in harness.rewrite.requests[0]
+
+    # 作业期间页面能看见进度：素材循环阶段的「素材改词」节点。
+    progress = [event for event in _events(harness.root, harness.session_id)
+                if event["type"] == "job.progress"
+                and event["payload"]["node"] == "asset_reword"]
+    assert progress, "改词作业一条进度事件都没有"
+    assert {event["payload"]["stage"] for event in progress} == {"asset_loop"}
+    # 作业期间台账仍是未交图，轮次不变（四态语义不变）。
+    assert [(entry["status"], entry["round"]) for entry in harness.ledger()] == [
+        ("pending", 1), ("pending", 0)]
+
+    harness.rewrite.gate.set()
+    body = harness.wait_until(
+        lambda snapshot: any(entry["kind"] == "asset_image"
+                             and entry["status"] == "pending"
+                             and entry["asset_index"] == 1
+                             and not entry["reason"]
+                             for entry in snapshot["action_items"]))
+    reopened = [entry for entry in body["action_items"]
+                if entry["kind"] == "asset_image" and entry["status"] == "pending"][0]
+    assert reopened["asset_index"] == 1, "重开的必须是同一件（件号与语义名不变）"
+    assert reopened["item_id"] != card["item_id"]
+
+    text = harness.artifact_text("assets/picture-01.md")
+    assert REWORDED_PROMPT in text, "作业成功后生图词没有更新"
+    assert CAT_PROMPT in text, "锁死清单条目没有逐字保留"
+    assert text != before
+
+    # 完成后仍是未交图，轮次不变：改词不是一轮交图。
+    assert [(entry["status"], entry["round"]) for entry in harness.ledger()] == [
+        ("pending", 1), ("pending", 0)]
+
+    # 轮次账：触发口沿用「AI 按偏差改词」，含偏差清单与改前改后全文。
+    rounds = [json.loads(line) for line in (
+        harness.root / Path(harness.session_id) / "asset-rounds.jsonl")
+        .read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(rounds) == 1
+    record = rounds[0]
+    assert record["trigger"] == "regen_ai_reword"
+    assert record["name"] == CAT
+    assert "尾巴绕住前爪" in record["feedback"]
+    assert record["prompt_before"].strip() == CAT_PROMPT
+    assert record["prompt_after"] == REWORDED_PROMPT
+
+
+def test_reword_that_drops_a_locked_feature_is_not_written(harness):
+    """加法守卫：删掉任一锁死条目即不落盘，卡片挂出「模型想删掉 X，要不要删」。"""
+    _body, card, before = _to_failed_first_card(harness)
+    harness.rewrite.reply = "一只橘色短毛猫蹲在木质窗台。"  # 丢了「尾巴绕住前爪」
+
+    resp = _resolve(harness, card, {"decision": "reword_reroll"})
+    assert resp.status_code == 202, resp.text
+    job = resp.json()
+
+    body = harness.wait_until(
+        lambda snapshot: any(entry["kind"] == "asset_image"
+                             and entry["status"] == "pending"
+                             and entry["asset_index"] == 1
+                             and "模型想删掉" in entry["reason"]
+                             for entry in snapshot["action_items"]))
+    card2 = [entry for entry in body["action_items"]
+             if entry["kind"] == "asset_image" and entry["status"] == "pending"][0]
+    assert "尾巴绕住前爪" in card2["reason"]
+    # 待裁项在文案里，不是只把差异报告重放一遍。
+    assert "要不要删" in card2["reason"].split("模型想删掉", 1)[1]
+    # 原差异清单仍在：用户要能换另一条出路。
+    assert "偏差" in card2["reason"]
+
+    # 一个字节都没写；轮次账也没有这一轮（没改成功就不记）。
+    assert harness.artifact_text("assets/picture-01.md") == before
+    assert not (harness.root / Path(harness.session_id) / "asset-rounds.jsonl").exists()
+    assert [(entry["status"], entry["round"]) for entry in harness.ledger()] == [
+        ("pending", 1), ("pending", 0)]
+
+    detail = harness.client.get(
+        f"/api/v1/sessions/{harness.session_id}/jobs/{job['job_id']}").json()
+    assert detail["status"] == "succeeded"
+    assert "没有落盘" in detail["detail"]
+
+
+def test_reroll_reopens_the_card_without_touching_any_text(harness):
+    """原词再掷：生图词与描述一个字都不动，只重开同一件号的卡片。"""
+    _body, card, before = _to_failed_first_card(harness)
+    assert harness.rewrite.requests == [], "校对本身不许叫改写模型"
+
+    resp = _resolve(harness, card, {"decision": "reroll"})
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["kind"] == "asset_loop"
+
+    body = harness.wait_until(
+        lambda snapshot: any(entry["kind"] == "asset_image"
+                             and entry["status"] == "pending"
+                             and entry["asset_index"] == 1
+                             and not entry["reason"]
+                             for entry in snapshot["action_items"]))
+    reopened = [entry for entry in body["action_items"]
+                if entry["kind"] == "asset_image" and entry["status"] == "pending"][0]
+    assert reopened["asset_index"] == 1
+
+    assert harness.artifact_text("assets/picture-01.md") == before
+    assert harness.rewrite.requests == [], "原词再掷不许叫改写模型"
+    assert not (harness.root / Path(harness.session_id) / "asset-rounds.jsonl").exists()
+    assert [(entry["status"], entry["round"]) for entry in harness.ledger()] == [
+        ("pending", 1), ("pending", 0)]
 

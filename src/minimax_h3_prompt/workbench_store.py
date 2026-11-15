@@ -808,6 +808,9 @@ _DECISIONS = frozenset({
     step_machine.DECISION_SUBMIT_VIDEO,
     # 素材图交回决议（D7 §6.3）：同上。
     step_machine.DECISION_SUBMIT_IMAGE,
+    # 校对不通过的两条出路（#288）：默认的「改词强化原意再掷」与原词再掷。
+    step_machine.DECISION_REWORD_REROLL,
+    step_machine.DECISION_REROLL,
     # 素材循环里的第二种决议（#279 §循环的边界动作 / #282）：放弃这一件。
     step_machine.DECISION_ABANDON_ASSET,
     # 补交口的两种决议（#279 §补交口 / #284）：交完了，或者明确「没有，就这样」。
@@ -872,13 +875,20 @@ _ACTION_ITEM_ASSET_KEYS: tuple[str, ...] = ("start_asset_id", "end_asset_id")
 # 分开声明，是因为重放侧的处理不同——图槽在两个事件（created/resolved）上都补，
 # 交付槽只在 resolved 上补（待办创建时用户还没交）。两份键表都不许手抄。
 _ACTION_ITEM_DELIVERY_KEYS: tuple[str, ...] = ("video_asset_id", "pack_asset_id")
+# 校对结论的结构化形态（#288）：偏差 ``aspect/prompt_quote/observed`` 与补漏
+# ``aspect/fact``。改词作业按它驱动，**不从渲染后的 ``reason`` 文本反解析**。
+_ACTION_ITEM_PROOFREAD_KEY = "proofread"
+_ACTION_ITEM_PROOFREAD_DEVIATION_KEYS: tuple[str, ...] = (
+    "aspect", "prompt_quote", "observed")
+_ACTION_ITEM_PROOFREAD_OMISSION_KEYS: tuple[str, ...] = ("aspect", "fact")
 # 校对结论附带的读图模型名（#292）：只出现在素材校对那两种事件上（不通过的重开卡、
 # 通过后的补报告）。它随事件走，快照落后时靠重放补回来——否则刷新后「读图模型」那一行
 # 会静默变成「未知」，把「没记」和「没读到」混成同一件事。
 _ACTION_ITEM_PROOFREAD_KEYS: tuple[str, ...] = ("vision_model",)
 _ACTION_ITEM_PAYLOAD_KEYS: tuple[str, ...] = (
     *_ACTION_ITEM_INDEX_KEYS, _ACTION_ITEM_REASON_KEY, *_ACTION_ITEM_ASSET_KEYS,
-    *_ACTION_ITEM_DELIVERY_KEYS, *_ACTION_ITEM_PROOFREAD_KEYS)
+    *_ACTION_ITEM_DELIVERY_KEYS, *_ACTION_ITEM_PROOFREAD_KEYS,
+    _ACTION_ITEM_PROOFREAD_KEY)
 
 
 def _validate_action_item_created(payload: dict[str, Any]) -> None:
@@ -899,6 +909,35 @@ def _validate_action_item_created(payload: dict[str, Any]) -> None:
     _validate_action_item_string_keys(payload, _ACTION_ITEM_ASSET_KEYS)
     _validate_action_item_string_keys(payload, _ACTION_ITEM_DELIVERY_KEYS)
     _validate_action_item_string_keys(payload, _ACTION_ITEM_PROOFREAD_KEYS)
+    _validate_proofread_conclusion(payload.get(_ACTION_ITEM_PROOFREAD_KEY))
+
+
+def _validate_proofread_conclusion(value: Any) -> None:
+    """待办载荷里的结构化校对结论（#288）：偏差与补漏两张清单，字段必须是字符串。
+
+    出现才校验：旧会话的 ``action_item.created`` 没有这个键，重放时要照旧能建出待办。
+    不认识的**顶层**键放行（``vision_model`` 由 #292 并列声明，走另一条字符串校验）；
+    条目里的键则按声明取——拼错的键会让改词作业读到空串，那是「静默改错方向」。
+    """
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise InvalidEventPayload(
+            f"事件 payload 的 {_ACTION_ITEM_PROOFREAD_KEY!r} 必须是对象：{value!r}")
+    for list_key, keys in (
+            ("deviations", _ACTION_ITEM_PROOFREAD_DEVIATION_KEYS),
+            ("omissions", _ACTION_ITEM_PROOFREAD_OMISSION_KEYS)):
+        rows = value.get(list_key)
+        if not isinstance(rows, list):
+            raise InvalidEventPayload(
+                f"校对结论的 {list_key!r} 必须是列表：{rows!r}")
+        for row in rows:
+            if not isinstance(row, dict):
+                raise InvalidEventPayload(f"校对结论的 {list_key!r} 条目必须是对象：{row!r}")
+            for key in keys:
+                if not isinstance(row.get(key), str):
+                    raise InvalidEventPayload(
+                        f"校对结论的 {list_key!r} 条目缺字符串字段 {key!r}：{row!r}")
 
 
 def _validate_action_item_string_keys(
@@ -1331,6 +1370,37 @@ class RevisionOut(BaseModel):
     text: str
 
 
+class ProofreadDeviationOut(BaseModel):
+    """一条结构化偏差（#288）：描述原文 ``prompt_quote`` 与图中实见 ``observed``。
+
+    与 ``asset_proofread.Deviation`` 同形是**契约与领域件的两侧**，不是别名：领域件可以
+    随判据演化，对外契约只承诺这三项。改词作业按它驱动，不从 ``reason`` 渲染文本反解析。
+    """
+
+    aspect: str = ""
+    prompt_quote: str = ""
+    observed: str = ""
+
+
+class ProofreadOmissionOut(BaseModel):
+    """一条结构化补漏（#288）：图里有 ``fact`` 而描述没有 ``aspect`` 那一项。"""
+
+    aspect: str = ""
+    fact: str = ""
+
+
+class ProofreadConclusionOut(BaseModel):
+    """校对结论的结构化形态（#288）：偏差与补漏两张清单。
+
+    人读的报告仍是待办的 ``reason``；这里供「改词再掷」消费。读图模型名是待办上的
+    并列字段 ``vision_model``（#292），不塞进这张清单——它是「谁给的结论」，不是
+    结论本身。缺省空清单而不是 ``None``：一张没有偏差的结论是合法值。
+    """
+
+    deviations: list[ProofreadDeviationOut] = Field(default_factory=list)
+    omissions: list[ProofreadOmissionOut] = Field(default_factory=list)
+
+
 class ActionItemOut(BaseModel):
     item_id: str
     kind: str
@@ -1358,6 +1428,11 @@ class ActionItemOut(BaseModel):
     pack_asset_id: str | None = None
     # 被拒原因/校对差异等给人看的文本：段循环被拒、素材校对不通过时填（D7 §6.3）。
     reason: str = ""
+    # 校对结论的结构化形态（#288）：``reason`` 是给人读的报告，这里是给「改词再掷」
+    # 消费的清单。只有素材校对不通过时随 ``action_item.created`` 一起写；
+    # 旧会话没有这个键时保持 ``None``（不是空清单——「没校对过」与「校对过没偏差」是
+    # 两件事，空清单会让改词作业误以为有一条可以照着改的清单）。
+    proofread: ProofreadConclusionOut | None = None
     # 本次读图结论是哪个视觉模型给的（#292）：只出现在素材校对那两种卡上（不通过的
     # 重开卡、通过后的补报告）。用 ``None`` 缺省（同图槽口径）：其余待办没有这一项，
     # 也让契约里保持可选；``None`` ＝读图模型未知，界面照实说「未知」。
@@ -3308,6 +3383,7 @@ __all__ = [
     "IdempotencyConflict", "IdempotencyRegistry", "InvalidEventPayload",
     "JobNotFound", "JobNotRunning",
     "JobSummary", "RefOut", "RevisionOut", "SessionBusy", "SessionCompleted", "SessionDetail",
+    "ProofreadConclusionOut", "ProofreadDeviationOut", "ProofreadOmissionOut",
     "SessionLegacy", "SessionNotFound", "SessionPage", "SessionSummary",
     "SegmentOut", "SEGMENT_STATUS_PENDING", "SEGMENT_STATUS_WAITING_VIDEO",
     "SEGMENT_STATUS_VALIDATING", "SEGMENT_STATUS_PASSED", "SEGMENT_STATUSES",

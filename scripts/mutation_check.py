@@ -1279,9 +1279,9 @@ MUTATIONS: tuple[Mutation, ...] = (
         "asset_loop_reopens_the_wrong_number",
         "src/minimax_h3_prompt/api/jobs.py",
         "                status=\"pending\", created_at=_now(), asset_index=number,\n"
-        "                reason=reason, vision_model=vision_model or None)",
+        "                reason=reason,\n",
         "                status=\"pending\", created_at=_now(), asset_index=number + 1,\n"
-        "                reason=reason, vision_model=vision_model or None)",
+        "                reason=reason,\n",
         ("tests/test_api_asset_loop.py::"
          "test_proofread_failure_reopens_the_same_item_and_leaves_the_prompt_untouched",),
         "重开的件号错位＝用户被要求交下一件的图，而第 N 件永远定不了稿（#256）",
@@ -1501,6 +1501,32 @@ MUTATIONS: tuple[Mutation, ...] = (
          "test_omissions_without_deviations_settle_the_item_and_stay_visible"),
         "补漏重新参与通过判定＝细节密集的身份板永远定不了稿，素材循环在结构上"
         "死锁（#286 事故 2 / #287）",
+    ),
+    Mutation(
+        "reword_locked_feature_guard_off",
+        "src/minimax_h3_prompt/asset_loop.py",
+        "    if missing:\n"
+        "        raise LockedFeaturesLost(",
+        "    if False:\n"
+        "        raise LockedFeaturesLost(",
+        ("tests/test_api_asset_loop.py::"
+         "test_reword_that_drops_a_locked_feature_is_not_written",),
+        "撤掉加法守卫＝删掉锁死条目的改写照样落盘，判偏差的锚点当场失效，"
+        "而卡片上不会有任何待裁项（#288）",
+    ),
+    Mutation(
+        "reword_round_not_logged",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "        log_asset_round(\n"
+        "            directory, name=name, kind=variant.kind,\n"
+        "            trigger=TRIGGER_REGEN_AI_REWORD,\n"
+        "            feedback=_reword_feedback(deviations),\n"
+        "            prompt_before=current, prompt_after=new_prompt)",
+        "        pass  # 变异：改完不记账",
+        ("tests/test_api_asset_loop.py::"
+         "test_reword_reroll_runs_as_a_background_job_and_only_adds",),
+        "改词不落轮次账＝「这条词什么时候被谁改过」永久无据可查，恢复动作也"
+        "分不清合法改写与坏词（#288 / spec #286 US21）",
     ),
     Mutation(
         "proofread_unavailable_hangs_instead_of_settling",

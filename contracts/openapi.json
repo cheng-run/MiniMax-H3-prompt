@@ -60,6 +60,16 @@
             ],
             "title": "Pack Asset Id"
           },
+          "proofread": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProofreadConclusionOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "reason": {
             "default": "",
             "title": "Reason",
@@ -135,7 +145,7 @@
         "type": "object"
       },
       "ActionItemResolve": {
-        "description": "决议载荷（spec §7 / D4 §9 / D6 §8 / D7 §6.3 / D8 §7.1）。\n\n五类人工待办各收一种载荷：\n- ``stage1_review`` 收 ``decision``（approve/revise，revise 带 ``revisions``）；\n- ``frame_submission`` 收 ``frames``；\n- ``segment_video`` 收 ``video_asset_id``（本段视频素材）；\n- ``asset_image`` 收 ``asset_id``（这一件资产图的生成结果，普通素材上传得到），\n  或 ``decision=\"abandon_asset\"`` 放弃这一件（#282：模型怎么都画不出来时的出口）；\n- ``asset_extra`` 收 ``decision=\"submit_extras\"`` 与 ``asset_id``（补交的\n  视频/音频里最后认可的那一件；文件本身走上传端点、带用户起的语义名登记），\n  或 ``decision=\"no_extras\"`` 明确「没有，就这样」（#284）；\n- ``director_start_image`` 收 ``decision=\"submit_start_image\"`` 与\n  ``start_asset_id``（必填）/``end_asset_id``（可选）/``confirm_aspect_mismatch``。\n\nkind 与载荷的错配由服务端判成 422（``frame_invalid`` / ``segment_video_invalid`` /\n``asset_image_invalid``，不是 pydantic 的通用 422）。",
+        "description": "决议载荷（spec §7 / D4 §9 / D6 §8 / D7 §6.3 / D8 §7.1）。\n\n五类人工待办各收一种载荷：\n- ``stage1_review`` 收 ``decision``（approve/revise，revise 带 ``revisions``）；\n- ``frame_submission`` 收 ``frames``；\n- ``segment_video`` 收 ``video_asset_id``（本段视频素材）；\n- ``asset_image`` 收 ``asset_id``（这一件资产图的生成结果，普通素材上传得到），\n  或 ``decision=\"abandon_asset\"`` 放弃这一件（#282：模型怎么都画不出来时的出口），\n  或 ``decision=\"reword_reroll\"`` / ``\"reroll\"``（#288 校对不通过的两条出路：前者是\n  默认的加法改词——独立作业跑；后者是原词再掷，只重开卡片）；\n- ``asset_extra`` 收 ``decision=\"submit_extras\"`` 与 ``asset_id``（补交的\n  视频/音频里最后认可的那一件；文件本身走上传端点、带用户起的语义名登记），\n  或 ``decision=\"no_extras\"`` 明确「没有，就这样」（#284）；\n- ``director_start_image`` 收 ``decision=\"submit_start_image\"`` 与\n  ``start_asset_id``（必填）/``end_asset_id``（可选）/``confirm_aspect_mismatch``。\n\nkind 与载荷的错配由服务端判成 422（``frame_invalid`` / ``segment_video_invalid`` /\n``asset_image_invalid``，不是 pydantic 的通用 422）。",
         "properties": {
           "asset_id": {
             "anyOf": [
@@ -170,7 +180,9 @@
                   "submit_delivery",
                   "abandon_asset",
                   "submit_extras",
-                  "no_extras"
+                  "no_extras",
+                  "reword_reroll",
+                  "reroll"
                 ],
                 "type": "string"
               },
@@ -670,6 +682,66 @@
           "type"
         ],
         "title": "ProblemFieldError",
+        "type": "object"
+      },
+      "ProofreadConclusionOut": {
+        "description": "校对结论的结构化形态（#288）：偏差与补漏两张清单。\n\n人读的报告仍是待办的 ``reason``；这里供「改词再掷」消费。读图模型名是待办上的\n并列字段 ``vision_model``（#292），不塞进这张清单——它是「谁给的结论」，不是\n结论本身。缺省空清单而不是 ``None``：一张没有偏差的结论是合法值。",
+        "properties": {
+          "deviations": {
+            "items": {
+              "$ref": "#/components/schemas/ProofreadDeviationOut"
+            },
+            "title": "Deviations",
+            "type": "array"
+          },
+          "omissions": {
+            "items": {
+              "$ref": "#/components/schemas/ProofreadOmissionOut"
+            },
+            "title": "Omissions",
+            "type": "array"
+          }
+        },
+        "title": "ProofreadConclusionOut",
+        "type": "object"
+      },
+      "ProofreadDeviationOut": {
+        "description": "一条结构化偏差（#288）：描述原文 ``prompt_quote`` 与图中实见 ``observed``。\n\n与 ``asset_proofread.Deviation`` 同形是**契约与领域件的两侧**，不是别名：领域件可以\n随判据演化，对外契约只承诺这三项。改词作业按它驱动，不从 ``reason`` 渲染文本反解析。",
+        "properties": {
+          "aspect": {
+            "default": "",
+            "title": "Aspect",
+            "type": "string"
+          },
+          "observed": {
+            "default": "",
+            "title": "Observed",
+            "type": "string"
+          },
+          "prompt_quote": {
+            "default": "",
+            "title": "Prompt Quote",
+            "type": "string"
+          }
+        },
+        "title": "ProofreadDeviationOut",
+        "type": "object"
+      },
+      "ProofreadOmissionOut": {
+        "description": "一条结构化补漏（#288）：图里有 ``fact`` 而描述没有 ``aspect`` 那一项。",
+        "properties": {
+          "aspect": {
+            "default": "",
+            "title": "Aspect",
+            "type": "string"
+          },
+          "fact": {
+            "default": "",
+            "title": "Fact",
+            "type": "string"
+          }
+        },
+        "title": "ProofreadOmissionOut",
         "type": "object"
       },
       "RefOut": {

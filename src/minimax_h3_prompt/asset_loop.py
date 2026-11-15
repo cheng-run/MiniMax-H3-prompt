@@ -381,6 +381,19 @@ AI_REWORD_DISCIPLINE_HEAD = "【生图提示词纪律】"
 AI_REWORD_ROLE = "role_asset_ai_reword"
 
 
+class LockedFeaturesLost(ValueError):
+    """AI 改词结果丢了锁死清单条目（#288）。
+
+    仍是 ``ValueError``：命令行那条路径只按「调用失败」处理，异常类型不变。工作台要多
+    一样东西——**丢的是哪几条**：那张卡片要把「模型想删掉 X，要不要删」挂成待裁项，
+    所以缺失清单必须跟着异常走，绝不从错误文案反解析。
+    """
+
+    def __init__(self, missing: Sequence[str], message: str) -> None:
+        super().__init__(message)
+        self.missing: tuple[str, ...] = tuple(str(item) for item in missing)
+
+
 def build_ai_reword_request(
     prompt: str,
     deviations: Sequence[tuple[str, str, str]],
@@ -468,7 +481,8 @@ def ai_reword_asset_prompt(
         raise ValueError("AI 改词结果为空")
     missing = [str(x) for x in locked_features if str(x).strip() and str(x) not in new_prompt]
     if missing:
-        raise ValueError(
+        raise LockedFeaturesLost(
+            missing,
             f"AI 改词结果丢了锁死特征：{'、'.join(missing)}——"
             "锁死清单是判偏差的判据，AI 改词只许强化原意、不许把它改掉")
     return new_prompt
@@ -479,6 +493,7 @@ __all__ = [
     "AI_REWORD_ROLE",
     "ASSET_ALIGN_ROLE", "ASSET_LOOP_KEY", "ASSET_ROUNDS_FILENAME", "ASSET_REWRITE_ROLE",
     "CURRENT_PROMPT_HEAD", "QueueItem",
+    "LockedFeaturesLost",
     "REGEN_TRIGGERS", "SETTLED_FACTS_HEAD",
     "TRIGGER_REGEN_AI_REWORD", "TRIGGER_REGEN_REROLL", "TRIGGER_REGEN_REWORD",
     "TRIGGER_REVIEW_MODEL", "TRIGGER_REVIEW_REWORD",

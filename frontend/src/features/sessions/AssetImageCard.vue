@@ -93,6 +93,30 @@ const submitting = ref(false)
 const submitError = ref<string | null>(null)
 const submitted = ref(false)
 
+// 校对不通过后的两条出路（#288）：默认是「改词强化原意再掷」——它只做加法，
+// 生图词按偏差清单把没画出来的细节写显式；「原词再掷」一个字都不动，只重开卡片。
+// 方向必须是「让设计被画对」，所以默认键不指向「让设计迁就图」。
+const rerolling = ref<'reword_reroll' | 'reroll' | null>(null)
+const rerollError = ref<string | null>(null)
+
+async function chooseExit(decision: 'reword_reroll' | 'reroll'): Promise<void> {
+  if (rerolling.value) {
+    return
+  }
+  rerolling.value = decision
+  rerollError.value = null
+  try {
+    // 不带 asset_id：这次决议是「下一轮怎么来」，不是又交了一张图。改词在后台作业里跑，
+    // 请求立即返回；快照随后会把这张卡换成同件号的新卡（或重开同一张）。
+    await resolveActionItem(props.sessionId, props.item.item_id, { decision }, newIdempotencyKey())
+    emit('submitted')
+  } catch (error) {
+    rerollError.value = errorMessage(error, '提交失败，请稍后重试。')
+  } finally {
+    rerolling.value = null
+  }
+}
+
 // 放弃这一件（#279 US9 / #282）：模型怎么都画不出来时的出口。代价只有一句，但必须
 // 在点下去之前看得到——所以先展开确认，不点确认不发请求。
 const confirmingAbandon = ref(false)
@@ -219,7 +243,9 @@ async function confirmAbandon(): Promise<void> {
     </p>
     <!-- 同一件号重开的两种情况：第一轮还没交（没有差异）与校对没过、等你重交。
          后者在这一格说清楚，用户不会以为「刚交的那张已经算数」。 -->
-    <p v-if="item.reason" class="muted">这一件上一轮没通过校对：按下面的差异改词后重交。</p>
+    <p v-if="item.reason" class="muted">
+      这一件上一轮没通过校对：在下面的出路上选一条，再按卡片上的词重新生成并交回。
+    </p>
 
     <div class="prompt">
       <div class="prompt__head">
@@ -246,7 +272,34 @@ async function confirmAbandon(): Promise<void> {
       <p class="muted" data-testid="proofread-vision-model">
         读图模型：{{ item.vision_model || '未知' }}
       </p>
-      <p class="muted">按上面的差异改词后重新生成一张，再交回这一件。</p>
+      <!-- 两条出路并列可见（#288）：默认是改词强化原意——它只做加法，让设计被画对；
+           原词再掷是「字一个都不动」的那一档。 -->
+      <div class="exits" aria-label="校对不通过后的出路">
+        <p class="muted">下一轮怎么来：</p>
+        <Button
+          type="button"
+          :disabled="rerolling !== null || submitting || abandoning"
+          @click="chooseExit('reword_reroll')"
+        >
+          {{ rerolling === 'reword_reroll' ? '正在按偏差改词…' : '改词强化原意再掷（默认）' }}
+        </Button>
+        <p class="muted exits__hint">
+          只做加法：在原词上把没画出来的细节写得更显式，锁死清单里的每一条都逐字保留。
+          改词在后台作业里跑，完成后这张卡会带着新词重开。
+        </p>
+        <Button
+          type="button"
+          variant="secondary"
+          :disabled="rerolling !== null || submitting || abandoning"
+          @click="chooseExit('reroll')"
+        >
+          {{ rerolling === 'reroll' ? '正在重开…' : '原词再掷' }}
+        </Button>
+        <p class="muted exits__hint">
+          原词再掷：生图词与描述一个字都不动，只把这一件的交图卡重开，用同一份词再生成一张。
+        </p>
+        <ErrorNotice v-if="rerollError" :message="rerollError" />
+      </div>
     </section>
 
     <form class="upload" @submit.prevent="submit">
@@ -349,6 +402,17 @@ async function confirmAbandon(): Promise<void> {
   border: 1px solid var(--color-error-text);
   border-radius: var(--radius-md);
   background: var(--color-error-bg);
+}
+.exits {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+.exits__hint {
+  margin: 0;
+  font-size: 0.8125rem;
 }
 .upload {
   display: flex;

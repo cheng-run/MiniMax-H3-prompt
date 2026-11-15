@@ -79,6 +79,7 @@ from ..workbench_store import (
     JobNotFound,
     JobNotRunning,
     JobSummary,
+    ProofreadConclusionOut,
     RevisionOut,
     RouteMismatch,
     SEGMENT_STATUS_PASSED,
@@ -167,6 +168,9 @@ SEGMENT_ASSEMBLE_NODE = "segment_assemble"
 # 素材循环（D7 spec §5.3 / §6.2）：出词与校对是**两个独立 job**，都记这个 kind；
 # 中间隔着持久化的 ``asset_image`` 待办（不是阻塞线程）。
 JOB_KIND_ASSET_LOOP = "asset_loop"
+# 校对不通过后的「改词再掷」（#288）：它是一次模型调用，必须异步。单独一个 kind 才
+# 回答得了「任务列表里那条几十秒的是什么」——出词、校对都不花这么久。
+JOB_KIND_ASSET_REWORD = "asset_reword"
 # 导演台打包（D8 spec §5.4 / #263）：唯一会写二进制产物的 job，也是唯一可能长时间
 # 占磁盘的一步。单独一个 kind 才回答得了「任务列表里跑了三分钟的那条是什么」。
 JOB_KIND_PACK = "pack"
@@ -181,6 +185,8 @@ ASSET_STEP_PROOFREAD = "proofread"
 ASSET_STEP_DONE = "done"
 ASSET_WRITE_NODE = "asset_write"
 ASSET_PROOFREAD_NODE = "asset_proofread"
+# 改词作业的进度节点名（#288）：进度带据此显示「素材改词」，前端 status.ts 同一张映射。
+ASSET_REWORD_NODE = "asset_reword"
 # 资产图词的落点模板（与 ``workbench_store`` 的模式产物同号：两位件号）。
 ASSET_PROMPT_FILENAME = ASSETS_DIRNAME + "/picture-{number:02d}.md"
 
@@ -345,6 +351,36 @@ def _parse_asset_prompt(text: str) -> str:
     """
     _head, separator, body = str(text).partition("\n\n")
     return body if separator else str(text)
+
+
+def _proofread_payload(report: Any) -> dict[str, list[dict[str, str]]]:
+    """把对照器结论翻成待办载荷里的结构化形态（#288）。
+
+    两张清单与 ``ProofreadConclusionOut`` 同形：偏差 ``aspect/prompt_quote/observed``、
+    补漏 ``aspect/fact``。改词作业只读这一份，**不从渲染后的 ``reason`` 反解析**——
+    渲染文案是给人看的，措辞随时会改，反解析会在改文案那天静默读错。
+    """
+    return {
+        "deviations": [
+            {"aspect": str(item.aspect), "prompt_quote": str(item.prompt_quote),
+             "observed": str(item.observed)}
+            for item in report.deviations],
+        "omissions": [
+            {"aspect": str(item.aspect), "fact": str(item.fact)}
+            for item in report.omissions],
+    }
+
+
+def _reword_feedback(deviations: Sequence[tuple[str, str, str]]) -> str:
+    """轮次账里的「意见」：把偏差清单原样带上（#288）。
+
+    ``asset-rounds.jsonl`` 的 ``feedback`` 是事后追查「这一轮为什么改」的唯一依据；
+    只写「按 AI 改词」而不写改了什么，翻账时仍然得去猜。格式与 CLI 那句同源。
+    """
+    items = "；".join(
+        f"{aspect}：描述「{quote}」→ 图中「{observed}」"
+        for aspect, quote, observed in deviations)
+    return f"校对裁决重生成：AI 按偏差改词（{items}）"
 
 
 PROOFREAD_STEP_VISION = "视觉客户端不可用"
@@ -1012,11 +1048,17 @@ class JobRunner:
             # 只为选任务 kind 与事件文案；权威落盘仍在锁内的 ``_decide``。
             abandon = (branch == _BRANCH_ASSET_LOOP
                        and decision == step_machine.DECISION_ABANDON_ASSET)
+            # 改词再掷（#288）：一次模型调用，必须在后台作业里跑；原词再掷不调模型，
+            # 沿用素材循环那条「按盘判步骤」的路（``round > 0`` 时它只重开卡片）。
+            reword = (branch == _BRANCH_ASSET_LOOP
+                      and decision == step_machine.DECISION_REWORD_REROLL)
             abandon_name, abandon_kind = (
                 await asyncio.to_thread(self._abandon_preview, session_id, item_id)
                 if abandon else ("", ""))
             if abandon:
                 kind = abandon_kind
+            elif reword:
+                kind = JOB_KIND_ASSET_REWORD
             elif branch == _BRANCH_ASSET_LOOP:
                 # 素材循环的两个 job 都记 ``asset_loop``（D7 §6.2）：前端/排障按 kind
                 # 就能把「出词」「校对」与外层的推进任务分开。
@@ -1232,11 +1274,22 @@ class JobRunner:
                         # 后果当场讲清（#279 US10）：放弃的是图，**不是那些文字**。
                         holder["reason"] = _abandon_asset_note(name)
                         recorded_decision = step_machine.DECISION_ABANDON_ASSET
+                    elif decision in (step_machine.DECISION_REWORD_REROLL,
+                                      step_machine.DECISION_REROLL):
+                        # 校对不通过的两条出路（#288）：台账**不动**（这一件仍是未交图
+                        # ``pending``，四态语义不变）。改词与原词再掷都不带图——用户是
+                        # 在选「下一轮怎么来」，不是又交了一张。
+                        if asset_id is not None:
+                            raise AssetImageInvalid(
+                                "重掷出路与交图不能同时提交：要么交一张图，"
+                                "要么选改词再掷／原词再掷。")
+                        holder["number"] = int(number)
+                        recorded_decision = decision
                     else:
                         if decision is not None:
                             raise AssetImageInvalid(
-                                "asset_image 待办只接受 asset_id 或 "
-                                "decision=abandon_asset。")
+                                "asset_image 待办只接受 asset_id、decision=abandon_asset、"
+                                "decision=reword_reroll 或 decision=reroll。")
                         submitted = str(asset_id or "").strip()
                         if not submitted:
                             raise AssetImageInvalid(
@@ -1527,6 +1580,11 @@ class JobRunner:
                     if branch == _BRANCH_FRAMES
                     else step_machine.DECISION_SUBMIT_VIDEO
                     if branch == _BRANCH_SEGMENT_VIDEO
+                    # 校对不通过的两条出路是**显式** decision 取值（#288），与交图/放弃
+                    # 不同，不靠载荷分型——事件里照抄请求里的那一个词。
+                    else decision
+                    if decision in (step_machine.DECISION_REWORD_REROLL,
+                                    step_machine.DECISION_REROLL)
                     else step_machine.DECISION_ABANDON_ASSET
                     if abandon
                     else step_machine.DECISION_SUBMIT_IMAGE
@@ -1587,7 +1645,14 @@ class JobRunner:
             await asyncio.to_thread(self._write_active_job, session_id, job.job_id, "")
             event = threading.Event()
             self._cancel_events[job.job_id] = event
-            if branch in (_BRANCH_SEGMENT_VIDEO, _BRANCH_ASSET_LOOP,
+            if reword:
+                # 改词作业有**自己的执行入口**（#288）：它按 job kind 分派，不挤进
+                # ``_run`` 的 ``_resume_step`` 判据——那条判据回答的是「续跑到哪一档」，
+                # 不代表「这条任务要做什么」，塞进去会让「跨件改词」变成一个盘上事实
+                # 说不清的落点。件号由锁内的 ``_decide`` 写进 holder。
+                coroutine = self._run_asset_reword(
+                    session_id, job.job_id, event, int(holder["number"]))
+            elif branch in (_BRANCH_SEGMENT_VIDEO, _BRANCH_ASSET_LOOP,
                           _BRANCH_ASSET_EXTRA,
                           _BRANCH_DIRECTOR_START_IMAGE,
                           _BRANCH_DIRECTOR_SEGMENT_IMAGE,
@@ -3321,6 +3386,7 @@ class JobRunner:
                             stage=step_machine.STEP_ASSET_LOOP)
         return {"step": ASSET_STEP_PROOFREAD, "number": number, "name": name,
                 "passed": report.is_clean(), "reason": reason,
+                "proofread": _proofread_payload(report),
                 "vision_model": vision_model}
 
     def _execute_asset_proofread_fake(self, session_id: str, job_id: str,
@@ -3351,7 +3417,7 @@ class JobRunner:
         first_number = min(
             int(item["number"]) for item in session.asset_ledger
             if str(item.get("kind")) == KIND_PICTURE)
-        passed, reason = asset_proofread_verdict(
+        passed, reason, proofread = asset_proofread_verdict(
             number, first_number, int(entry.get("round", 0)))
 
         self._emit_progress(session_id, job_id, ASSET_PROOFREAD_NODE, "started",
@@ -3361,7 +3427,7 @@ class JobRunner:
         self._emit_progress(session_id, job_id, ASSET_PROOFREAD_NODE, "done",
                             stage=step_machine.STEP_ASSET_LOOP)
         return {"step": ASSET_STEP_PROOFREAD, "number": number, "name": name,
-                "passed": passed, "reason": reason,
+                "passed": passed, "reason": reason, "proofread": proofread,
                 "vision_model": _vision_model_name()}
 
     def _finish_asset_write(self, session_id: str, job_id: str,
@@ -3496,10 +3562,16 @@ class JobRunner:
                     job_id=uuid.uuid4().hex, kind="advance",
                     status="running", started_at=_now())
         else:
+            # 结构化结论随重开的卡片走（#288）：改词作业按它驱动；人读的 ``reason``
+            # 仍是渲染报告。旧任务的 result 没有这一键（防御分支），按无结论处理。
+            proofread = result.get("proofread")
             item = ActionItemOut(
                 item_id=uuid.uuid4().hex, kind=step_machine.ACTION_ASSET_IMAGE,
                 status="pending", created_at=_now(), asset_index=number,
-                reason=reason, vision_model=vision_model or None)
+                reason=reason,
+                proofread=(ProofreadConclusionOut.model_validate(proofread)
+                           if isinstance(proofread, dict) else None),
+                vision_model=vision_model or None)
 
         def _apply(detail: Any) -> dict[str, Any]:
             jobs = self._succeed_job(detail, job_id)
@@ -3551,6 +3623,10 @@ class JobRunner:
                 # 校差不通过才有这几个键：件号、差异清单与读图模型是重开卡片要读的。
                 created_payload["asset_index"] = number
                 created_payload["reason"] = reason
+                if item.proofread is not None:
+                    # 结构化结论随创建事件走（#288）：快照落后时重放能把它补回，
+                    # 改词作业在崩溃续跑后才读得到偏差清单。
+                    created_payload["proofread"] = item.proofread.model_dump(mode="json")
                 if vision_model:
                     created_payload["vision_model"] = vision_model
             events.append(EventDraft(
@@ -3567,6 +3643,216 @@ class JobRunner:
             events.append(EventDraft("action_item.resolved", payload, job_id=job_id))
         self.store.mutate(session_id, _apply, events=events)
         return next_job
+
+    async def _run_asset_reword(self, session_id: str, job_id: str,
+                                cancel_event: threading.Event, number: int) -> None:
+        """改词再掷的后台执行（#288）：按 job kind 分派，不走 ``_resume_step``。
+
+        失败**不落成会话 failed**：词保持原样、卡片重开并写明原因（与 CLI「失败只提示、
+        词不动、留在菜单」同一口径）。取消是唯一照常中断的结局。
+        """
+        try:
+            result = await asyncio.to_thread(
+                self._execute_asset_reword, session_id, job_id, cancel_event, number)
+        except JobCancelled as exc:
+            await asyncio.to_thread(
+                self._finish_cancelled, session_id, job_id, exc.node)
+        except Exception as exc:  # noqa: BLE001 - 任务失败要落成 job 状态
+            logger.exception("改词作业失败：%s / %s", session_id, job_id)
+            await asyncio.to_thread(
+                self._finish_failed, session_id, job_id, error_code(exc), str(exc))
+        else:
+            await asyncio.to_thread(
+                self._finish_asset_reword, session_id, job_id, result)
+        finally:
+            await asyncio.to_thread(self._cleanup, session_id, job_id)
+
+    @staticmethod
+    def _latest_asset_card(session: Any, number: int) -> dict[str, Any]:
+        """这一件最近一次被决议掉的 ``asset_image`` 卡：改词作业从它读偏差清单。
+
+        读的是**最近一条已决议**的卡片（重开后再改词，最新那张才是这一次的依据）；
+        没有就返回空字典，调用方据此报「没有结构化结论」而不是猜着改。
+        """
+        cards = [
+            entry for entry in session.action_items
+            if (str(entry.get("kind")) == step_machine.ACTION_ASSET_IMAGE
+                and int(entry.get("asset_index") or 0) == int(number)
+                and str(entry.get("status")) == "resolved")]
+        return dict(cards[-1]) if cards else {}
+
+    def _execute_asset_reword(self, session_id: str, job_id: str,
+                              cancel_event: threading.Event,
+                              number: int) -> dict[str, Any]:
+        """线程里的改词（#288）：按偏差清单做加法改写，锁死条目逐字保留。
+
+        落盘与留痕都在这里（作业成功即事实）：``assets/picture-NN.md`` 写新正文、
+        ``asset-rounds.jsonl`` 追加一行（触发口沿用「AI 按偏差改词」）。守卫不过时
+        **一个字节都不写**，把缺失条目带回收尾，由它挂成待裁项。
+
+        读模型这一路与 CLI 同源：``asset_assignment`` 取这一张记下的模型档，锁死清单
+        取 ``asset_prompt_for``（与校对判据同一份），纪律文本按那一档现取。
+        """
+        from ..asset_loop import (
+            TRIGGER_REGEN_AI_REWORD,
+            LockedFeaturesLost,
+            QueueItem,
+            ai_reword_asset_prompt,
+            log_asset_round,
+        )
+        from ..generation import asset_prompt_for
+
+        session = load_session(self.store.session_directory(session_id))
+        if session is None:
+            raise RuntimeError(f"会话文件读不到：{session_id}")
+        entry = self._picture_entry(session.asset_ledger, number)
+        name = str(entry["name"])
+        directory = self.store.session_directory(session_id)
+        artifact_name = ASSET_PROMPT_FILENAME.format(number=number)
+        text = (directory / artifact_name).read_text(encoding="utf-8")
+        current = _parse_asset_prompt(text)
+        variant = asset_prompt_for(session.brief, session.stage_state, name)
+        locked = tuple(variant.locked_features)
+        card = self._latest_asset_card(session, number)
+        reason_before = str(card.get("reason") or "")
+        raw_conclusion = card.get("proofread")
+        conclusion = dict(raw_conclusion) if isinstance(raw_conclusion, dict) else None
+        deviations = [
+            (str(item.get("aspect") or ""), str(item.get("prompt_quote") or ""),
+             str(item.get("observed") or ""))
+            for item in ((conclusion or {}).get("deviations") or [])
+            if isinstance(item, dict)]
+
+        self._emit_progress(session_id, job_id, ASSET_REWORD_NODE, "started",
+                            stage=step_machine.STEP_ASSET_LOOP)
+        if cancel_event.is_set():
+            raise JobCancelled(ASSET_REWORD_NODE)
+
+        result: dict[str, Any] = {
+            "number": number, "name": name, "prompt_before": current,
+            "prompt_after": "", "reason_before": reason_before,
+            "proofread": conclusion, "missing": [], "note": "",
+            # 读图模型名随卡片一起带过去（#292）：重开的是同一份结论，谁给的别丢。
+            "vision_model": str(card.get("vision_model") or ""),
+        }
+        if not deviations:
+            # 旧版本重开的卡片没有结构化清单：不猜着改（CLI 同一条「没有清单就不改」）。
+            result["note"] = (
+                "这条卡片没有结构化的偏差清单（旧版本重开的卡片），这次没有改词；"
+                "可以选「原词再掷」，或直接用现在的词重新生成。")
+            self._emit_progress(session_id, job_id, ASSET_REWORD_NODE, "done",
+                                stage=step_machine.STEP_ASSET_LOOP)
+            return result
+
+        try:
+            from ..ui.wizard_display import asset_assignment
+
+            model_key = asset_assignment(
+                session.stage_state, QueueItem(number, variant.kind, name))["model"]
+            if self.fake_pipeline:
+                from .fake_pipeline import asset_reword_text
+
+                new_prompt = asset_reword_text(
+                    current, list((conclusion or {}).get("deviations") or []))
+                missing = [str(x) for x in locked
+                           if str(x).strip() and str(x) not in new_prompt]
+                if missing:
+                    raise LockedFeaturesLost(
+                        missing, f"桩改词丢了锁死特征：{'、'.join(missing)}")
+            else:
+                new_prompt = ai_reword_asset_prompt(
+                    current, deviations, build_chat_model(),
+                    locked_features=locked, model=model_key)
+        except LockedFeaturesLost as exc:
+            # 加法守卫：缺任一条目即本次改写**不落盘**，缺失清单交给收尾挂成待裁项。
+            result["missing"] = list(exc.missing)
+            self._emit_progress(session_id, job_id, ASSET_REWORD_NODE, "done",
+                                stage=step_machine.STEP_ASSET_LOOP)
+            return result
+        except Exception as exc:  # noqa: BLE001 — 词保持原样，卡片重开并写明原因
+            result["note"] = f"这次改词没有完成：{exc}；生图词保持原样。"
+            self._emit_progress(session_id, job_id, ASSET_REWORD_NODE, "done",
+                                stage=step_machine.STEP_ASSET_LOOP)
+            return result
+        if cancel_event.is_set():
+            raise JobCancelled(ASSET_REWORD_NODE)
+
+        # 落盘（一个字节都不写直到这里）：正文走产物登记，轮次账追加在**会话目录**。
+        self.store.write_text_artifact(
+            session_id, artifact_name,
+            _render_asset_prompt(number, name, new_prompt), job_id=job_id)
+        log_asset_round(
+            directory, name=name, kind=variant.kind,
+            trigger=TRIGGER_REGEN_AI_REWORD,
+            feedback=_reword_feedback(deviations),
+            prompt_before=current, prompt_after=new_prompt)
+        result["prompt_after"] = new_prompt
+        self._emit_progress(session_id, job_id, ASSET_REWORD_NODE, "done",
+                            stage=step_machine.STEP_ASSET_LOOP)
+        return result
+
+    def _finish_asset_reword(self, session_id: str, job_id: str,
+                             result: dict[str, Any]) -> None:
+        """改词收尾（#288）：重开同一件号的卡片，台账仍是 ``pending``。
+
+        三种结局都重开卡片（成功的卡片带新词、``reason`` 为空；失败/守卫拦下的卡片
+        保留原差异报告并附上这次为什么没改），会话回 ``awaiting_human``。
+        """
+        number = int(result["number"])
+        missing = [str(item) for item in result.get("missing") or []]
+        note = str(result.get("note") or "")
+        reason_before = str(result.get("reason_before") or "")
+        written = bool(str(result.get("prompt_after") or "").strip())
+        proofread = result.get("proofread")
+        proofread_out = (ProofreadConclusionOut.model_validate(proofread)
+                         if isinstance(proofread, dict) else None)
+        vision_model = str(result.get("vision_model") or "")
+        if written:
+            # 新词已在盘上：卡片回到「用新词重新生成并交回」的初始形态。
+            reason = ""
+        else:
+            if missing:
+                note = (
+                    f"模型想删掉锁死清单里的「{'、'.join(missing)}」，要不要删？"
+                    "这次改写**没有落盘**（锁死清单是判偏差的判据，加法改写不许删条目）。"
+                    "生图词保持原样——可以再点一次改词，或选「原词再掷」直接重交。")
+            reason = f"{reason_before}\n\n{note}".strip() if reason_before else note
+        if written:
+            job_detail = "已按偏差清单改词，生图词已更新"
+        elif missing:
+            job_detail = f"改写会删掉锁死条目「{'、'.join(missing)}」，没有落盘"
+        else:
+            job_detail = note or "这次没有改词"
+        item = ActionItemOut(
+            item_id=uuid.uuid4().hex, kind=step_machine.ACTION_ASSET_IMAGE,
+            status="pending", created_at=_now(), asset_index=number,
+            reason=reason, proofread=proofread_out,
+            vision_model=vision_model or None)
+
+        def _apply(detail: Any) -> dict[str, Any]:
+            return {
+                "status": step_machine.STATUS_AWAITING_HUMAN,
+                "jobs": self._succeed_job(detail, job_id, detail_text=job_detail),
+                "action_items": [
+                    existing.model_dump(mode="json") for existing in detail.action_items
+                    if not (existing.kind == step_machine.ACTION_ASSET_IMAGE
+                            and existing.status == "pending")
+                ] + [item.model_dump(mode="json")],
+            }
+
+        created_payload: dict[str, Any] = {
+            "item_id": item.item_id, "kind": item.kind, "asset_index": number}
+        if reason:
+            created_payload["reason"] = reason
+        if proofread_out is not None:
+            created_payload["proofread"] = proofread_out.model_dump(mode="json")
+        if vision_model:
+            created_payload["vision_model"] = vision_model
+        self.store.mutate(session_id, _apply, events=[
+            EventDraft("job.succeeded",
+                       {"next": step_machine.STATUS_AWAITING_HUMAN}, job_id=job_id),
+            EventDraft("action_item.created", created_payload, job_id=job_id),
+        ])
 
     def _execute_segment_planning(self, session_id: str, job_id: str,
                                   cancel_event: threading.Event) -> list[dict[str, Any]]:

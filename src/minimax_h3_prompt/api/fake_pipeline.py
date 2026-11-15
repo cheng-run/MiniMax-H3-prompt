@@ -216,21 +216,45 @@ def asset_prompt_text(name: str) -> str:
 
 def asset_proofread_verdict(
     number: int, first_number: int, round_no: int,
-) -> tuple[bool, str]:
-    """桩校对结论：**第 1 件的第一轮**不通过，其余一律通过（D7-6 / #287）。
+) -> tuple[bool, str, dict[str, list[dict[str, str]]]]:
+    """桩校对结论：**第 1 件的第一轮**不通过，其余一律通过（D7-6 / #287 / #288）。
 
     必须确定性：随机或按调用次数会在重跑/续跑时换结论，E2E 就时红时绿。判据用台账
     轮次（``round == 0`` 才是第一轮，与 ``_settle_asset`` 的转移规则同源），不数调用。
     差异清单要提到「词里是什么、图里是什么」，否则卡片上的红框没有内容可读。
     桩**不改写任何词**（#287）：不通过只让这一件退回重交，与真实路径同形。
+
+    第三个返回值是**结构化的**校对结论（#288）：改词作业按它驱动，与真实路径给出的
+    ``deviations/omissions`` 同形。引文逐字取自 :func:`asset_prompt_text`。
     """
     if number != first_number or round_no > 0:
-        return True, ""
+        return True, "", {"deviations": [], "omissions": []}
+    conclusion = {
+        "deviations": [
+            {"aspect": "外套", "prompt_quote": "米色风衣", "observed": "深灰外套"},
+            {"aspect": "伞", "prompt_quote": "黑色长柄伞", "observed": "透明塑料伞"},
+        ],
+        "omissions": [],
+    }
     return False, (
         "差异清单（桩管线）：词里写的是「米色风衣、黑色长柄伞」，"
         "图里人物穿深灰外套、撑透明塑料伞——外套颜色与伞的材质不一致。"
         "重新生成一张，再交回这一件。"
-    )
+    ), conclusion
+
+
+def asset_reword_text(
+    prompt: str, deviations: list[dict[str, str]],
+) -> str:
+    """桩 AI 改词（#288）：只做加法，锁死条目因此逐字仍在。
+
+    真实路径的纪律是「按偏差清单强化原意」；桩用固定句式把偏差涉及的部位写显式，
+    判据不依赖模型——E2E 要能确定性走完「校对不通过 → 改词再掷 → 重交 → 定稿」。
+    """
+    aspects = "、".join(
+        str(item.get("aspect") or "").strip() for item in deviations
+        if str(item.get("aspect") or "").strip())
+    return f"{str(prompt).strip()}；把{aspects or '偏差部位'}的样子写得更具体（桩管线改词）"
 
 
 def _fake_assets(brief: Any, refs: list[Any]) -> list[tuple[int, str]]:
@@ -317,7 +341,7 @@ def stage1_state(brief: Any, previous: dict[str, Any] | None = None) -> dict[str
         drops = set(fake_asset_drops())
         update[ASSET_KIND_FIELDS["character"][0]] = [
             {"name": name, "positive_prompt": asset_prompt_text(name),
-             "negative_prompt": "", "locked_features": []}
+             "negative_prompt": "", "locked_features": ["米色风衣", "黑色长柄伞"]}
             for number, name in assets if number not in drops]
         update[ASSET_KIND_FIELDS["prop"][0]] = []
         update[ASSET_KIND_FIELDS["scene"][0]] = []
@@ -666,6 +690,7 @@ __all__ = [
     "StubChatModel",
     "asset_prompt_text",
     "asset_proofread_verdict",
+    "asset_reword_text",
     "director_firstframe_prompt",
     "director_ref_sections",
     "director_segment_reply",

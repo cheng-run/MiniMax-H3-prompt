@@ -30,6 +30,7 @@ from minimax_h3_prompt.tools.preflight import (
     EXPECTED_VIDEO_SIZE,
     check_segment_video,
 )
+from minimax_h3_prompt.session_store import SESSION_FILENAME
 from minimax_h3_prompt.workbench_store import EVENT_TYPES
 from workbench_client import workbench_client
 
@@ -413,3 +414,101 @@ def test_fake_switch_off_never_fabricates_conclusions(tmp_path, monkeypatch):
                 session_id, "job", threading.Event(), 1)
 
     assert not (root / Path(session_id) / "assets" / "picture-01.md").exists()
+
+
+def test_fake_ref_reword_reroll_and_resubmit_settles_the_item(fake_app, tmp_path):
+    """桩里的「校对不通过 → 改词再掷 → 重交 → 定稿」（#288）。
+
+    改词作业在桩模式下也必须能跑：桩只换「谁写」（确定性文本、保留锁死条目），
+    轮次账、卡片重开与台账转移全走真实路径；全程不建模型（``build_chat_model`` 一调
+    就炸），所以这条用例同时钉住「桩不偷偷走真实改词」。
+    """
+    app, root = fake_app
+
+    with workbench_client(app) as client:
+        created = client.post("/api/v1/sessions", json={
+            "mode": "ref", "variant": "T2VA", "duration": REF_SECONDS,
+            "style": "写实", "language": "Chinese", "plot": "改词再掷的桩闭环"})
+        assert created.status_code == 201, created.text
+        session_id = created.json()["session_id"]
+        assert client.post(f"/api/v1/sessions/{session_id}/jobs").status_code == 202
+        detail = _wait_until(
+            client, session_id, lambda body: _pending(body, "stage1_review"))
+        review = _pending(detail, "stage1_review")[0]
+        client.post(
+            f"/api/v1/sessions/{session_id}/action-items/{review['item_id']}/resolve",
+            json={"decision": "approve"})
+
+        # 第 1 件：交图 → 校对不通过 → 同一件号重开，卡片带着结构化偏差清单。
+        detail = _wait_until(
+            client, session_id,
+            lambda body: _pending(body, "asset_image")
+            and any(item["asset_index"] == 1 for item in _pending(body, "asset_image")))
+        todo = _pending(detail, "asset_image")[0]
+        word_path = root / Path(session_id) / "assets" / "picture-01.md"
+        word_before = word_path.read_text(encoding="utf-8")
+        image = _upload(client, session_id, _png(21), "cat-1.png", "image/png")
+        resp = client.post(
+            f"/api/v1/sessions/{session_id}/action-items/{todo['item_id']}/resolve",
+            json={"asset_id": image["asset_id"]})
+        assert resp.status_code == 202, resp.text
+        _wait_job(client, session_id, resp.json()["job_id"])
+        detail = _wait_until(
+            client, session_id,
+            lambda body: [item for item in _pending(body, "asset_image")
+                          if item["asset_index"] == 1 and item["reason"]])
+        reopened = [item for item in _pending(detail, "asset_image")
+                    if item["asset_index"] == 1][0]
+        assert reopened["proofread"]["deviations"], "桩没有给出结构化偏差清单"
+        assert word_path.read_text(encoding="utf-8") == word_before
+
+        # 默认出路：改词再掷。桩只换「谁写」，卡片、轮次账与台账都走真实路径。
+        resp = client.post(
+            f"/api/v1/sessions/{session_id}/action-items/"
+            f"{reopened['item_id']}/resolve",
+            json={"decision": "reword_reroll"})
+        assert resp.status_code == 202, resp.text
+        job = resp.json()
+        assert job["kind"] == "asset_reword"
+        done = _wait_job(client, session_id, job["job_id"])
+        assert done["status"] == "succeeded", done
+
+        detail = _wait_until(
+            client, session_id,
+            lambda body: [item for item in _pending(body, "asset_image")
+                          if item["asset_index"] == 1 and not item["reason"]])
+        word_after = word_path.read_text(encoding="utf-8")
+        assert "桩管线改词" in word_after
+        for locked in ("米色风衣", "黑色长柄伞"):
+            assert locked in word_after, f"桩改词丢了锁死条目：{locked}"
+        # 台账仍是未交图（四态语义不变）——台账不在详情契约里，直接读会话文件。
+        snapshot = json.loads(
+            (root / Path(session_id) / SESSION_FILENAME).read_text(encoding="utf-8"))
+        pictures = [entry for entry in snapshot["asset_ledger"]
+                    if entry["kind"] == "picture"]
+        assert (pictures[0]["round"], pictures[0]["status"]) == (1, "pending")
+
+        rounds = [json.loads(line) for line in (
+            root / Path(session_id) / "asset-rounds.jsonl")
+            .read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert [record["trigger"] for record in rounds] == ["regen_ai_reword"]
+        assert word_before.split("\n\n", 1)[1].strip() == rounds[0]["prompt_before"].strip()
+
+        # 重交一张 → 第 1 件定稿（轮次 1 的桩校对通过），循环接下一件。
+        card = [item for item in _pending(detail, "asset_image")
+                if item["asset_index"] == 1][0]
+        again = _upload(client, session_id, _png(22), "cat-2.png", "image/png")
+        resp = client.post(
+            f"/api/v1/sessions/{session_id}/action-items/{card['item_id']}/resolve",
+            json={"asset_id": again["asset_id"]})
+        assert resp.status_code == 202, resp.text
+        _wait_job(client, session_id, resp.json()["job_id"])
+        _wait_until(
+            client, session_id,
+            lambda body: [item for item in _pending(body, "asset_image")
+                          if item["asset_index"] == 2])
+        snapshot = json.loads(
+            (root / Path(session_id) / SESSION_FILENAME).read_text(encoding="utf-8"))
+        first = [entry for entry in snapshot["asset_ledger"]
+                 if entry["kind"] == "picture" and entry["number"] == 1][0]
+        assert (first["round"], first["status"]) == (2, "passed")

@@ -114,7 +114,7 @@ describe('AssetImageCard 词与已定稿', () => {
     expect(wrapper.text()).not.toContain('已定稿：橘猫')
   })
 
-  it('不通过时把差异清单摆出来，并明说要把同一件重交', async () => {
+  it('不通过时把差异清单摆出来，并给出两条并列出路', async () => {
     const wrapper = mountCard(
       makeItem({
         reason: '[偏差] 1 处（描述与图不符）：\n  - 灯罩：描述「墨绿色灯罩」→ 图中「米白色灯罩」',
@@ -125,9 +125,70 @@ describe('AssetImageCard 词与已定稿', () => {
     expect(wrapper.text()).toContain('校对结论：不通过')
     expect(wrapper.text()).toContain('墨绿色灯罩')
     expect(wrapper.text()).toContain('米白色灯罩')
-    expect(wrapper.text()).toContain('重新生成一张')
+    expect(wrapper.text()).toContain('重新生成并交回')
     // 重开的是同一件：卡片标题仍然是第 2 件。
     expect(wrapper.text()).toContain('第 2 件素材图')
+    // 两条出路并列可见（#288）：默认是「改词强化原意再掷」，原词再掷在旁边。
+    expect(wrapper.text()).toContain('改词强化原意再掷（默认）')
+    expect(wrapper.text()).toContain('原词再掷')
+    // 默认键的文案必须说清「只做加法」，否则用户会以为它照图改设计。
+    expect(wrapper.text()).toContain('只做加法')
+  })
+})
+
+describe('AssetImageCard 校对不通过的两条出路', () => {
+  it('默认出路（改词强化原意再掷）发 reword_reroll，请求立即返回并通知父组件', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(resolveUrl, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json(
+          { job_id: 'job-1', kind: 'asset_reword', status: 'running', started_at: '' },
+          { status: 202 },
+        )
+      }),
+    )
+    const wrapper = mountCard(makeItem({ reason: '[偏差] 1 处：灯罩颜色不符' }))
+    await settle()
+
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '改词强化原意再掷（默认）')!
+      .trigger('click')
+    await settle()
+
+    expect(bodies).toEqual([{ decision: 'reword_reroll' }])
+    expect(wrapper.emitted('submitted')).toHaveLength(1)
+  })
+
+  it('原词再掷发 reroll（不带 asset_id，也不上传任何文件）', async () => {
+    const bodies: unknown[] = []
+    let uploads = 0
+    server.use(
+      http.post(uploadUrl, () => {
+        uploads += 1
+        return HttpResponse.json({}, { status: 201 })
+      }),
+      http.post(resolveUrl, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json(
+          { job_id: 'job-2', kind: 'asset_loop', status: 'running', started_at: '' },
+          { status: 202 },
+        )
+      }),
+    )
+    const wrapper = mountCard(makeItem({ reason: '[偏差] 1 处：灯罩颜色不符' }))
+    await settle()
+
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '原词再掷')!
+      .trigger('click')
+    await settle()
+
+    expect(uploads).toBe(0)
+    expect(bodies).toEqual([{ decision: 'reroll' }])
+    expect(wrapper.emitted('submitted')).toHaveLength(1)
   })
 })
 
