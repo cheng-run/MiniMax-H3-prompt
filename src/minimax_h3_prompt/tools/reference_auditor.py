@@ -44,6 +44,15 @@ _FALLBACK_HEARTBEAT_SECONDS = 10.0
 _CONFIG_ERROR_STATUS = frozenset({401, 403, 404})
 
 
+class VisionClientUnavailable(RuntimeError):
+    """视觉客户端**建不出来**（缺密钥 / 依赖没装），与「调用失败」分开报（#290）。
+
+    两者对用户的修法不同：这一条要改配置或装依赖，调用失败多半是网关波动。工作台
+    的读图校对据此把「校对未完成」的原因点名到具体环节，而不是一句笼统的读图失败。
+    继承 ``RuntimeError``：既有调用方只认「读图会抛 RuntimeError」这件事，不受影响。
+    """
+
+
 def _build_vision_model(*, streaming: bool = True) -> ChatOpenAI:
     """视觉客户端：流式档接与主档同源的等待判据；非流式档只用于网关不支持流式的回退。
 
@@ -56,7 +65,7 @@ def _build_vision_model(*, streaming: bool = True) -> ChatOpenAI:
     try:
         key = config.resolve_api_key(settings)
     except ValueError as exc:
-        raise RuntimeError(
+        raise VisionClientUnavailable(
             f"缺失 {settings.api_key_env}：参考图审核需要视觉模型 "
             f"{settings.model}（{settings.base_url}）"
         ) from exc

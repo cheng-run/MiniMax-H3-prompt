@@ -1485,6 +1485,20 @@ MUTATIONS: tuple[Mutation, ...] = (
         "补漏重新参与通过判定＝细节密集的身份板永远定不了稿，素材循环在结构上"
         "死锁（#286 事故 2 / #287）",
     ),
+    Mutation(
+        "proofread_unavailable_hangs_instead_of_settling",
+        "src/minimax_h3_prompt/api/jobs.py",
+        '                    "passed": True, "reason": _unproofread_reason(exc)}',
+        '                    "passed": False, "reason": _unproofread_reason(exc)}',
+        ("tests/test_api_asset_loop.py::"
+         "test_a_failed_reading_call_settles_the_item_and_names_the_step",
+         "tests/test_api_asset_loop.py::"
+         "test_an_unparsable_reading_settles_the_item_and_names_the_step",
+         "tests/test_api_asset_loop.py::"
+         "test_an_unavailable_vision_client_settles_the_item_and_names_the_step"),
+        "读图不可用改回挂卡＝一次服务波动就把这一件打回重交，用户白等一轮且"
+        "「没交图」与「没校对」混成同一个状态（#290，spec #286「读图不可用」）",
+    ),
 )
 
 

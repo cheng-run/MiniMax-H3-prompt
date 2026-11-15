@@ -23,6 +23,7 @@ from langchain_core.messages import AIMessage
 from PIL import Image
 
 from minimax_h3_prompt import model_factory
+from minimax_h3_prompt.config import config
 from minimax_h3_prompt.observability import VISION_ROLE, reporter, token_meter
 from minimax_h3_prompt.tools import reference_auditor
 
@@ -264,3 +265,21 @@ def test_fallback_failure_reports_both_causes(image, monkeypatch):
 
     message = str(excinfo.value)
     assert "stream rejected" in message and "non-stream rejected" in message
+
+
+# ---------------------------------------------------------------------------
+# 建客户端失败要能与「调用失败」分开（#290）
+# ---------------------------------------------------------------------------
+
+def test_a_missing_vision_key_is_reported_as_client_unavailable(image, monkeypatch):
+    """缺密钥＝客户端不可用，不是「读图调用失败」（#290，工作台据此点名环节）。
+
+    工作台按异常类型分流：这一条对应「视觉客户端不可用」，其余读图异常才是
+    「读图调用失败」。两者修法不同，类型退回 ``RuntimeError`` 会让它们又混成一句。
+    """
+    monkeypatch.delenv(config.vision_model.api_key_env, raising=False)
+
+    with pytest.raises(reference_auditor.VisionClientUnavailable) as excinfo:
+        reference_auditor.describe_image(image)
+
+    assert config.vision_model.api_key_env in str(excinfo.value)

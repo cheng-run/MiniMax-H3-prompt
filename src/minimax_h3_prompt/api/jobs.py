@@ -347,6 +347,69 @@ def _parse_asset_prompt(text: str) -> str:
     return body if separator else str(text)
 
 
+PROOFREAD_STEP_VISION = "视觉客户端不可用"
+PROOFREAD_STEP_CALL = "读图调用失败"
+PROOFREAD_STEP_PARSE = "结论解析失败"
+PROOFREAD_INCOMPLETE = "校对未完成"
+
+
+class ProofreadUnavailable(RuntimeError):
+    """读图不可用的三种形态之一（#290）：带环节标签，收尾时这一件照常定稿。
+
+    ``step`` 是给用户看的失败环节——三者的修法不同（改配置 / 查网关 / 查模型输出），
+    混成一句会把人引向错误方向；``cause`` 是原始异常，进日志与卡片 reason 摘要。
+    """
+
+    def __init__(self, step: str, cause: BaseException) -> None:
+        super().__init__(step)
+        self.step = step
+        self.cause = cause
+
+
+def _error_summary(exc: BaseException, limit: int = 200) -> str:
+    """异常的一句话摘要：折成单行并截断（完整现场留给日志）。
+
+    reason 是给人读的卡片文案，几百字的排查提示会把「哪一步失败」淹掉；截断标记
+    ``…`` 明说这里不是原文全文。
+    """
+    text = " ".join(str(exc).split()) or type(exc).__name__
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _unproofread_reason(exc: ProofreadUnavailable) -> str:
+    """「校对未完成：哪一步——原始错误摘要」：点名环节，原文摘要留给排查（#290）。"""
+    return (f"{PROOFREAD_INCOMPLETE}：{exc.step}"
+            f"——{_error_summary(exc.cause)}。本件已定稿。")
+
+
+def _read_image_for_proofread(path: Path, request: str) -> Any:
+    """读图 + 结论解析，三种「不可用」各带环节标签抛 ``ProofreadUnavailable``（#290）。
+
+    除了这三种，其余异常照旧往上冒（那是任务故障，不是「读图不可用」）：本函数
+    只把「建客户端失败 / 调用失败 / 结论解析失败」翻译成可读的环节名。
+    """
+    from ..asset_proofread import parse_reading
+    try:
+        from ..tools.reference_auditor import (
+            VisionClientUnavailable,
+            describe_image,
+        )
+    except ImportError as exc:
+        # 读图模块本身导不进来（依赖没装）也是「客户端不可用」，不是调用失败。
+        raise ProofreadUnavailable(PROOFREAD_STEP_VISION, exc) from exc
+    try:
+        raw = describe_image(path, request)
+    except (ImportError, VisionClientUnavailable) as exc:
+        # ``describe_image`` 内部懒导入 agents 栈，缺依赖时同样是客户端不可用。
+        raise ProofreadUnavailable(PROOFREAD_STEP_VISION, exc) from exc
+    except Exception as exc:  # noqa: BLE001 - 读图失败的形态很多，统一按「调用失败」报
+        raise ProofreadUnavailable(PROOFREAD_STEP_CALL, exc) from exc
+    try:
+        return parse_reading(raw)
+    except Exception as exc:  # noqa: BLE001 - 模型输出不是约定的 JSON
+        raise ProofreadUnavailable(PROOFREAD_STEP_PARSE, exc) from exc
+
+
 def _abandon_asset_note(name: str) -> str:
     """放弃一件的代价说明（#279 US10）：放弃的是图，**不是那些文字**。
 
@@ -3179,6 +3242,11 @@ class JobRunner:
         校对**不改写生图词**：词是指令、图是既成事实（#286 / ADR 0039）。「按差异
         覆盖写回 ``assets/picture-NN.md``」与资产轮次账的那条路径已整体删除。
 
+        **读图不可用时这一件照常定稿**（#290 / spec #286「读图不可用」）：建视觉
+        客户端失败、 ``describe_image`` 抛错、结论解析不了，三种形态都判 ``passed``
+        并把「校对未完成：哪一步——原因」写进刚决议那张卡的 ``reason``。不重试、
+        不挂新的交图卡、不改写、不写轮次账——通过与这些副作用本来就不相干。
+
         桩模式（``fake_pipeline``）只把这个 job 的「读图」换成固定结论，台账转移、
         待办重开仍由收尾的同一份代码走——CI 里两条分支都要真的跑到。
         """
@@ -3188,11 +3256,9 @@ class JobRunner:
         from ..asset_proofread import (
             build_proofread_request,
             compare_descriptions,
-            parse_reading,
             render_proofread_report,
         )
         from ..generation import asset_prompt_for
-        from ..tools.reference_auditor import describe_image
 
         session = load_session(self.store.session_directory(session_id))
         if session is None:
@@ -3215,8 +3281,18 @@ class JobRunner:
                             stage=step_machine.STEP_ASSET_LOOP)
         if cancel_event.is_set():
             raise JobCancelled(ASSET_PROOFREAD_NODE)
-        raw = describe_image(path, build_proofread_request(current, locked))
-        reading = parse_reading(raw)
+        try:
+            reading = _read_image_for_proofread(
+                path, build_proofread_request(current, locked))
+        except ProofreadUnavailable as exc:
+            # 三种不可用都从这里收场：这一件照常定稿，结论写进刚决议那张卡
+            # （通过之后卡片不再回来，那是它唯一的可见面）。
+            logger.warning("第 %s 件校对未完成（%s），按定稿收尾：%s",
+                           number, exc.step, exc.cause, exc_info=exc.cause)
+            self._emit_progress(session_id, job_id, ASSET_PROOFREAD_NODE, "done",
+                                stage=step_machine.STEP_ASSET_LOOP)
+            return {"step": ASSET_STEP_PROOFREAD, "number": number, "name": name,
+                    "passed": True, "reason": _unproofread_reason(exc)}
         report = compare_descriptions(current, reading, locked)
         if cancel_event.is_set():
             raise JobCancelled(ASSET_PROOFREAD_NODE)

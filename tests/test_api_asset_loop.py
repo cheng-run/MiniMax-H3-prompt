@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from pathlib import Path
@@ -492,6 +493,116 @@ def test_omissions_without_deviations_settle_the_item_and_stay_visible(harness):
     listed_item = [entry for entry in listed
                    if entry["item_id"] == item["item_id"]][0]
     assert "毛线球" in listed_item["reason"]
+
+
+# ---------------------------------------------------------------------------
+# 读图不可用（#290 / spec #286「读图不可用」）
+# ---------------------------------------------------------------------------
+
+def _settle_as_unproofread(harness, item: dict, before: str,
+                           step: str, cause: str) -> None:
+    """三种不可用共用的判据：这一件照常定稿，结论落在刚决议那张卡上。
+
+    「没交图」与「没校对」不能混成同一个状态（spec US25），所以台账必须是
+    ``passed``；通过分支本来就不改写、不写轮次账、不挂交图卡，三条都当场复核。
+    """
+    body = harness.wait_until(
+        lambda snapshot: any(entry["kind"] == "asset_image"
+                             and entry["status"] == "pending"
+                             and entry["asset_index"] == 2
+                             for entry in snapshot["action_items"]))
+    entries = harness.ledger()
+    assert [(entry["round"], entry["status"]) for entry in entries] == [
+        (1, "passed"), (0, "pending")], "读图不可用也照常定稿，轮次与通过同路"
+    assert "proofread_asset_id" not in entries[0]
+
+    assert harness.artifact_text("assets/picture-01.md") == before, "不许改写生图词"
+    assert harness.rewrite.requests == [], "读图不可用也不许叫改写模型"
+    assert not (harness.root / Path(harness.session_id)
+                / "asset-rounds.jsonl").exists(), "不许写资产轮次账"
+    # 不挂新的交图卡：未决项只剩第 2 件（第 1 件没有被打回重开）。
+    pending = [entry for entry in body["action_items"]
+               if entry["kind"] == "asset_image" and entry["status"] == "pending"]
+    assert [entry["asset_index"] for entry in pending] == [2]
+
+    # 通过分支卡片不再回来，刚决议那张卡的 reason 是唯一的可见面。
+    resolved = [entry for entry in body["action_items"]
+                if entry["item_id"] == item["item_id"]][0]
+    assert resolved["status"] == "resolved"
+    reason = resolved["reason"]
+    assert reason.startswith("校对未完成："), reason
+    assert step in reason, "原因要点名是哪一步失败"
+    assert cause in reason, "原因要带原始错误摘要"
+    # 待办报告接口与详情是同一份快照，都要看得到。
+    listed = harness.client.get(
+        f"/api/v1/sessions/{harness.session_id}/action-items").json()
+    listed_item = [entry for entry in listed
+                   if entry["item_id"] == item["item_id"]][0]
+    assert reason == listed_item["reason"]
+    # 事件类型仍是十种闭合集合里那一条：只给既有 payload 多一个 reason 键。
+    reports = [event for event in _events(harness.root, harness.session_id)
+               if event["type"] == "action_item.resolved"
+               and event["payload"].get("item_id") == item["item_id"]
+               and event["payload"].get("reason")]
+    assert len(reports) == 1 and reports[0]["payload"]["reason"] == reason
+
+
+def _submit_first_image(harness) -> tuple[dict, dict, str]:
+    """交第 1 件的图，返回（那张卡、素材、交图前的生图词正文）。"""
+    body = _to_first_card(harness)
+    item = [entry for entry in body["action_items"]
+            if entry["kind"] == "asset_image" and entry["status"] == "pending"][0]
+    return (item, harness.upload(_png(9), "gen-cat.png"),
+            harness.artifact_text("assets/picture-01.md"))
+
+
+def test_a_failed_reading_call_settles_the_item_and_names_the_step(
+        harness, monkeypatch, caplog):
+    """读图调用失败（网络/超时/5xx）：不重试、不停循环，定稿并点名「读图调用失败」。
+
+    捕获后必须留日志（本仓纪律：绝不静默失败）——reason 只说给用户听，完整现场进日志。
+    """
+    item, image, before = _submit_first_image(harness)
+
+    def boom(path, instruction=None):
+        raise RuntimeError("读图超时：首字节线内没有任何数据（ADR 0019）")
+
+    monkeypatch.setattr(reference_auditor, "describe_image", boom)
+    with caplog.at_level(logging.WARNING,
+                         logger="minimax_h3_prompt.api.jobs"):
+        assert harness.submit_image(item, image["asset_id"]).status_code == 202
+        _settle_as_unproofread(harness, item, before, "读图调用失败",
+                               "首字节线内没有任何数据")
+    assert any("校对未完成" in record.getMessage() for record in caplog.records), \
+        "读图不可用被捕获了却没留日志＝静默吞异常"
+
+
+def test_an_unparsable_reading_settles_the_item_and_names_the_step(
+        harness, monkeypatch):
+    """结论解析失败：模型回了一段不是约定的 JSON，本件照常定稿并点名这一步。"""
+    item, image, before = _submit_first_image(harness)
+    monkeypatch.setattr(reference_auditor, "describe_image",
+                        lambda path, instruction=None: "模型今天只说人话，不给 JSON")
+    assert harness.submit_image(item, image["asset_id"]).status_code == 202
+
+    _settle_as_unproofread(harness, item, before, "结论解析失败",
+                           "读图结果不是 JSON")
+
+
+def test_an_unavailable_vision_client_settles_the_item_and_names_the_step(
+        harness, monkeypatch):
+    """视觉客户端不可用：建客户端这一步就失败（配置缺失/依赖没装），照常定稿。"""
+    item, image, before = _submit_first_image(harness)
+
+    def unavailable(path, instruction=None):
+        raise reference_auditor.VisionClientUnavailable(
+            "缺失 DASHSCOPE_API_KEY：参考图审核需要视觉模型 deepseek-v4.1-flash-1017")
+
+    monkeypatch.setattr(reference_auditor, "describe_image", unavailable)
+    assert harness.submit_image(item, image["asset_id"]).status_code == 202
+
+    _settle_as_unproofread(harness, item, before, "视觉客户端不可用",
+                           "缺失 DASHSCOPE_API_KEY")
 
 
 def test_the_proofread_report_survives_snapshot_replay(harness):
