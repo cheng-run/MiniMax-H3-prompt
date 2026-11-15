@@ -1170,13 +1170,36 @@ MUTATIONS: tuple[Mutation, ...] = (
         "OOM（2026-10-22 实测 232 GiB）才炸（#255）",
     ),
     Mutation(
-        "ref_asset_lock_off",
+        "ref_asset_delete_lock_off",
         "src/minimax_h3_prompt/workbench_store.py",
         '        if route_uses_asset_ledger(session.brief) and session.status != "created":',
         "        if False and route_uses_asset_ledger(session.brief) and session.status != \"created\":",
+        ("tests/test_api_ref_assets.py::test_delete_after_start_is_locked",),
+        "撤销锁失效＝素材循环开始后还能删台账行，已写好的资产图词与图脱钩，"
+        "派生清单也少一件（#255 / #282）",
+    ),
+    Mutation(
+        "asset_loop_stalls_on_an_abandoned_item",
+        "src/minimax_h3_prompt/workbench_store.py",
+        '             and str(entry.get("status")) not in (\n'
+        "                 ASSET_LEDGER_STATUS_PASSED, ASSET_LEDGER_STATUS_ABANDONED))),",
+        '             and str(entry.get("status")) != ASSET_LEDGER_STATUS_PASSED)),',
+        ("tests/test_api_asset_loop.py::"
+         "test_abandoning_an_item_skips_it_and_lets_the_next_one_proceed",),
+        "放弃行仍算「当前件」＝放弃之后进度永远停在那件上，放弃键成了第二种死锁"
+        "（#282，spec #279「跳过 abandoned 行」）",
+    ),
+    Mutation(
+        "asset_position_lock_off",
+        "src/minimax_h3_prompt/workbench_store.py",
+        "        remaining = unsettled_picture_entries(ledger)\n"
+        "        if not remaining:",
+        "        remaining = []\n"
+        "        if not remaining:",
         ("tests/test_api_ref_assets.py::"
-         "test_registration_after_start_is_locked_but_plain_upload_is_not",),
-        "起跑锁失效＝素材循环开始后还能加删台账，已写好的资产图词与图脱钩（#255）",
+         "test_registration_after_start_only_accepts_the_current_item",),
+        "位置锁整体失效＝起跑后什么名字都能登记，循环正等着的那一件反而交不进去"
+        "（#282，spec #279「只许往当前待办那一件交」）",
     ),
     Mutation(
         "asset_loop_settles_a_rejected_item",

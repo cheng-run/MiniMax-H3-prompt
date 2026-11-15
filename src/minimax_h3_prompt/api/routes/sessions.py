@@ -262,7 +262,8 @@ class ActionItemResolve(BaseModel):
     - ``stage1_review`` 收 ``decision``（approve/revise，revise 带 ``revisions``）；
     - ``frame_submission`` 收 ``frames``；
     - ``segment_video`` 收 ``video_asset_id``（本段视频素材）；
-    - ``asset_image`` 收 ``asset_id``（这一件资产图的生成结果，普通素材上传得到）；
+    - ``asset_image`` 收 ``asset_id``（这一件资产图的生成结果，普通素材上传得到），
+      或 ``decision="abandon_asset"`` 放弃这一件（#282：模型怎么都画不出来时的出口）；
     - ``director_start_image`` 收 ``decision="submit_start_image"`` 与
       ``start_asset_id``（必填）/``end_asset_id``（可选）/``confirm_aspect_mismatch``。
 
@@ -272,7 +273,7 @@ class ActionItemResolve(BaseModel):
 
     decision: Literal[
         "approve", "revise", "submit_start_image", "submit_segment_image",
-        "submit_delivery"] | None = None
+        "submit_delivery", "abandon_asset"] | None = None
     revisions: list[RevisionIn] = Field(default_factory=list)
     frames: FrameSelection | None = None
     # 段视频待办（D6 §8）：本会话已上传的 mp4 素材 id。`Decision` 载荷互斥由路由先拦。
@@ -912,6 +913,54 @@ async def reopen_segment(
     """
     item, replayed = await _runner(request).reopen_segment(
         session_id, index, idempotency_key=idempotency_key or None)
+    if replayed:
+        response.headers["Idempotency-Replayed"] = "true"
+    return item
+
+
+_ASSET_REOPEN_RESPONSES = {
+    **_SESSION_ERROR_RESPONSES,
+    200: {
+        "description": "已打回：返回按这一件重挂出的 asset_image 待办",
+        "headers": {
+            "Idempotency-Replayed": {
+                "description": "重放标记；首次换图不返回该头",
+                "schema": {"type": "string"},
+            },
+        },
+    },
+    404: {"model": ProblemDetail,
+          "description": "会话不存在，或这一件不在本会话的素材台账里（problem+json）"},
+    409: {"model": ProblemDetail,
+          "description": "路线不是 ref、素材循环已结束、这一件已放弃/还没定稿，"
+                         "或会话有任务在跑（problem+json）"},
+}
+
+
+@router.post(
+    "/sessions/{session_id:path}/assets/{asset_id:path}/reopen",
+    response_model=ActionItemOut,
+    responses=_ASSET_REOPEN_RESPONSES,
+)
+async def reopen_asset(
+    session_id: str,
+    asset_id: str,
+    request: Request,
+    response: Response,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> ActionItemOut:
+    """把一件已定稿的参考素材打回：退回未定稿、按这一件重挂待办（#282）。
+
+    #279 只说「换一张图限定在循环内（同一件重开、该行退回未定稿）」，没给触发形状；
+    与上面的换段端点同构。**循环结束之后不开这个口**：注入卡与段内子集都在下游用掉了
+    那份台账快照，改它属于另一个粗动作（spec「Out of Scope」）。只对 ref——导演台
+    r2v 的件是用户起跑前传的参考图，换掉它就是推翻按它写好的资产图词。
+
+    状态判定与落盘在 ``JobRunner.reopen_asset`` 的会话临界区里完成，这里不先查一遍
+    状态——两处判据会在并发下各说各话。
+    """
+    item, replayed = await _runner(request).reopen_asset(
+        session_id, asset_id, idempotency_key=idempotency_key or None)
     if replayed:
         response.headers["Idempotency-Replayed"] = "true"
     return item

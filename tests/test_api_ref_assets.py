@@ -412,28 +412,51 @@ def test_base_session_upload_with_a_name_is_rejected(tmp_path):
 # 起跑锁与起跑门槛（spec §4.3 / AC4）
 # ---------------------------------------------------------------------------
 
-def test_registration_after_start_is_locked_but_plain_upload_is_not(tmp_path):
-    """起跑锁只挡**台账登记**：素材图/段视频回交（不带 name）起跑后照常可传。
+def test_registration_after_start_only_accepts_the_current_item(tmp_path):
+    """位置锁（#282）：起跑后带语义名的登记只放行**当前待办那一件**。
 
-    判据是「带不带语义名」，不是「会话在不在 created」——#256/#258 的回交都在
-    seeing_human 之后，按状态锁会把整条回交路径锁死（用户 2026-11-13 裁定）。
+    旧判据是时间锁（起跑即全锁死）。#279 把素材集合改成阶段 1 派生之后，循环里交图
+    本来就是流程的一部分——锁的对象因此从「什么时候」换成「哪一件」：别的名字一律
+    409，且文案点名当前是第几件（只说「不能登记」等于让用户猜该交哪一件）。
+    不带语义名的普通上传（素材图/段视频回交）本来就不进台账，仍然不受影响。
     """
     client = _client(tmp_path)
     session_id = _create(client)["session_id"]
     _upload(client, session_id, _png(1), "a.png", name="甲")
+    _upload(client, session_id, _png(2), "b.png", name="乙")
     # 用存储层把会话推进到起跑后（真起任务会跑模型；这里只要状态）。
     client.app.state.session_store.update(session_id, status="running")
 
-    locked = _upload(client, session_id, _png(2), "b.png", name="乙")
-    plain = _upload(client, session_id, _png(3), "素材图.png")
+    blocked = _upload(client, session_id, _png(3), "c.png", name="丙")
+    plain = _upload(client, session_id, _png(4), "素材图.png")
     detail = client.get(f"/api/v1/sessions/{session_id}").json()
 
-    body = _assert_problem(locked, 409, "asset_locked")
-    assert "起跑" in body["detail"] or "开始" in body["detail"]
+    body = _assert_problem(blocked, 409, "asset_locked")
+    assert "第 1 件" in body["detail"] and "甲" in body["detail"]
     assert plain.status_code == 201, plain.text
-    # 普通上传不进台账：只有起跑前登记的那一件在 refs 里。
-    assert [ref["name"] for ref in detail["brief"]["refs"]] == ["甲"]
-    assert len(detail["assets"]) == 2
+    # 被拒的那次不落行；普通上传也不进台账：refs 里仍是起跑前登记的那两件。
+    assert [ref["name"] for ref in detail["brief"]["refs"]] == ["甲", "乙"]
+    assert len(detail["assets"]) == 3
+
+
+def test_registration_after_start_of_the_current_name_is_accepted(tmp_path):
+    """当前那一件自己的名字放行：位置锁回答「这一件能不能交」，不是「一律不许」。
+
+    上传行（导演台 r2v 与起跑前的预上传）的图连同资产图词一起已经定下了这一件的
+    描述，起跑后再换一张就是「事后推翻已写好的词」——所以这里只放行文件落盘，
+    台账一行不动（编号仍为空）。派生行的「交图」在素材循环里有另一条用例。
+    """
+    client = _client(tmp_path)
+    session_id = _create(client)["session_id"]
+    _upload(client, session_id, _png(1), "a.png", name="甲")
+    client.app.state.session_store.update(session_id, status="running")
+
+    allowed = _upload(client, session_id, _png(2), "a2.png", name="甲")
+    detail = client.get(f"/api/v1/sessions/{session_id}").json()
+
+    assert allowed.status_code == 201, allowed.text
+    assert allowed.json()["number"] is None, "位置锁放行不等于新增一行台账"
+    assert [(ref["name"], ref["number"]) for ref in detail["brief"]["refs"]] == [("甲", 1)]
 
 
 def test_ref_session_starts_with_zero_pictures(tmp_path, monkeypatch):

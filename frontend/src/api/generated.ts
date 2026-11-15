@@ -265,6 +265,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{session_id}/assets/{asset_id}/reopen": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reopen Asset
+         * @description 把一件已定稿的参考素材打回：退回未定稿、按这一件重挂待办（#282）。
+         *
+         *     #279 只说「换一张图限定在循环内（同一件重开、该行退回未定稿）」，没给触发形状；
+         *     与上面的换段端点同构。**循环结束之后不开这个口**：注入卡与段内子集都在下游用掉了
+         *     那份台账快照，改它属于另一个粗动作（spec「Out of Scope」）。只对 ref——导演台
+         *     r2v 的件是用户起跑前传的参考图，换掉它就是推翻按它写好的资产图词。
+         *
+         *     状态判定与落盘在 ``JobRunner.reopen_asset`` 的会话临界区里完成，这里不先查一遍
+         *     状态——两处判据会在并发下各说各话。
+         */
+        post: operations["reopen_asset_api_v1_sessions__session_id__assets__asset_id__reopen_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{session_id}/events": {
         parameters: {
             query?: never;
@@ -431,7 +459,8 @@ export interface components {
          *     - ``stage1_review`` 收 ``decision``（approve/revise，revise 带 ``revisions``）；
          *     - ``frame_submission`` 收 ``frames``；
          *     - ``segment_video`` 收 ``video_asset_id``（本段视频素材）；
-         *     - ``asset_image`` 收 ``asset_id``（这一件资产图的生成结果，普通素材上传得到）；
+         *     - ``asset_image`` 收 ``asset_id``（这一件资产图的生成结果，普通素材上传得到），
+         *       或 ``decision="abandon_asset"`` 放弃这一件（#282：模型怎么都画不出来时的出口）；
          *     - ``director_start_image`` 收 ``decision="submit_start_image"`` 与
          *       ``start_asset_id``（必填）/``end_asset_id``（可选）/``confirm_aspect_mismatch``。
          *
@@ -444,7 +473,7 @@ export interface components {
             /** Confirm Aspect Mismatch */
             confirm_aspect_mismatch?: boolean | null;
             /** Decision */
-            decision?: ("approve" | "revise" | "submit_start_image" | "submit_segment_image" | "submit_delivery") | null;
+            decision?: ("approve" | "revise" | "submit_start_image" | "submit_segment_image" | "submit_delivery" | "abandon_asset") | null;
             /** End Asset Id */
             end_asset_id?: string | null;
             frames?: components["schemas"]["FrameSelection"] | null;
@@ -2327,6 +2356,87 @@ export interface operations {
                 };
             };
             /** @description base 会话调用（route_mismatch）、会话已起跑（asset_locked）或历史会话只读（problem+json） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 请求参数校验失败（problem+json） */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 服务器内部错误（problem+json） */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+        };
+    };
+    reopen_asset_api_v1_sessions__session_id__assets__asset_id__reopen_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                session_id: string;
+                asset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 已打回：返回按这一件重挂出的 asset_image 待办 */
+            200: {
+                headers: {
+                    /** @description 重放标记；首次换图不返回该头 */
+                    "Idempotency-Replayed"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActionItemOut"];
+                };
+            };
+            /** @description 缺少或无效的工作台访问令牌（problem+json） */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Host/Origin 不是本机回环地址（problem+json） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 会话不存在，或这一件不在本会话的素材台账里（problem+json） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 路线不是 ref、素材循环已结束、这一件已放弃/还没定稿，或会话有任务在跑（problem+json） */
             409: {
                 headers: {
                     [name: string]: unknown;

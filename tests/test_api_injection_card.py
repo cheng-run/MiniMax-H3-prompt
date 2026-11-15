@@ -185,6 +185,50 @@ def test_film_card_still_renders_when_the_ledger_exceeds_one_request(harness):
     assert "无对应槽位" in text and "槽位越界" in text
 
 
+def test_abandoned_item_stays_out_of_the_card_and_the_segment_subset(harness):
+    """放弃件不进整片卡、也不进段内子集（#279「下游只取已定稿」/ #282）。
+
+    卡是给人照抄的接线清单、段内子集是段词的参考槽：放弃的件写进去，抄下来就是一个
+    填不上的槽，而规划器看不出那一格本来就该是空的。
+    """
+    harness.create()
+    harness.start_stage1()
+    harness.approve_stage1()
+
+    def _card(number: int) -> dict:
+        body = harness.wait_until(
+            lambda snapshot: any(entry["kind"] == "asset_image"
+                                 and entry["status"] == "pending"
+                                 and entry["asset_index"] == number
+                                 for entry in snapshot["action_items"]))
+        return [entry for entry in body["action_items"]
+                if entry["kind"] == "asset_image"
+                and entry["status"] == "pending"][0]
+
+    resp = harness.client.post(
+        f"/api/v1/sessions/{harness.session_id}"
+        f"/action-items/{_card(1)['item_id']}/resolve",
+        json={"decision": "abandon_asset"})
+    assert resp.status_code == 202, resp.text
+    second = _card(2)
+    harness.readings.append(CLEAN)
+    harness.submit_image(second, harness.upload(_png(91), "gen-lamp.png")["asset_id"])
+
+    _wait_for_stage2_and_card(harness)
+    text = harness.artifact_text("injection-card.md")
+    assert LAMP in text, "定稿的那一件要照常进卡"
+    assert CAT not in text, "放弃的那一件不许出现在接线清单里"
+    assert "本片用量：图 1 / 视频 0 / 音频 0，共 1 个文件" in text
+
+    # 段内子集：阶段 2 之后才规划，等段表落盘再读（读盘，不读私有属性）。
+    plan_path = harness.root / Path(harness.session_id) / "segments" / "plan.json"
+    harness.wait_until(lambda _snapshot: plan_path.is_file())
+    plans = json.loads(plan_path.read_text(encoding="utf-8"))
+    names = [item["name"] for plan in plans
+             for item in (plan.get("assets_in_segment") or {}).get("pictures", [])]
+    assert names == [LAMP]
+
+
 # ---------------------------------------------------------------------------
 # 段级卡（能力在本票，接线在 #258）
 # ---------------------------------------------------------------------------

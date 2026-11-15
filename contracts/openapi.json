@@ -124,7 +124,7 @@
         "type": "object"
       },
       "ActionItemResolve": {
-        "description": "决议载荷（spec §7 / D4 §9 / D6 §8 / D7 §6.3 / D8 §7.1）。\n\n五类人工待办各收一种载荷：\n- ``stage1_review`` 收 ``decision``（approve/revise，revise 带 ``revisions``）；\n- ``frame_submission`` 收 ``frames``；\n- ``segment_video`` 收 ``video_asset_id``（本段视频素材）；\n- ``asset_image`` 收 ``asset_id``（这一件资产图的生成结果，普通素材上传得到）；\n- ``director_start_image`` 收 ``decision=\"submit_start_image\"`` 与\n  ``start_asset_id``（必填）/``end_asset_id``（可选）/``confirm_aspect_mismatch``。\n\nkind 与载荷的错配由服务端判成 422（``frame_invalid`` / ``segment_video_invalid`` /\n``asset_image_invalid``，不是 pydantic 的通用 422）。",
+        "description": "决议载荷（spec §7 / D4 §9 / D6 §8 / D7 §6.3 / D8 §7.1）。\n\n五类人工待办各收一种载荷：\n- ``stage1_review`` 收 ``decision``（approve/revise，revise 带 ``revisions``）；\n- ``frame_submission`` 收 ``frames``；\n- ``segment_video`` 收 ``video_asset_id``（本段视频素材）；\n- ``asset_image`` 收 ``asset_id``（这一件资产图的生成结果，普通素材上传得到），\n  或 ``decision=\"abandon_asset\"`` 放弃这一件（#282：模型怎么都画不出来时的出口）；\n- ``director_start_image`` 收 ``decision=\"submit_start_image\"`` 与\n  ``start_asset_id``（必填）/``end_asset_id``（可选）/``confirm_aspect_mismatch``。\n\nkind 与载荷的错配由服务端判成 422（``frame_invalid`` / ``segment_video_invalid`` /\n``asset_image_invalid``，不是 pydantic 的通用 422）。",
         "properties": {
           "asset_id": {
             "anyOf": [
@@ -156,7 +156,8 @@
                   "revise",
                   "submit_start_image",
                   "submit_segment_image",
-                  "submit_delivery"
+                  "submit_delivery",
+                  "abandon_asset"
                 ],
                 "type": "string"
               },
@@ -3327,6 +3328,132 @@
         "summary": "Delete Asset",
         "tags": [
           "assets"
+        ]
+      }
+    },
+    "/api/v1/sessions/{session_id}/assets/{asset_id}/reopen": {
+      "post": {
+        "description": "把一件已定稿的参考素材打回：退回未定稿、按这一件重挂待办（#282）。\n\n#279 只说「换一张图限定在循环内（同一件重开、该行退回未定稿）」，没给触发形状；\n与上面的换段端点同构。**循环结束之后不开这个口**：注入卡与段内子集都在下游用掉了\n那份台账快照，改它属于另一个粗动作（spec「Out of Scope」）。只对 ref——导演台\nr2v 的件是用户起跑前传的参考图，换掉它就是推翻按它写好的资产图词。\n\n状态判定与落盘在 ``JobRunner.reopen_asset`` 的会话临界区里完成，这里不先查一遍\n状态——两处判据会在并发下各说各话。",
+        "operationId": "reopen_asset_api_v1_sessions__session_id__assets__asset_id__reopen_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "asset_id",
+            "required": true,
+            "schema": {
+              "title": "Asset Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionItemOut"
+                }
+              }
+            },
+            "description": "已打回：返回按这一件重挂出的 asset_image 待办",
+            "headers": {
+              "Idempotency-Replayed": {
+                "description": "重放标记；首次换图不返回该头",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "缺少或无效的工作台访问令牌（problem+json）"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "Host/Origin 不是本机回环地址（problem+json）"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "会话不存在，或这一件不在本会话的素材台账里（problem+json）"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "路线不是 ref、素材循环已结束、这一件已放弃/还没定稿，或会话有任务在跑（problem+json）"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "请求参数校验失败（problem+json）"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "服务器内部错误（problem+json）"
+          }
+        },
+        "summary": "Reopen Asset",
+        "tags": [
+          "sessions"
         ]
       }
     },

@@ -819,3 +819,215 @@ def test_manifest_and_prompts_mismatch_fails_stage1_and_names_both_sides(
     assert not (harness.root / Path(harness.session_id)
                 / "assets" / "picture-01.md").exists()
 
+
+# ---------------------------------------------------------------------------
+# 循环的边界动作（#279 §循环的边界动作 / #282）
+# ---------------------------------------------------------------------------
+
+def _card(harness, number: int) -> dict:
+    """等第 ``number`` 件的待办卡挂出来，返回它。"""
+    body = harness.wait_until(
+        lambda snapshot: any(entry["kind"] == "asset_image"
+                             and entry["status"] == "pending"
+                             and entry["asset_index"] == number
+                             for entry in snapshot["action_items"]))
+    return [entry for entry in body["action_items"]
+            if entry["kind"] == "asset_image" and entry["status"] == "pending"][0]
+
+
+def _resolve(harness, item: dict, payload: dict):
+    return harness.client.post(
+        f"/api/v1/sessions/{harness.session_id}"
+        f"/action-items/{item['item_id']}/resolve", json=payload)
+
+
+def _reopen(harness, asset_id: str):
+    return harness.client.post(
+        f"/api/v1/sessions/{harness.session_id}/assets/{asset_id}/reopen")
+
+
+def test_abandoning_an_item_skips_it_and_lets_the_next_one_proceed(harness):
+    """放弃一件：行标 abandoned、进度跨过它，下一件照常出词；已定稿的文本不动。
+
+    「最大连续通过编号 + 1」若不跳过放弃行，用户点了放弃反而更走不动——放弃键成了
+    第二种死锁。代价要在待办文案与事件里当场讲清（#279 US10），而不许系统替用户去改
+    分镜表与段词：它写的是「这个角色在这一段做什么」，删改等于悄悄改剧本。
+    """
+    _to_first_card(harness)
+    shot_table = harness.artifact_text("shot-table.md")
+    first = _card(harness, 1)
+
+    resp = _resolve(harness, first, {"decision": "abandon_asset"})
+    assert resp.status_code == 202, resp.text
+
+    _card(harness, 2)
+    entries = harness.ledger()
+    assert [(entry["name"], entry["status"], entry["asset_id"])
+            for entry in entries] == [(CAT, "abandoned", ""), (LAMP, "pending", "")]
+
+    # 待办文案：决议后的那一条带着代价，件号仍是 1。
+    resolved_item = next(entry for entry in harness.detail()["action_items"]
+                         if entry["item_id"] == first["item_id"])
+    assert resolved_item["status"] == "resolved"
+    assert resolved_item["decision"] == "abandon_asset"
+    assert CAT in resolved_item["reason"] and "无图指称" in resolved_item["reason"]
+
+    # 事件流里也留一句话（同一份文案，不另写一份）。
+    resolved = [event for event in _events(harness.root, harness.session_id)
+                if event["type"] == "action_item.resolved"
+                and event["payload"]["decision"] == "abandon_asset"]
+    assert len(resolved) == 1
+    assert CAT in resolved[0]["payload"]["reason"]
+
+    # 已经定稿的文本一个字都没改：放弃的是图，不是剧本。
+    assert shot_table.strip(), "分镜表本来就该在阶段 1 落盘"
+    assert harness.artifact_text("shot-table.md") == shot_table
+
+
+def test_abandon_cannot_carry_an_image_and_is_not_an_approval(harness):
+    """放弃与交图互斥；approve/revise 仍然不是素材卡的决议。"""
+    _to_first_card(harness)
+    first = _card(harness, 1)
+    image = harness.upload(_png(31), "gen.png")
+
+    _assert_problem(
+        _resolve(harness, first, {"decision": "abandon_asset",
+                                  "asset_id": image["asset_id"]}),
+        422, "asset_image_invalid")
+    _assert_problem(_resolve(harness, first, {"decision": "approve"}),
+                    422, "asset_image_invalid")
+    # 两次错配都没有把卡片决议掉：用户还能正常交图或放弃。
+    assert [entry["item_id"] for entry in harness.pending("asset_image")] == [
+        first["item_id"]]
+
+
+def test_position_lock_takes_only_the_current_item(harness):
+    """位置锁（#282）：起跑后带语义名的登记只认当前待办那一件。
+
+    派生行没有自己的正本，所以「命中当前件」＝把这张图绑到这一行（交图）；换成别的
+    名字则 409 并点名当前是第几件。普通上传（素材图回交）不进台账，不受影响。
+    """
+    _to_first_card(harness)
+
+    allowed = harness.upload(_png(41), "cat-again.png", name=CAT)
+    assert allowed["number"] == 1, "放行的登记落到当前件的件号上"
+    entries = harness.ledger()
+    assert entries[0]["asset_id"] == allowed["asset_id"]
+    assert entries[0]["status"] == "pending", "没读图校对之前不算交回"
+
+    blocked = harness.client.post(
+        f"/api/v1/sessions/{harness.session_id}/assets",
+        files={"file": ("lamp.png", _png(42), "application/octet-stream")},
+        data={"name": LAMP})
+    body = _assert_problem(blocked, 409, "asset_locked")
+    assert "第 1 件" in body["detail"] and CAT in body["detail"]
+
+    plain = harness.upload(_png(43), "gen.png")
+    assert plain["number"] is None, "不带语义名的上传不进台账"
+
+
+def test_reopening_a_passed_item_inside_the_loop_rehangs_its_card(harness):
+    """循环内换一张图：该行退回待交、按这一件重挂卡片，重新交图能重新定稿。"""
+    body = _to_first_card(harness)
+    first = [entry for entry in body["action_items"]
+             if entry["kind"] == "asset_image" and entry["status"] == "pending"][0]
+    old_image = harness.upload(_png(51), "gen-cat.png")
+    harness.readings.append(CLEAN)
+    assert harness.submit_image(first, old_image["asset_id"]).status_code == 202
+    _card(harness, 2)
+
+    resp = _reopen(harness, old_image["asset_id"])
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["asset_index"] == 1
+
+    # 每件同时最多一个未决待办：第 2 件那张卡片先收掉，换成第 1 件重开的这一张。
+    pending = harness.pending("asset_image")
+    assert [entry["asset_index"] for entry in pending] == [1]
+    assert [(entry["number"], entry["status"], entry["asset_id"], entry["round"])
+            for entry in harness.ledger()] == [
+        (1, "pending", "", 1), (2, "pending", "", 0)]
+
+    # 再交一张不同的图：重新读图校对、重新定稿，然后循环照常往下走。
+    new_image = harness.upload(_png(52), "gen-cat-2.png")
+    harness.readings.append(CLEAN)
+    assert harness.submit_image(pending[0], new_image["asset_id"]).status_code == 202
+    _card(harness, 2)
+    entries = harness.ledger()
+    assert entries[0]["status"] == "passed"
+    assert entries[0]["asset_id"] == new_image["asset_id"]
+    assert entries[0]["round"] == 2, "换图走的是完整的一轮校对"
+
+
+def test_reopen_after_the_loop_ended_is_refused(harness, monkeypatch):
+    """循环结束之后不开这个口（#279）：注入卡与段都在下游用掉了那份快照。"""
+    monkeypatch.setattr(
+        pipeline, "run_stage2",
+        lambda state, brief, config, on_node=None, checkpoint_dir=None:
+        (dict(state, final_prompt="固定视频提示词"), "固定视频提示词"))
+    body = _to_first_card(harness)
+    first = [entry for entry in body["action_items"]
+             if entry["kind"] == "asset_image" and entry["status"] == "pending"][0]
+    first_image = harness.upload(_png(61), "gen-cat.png")
+    harness.readings.append(CLEAN)
+    assert harness.submit_image(first, first_image["asset_id"]).status_code == 202
+    second = _card(harness, 2)
+    harness.readings.append(CLEAN)
+    assert harness.submit_image(
+        second, harness.upload(_png(62), "gen-lamp.png")["asset_id"]).status_code == 202
+
+    # 等会话停稳（阶段 2 → 段循环）：此时素材循环早已走完（两件都定稿）。
+    harness.wait_idle()
+
+    body = _assert_problem(_reopen(harness, first_image["asset_id"]),
+                           409, "asset_reopen_unsupported")
+    assert "循环" in body["detail"]
+
+
+def test_reopening_an_abandoned_item_is_refused(harness):
+    """已放弃的件没有可换的图：出路是改流程，不是再换一张。"""
+    body = _to_first_card(harness)
+    first = [entry for entry in body["action_items"]
+             if entry["kind"] == "asset_image" and entry["status"] == "pending"][0]
+    # 先交一张、校对不通过（行回到 registered，asset_id 还指着那张图），再放弃。
+    rejected = harness.upload(_png(71), "gen-cat.png")
+    harness.readings.append(CAT_DEVIATION)
+    assert harness.submit_image(first, rejected["asset_id"]).status_code == 202
+    retried = harness.wait_until(
+        lambda snapshot: any(entry["kind"] == "asset_image"
+                             and entry["status"] == "pending"
+                             and entry["reason"]
+                             for entry in snapshot["action_items"]))
+    card = [entry for entry in retried["action_items"]
+            if entry["kind"] == "asset_image" and entry["status"] == "pending"][0]
+    assert _resolve(harness, card, {"decision": "abandon_asset"}).status_code == 202
+
+    assert harness.ledger()[0]["status"] == "abandoned"
+    _card(harness, 2)  # 放弃之后流程照常接下一件，等它停稳再试换图
+    _assert_problem(_reopen(harness, rejected["asset_id"]),
+                    409, "asset_not_reopenable")
+
+
+def test_reopen_is_ref_only(harness):
+    """导演台 r2v 与 base 都不开这个口：那不是一条「素材循环」。"""
+    base = harness.client.post("/api/v1/sessions", json={
+        "mode": "base", "variant": "T2VA", "duration": 4.0,
+        "style": "写实", "language": "Chinese", "plot": "雨夜旧信"})
+    base_id = base.json()["session_id"]
+    asset = harness.client.post(
+        f"/api/v1/sessions/{base_id}/assets",
+        files={"file": ("帧.png", _png(81), "application/octet-stream")}).json()
+
+    _assert_problem(
+        harness.client.post(
+            f"/api/v1/sessions/{base_id}/assets/{asset['asset_id']}/reopen"),
+        409, "asset_reopen_unsupported")
+
+
+def test_reopen_unknown_asset_is_not_found(harness):
+    """不属于本会话台账的素材标识 → 404（与素材读取同一口径，不给探测 oracle）。"""
+    _to_first_card(harness)
+
+    _assert_problem(
+        _reopen(harness, f"{harness.session_id}/0123456789abcdef"),
+        404, "asset_not_found")
+

@@ -157,9 +157,14 @@ DECISION_SUBMIT_FRAMES = "submit_frames"
 # 段视频回交同理：请求体里靠 ``video_asset_id`` 分型，决议事件用这个词说明「这段视频
 # 是被交上来的」。它只进内部事件与待办回显，不是接口上的 decision 取值。
 DECISION_SUBMIT_VIDEO = "submit_video"
-# 资产图交回同理：请求体里靠 ``asset_id`` 分型。它同样是待办的**唯一**决议——
-# 素材校对没有「就这样吧」的放行（spec §6.3）。
+# 资产图交回同理：请求体里靠 ``asset_id`` 分型。素材校对仍然没有「就这样吧」的放行
+# （spec §6.3）——降级只能靠改词。
 DECISION_SUBMIT_IMAGE = "submit_image"
+# 素材循环的第二种决议（#279 §循环的边界动作 / #282）：**放弃这一件**。
+# 「没有放行键」不等于「没有出口」：某一件模型怎么都画不出来时，卡片本身会变成死锁。
+# 它是循环内的动作，代价（分镜表与段词里的指称变成无图指称）当场讲清，已定稿的文本
+# 一个字都不改——放弃的是图，不是那些文字。
+DECISION_ABANDON_ASSET = "abandon_asset"
 # 导演台开场首帧（D8 §5.6）：与 ``submit_start_image`` 同名，是本票**唯一**在接口上
 # 显式声明的 decision 取值（其余交图类靠字段分型）。两张图分别是开场首帧与全片尾帧。
 DECISION_SUBMIT_START_IMAGE = "submit_start_image"
@@ -352,6 +357,7 @@ __all__ = [
     "ACTION_STAGE1_REVIEW",
     "ADVANCEABLE_STATUSES",
     "Action",
+    "DECISION_ABANDON_ASSET",
     "DECISION_APPROVE",
     "DECISION_REVISE",
     "DECISION_SUBMIT_FRAMES",

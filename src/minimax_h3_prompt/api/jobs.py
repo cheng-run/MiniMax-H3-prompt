@@ -53,7 +53,9 @@ from ..workbench_store import (
     ARTIFACT_SUMMARY_MARKDOWN,
     ARTIFACT_VIDEO_PROMPT,
     ASSETS_DIRNAME,
+    ASSET_LEDGER_STATUS_ABANDONED,
     ASSET_LEDGER_STATUS_PASSED,
+    ASSET_LEDGER_STATUS_PENDING,
     ASSET_LEDGER_STATUS_REGISTERED,
     ASSET_LEDGER_SOURCE_DERIVED,
     ASSET_PROOFREAD_KEY,
@@ -64,6 +66,9 @@ from ..workbench_store import (
     ActionItemResolved,
     AspectMismatchUnconfirmed,
     AssetImageInvalid,
+    AssetNotFound,
+    AssetNotReopenable,
+    AssetReopenUnsupported,
     ArchiveInvalid,
     CacheOutOfRoot,
     EventDraft,
@@ -91,6 +96,7 @@ from ..workbench_store import (
     bridge_frame_name,
     derived_asset_rows,
     merge_derived_rows,
+    unsettled_picture_entries,
     director_briefing_name,
     director_first_frame_prompt_name,
     director_segment_prompt_name,
@@ -185,6 +191,11 @@ def _reopen_fingerprint(index: int) -> str:
     return hashlib.sha256(f"reopen:{int(index)}".encode("utf-8")).hexdigest()
 
 
+def _reopen_asset_fingerprint(asset_id: str) -> str:
+    """换图请求的摘要：素材标识进摘要，同 key 换一件重发不能重放上一件的响应。"""
+    return hashlib.sha256(f"reopen-asset:{asset_id}".encode("utf-8")).hexdigest()
+
+
 def _require_cache_inside_root(root: Path, directory: Path) -> None:
     """段缓存目录解析后必须仍在配置根内（#265 路径安全的第一道）。
 
@@ -261,17 +272,15 @@ def _asset_step_of(
     严格串行意味着「第 1..N-1 件已定稿、当前是第 N 件」由编号本身就说得清；事件与
     job 记录只做通知，进程重启后不靠它们重建进度（D7 §6.4 / §14）。当前件上带着
     ``ASSET_PROOFREAD_KEY`` ＝ 用户已交图、还差校对；否则该件还欠出词。
+
+    筛选跳过**已定稿**与**已放弃**两种行（#282）：放弃一件若仍算「当前」，循环就永远
+    停在那件上——用户点了放弃反而更走不动，等于用另一种姿势再死锁一次。筛选住
+    ``workbench_store.unsettled_picture_entries``，位置锁用的是同一份。
     """
-    pictures = sorted(
-        (entry for entry in ledger if str(entry.get("kind")) == KIND_PICTURE),
-        key=lambda entry: int(entry["number"]))
-    index = 0
-    while (index < len(pictures)
-           and pictures[index].get("status") == ASSET_LEDGER_STATUS_PASSED):
-        index += 1
-    if index >= len(pictures):
+    pictures = unsettled_picture_entries(ledger)
+    if not pictures:
         return (ASSET_STEP_DONE, 0)
-    entry = pictures[index]
+    entry = pictures[0]
     number = int(entry["number"])
     if str(entry.get(ASSET_PROOFREAD_KEY) or "").strip():
         return (ASSET_STEP_PROOFREAD, number)
@@ -285,12 +294,19 @@ def _settle_asset(
 
     这是「轮次 + 状态」的唯一转移规则：收尾写盘与「下一件是谁」的判定都调它，
     两处各写一遍就会在改状态名时静默分家。
+
+    **已放弃的行一律不动**（#282）：放弃是在循环里当场做的决定，一份晚到的校对结论
+    （交图后才放弃、job 已经排上）不许把它改回「交过没通过」再重开卡片——那样放弃
+    键在慢任务面前就失效了。
     """
     updated: list[dict[str, Any]] = []
     for entry in ledger:
         row = dict(entry)
         if (str(row.get("kind")) == KIND_PICTURE
                 and int(row.get("number", 0)) == int(number)):
+            if row.get("status") == ASSET_LEDGER_STATUS_ABANDONED:
+                updated.append(row)
+                continue
             row["round"] = int(row.get("round", 0)) + 1
             row["status"] = (ASSET_LEDGER_STATUS_PASSED if passed
                              else ASSET_LEDGER_STATUS_REGISTERED)
@@ -321,6 +337,17 @@ def _parse_asset_prompt(text: str) -> str:
     """
     _head, separator, body = str(text).partition("\n\n")
     return body if separator else str(text)
+
+
+def _abandon_asset_note(name: str) -> str:
+    """放弃一件的代价说明（#279 US10）：放弃的是图，**不是那些文字**。
+
+    已定稿的分镜表与段词一个字都不改：它们写的是「这个角色在这一段做什么」，系统
+    替用户删改等于悄悄改剧本。代价讲清楚，改不改由用户自己在修订里决定。
+    """
+    return (
+        f"已放弃「{name}」这一件：分镜表与段词里对「{name}」的指称会变成无图指称"
+        "（照抄接线时这一格没有参考图可填）。已经定稿的文本不会被自动改写。")
 
 
 class JobCancelled(Exception):
@@ -706,6 +733,108 @@ class JobRunner:
                     response=(item.model_dump(mode="json") if job is None else {}))
             return (None if job is not None else item), False
 
+    async def reopen_asset(
+        self, session_id: str, asset_id: str, *, idempotency_key: str | None = None
+    ) -> tuple[ActionItemOut, bool]:
+        """把一件**已定稿**的参考素材退回未定稿，重新交图、重新校对（#282）。
+
+        #279 只说「换一张图限定在循环内（同一件重开、该行退回未定稿）」，没给触发
+        形状；这里与段级「换一段」同构，开一条同样形状的端点。
+
+        三道时间/路线判据：只对 ref（导演台 r2v 的件是用户起跑前传的参考图，换掉它
+        就是推翻已经按它写好的资产图词，它的循环形态本次不动）、只在素材循环没走完
+        时、只对已经定稿的行。留下 ``round``：它不是「第几轮交图」，是「这份词被打回
+        改过几版」，重开不改写正文（``_execute_asset_write`` 见 round > 0 只重开卡片）。
+
+        退回 ``pending`` 而不是 ``registered``：这一行此刻没有可信的图，用户重新交的
+        那张要走完整的读图校对。
+        """
+        lock = self._locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            payload = _reopen_asset_fingerprint(asset_id)
+            registry = None
+            if idempotency_key:
+                registry = self.store.session_registry(session_id)
+                cached = await asyncio.to_thread(
+                    registry.replay, idempotency_key, fingerprint=payload)
+                if cached is not None:
+                    return ActionItemOut.model_validate(cached), True
+
+            # 件号先只读预判一次，供待办与事件用；权威判定在下面的会话锁内。
+            before = await asyncio.to_thread(self.store.get_session, session_id)
+            preview = next(
+                (int(ref.number) for ref in before.brief.refs
+                 if ref.kind == KIND_PICTURE and ref.asset_id == asset_id), None)
+            item = ActionItemOut(
+                item_id=uuid.uuid4().hex, kind=step_machine.ACTION_ASSET_IMAGE,
+                status="pending", created_at=_now(), asset_index=preview)
+            holder: dict[str, Any] = {}
+
+            def _apply(detail: Any) -> dict[str, Any]:
+                if not is_ref_mode(detail.brief.mode):
+                    raise AssetReopenUnsupported(
+                        "只有 ref 会话的素材循环能换图：导演台 r2v 的参考图连同"
+                        "资产图词一起已经定下了这一件。")
+                if detail.status == step_machine.STATUS_RUNNING:
+                    raise SessionBusy("会话有任务在跑，等它停下再换图。")
+                ledger = detail.asset_ledger_snapshot()
+                target = next(
+                    (entry for entry in ledger
+                     if (str(entry.get("kind")) == KIND_PICTURE
+                         and str(entry.get("asset_id")) == asset_id)), None)
+                if target is None:
+                    raise AssetNotFound(f"素材不存在：{asset_id}")
+                number = int(target["number"])
+                if str(target.get("status")) == ASSET_LEDGER_STATUS_ABANDONED:
+                    raise AssetNotReopenable(
+                        f"第 {number} 件已经放弃：放弃件没有图可换，"
+                        "要么在修订里改词重跑，要么让它保持无图。")
+                if str(target.get("status")) != ASSET_LEDGER_STATUS_PASSED:
+                    raise AssetNotReopenable(
+                        f"第 {number} 件还没定稿：它本来就在素材循环里，"
+                        "直接交新图即可。")
+                # 循环结束之后不开这个口（#279）：注入卡与段内子集都在下游用掉了
+                # 那份快照，改台账会让它们与这份台账对不上——那是另一个粗动作。
+                if _asset_step_of(ledger)[0] == ASSET_STEP_DONE:
+                    raise AssetReopenUnsupported(
+                        "素材循环已经结束：换图会让注入卡与段内子集和这份台账对不上，"
+                        "那属于循环之外的动作。")
+                target["status"] = ASSET_LEDGER_STATUS_PENDING
+                target["asset_id"] = ""
+                target["sha256"] = ""
+                target.pop(ASSET_PROOFREAD_KEY, None)
+                reopened = item.model_copy(update={"asset_index": number})
+                holder["item"] = reopened
+                # 每件同时最多一个未决待办：先把别的件的卡片收掉，再按重开的件号挂新的
+                # （与「收旧挂新」同一条纪律）。``_asset_step_of`` 会因连续通过编号退回
+                # 而自动指到这一件，所以不需要另记「在等哪一件」。
+                items = [
+                    existing.model_dump(mode="json")
+                    for existing in detail.action_items
+                    if not (existing.kind == step_machine.ACTION_ASSET_IMAGE
+                            and existing.status == "pending")]
+                items.append(reopened.model_dump(mode="json"))
+                return {
+                    "status": step_machine.STATUS_AWAITING_HUMAN,
+                    "asset_ledger": ledger,
+                    "action_items": items,
+                }
+
+            created_payload: dict[str, Any] = {
+                "item_id": item.item_id, "kind": item.kind}
+            if preview is not None:
+                created_payload["asset_index"] = preview
+            await asyncio.to_thread(
+                self.store.mutate, session_id, _apply,
+                events=[EventDraft("action_item.created", created_payload,
+                                   job_id=None)])
+            reopened_item = holder["item"]
+            if idempotency_key and registry is not None:
+                await asyncio.to_thread(
+                    registry.record, idempotency_key, fingerprint=payload,
+                    response=reopened_item.model_dump(mode="json"))
+            return reopened_item, False
+
     def _director_cache_directory(self, brief: Any) -> Path | None:
         """段缓存目录；定位不到返回 ``None``（跳过删缓存，不阻断作废）。
 
@@ -790,15 +919,28 @@ class JobRunner:
             # 两者都不产生可等待的执行，所以 job 为 None，会话停在 awaiting_human。
             gate_branch = branch in (
                 _BRANCH_FRAME_GATE, _BRANCH_DIRECTOR_START_GATE)
+            # 放弃一件（#282）与交图走同一个分支，但**下一步**不同：交图要跑校对，
+            # 放弃之后要接下一件、或者直接进阶段 2。两处都在这里先按磁盘快照预判，
+            # 只为选任务 kind 与事件文案；权威落盘仍在锁内的 ``_decide``。
+            abandon = (branch == _BRANCH_ASSET_LOOP
+                       and decision == step_machine.DECISION_ABANDON_ASSET)
+            abandon_name, abandon_kind = (
+                await asyncio.to_thread(self._abandon_preview, session_id, item_id)
+                if abandon else ("", ""))
+            if abandon:
+                kind = abandon_kind
+            elif branch == _BRANCH_ASSET_LOOP:
+                # 素材循环的两个 job 都记 ``asset_loop``（D7 §6.2）：前端/排障按 kind
+                # 就能把「出词」「校对」与外层的推进任务分开。
+                kind = JOB_KIND_ASSET_LOOP
+            elif branch == _BRANCH_DIRECTOR_DELIVERY:
+                kind = JOB_KIND_DELIVERY
+            else:
+                kind = "advance"
             # 闸门分支通过审查不产生任务；其余去向照旧。``job`` 为 None 时下面所有
             # 与任务相关的落盘都跳过——契约里那一段的 202 是「已受理、无执行」。
             job = None if gate_branch else JobSummary(
-                job_id=uuid.uuid4().hex,
-                # 素材循环的两个 job 都记 ``asset_loop``（D7 §6.2）：前端/排障按 kind
-                # 就能把「出词」「校对」与外层的推进任务分开。
-                kind=(JOB_KIND_ASSET_LOOP if branch == _BRANCH_ASSET_LOOP
-                      else JOB_KIND_DELIVERY if branch == _BRANCH_DIRECTOR_DELIVERY
-                      else "advance"),
+                job_id=uuid.uuid4().hex, kind=kind,
                 status="running", started_at=_now())
             # 新待办的 id 先生成：``action_item.created`` 事件要和决议在**同一次**
             # 落盘里写出，不能等 _decide 返回后再补一条事件。
@@ -963,11 +1105,13 @@ class JobRunner:
                     holder["segments"] = rows
                     recorded_decision = step_machine.DECISION_SUBMIT_VIDEO
                 elif target.kind == step_machine.ACTION_ASSET_IMAGE:
-                    # kind 与载荷强校验（D7 §6.3）：素材图待办只收 ``asset_id``。它没有
-                    # 「就这样吧」那一档——放行入口一旦存在，校对结论就只是建议。
-                    if decision is not None:
-                        raise AssetImageInvalid(
-                            "asset_image 待办不接受 approve/revise；请提交 asset_id。")
+                    # kind 与载荷强校验（D7 §6.3 / #279 §循环的边界动作）：素材图待办
+                    # 收两种决议——交图（``asset_id``）与**放弃这一件**。仍然没有
+                    # 「就这样吧」的放行档（放行入口一旦存在，校对结论就只是建议）；
+                    # 放弃是另一个动作：它不认这张图，认的是「这一件永远没有图」。
+                    number = target.asset_index
+                    if number is None:
+                        raise AssetImageInvalid("这条 asset_image 待办缺件号，无法核对。")
                     if revisions:
                         raise AssetImageInvalid("asset_image 待办不接受 revisions。")
                     if frames is not None:
@@ -976,12 +1120,6 @@ class JobRunner:
                         raise AssetImageInvalid(
                             "asset_image 待办不接受 video_asset_id；段视频请交到 "
                             "segment_video。")
-                    submitted = str(asset_id or "").strip()
-                    if not submitted:
-                        raise AssetImageInvalid("asset_image 待办必须带 asset_id。")
-                    number = target.asset_index
-                    if number is None:
-                        raise AssetImageInvalid("这条 asset_image 待办缺件号，无法核对。")
                     ledger = current.asset_ledger_snapshot()
                     current_entry = next(
                         (entry for entry in ledger
@@ -990,22 +1128,49 @@ class JobRunner:
                     if current_entry is None:
                         raise AssetImageInvalid(
                             f"素材台账里没有第 {number} 件参考素材。")
-                    # 归属与类型（不属于本会话 / 非图片）都在这里判，一律 422。
-                    path = self.store.resolve_image_asset(session_id, submitted)
-                    # **派生行**的正本来自这里（D7 修订 #279）：派生时 ``asset_id`` 是空
-                    # 的，而段规划、注入卡要按编号取文件、还要核对 SHA256（CONTEXT.md
-                    # 「素材台账」记哈希的理由是文件名可变引用）。
-                    # 上传行（导演台 r2v）**不动**：它的正本是用户起跑前传的原图，不是
-                    # 素材循环里交回的校对图（#268 的打包据此挂开场图）。
-                    if str(current_entry.get("source") or "") == ASSET_LEDGER_SOURCE_DERIVED:
-                        current_entry["asset_id"] = submitted
-                        current_entry["sha256"] = hashlib.sha256(
-                            path.read_bytes()).hexdigest()
-                    # 先落盘再接校对：崩在两者之间时，恢复能重跑校对而不是要求重交
-                    # （用户已经交过一次的图不该再交一遍）。
-                    current_entry[ASSET_PROOFREAD_KEY] = submitted
-                    holder["asset_ledger"] = ledger
-                    recorded_decision = step_machine.DECISION_SUBMIT_IMAGE
+                    if decision == step_machine.DECISION_ABANDON_ASSET:
+                        if asset_id is not None:
+                            raise AssetImageInvalid(
+                                "放弃这一件与交图不能同时提交：要么交一张图，"
+                                "要么放弃。")
+                        name = str(current_entry.get("name") or "")
+                        current_entry["status"] = ASSET_LEDGER_STATUS_ABANDONED
+                        # 只收走「待校对」标记：放弃之后那份慢任务不该再把结论结算进
+                        # 这一行（``_settle_asset`` 另有一道同样的守卫）。已经交过的
+                        # asset_id **不清**——「这一行最后试过哪张图」是事实，而且换图
+                        # 端点就是按 asset_id 认行的，清掉之后「放弃又反悔」就没有入口。
+                        current_entry.pop(ASSET_PROOFREAD_KEY, None)
+                        holder["asset_ledger"] = ledger
+                        # 后果当场讲清（#279 US10）：放弃的是图，**不是那些文字**。
+                        holder["reason"] = _abandon_asset_note(name)
+                        recorded_decision = step_machine.DECISION_ABANDON_ASSET
+                    else:
+                        if decision is not None:
+                            raise AssetImageInvalid(
+                                "asset_image 待办只接受 asset_id 或 "
+                                "decision=abandon_asset。")
+                        submitted = str(asset_id or "").strip()
+                        if not submitted:
+                            raise AssetImageInvalid(
+                                "asset_image 待办必须带 asset_id，或 "
+                                "decision=abandon_asset 放弃这一件。")
+                        # 归属与类型（不属于本会话 / 非图片）都在这里判，一律 422。
+                        path = self.store.resolve_image_asset(session_id, submitted)
+                        # **派生行**的正本来自这里（D7 修订 #279）：派生时 ``asset_id``
+                        # 是空的，而段规划、注入卡要按编号取文件、还要核对 SHA256
+                        # （CONTEXT.md「素材台账」记哈希的理由是文件名可变引用）。
+                        # 上传行（导演台 r2v）**不动**：它的正本是用户起跑前传的原图，
+                        # 不是素材循环里交回的校对图（#268 的打包据此挂开场图）。
+                        if (str(current_entry.get("source") or "")
+                                == ASSET_LEDGER_SOURCE_DERIVED):
+                            current_entry["asset_id"] = submitted
+                            current_entry["sha256"] = hashlib.sha256(
+                                path.read_bytes()).hexdigest()
+                        # 先落盘再接校对：崩在两者之间时，恢复能重跑校对而不是要求重交
+                        # （用户已经交过一次的图不该再交一遍）。
+                        current_entry[ASSET_PROOFREAD_KEY] = submitted
+                        holder["asset_ledger"] = ledger
+                        recorded_decision = step_machine.DECISION_SUBMIT_IMAGE
                 elif target.kind == step_machine.ACTION_DIRECTOR_START_IMAGE:
                     # 开场首帧与全片尾帧（D8 §7.1）：两张都必须是**本会话已上传的图片
                     # 素材**，不接受本地路径（spec §4.4 的不变式 6/10）。
@@ -1215,11 +1380,17 @@ class JobRunner:
                     if branch == _BRANCH_FRAMES
                     else step_machine.DECISION_SUBMIT_VIDEO
                     if branch == _BRANCH_SEGMENT_VIDEO
+                    else step_machine.DECISION_ABANDON_ASSET
+                    if abandon
                     else step_machine.DECISION_SUBMIT_IMAGE
                     if branch == _BRANCH_ASSET_LOOP
                     else decision),
                 "revisions": event_revisions,
             }
+            if abandon:
+                # 放弃的代价要进事件（#279 US10）：事后翻事件流的人也得看得出
+                # 「这一格为什么没有图」，不能只剩一个 ``abandoned`` 状态值。
+                resolved_payload["reason"] = _abandon_asset_note(abandon_name)
             if frames is not None:
                 # 帧槽载荷是用户输入的一部分（D4 §9）：重放与排障要看出用户当时
                 # 选了哪两个素材。审查待办没有这一项，就不写空对象进事件。
@@ -1329,6 +1500,32 @@ class JobRunner:
                 return (_BRANCH_DIRECTOR_START_GATE
                         if session.brief.is_director else _BRANCH_FRAME_GATE)
         return _BRANCH_REVIEW
+
+    def _abandon_preview(self, session_id: str, item_id: str) -> tuple[str, str]:
+        """放弃一件的只读预判：``(这一件的语义名, 放弃之后那个任务的 kind)``。
+
+        为什么要预判：任务对象在 ``_decide`` 跑起来之前就建好了（事件要用它的 id），
+        而放弃之后可能是「出下一件的词」也可能是「进阶段 2」——记成 ``asset_loop``
+        却实际跑阶段 2，任务列表里就是一条假记录。判据与 ``_finish_asset_proofread``
+        同源（``_asset_step_of``），只在磁盘快照上先把这一件标掉。
+        """
+        session = load_session(self.store.session_directory(session_id))
+        if session is None:
+            return ("", JOB_KIND_ASSET_LOOP)
+        target = next(
+            (item for item in session.action_items
+             if str(item.get("item_id")) == item_id), None)
+        number = target.get("asset_index") if target is not None else None
+        ledger = [dict(entry) for entry in session.asset_ledger]
+        name = ""
+        for entry in ledger:
+            if (str(entry.get("kind")) != KIND_PICTURE
+                    or number is None or int(entry.get("number", 0)) != int(number)):
+                continue
+            name = str(entry.get("name") or "")
+            entry["status"] = ASSET_LEDGER_STATUS_ABANDONED
+        return (name, JOB_KIND_ASSET_LOOP
+                if _asset_step_of(ledger)[0] != ASSET_STEP_DONE else "advance")
 
     def _director_frame_tolerance(self) -> int | None:
         """配置里的帧容差；拿不到就交 ``None`` 给 companion 用代码默认值。
@@ -1885,12 +2082,15 @@ class JobRunner:
         ``passed_only=False`` 只给 r2v 的阶段 1 用：那时它的台账还是用户上传建立的一批
         ``registered`` 行（素材循环尚未开始），按「已定稿」过滤会把它们全滤掉。派生行
         不会出现在 r2v 上（``brief.is_ref`` 才派生），所以放宽这一档不会漏进没图的槽。
+        **已放弃的行在放宽这一档里也一律不收**（#282）：它是循环里当场做出的「这一件没有
+        图」的决定，与「还没交」不是一回事——重跑阶段 1 也不该把死掉的件重新塞回 refs。
         """
         if not route_uses_asset_ledger(session.brief):
             return session.brief
         pictures = sorted(
             (entry for entry in session.asset_ledger
              if (str(entry.get("kind")) == KIND_PICTURE
+                 and entry.get("status") != ASSET_LEDGER_STATUS_ABANDONED
                  and (not passed_only
                       or entry.get("status") == ASSET_LEDGER_STATUS_PASSED))),
             key=lambda entry: int(entry["number"]))
