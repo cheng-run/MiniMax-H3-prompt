@@ -74,6 +74,9 @@ FAST_TESTS=(
   tests/test_direct_call_coverage.py
   tests/test_network_guard.py
   tests/test_mutation_anchors.py
+  # 变异器的 vitest 目标本身要有守卫（#278）：命令拼错或把缺依赖误报成存活，
+  # 前端行为变异就会静默失效。
+  tests/test_mutation_vitest.py
   # 变更集本身是守卫的守卫（retro 2026-11-14）：它错了，mypy/前端/契约三条会静默跳过。
   tests/test_check_changed_paths.py
   tests/test_script_line_endings.py

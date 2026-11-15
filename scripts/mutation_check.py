@@ -25,6 +25,8 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import os
+import re
+import shutil
 import subprocess
 import sys
 import time
@@ -45,6 +47,13 @@ class Mutation:
     # 行尾本身就是被测对象时置 False。默认会先把锚点按 LF 归一、写完再补回 CRLF，
     # 那会把「CRLF → LF」这类变异当场抵消掉，变异报「存活」而守卫其实好好的。
     normalize_newlines: bool = True
+    # 运行目标：默认 pytest；``vitest`` 时 ``tests`` 写
+    # ``<spec 相对 frontend/ 的路径>::<测试名>``，由前端 node_modules 里的 vitest 执行。
+    runner: str = "pytest"
+
+
+class MutationSkipped(RuntimeError):
+    """运行环境缺失（例如前端依赖未安装）：既不算杀死也不算存活。"""
 
 
 MUTATIONS: tuple[Mutation, ...] = (
@@ -110,6 +119,9 @@ MUTATIONS: tuple[Mutation, ...] = (
         "桥接帧模式失效＝剥出的尾帧既不出现在清单里也读不出来，"
         "段卡片按产物名永远取不到本段起点图（#277）",
     ),
+    # 下面两条仍是 pytest 源码守卫（#278）：前者是前后端**跨语言**命名一致，
+    # vitest 读不到后端的 Python 常量；后者钉的是「有意不进产物分区」的意图，
+    # 现有组件用例对未分组 kind 默认通过、杀不死它。
     Mutation(
         "frontend_bridge_frame_name_drifts",
         "frontend/src/features/sessions/artifactKinds.ts",
@@ -135,10 +147,11 @@ MUTATIONS: tuple[Mutation, ...] = (
         "frontend/src/features/sessions/SegmentsTab.vue",
         "bridgeFrameName(index - 1)",
         "bridgeFrameName(index)",
-        ("tests/test_frontend_bridge_frame.py::"
-         "test_segments_tab_maps_the_start_frame_to_the_previous_segment",),
+        ("src/features/sessions/SegmentsTab.spec.ts"
+         "::按剥帧段号差一位取图：第 3 段取 shot-02，不取 shot-03",),
         "段卡片取本段尾帧而不是上一段剥帧＝第 N 段的起点图错一位（segment-NN-start.png 的"
-        "语义就是这样断的；#277 复审 F7）",
+        "语义就是这样断的；#277 复审 F7 / #278 改成真实组件用例）",
+        runner="vitest",
     ),
     Mutation(
         "session_detail_leaks_stage_state",
@@ -759,10 +772,11 @@ MUTATIONS: tuple[Mutation, ...] = (
         <ErrorNotice v-if="runError" :message="runError" />
 
         <ProgressBand v-if="progressView.steps.length" :view="progressView" />''',
-        ("tests/test_frontend_progress_band.py"
-         "::test_step_band_and_pending_hint_render_above_all_panels",),
+        ("src/features/sessions/SessionDetailView.spec.ts"
+         "::切到任一分区，步骤带仍然渲染且当前步骤正确",),
         "步骤带移回概览 panel 内部＝切到分段/产物/审查就看不到当前进度"
-        "（spec #274 复检的直接成因；#251 真实验收实测）",
+        "（spec #274 复检的直接成因；#251 真实验收实测 / #278 改成真实组件用例）",
+        runner="vitest",
     ),
     Mutation(
         "fake_switch_ignored",
@@ -1392,7 +1406,49 @@ def anchor_problems(mutations: tuple[Mutation, ...], *, root: Path = ROOT) -> li
     return problems
 
 
-def _run_tests(nodes: tuple[str, ...]) -> int:
+def _vitest_argv(nodes: tuple[str, ...], *, node: str, vitest: str) -> list[str]:
+    """把 ``<spec>::<测试名>`` 节点翻成 vitest 命令行。
+
+    测试名走 ``-t``（按正则匹配），所以必须转义——用例名里有括号、点号之类的
+    元字符时，不转义会匹配到别的用例或者干脆不匹配。
+    """
+    argv = [node, vitest, "run"]
+    specs: list[str] = []
+    names: list[str] = []
+    for raw in nodes:
+        spec, separator, name = raw.partition("::")
+        specs.append(spec)
+        if separator:
+            names.append(name)
+    if len(names) > 1:
+        raise ValueError(
+            "vitest 变异只支持一个 -t；要跑多条请拆成多条 Mutation")
+    argv.extend(specs)
+    if names:
+        argv.extend(["-t", re.escape(names[0])])
+    return argv
+
+
+def _run_vitest(nodes: tuple[str, ...]) -> int:
+    """跑前端 vitest 用例；依赖缺失时抛 ``MutationSkipped``，不误报成存活。"""
+    frontend = ROOT / "frontend"
+    vitest = frontend / "node_modules" / "vitest" / "vitest.mjs"
+    node = shutil.which("node")
+    if node is None or not vitest.is_file():
+        raise MutationSkipped(
+            "前端依赖或 node 不可用：先 cd frontend && npx pnpm@11.7.0 install")
+    return subprocess.run(
+        _vitest_argv(nodes, node=node, vitest=str(vitest)),
+        cwd=str(frontend), capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
+        env=dict(os.environ)).returncode
+
+
+def _run_tests(nodes: tuple[str, ...], runner: str = "pytest") -> int:
+    if runner == "vitest":
+        return _run_vitest(nodes)
+    if runner != "pytest":
+        raise ValueError(f"未知的变异运行目标：{runner!r}")
     # PYTHONPATH 必须显式指向本次变异的那棵树的 ``src``：工作树里没有自己的 .venv，
     # 继承来的包路径指向主树，变异打在 A 树、用例读的却是 B 树——用例照绿，变异被
     # 报成「存活（守卫是摆设）」（2026-11-08 #199 复审实测）。主树里两者同一份，
@@ -1442,7 +1498,7 @@ def check(mutation: Mutation) -> tuple[bool, str]:
         mutated = mutated.replace("\n", "\r\n")
     try:
         path.write_bytes(mutated.encode("utf-8"))
-        code = _run_tests(mutation.tests)
+        code = _run_tests(mutation.tests, mutation.runner)
     finally:
         path.write_bytes(raw)
         _drop_bytecode(path)
@@ -1476,10 +1532,18 @@ def main(argv: list[str] | None = None) -> int:
                     if not any(line.startswith(f"{m.name}：") for line in broken)]
 
     survivors = []
+    skipped = []
     total = len(selected)
     for index, mutation in enumerate(selected, start=1):
         started = time.monotonic()
-        killed, note = check(mutation)
+        try:
+            killed, note = check(mutation)
+        except MutationSkipped as exc:
+            # 缺前端依赖不是「守卫是摆设」，也不是「杀死」：单独记，不算失败。
+            print(f"[{index}/{total}] [跳过] {mutation.name}: {exc}"
+                  f"（{time.monotonic() - started:.1f}s）", flush=True)
+            skipped.append(mutation.name)
+            continue
         # 逐条打印序号与耗时（2026-11-13）：115 条串行约 8 分钟，没有进度只能靠
         # 查进程表猜「卡住还是慢」。
         print(f"[{index}/{total}] [{'杀死' if killed else '存活'}] "
@@ -1493,6 +1557,10 @@ def main(argv: list[str] | None = None) -> int:
     if survivors:
         print(f"\n{len(survivors)} 条变异没被杀死：{', '.join(survivors)}")
         return 1
+    if skipped:
+        print(f"\n{len(selected)} 条变异中 {len(skipped)} 条因环境缺失跳过，"
+              f"其余全部被杀死。")
+        return 0
     print(f"\n{len(selected)} 条变异全部被杀死。")
     return 0
 

@@ -1,10 +1,12 @@
-"""桥接帧的前后端对齐与两条「有意如此」的判据（#277 复审 F5–F7）。
+"""桥接帧的前后端对齐与「有意如此」的判据（#277 复审 F5–F6；#278 收窄）。
 
-为什么需要：`artifactKinds.ts` 的 `bridgeFrameName` 与 `SegmentsTab.vue` 的「差一位」
-映射是前端 JS 侧的第二份契约。后端改名、段号位数改动或偏移写错时前端不报错，只是
-**静默取不到图**：段卡片没有起点图、产物分区凭空少一件。这三条守卫都从后端真源
-（`workbench_store` 的常量与命名函数）派生，锚点是前端源码里的字面结构；后端或前端
-任一侧漂移都会变红。
+为什么需要：`artifactKinds.ts` 的 `bridgeFrameName` 是前端 JS 侧的第二份契约。后端
+改名、段号位数改动时前端不报错，只是**静默取不到图**：段卡片没有起点图。这两条守卫
+都从后端真源（`workbench_store` 的常量与命名函数）派生，锚点是前端源码里的字面结构；
+后端或前端任一侧漂移都会变红。
+
+「差一位」的判据已换成 vitest 行为变异（#278）：跑 `SegmentsTab.spec.ts` 的
+「按剥帧段号差一位取图」用例，不再靠源码文本。
 """
 from __future__ import annotations
 
@@ -22,7 +24,6 @@ from minimax_h3_prompt.workbench_store import (
 ROOT = Path(__file__).resolve().parents[1]
 FRONTEND = ROOT / "frontend" / "src" / "features" / "sessions"
 ARTIFACT_KINDS = FRONTEND / "artifactKinds.ts"
-SEGMENTS_TAB = FRONTEND / "SegmentsTab.vue"
 
 
 def _function_body(source: str, name: str) -> str:
@@ -72,14 +73,3 @@ def test_bridge_frame_is_registered_as_a_segment_local_kind():
     members = re.findall(r"'([^']+)'", match.group(1))
     assert "bridge_frame" in members, (
         f"SEGMENT_LOCAL_KINDS 没把 bridge_frame 收进来：{members}")
-
-
-def test_segments_tab_maps_the_start_frame_to_the_previous_segment():
-    """第 N 段（N ≥ 2）取 N−1 那张桥接帧——「差一位」只在 SegmentsTab 折算一次。"""
-    body = _function_body(SEGMENTS_TAB.read_text(encoding="utf-8"), "startFrameFor")
-
-    assert "if (index < 2)" in body, (
-        "第 1 段的起点是用户交的开场帧，没有桥接帧；缺少 index < 2 的分支会去取"
-        "一张不存在的图")
-    assert "bridgeFrameName(index - 1)" in body, (
-        "第 N 段的起点图是第 N−1 段的剥帧；写成 index 会取到本段尾帧（差一位）")
