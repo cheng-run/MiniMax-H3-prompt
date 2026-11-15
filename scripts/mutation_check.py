@@ -1202,6 +1202,27 @@ MUTATIONS: tuple[Mutation, ...] = (
         "（#282，spec #279「只许往当前待办那一件交」）",
     ),
     Mutation(
+        "asset_extra_gate_not_blocking",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "            if (session.brief.is_ref\n"
+        "                    and not asset_extras_settled(session.action_items)):",
+        "            if False:",
+        ("tests/test_api_asset_extra.py::"
+         "test_restart_keeps_the_gate_and_rehangs_it_after_a_crash_like_snapshot",),
+        "补交口不拦＝循环走完（含零资产）直接进阶段 2，视频/音频补交这一步被静默跳过"
+        "（#284，spec #279「它是阻塞的：不解掉就不进阶段 2」）",
+    ),
+    Mutation(
+        "asset_extra_capacity_not_recomputed",
+        "src/minimax_h3_prompt/api/jobs.py",
+        '                    self.store.ensure_ref_capacity(usable, where="补交素材")',
+        "                    pass",
+        ("tests/test_api_asset_extra.py::"
+         "test_capacity_is_recomputed_when_the_gate_settles",),
+        "落定不再现算容量＝注入卡与段内子集用的快照合法性只剩上传时那一半保证"
+        "（#284，spec #279「补交口落定之后，容量闸门按当时台账现算」）",
+    ),
+    Mutation(
         "asset_loop_settles_a_rejected_item",
         "src/minimax_h3_prompt/api/jobs.py",
         "            row[\"status\"] = (ASSET_LEDGER_STATUS_PASSED if passed\n"

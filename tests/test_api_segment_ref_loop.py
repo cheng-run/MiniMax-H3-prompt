@@ -206,8 +206,18 @@ class Harness:
         assert resp.status_code == 202, resp.text
         return self.wait_job(resp.json()["job_id"])
 
+    def pass_extras_gate(self) -> None:
+        """素材循环之后先过补交口（#284）：本文件看的是段循环，明确选「没有」。"""
+        self.wait_pending("asset_extra")
+        item = self.pending("asset_extra")[0]
+        resp = self.client.post(
+            f"/api/v1/sessions/{self.session_id}/action-items/"
+            f"{item['item_id']}/resolve",
+            json={"decision": "no_extras"})
+        assert resp.status_code == 202, resp.text
+
     def to_segment_todo(self, duration: float, pictures: tuple[str, ...]) -> dict:
-        """跑完阶段 1 → 素材循环 → 阶段 2 → 分段规划 → 写第 1 段。"""
+        """跑完阶段 1 → 素材循环 → 补交口 → 阶段 2 → 分段规划 → 写第 1 段。"""
         self.create(duration)
         for index, name in enumerate(pictures):
             self.upload_picture(name, index + 1)
@@ -216,6 +226,7 @@ class Harness:
         for index in range(len(pictures)):
             self.wait_pending("asset_image")
             self.submit_asset_image(seed=index + 7)
+        self.pass_extras_gate()
         return self.wait_until(
             lambda body: body["status"] != "running"
             and bool([item for item in body["action_items"]
@@ -389,6 +400,7 @@ def test_ref_planning_hard_fails_when_segment_subset_overflows(
     for index in range(2):
         harness.wait_pending("asset_image")
         harness.submit_asset_image(seed=index + 7)
+    harness.pass_extras_gate()
     detail = harness.wait_until(lambda body: body["status"] == "failed")
 
     assert detail["segments"] == []

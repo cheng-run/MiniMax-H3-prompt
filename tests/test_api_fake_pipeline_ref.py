@@ -215,7 +215,7 @@ def test_fake_ref_closed_loop_rejects_then_settles(fake_app, tmp_path):
         artifacts = {item["name"]: item for item in detail["artifacts"]}
         assert "assets/picture-02.md" in artifacts
 
-        # 第 2 件一次通过 → 素材循环收尾 → 阶段 2 → 2 段 × 10 秒。
+        # 第 2 件一次通过 → 素材循环收尾 → **补交口**（#284）→ 阶段 2 → 2 段 × 10 秒。
         third_image = _upload(client, session_id, _png(13), "lamp-1.png", "image/png")
         todo2 = [item for item in _pending(detail, "asset_image")
                  if item["asset_index"] == 2][0]
@@ -225,8 +225,16 @@ def test_fake_ref_closed_loop_rejects_then_settles(fake_app, tmp_path):
         assert resp.status_code == 202, resp.text
         _wait_job(client, session_id, resp.json()["job_id"])
         detail = _wait_until(
+            client, session_id, lambda body: _pending(body, "asset_extra"))
+        extra = _pending(detail, "asset_extra")[0]
+        resp = client.post(
+            f"/api/v1/sessions/{session_id}/action-items/{extra['item_id']}/resolve",
+            json={"decision": "no_extras"})
+        assert resp.status_code == 202, resp.text
+        detail = _wait_until(
             client, session_id,
-            lambda body: body["status"] != "running" and len(body.get("segments") or []) == 2)
+            lambda body: body["status"] != "running"
+            and len(body.get("segments") or []) == 2)
 
         # 整片注入卡在产物分区（kind 由登记表给），段内只读子集按段落位。
         artifacts = {item["name"]: item for item in detail["artifacts"]}
@@ -339,7 +347,16 @@ def test_fake_zero_assets_derives_nothing_and_moves_on(fake_app, monkeypatch):
         client.post(
             f"/api/v1/sessions/{session_id}/action-items/{review['item_id']}/resolve",
             json={"decision": "approve"})
-        # 素材循环空转：直接进阶段 2 与单段，停在收段视频那一格。
+        # 素材循环空转，但**不跳过补交口**（#284）：零资产同样要问一次
+        # 「要不要补交素材视频/音频」，「没有」是一个能点下去的答案。
+        detail = _wait_until(
+            client, session_id, lambda body: _pending(body, "asset_extra"))
+        extra = _pending(detail, "asset_extra")[0]
+        resp = client.post(
+            f"/api/v1/sessions/{session_id}/action-items/{extra['item_id']}/resolve",
+            json={"decision": "no_extras"})
+        assert resp.status_code == 202, resp.text
+        # 之后才是阶段 2 与单段，停在收段视频那一格。
         detail = _wait_until(
             client, session_id, lambda body: _pending(body, "segment_video"))
 

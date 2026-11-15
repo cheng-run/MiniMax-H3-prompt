@@ -703,6 +703,18 @@ class AssetImageInvalid(WorkbenchError):
     code = "asset_image_invalid"
 
 
+class AssetExtraInvalid(WorkbenchError):
+    """补交待办的回交无效（#279 §补交口 / #284）：载荷错配、或交的那件不是视频/音频。
+
+    与 ``asset_image_invalid`` 分开是前端出路不同：素材图不合格要重新生成一张，
+    补交的视频/音频不合格要换一份文件或改语义名。容量超限不归这里——那是
+    ``ref_capacity_exceeded``，因为它点名的是「哪一档超了」而不是「这份文件不对」。
+    """
+
+    status_code = 422
+    code = "asset_extra_invalid"
+
+
 class AspectMismatchUnconfirmed(WorkbenchError):
     """开场首帧比例不符且用户没有显式确认（D8 spec §7.2 / §15）。
 
@@ -796,6 +808,9 @@ _DECISIONS = frozenset({
     step_machine.DECISION_SUBMIT_IMAGE,
     # 素材循环里的第二种决议（#279 §循环的边界动作 / #282）：放弃这一件。
     step_machine.DECISION_ABANDON_ASSET,
+    # 补交口的两种决议（#279 §补交口 / #284）：交完了，或者明确「没有，就这样」。
+    step_machine.DECISION_SUBMIT_EXTRAS,
+    step_machine.DECISION_NO_EXTRAS,
     # 导演台开场首帧决议（D8 §5.6）：唯一显式声明的 decision 取值。
     step_machine.DECISION_SUBMIT_START_IMAGE,
     # 切镜段段首图决议（D8 §5.6 / #264）：逐段的图槽，同样显式声明。
@@ -1668,6 +1683,27 @@ def unsettled_picture_entries(
              and str(entry.get("status")) not in (
                  ASSET_LEDGER_STATUS_PASSED, ASSET_LEDGER_STATUS_ABANDONED))),
         key=lambda entry: int(entry["number"]))
+
+
+def asset_extra_pending(items: Sequence[Mapping[str, Any]]) -> bool:
+    """补交待办是否还在等用户（#279 §补交口 / #284）。
+
+    位置锁用它开口：只有这张待办未解时，循环结束后的视频/音频登记才放行；它与
+    ``asset_extras_settled`` 是同一件事的两面，分开写比一个三态枚举更不容易被
+    某处误读成「还没问过」。
+    """
+    return any(str(item.get("kind")) == step_machine.ACTION_ASSET_EXTRA
+               and str(item.get("status")) == "pending" for item in items)
+
+
+def asset_extras_settled(items: Sequence[Mapping[str, Any]]) -> bool:
+    """补交口是否已经落定（#284）：「没有，就这样」与「交完了」都算落定。
+
+    落定是**持久事实**（待办记录在会话里），不是内存里的一次性判断：重启、刷新、
+    重新进页面之后都不该把这个问题再问一遍。
+    """
+    return any(str(item.get("kind")) == step_machine.ACTION_ASSET_EXTRA
+               and str(item.get("status")) == "resolved" for item in items)
 
 
 def derived_asset_rows(brief: Brief,
@@ -2587,13 +2623,14 @@ class WorkbenchSessionStore:
     @staticmethod
     def _asset_position_lock(
         session: SessionState, ledger: Sequence[Mapping[str, Any]],
-        semantic_name: str,
+        semantic_name: str, asset_kind: str,
     ) -> dict[str, Any] | None:
         """位置锁（#279 §素材分区 / #282）：起跑后带语义名的登记只许「命中当前待办那一件」。
 
         三态返回：
 
-        - ``None``：还没起跑（或这条路线没有台账）——按普通登记处理；
+        - ``None``：还没起跑（或这条路线没有台账），或**补交口未解时的视频/音频**——
+          按普通登记处理（新增一行，编号走本 kind 的号段）；
         - 一个台账行：起跑后，且这个名字正是素材循环此刻等着的那一件——放行；
         - 其余一律 ``AssetLocked``（409）。
 
@@ -2601,11 +2638,22 @@ class WorkbenchSessionStore:
         「不能登记」等于让用户去猜该交哪一件。判据取 ``unsettled_picture_entries``
         （与推进度同一份），跳过的行（已定稿、已放弃）不会再把锁挂在一个交不出去的
         件号上。
+
+        循环结束后的补交口（#284）是这条锁的**唯一放宽**：那张待办还在等用户时，
+        视频/音频可以带着用户起的语义名登记；Picture 仍拒——那 9 件由阶段 1 派生定死，
+        事后加一张就是推翻已经写好的资产图词。待办一落定，这里立刻回到「循环已结束」
+        的口径，此后不再接受增补（注入卡与段内子集用的就是落定那一刻的台账快照）。
         """
         if not route_uses_asset_ledger(session.brief) or session.status == "created":
             return None
         remaining = unsettled_picture_entries(ledger)
         if not remaining:
+            if asset_extra_pending(session.action_items):
+                if ASSET_KIND_TO_REFERENCE.get(asset_kind) == KIND_PICTURE:
+                    raise AssetLocked(
+                        "素材循环已经结束：补交口只收视频/音频，Picture 的件数与名字由"
+                        "阶段 1 定，不能再加。")
+                return None
             raise AssetLocked(
                 "素材循环已经结束：参考素材只能在循环里逐件交回，不能再登记新的。")
         entry = remaining[0]
@@ -2840,7 +2888,7 @@ class WorkbenchSessionStore:
                             # 位置锁先判一次：名字不对的请求不值得陪它搬完整份字节
                             # （锁内还会权威地再判一次，#282）。
                             current = self._asset_position_lock(
-                                session, session.asset_ledger, semantic_name)
+                                session, session.asset_ledger, semantic_name, kind)
                             # 快速失败：拿当前台账快照先判一次，超限就不搬剩余字节。
                             # 权威判定在会话锁内再做一次（并发上传可能同时通过这一关）。
                             # 位置锁放行的那一次**不新增行**，容量不必重算。
@@ -2936,6 +2984,17 @@ class WorkbenchSessionStore:
                                 response=asset.model_dump(mode="json"))
             return asset, False
 
+    def ensure_ref_capacity(
+        self, entries: Sequence[Mapping[str, Any]], *, where: str,
+    ) -> None:
+        """按给定台账现算 9/3/3/12 并点名超限档（#279 §补交口 / #284）。
+
+        与上传时那道闸共用 ``ref_capacity`` 这一份数字与文案；补交口落定那一刻再算
+        一次，是因为「注入卡与段内子集以这份快照为准，此后不再接受增补」——快照要
+        在落定时就是合法的，而不是靠每次上传各判一半拼出来。
+        """
+        _check_ref_capacity([dict(entry) for entry in entries], where=where)
+
     def _register_ledger_entry(
         self,
         session: SessionState,
@@ -2958,7 +3017,8 @@ class WorkbenchSessionStore:
         资产图词一起已经定下了这一件的描述，起跑后再换一张就是「事后推翻已写好的
         词」——位置锁在那里只回答「这个名字可以进」，不替用户换图。
         """
-        current = self._asset_position_lock(session, ledger, semantic_name)
+        current = self._asset_position_lock(session, ledger, semantic_name,
+                                            asset_kind)
         if current is not None:
             if ASSET_KIND_TO_REFERENCE.get(asset_kind) != KIND_PICTURE:
                 raise AssetImageInvalid(

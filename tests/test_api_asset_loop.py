@@ -450,8 +450,8 @@ def test_proofread_failure_reopens_the_same_item_with_the_diff(harness):
     assert entries[0]["number"] == 1
 
 
-def test_last_item_pass_chains_stage2(harness, monkeypatch):
-    """两件都定稿后直接接阶段 2（注入卡是 #257 的事，本票不占步骤）。"""
+def test_last_item_pass_opens_the_extras_gate_before_stage2(harness, monkeypatch):
+    """两件都定稿后**不直接进阶段 2**：先挂补交口，选「没有」才开跑（#284）。"""
     stage2_briefs: list[object] = []
 
     def record_stage2(state, brief, config, on_node=None, checkpoint_dir=None):
@@ -479,8 +479,23 @@ def test_last_item_pass_chains_stage2(harness, monkeypatch):
     harness.readings.append(CLEAN)
     harness.submit_image(second, harness.upload(_png(10), "gen-lamp.png")["asset_id"])
 
-    # #258 起 ref 阶段 2 之后还要进段循环，不再直接 completed；本用例只钉「最后
-    # 一件定稿 → 阶段 2 开跑」，所以等阶段 2 的产物落盘，而不是终态。
+    # 最后一件定稿只到补交口：阶段 2 一次都没跑，待办在等「要不要补交视频/音频」。
+    body = harness.wait_until(
+        lambda snapshot: any(entry["kind"] == "asset_extra"
+                             and entry["status"] == "pending"
+                             for entry in snapshot["action_items"]))
+    assert body["status"] == "awaiting_human"
+    assert stage2_briefs == [], "补交口未解就跑到了阶段 2"
+    extra = [entry for entry in body["action_items"]
+             if entry["kind"] == "asset_extra" and entry["status"] == "pending"][0]
+    resp = harness.client.post(
+        f"/api/v1/sessions/{harness.session_id}/action-items/"
+        f"{extra['item_id']}/resolve",
+        json={"decision": "no_extras"})
+    assert resp.status_code == 202, resp.text
+
+    # #258 起 ref 阶段 2 之后还要进段循环，不再直接 completed；本用例只钉「补交口
+    # 放行 → 阶段 2 开跑」，所以等阶段 2 的产物落盘，而不是终态。
     body = harness.wait_until(
         lambda snapshot: bool(stage2_briefs)
         and any(item["name"] == "video-prompt.md" for item in snapshot["artifacts"]))

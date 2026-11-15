@@ -78,6 +78,11 @@ ACTION_DIRECTOR_SEGMENT_IMAGE = "director_segment_image"
 # 交付闸门——成片与最终包都由用户在导演台导出、再作为本会话素材交回，项目不拼片。
 # 载荷带两个必填素材 id（成片 mp4 与最终包 zip），同样是 ``action_item.created``。
 ACTION_DIRECTOR_DELIVERY = "director_delivery"
+# 第八个人工待办（#279 §补交口 / #284）：素材循环走完之后、阶段 2 之前，问一次
+# 「要不要补交素材视频/音频」。它是**阻塞的**，但两条答案都能点下去——「没有，就这样」
+# 也是一个明确决定。理由与终端向导那句「还要交回素材视频/音频吗？（默认否）」等价：
+# 把「确实没有」变成可恢复的事实，而不是靠隐含的先后顺序跳过。
+ACTION_ASSET_EXTRA = "asset_extra"
 
 STEP_STAGE1 = "stage1"
 STEP_STAGE2 = "stage2"
@@ -165,6 +170,12 @@ DECISION_SUBMIT_IMAGE = "submit_image"
 # 它是循环内的动作，代价（分镜表与段词里的指称变成无图指称）当场讲清，已定稿的文本
 # 一个字都不改——放弃的是图，不是那些文字。
 DECISION_ABANDON_ASSET = "abandon_asset"
+# 补交口的两种决议（#279 §补交口 / #284）。``submit_extras`` 只说明「我交完了」，
+# 具体交了哪些视频/音频看台账——那一次上传已经带语义名登记进去了，决议不重抄一份；
+# ``no_extras`` 就是卡片上那个「没有，就这样」，它必须是能点下去的答案，否则补交口
+# 会把「这片确实不需要素材视频」的用户困在同一张卡上。
+DECISION_SUBMIT_EXTRAS = "submit_extras"
+DECISION_NO_EXTRAS = "no_extras"
 # 导演台开场首帧（D8 §5.6）：与 ``submit_start_image`` 同名，是本票**唯一**在接口上
 # 显式声明的 decision 取值（其余交图类靠字段分型）。两张图分别是开场首帧与全片尾帧。
 DECISION_SUBMIT_START_IMAGE = "submit_start_image"
@@ -348,6 +359,7 @@ def resolve(status: str, decision: str, *, layer: str = "") -> Decision:
 
 
 __all__ = [
+    "ACTION_ASSET_EXTRA",
     "ACTION_ASSET_IMAGE",
     "ACTION_DIRECTOR_DELIVERY",
     "ACTION_DIRECTOR_SEGMENT_IMAGE",
@@ -359,7 +371,9 @@ __all__ = [
     "Action",
     "DECISION_ABANDON_ASSET",
     "DECISION_APPROVE",
+    "DECISION_NO_EXTRAS",
     "DECISION_REVISE",
+    "DECISION_SUBMIT_EXTRAS",
     "DECISION_SUBMIT_FRAMES",
     "DECISION_SUBMIT_IMAGE",
     "DECISION_SUBMIT_DELIVERY",

@@ -34,7 +34,7 @@ if TYPE_CHECKING:  # 只用于段级注入卡写入口的签名，运行时按�
 from .. import step_machine
 from ..brief_parser import is_director_mode, is_ref_mode, route_uses_asset_ledger
 from ..errors import error_code
-from ..kinds import KIND_PICTURE
+from ..kinds import KIND_AUDIO, KIND_PICTURE, KIND_VIDEO
 from ..segment_validation import segment_submission_problems
 from ..session_store import FRAME_SUBMISSION_KEY, atomic_write_text, load_session
 from ..summary import PromptSummary, render_summary_zh
@@ -66,6 +66,7 @@ from ..workbench_store import (
     ActionItemResolved,
     AspectMismatchUnconfirmed,
     AssetImageInvalid,
+    AssetExtraInvalid,
     AssetNotFound,
     AssetNotReopenable,
     AssetReopenUnsupported,
@@ -93,6 +94,7 @@ from ..workbench_store import (
     VideoUnreadable,
     WorkbenchError,
     WorkbenchSessionStore,
+    asset_extras_settled,
     bridge_frame_name,
     derived_asset_rows,
     merge_derived_rows,
@@ -250,6 +252,9 @@ _BRANCH_SEGMENT_VIDEO = step_machine.ACTION_SEGMENT_VIDEO
 # 第四个去向（D7 §5.3）：素材循环。它同时覆盖两个入口——ref 会话通过阶段 1 审查
 # （先出第 1 件的词）与交回一张素材图（跑校对）。
 _BRANCH_ASSET_LOOP = step_machine.ACTION_ASSET_IMAGE
+# 补交口（#279 §补交口 / #284）：素材循环走完之后的阻塞决定点。分支名就是待办
+# kind——「交完了」与「没有，就这样」都从这里放行，随后照常走通用推进。
+_BRANCH_ASSET_EXTRA = step_machine.ACTION_ASSET_EXTRA
 # 第五个去向（D8 §5.6）：导演台开场首帧。**两个入口共用同一个待办 kind、不同分支**：
 # 审查通过后只挂待办（``_GATE``，不起任务，与 base 的帧闸门同形），交图之后才起阶段 2
 # （``_BRANCH_DIRECTOR_START_IMAGE``）。合成一个分支会让「刚挂出的待办」也被当成
@@ -1171,6 +1176,61 @@ class JobRunner:
                         current_entry[ASSET_PROOFREAD_KEY] = submitted
                         holder["asset_ledger"] = ledger
                         recorded_decision = step_machine.DECISION_SUBMIT_IMAGE
+                elif target.kind == step_machine.ACTION_ASSET_EXTRA:
+                    # 补交口（#279 §补交口 / #284）：两条答案都能点下去——「交完了」
+                    # 与「没有，就这样」。文件本身不从这里交：上传端点带用户起的
+                    # 语义名登记成台账行，这里只认一件已登记的视频/音频作为载荷，
+                    # 免得「决议时才知道要交什么」变成又一条上传通路。
+                    if decision not in (step_machine.DECISION_SUBMIT_EXTRAS,
+                                        step_machine.DECISION_NO_EXTRAS):
+                        raise AssetExtraInvalid(
+                            "asset_extra 待办需要 decision=submit_extras 或 "
+                            "decision=no_extras。")
+                    if revisions:
+                        raise AssetExtraInvalid(
+                            "asset_extra 待办不接受 revisions。")
+                    if frames is not None:
+                        raise AssetExtraInvalid(
+                            "asset_extra 待办不接受 frames。")
+                    if video_asset_id is not None:
+                        raise AssetExtraInvalid(
+                            "asset_extra 待办不接受 video_asset_id：补交文件先走上传"
+                            "端点（带语义名登记），这里只收 asset_id。")
+                    if start_asset_id is not None or end_asset_id is not None:
+                        raise AssetExtraInvalid(
+                            "asset_extra 待办不接受 start_asset_id/end_asset_id。")
+                    if pack_asset_id is not None:
+                        raise AssetExtraInvalid(
+                            "asset_extra 待办不接受 pack_asset_id。")
+                    submitted_extra = str(asset_id or "").strip()
+                    ledger = current.asset_ledger_snapshot()
+                    if decision == step_machine.DECISION_SUBMIT_EXTRAS:
+                        if not submitted_extra:
+                            raise AssetExtraInvalid(
+                                "submit_extras 必须带 asset_id：指认补交的视频/音频"
+                                "（文件已经带语义名上传登记）。")
+                        row = next(
+                            (entry for entry in ledger
+                             if str(entry.get("asset_id")) == submitted_extra), None)
+                        if row is None or str(row.get("kind")) not in (
+                                KIND_VIDEO, KIND_AUDIO):
+                            raise AssetExtraInvalid(
+                                "补交的素材必须是本会话已登记的视频/音频："
+                                f"{submitted_extra}")
+                    elif submitted_extra:
+                        # 两条答案互斥：同时出现说明前端把「交完了」与「没有」绑进了
+                        # 一次请求，照收会把「没有」变成一个假决定。
+                        raise AssetExtraInvalid(
+                            "decision=no_extras 不接受 asset_id：要么交完了，"
+                            "要么明确没有。")
+                    # 落定那一刻按当时台账**现算**一次容量（#279 §补交口）：注入卡与
+                    # 段内子集此后都以这份快照为准，所以超限要在这里就点名哪一档。
+                    # 已放弃的行不参与——它们没有正本、也不会被任何一次请求带上。
+                    usable = [entry for entry in ledger
+                              if str(entry.get("status"))
+                              != ASSET_LEDGER_STATUS_ABANDONED]
+                    self.store.ensure_ref_capacity(usable, where="补交素材")
+                    recorded_decision = decision
                 elif target.kind == step_machine.ACTION_DIRECTOR_START_IMAGE:
                     # 开场首帧与全片尾帧（D8 §7.1）：两张都必须是**本会话已上传的图片
                     # 素材**，不接受本地路径（spec §4.4 的不变式 6/10）。
@@ -1441,6 +1501,7 @@ class JobRunner:
             event = threading.Event()
             self._cancel_events[job.job_id] = event
             if branch in (_BRANCH_SEGMENT_VIDEO, _BRANCH_ASSET_LOOP,
+                          _BRANCH_ASSET_EXTRA,
                           _BRANCH_DIRECTOR_START_IMAGE,
                           _BRANCH_DIRECTOR_SEGMENT_IMAGE,
                           _BRANCH_DIRECTOR_DELIVERY):
@@ -1482,6 +1543,8 @@ class JobRunner:
             return _BRANCH_FRAMES
         if kind == step_machine.ACTION_ASSET_IMAGE:
             return _BRANCH_ASSET_LOOP
+        if kind == step_machine.ACTION_ASSET_EXTRA:
+            return _BRANCH_ASSET_EXTRA
         if kind == step_machine.ACTION_DIRECTOR_START_IMAGE:
             return _BRANCH_DIRECTOR_START_IMAGE
         if kind == step_machine.ACTION_DIRECTOR_SEGMENT_IMAGE:
@@ -1774,9 +1837,9 @@ class JobRunner:
                         self._execute_asset_write,
                         session_id, job_id, cancel_event, number)
                 else:
-                    # ``_resume_step`` 只在循环没走完时给出 ``asset_loop``；真到了
-                    # 「已完成」说明两处判据打架，按失败收场而不是静默跳过。
-                    raise RuntimeError("素材循环已全部定稿，不该再起 asset_loop 任务")
+                    # 循环已全部定稿：`_resume_step` 在这一格给的是补交口（#284），
+                    # 收尾时挂 ``asset_extra`` 待办、等人决定要不要补交视频/音频。
+                    result = {"step": ASSET_STEP_DONE}
             elif step == step_machine.STEP_PACKING:
                 result = await asyncio.to_thread(
                     self._execute_pack, session_id, job_id, cancel_event)
@@ -1835,6 +1898,10 @@ class JobRunner:
                 if result["step"] == ASSET_STEP_PROOFREAD:
                     next_job = await asyncio.to_thread(
                         self._finish_asset_proofread, session_id, job_id, result)
+                elif result["step"] == ASSET_STEP_DONE:
+                    await asyncio.to_thread(
+                        self._finish_asset_extra_gate, session_id, job_id)
+                    next_job = None
                 else:
                     await asyncio.to_thread(
                         self._finish_asset_write, session_id, job_id, result)
@@ -1931,6 +1998,13 @@ class JobRunner:
             # 台账，`_asset_step_of` 对空台账恒 DONE，不会给它们凭空多开一档。
             if (route_uses_asset_ledger(session.brief)
                     and _asset_step_of(session.asset_ledger)[0] != ASSET_STEP_DONE):
+                return step_machine.STEP_ASSET_LOOP
+            # 补交口（#279 §补交口 / #284）：ref 的循环走完不等于可以进阶段 2——还有
+            # 一次「要不要补交视频/音频」的决定。返回 ``asset_loop`` 是让 ``_run`` 走
+            # 「循环已完成」那一支去挂待办（阶段 2 的入口仍只有一处）。这条判据也
+            # 兜住「待办还没挂出来就崩了」的会话：重启后照样停在补交口，而不是跳过。
+            if (session.brief.is_ref
+                    and not asset_extras_settled(session.action_items)):
                 return step_machine.STEP_ASSET_LOOP
             # 导演台的阶段 2 只做规划 + 写段；写完就该打包（#263）。zip 已落盘
             # 之后进入段循环（#264）——判据全在磁盘（段表 + 每段段词 + zip），
@@ -3222,6 +3296,42 @@ class JobRunner:
                         "asset_index": number}, job_id=job_id),
         ])
 
+    def _finish_asset_extra_gate(self, session_id: str, job_id: str) -> None:
+        """进入补交口：收掉这个推进任务，挂出 ``asset_extra`` 待办（#284）。
+
+        正常路径（最后一件刚定稿）由 ``_finish_asset_proofread`` 与台账结算同一笔挂出；
+        这里兜另外两种入口：阶段 1 派生 0 行时素材循环空转，以及循环已走完但待办还没
+        挂出来的会话（重启/崩溃恢复）。两处挂的是**同一种待办**——判据只有「补交口
+        还没落定」一条，所以不需要第二个中间状态。
+
+        ``_resume_step`` 只在补交口未落定时给出 ``asset_loop``，到这里时待办必然还没
+        决议过；「不再重复问」由那条判据保证，不在这里再判一次（两处各判一次时，
+        改一处就会让另一处把已落定的会话重新困住）。
+        """
+        item = ActionItemOut(
+            item_id=uuid.uuid4().hex, kind=step_machine.ACTION_ASSET_EXTRA,
+            status="pending", created_at=_now())
+
+        def _apply(detail: Any) -> dict[str, Any]:
+            jobs = self._succeed_job(detail, job_id)
+            items = [
+                existing.model_dump(mode="json") for existing in detail.action_items
+                if not (existing.kind == step_machine.ACTION_ASSET_EXTRA
+                        and existing.status == "pending")]
+            items.append(item.model_dump(mode="json"))
+            return {
+                "status": step_machine.STATUS_AWAITING_HUMAN,
+                "jobs": jobs,
+                "action_items": items,
+            }
+
+        self.store.mutate(session_id, _apply, events=[
+            EventDraft("job.succeeded",
+                       {"next": step_machine.STATUS_AWAITING_HUMAN}, job_id=job_id),
+            EventDraft("action_item.created",
+                       {"item_id": item.item_id, "kind": item.kind}, job_id=job_id),
+        ])
+
     def _finish_asset_proofread(self, session_id: str, job_id: str,
                                 result: dict[str, Any]) -> JobSummary | None:
         """校验收尾：通过则定稿并接下一件（或转阶段 2）；不通过则同件号重开待办。
@@ -3244,11 +3354,25 @@ class JobRunner:
         next_job: JobSummary | None = None
         item: ActionItemOut | None = None
         if passed:
-            next_job = JobSummary(
-                job_id=uuid.uuid4().hex,
-                # 还有下一件 → 继续素材循环；全部定稿 → 普通推进任务（进阶段 2）。
-                kind=(JOB_KIND_ASSET_LOOP if step != ASSET_STEP_DONE else "advance"),
-                status="running", started_at=_now())
+            if step != ASSET_STEP_DONE:
+                next_job = JobSummary(
+                    job_id=uuid.uuid4().hex,
+                    # 还有下一件 → 继续素材循环。
+                    kind=JOB_KIND_ASSET_LOOP, status="running", started_at=_now())
+            elif session.brief.is_ref:
+                # 补交口（#279 §补交口 / #284）：最后一件定稿**不直接进阶段 2**，
+                # 先把「要不要补交素材视频/音频」挂出来。与定稿同一笔落盘，消除
+                # 「循环已完、待办没挂」的中间态；零资产（循环空转）走的是
+                # ``_finish_asset_extra_gate``，两条路挂的是同一张待办。
+                item = ActionItemOut(
+                    item_id=uuid.uuid4().hex,
+                    kind=step_machine.ACTION_ASSET_EXTRA,
+                    status="pending", created_at=_now())
+            else:
+                # 导演台 r2v 的循环形态本次不动（#279 Out of Scope）：走完照旧推进。
+                next_job = JobSummary(
+                    job_id=uuid.uuid4().hex, kind="advance",
+                    status="running", started_at=_now())
         else:
             item = ActionItemOut(
                 item_id=uuid.uuid4().hex, kind=step_machine.ACTION_ASSET_IMAGE,
@@ -3264,14 +3388,14 @@ class JobRunner:
                 changes["status"] = step_machine.STATUS_RUNNING
                 changes["jobs"] = _upsert_job(jobs, _job_dict(next_job))
             else:
-                # 同一件号重开：同类未决旧项先收掉再挂新的（收旧挂新）。
+                # 同一件号重开（或挂补交待办）：同类未决旧项先收掉再挂新的（收旧挂新）。
                 # 未通过的这一支一定造了待办；闭包里 mypy 不追 ``if passed`` 的对应
                 # 关系，显式取一次局部值把类型收窄（运行期不可能为空）。
                 assert item is not None
                 items = [
                     existing.model_dump(mode="json")
                     for existing in detail.action_items
-                    if not (existing.kind == step_machine.ACTION_ASSET_IMAGE
+                    if not (existing.kind == item.kind
                             and existing.status == "pending")]
                 items.append(item.model_dump(mode="json"))
                 changes["status"] = step_machine.STATUS_AWAITING_HUMAN
@@ -3287,10 +3411,14 @@ class JobRunner:
                 "job.started", {"kind": next_job.kind}, job_id=next_job.job_id))
         else:
             assert item is not None
+            created_payload: dict[str, Any] = {
+                "item_id": item.item_id, "kind": item.kind}
+            if item.kind == step_machine.ACTION_ASSET_IMAGE:
+                # 校差不通过才有这两个键：件号与差异清单是重开卡片要读的。
+                created_payload["asset_index"] = number
+                created_payload["reason"] = reason
             events.append(EventDraft(
-                "action_item.created",
-                {"item_id": item.item_id, "kind": item.kind,
-                 "asset_index": number, "reason": reason}, job_id=job_id))
+                "action_item.created", created_payload, job_id=job_id))
         self.store.mutate(session_id, _apply, events=events)
         return next_job
 

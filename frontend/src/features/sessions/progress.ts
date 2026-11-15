@@ -496,6 +496,8 @@ const PENDING_HINTS: Record<string, (item: ActionItemOut, refs: RefOut[]) => str
     const name = refs.find((ref) => ref.kind === KIND_PICTURE && ref.number === number)?.name
     return name ? `交回第 ${number} 件素材图 · ${name}` : `交回第 ${number} 件素材图`
   },
+  // 补交口（#284）：循环之后的阻塞决定点，两句答案都在卡片上。
+  asset_extra: () => '确认要不要补交素材视频/音频',
   director_start_image: () => '提交开场首帧',
   director_segment_image: (item) =>
     item.segment_index ? `提交第 ${item.segment_index} 段首帧图` : '提交段首帧图',

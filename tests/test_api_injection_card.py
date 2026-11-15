@@ -76,6 +76,23 @@ def harness(tmp_path, monkeypatch):
         yield state
 
 
+def _pass_extras_gate(harness) -> None:
+    """循环走完先到补交口（#284）：本文件的用例看的是补交之后的整片卡与阶段 2。
+
+    显式选「没有，就这样」——补交视频/音频的用例在 ``test_api_asset_extra.py``。
+    """
+    body = harness.wait_until(
+        lambda snapshot: any(item["kind"] == "asset_extra"
+                             and item["status"] == "pending"
+                             for item in snapshot["action_items"]))
+    item = next(entry for entry in body["action_items"]
+                if entry["kind"] == "asset_extra" and entry["status"] == "pending")
+    resp = harness.client.post(
+        f"/api/v1/sessions/{harness.session_id}/action-items/"
+        f"{item['item_id']}/resolve", json={"decision": "no_extras"})
+    assert resp.status_code == 202, resp.text
+
+
 def _complete_asset_loop(harness) -> dict:
     """走完整条素材循环（两件逐件交图、校对通过），返回停下来的详情快照。"""
     harness.create()
@@ -96,6 +113,7 @@ def _complete_asset_loop(harness) -> dict:
         harness.readings.append(CLEAN)
         resp = harness.submit_image(item, image["asset_id"])
         assert resp.status_code == 202, resp.text
+    _pass_extras_gate(harness)
     return body
 
 
@@ -213,6 +231,7 @@ def test_abandoned_item_stays_out_of_the_card_and_the_segment_subset(harness):
     second = _card(2)
     harness.readings.append(CLEAN)
     harness.submit_image(second, harness.upload(_png(91), "gen-lamp.png")["asset_id"])
+    _pass_extras_gate(harness)
 
     _wait_for_stage2_and_card(harness)
     text = harness.artifact_text("injection-card.md")

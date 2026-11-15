@@ -461,6 +461,9 @@ export interface components {
          *     - ``segment_video`` 收 ``video_asset_id``（本段视频素材）；
          *     - ``asset_image`` 收 ``asset_id``（这一件资产图的生成结果，普通素材上传得到），
          *       或 ``decision="abandon_asset"`` 放弃这一件（#282：模型怎么都画不出来时的出口）；
+         *     - ``asset_extra`` 收 ``decision="submit_extras"`` 与 ``asset_id``（补交的
+         *       视频/音频里最后认可的那一件；文件本身走上传端点、带用户起的语义名登记），
+         *       或 ``decision="no_extras"`` 明确「没有，就这样」（#284）；
          *     - ``director_start_image`` 收 ``decision="submit_start_image"`` 与
          *       ``start_asset_id``（必填）/``end_asset_id``（可选）/``confirm_aspect_mismatch``。
          *
@@ -473,7 +476,7 @@ export interface components {
             /** Confirm Aspect Mismatch */
             confirm_aspect_mismatch?: boolean | null;
             /** Decision */
-            decision?: ("approve" | "revise" | "submit_start_image" | "submit_segment_image" | "submit_delivery" | "abandon_asset") | null;
+            decision?: ("approve" | "revise" | "submit_start_image" | "submit_segment_image" | "submit_delivery" | "abandon_asset" | "submit_extras" | "no_extras") | null;
             /** End Asset Id */
             end_asset_id?: string | null;
             frames?: components["schemas"]["FrameSelection"] | null;

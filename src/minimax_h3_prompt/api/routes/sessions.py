@@ -264,6 +264,9 @@ class ActionItemResolve(BaseModel):
     - ``segment_video`` 收 ``video_asset_id``（本段视频素材）；
     - ``asset_image`` 收 ``asset_id``（这一件资产图的生成结果，普通素材上传得到），
       或 ``decision="abandon_asset"`` 放弃这一件（#282：模型怎么都画不出来时的出口）；
+    - ``asset_extra`` 收 ``decision="submit_extras"`` 与 ``asset_id``（补交的
+      视频/音频里最后认可的那一件；文件本身走上传端点、带用户起的语义名登记），
+      或 ``decision="no_extras"`` 明确「没有，就这样」（#284）；
     - ``director_start_image`` 收 ``decision="submit_start_image"`` 与
       ``start_asset_id``（必填）/``end_asset_id``（可选）/``confirm_aspect_mismatch``。
 
@@ -273,7 +276,8 @@ class ActionItemResolve(BaseModel):
 
     decision: Literal[
         "approve", "revise", "submit_start_image", "submit_segment_image",
-        "submit_delivery", "abandon_asset"] | None = None
+        "submit_delivery", "abandon_asset", "submit_extras",
+        "no_extras"] | None = None
     revisions: list[RevisionIn] = Field(default_factory=list)
     frames: FrameSelection | None = None
     # 段视频待办（D6 §8）：本会话已上传的 mp4 素材 id。`Decision` 载荷互斥由路由先拦。
@@ -816,11 +820,12 @@ async def resolve_action_item(
             "decision=submit_delivery，并与 video_asset_id 一起提交。")
     if payload.asset_id is not None and (
             payload.decision is not None
-            and payload.decision != "submit_segment_image"
+            and payload.decision not in ("submit_segment_image", "submit_extras")
             or payload.frames is not None):
         raise AssetImageInvalid(
-            "asset_id 只能单独提交（asset_image 待办）或与 "
-            "decision=submit_segment_image 一起提交（director_segment_image 待办）。")
+            "asset_id 只能单独提交（asset_image 待办）、与 "
+            "decision=submit_segment_image 一起提交（director_segment_image 待办），"
+            "或与 decision=submit_extras 一起提交（asset_extra 待办）。")
     # 导演台首帧的两个字段只服务 ``submit_start_image``：带它们却不带那个 decision，
     # 一定是发错了（D8 §7.1）。空串按「没带」处理，与其他载荷同一条口径。
     start_given = bool(str(payload.start_asset_id or "").strip())

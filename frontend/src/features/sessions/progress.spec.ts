@@ -719,6 +719,8 @@ describe('pendingActionHint', () => {
     expect(pendingActionHint(actions('frame_submission'), [])).toBe('提交首帧/尾帧素材')
     expect(pendingActionHint(actions('director_start_image'), [])).toBe('提交开场首帧')
     expect(pendingActionHint(actions('director_delivery'), [])).toBe('交付成片与最终包')
+    // 补交口（#284）：循环走完之后的阻塞决定点，不能退化成通用文案。
+    expect(pendingActionHint(actions('asset_extra'), [])).toBe('确认要不要补交素材视频/音频')
   })
 
   it('段号 / 件号进说明；素材语义名从 refs 台账取', () => {
