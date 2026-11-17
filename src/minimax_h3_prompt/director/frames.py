@@ -241,12 +241,11 @@ def give_images_for(segment_type: str, mode: str) -> tuple[str, ...]:
         return (IMAGE_FIRST, IMAGE_END)
     if segment_type == "ending":
         return (IMAGE_END,)
-    # opening：只剩 i2v/fl2v 两种有图槽的模式。r2v 与 t2v 都在上方提前返回，这里
-    # 不再列它们——写了也是死分支，而它会让上面「不发明不可达规则」的说法变成空话。
-    return {
-        "i2v": (IMAGE_FIRST,),
-        "fl2v": (IMAGE_FIRST,),
-    }[mode]
+    # opening：走到这里只剩 fl2v 一种有图槽的模式。i2v 在上方已按单段返回、r2v 与
+    # t2v 也早已提前返回，所以字典里不再列它们——留着就是不可达的死键，会让上面
+    # 「不发明不可达规则」的说法变成空话。字典形态保留：将来若有新模式带图槽却漏了
+    # 这里，KeyError 当场报红，不会静默沿用别人的给图规则。
+    return {"fl2v": (IMAGE_FIRST,)}[mode]
 
 
 def mode_has_image_slots(mode: str) -> bool:
