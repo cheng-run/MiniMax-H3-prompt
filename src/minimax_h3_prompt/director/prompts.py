@@ -34,6 +34,11 @@ from typing import Any, Iterable, Sequence
 from .. import film_language
 from ..ref_capacity import MAX_PICTURES
 from ..text_patterns import AT_TIMESTAMP as _AT_TIME_RE
+from ..writing_disciplines import (
+    ANAPHORA_DISCIPLINE,
+    CAMERA_SPEED_DISCIPLINE,
+    FUTURE_EVENTS_DISCIPLINE,
+)
 from .film_end import render_film_end_block
 from ..segment_refs import (
     SegmentAssetOverflowError,
@@ -166,6 +171,27 @@ def rejected_segment_path(session_dir: str | Path, position: int) -> Path:
     return path.with_name(path.stem + REJECTED_SEGMENT_SUFFIX)
 
 
+# 指令文件里的占位符 → 真源文本。字典只在这里声明一份：键是 ASCII 形态（好认、
+# 不会被中文输入法改坏），值是 ``writing_disciplines`` 的常量（#312）。
+_WRITING_DISCIPLINE_PLACEHOLDERS = {
+    "{{CAMERA_SPEED_DISCIPLINE}}": CAMERA_SPEED_DISCIPLINE,
+    "{{FUTURE_EVENTS_DISCIPLINE}}": FUTURE_EVENTS_DISCIPLINE,
+    "{{ANAPHORA_DISCIPLINE}}": ANAPHORA_DISCIPLINE,
+}
+
+
+def _apply_writing_discipline_placeholders(text: str) -> str:
+    """指令里的三族 ASCII 占位符 → 真源文本；不含占位符时逐字节原样返回。
+
+    只在 ``load_instruction`` 这一个加载口生效：不引入通用模板引擎、不解析 markdown，
+    所以其余提示词文件的字节一个都不动（#312 AC）。真源住
+    ``writing_disciplines``，指令文件里只留占位符，改一次纪律四条模式同时生效。
+    """
+    for placeholder, value in _WRITING_DISCIPLINE_PLACEHOLDERS.items():
+        text = text.replace(placeholder, value)
+    return text
+
+
 def load_instruction(mode: str) -> str:
     """取该模式的写作指令小节（一个文件按模式分节，加载口按模式取节）。
 
@@ -180,7 +206,8 @@ def load_instruction(mode: str) -> str:
     if missing:
         raise ValueError(
             f"导演台写段指令缺小节：{'、'.join(missing)}（{_INSTRUCTION_NAME} 必须按模式分节）")
-    return f"{sections['common']}\n\n{sections[mode]}"
+    return _apply_writing_discipline_placeholders(
+        f"{sections['common']}\n\n{sections[mode]}")
 
 
 def _split_instruction_file(text: str) -> dict[str, str]:

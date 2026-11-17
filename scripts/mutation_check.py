@@ -599,6 +599,15 @@ MUTATIONS: tuple[Mutation, ...] = (
         "写段预算守卫恒不触发＝预算外的图照写，规划与写段各推一套（#180 事故形态，#188）",
     ),
     Mutation(
+        "writing_discipline_placeholders_not_applied",
+        "src/minimax_h3_prompt/director/prompts.py",
+        "        text = text.replace(placeholder, value)\n",
+        "        text = text\n",
+        ("tests/test_writing_disciplines.py::"
+         "test_every_write_mode_receives_the_three_disciplines_without_placeholders",),
+        "占位符不替换＝模型收到 {{...}} 字面量，三族纪律在四条模式里全部缺席（#312）",
+    ),
+    Mutation(
         "music_guided_segment_writes_na",
         "src/minimax_h3_prompt/prompts/segment_writer_director.md",
         "**不许写 `N/A`**",
@@ -1750,8 +1759,10 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "director_common_section_dropped_from_instruction",
         "src/minimax_h3_prompt/director/prompts.py",
-        "    return f\"{sections['common']}\\n\\n{sections[mode]}\"",
-        "    return sections[mode]",
+        "    return _apply_writing_discipline_placeholders(\n"
+        "        f\"{sections['common']}\\n\\n{sections[mode]}\")",
+        "    return _apply_writing_discipline_placeholders(\n"
+        "        f\"{sections[mode]}\")",
         ("tests/test_director_prompts.py::"
          "test_action_motivation_rule_reaches_first_write_and_rewrite_in_every_mode",),
         "加载口只取模式小节、丢掉 common＝动作动机（连同时间窗、门槛、道具归属）到不了"
