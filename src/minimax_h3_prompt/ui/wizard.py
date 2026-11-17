@@ -731,7 +731,11 @@ def _run_director_flow(session: SessionState) -> int:
     """
     from ..director.pack import prepare_director_pack
     from ..director.planning import plan_director_segments
-    from ..director.prompts import render_written_listing, write_director_segments
+    from ..director.prompts import (
+        render_written_listing,
+        visual_decision_source,
+        write_director_segments,
+    )
     from .wizard_director import persist_director_plan
     from ..model_factory import build_chat_model
     from ..segment_prompts import frame_anchor_context, render_revision_context
@@ -881,10 +885,10 @@ def _run_director_flow(session: SessionState) -> int:
                 # 与段表清单同一份判据：ending 段（单段时是 opening）的请求带终点图
                 # 描述，段词与图冲突时以图为准（#160）。
                 film_end_description=film_end_description,
-                # #298：写段请求的两个上下文块槽位。本票恒为空串；#299／#300 在这里
-                # 接阶段 1 产物（改词那条出口必须同时接，否则首写与改词两套前提）。
+                # #298／#299：画面决策块从本会话阶段 1 产物渲染（#300 的修订块仍是
+                # 空位）。改词那条出口必须用同一份来源，否则首写与改词两套前提。
                 revision_context="",
-                visual_decision="",
+                visual_decision=visual_decision_source(state, shot_table),
             )
     except (RuntimeError, ValueError) as exc:
         # 写段失败不写半段假内容（半份段表比没写更糟：用户会拿它去打包）。
@@ -1258,7 +1262,11 @@ def _rewrite_director_segment_round(plan, segment, session: SessionState, *,
     事后分不清哪笔改动是项目侧做的，哪笔是用户在导演台里做的）。
     """
     from ..director.pack import film_end_still, prepare_director_pack
-    from ..director.prompts import rewrite_director_segment, segment_path
+    from ..director.prompts import (
+        rewrite_director_segment,
+        segment_path,
+        visual_decision_source,
+    )
     from ..ref_segments import log_segment_rewrite_round
     from ..segment_prompts import MAX_SEGMENT_ATTEMPTS
 
@@ -1300,10 +1308,11 @@ def _rewrite_director_segment_round(plan, segment, session: SessionState, *,
                 # 与首写同一份上下文：单段 fl2v 的给图行要照旧写「首+尾」（#147）。
                 film_end=film_end,
                 film_end_description=film_end_description,
-                # #298：改词与首写共用同一份请求组装，两个上下文块必须一起穿，
-                # 否则按 e 改一次就把首写有的事实改丢。本票恒为空串。
+                # #298／#299：改词与首写共用同一份请求组装与同一份画面决策来源，
+                # 否则按 e 改一次就把首写有的事实改丢（#300 的修订块仍是空位）。
                 revision_context="",
-                visual_decision="",
+                visual_decision=visual_decision_source(
+                    state, str(state.get("shot_table", ""))),
             )
     except (OSError, ValueError) as exc:
         # 上下文不完整（如 r2v 缺 subject_defs）：大声报，原词不动、不落账。

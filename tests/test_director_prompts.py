@@ -1815,3 +1815,182 @@ def test_action_motivation_rule_reaches_first_write_and_rewrite_in_every_mode(tm
             assert request.count(rule) == 1, \
                 f"{mode} 的{label}请求里动作动机纪律不是恰好一份（出现 " \
                 f"{request.count(rule)} 次）"
+
+
+# ---------------------------------------------------------------------------
+# #299 阶段 1 画面决策进写段请求：整份注入、按本段窗口镜头号约束
+# ---------------------------------------------------------------------------
+
+_VISUAL_STATE = {
+    "shot_review_lock": "镜头评审锁定：全片 Static Shot，色温 4300K，风自海向陆。",
+    "visual_design": "画面细化：她背对镜头，身后侧旧木格长窗的窗框压住画面右缘。",
+}
+
+# 每 2 秒一镜的分镜表：段 [0, 4.458) 覆盖 Shot 1–3，段 [4.458, 8.917) 覆盖 Shot 3–5。
+_VISUAL_SHOT_TABLE = """**[Shot 1]**
+- 时长与切点：2.0秒（首镜，无时间戳）
+
+**[Shot 2]**
+- 时长与切点：2.0秒；切入 At 00:02.000。
+
+**[Shot 3]**
+- 时长与切点：2.0秒；切入 At 00:04.000。
+
+**[Shot 4]**
+- 时长与切点：2.0秒；切入 At 00:06.000。
+
+**[Shot 5]**
+- 时长与切点：2.0秒；切入 At 00:08.000。
+"""
+
+
+def test_visual_decision_source_renders_the_block_per_segment_window():
+    """#299：块内容取本会话阶段 1 产物，块首句的 Shot N 取**本段窗口**镜头号。
+
+    整份注入（不切片）：同一份 state 在两段里渲染出的 shot_review_lock 与
+    visual_design 逐字相同，只有块首的窗口纪律句按段变化——跨段一致性正是靠
+    那两份全片产物立住的。
+    """
+    from minimax_h3_prompt.director.prompts import visual_decision_source
+    from minimax_h3_prompt.segment_prompts import VISUAL_DECISION_HEADER
+
+    plan = _fl2v_plan("opening", "continue", "ending")
+    source = visual_decision_source(_VISUAL_STATE, _VISUAL_SHOT_TABLE)
+    first = source(plan.segments[0])
+    second = source(plan.segments[1])
+
+    assert VISUAL_DECISION_HEADER in first, "块标题必须来自共享常量"
+    assert VISUAL_DECISION_HEADER in second
+    assert "Shot 1、Shot 2、Shot 3" in first, "段 1 的窗口镜头号不对"
+    assert "Shot 3、Shot 4、Shot 5" in second, "段 2 的窗口镜头号不对"
+    for value in _VISUAL_STATE.values():
+        assert value in first and value in second, "画面决策没有整份注入"
+
+
+def test_visual_decision_source_is_empty_when_stage_one_has_nothing_to_say():
+    """#299：阶段 1 两份产物都缺时返回空串——调用方据此不注入空块。"""
+    from minimax_h3_prompt.director.prompts import visual_decision_source
+
+    assert visual_decision_source({}, _VISUAL_SHOT_TABLE) == ""
+    assert visual_decision_source({"shot_review_lock": "  ",
+                                   "visual_design": "\n"}, _VISUAL_SHOT_TABLE) == ""
+
+
+def test_visual_decision_reaches_batch_first_write_and_rewrite_requests(tmp_path):
+    """#299 AC1（S1 主接缝）：记录型桩模型抓**批量首写**与**改词**的出站请求。
+
+    「会拼」不等于「传了」：本仓多次栽在调用方没把参数传下去。断言从
+    ``VISUAL_DECISION_HEADER`` 派生（常量一改这里即报红），不重抄标题字面。
+    同时断言两份内容逐字相同（整份注入）而块首镜头号按段变化。
+    """
+    from minimax_h3_prompt.director import prompts
+    from minimax_h3_prompt.segment_prompts import VISUAL_DECISION_HEADER
+
+    plan = _fl2v_plan("opening", "continue", "ending")
+    source = prompts.visual_decision_source(_VISUAL_STATE, _VISUAL_SHOT_TABLE)
+
+    # 出口 1：批量首写
+    batch = _DialectLLM(lambda index: _single_reply(plan.segments[index - 1], plan))
+    prompts.write_director_segments(plan, llm=batch, session_dir=tmp_path,
+                                    shot_table=_VISUAL_SHOT_TABLE,
+                                    visual_decision=source)
+    assert len(batch.requests) == 3
+    assert all(VISUAL_DECISION_HEADER in request for request in batch.requests), \
+        "批量首写漏传画面决策块"
+    assert "Shot 1、Shot 2、Shot 3" in batch.requests[0], "段 1 的窗口镜头号没写进块首"
+    assert "Shot 3、Shot 4、Shot 5" in batch.requests[1], "段 2 的窗口镜头号没写进块首"
+    for request in batch.requests:
+        for value in _VISUAL_STATE.values():
+            assert value in request, "画面决策没有整份注入（被切片了）"
+
+    # 出口 2：改词（与首写同一份请求组装）
+    rewrite = _DialectLLM(lambda index: _single_reply(plan.segments[1], plan))
+    outcome = prompts.rewrite_director_segment(
+        plan, plan.segments[1], llm=rewrite,
+        current_text=_single_text(plan.segments[1], plan),
+        shot_table=_VISUAL_SHOT_TABLE, visual_decision=source)
+    assert outcome.errors == ()
+    assert VISUAL_DECISION_HEADER in rewrite.requests[0], "改词出口漏传画面决策块"
+    assert "Shot 3、Shot 4、Shot 5" in rewrite.requests[0], "改词的窗口镜头号不对"
+
+
+_FLOW_SHOT_TABLE = """**[Shot 1]**
+- 时长与切点：6.0秒（首镜，无时间戳）
+
+**[Shot 2]**
+- 时长与切点：6.0秒；切入 At 00:06.000。
+
+**[Shot 3]**
+- 时长与切点：6.0秒；切入 At 00:12.000。
+
+**[Shot 4]**
+- 时长与切点：6.0秒；切入 At 00:18.000。
+
+**[Shot 5]**
+- 时长与切点：6.0秒；切入 At 00:24.000。
+"""
+
+
+def test_wizard_director_flow_passes_visual_decision_into_write_requests(
+        tmp_path, monkeypatch):
+    """#299 AC1：向导批量首写这条出口把本会话 stage_state 的画面决策传给模型。
+
+    拦在 `write_director_segments` 一层不够——本仓栽过的正是「组装会拼、调用方没传」。
+    这里跑真实向导流程，抓模型收到的写段请求（规划请求不含「本段编号」）。
+    """
+    from minimax_h3_prompt import model_factory
+    from minimax_h3_prompt.director.planning import parse_director_plan
+    from minimax_h3_prompt.segment_prompts import VISUAL_DECISION_HEADER
+    from minimax_h3_prompt.ui import wizard
+
+    plan = parse_director_plan(_PLAN_JSON, 30.0, mode="t2v")
+    llm = _DirectorFlowLLM(plan)
+    monkeypatch.setattr(model_factory, "build_chat_model", lambda: llm)
+    monkeypatch.setattr(wizard, "_prompt", lambda text: "q")
+    monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
+    session = _director_session(tmp_path)
+    session.stage_state.update(dict(_VISUAL_STATE, shot_table=_FLOW_SHOT_TABLE))
+
+    assert wizard._run_director_flow(session) == 0
+
+    writes = [request for request in llm.requests if "本段编号：" in request]
+    assert len(writes) == 5
+    assert all(VISUAL_DECISION_HEADER in request for request in writes), \
+        "向导批量首写漏传画面决策块"
+    assert "本段只取 Shot 1 的内容" in writes[0], "段 1 的窗口镜头号没写进块首"
+    # 段 2（4.458–10.833s）起点落在 Shot 1 与 Shot 2 之间：两镜都算本段窗口
+    assert "本段只取 Shot 1、Shot 2 的内容" in writes[1], "段 2 的窗口镜头号没写进块首"
+    for request in writes:
+        for value in _VISUAL_STATE.values():
+            assert value in request, "画面决策没有整份注入"
+
+
+def test_segment_request_places_the_rendered_visual_decision_block_after_story():
+    """#299 S2：真实渲染器的块进请求后，位置在剧情概述之后、分镜表之前。
+
+    与 #298 的哨兵用例互补：那条守拼接位置，这条守「渲染出的块真的能整块落进
+    请求且不与相邻块黏连」。空内容时与不传逐字节相同（不多空行）。
+    """
+    from minimax_h3_prompt.director.prompts import (
+        build_segment_request,
+        visual_decision_source,
+    )
+    from minimax_h3_prompt.segment_prompts import VISUAL_DECISION_HEADER
+
+    plan = _fl2v_plan("opening", "continue", "ending")
+    segment = plan.segments[1]
+    source = visual_decision_source(_VISUAL_STATE, _VISUAL_SHOT_TABLE)
+    request = build_segment_request(plan, segment, shot_table=_VISUAL_SHOT_TABLE,
+                                    visual_decision=source(segment))
+
+    assert f"\n{VISUAL_DECISION_HEADER}\n" in request, "画面决策块没有独占一段"
+    assert request.index(_STORY_LINE) < request.index(VISUAL_DECISION_HEADER)
+    assert request.index(VISUAL_DECISION_HEADER) < request.index("分镜表（")
+
+    # 阶段 1 没有画面决策：渲染源是空串，请求与不传逐字节相同（不多空行）。
+    empty = visual_decision_source({}, _VISUAL_SHOT_TABLE)
+    assert empty == "", "没有内容时渲染源应为空串（调用方据此不注入空块）"
+    default = build_segment_request(plan, segment, shot_table=_VISUAL_SHOT_TABLE)
+    assert build_segment_request(plan, segment, shot_table=_VISUAL_SHOT_TABLE,
+                                 visual_decision=empty) == default
+    assert VISUAL_DECISION_HEADER not in default

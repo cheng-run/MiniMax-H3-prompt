@@ -633,3 +633,47 @@ def test_director_resume_context_leaves_the_two_slots_empty_from_disk_facts(tmp_
     assert context.shot_table == "[Shot 1] ..."
     assert context.revision_context == ""
     assert context.visual_decision == ""
+
+
+def test_director_write_context_renders_visual_decision_from_this_sessions_state(tmp_path):
+    """#299 S3/AC4：当轮规划与续跑重建两条出口都从**本会话 stage_state** 渲染画面决策块。
+
+    两条出口必须渲染出逐字相同的块（同一份 state、同一份分镜表）：续跑若读了实例级
+    残留或退回空串，同一张段表就会出现两套写作前提。断言取**渲染后的块**，不是
+    「字段非空」——字段类型本身不保证内容对。
+    """
+    import threading
+    from types import SimpleNamespace
+
+    from minimax_h3_prompt.api.jobs import JobRunner
+    from minimax_h3_prompt.segment_prompts import VISUAL_DECISION_HEADER
+
+    shot_table = ("**[Shot 1]**\n- 时长与切点：2.0秒（首镜，无时间戳）\n\n"
+                  "**[Shot 2]**\n- 时长与切点：2.0秒；切入 At 00:02.000。\n")
+    state = {
+        "shot_review_lock": "镜头评审锁定：全片 Static Shot。",
+        "visual_design": "画面细化：她背对镜头，身后侧旧木格长窗。",
+        "shot_table": shot_table,
+    }
+    session = SimpleNamespace(brief=SimpleNamespace(duration=4.0), stage_state=state)
+    runner = SimpleNamespace(
+        fake_pipeline=True,
+        _emit_progress=lambda *args, **kwargs: None,
+        _write_active_job=lambda *args, **kwargs: None,
+        _director_ref_context=lambda *args, **kwargs: ((), None),
+    )
+
+    plan, planned_context = JobRunner._plan_director_project(
+        runner, "session", "job", threading.Event(), session, state,
+        shot_table, "t2v", tmp_path)
+    resume_context = JobRunner._director_resume_context(
+        SimpleNamespace(_director_ref_context=lambda *args, **kwargs: ((), None)),
+        tmp_path, session, "t2v", shot_table)
+
+    segment = plan.segments[0]
+    planned = planned_context.visual_decision(segment)
+    resumed = resume_context.visual_decision(segment)
+
+    assert VISUAL_DECISION_HEADER in planned, "当轮规划的写段上下文没带画面决策块"
+    assert planned == resumed, "续跑重建的画面决策块与当轮规划不一致"
+    assert "身后侧" in planned, "画面细化没有进请求（空块或错源）"

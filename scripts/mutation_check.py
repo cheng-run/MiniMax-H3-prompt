@@ -214,6 +214,16 @@ MUTATIONS: tuple[Mutation, ...] = (
         "容差归零＝相位对齐裁尾的合法形态被当成贴错段（2026-10-31 现场 226 帧）",
     ),
     Mutation(
+        "director_visual_decision_not_injected",
+        "src/minimax_h3_prompt/director/prompts.py",
+        "    return _context_block(ctx.visual_decision)",
+        '    return ""',
+        ("tests/test_director_prompts.py::"
+         "test_visual_decision_reaches_batch_first_write_and_rewrite_requests",),
+        "画面决策块不注入＝阶段 1 的镜头评审锁定与画面细化回不到写段请求"
+        "（#297 缺口的原形：模型只剩分镜表摘要）",
+    ),
+    Mutation(
         "asset_modes_drop_r2v",
         "src/minimax_h3_prompt/brief_parser.py",
         'DIRECTOR_ASSET_MODES = ("r2v",)',

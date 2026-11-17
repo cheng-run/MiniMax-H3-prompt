@@ -81,25 +81,45 @@ def _shot_blocks(shot_table: str) -> list[tuple[int, float, str]]:
     return blocks
 
 
-def shot_excerpt_for_window(shot_table: str, start_s: float, end_s: float) -> str:
-    """本段窗口覆盖到的镜头原文（含起点所在那一镜）。
+def _window_blocks(shot_table: str, start_s: float,
+                   end_s: float) -> list[tuple[int, float, str]]:
+    """本段窗口覆盖到的镜头块（``_shot_blocks`` 的同一份解析结果）。
 
-    段边界按 17k+5 网格落位，经常**切在某个镜头中间**——起点所在那一镜必须收进来，
-    否则首帧词会按下一镜写，画面直接从段中开始。
+    切片与镜头号**共用这一份选择**（#299）：两处各写一套边界判断，迟早出现
+    「块首写 Shot 2、分镜表节选却从 Shot 1 起」这种自相矛盾的请求。
     """
     blocks = _shot_blocks(shot_table)
-    if not blocks:
-        return shot_table.strip()
-    selected: list[str] = []
-    for position, (_, shot_start, text) in enumerate(blocks):
+    selected: list[tuple[int, float, str]] = []
+    for position, block in enumerate(blocks):
+        _, shot_start, _ = block
         next_start = (blocks[position + 1][1]
                       if position + 1 < len(blocks) else float("inf"))
         if next_start <= start_s:
             continue
         if shot_start >= end_s:
             break
-        selected.append(text)
-    return "\n\n".join(selected) if selected else shot_table.strip()
+        selected.append(block)
+    return selected
+
+
+def shot_excerpt_for_window(shot_table: str, start_s: float, end_s: float) -> str:
+    """本段窗口覆盖到的镜头原文（含起点所在那一镜）。
+
+    段边界按 17k+5 网格落位，经常**切在某个镜头中间**——起点所在那一镜必须收进来，
+    否则首帧词会按下一镜写，画面直接从段中开始。
+    """
+    selected = _window_blocks(shot_table, start_s, end_s)
+    return "\n\n".join(text for _, _, text in selected) if selected else shot_table.strip()
+
+
+def window_shot_numbers(shot_table: str, start_s: float,
+                        end_s: float) -> tuple[int, ...]:
+    """本段窗口覆盖到的镜头号（含起点所在那一镜）；解析不出镜头块时为空元组。
+
+    #299：画面决策块的块首句「本段只取 Shot N」取这里。空元组由共享渲染器回落成
+    「本段时间窗内的镜头」的笼统措辞——不编造一个不存在的镜头号。
+    """
+    return tuple(number for number, _, _ in _window_blocks(shot_table, start_s, end_s))
 
 
 def build_firstframe_request(segment: DirectorSegment,

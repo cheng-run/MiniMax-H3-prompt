@@ -22,7 +22,7 @@ import os
 import threading
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -724,11 +724,12 @@ class _DirectorWriteContext:
     # 只有**本轮真的做了规划**才有预算；续跑读到 plan.json 时预算文件是规划期的
     # 产物，不补写、也不从任何残留值补。
     budget: Any = None
-    # 写段请求的两个上下文块（#298 的接缝）：调用方渲染好的整块文本。本票恒为空串；
-    # #299／#300 各自只填自己那一个，不碰请求组装。两个构造点都必须显式填（当轮规划、
-    # 续跑重建），续跑按本会话盘上事实现算，不读任何实例级残留。
+    # 写段请求的两个上下文块（#298 的接缝）：调用方渲染好的整块文本；画面决策块
+    # （#299）还可以是**按段**渲染的工厂——块首「本段只取 Shot N」的镜头号按段变化，
+    # 一份整块文本写不对两段。两个构造点都必须显式填（当轮规划、续跑重建），续跑按
+    # 本会话盘上事实现算，不读任何实例级残留。
     revision_context: str = ""
-    visual_decision: str = ""
+    visual_decision: str | Callable[[Any], str] = ""
 
 
 def _director_segment_rows(
@@ -3247,6 +3248,7 @@ class JobRunner:
     ) -> tuple[Any, _DirectorWriteContext]:
         """跑一次导演台规划，交回段表与**本次执行**的写段上下文（含预算）。"""
         from ..director.planning import plan_director_segments
+        from ..director.prompts import visual_decision_source
         from ..segment_prompts import frame_anchor_context, render_revision_context
 
         self._emit_progress(
@@ -3276,8 +3278,10 @@ class JobRunner:
             context = _DirectorWriteContext(
                 shot_table=shot_table, sections=sections, registry=registry,
                 budget=budget,
-                # #298：桩模式同样显式填两个块的槽位（本票恒为空串）。
-                revision_context="", visual_decision="")
+                # #298／#299：桩模式同样显式填两个块的槽位；画面决策块从**本会话**
+                # 的 stage_state 现渲染（与真实分支、续跑重建同一份口径）。
+                revision_context="",
+                visual_decision=visual_decision_source(state, shot_table))
         else:
             from ..director.pack import film_end_still
             from ..ui.wizard_director import prepare_film_end_description
@@ -3306,8 +3310,9 @@ class JobRunner:
                 film_end=film_end,
                 film_end_description=description,
                 budget=result.budget,
-                # #298：两个上下文块先留空位；#299／#300 在此接本会话的阶段 1 产物。
-                revision_context="", visual_decision="",
+                # #298／#299：画面决策块从本会话阶段 1 产物渲染（#300 的修订块仍是空位）。
+                revision_context="",
+                visual_decision=visual_decision_source(state, shot_table),
             )
         if cancel_event.is_set():
             raise JobCancelled(DIRECTOR_PLAN_NODE)
@@ -3326,6 +3331,7 @@ class JobRunner:
         重新规划，预算文件是规划期的产物，不该被覆盖。
         """
         from ..director.pack import film_end_still
+        from ..director.prompts import visual_decision_source
         from ..ui.wizard_director import prepare_film_end_description
 
         # 定义块与登记表只从本会话的盘上事实取：缓存命中就复用；盘上没有（例如
@@ -3342,10 +3348,12 @@ class JobRunner:
             registry=registry,
             film_end=film_end,
             film_end_description=description,
-            # #298：两个上下文块必须与当轮规划同源。本票恒为空串；#299／#300 从这里
-            # **按本会话**（``session.stage_state``，也就是本会话盘上事实）现算，
-            # 绝不读 runner 上的实例属性。
-            revision_context="", visual_decision="",
+            # #298／#299：两个上下文块必须与当轮规划同源。画面决策块从这里
+            # **按本会话**（``session.stage_state``，也就是本会话盘上事实）现渲染，
+            # 绝不读 runner 上的实例属性；#300 的修订块仍是空位。
+            revision_context="",
+            visual_decision=visual_decision_source(
+                dict(session.stage_state), shot_table),
         )
 
     def _write_director_project(

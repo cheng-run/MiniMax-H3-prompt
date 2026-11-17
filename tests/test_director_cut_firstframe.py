@@ -60,6 +60,23 @@ def test_excerpt_includes_the_shot_containing_the_segment_start():
     assert "[Shot 3]" not in excerpt
 
 
+def test_window_shot_numbers_include_the_shot_containing_the_segment_start():
+    """#299：窗口镜头号与切片同一个边界口径——起点所在那一镜必须收进来。
+
+    画面决策块的块首句要写「本段只取 Shot N」，N 就取这里；与
+    ``shot_excerpt_for_window`` 共用同一份镜头块解析，两处各切一套边界就会
+    出现「块首说 Shot 2、分镜表却给了 Shot 1」这种自相矛盾的请求。
+    """
+    from minimax_h3_prompt.director.firstframe import window_shot_numbers
+
+    assert window_shot_numbers(_SHOT_TABLE, 3.75, 8.0) == (1, 2), \
+        "起点 3.75s 落在 Shot 1 中间：必须含 1，且不含起点之后的 Shot 3"
+    # 紧贴边界：起点 5.0s 正好是 Shot 2 的开头，Shot 1 已结束
+    assert window_shot_numbers(_SHOT_TABLE, 5.0, 9.0) == (2,)
+    # 解析不出镜头块：空元组＝调用方回落到「本段时间窗内的镜头」的笼统措辞
+    assert window_shot_numbers("没有镜头块的分镜表", 0.0, 5.0) == ()
+
+
 def test_request_carries_the_window_the_excerpt_and_the_model():
     from minimax_h3_prompt.director.firstframe import build_firstframe_request
 

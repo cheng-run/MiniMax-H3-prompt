@@ -26,9 +26,10 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Sequence
 
 from .. import film_language
 from ..ref_capacity import MAX_PICTURES
@@ -50,6 +51,10 @@ from ..segment_prompts import (
     _REF_END_STATE_PREFIX,
     _REF_START_STATE_PREFIX,
     _direct_write,
+    # 画面决策块（#299）的渲染器：标题、整份注入的纪律与优先序都在那边一处。
+    # 导演台只把「本段窗口镜头号」喂给它，不在这里另拼一套同义的块（「同一语义
+    # 只许一处口径」——重抄一份，base 改措辞时这里会静默漂）。
+    _visual_decision_block_for_request,
     MAX_SEGMENT_ATTEMPTS,
     assemble_ref_segment,
     split_task_type,
@@ -74,6 +79,9 @@ from .frames import (
     is_guided,
     mode_has_image_slots,
 )
+# 窗口镜头号与分镜表切片共用同一份镜头块解析（#299）：块首的「本段只取 Shot N」
+# 与分镜表节选必须落在同一个边界上，两处各切一套就会出现自相矛盾的请求。
+from .firstframe import window_shot_numbers
 # 产物目录名只有 ``planning.DIRECTOR_DIRNAME`` 一处声明（复审 H1）：段文件、段表、
 # 尾帧与导演包必须落在**同一个** ``GENxxx/director/`` 下，各写一份字面量就是几条
 # 会各自漂的路径口径（某一条改了，另一条只会表现为「读不到/缺文件」）。
@@ -800,8 +808,38 @@ def _request_future_events_block(ctx: _SegmentRequestContext) -> str:
 
 
 def _request_visual_decision_block(ctx: _SegmentRequestContext) -> str:
-    """画面决策块（#298 留位、#299 供内容）：剧情概述之后、分镜表之前。"""
+    """画面决策块（#299）：剧情概述之后、分镜表之前；内容由调用方渲染后传入。"""
     return _context_block(ctx.visual_decision)
+
+
+# 画面决策块的两种来源形态（#299）：调用方已渲染好的整块文本，或**按段**渲染的
+# 工厂。窗口镜头号是按段的（段边界常切在镜头中间），一份整块文本无法同时写对
+# 两段的「本段只取 Shot N」——多段出口收工厂，单段出口与旧调用仍可传字符串。
+VisualDecisionSource = str | Callable[[DirectorSegment], str]
+
+
+def visual_decision_source(state: dict[str, Any],
+                           shot_table: str) -> VisualDecisionSource:
+    """阶段 1 画面决策块的**按段**渲染源（#299）：块首「本段只取 Shot N」取本段窗口。
+
+    渲染本身只读复用 ``segment_prompts._visual_decision_block_for_request``——标题、
+    「整份注入、其他镜头不许写进正文」的纪律与优先序声明都在那一处；本函数只负责
+    把**本段窗口镜头号**（``firstframe.window_shot_numbers``，与分镜表切片同一份
+    解析）喂给它，不另拼一套同义的块。
+
+    没有可注入的内容时返回空串（用同一个渲染器判空，不另写一条判据）：调用方据此
+    不产生请求块、也不多空行，与 ``_context_block`` 的空值契约一致。
+    """
+    if not _visual_decision_block_for_request(state):
+        return ""
+    return lambda segment: _visual_decision_block_for_request(
+        state, window_shot_numbers(shot_table, segment.start_s, segment.end_s))
+
+
+def _resolve_visual_decision(source: VisualDecisionSource,
+                             segment: DirectorSegment) -> str:
+    """按段取画面决策块：工厂就以本段求值，字符串原样返回（#299）。"""
+    return source(segment) if callable(source) else source
 
 
 def _request_shot_table_block(ctx: _SegmentRequestContext) -> str:
@@ -1040,7 +1078,7 @@ def write_director_segment(plan: DirectorPlan, segment: DirectorSegment, *, llm,
                            film_end: bool = False,
                            film_end_description: str = "",
                            revision_context: str = "",
-                           visual_decision: str = "") -> str | None:
+                           visual_decision: VisualDecisionSource = "") -> str | None:
     """写一段（直调看门狗 + 有界重写）。调用失败返回 None（调用方据此大声报错）。
 
     契约与 ``write_ref_segment_v2`` 同形：**调用失败**返回 None；**内容不合格**带着
@@ -1049,12 +1087,14 @@ def write_director_segment(plan: DirectorPlan, segment: DirectorSegment, *, llm,
 
     ``revision_context`` / ``visual_decision`` 原样穿给 ``build_segment_request``：
     单段首写与批量首写必须从同一份上下文取值，否则同一张段表会有两套写作前提（#298）。
+    ``visual_decision`` 可以是按段渲染的工厂（#299）：块首的窗口镜头号按段不同。
     """
     base_request = build_segment_request(
         plan, segment, shot_table=shot_table,
         sections=sections, film_end=film_end,
         film_end_description=film_end_description,
-        revision_context=revision_context, visual_decision=visual_decision)
+        revision_context=revision_context,
+        visual_decision=_resolve_visual_decision(visual_decision, segment))
     result = _write_validated(
         plan, segment, llm=llm, base_request=base_request, sections=sections,
         role=DIRECTOR_SEGMENT_WRITER_ROLE,
@@ -1093,13 +1133,14 @@ def build_rewrite_request(plan: DirectorPlan, segment: DirectorSegment, *,
                           film_end: bool = False,
                           film_end_description: str = "",
                           revision_context: str = "",
-                          visual_decision: str = "") -> str:
+                          visual_decision: VisualDecisionSource = "") -> str:
     """一轮改词的请求（#113）：**同一份写段上下文** ＋ 当前段提示词 ＋ 只改正文的要求。
 
     为什么直接复用 ``build_segment_request`` 而不是另写一份精简请求：改词的落笔纪律与
     首写必须逐条相同（时间窗外禁区、分镜窗口、词表切片、r2v 定义块），少一处就会
     改出「首写合格、改词走样」的两套方言（「同一语义只许一处口径」）。两个上下文块
-    也因此天然同源：它们只在上游渲染一次，这里与首写走同一个组装（#298）。
+    也因此天然同源：两者都来自上游同一份上下文（画面决策块是按段求值的工厂时，
+    各段仍由同一个渲染器产出），这里与首写走同一个组装（#298／#299）。
 
     时间基那句是本请求最要紧的提示：``current_text`` 是盘上的段文件，里面的 ``At``
     时间戳已是**成片坐标**（组装器加过本段起点）；模型照抄它会被组装器再加一次、
@@ -1111,7 +1152,8 @@ def build_rewrite_request(plan: DirectorPlan, segment: DirectorSegment, *,
         plan, segment, shot_table=shot_table,
         sections=sections, film_end=film_end,
         film_end_description=film_end_description,
-        revision_context=revision_context, visual_decision=visual_decision)
+        revision_context=revision_context,
+        visual_decision=_resolve_visual_decision(visual_decision, segment))
     start_s = segment.start_frame / FPS
     relative_current = relativize_timestamps(current_text, segment.start_frame)
     return (
@@ -1137,7 +1179,7 @@ def rewrite_director_segment(plan: DirectorPlan, segment: DirectorSegment, *, ll
                              sections=None, film_end: bool = False,
                              film_end_description: str = "",
                              revision_context: str = "",
-                             visual_decision: str = "") -> RewriteOutcome:
+                             visual_decision: VisualDecisionSource = "") -> RewriteOutcome:
     """按「看过成片、不满意」重写一段（#113）：与 ``write_director_segment`` 同形。
 
     同形之处就是票面要的「同一份写段指令与同一个校验器」：请求从
@@ -1288,7 +1330,7 @@ def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
                             film_end: bool = False,
                             film_end_description: str = "",
                             revision_context: str = "",
-                            visual_decision: str = "",
+                            visual_decision: VisualDecisionSource = "",
                             only_missing: bool = False) -> list[WrittenSegment]:
     """逐段写并落盘 ``GENxxx/director/segment-NN.md``（1 起）。
 
@@ -1314,9 +1356,10 @@ def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
     ``only_missing`` 只服务工作台的续跑（#262）：已在盘上的段词是用户已经看过的产物，
     不重写、也不重付一次模型调用；跳过时仍把盘上正文当作「上一段定稿」喂给跨段守卫。
 
-    ``revision_context`` / ``visual_decision`` 是**本轮执行**渲染好的两个上下文块
-    （#298）：逐段原样穿给 ``build_segment_request``。调用方（工作台、向导）从同一份
-    写段上下文取值；续跑重建的那一份也必须来自本会话盘上事实，不读实例级残留。
+    ``revision_context`` / ``visual_decision`` 是**本轮执行**的两个上下文块
+    （#298／#299）：逐段穿给 ``build_segment_request``；画面决策块可以是按段渲染的
+    工厂，逐段以本段窗口镜头号求值。调用方（工作台、向导）从同一份写段上下文取值；
+    续跑重建的那一份也必须来自本会话盘上事实，不读实例级残留。
     """
     _require_write_mode(plan.mode)
     global_sections = _sections_mapping(sections)
@@ -1351,7 +1394,8 @@ def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
             plan, segment, shot_table=shot_table, sections=global_sections,
             film_end=film_end, film_end_description=film_end_description,
             budget=segment_budget,
-            revision_context=revision_context, visual_decision=visual_decision)
+            revision_context=revision_context,
+            visual_decision=_resolve_visual_decision(visual_decision, segment))
         result = _write_validated(
             plan, segment, llm=llm, base_request=base_request,
             sections=global_sections, role=DIRECTOR_SEGMENT_WRITER_ROLE,
