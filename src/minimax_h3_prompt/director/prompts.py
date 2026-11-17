@@ -38,6 +38,7 @@ from ..writing_disciplines import (
     ANAPHORA_DISCIPLINE,
     CAMERA_SPEED_DISCIPLINE,
     FUTURE_EVENTS_DISCIPLINE,
+    FUTURE_EVENTS_TITLE,
 )
 from .film_end import render_film_end_block
 from ..segment_refs import (
@@ -611,13 +612,18 @@ def _require_r2v_sections(sections: dict[str, str] | None) -> dict[str, str]:
 
 
 def _future_events_block(plan: DirectorPlan, segment: DirectorSegment) -> str:
-    """时间窗外剧情禁区：其他段的概述逐条列出（与多参 v2 请求同形）。"""
+    """时间窗外剧情禁区：其他段的概述逐条列出（与多参 v2 请求同形）。
+
+    标题句与纪律句取 ``writing_disciplines`` 真源（#314）；清单**不进真源**——
+    它是按本段现算的数据（格式 ``- 段 N（label）：summary``、按段序、跳过本段），
+    搬进常量就会让每一段收到同一份别人的剧情。
+    """
     others = [f"- 段 {item.index}（{item.label}）：{item.summary}"
               for item in plan.segments if item.index != segment.index]
     if not others:
         return ""
-    return ("\n【时间窗外剧情禁区】以下事件属于其他段，本段一个字都不能出现：\n"
-            + "\n".join(others) + "\n")
+    return (f"\n{FUTURE_EVENTS_TITLE}\n"
+            + "\n".join(others) + f"\n{FUTURE_EVENTS_DISCIPLINE}\n")
 
 
 def _definitions_block(sections: dict[str, str]) -> str:

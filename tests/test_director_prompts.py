@@ -2361,3 +2361,28 @@ def test_shot_table_falls_back_to_the_whole_table_with_honest_wording():
     assert SHOT_TABLE_FULL_WORDING.format(start=start, window=window) in request
     assert SHOT_TABLE_SLICE_WORDING.format(start=start, window=window) not in request
     assert "整表" in request, "回落措辞没有如实说明给的是整表"
+
+
+def test_segment_request_carries_the_shared_future_events_block():
+    """导演台写段请求的「时间窗外剧情禁区」取真源标题句与纪律句（#314）。
+
+    清单不进真源：仍是按 plan 现算、格式与顺序不变（``- 段 N（label）：summary``，
+    按段序、跳过本段）。真源一旦被换成「不带清单的整块」，两条断言各自红一半。
+    """
+    from minimax_h3_prompt import writing_disciplines as wd
+    from minimax_h3_prompt.director.prompts import build_segment_request, split_ref_sections
+
+    plan = _plan()
+    segment = plan.segments[1]  # 段 2：清单里必须恰好缺它
+    request = build_segment_request(
+        plan, segment, sections=split_ref_sections(_SUBJECT_DEFS))
+
+    assert wd.FUTURE_EVENTS_TITLE in request, "导演台请求没带上真源标题句"
+    assert wd.FUTURE_EVENTS_DISCIPLINE in request, "导演台请求没带上窗外剧情禁区纪律"
+
+    others = [item for item in plan.segments if item.index != segment.index]
+    items = [f"- 段 {item.index}（{item.label}）：{item.summary}" for item in others]
+    offsets = [request.index(item) for item in items]
+    assert offsets == sorted(offsets), f"事件清单顺序不是段序：{items}"
+    assert "- 段 2（" not in request, "本段被列进了自己的窗外清单"
+    assert request.index(wd.FUTURE_EVENTS_TITLE) < offsets[0], "清单没有排在标题句之后"

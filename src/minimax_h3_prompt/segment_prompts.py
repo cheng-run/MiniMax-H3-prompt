@@ -19,6 +19,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import film_language
+# 三族写作纪律的唯一可写来源（#312）。本模块只消费「时间窗外剧情禁区」一族（#314）：
+# 其余两族由并行票收口，故这里逐名导入、不导入整个模块。
+from .writing_disciplines import FUTURE_EVENTS_DISCIPLINE, FUTURE_EVENTS_TITLE
 from .text_patterns import (
     AT_TIMESTAMP as _AT_TIME_RE,
     LEADING_TIMESTAMP as _BARE_TIMESTAMP_LINE,
@@ -485,6 +488,7 @@ _REWRITE_INSTRUCTION = f"""你是 H3 视频提示词工程师。把整条视频�
   要求它的理由就是本流程的桥接帧链——抽出的尾帧要保持轮廓锐利，留给下一段当首帧参考；
   **机位速度按剧情选**：静场、克制段落才用 `Static Shot`；有动作的段写完整的「运动类型 + 幅度 +
   速度」自然句（词表见下），不要把「静态/慢速中景」当默认；
+  **时间窗外剧情禁区**：{FUTURE_EVENTS_DISCIPLINE}——本段时间窗之外的事件出现即本段作废；
 - overall_soundscape: **为本段重写**（不是从整条裁切，按段重写）：1-4 句 English 连续段落，
   描述本段时间窗内的环境声与动作声，无时间戳（官方 §4.6）；
 - non_diegetic_music: **为本段重写**：1-3 句 English，或无声时只写 N/A，无时间戳（官方 §4.7）。
@@ -784,14 +788,16 @@ def build_segment_v2_request(
             + str(state.get("shot_table", ""))
         )
 
-    # 未来段剧情红线：把后续段的 summary 列出来，明令禁止提前出现
+    # 未来段剧情红线：标题句与纪律句取真源（#314），清单仍由此处现算——
+    # 清单是逐段数据，不是纪律文本，搬进常量就会让每段收到同一份别人的剧情。
     future_events = [
         f"Segment {p.index + 1} ({p.start_s}-{p.end_s}s): {p.summary}"
         for p in all_plans if p.index > plan.index
     ]
     future_block = (
-        "\n【时间窗外剧情禁区】以下事件属于其他视频段，本段绝对不能出现其中任何一个：\n"
+        f"\n{FUTURE_EVENTS_TITLE}\n"
         + "\n".join(f"- {s}" for s in future_events)
+        + f"\n{FUTURE_EVENTS_DISCIPLINE}"
         if future_events else ""
     )
 
@@ -1175,7 +1181,7 @@ H3 是执行型模型：你写什么它就做什么，含糊等于失控。要�
 ## ⚠️ 时间窗纪律（最高优先级）
 - 产出的是「整片 N 秒中的第 [start-end] 秒」这一段自己的独立提示词
 - 正文时间基相对**本段起点**（00:00.000＝本段第一帧），取值落在 `[0, 本段时长)`；绝对片时严禁写进时间戳
-- 本段时间窗**之外**的事件（其他段的剧情）一个字都不能出现——违反＝本段作废
+- {FUTURE_EVENTS_DISCIPLINE}——本段时间窗之外的事件出现即本段作废
 - **禁止指代前文的措辞**（as mentioned before / as described earlier / the previous segment / 如前所述 等）：每段是独立生成，**模型无跨段记忆**，此类措辞是无效信息；被指代的内容要么改写成本段自足的表述，要么不写
 
 ## 机位速度
@@ -1248,8 +1254,9 @@ def build_ref_segment_v2_request(plan, all_plans: list, *,
         for p in all_plans if p.index > plan.index
     ]
     future_block = (
-        "\n【时间窗外剧情禁区】以下事件属于其他视频段，本段绝对不能出现其中任何一个：\n"
+        f"\n{FUTURE_EVENTS_TITLE}\n"
         + "\n".join(f"- {s}" for s in future_events)
+        + f"\n{FUTURE_EVENTS_DISCIPLINE}"
         if future_events else ""
     )
     annotations_hint = render_ref_segment_annotations(

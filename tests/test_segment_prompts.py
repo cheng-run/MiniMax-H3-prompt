@@ -1539,3 +1539,69 @@ def test_camera_speed_guidance_reaches_all_four_segment_requests():
         llm=ref_llm,
     )
     assert marker in ref_llm.requests[-1], "多参回退请求没带上机位速度指引"
+
+
+def test_future_events_discipline_reaches_all_four_segment_requests():
+    """「时间窗外剧情禁区」这一族必须真发到四条写段请求（#314）。
+
+    两条 v2 请求靠「块尾追加纪律句」携带；两条回退路径拿不到 all_plans（没有窗外
+    清单可列），纪律句直接写进共用的指令正文——否则五条写段路径里有两条整族缺失，
+    #316 的跨路线守卫会当场红。只断言常量本身是「被测物自身的单测」，钉的是接线。
+    """
+    from minimax_h3_prompt import writing_disciplines as wd
+    from minimax_h3_prompt.segment_prompts import (
+        build_segment_v2_request,
+        rewrite_ref_segment_prompt,
+        rewrite_segment_prompt,
+    )
+
+    plans = _v2_plans()
+    base_v2 = build_segment_v2_request(plans[0], plans, {"shot_table": "x"})
+    assert wd.FUTURE_EVENTS_DISCIPLINE in base_v2, "首尾帧 v2 请求没带上窗外剧情禁区纪律"
+    assert wd.FUTURE_EVENTS_TITLE in base_v2, "首尾帧 v2 请求没带上真源标题句"
+
+    segments = split_shots_from_prompt(SAMPLE_PROMPT, total_duration=15.0)
+    llm = FakeLLM()
+    rewrite_segment_prompt(segments[1], SAMPLE_PROMPT, llm)
+    assert wd.FUTURE_EVENTS_DISCIPLINE in llm.last_request, \
+        "首尾帧回退请求没带上窗外剧情禁区纪律"
+
+    plan, all_plans = _ref_plans()[0], _ref_plans()
+    ref_v2 = build_ref_segment_v2_request(plan, all_plans, **_ref_request_kwargs())
+    assert wd.FUTURE_EVENTS_DISCIPLINE in ref_v2, "多参 v2 请求没带上窗外剧情禁区纪律"
+    assert wd.FUTURE_EVENTS_TITLE in ref_v2, "多参 v2 请求没带上真源标题句"
+
+    ref_llm = _ref_v2_llm()
+    rewrite_ref_segment_prompt(
+        base_prompt=_REF_WHOLE_PROMPT, plan=plan, total_segments=len(all_plans),
+        total_s=22, shot_texts=["[Shot 1] A wide view of the garden path."],
+        llm=ref_llm,
+    )
+    assert wd.FUTURE_EVENTS_DISCIPLINE in ref_llm.requests[-1], \
+        "多参回退请求没带上窗外剧情禁区纪律"
+
+
+def test_v2_requests_keep_computing_the_future_event_list():
+    """清单仍由调用点现算（#314 AC2）：后续段的 summary 必须原样出现在两条 v2 请求里。
+
+    真源只有标题句与纪律句；把清单也搬进常量就会在此处红——同一份输入下，
+    清单内容与改动前一致才是「行为不变」的判据。
+    """
+    from minimax_h3_prompt.segment_prompts import (
+        build_ref_segment_v2_request,
+        build_segment_v2_request,
+    )
+
+    plans = _v2_plans()
+    request = build_segment_v2_request(plans[0], plans, {"shot_table": "x"})
+    later = plans[1]
+    assert later.summary not in plans[0].summary  # 标记串不能是本段自己的
+    assert f"- Segment {later.index + 1} ({later.start_s}-{later.end_s}s): {later.summary}" \
+        in request, "首尾帧 v2 的事件清单没有现算后续段"
+
+    ref_plan, ref_all = _ref_plans()[0], _ref_plans()
+    ref_later = ref_all[1]
+    ref_request = build_ref_segment_v2_request(
+        ref_plan, ref_all, **_ref_request_kwargs())
+    assert f"- Segment {ref_later.index + 1} ({ref_later.start_s}-{ref_later.end_s}s): " \
+        f"{ref_later.summary}" in ref_request, "多参 v2 的事件清单没有现算后续段"
