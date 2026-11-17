@@ -1617,6 +1617,120 @@ def test_phantom_message_says_where_continuity_comes_from():
 
 
 # ---------------------------------------------------------------------------
+# #298 写段请求的上下文块接缝：修订块 / 画面决策块的固定位置
+# ---------------------------------------------------------------------------
+
+_REVISION_SENTINEL = "REVISION-BLOCK-SENTINEL：别拿手机。"
+_VISUAL_SENTINEL = "VISUAL-DECISION-SENTINEL：冷蓝侧逆光，浅景深。"
+# 段头行前缀：指令正文里也会提到「本段剧情概述」，按裸词定位会撞到指令。
+_STORY_LINE = "本段剧情概述（中文，仅供你理解剧情"
+
+
+def test_segment_request_leaves_no_trace_when_the_context_blocks_are_empty():
+    """#298 AC2：两个新入参为空时，块不出现、也不多出空行（逐字节等于不传）。
+
+    空串与纯空白都要按「没有内容」处理：调用方从 state 渲染出来的块在无内容时
+    也是空串/空白，若这里当内容注入，请求就会多出只有标题的空块或一行空行。
+    """
+    from minimax_h3_prompt.director.prompts import build_segment_request
+
+    plan = _fl2v_plan("opening", "continue", "ending")
+    segment = plan.segments[1]
+    default = build_segment_request(plan, segment, shot_table="[Shot 1] ...")
+    explicit = build_segment_request(
+        plan, segment, shot_table="[Shot 1] ...",
+        revision_context="", visual_decision="")
+    blank = build_segment_request(
+        plan, segment, shot_table="[Shot 1] ...",
+        revision_context="  \n", visual_decision="\n ")
+
+    assert explicit == default, "显式传空串改变了请求字节"
+    assert blank == default, "空白值被当成有内容注入了空块/多出空行"
+
+
+def test_segment_request_places_revision_after_images_and_before_story():
+    """修订块的位置（#297 顺序约束）：本段给图/起点之后、剧情概述之前。"""
+    from minimax_h3_prompt.director.prompts import build_segment_request
+
+    plan = _fl2v_plan("opening", "continue", "ending")
+    segment = plan.segments[1]
+    request = build_segment_request(
+        plan, segment, shot_table="[Shot 1] ...",
+        revision_context=_REVISION_SENTINEL)
+
+    assert f"\n{_REVISION_SENTINEL}\n" in request, "修订块没有独占一段（与相邻块黏在一起）"
+    assert request.index("【本段给图】") < request.index(_REVISION_SENTINEL)
+    assert request.index("【本段起点】") < request.index(_REVISION_SENTINEL)
+    assert request.index(_REVISION_SENTINEL) < request.index(_STORY_LINE)
+
+
+def test_segment_request_places_visual_decision_after_story_and_before_shot_table():
+    """画面决策块的位置（#297 顺序约束）：剧情概述之后、分镜表之前。"""
+    from minimax_h3_prompt.director.prompts import build_segment_request
+
+    plan = _fl2v_plan("opening", "continue", "ending")
+    segment = plan.segments[1]
+    request = build_segment_request(
+        plan, segment, shot_table="[Shot 1] ...",
+        visual_decision=_VISUAL_SENTINEL)
+
+    assert f"\n{_VISUAL_SENTINEL}\n" in request, "画面决策块没有独占一段"
+    assert request.index(_STORY_LINE) < request.index(_VISUAL_SENTINEL)
+    assert request.index(_VISUAL_SENTINEL) < request.index("分镜表（")
+
+
+def test_all_write_and_rewrite_exits_pass_the_context_blocks_through(tmp_path,
+                                                                     monkeypatch):
+    """#298 AC3：四个写段出口都从同一份上下文取值，任一出口漏传都会在这里报红。
+
+    断言的是**模型收到的出站请求**（记录型桩模型 / 直调口记录器），不是内部拼装。
+    """
+    from minimax_h3_prompt.director import prompts
+
+    plan = _fl2v_plan("opening", "continue", "ending")
+    sentinels = dict(revision_context=_REVISION_SENTINEL,
+                     visual_decision=_VISUAL_SENTINEL)
+
+    def reply(index):
+        return _single_reply(plan.segments[index - 1], plan)
+
+    # 出口 1：批量首写
+    batch = _DialectLLM(reply)
+    prompts.write_director_segments(plan, llm=batch, session_dir=tmp_path,
+                                    **sentinels)
+    assert batch.requests
+    assert all(_REVISION_SENTINEL in request and _VISUAL_SENTINEL in request
+               for request in batch.requests), "批量首写漏传上下文块"
+
+    # 出口 2：单段首写
+    single = _DialectLLM(reply)
+    prompts.write_director_segment(plan, plan.segments[1], llm=single, **sentinels)
+    assert _REVISION_SENTINEL in single.requests[0], "单段首写漏传修订块"
+    assert _VISUAL_SENTINEL in single.requests[0], "单段首写漏传画面决策块"
+
+    # 出口 3：改词请求的组装（改词复用同一份写段组装）
+    rewrite_request = prompts.build_rewrite_request(
+        plan, plan.segments[1], current_text="[Shot 1] old", **sentinels)
+    assert _REVISION_SENTINEL in rewrite_request, "改词请求漏传修订块"
+    assert _VISUAL_SENTINEL in rewrite_request, "改词请求漏传画面决策块"
+
+    # 出口 4：改词执行
+    requests: list[str] = []
+
+    def fake_direct_write(llm, request, *, role, label):
+        requests.append(request)
+        return reply(2)
+
+    monkeypatch.setattr(prompts, "_direct_write", fake_direct_write)
+    outcome = prompts.rewrite_director_segment(
+        plan, plan.segments[1], llm=object(), current_text="段 2 的提示词",
+        **sentinels)
+    assert outcome.errors == ()
+    assert _REVISION_SENTINEL in requests[0], "改词出口漏传修订块"
+    assert _VISUAL_SENTINEL in requests[0], "改词出口漏传画面决策块"
+
+
+# ---------------------------------------------------------------------------
 # #303 动作动机纪律：只住 common，四种模式 × 首写/改词都拿得到，且请求里只有一份
 # ---------------------------------------------------------------------------
 

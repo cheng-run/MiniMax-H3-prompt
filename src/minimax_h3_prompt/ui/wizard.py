@@ -881,6 +881,10 @@ def _run_director_flow(session: SessionState) -> int:
                 # 与段表清单同一份判据：ending 段（单段时是 opening）的请求带终点图
                 # 描述，段词与图冲突时以图为准（#160）。
                 film_end_description=film_end_description,
+                # #298：写段请求的两个上下文块槽位。本票恒为空串；#299／#300 在这里
+                # 接阶段 1 产物（改词那条出口必须同时接，否则首写与改词两套前提）。
+                revision_context="",
+                visual_decision="",
             )
     except (RuntimeError, ValueError) as exc:
         # 写段失败不写半段假内容（半份段表比没写更糟：用户会拿它去打包）。
@@ -1296,6 +1300,10 @@ def _rewrite_director_segment_round(plan, segment, session: SessionState, *,
                 # 与首写同一份上下文：单段 fl2v 的给图行要照旧写「首+尾」（#147）。
                 film_end=film_end,
                 film_end_description=film_end_description,
+                # #298：改词与首写共用同一份请求组装，两个上下文块必须一起穿，
+                # 否则按 e 改一次就把首写有的事实改丢。本票恒为空串。
+                revision_context="",
+                visual_decision="",
             )
     except (OSError, ValueError) as exc:
         # 上下文不完整（如 r2v 缺 subject_defs）：大声报，原词不动、不落账。

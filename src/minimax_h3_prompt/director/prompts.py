@@ -690,45 +690,100 @@ def _budget_violation(segment: DirectorSegment, record: Sequence[dict] | None,
         "或把它们改写成不含 <Picture N> 的纯文字描述。")
 
 
-def build_segment_request(plan: DirectorPlan, segment: DirectorSegment, *,
-                          shot_table: str = "",
-                          sections: dict[str, str] | None = None,
-                          film_end: bool = False,
-                          film_end_description: str = "",
-                          budget: SegmentBudget | None = None) -> str:
-    """组装一段的写段请求（入参全部显式，不依赖 state——issue #26 的教训）。
+@dataclass(frozen=True)
+class _SegmentRequestContext:
+    """一次段请求组装要用的全部事实（入参原样 ＋ 按帧现算的注记与秒数）。
 
-    请求里的时间轴提示句取 ``render_timeline_note`` 与 ``absolutize_timestamps`` 的
-    同一份口径：请求里不手抄第二份注记形态，也不让模型自己算绝对秒。
+    为什么先收成一份上下文：块与块之间不再互相读拼接现场里的局部变量，provider
+    只拿这一份，顺序完全由 ``_SEGMENT_REQUEST_BLOCKS`` 决定。于是「会拼」与「传了」
+    的接线判断只落在两处：``build_segment_request`` 收参数、清单一处排顺序。
     """
-    _require_write_mode(plan.mode)
-    note = render_timeline_note(plan, segment)
-    start_s = segment.start_frame / FPS
-    duration_s = segment.export_frames / FPS
-    shots_block = (
-        f"分镜表（**只取本段 {start_s:.3f}s 起的 {duration_s:.3f}s 窗口内**的镜头；"
-        f"其他镜头一个字都不能写进正文）：\n{shot_table}"
-        if str(shot_table).strip() else
-        "（缺分镜表原文：按本段剧情概述与 end_hook（切点）写，不得虚构窗外事件）"
+
+    plan: DirectorPlan
+    segment: DirectorSegment
+    shot_table: str
+    sections: dict[str, str] | None
+    film_end: bool
+    film_end_description: str
+    budget: SegmentBudget | None
+    # 调用方渲染好的整块文本（标题、正文、优先序都在里面，见 ``_context_block``）。
+    revision_context: str
+    visual_decision: str
+    note: str
+    start_s: float
+    duration_s: float
+
+
+def _context_block(value: str) -> str:
+    """把调用方渲染好的上下文块放进请求：空值不产生块、也不产生空行。
+
+    契约：入参是**已经渲染完整**的块（标题、正文与优先序都由共享渲染器给出——
+    ``segment_prompts.render_revision_context`` / ``_visual_decision_block_for_request``，
+    只读复用、不在这里另拼一套）。本函数只负责分隔与空值：两处各写一遍「有没有块 +
+    补不补换行」迟早漏一处，而请求文本没有校验器看得住这种错。
+    """
+    body = str(value or "").strip()
+    return f"\n{body}\n" if body else ""
+
+
+def _request_instruction_block(ctx: _SegmentRequestContext) -> str:
+    return f"{load_instruction(ctx.plan.mode)}\n\n---\n"
+
+
+def _request_header_block(ctx: _SegmentRequestContext) -> str:
+    segment = ctx.segment
+    return (
+        f"本段编号：Segment {segment.index}/{len(ctx.plan.segments)}\n"
+        f"段类型：{segment.label}\n"
+        f"本段时长：{ctx.duration_s:.3f}s（声明 {segment.declared_frames} 帧 / "
+        f"导出 {segment.export_frames} 帧）\n"
+        f"本段在成片中的起点（成片坐标，供你理解；**不要写进正文**）：{ctx.start_s:.3f}s\n"
+        "时间轴注记（组装器注入，你不要写；正文叙事须与它一致）：\n"
+        f"{ctx.note}\n"
     )
-    definitions = (
-        _definitions_block(_require_r2v_sections(sections)) if plan.mode == "r2v" else "")
-    # 参考图预算是**事前的**，不是事后截断：插件按「每次请求」限 9 张（
-    # ``lib/ref_images.py`` 的 MAX_REFERENCE_IMAGES），而本段最终只会挂正文真正点名
-    # 的那几张。先写清上限，模型才在第一版就按剧情取舍，而不是写满 13 张再被退回。
-    budget_note = (
-        f"\n【本段参考图预算】最多引用 {MAX_PICTURES} 张不同的 <Picture N>："
-        "插件每次生成（＝每段）只接受这么多个参考图槽位。请按本段剧情挑选**真正出场**"
-        f"的素材，超过 {MAX_PICTURES} 张会被退回重写（不会替你删图——删掉的图在正文里"
-        "没有接线可落）。\n"
-        if plan.mode == "r2v" else "")
-    # 本段的具体预算清单（#188）：上限之外还要说清**哪几张**能挂，否则规划期挑的图
-    # 与写段实际挂的图会各推一套（#180 事故的第 10 张就是这么来的）。
-    budget_list = _segment_budget_block(budget) if plan.mode == "r2v" else ""
+
+
+def _request_give_images_block(ctx: _SegmentRequestContext) -> str:
+    # 本段给图（#130）：改动前请求里**没有任何**「本段有没有首尾帧图」的信息，而
+    # 「有尾帧才写终点构图句」等规则全依赖它。这条事实段表里现成、也有中文渲染，
+    # 直接调 ``render_give_images``——与段表清单、出站清单同一份，不另写 token 翻译。
+    # ``film_end`` 只对**单段** fl2v 的开场有效：全片尾帧在单段片子里就是这一段的
+    # 终点画面；多段时它属于最后一段（见 ``frames.optional_images_for``，#147）。
+    give_images = render_give_images(ctx.segment, ctx.plan.mode,
+                                     single_segment=len(ctx.plan.segments) == 1,
+                                     film_end=ctx.film_end)
+    return f"【本段给图】{give_images}\n"
+
+
+def _request_start_block(ctx: _SegmentRequestContext) -> str:
+    return _fl2v_start_block(ctx.plan, ctx.segment)
+
+
+def _request_revision_block(ctx: _SegmentRequestContext) -> str:
+    """用户累积修订块（#298 留位、#300 供内容）：给图/起点之后、剧情概述之前。"""
+    return _context_block(ctx.revision_context)
+
+
+def _request_film_end_block(ctx: _SegmentRequestContext) -> str:
+    return _film_end_block(ctx.plan, ctx.segment, film_end=ctx.film_end,
+                           description=ctx.film_end_description)
+
+
+def _request_story_block(ctx: _SegmentRequestContext) -> str:
+    segment = ctx.segment
+    return (
+        f"本段剧情概述（中文，仅供你理解剧情，不得写进提示词）：{segment.summary}\n"
+        f"本段最后一帧的画面（end_hook）：{segment.end_hook}。{END_HOOK_CUT_CLAUSE}\n"
+    )
+
+
+def _request_shell_block(ctx: _SegmentRequestContext) -> str:
     # 本段输出外壳（#130）：r2v 的六节外壳已在指令里写死，这里只服务三条单段模式。
     # 为什么要在**请求里**再写一遍：指令是通用纪律，请求是这一次的执行前提；三字段是
     # 逐字要照抄的格式，写在离产出最近的地方，模型才不会按自己习惯改字段名。
-    shell = (
+    if ctx.plan.mode == "r2v":
+        return ""
+    return (
         "\n【本段输出外壳】\n"
         "本段正文必须是三个字段，字段名逐字、顺序固定、节间空一行：\n"
         "`integrated_multimodal_description:` → `overall_soundscape:` → `non_diegetic_music:`。\n"
@@ -737,39 +792,55 @@ def build_segment_request(plan: DirectorPlan, segment: DirectorSegment, *,
         # 时，模型仍会把对白与唱歌抄进 soundscape——两处写的是同一件事，缺一处就会漂。
         "`overall_soundscape:` 只写环境声、动作声与非语言人声，"
         "不重复对白、唱歌与角色能听到的音乐（它们只写在正文里）。\n"
-        if plan.mode != "r2v" else "")
-    # 本段给图（#130）：改动前请求里**没有任何**「本段有没有首尾帧图」的信息，而
-    # 「有尾帧才写终点构图句」等规则全依赖它。这条事实段表里现成、也有中文渲染，
-    # 直接调 ``render_give_images``——与段表清单、出站清单同一份，不另写 token 翻译。
-    # ``film_end`` 只对**单段** fl2v 的开场有效：全片尾帧在单段片子里就是这一段的
-    # 终点画面；多段时它属于最后一段（见 ``frames.optional_images_for``，#147）。
-    give_images = render_give_images(segment, plan.mode,
-                                     single_segment=len(plan.segments) == 1,
-                                     film_end=film_end)
-    give = f"【本段给图】{give_images}\n"
-    film_end_block = _film_end_block(
-        plan, segment, film_end=film_end, description=film_end_description)
+    )
+
+
+def _request_future_events_block(ctx: _SegmentRequestContext) -> str:
+    return _future_events_block(ctx.plan, ctx.segment)
+
+
+def _request_visual_decision_block(ctx: _SegmentRequestContext) -> str:
+    """画面决策块（#298 留位、#299 供内容）：剧情概述之后、分镜表之前。"""
+    return _context_block(ctx.visual_decision)
+
+
+def _request_shot_table_block(ctx: _SegmentRequestContext) -> str:
+    shots_block = (
+        f"分镜表（**只取本段 {ctx.start_s:.3f}s 起的 {ctx.duration_s:.3f}s 窗口内**的镜头；"
+        f"其他镜头一个字都不能写进正文）：\n{ctx.shot_table}"
+        if str(ctx.shot_table).strip() else
+        "（缺分镜表原文：按本段剧情概述与 end_hook（切点）写，不得虚构窗外事件）"
+    )
+    return f"\n{shots_block}\n"
+
+
+def _request_definitions_block(ctx: _SegmentRequestContext) -> str:
+    return (_definitions_block(_require_r2v_sections(ctx.sections))
+            if ctx.plan.mode == "r2v" else "")
+
+
+def _request_budget_note_block(ctx: _SegmentRequestContext) -> str:
+    # 参考图预算是**事前的**，不是事后截断：插件按「每次请求」限 9 张（
+    # ``lib/ref_images.py`` 的 MAX_REFERENCE_IMAGES），而本段最终只会挂正文真正点名
+    # 的那几张。先写清上限，模型才在第一版就按剧情取舍，而不是写满 13 张再被退回。
+    if ctx.plan.mode != "r2v":
+        return ""
     return (
-        f"{load_instruction(plan.mode)}\n\n"
-        "---\n"
-        f"本段编号：Segment {segment.index}/{len(plan.segments)}\n"
-        f"段类型：{segment.label}\n"
-        f"本段时长：{duration_s:.3f}s（声明 {segment.declared_frames} 帧 / "
-        f"导出 {segment.export_frames} 帧）\n"
-        f"本段在成片中的起点（成片坐标，供你理解；**不要写进正文**）：{start_s:.3f}s\n"
-        "时间轴注记（组装器注入，你不要写；正文叙事须与它一致）：\n"
-        f"{note}\n"
-        f"{give}"
-        f"{_fl2v_start_block(plan, segment)}"
-        f"{film_end_block}"
-        f"本段剧情概述（中文，仅供你理解剧情，不得写进提示词）：{segment.summary}\n"
-        f"本段最后一帧的画面（end_hook）：{segment.end_hook}。{END_HOOK_CUT_CLAUSE}\n"
-        f"{shell}"
-        f"{_future_events_block(plan, segment)}"
-        f"\n{shots_block}\n"
-        f"{definitions}"
-        f"{budget_note}"
-        f"{budget_list}"
+        f"\n【本段参考图预算】最多引用 {MAX_PICTURES} 张不同的 <Picture N>："
+        "插件每次生成（＝每段）只接受这么多个参考图槽位。请按本段剧情挑选**真正出场**"
+        f"的素材，超过 {MAX_PICTURES} 张会被退回重写（不会替你删图——删掉的图在正文里"
+        "没有接线可落）。\n"
+    )
+
+
+def _request_budget_list_block(ctx: _SegmentRequestContext) -> str:
+    # 本段的具体预算清单（#188）：上限之外还要说清**哪几张**能挂，否则规划期挑的图
+    # 与写段实际挂的图会各推一套（#180 事故的第 10 张就是这么来的）。
+    return _segment_budget_block(ctx.budget) if ctx.plan.mode == "r2v" else ""
+
+
+def _request_wordlist_block(ctx: _SegmentRequestContext) -> str:
+    return (
         "\n## 词表切片（ADR 0007 落笔侧同一份）\n"
         "下面词表**前言**里「edge-stability 句」「分段首行的锚定行」两处指针是首尾帧链的"
         "义务，导演台分段**一概不用**（见上方禁止清单）。"
@@ -779,6 +850,64 @@ def build_segment_request(plan: DirectorPlan, segment: DirectorSegment, *,
         "有尾帧时仍以尾帧构图为终点。词表正文的选词与写法照用。\n\n"
         f"{_WRITING_WORDLIST}\n"
     )
+
+
+# 请求块的**唯一顺序真源**：新增块只在这里插一行，不碰相邻块的拼接现场。
+# 顺序约束（#297）：修订块在「本段给图／本段起点」之后、剧情概述之前；画面决策块
+# 在剧情概述之后、分镜表之前——越靠近产出的越靠后。
+_SEGMENT_REQUEST_BLOCKS = (
+    _request_instruction_block,
+    _request_header_block,
+    _request_give_images_block,
+    _request_start_block,
+    _request_revision_block,
+    _request_film_end_block,
+    _request_story_block,
+    _request_shell_block,
+    _request_future_events_block,
+    _request_visual_decision_block,
+    _request_shot_table_block,
+    _request_definitions_block,
+    _request_budget_note_block,
+    _request_budget_list_block,
+    _request_wordlist_block,
+)
+
+
+def build_segment_request(plan: DirectorPlan, segment: DirectorSegment, *,
+                          shot_table: str = "",
+                          sections: dict[str, str] | None = None,
+                          film_end: bool = False,
+                          film_end_description: str = "",
+                          budget: SegmentBudget | None = None,
+                          revision_context: str = "",
+                          visual_decision: str = "") -> str:
+    """组装一段的写段请求（入参全部显式，不依赖 state——issue #26 的教训）。
+
+    请求里的时间轴提示句取 ``render_timeline_note`` 与 ``absolutize_timestamps`` 的
+    同一份口径：请求里不手抄第二份注记形态，也不让模型自己算绝对秒。
+
+    组装形态是**按固定顺序拼接的命名块**（``_SEGMENT_REQUEST_BLOCKS``）：每个块一个
+    provider，块之间不共享拼接现场的局部变量。``revision_context`` /
+    ``visual_decision`` 接的是调用方用共享渲染器拼好的整块文本（本模块不读 state、
+    也不另拼标题）；空串/纯空白时不出现、也不多出空行（#298）。
+    """
+    _require_write_mode(plan.mode)
+    ctx = _SegmentRequestContext(
+        plan=plan,
+        segment=segment,
+        shot_table=shot_table,
+        sections=sections,
+        film_end=film_end,
+        film_end_description=film_end_description,
+        budget=budget,
+        revision_context=revision_context,
+        visual_decision=visual_decision,
+        note=render_timeline_note(plan, segment),
+        start_s=segment.start_frame / FPS,
+        duration_s=segment.export_frames / FPS,
+    )
+    return "".join(provider(ctx) for provider in _SEGMENT_REQUEST_BLOCKS)
 
 
 def normalize_segment_output(text: str, *, plan: DirectorPlan,
@@ -909,16 +1038,23 @@ def write_director_segment(plan: DirectorPlan, segment: DirectorSegment, *, llm,
                            sections: dict[str, str] | None = None,
                            registry: Sequence[Sequence] = (),
                            film_end: bool = False,
-                           film_end_description: str = "") -> str | None:
+                           film_end_description: str = "",
+                           revision_context: str = "",
+                           visual_decision: str = "") -> str | None:
     """写一段（直调看门狗 + 有界重写）。调用失败返回 None（调用方据此大声报错）。
 
     契约与 ``write_ref_segment_v2`` 同形：**调用失败**返回 None；**内容不合格**带着
     问题清单重写 ``MAX_SEGMENT_ATTEMPTS`` 次，仍不合格交回原文由出站清单当面展示
     ——不返回 None 装死（那会把「模型写坏了」和「网关卡住了」混成一件事）。
+
+    ``revision_context`` / ``visual_decision`` 原样穿给 ``build_segment_request``：
+    单段首写与批量首写必须从同一份上下文取值，否则同一张段表会有两套写作前提（#298）。
     """
-    base_request = build_segment_request(plan, segment, shot_table=shot_table,
-                                         sections=sections, film_end=film_end,
-                                         film_end_description=film_end_description)
+    base_request = build_segment_request(
+        plan, segment, shot_table=shot_table,
+        sections=sections, film_end=film_end,
+        film_end_description=film_end_description,
+        revision_context=revision_context, visual_decision=visual_decision)
     result = _write_validated(
         plan, segment, llm=llm, base_request=base_request, sections=sections,
         role=DIRECTOR_SEGMENT_WRITER_ROLE,
@@ -955,12 +1091,15 @@ def build_rewrite_request(plan: DirectorPlan, segment: DirectorSegment, *,
                           current_text: str, shot_table: str = "",
                           sections: dict[str, str] | None = None,
                           film_end: bool = False,
-                          film_end_description: str = "") -> str:
+                          film_end_description: str = "",
+                          revision_context: str = "",
+                          visual_decision: str = "") -> str:
     """一轮改词的请求（#113）：**同一份写段上下文** ＋ 当前段提示词 ＋ 只改正文的要求。
 
     为什么直接复用 ``build_segment_request`` 而不是另写一份精简请求：改词的落笔纪律与
     首写必须逐条相同（时间窗外禁区、分镜窗口、词表切片、r2v 定义块），少一处就会
-    改出「首写合格、改词走样」的两套方言（「同一语义只许一处口径」）。
+    改出「首写合格、改词走样」的两套方言（「同一语义只许一处口径」）。两个上下文块
+    也因此天然同源：它们只在上游渲染一次，这里与首写走同一个组装（#298）。
 
     时间基那句是本请求最要紧的提示：``current_text`` 是盘上的段文件，里面的 ``At``
     时间戳已是**成片坐标**（组装器加过本段起点）；模型照抄它会被组装器再加一次、
@@ -968,9 +1107,11 @@ def build_rewrite_request(plan: DirectorPlan, segment: DirectorSegment, *,
     写清「00:00.000 = 本段第一帧」与组装器会补上的起点秒——实现与提示两边同一条口径，
     不能只靠模型自觉（2026-10-31 复审实测：只写提示时模型照抄，时间戳翻倍）。
     """
-    base = build_segment_request(plan, segment, shot_table=shot_table,
-                                 sections=sections, film_end=film_end,
-                                 film_end_description=film_end_description)
+    base = build_segment_request(
+        plan, segment, shot_table=shot_table,
+        sections=sections, film_end=film_end,
+        film_end_description=film_end_description,
+        revision_context=revision_context, visual_decision=visual_decision)
     start_s = segment.start_frame / FPS
     relative_current = relativize_timestamps(current_text, segment.start_frame)
     return (
@@ -994,7 +1135,9 @@ def build_rewrite_request(plan: DirectorPlan, segment: DirectorSegment, *,
 def rewrite_director_segment(plan: DirectorPlan, segment: DirectorSegment, *, llm,
                              current_text: str, shot_table: str = "",
                              sections=None, film_end: bool = False,
-                             film_end_description: str = "") -> RewriteOutcome:
+                             film_end_description: str = "",
+                             revision_context: str = "",
+                             visual_decision: str = "") -> RewriteOutcome:
     """按「看过成片、不满意」重写一段（#113）：与 ``write_director_segment`` 同形。
 
     同形之处就是票面要的「同一份写段指令与同一个校验器」：请求从
@@ -1017,7 +1160,8 @@ def rewrite_director_segment(plan: DirectorPlan, segment: DirectorSegment, *, ll
     base_request = build_rewrite_request(
         plan, segment, current_text=current_text, shot_table=shot_table,
         sections=sections, film_end=film_end,
-        film_end_description=film_end_description)
+        film_end_description=film_end_description,
+        revision_context=revision_context, visual_decision=visual_decision)
     result = _write_validated(
         plan, segment, llm=llm, base_request=base_request, sections=sections,
         role=DIRECTOR_SEGMENT_REVISER_ROLE,
@@ -1143,6 +1287,8 @@ def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
                             registry: Iterable[Sequence] = (),
                             film_end: bool = False,
                             film_end_description: str = "",
+                            revision_context: str = "",
+                            visual_decision: str = "",
                             only_missing: bool = False) -> list[WrittenSegment]:
     """逐段写并落盘 ``GENxxx/director/segment-NN.md``（1 起）。
 
@@ -1167,6 +1313,10 @@ def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
 
     ``only_missing`` 只服务工作台的续跑（#262）：已在盘上的段词是用户已经看过的产物，
     不重写、也不重付一次模型调用；跳过时仍把盘上正文当作「上一段定稿」喂给跨段守卫。
+
+    ``revision_context`` / ``visual_decision`` 是**本轮执行**渲染好的两个上下文块
+    （#298）：逐段原样穿给 ``build_segment_request``。调用方（工作台、向导）从同一份
+    写段上下文取值；续跑重建的那一份也必须来自本会话盘上事实，不读实例级残留。
     """
     _require_write_mode(plan.mode)
     global_sections = _sections_mapping(sections)
@@ -1200,7 +1350,8 @@ def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
         base_request = build_segment_request(
             plan, segment, shot_table=shot_table, sections=global_sections,
             film_end=film_end, film_end_description=film_end_description,
-            budget=segment_budget)
+            budget=segment_budget,
+            revision_context=revision_context, visual_decision=visual_decision)
         result = _write_validated(
             plan, segment, llm=llm, base_request=base_request,
             sections=global_sections, role=DIRECTOR_SEGMENT_WRITER_ROLE,

@@ -556,3 +556,80 @@ def test_target_frames_comes_from_a_single_helper(tmp_path, monkeypatch):
     parsed = planning.parse_director_plan(reply, 4.0, mode="t2v")
     assert seen == [4.0], "规划器没有向共用函数要目标帧"
     assert parsed.total_frames > 96, "哨兵目标 999 没有被规划器采用"
+
+
+# ---------------------------------------------------------------------------
+# #298 写段上下文的两个请求块槽位：两个构造点都填，续跑重建不读实例残留
+# ---------------------------------------------------------------------------
+
+def test_director_write_context_threads_the_two_request_blocks(tmp_path, monkeypatch):
+    """#298 AC3：续跑补写这条出口从**自己的**上下文取值，不读别的执行。
+
+    本票内两值恒为空串，所以用哨兵区分来源：当轮上下文与续跑重建上下文各给一个，
+    写段出口收到的必须是各自那一份。漏传会拿到默认空串，串用残留会拿到另一个哨兵。
+    """
+    import threading
+
+    from minimax_h3_prompt.api.jobs import JobRunner, _DirectorWriteContext
+
+    # 数据类默认值就是本票的产线取值。
+    assert _DirectorWriteContext().revision_context == ""
+    assert _DirectorWriteContext().visual_decision == ""
+
+    plan = DirectorPlan(mode="t2v", total_frames=90, segments=(
+        DirectorSegment(
+            index=1, type="opening", guided=False, start_frame=0, end_frame=90,
+            declared_frames=90, export_frames=90,
+            summary="开场", end_hook="人物走进门廊", give_images=()),
+    ))
+    captured: dict = {}
+
+    def fake_write(plan, **kwargs):
+        captured.clear()
+        captured.update(kwargs)
+        return []
+
+    from minimax_h3_prompt.director import prompts
+    monkeypatch.setattr(prompts, "write_director_segments", fake_write)
+    # 写段出口在建模型之后才调用：本用例只验参数穿递，模型换成不发请求的桩。
+    monkeypatch.setattr(jobs_module, "build_chat_model", lambda: object())
+
+    def call(context):
+        runner = SimpleNamespace(
+            fake_pipeline=False,
+            _emit_progress=lambda *args, **kwargs: None,
+            _write_active_job=lambda *args, **kwargs: None,
+            # 续跑出口要按本会话重建上下文；这里换成一个带哨兵的版本，验证的是
+            # 「出口从传入的上下文取值」，重建本身由下一条用例断言。
+            _director_resume_context=lambda *args, **kwargs: _DirectorWriteContext(
+                shot_table="[Shot 1] resumed",
+                revision_context="REV-RESUME", visual_decision="VIS-RESUME"),
+        )
+        JobRunner._write_director_project(
+            runner, "session", "job", threading.Event(), SimpleNamespace(), {},
+            "t2v", tmp_path, plan, context)
+
+    call(_DirectorWriteContext(shot_table="[Shot 1] planned",
+                               revision_context="REV-PLAN",
+                               visual_decision="VIS-PLAN"))
+    assert captured["revision_context"] == "REV-PLAN"
+    assert captured["visual_decision"] == "VIS-PLAN"
+
+    call(None)
+    assert captured["revision_context"] == "REV-RESUME", \
+        "续跑补写没有从重建的上下文取修订块"
+    assert captured["visual_decision"] == "VIS-RESUME", \
+        "续跑补写没有从重建的上下文取画面决策块"
+
+
+def test_director_resume_context_leaves_the_two_slots_empty_from_disk_facts(tmp_path):
+    """#298：续跑重建的上下文两个槽位都显式填（本票为空串），不继承任何残留。"""
+    from minimax_h3_prompt.api.jobs import JobRunner
+
+    runner = SimpleNamespace(_director_ref_context=lambda *args, **kwargs: ((), None))
+    context = JobRunner._director_resume_context(
+        runner, tmp_path, SimpleNamespace(stage_state={}), "t2v", "[Shot 1] ...")
+
+    assert context.shot_table == "[Shot 1] ..."
+    assert context.revision_context == ""
+    assert context.visual_decision == ""

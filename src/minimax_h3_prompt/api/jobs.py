@@ -724,6 +724,11 @@ class _DirectorWriteContext:
     # 只有**本轮真的做了规划**才有预算；续跑读到 plan.json 时预算文件是规划期的
     # 产物，不补写、也不从任何残留值补。
     budget: Any = None
+    # 写段请求的两个上下文块（#298 的接缝）：调用方渲染好的整块文本。本票恒为空串；
+    # #299／#300 各自只填自己那一个，不碰请求组装。两个构造点都必须显式填（当轮规划、
+    # 续跑重建），续跑按本会话盘上事实现算，不读任何实例级残留。
+    revision_context: str = ""
+    visual_decision: str = ""
 
 
 def _director_segment_rows(
@@ -3270,7 +3275,9 @@ class JobRunner:
                     subject_definitions=subject_definitions, registry=registry)
             context = _DirectorWriteContext(
                 shot_table=shot_table, sections=sections, registry=registry,
-                budget=budget)
+                budget=budget,
+                # #298：桩模式同样显式填两个块的槽位（本票恒为空串）。
+                revision_context="", visual_decision="")
         else:
             from ..director.pack import film_end_still
             from ..ui.wizard_director import prepare_film_end_description
@@ -3299,6 +3306,8 @@ class JobRunner:
                 film_end=film_end,
                 film_end_description=description,
                 budget=result.budget,
+                # #298：两个上下文块先留空位；#299／#300 在此接本会话的阶段 1 产物。
+                revision_context="", visual_decision="",
             )
         if cancel_event.is_set():
             raise JobCancelled(DIRECTOR_PLAN_NODE)
@@ -3333,6 +3342,10 @@ class JobRunner:
             registry=registry,
             film_end=film_end,
             film_end_description=description,
+            # #298：两个上下文块必须与当轮规划同源。本票恒为空串；#299／#300 从这里
+            # **按本会话**（``session.stage_state``，也就是本会话盘上事实）现算，
+            # 绝不读 runner 上的实例属性。
+            revision_context="", visual_decision="",
         )
 
     def _write_director_project(
@@ -3391,6 +3404,9 @@ class JobRunner:
                 registry=context.registry,
                 film_end=context.film_end,
                 film_end_description=context.film_end_description,
+                # #298：两个上下文块从**同一份**写段上下文取值，首写与续跑同源。
+                revision_context=context.revision_context,
+                visual_decision=context.visual_decision,
                 # 续跑只补缺的段：已在盘上的段词是用户已经看过的产物，不重写、不重付。
                 only_missing=True,
             )
