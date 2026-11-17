@@ -13,7 +13,7 @@ scripts/check.sh fast       # 提交前：结构守卫 + 改动文件 lint + 秒
 scripts/check.sh full       # 交验收/推送前：全量测试 + docstring 守卫 + lint + mypy（含改动的 scripts）
                             #   + 前端（eslint/prettier/vue-tsc + e2e 类型）+ 契约漂移 + 变异检验
 scripts/check.sh lint       # 全量 src/tests/scripts 的 ruff（装了才跑）
-scripts/check.sh mutate     # 守卫变异检验（无额外依赖，约 2 分钟；full 已含）
+scripts/check.sh mutate     # 守卫变异检验（无额外依赖；实测耗时见 AGENTS.md「守卫」节，full 已含）
 scripts/check.sh types      # mypy 全仓（装了才跑）
 scripts/check.sh coverage   # 分支覆盖度量（装了才跑，不设门槛）
 scripts/check.sh frontend   # 强制跑 eslint + prettier --check + vue-tsc + e2e 类型（依赖不完整时跳过并提示）
@@ -33,7 +33,8 @@ scripts/check.sh rehash     # 打印关键帧角色提示词的 sha256，供更�
   会红。改法不是跳过钩子，而是把那一份先 `git stash push -- <路径>`，提交完再
   `git stash pop`（2026-11-11 实测：未提交的 handoff 引用尚未创建的 ADR 0034，
   挡住了 D4 的每一次提交）。
-- **跑动时机**（规则本身住 AGENTS.md「守卫」节，这里只记来由）：一轮全量约 2 分钟，
+- **跑动时机**（规则本身住 AGENTS.md「守卫」节，这里只记来由）：一轮全量以十分钟计
+  （实测数字住 AGENTS.md「守卫」节），
   复审一改就作废。2026-11-10 连踩两次：`/implement` 的步骤串是「实现 → 全量 → 复审」，
   #224 照它跑了一遍；#225 又白跑 129 秒——上一版把规则只写在本节，实现代理读的是
   AGENTS.md 与 skill，根本没到这一页。**规则要放在决策点读得到的文件里，细节才放这里。**
