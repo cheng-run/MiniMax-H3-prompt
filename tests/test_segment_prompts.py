@@ -329,6 +329,23 @@ def test_segment_v2_request_scopes_visual_decisions_to_this_segment():
     assert "只取 Shot 1" not in request and "只取 Shot 2" not in request, "注入了别段的 Shot 号"
 
 
+def test_visual_decision_block_carries_the_future_events_discipline():
+    """块里那句「只取本段」的纪律必须是真源常量（#310 US3）：真源一改，块跟着改。
+
+    画面决策块与时间窗外禁区是同一条纪律的两种载体；块里若再抄一份字面量，真源
+    改了这里就静默漂，而守卫只查出站文本含真源全文——两份同时存在时照样绿。
+    断言钉在块自己的句式上（``只取 Shot N 的内容，`` 紧跟真源），不和 v2 指令里
+    另一处引用混为一谈。
+    """
+    from minimax_h3_prompt import writing_disciplines as wd
+    from minimax_h3_prompt.segment_prompts import build_segment_v2_request
+
+    plans = _v2_plans()
+    request = build_segment_v2_request(plans[1], plans, _visual_decisions_state())
+    assert f"只取 Shot 2 的内容，{wd.FUTURE_EVENTS_DISCIPLINE}" in request, \
+        "画面决策块没带上时间窗外剧情禁区纪律（真源插值漏了或又抄了一份）"
+
+
 def test_fallback_segment_request_carries_visual_decisions():
     """回退写段路径同样要带画面决策（issue #34）：两条路径不许「规划一失败就掉一个档次」。
 

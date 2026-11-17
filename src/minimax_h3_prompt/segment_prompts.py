@@ -19,9 +19,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import film_language
-# 三族写作纪律的唯一可写来源（#312）。本模块只消费「时间窗外剧情禁区」一族（#314）：
-# 其余两族由并行票收口，故这里逐名导入、不导入整个模块。
-from .writing_disciplines import FUTURE_EVENTS_DISCIPLINE, FUTURE_EVENTS_TITLE
 from .text_patterns import (
     AT_TIMESTAMP as _AT_TIME_RE,
     LEADING_TIMESTAMP as _BARE_TIMESTAMP_LINE,
@@ -39,9 +36,14 @@ from .tools.h3_validator import (
     validate_ref,
 )
 from .user_revisions import pending_revisions, render_revision_block
-# 写作纪律的唯一可写来源（#312 建源、#313–#315 按族收口）：纪律文本只住那边一处，
-# 这里与其他写段路径一样取常量，不再各留一份会各自漂的硬拷贝。
-from .writing_disciplines import ANAPHORA_DISCIPLINE, CAMERA_SPEED_DISCIPLINE
+# 三族写作纪律的唯一可写来源（#312 建源、#313–#315 按族收口）：纪律文本只住那边一处，
+# 本模块与其他写段路径一样取常量，不再各留一份会各自漂的硬拷贝。
+from .writing_disciplines import (
+    ANAPHORA_DISCIPLINE,
+    CAMERA_SPEED_DISCIPLINE,
+    FUTURE_EVENTS_DISCIPLINE,
+    FUTURE_EVENTS_TITLE,
+)
 
 # 镜头块标记：[Shot N]（允许中括号与数字间任意空白）；判据单一来源见 text_patterns。
 # 镜头块首的绝对时间戳：[Shot 2] At 00:03.500, the camera ...
@@ -453,7 +455,7 @@ def _visual_decision_block_for_request(state: dict, shots: tuple[int, ...] = ())
     lines = [
         VISUAL_DECISION_HEADER,
         f"下面两份是**全片**产物（含其他时间窗的镜头）：本段只取 {scope} 的内容，"
-        "其他镜头的事件、构图与机位一个字都不能写进正文（与「时间窗外剧情禁区」同一条纪律）。",
+        f"{FUTURE_EVENTS_DISCIPLINE}（与「时间窗外剧情禁区」同一条纪律）。",
     ]
     if lock:
         lines.append(f"镜头评审锁定（分镜圆桌的可生成性结论，含全片硬约束）：\n{lock}")
@@ -563,7 +565,7 @@ H3 是执行型模型：你写什么它就做什么，含糊等于失控；把**
 - **时间基（最高优先级）：正文里所有 `At 00:XX.XXX` 一律相对本段起点计时**（`00:00.000`＝本段第一帧＝Picture 1），
   取值必须落在 `[0, 本段时长)` 内。绝对片时严禁出现——若本段从整片第 8 秒开始，正文**不能**写 `At 00:08.200`，
   要写 `At 00:00.200`。喂给 H3 的是本段这一条片段，它的时钟从 0 开始；超出时长的节拍会被挤成一团或凭空乱动
-- 你只负责写**本段时间窗发生的事**。分析表/人物设定里出现的、发生在其他时间窗的事件（比如整片第 N1 秒才会破碎的窗户、第 N2 秒的转折动作），**本段一个字都不能出现**
+- 你只负责写**本段时间窗发生的事**。分析表/人物设定里出现的、发生在其他时间窗的事件（比如整片第 N1 秒才会破碎的窗户、第 N2 秒的转折动作）同样不许写：{FUTURE_EVENTS_DISCIPLINE}
 - **本段是一个完整的动作单元**：本段的动作必须在**本段时长内落定**（做完并停在该有的姿态上），
   不许做到一半就收尾留给下一段（请求若给出本段末态声明，正文结束时的画面必须达到它）
 - {ANAPHORA_DISCIPLINE}
@@ -787,7 +789,7 @@ def build_segment_v2_request(
     else:
         shots_block = (
             "本段 Shot 原始描述（⚠️ 未能按 Shot 号定位本段镜头，以下是整条分镜表；"
-            "**只准取本段时间窗内的内容**，其他镜头的事件一个字都不能出现）：\n"
+            f"**只准取本段时间窗内的内容**，{FUTURE_EVENTS_DISCIPLINE}）：\n"
             + str(state.get("shot_table", ""))
         )
 

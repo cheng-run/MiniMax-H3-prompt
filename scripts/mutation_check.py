@@ -634,6 +634,18 @@ MUTATIONS: tuple[Mutation, ...] = (
         "``\"\" in text`` 恒真就会永远不红（#316）",
     ),
     Mutation(
+        "future_events_discipline_cleared",
+        # 锚点取常量赋值**整行**（全仓恰好一次）；清空后五条写段路径（含画面决策块的
+        # 插值）同时失去这条纪律，守卫必须先自证真源非空才会红。
+        "src/minimax_h3_prompt/writing_disciplines.py",
+        'FUTURE_EVENTS_DISCIPLINE = "其他镜头的事件、构图与机位一个字都不能写进正文"',
+        'FUTURE_EVENTS_DISCIPLINE = ""',
+        ("tests/test_writing_disciplines_guard.py::"
+         "test_every_write_route_sends_the_family_discipline",),
+        "清空时间窗外剧情禁区真源＝五条写段路径同时失去这条纪律；守卫若不自证真源非空，"
+        "``\"\" in text`` 恒真就会永远不红（#316）",
+    ),
+    Mutation(
         "music_guided_segment_writes_na",
         "src/minimax_h3_prompt/prompts/segment_writer_director.md",
         "**不许写 `N/A`**",
