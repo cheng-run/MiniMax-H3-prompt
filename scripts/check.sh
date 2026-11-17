@@ -83,6 +83,12 @@ FAST_TESTS=(
   tests/test_start_web_freshness.py
   tests/test_adr_guard.py
   tests/test_doc_pointer_shape.py
+  # 文档引用与根路径推导、向导体量：都是「读文件做断言」的秒级守卫，放全量等于让
+  # `fast` 绿着过、全量才炸（2026-11-17 #297 实测：wizard.py 长过 6267 只在 full 露头，
+  # 白跑一轮全量）。
+  tests/test_doc_references_tracked.py
+  tests/test_path_root_guard.py
+  tests/test_wizard_size.py
   tests/test_spike_exe.py
 )
 
