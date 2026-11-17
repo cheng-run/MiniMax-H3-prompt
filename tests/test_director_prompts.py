@@ -1614,3 +1614,90 @@ def test_phantom_message_says_where_continuity_comes_from():
     assert "图槽" in message
     assert "段间引导" in message
     assert "Picture 2" in message
+
+
+# ---------------------------------------------------------------------------
+# #303 动作动机纪律：只住 common，四种模式 × 首写/改词都拿得到，且请求里只有一份
+# ---------------------------------------------------------------------------
+
+def _motivation_rule_line() -> str:
+    """common 里的动作动机纪律原文：按「动机」认出来，不从测试侧重抄整段字面。
+
+    与加载口同一份分节解析（``_split_instruction_file``）；文件里没有这条时这里先红，
+    不需要另写一条「有没有」的断言。
+    """
+    from minimax_h3_prompt.director import prompts
+
+    source = (prompts.PROMPTS_DIR / prompts._INSTRUCTION_NAME).read_text(encoding="utf-8")
+    common = prompts._split_instruction_file(source)["common"]
+    lines = [line.strip() for line in common.splitlines() if "动机" in line]
+    assert len(lines) == 1, f"common 里应恰有一条动作动机纪律，实际 {len(lines)} 条：{lines}"
+    return lines[0]
+
+
+def test_action_motivation_rule_stays_in_the_common_section_only():
+    """通用纪律写成模式专属会各自漂：动机纪律只准出现在 ``## common``。
+
+    请求正文只由「common ＋ 该模式小节」拼成（``load_instruction``），所以各模式小节
+    一旦也抄一份，请求里就有两处分头维护的同一句话——这正是票面要防的第 2 份硬拷贝。
+    """
+    from minimax_h3_prompt.director import prompts
+
+    source = (prompts.PROMPTS_DIR / prompts._INSTRUCTION_NAME).read_text(encoding="utf-8")
+    sections = prompts._split_instruction_file(source)
+    rule = _motivation_rule_line()
+
+    assert rule in sections["common"]
+    for mode in ("t2v", "i2v", "fl2v", "r2v"):
+        assert rule not in sections[mode], \
+            f"动作动机纪律被抄进了 {mode} 小节（通用纪律写成了模式专属）"
+    assert source.count(rule) == 1, "整份指令文件里动作动机纪律出现了不止一份"
+
+
+def test_action_motivation_rule_reaches_first_write_and_rewrite_in_every_mode(tmp_path):
+    """四种模式 × 首写与改词：模型收到的请求都含这条纪律，且**恰好一次**。
+
+    断言模型实际拿到的出站字符串（记录型桩模型），不是 ``load_instruction`` 的返回值
+    ——「规则在、接线不在」是本仓反复踩的坑。只出现一次覆盖票面第 2 条 AC：请求正文
+    不许再抄一份同义纪律（写了就会出现第二份，或与指令里那份各自漂）。
+    纪律原文从指令文件派生，不在测试里重抄。
+    """
+    from minimax_h3_prompt.director.prompts import (
+        load_instruction,
+        rewrite_director_segment,
+        write_director_segments,
+    )
+    from minimax_h3_prompt.tools.h3_validator import split_ref_sections
+
+    rule = _motivation_rule_line()
+
+    for mode in ("t2v", "i2v", "fl2v", "r2v"):
+        assert rule in load_instruction(mode), f"{mode} 的加载口没带上动作动机纪律"
+
+        plan = _plan(mode)
+        if mode == "r2v":
+            reply = lambda index: _r2v_reply(plan.segments[index - 1], plan)
+            sections = split_ref_sections(_SUBJECT_DEFS)
+            current = _r2v_text(plan.segments[1], plan)
+        else:
+            reply = lambda index: _single_reply(plan.segments[index - 1], plan)
+            sections = None
+            current = _single_text(plan.segments[1], plan)
+
+        # 首写：第一段的出站请求
+        first_llm = _DialectLLM(reply)
+        write_director_segments(plan, llm=first_llm, session_dir=tmp_path / f"{mode}-first",
+                                sections=sections)
+        first_request = first_llm.requests[0]
+
+        # 改词：与首写同一份上下文的出站请求
+        rewrite_llm = _DialectLLM(reply)
+        rewrite_director_segment(plan, plan.segments[1], llm=rewrite_llm,
+                                 current_text=current, sections=sections)
+        assert len(rewrite_llm.requests) == 1, f"{mode} 改词请求不该被退回重写"
+        rewrite_request = rewrite_llm.requests[0]
+
+        for label, request in (("首写", first_request), ("改词", rewrite_request)):
+            assert request.count(rule) == 1, \
+                f"{mode} 的{label}请求里动作动机纪律不是恰好一份（出现 " \
+                f"{request.count(rule)} 次）"

@@ -1659,6 +1659,16 @@ MUTATIONS: tuple[Mutation, ...] = (
         "恢复不看资产轮次账＝用户认可的合法改写会被一键抹成阶段 1 初稿，"
         "而卡片上没有任何提示（#291，spec #286 US23「无账差异」判据）",
     ),
+    Mutation(
+        "director_common_section_dropped_from_instruction",
+        "src/minimax_h3_prompt/director/prompts.py",
+        "    return f\"{sections['common']}\\n\\n{sections[mode]}\"",
+        "    return sections[mode]",
+        ("tests/test_director_prompts.py::"
+         "test_action_motivation_rule_reaches_first_write_and_rewrite_in_every_mode",),
+        "加载口只取模式小节、丢掉 common＝动作动机（连同时间窗、门槛、道具归属）到不了"
+        "模型眼前，「规则在、接线不在」（#303）",
+    ),
 )
 
 
