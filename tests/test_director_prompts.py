@@ -1061,6 +1061,130 @@ def test_r2v_camera_cut_does_not_point_at_a_first_frame_image(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# #302 t2v / i2v：没有图的段补起点事实
+# ---------------------------------------------------------------------------
+
+def _t2v_plan(*types):
+    """按给定类型序列造一张 t2v 段表：t2v 一个图槽都没有（给图清单恒空）。"""
+    from dataclasses import replace
+
+    from minimax_h3_prompt.director.frames import DirectorPlan, give_images_for
+
+    segments = []
+    for index, segment_type in enumerate(types, 1):
+        segment = _segment(index, segment_type, (index - 1) * 107, index * 107,
+                           107, 107, segment_type not in ("opening", "camera_cut"))
+        segments.append(replace(segment,
+                                give_images=give_images_for(segment_type, "t2v")))
+    return DirectorPlan(mode="t2v", total_frames=107 * len(types),
+                        segments=tuple(segments))
+
+
+def _start_block(request: str) -> str:
+    """【本段起点】整块（块首行 ＋ 其后的括注行）。
+
+    起点块有两行形态（引导段的事实行 ＋ 括注行），只取首行会漏掉括注里的措辞；
+    「块内不得出现某词」这类断言必须看整块。
+    """
+    lines = request.splitlines()
+    begin = next((pos for pos, row in enumerate(lines)
+                  if row.startswith("【本段起点】")), None)
+    if begin is None:
+        return ""
+    block = [lines[begin]]
+    for row in lines[begin + 1:]:
+        if not row.strip() or row.startswith("【") or row.startswith("本段剧情概述"):
+            break
+        block.append(row)
+    return "\n".join(block)
+
+
+# 「指令性图片指称」的判定范围（2026-11-17 coord 裁定）：起点块、给图块、
+# 剧情/切点块、尾帧块。共享词表切片里官方例文的 ``Picture 2``、以及「edge-stability
+# ／锚定行不用」的免责句**不算**指向，不许为了它们改词表——所以判据不拿整份请求。
+_POINTING_LINE_HEADS = ("【本段给图】", "本段剧情概述", "本段最后一帧的画面（end_hook）")
+_PICTURE_POINTING_RE = re.compile(r"Picture\s*\d|首帧图|尾帧图")
+
+
+def _pointing_blocks_text(request: str) -> str:
+    from minimax_h3_prompt.director.film_end import FILM_END_BLOCK_HEAD
+
+    blocks = [block for block in (_start_block(request),) if block]
+    lines = request.splitlines()
+    blocks.extend(row for row in lines
+                  if any(row.startswith(head) for head in _POINTING_LINE_HEADS))
+    film_end = next((pos for pos, row in enumerate(lines)
+                     if row.startswith(FILM_END_BLOCK_HEAD)), None)
+    if film_end is not None:
+        for row in lines[film_end:]:
+            if not row.strip():
+                break
+            blocks.append(row)
+    return "\n".join(blocks)
+
+
+def test_t2v_start_block_states_the_previous_settled_frame_without_a_first_frame_image():
+    """t2v 引导段拿到上一段落定画面；起点块里不得出现「首帧图」。
+
+    t2v 一个图槽都没有（``give_images_for`` 提前归零），照抄 fl2v 的「本段没有首帧图」
+    会把模型引向一张不存在的图槽——模式分叉必须落在措辞上，不只是给图清单上。
+    """
+    from minimax_h3_prompt.director.prompts import build_segment_request
+
+    plan = _t2v_plan("opening", "continue", "camera_same", "camera_cut", "ending")
+
+    opening = _start_line(build_segment_request(plan, plan.segments[0]))
+    assert "全片开场" in opening
+
+    for position in (1, 2, 4):  # continue / camera_same / ending 都是引导段
+        segment = plan.segments[position]
+        block = _start_block(build_segment_request(plan, segment))
+        assert block, f"{segment.label} 没有【本段起点】块"
+        assert "上一段落定画面" in block, block
+        assert plan.segments[position - 1].end_hook in block, \
+            f"{segment.label} 没带上一段落定画面原文"
+        assert "首帧图" not in block, \
+            f"{segment.label} 的起点块把 t2v 引向了一张不存在的首帧图"
+
+    for segment in plan.segments:
+        assert "首帧图" not in _start_block(build_segment_request(plan, segment)), \
+            f"{segment.label} 的起点块出现「首帧图」"
+
+
+def test_t2v_camera_cut_is_a_hard_cut_with_no_picture_reference():
+    """t2v 切镜段：硬切、不承接上一段，且指令性块里没有任何图片指称。
+
+    判据按 2026-11-17 coord 裁定只看起点／给图／剧情与切点／尾帧四块：
+    共享词表的官方例文 ``Picture 2`` 与免责句不算指向。
+    """
+    from minimax_h3_prompt.director.prompts import build_segment_request
+
+    plan = _t2v_plan("opening", "continue", "camera_cut")
+    request = build_segment_request(plan, plan.segments[2])
+    cut = _start_line(request)
+    assert "硬切" in cut and "不承接" in cut, cut
+    assert not _PICTURE_POINTING_RE.search(_pointing_blocks_text(request)), \
+        "t2v 没有图槽，切镜段的指令性块不得出现任何图片指称"
+
+
+def test_i2v_single_segment_opening_names_the_user_supplied_first_frame():
+    """i2v 全片唯一那段：起点写明第一帧就是用户提供的首帧图，全片只有这一段。"""
+    from dataclasses import replace
+
+    from minimax_h3_prompt.director.frames import DirectorPlan, give_images_for
+    from minimax_h3_prompt.director.prompts import build_segment_request
+
+    segment = replace(_segment(1, "opening", 0, 243, 243, 243, False),
+                      give_images=give_images_for("opening", "i2v"))
+    plan = DirectorPlan(mode="i2v", total_frames=243, segments=(segment,))
+
+    block = _start_block(build_segment_request(plan, segment))
+    assert "全片开场" in block
+    assert "用户提供的首帧图" in block, "i2v 起点没写第一帧来自用户提供的首帧图"
+    assert "全片只有这一段" in block, "i2v 起点没写全片只有这一段"
+
+
+# ---------------------------------------------------------------------------
 # 逐段写与落盘：GENxxx/director/segment-NN.md
 # ---------------------------------------------------------------------------
 
@@ -1444,6 +1568,10 @@ def test_segment_request_reads_end_hook_as_the_cut_point():
 
     assert "正文必须落到这个状态" not in request, "旧的「落到终点」口径还在请求里"
     assert END_HOOK_CUT_CLAUSE in hook_line, "请求行没写「写到那一刻就结束」"
+    # #302：切点不只是「不落定」，还要「推进到」且「不越过」——少一半模型就会
+    # 提前收（差一口气）或越过它去写下一段（段边界被侵蚀）。
+    assert "推进到" in hook_line, "请求行没写「推进到」：模型会提前收"
+    assert "不越过" in hook_line, "请求行没写「不越过」：模型会写下一段的事"
     assert plan.segments[1].end_hook in hook_line, "end_hook 原文没被注入"
 
 

@@ -586,11 +586,21 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "r2v_start_block_dropped",
         "src/minimax_h3_prompt/director/prompts.py",
-        '    if plan.mode not in ("fl2v", "r2v"):',
+        '    if plan.mode not in ("fl2v", "r2v", "t2v", "i2v"):',
         '    if plan.mode != "fl2v":',
         ("tests/test_director_prompts.py::"
          "test_r2v_guided_and_opening_requests_state_the_segment_start",),
         "起点事实块退回只认 fl2v＝r2v 引导段拿不到上一段落定画面（#192）",
+    ),
+    Mutation(
+        "t2v_start_block_gate_dropped",
+        "src/minimax_h3_prompt/director/prompts.py",
+        '    if plan.mode not in ("fl2v", "r2v", "t2v", "i2v"):',
+        '    if plan.mode not in ("fl2v", "r2v"):',
+        ("tests/test_director_prompts.py::"
+         "test_t2v_start_block_states_the_previous_settled_frame_without_a_first_frame_image",),
+        "模式闸退回只认 fl2v/r2v＝t2v 的引导段拿不到上一段落定画面、切镜段也不会"
+        "被写成硬切（#302 的起点事实缺口原形）",
     ),
     Mutation(
         "end_hook_request_reads_as_a_held_endpoint",

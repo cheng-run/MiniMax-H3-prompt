@@ -519,9 +519,12 @@ _WRITING_WORDLIST = film_language.video_slice("segment_writer")
 
 # #193：``end_hook`` 是本段的**切点**，不是要停下来的终点画面。请求行与词表免责块
 # 引用同一句；两处各抄一份就会各自漂（「同一契约两处口径」在本仓已咬过两次）。
+# #302 补齐语义的两半：写到那一刻就结束（不落定）只是「不越过」的一半；另一半是
+# **推进到**它——模型缺这一半时会提前收（差一口气），缺那一半时会越过它写下一段。
 END_HOOK_CUT_CLAUSE = (
-    "正文写到这个状态的那一刻就结束——不要为它停顿、不要补一个落定的收尾镜头、"
-    "不要把它摆成静止构图"
+    "正文必须**推进到**这个状态：本段结束那一刻的画面就是它——"
+    "不要提前收（不要为它停顿、不要补一个落定的收尾镜头、不要把它摆成静止构图），"
+    "也**不越过**它去写下一段的事"
 )
 # 四个角色共用的词表里与导演台相左的那条指针。免责块点名它、测试也按它派生：
 # 真源那句措辞一改，这里会一起报红，而不是静默指着一句不存在的话。
@@ -600,27 +603,33 @@ def _definitions_block(sections: dict[str, str]) -> str:
 
 
 def _fl2v_start_block(plan: DirectorPlan, segment: DirectorSegment) -> str:
-    """「本段起点」事实块（#147 fl2v / #192 r2v）：引导段接上一段落定画面，切镜段硬切新场景。
+    """「本段起点」事实块（#147 fl2v / #192 r2v / #302 t2v・i2v）：第一拍从哪接。
 
     为什么必须有这一块：段类型只决定给哪几张图，「第一拍从哪接」既不是图也不是
     ``end_hook``（那是终点）。不写进请求，模型只能按类型名猜——``continue`` 会被写成
     从一张不存在的首帧图开始，``camera_cut`` 会被写成与上一段同景的软过渡。
 
-    r2v 与 fl2v 共用同一份事实，但切镜段措辞必须分叉：r2v 没有帧槽
-    （``frames.give_images_for`` 对 r2v 恒给参考素材），照抄 fl2v 的「本段第一帧
-    来自本段首帧图」会把模型引向一张不存在的图。函数名保留 fl2v 是因为改名只会
-    波及既有用例、不改变行为。
+    四种模式的切镜段措辞必须分叉：r2v 与 t2v 都没有帧槽（``frames.give_images_for``
+    对两者一个图槽都不给），照抄 fl2v 的「本段第一帧来自本段首帧图」会把模型引向一张
+    不存在的图。函数名保留 fl2v 是因为改名只会波及既有用例、不改变行为。
     """
-    if plan.mode not in ("fl2v", "r2v"):
+    if plan.mode not in ("fl2v", "r2v", "t2v", "i2v"):
         return ""
     if segment.type == "opening":
-        return "\n【本段起点】全片开场：本段第一帧就是全片第一帧，没有上一段可承接。\n"
+        opening = "\n【本段起点】全片开场：本段第一帧就是全片第一帧，没有上一段可承接。"
+        if plan.mode == "i2v":
+            # i2v 单段（ADR 0026）：全片只有这一段，第一帧是用户真给的那张图，不是
+            # 自由构图。不写这句，模型会按 I2VA 四段推进自行编一个起始画面。
+            opening += "本段第一帧就是**用户提供的首帧图**，全片只有这一段。"
+        return opening + "\n"
     previous = next(
         (item for item in plan.segments if item.index == segment.index - 1), None)
     if previous is None:
         return ""
     if segment.type == "camera_cut":
-        if plan.mode == "r2v":
+        if plan.mode in ("r2v", "t2v"):
+            # 2026-11-17 coord 裁定：t2v 切镜段复用 r2v 的无图措辞——硬切新场景、
+            # 不承接上一段，且不得出现任何指向图槽的指称。
             return (
                 "\n【本段起点】切镜：**硬切**的新场景——**不承接**上一段的画面、"
                 "构图与人物位置。\n")
@@ -630,6 +639,13 @@ def _fl2v_start_block(plan: DirectorPlan, segment: DirectorSegment) -> str:
             f"（{previous.end_hook}）只作剧情先后参考，不要写成同一空间。\n")
 
     # continue / camera_same / ending：都是引导段，第一拍从上一段终点接着写。
+    if plan.mode == "t2v":
+        # 2026-11-17 coord 裁定：t2v 一个图槽都没有，措辞必须说「没有可挂的图」；
+        # 不得出现「首帧图」——那句话在无图槽的模式里就是一个假指称。
+        return (
+            "\n【本段起点】上一段落定画面："
+            f"{previous.end_hook}\n"
+            "（本段第一拍从这里接着写；本模式没有图槽，也没有可挂的图。）\n")
     return (
         "\n【本段起点】上一段落定画面："
         f"{previous.end_hook}\n"
