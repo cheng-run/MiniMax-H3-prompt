@@ -22,13 +22,14 @@ import os
 import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # 只用于段级注入卡写入口的签名，运行时按鸭子类型调用
+    from ..director.prompts import VisualDecisionSource
     from ..ref_segments import RefSegmentJob
 
 from .. import step_machine
@@ -730,7 +731,10 @@ class _DirectorWriteContext:
     # 的整块输出，只含待落地的修订，修订不分段）。两个构造点都必须显式填（当轮规划、
     # 续跑重建），续跑按本会话盘上事实现算，不读任何实例级残留。
     revision_context: str = ""
-    visual_decision: str | Callable[[Any], str] = ""
+    # 别名取 ``director/prompts.VisualDecisionSource``（只用于注解，TYPE_CHECKING 导入）：
+    # 「字符串或按段工厂」这套口径只有那一处真源，重写一遍 ``str | Callable[...]``
+    # 就会退化成各写一份、迟早在一边放宽成 Any。
+    visual_decision: VisualDecisionSource = ""
 
 
 def _director_segment_rows(
