@@ -1428,6 +1428,63 @@ def test_fallback_ref_rewrite_request_carries_same_disciplines():
     assert sections["subject_definitions"].splitlines()[1] in request  # 定义块随请求下发
 
 
+# ---------------------------------------------------------------------------
+# 禁止指代前文单源化（#315）：四条 Python 写段请求都带真源那句，模板里只剩一份措辞
+# ---------------------------------------------------------------------------
+from minimax_h3_prompt.writing_disciplines import ANAPHORA_DISCIPLINE  # noqa: E402
+
+
+def test_anaphora_discipline_has_exactly_one_copy_in_each_template():
+    """纪律文本只剩一处真源：每个模板里它恰好出现一次（重抄一份就会数到 2）。"""
+    from minimax_h3_prompt.segment_prompts import (
+        _REF_SEGMENT_DISCIPLINES,
+        _REWRITE_INSTRUCTION,
+        _SEGMENT_V2_INSTRUCTION,
+    )
+
+    for name, tpl in (
+        ("首尾帧 v2", _SEGMENT_V2_INSTRUCTION),
+        ("首尾帧回退", _REWRITE_INSTRUCTION),
+        ("多参", _REF_SEGMENT_DISCIPLINES),
+    ):
+        assert tpl.count(ANAPHORA_DISCIPLINE) == 1, \
+            f"{name} 模板里禁止指代前文的纪律不是恰好一份"
+
+
+def test_all_four_python_write_requests_carry_the_anaphora_discipline():
+    """首尾帧 v2/回退、多参 v2/回退四条请求都含规范纪律句（#315 AC）。
+
+    首尾帧两条此前**根本没有**这条纪律：写段器照抄「如前所述」会被校验器判死，
+    白耗一轮有界重写；多参那两条原来是硬拷贝，现在与真源同一句。
+    """
+    # 首尾帧 v2
+    from minimax_h3_prompt.segment_prompts import build_segment_v2_request
+
+    plans = _v2_plans()
+    frame_v2 = build_segment_v2_request(plans[1], plans, {"shot_table": "x"})
+    # 首尾帧回退（规划失败才走的那条）
+    segments = split_shots_from_prompt(SAMPLE_PROMPT, total_duration=15.0)
+    frame_llm = FakeLLM()
+    rewrite_segment_prompt(segments[1], SAMPLE_PROMPT, frame_llm)
+    # 多参 v2 与规划失败回退
+    ref_all = _ref_plans()
+    ref_plan = ref_all[1]
+    ref_v2 = build_ref_segment_v2_request(ref_plan, ref_all, **_ref_request_kwargs())
+    ref_llm = _ref_v2_llm()
+    rewrite_ref_segment_prompt(
+        base_prompt=_REF_WHOLE_PROMPT, plan=ref_plan, total_segments=2,
+        total_s=22, shot_texts=["[Shot 2] A close-up as she hands the key over."],
+        llm=ref_llm)
+
+    for name, request in (
+        ("首尾帧 v2", frame_v2),
+        ("首尾帧回退", frame_llm.last_request),
+        ("多参 v2", ref_v2),
+        ("多参回退", ref_llm.requests[0]),
+    ):
+        assert ANAPHORA_DISCIPLINE in request, f"{name} 请求缺禁止指代前文的纪律句"
+
+
 def test_wordlist_reaches_both_ref_segment_requests():
     """落笔侧词表（ADR 0007 同一份切片）也进两条多参写段请求——「一套有一套没有」
     正是 ADR 0007 否决的形态，回退路径最晚暴露。"""

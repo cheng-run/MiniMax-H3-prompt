@@ -608,6 +608,18 @@ MUTATIONS: tuple[Mutation, ...] = (
         "占位符不替换＝模型收到 {{...}} 字面量，三族纪律在四条模式里全部缺席（#312）",
     ),
     Mutation(
+        "anaphora_discipline_not_wired_into_write_requests",
+        # 锚点取**不带 import 的**用法行：两条纪律族的票各加一行 import 时会在同一处
+        # 汇合，拿 import 行当锚点会在合票后变成 0 次（锚点失效＝变异已不守任何东西）。
+        "src/minimax_h3_prompt/segment_prompts.py",
+        "  {ANAPHORA_DISCIPLINE}；\n",
+        "\n",
+        ("tests/test_segment_prompts.py::"
+         "test_all_four_python_write_requests_carry_the_anaphora_discipline",),
+        "纪律常量不接线＝首尾帧与多参四条写段请求一起失去这句纪律，"
+        "写段器照抄「如前所述」再被校验器判死，白耗一轮有界重写（#315）",
+    ),
+    Mutation(
         "music_guided_segment_writes_na",
         "src/minimax_h3_prompt/prompts/segment_writer_director.md",
         "**不许写 `N/A`**",

@@ -39,7 +39,9 @@ from .tools.h3_validator import (
     validate_ref,
 )
 from .user_revisions import pending_revisions, render_revision_block
-from .writing_disciplines import CAMERA_SPEED_DISCIPLINE
+# 写作纪律的唯一可写来源（#312 建源、#313–#315 按族收口）：纪律文本只住那边一处，
+# 这里与其他写段路径一样取常量，不再各留一份会各自漂的硬拷贝。
+from .writing_disciplines import ANAPHORA_DISCIPLINE, CAMERA_SPEED_DISCIPLINE
 
 # 镜头块标记：[Shot N]（允许中括号与数字间任意空白）；判据单一来源见 text_patterns。
 # 镜头块首的绝对时间戳：[Shot 2] At 00:03.500, the camera ...
@@ -483,6 +485,7 @@ _REWRITE_INSTRUCTION = f"""你是 H3 视频提示词工程师。把整条视频�
 - integrated_multimodal_description: 只含本段的一个 [Shot 1] 块，英文；正文以 `[Shot 1] ` 标记紧跟字段名开头
   （官方逐字符格式，如 `integrated_multimodal_description: [Shot 1] Live-action, cinematic, a wide shot frames ...`）
   （沿用原 [Shot N] 的画面/运镜/表演描述，**时间戳归零＝相对本段起点计时，绝不得出现绝对片时**，不得虚构原镜头外的内容）；
+  {ANAPHORA_DISCIPLINE}；
   实体外观只写在首次出场的 Shot；不写 GLOBAL_LOCK/BRIDGE_FROM/END_HOOK/时长句；
   **每个 Shot 块必须以 edge-stability 原句收尾**（逐字符照抄，不改写、不译文）：
   `{EDGE_STABILITY_SENTENCE}`
@@ -563,6 +566,7 @@ H3 是执行型模型：你写什么它就做什么，含糊等于失控；把**
 - 你只负责写**本段时间窗发生的事**。分析表/人物设定里出现的、发生在其他时间窗的事件（比如整片第 N1 秒才会破碎的窗户、第 N2 秒的转折动作），**本段一个字都不能出现**
 - **本段是一个完整的动作单元**：本段的动作必须在**本段时长内落定**（做完并停在该有的姿态上），
   不许做到一半就收尾留给下一段（请求若给出本段末态声明，正文结束时的画面必须达到它）
+- {ANAPHORA_DISCIPLINE}
 - 违反这条 = 本段作废
 
 ## 结构（严格官方 base-en.txt 格式，全部英文）
@@ -1181,7 +1185,7 @@ H3 是执行型模型：你写什么它就做什么，含糊等于失控。要�
 - 产出的是「整片 N 秒中的第 [start-end] 秒」这一段自己的独立提示词
 - 正文时间基相对**本段起点**（00:00.000＝本段第一帧），取值落在 `[0, 本段时长)`；绝对片时严禁写进时间戳
 - {FUTURE_EVENTS_DISCIPLINE}——本段时间窗之外的事件出现即本段作废
-- **禁止指代前文的措辞**（as mentioned before / as described earlier / the previous segment / 如前所述 等）：每段是独立生成，**模型无跨段记忆**，此类措辞是无效信息；被指代的内容要么改写成本段自足的表述，要么不写
+- {ANAPHORA_DISCIPLINE}
 
 ## 机位速度
 - {CAMERA_SPEED_DISCIPLINE}
