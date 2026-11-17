@@ -12,8 +12,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-# 2026-11-02 抽出 wizard_display.py 之后的基线（原 6408 行）。
-_BASELINE_LINES = 6267
+# 2026-11-17 抽出 wizard_tailframe.py 之后的基线（#305，原 6267，留 1 行余量）。
+_BASELINE_LINES = 6015
 
 
 def test_wizard_does_not_grow():

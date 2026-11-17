@@ -4,10 +4,10 @@
 引导段里「本段起点」＝上一段终点，两种取法等价；`camera_cut` 段起点在别处，
 必须取用户挂在该段**首帧槽**的那张图。
 
-缝：`ui.wizard._write_director_tailframe` 传给 `write_tailframe_prompts` 的
+缝：`ui.wizard_tailframe.write_director_tailframe` 传给 `write_tailframe_prompts` 的
 ``start_image``——这正是写词模型看到的参考图，外部可观察（落盘文件与模型请求都从它来）。
 
-变异检验：把 `_write_director_tailframe` 改回「只认上一段终点图」→ 第一条用例红。
+变异检验：把 `write_director_tailframe` 改回「只认上一段终点图」→ 第一条用例红。
 """
 from __future__ import annotations
 
@@ -15,6 +15,13 @@ from pathlib import Path
 
 import pytest
 
+
+def _no_confirm(text: str, default: bool = True) -> bool:
+    raise AssertionError(f"不该问「{text}」")
+
+
+def _no_ask(question: str) -> str:
+    raise AssertionError(f"不该问路径：{question}")
 
 
 def _segment(index, segment_type, start, end, declared, export, guided, give_images=()):
@@ -69,7 +76,7 @@ def _capture(monkeypatch):
 
 def test_camera_cut_tailframe_uses_its_own_first_image(tmp_path, monkeypatch):
     from minimax_h3_prompt.director import ledger
-    from minimax_h3_prompt.ui import wizard
+    from minimax_h3_prompt.ui import wizard_tailframe
 
     plan = _plan()
     segment = plan.segments[1]  # camera_cut
@@ -84,12 +91,13 @@ def test_camera_cut_tailframe_uses_its_own_first_image(tmp_path, monkeypatch):
         asked.append(question)
         return str(cut_first)
 
-    monkeypatch.setattr(wizard, "_prompt", fake_prompt)
     monkeypatch.setattr(
         ledger, "passed_director_rows", lambda directory: {1: {"end_image": str(prev_end)}})
     recorded = _capture(monkeypatch)
 
-    ok = wizard._write_director_tailframe(plan, segment, _session(tmp_path), llm=object())
+    ok = wizard_tailframe.write_director_tailframe(
+        plan, segment, _session(tmp_path), llm=object(),
+        ask=fake_prompt, confirm=_no_confirm)
 
     assert ok is True
     assert any("首帧" in q for q in asked), "切镜段没有问本段首帧路径"
@@ -100,7 +108,7 @@ def test_camera_cut_tailframe_uses_its_own_first_image(tmp_path, monkeypatch):
 def test_camera_cut_first_image_path_is_required_and_reasks(tmp_path, monkeypatch):
     """#149：切镜首帧路径必填——空输入讲清后果后重问，不退回上一段终点图。"""
     from minimax_h3_prompt.director import ledger
-    from minimax_h3_prompt.ui import wizard
+    from minimax_h3_prompt.ui import wizard_tailframe
 
     plan = _plan()
     segment = plan.segments[1]
@@ -116,13 +124,13 @@ def test_camera_cut_first_image_path_is_required_and_reasks(tmp_path, monkeypatc
         asked.append(question)
         return answers.pop(0)
 
-    monkeypatch.setattr(wizard, "_prompt", fake_prompt)
     monkeypatch.setattr(
         ledger, "passed_director_rows", lambda directory: {1: {"end_image": str(prev_end)}})
     recorded = _capture(monkeypatch)
 
-    assert wizard._write_director_tailframe(
-        plan, segment, _session(tmp_path), llm=object()) is True
+    assert wizard_tailframe.write_director_tailframe(
+        plan, segment, _session(tmp_path), llm=object(),
+        ask=fake_prompt, confirm=_no_confirm) is True
 
     assert len(asked) == 2, "空输入没有重问"
     assert recorded["start_image"] == cut_first, "重问后仍没把本段首帧交给写词"
@@ -130,7 +138,7 @@ def test_camera_cut_first_image_path_is_required_and_reasks(tmp_path, monkeypatc
 
 def test_guided_segment_keeps_using_the_previous_end_image(tmp_path, monkeypatch):
     from minimax_h3_prompt.director import ledger
-    from minimax_h3_prompt.ui import wizard
+    from minimax_h3_prompt.ui import wizard_tailframe
 
     plan = _plan()
     segment = plan.segments[2]  # ending：引导段，起点＝上一段终点
@@ -143,12 +151,13 @@ def test_guided_segment_keeps_using_the_previous_end_image(tmp_path, monkeypatch
         asked.append(question)
         return ""
 
-    monkeypatch.setattr(wizard, "_prompt_optional_image", fake_prompt)
     monkeypatch.setattr(
         ledger, "passed_director_rows", lambda directory: {2: {"end_image": str(prev_end)}})
     recorded = _capture(monkeypatch)
 
-    ok = wizard._write_director_tailframe(plan, segment, _session(tmp_path), llm=object())
+    ok = wizard_tailframe.write_director_tailframe(
+        plan, segment, _session(tmp_path), llm=object(),
+        ask=fake_prompt, confirm=_no_confirm)
 
     assert ok is True
     assert not any("首帧" in q for q in asked), "引导段不该问本段首帧"
@@ -160,7 +169,7 @@ def test_ending_prefers_the_film_end_still_and_skips_the_tailframe_word(
     """#149：盘上有全片尾帧时，ending 直接挂它——不再产出尾帧词，旧词注明不采用。"""
     from minimax_h3_prompt.director import tailframe
     from minimax_h3_prompt.director.tailframe import tailframe_path
-    from minimax_h3_prompt.ui import wizard
+    from minimax_h3_prompt.ui import wizard_tailframe
 
     plan = _plan()
     ending = plan.segments[2]
@@ -177,8 +186,9 @@ def test_ending_prefers_the_film_end_still_and_skips_the_tailframe_word(
 
     monkeypatch.setattr(tailframe, "write_tailframe_prompts", fail_write)
 
-    assert wizard._write_director_tailframe(
-        plan, ending, _session(tmp_path), llm=object()) is True
+    assert wizard_tailframe.write_director_tailframe(
+        plan, ending, _session(tmp_path), llm=object(),
+        ask=_no_ask, confirm=_no_confirm) is True
 
     out = capsys.readouterr().out
     assert "全片尾帧" in out and str(film_end) in out
@@ -189,7 +199,7 @@ def test_ending_prefers_the_film_end_still_and_skips_the_tailframe_word(
 def test_ending_without_film_end_still_writes_the_tailframe_word(tmp_path, monkeypatch):
     """没有全片尾帧时才走尾帧词——film-end 优先不能把正常路径也跳掉。"""
     from minimax_h3_prompt.director import ledger
-    from minimax_h3_prompt.ui import wizard
+    from minimax_h3_prompt.ui import wizard_tailframe
 
     plan = _plan()
     ending = plan.segments[2]
@@ -197,11 +207,11 @@ def test_ending_without_film_end_still_writes_the_tailframe_word(tmp_path, monke
     prev_end.write_bytes(b"end")
     monkeypatch.setattr(ledger, "passed_director_rows",
                         lambda directory: {2: {"end_image": str(prev_end)}})
-    monkeypatch.setattr(wizard, "_prompt_optional_image", lambda question: "")
     recorded = _capture(monkeypatch)
 
-    assert wizard._write_director_tailframe(
-        plan, ending, _session(tmp_path), llm=object()) is True
+    assert wizard_tailframe.write_director_tailframe(
+        plan, ending, _session(tmp_path), llm=object(),
+        ask=lambda question: "", confirm=_no_confirm) is True
     assert recorded["start_image"] == prev_end
 
 
@@ -222,7 +232,7 @@ def test_firstframe_written_by_another_model_warns_and_keeps_by_default(
         tmp_path, monkeypatch, capsys):
     from minimax_h3_prompt import image_config
     from minimax_h3_prompt.director import firstframe
-    from minimax_h3_prompt.ui import wizard
+    from minimax_h3_prompt.ui import wizard_tailframe
 
     plan = _plan()
     segment = plan.segments[1]
@@ -237,13 +247,12 @@ def test_firstframe_written_by_another_model_warns_and_keeps_by_default(
         asked.append((text, default))
         return False
 
-    monkeypatch.setattr(wizard, "_confirm", fake_confirm)
     monkeypatch.setattr(
         firstframe, "write_firstframe_prompt",
         lambda *args, **kwargs: pytest.fail("默认 N 时不该重写段首帧词"))
 
-    text = wizard._cut_first_frame_prompt(
-        plan, segment, _session(tmp_path), llm=object())
+    text = wizard_tailframe.cut_first_frame_prompt(
+        plan, segment, _session(tmp_path), llm=object(), confirm=fake_confirm)
 
     assert text.strip() == "旧的段首帧词", "默认 N 必须沿用旧词"
     out = capsys.readouterr().out
@@ -254,7 +263,7 @@ def test_firstframe_written_by_another_model_warns_and_keeps_by_default(
 def test_confirming_the_rewrite_regenerates_the_firstframe_word(tmp_path, monkeypatch):
     from minimax_h3_prompt import image_config
     from minimax_h3_prompt.director import firstframe
-    from minimax_h3_prompt.ui import wizard
+    from minimax_h3_prompt.ui import wizard_tailframe
 
     plan = _plan()
     segment = plan.segments[1]
@@ -263,7 +272,6 @@ def test_confirming_the_rewrite_regenerates_the_firstframe_word(tmp_path, monkey
     path.write_text("旧的段首帧词", encoding="utf-8")
     _plant_meta(path, model="qwen")
     monkeypatch.setattr(image_config, "load_frame_image_model", lambda: "moss")
-    monkeypatch.setattr(wizard, "_confirm", lambda text, default=True: True)
     calls: list[str] = []
 
     def fake_write(*args, **kwargs):
@@ -272,8 +280,9 @@ def test_confirming_the_rewrite_regenerates_the_firstframe_word(tmp_path, monkey
 
     monkeypatch.setattr(firstframe, "write_firstframe_prompt", fake_write)
 
-    text = wizard._cut_first_frame_prompt(
-        plan, segment, _session(tmp_path), llm=object())
+    text = wizard_tailframe.cut_first_frame_prompt(
+        plan, segment, _session(tmp_path), llm=object(),
+        confirm=lambda text, default=True: True)
 
     assert text == "新的段首帧词"
     assert calls == ["rewritten"]
@@ -283,7 +292,7 @@ def test_new_firstframe_word_prints_the_frame_model(tmp_path, monkeypatch, capsy
     """#144 C / US18：新写出来的段首帧词在终端标明按哪一档出词。"""
     from minimax_h3_prompt import image_config
     from minimax_h3_prompt.director import firstframe
-    from minimax_h3_prompt.ui import wizard
+    from minimax_h3_prompt.ui import wizard_tailframe
 
     plan = _plan()
     segment = plan.segments[1]
@@ -292,7 +301,8 @@ def test_new_firstframe_word_prints_the_frame_model(tmp_path, monkeypatch, capsy
         firstframe, "write_firstframe_prompt",
         lambda *args, **kwargs: "A rider steps into the new scene.")
 
-    wizard._cut_first_frame_prompt(plan, segment, _session(tmp_path), llm=object())
+    wizard_tailframe.cut_first_frame_prompt(
+        plan, segment, _session(tmp_path), llm=object(), confirm=_no_confirm)
 
     out = capsys.readouterr().out
     assert "本次按 MOSS-Image（moss）档出词" in out, "新段首帧词没打印出图档名"
@@ -305,7 +315,7 @@ def test_reused_firstframe_word_prints_its_recorded_model(tmp_path, monkeypatch,
     """
     from minimax_h3_prompt import image_config
     from minimax_h3_prompt.director import firstframe
-    from minimax_h3_prompt.ui import wizard
+    from minimax_h3_prompt.ui import wizard_tailframe
 
     plan = _plan()
     segment = plan.segments[1]
@@ -314,9 +324,10 @@ def test_reused_firstframe_word_prints_its_recorded_model(tmp_path, monkeypatch,
     path.write_text("旧的段首帧词", encoding="utf-8")
     _plant_meta(path, model="qwen")
     monkeypatch.setattr(image_config, "load_frame_image_model", lambda: "moss")
-    monkeypatch.setattr(wizard, "_confirm", lambda text, default=True: False)
 
-    wizard._cut_first_frame_prompt(plan, segment, _session(tmp_path), llm=object())
+    wizard_tailframe.cut_first_frame_prompt(
+        plan, segment, _session(tmp_path), llm=object(),
+        confirm=lambda text, default=True: False)
 
     out = capsys.readouterr().out
     assert "本次按 Qwen-Image 2.1（qwen）档出词" in out, \
@@ -328,7 +339,7 @@ def test_tailframe_written_by_another_model_warns_and_keeps_by_default(
         tmp_path, monkeypatch, capsys):
     from minimax_h3_prompt import image_config
     from minimax_h3_prompt.director import tailframe
-    from minimax_h3_prompt.ui import wizard
+    from minimax_h3_prompt.ui import wizard_tailframe
 
     plan = _plan()
     ending = plan.segments[2]
@@ -345,13 +356,13 @@ def test_tailframe_written_by_another_model_warns_and_keeps_by_default(
         asked.append((text, default))
         return False
 
-    monkeypatch.setattr(wizard, "_confirm", fake_confirm)
     monkeypatch.setattr(
         tailframe, "write_tailframe_prompts",
         lambda *args, **kwargs: pytest.fail("默认 N 时不该重写尾帧词"))
 
-    assert wizard._write_director_tailframe(
-        plan, ending, _session(tmp_path), llm=object()) is True
+    assert wizard_tailframe.write_director_tailframe(
+        plan, ending, _session(tmp_path), llm=object(),
+        ask=_no_ask, confirm=fake_confirm) is True
 
     out = capsys.readouterr().out
     assert "qwen" in out and "moss" in out
@@ -383,7 +394,7 @@ def test_fresh_tailframe_document_prints_the_frame_model(
         tmp_path, monkeypatch, capsys):
     """#150 AC2：新写出来的尾帧词要在终端标明按哪一档出词。"""
     from minimax_h3_prompt.director import ledger, tailframe
-    from minimax_h3_prompt.ui import wizard
+    from minimax_h3_prompt.ui import wizard_tailframe
 
     plan = _plan()
     ending = plan.segments[2]
@@ -391,13 +402,13 @@ def test_fresh_tailframe_document_prints_the_frame_model(
     prev_end.write_bytes(b"end")
     monkeypatch.setattr(ledger, "passed_director_rows",
                         lambda directory: {2: {"end_image": str(prev_end)}})
-    monkeypatch.setattr(wizard, "_prompt_optional_image", lambda question: "")
     monkeypatch.setattr(
         tailframe, "write_tailframe_prompts",
         lambda *args, **kwargs: [_written_item(tmp_path, model="moss")])
 
-    assert wizard._write_director_tailframe(
-        plan, ending, _session(tmp_path), llm=object()) is True
+    assert wizard_tailframe.write_director_tailframe(
+        plan, ending, _session(tmp_path), llm=object(),
+        ask=lambda question: "", confirm=_no_confirm) is True
 
     out = capsys.readouterr().out
     assert "MOSS-Image" in out and "moss" in out, "新尾帧词没打印出图档名"
@@ -407,7 +418,7 @@ def test_existing_tailframe_document_prints_its_recorded_model(
         tmp_path, monkeypatch, capsys):
     """#150 AC2：沿用盘上旧词时也要打印它**写时**的档名（sidecar 里有）。"""
     from minimax_h3_prompt.director import ledger
-    from minimax_h3_prompt.ui import wizard
+    from minimax_h3_prompt.ui import wizard_tailframe
 
     plan = _plan()
     ending = plan.segments[2]
@@ -416,8 +427,9 @@ def test_existing_tailframe_document_prints_its_recorded_model(
     monkeypatch.setattr(ledger, "passed_director_rows",
                         lambda directory: {2: {"end_image": str(tmp_path / "x.png")}})
 
-    assert wizard._write_director_tailframe(
-        plan, ending, _session(tmp_path), llm=object()) is True
+    assert wizard_tailframe.write_director_tailframe(
+        plan, ending, _session(tmp_path), llm=object(),
+        ask=_no_ask, confirm=lambda text, default=True: False) is True
 
     out = capsys.readouterr().out
     assert "Qwen-Image 2.1" in out and "qwen" in out, \
@@ -433,19 +445,19 @@ def test_camera_cut_first_image_path_is_recorded_in_the_sidecar(tmp_path, monkey
         FIRST_FRAME_IMAGE_FIELD, firstframe_path,
     )
     from minimax_h3_prompt.director.frame_meta import read_frame_meta
-    from minimax_h3_prompt.ui import wizard
+    from minimax_h3_prompt.ui import wizard_tailframe
 
     plan = _plan()
     segment = plan.segments[1]  # camera_cut
     cut_first = tmp_path / "cut-first.png"
     cut_first.write_bytes(b"first")
 
-    monkeypatch.setattr(wizard, "_prompt", lambda question: str(cut_first))
     monkeypatch.setattr(ledger, "passed_director_rows", lambda directory: {})
     _capture(monkeypatch)
 
-    assert wizard._write_director_tailframe(
-        plan, segment, _session(tmp_path), llm=object()) is True
+    assert wizard_tailframe.write_director_tailframe(
+        plan, segment, _session(tmp_path), llm=object(),
+        ask=lambda question: str(cut_first), confirm=_no_confirm) is True
 
     meta = read_frame_meta(firstframe_path(tmp_path, 2))
     assert meta is not None

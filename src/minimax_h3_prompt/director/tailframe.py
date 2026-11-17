@@ -126,7 +126,7 @@ def _reading_instruction(static: bool) -> str:
 # 编号跟**段号**而不是第几个产物：用户是拿「第 3 段的终点画面」去挂导演台的，重编号会挂错槽。
 TAILFRAME_FILENAME = "tailframe-{position:02d}.md"
 # 一段缓存末帧的导出图：``GENxxx/director/frame-KK-last.png``（``KK`` 是**被取帧的那一段**，
-# 即下一段的起点画面）。名字原先只写在 ``ui.wizard._write_director_tailframe`` 里，
+# 即下一段的起点画面）。名字原先只写在 ``ui.wizard_tailframe.write_director_tailframe`` 里，
 # 级联重跑（#106）要按同一个名字删，照抄一份就是两处会各自漂的口径（本条即为此抽出）。
 LAST_FRAME_FILENAME = "frame-{segment:02d}-last.png"
 
