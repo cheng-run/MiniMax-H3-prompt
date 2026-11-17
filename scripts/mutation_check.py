@@ -225,11 +225,9 @@ MUTATIONS: tuple[Mutation, ...] = (
     ),
     Mutation(
         "director_revision_context_not_wired",
-        "src/minimax_h3_prompt/ui/wizard.py",
-        "                revision_context=render_revision_context(state),\n"
-        "                visual_decision=visual_decision_source(state, shot_table),",
-        "                revision_context=\"\",\n"
-        "                visual_decision=visual_decision_source(state, shot_table),",
+        "src/minimax_h3_prompt/ui/wizard_director.py",
+        '        "revision_context": render_revision_context(state),',
+        '        "revision_context": "",',
         ("tests/test_director_prompts.py::"
          "test_wizard_director_flow_passes_revision_context_into_write_requests",),
         "修订块不接线＝用户在对话里提的累积要求到不了导演台写段请求"
