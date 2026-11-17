@@ -102,14 +102,35 @@ def _window_blocks(shot_table: str, start_s: float,
     return selected
 
 
+def window_shot_excerpt(shot_table: str, start_s: float,
+                        end_s: float) -> tuple[str, bool]:
+    """本段窗口覆盖到的镜头原文，以及**是否真的切过**（#301）。
+
+    第二个值供写段请求选措辞：True 表示给的是窗口内切片的镜头，可以说「只取本段
+    窗口内」；False 表示解析不出镜头块或窗口内没有镜头，给的是**整表**——调用方
+    必须如实说明，不能声称「窗口外镜头已省略」。
+
+    「真的切过」按**是否选出了镜头块**判定，而不是按「原文是否变化」：窗口覆盖全片
+    时选中的就是全部镜头，那仍是本段窗口的结论（没有窗口外的镜头可省略），措辞无需
+    回落；原文按块重排空行则会让「变化」这个判据随机抖动。
+    """
+    selected = _window_blocks(shot_table, start_s, end_s)
+    if not selected:
+        return shot_table.strip(), False
+    return "\n\n".join(text for _, _, text in selected), True
+
+
 def shot_excerpt_for_window(shot_table: str, start_s: float, end_s: float) -> str:
     """本段窗口覆盖到的镜头原文（含起点所在那一镜）。
 
     段边界按 17k+5 网格落位，经常**切在某个镜头中间**——起点所在那一镜必须收进来，
     否则首帧词会按下一镜写，画面直接从段中开始。
+
+    节选本身委托 ``window_shot_excerpt``（#301）：写段请求与首帧词共用同一次切片，
+    两处各切一套就会出现「写段说 Shot 2、首帧词写了 Shot 1」。对外行为逐字不变。
     """
-    selected = _window_blocks(shot_table, start_s, end_s)
-    return "\n\n".join(text for _, _, text in selected) if selected else shot_table.strip()
+    return window_shot_excerpt(shot_table, start_s, end_s)[0]
+
 
 
 def window_shot_numbers(shot_table: str, start_s: float,

@@ -60,6 +60,37 @@ def test_excerpt_includes_the_shot_containing_the_segment_start():
     assert "[Shot 3]" not in excerpt
 
 
+def test_window_excerpt_reports_whether_it_really_sliced():
+    """#301：窗口切片要带「是否真的切过」标志，回落整表时标志为假。
+
+    写段请求靠这个标志决定措辞：切成窗口内才可以说「只取本段窗口内」；
+    解析不出镜头块或窗口内没有镜头时给的是整表，请求里必须如实说明。
+    ``shot_excerpt_for_window`` 改为调它、对外行为逐字不变——同一次调用两边的
+    节选原文必须相同。
+    """
+    from minimax_h3_prompt.director.firstframe import (
+        shot_excerpt_for_window,
+        window_shot_excerpt,
+    )
+
+    excerpt, sliced = window_shot_excerpt(_SHOT_TABLE, 3.75, 8.0)
+    assert excerpt == shot_excerpt_for_window(_SHOT_TABLE, 3.75, 8.0), \
+        "同族函数的节选原文漂了：首帧词会跟着变"
+    assert "[Shot 1]" in excerpt and "[Shot 2]" in excerpt
+    assert sliced is True, "窗口切开了镜头块，必须报「真的切过」"
+
+    # 解析不出镜头块：回落整表，标志为假（请求据此改说「整表」）。
+    whole, sliced = window_shot_excerpt("没有镜头块的分镜表", 0.0, 5.0)
+    assert whole == "没有镜头块的分镜表"
+    assert sliced is False
+
+    # 窗口落在所有镜头之前（首镜自带时间戳晚于窗口终点）：选择为空，同样回落整表。
+    late = "**[Shot 1]**\n- 时长与切点：3.0秒；切入 At 00:05.000。\n"
+    whole, sliced = window_shot_excerpt(late, 0.0, 2.0)
+    assert whole == late.strip()
+    assert sliced is False
+
+
 def test_window_shot_numbers_include_the_shot_containing_the_segment_start():
     """#299：窗口镜头号与切片同一个边界口径——起点所在那一镜必须收进来。
 

@@ -236,6 +236,17 @@ MUTATIONS: tuple[Mutation, ...] = (
         "（组装会拼、调用方没传，本仓反复栽的那一处）",
     ),
     Mutation(
+        "director_shot_table_not_sliced",
+        "src/minimax_h3_prompt/director/prompts.py",
+        "    excerpt, sliced = window_shot_excerpt(\n"
+        "        ctx.shot_table, ctx.start_s, ctx.start_s + ctx.duration_s)\n",
+        "    excerpt, sliced = ctx.shot_table, True\n",
+        ("tests/test_director_prompts.py::"
+         "test_shot_table_block_carries_only_the_shots_inside_the_segment_window",),
+        "分镜表不切片＝整张表原样下发，模型要自己找时间窗、窗口外的镜头细节"
+        "串进本段（#301 缺口的原形）",
+    ),
+    Mutation(
         "asset_modes_drop_r2v",
         "src/minimax_h3_prompt/brief_parser.py",
         'DIRECTOR_ASSET_MODES = ("r2v",)',

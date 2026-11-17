@@ -2105,3 +2105,115 @@ def test_wizard_director_flow_passes_revision_context_into_write_requests(
     for request in writes:
         assert _PENDING_REVISION["text"] in request, "待落地的修订没有进写段请求"
         assert _LANDED_REVISION["text"] not in request, "已落地的修订被重复注入"
+
+
+# ---------------------------------------------------------------------------
+# #301 分镜表切片到本段窗口：窗口外镜头不进写段请求，回落整表时措辞如实
+# ---------------------------------------------------------------------------
+
+# 合成表：三个镜头（0s / 3s / 7s 起），每镜一句只在本文出现一次的散文标记。
+_WINDOW_SHOT_TABLE = """# 分镜表
+
+**[Shot 1]**：SHOT-ONE-PROSE 建立地理。
+
+- **时长与切点**：3.0s（首镜，无时间戳）
+
+---
+
+**[Shot 2]**：SHOT-TWO-PROSE 取出物证。
+
+- **时长与切点**：4.0s，At 00:03.000
+
+---
+
+**[Shot 3]**：SHOT-THREE-PROSE 落座。
+
+- **时长与切点**：5.0s，At 00:07.000
+"""
+
+# 真实会话 d69f2cfd/GEN002 的五镜各一句散文（镜号外的独立定位，不靠实现切块）。
+_GEN002_SHOT_PROSE = {
+    1: "堤的尽头没有人",
+    2: "这一镜揭示全片的物证",
+    3: "变成留在这里的人",
+    4: "身体先承认自己留下来了",
+    5: "她自己把这件事按了下去",
+}
+# 窗口集合是测试侧按 shot-table.md 的时间戳（0/3/7/10/13s）与 plan.json 的段起止
+# （0–5.875 / 5.875–12.25 / 12.25–17.917）算出的字面量，不是拿被测函数回读。
+_GEN002_EXPECTED_SHOTS = {1: (1, 2), 2: (2, 3, 4), 3: (4, 5)}
+
+
+def test_shot_table_block_carries_only_the_shots_inside_the_segment_window():
+    """#301 AC1：请求只带本段窗口覆盖到的镜头原文，窗口外的一字不进。
+
+    段 2（4.458s 起 4.458s）落在 Shot 2 与 Shot 3 内；Shot 1 已结束、
+    Shot 4 还没开始。措辞取自代码里的切片常量——改字面即报红。
+    """
+    from minimax_h3_prompt.director.prompts import (
+        SHOT_TABLE_FULL_WORDING, SHOT_TABLE_SLICE_WORDING, build_segment_request)
+
+    plan = _fl2v_plan("opening", "continue")
+    segment = plan.segments[1]
+    start = segment.start_frame / 24
+    window = segment.export_frames / 24
+    request = build_segment_request(plan, segment, shot_table=_WINDOW_SHOT_TABLE)
+
+    assert "SHOT-TWO-PROSE" in request and "SHOT-THREE-PROSE" in request
+    assert "SHOT-ONE-PROSE" not in request, "窗口外的 Shot 1 原文进了请求"
+    assert SHOT_TABLE_SLICE_WORDING.format(start=start, window=window) in request
+    assert SHOT_TABLE_FULL_WORDING.format(start=start, window=window) not in request, \
+        "切片成功时不该说「整表」"
+
+
+def test_gen002_requests_only_carry_the_shots_of_each_segment_window():
+    """#301 AC1（真实样本）：段 1 不含 Shot 4/5，其余各段只含自己窗口内的镜头。
+
+    起点所在那一镜必在其中（段 2 起点 5.875s 落在 Shot 2 中间、段 3 起点 12.25s
+    落在 Shot 4 中间）——段边界切在镜头中间时那一镜整块收进来，不能从下一镜起。
+    """
+    from conftest import session_samples_dir
+    from minimax_h3_prompt.director.planning import plan_path, read_plan_json
+    from minimax_h3_prompt.director.prompts import build_segment_request
+
+    gen = (session_samples_dir()
+           / "一个日本女高中生-傍晚放学之后-背着书包-d69f2cfd" / "GEN002")
+    if not (gen / "shot-table.md").is_file():
+        pytest.skip(f"真实会话样本不存在：{gen}")
+    shot_table = (gen / "shot-table.md").read_text(encoding="utf-8")
+    plan = read_plan_json(plan_path(gen))
+    for number, prose in _GEN002_SHOT_PROSE.items():
+        assert prose in shot_table, f"样本里找不到 Shot {number} 的定位散文：{prose}"
+
+    for segment in plan.segments:
+        request = build_segment_request(plan, segment, shot_table=shot_table)
+        inside = _GEN002_EXPECTED_SHOTS[segment.index]
+        for number, prose in _GEN002_SHOT_PROSE.items():
+            if number in inside:
+                assert prose in request, \
+                    f"第 {segment.index} 段漏了窗口内的 Shot {number}"
+            else:
+                assert prose not in request, \
+                    f"第 {segment.index} 段带进了窗口外的 Shot {number}"
+
+
+def test_shot_table_falls_back_to_the_whole_table_with_honest_wording():
+    """#301 AC3（S2）：解析不出镜头块时回落整表，措辞如实说明给的是整表。
+
+    两种措辞都从代码常量派生：切片成功说「只取本段窗口内」，回落必须出现
+    「整表」，且不得出现切片那句（那会声称窗口外镜头已省略，与实际不符）。
+    """
+    from minimax_h3_prompt.director.prompts import (
+        SHOT_TABLE_FULL_WORDING, SHOT_TABLE_SLICE_WORDING, build_segment_request)
+
+    plan = _fl2v_plan("opening", "continue")
+    segment = plan.segments[1]
+    start = segment.start_frame / 24
+    window = segment.export_frames / 24
+    unparsable = "# 分镜表\n\n（这份表没有镜头块标记，整段是一段散文。）\n"
+    request = build_segment_request(plan, segment, shot_table=unparsable)
+
+    assert unparsable.strip() in request, "回落时没有给整表"
+    assert SHOT_TABLE_FULL_WORDING.format(start=start, window=window) in request
+    assert SHOT_TABLE_SLICE_WORDING.format(start=start, window=window) not in request
+    assert "整表" in request, "回落措辞没有如实说明给的是整表"

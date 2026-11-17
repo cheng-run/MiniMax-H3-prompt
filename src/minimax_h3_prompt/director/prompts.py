@@ -81,7 +81,7 @@ from .frames import (
 )
 # 窗口镜头号与分镜表切片共用同一份镜头块解析（#299）：块首的「本段只取 Shot N」
 # 与分镜表节选必须落在同一个边界上，两处各切一套就会出现自相矛盾的请求。
-from .firstframe import window_shot_numbers
+from .firstframe import window_shot_excerpt, window_shot_numbers
 # 产物目录名只有 ``planning.DIRECTOR_DIRNAME`` 一处声明（复审 H1）：段文件、段表、
 # 尾帧与导演包必须落在**同一个** ``GENxxx/director/`` 下，各写一份字面量就是几条
 # 会各自漂的路径口径（某一条改了，另一条只会表现为「读不到/缺文件」）。
@@ -842,14 +842,30 @@ def _resolve_visual_decision(source: VisualDecisionSource,
     return source(segment) if callable(source) else source
 
 
+# 分镜表块的两种措辞（#301）：切片成功 / 回落整表。请求里给的是哪一份必须与
+# 实际下发的内容一致——回落时若仍说「只取本段窗口内」，模型会以为窗口外的镜头
+# 已被省略，转而按剧情概述补写。测试从这两个常量派生形态（改字面即报红）。
+SHOT_TABLE_SLICE_WORDING = (
+    "分镜表（**只取本段 {start:.3f}s 起的 {window:.3f}s 窗口内**的镜头；"
+    "其他镜头一个字都不能写进正文）：")
+SHOT_TABLE_FULL_WORDING = (
+    "分镜表（**整表**：本段窗口没有切分出镜头块，故全文给出；"
+    "正文只写本段 {start:.3f}s 起的 {window:.3f}s 窗口内的镜头，"
+    "窗口外的镜头一个字都不能写进正文）：")
+
+
 def _request_shot_table_block(ctx: _SegmentRequestContext) -> str:
-    shots_block = (
-        f"分镜表（**只取本段 {ctx.start_s:.3f}s 起的 {ctx.duration_s:.3f}s 窗口内**的镜头；"
-        f"其他镜头一个字都不能写进正文）：\n{ctx.shot_table}"
-        if str(ctx.shot_table).strip() else
-        "（缺分镜表原文：按本段剧情概述与 end_hook（切点）写，不得虚构窗外事件）"
-    )
-    return f"\n{shots_block}\n"
+    if not str(ctx.shot_table).strip():
+        return ("\n（缺分镜表原文：按本段剧情概述与 end_hook（切点）写，"
+                "不得虚构窗外事件）\n")
+    # 窗口与画面决策块的窗口镜头号同一份解析（``firstframe``）：写段只看到本段
+    # 窗口覆盖到的镜头原文，模型不必自己在整张表里找时间窗，窗口外的镜头细节也
+    # 不会串进这一段（#301）。
+    excerpt, sliced = window_shot_excerpt(
+        ctx.shot_table, ctx.start_s, ctx.start_s + ctx.duration_s)
+    wording = SHOT_TABLE_SLICE_WORDING if sliced else SHOT_TABLE_FULL_WORDING
+    return f"\n{wording.format(start=ctx.start_s, window=ctx.duration_s)}\n{excerpt}\n"
+
 
 
 def _request_definitions_block(ctx: _SegmentRequestContext) -> str:
