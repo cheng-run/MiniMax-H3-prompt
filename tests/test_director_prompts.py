@@ -1776,6 +1776,22 @@ def test_segment_request_leaves_no_trace_when_the_context_blocks_are_empty():
     assert blank == default, "空白值被当成有内容注入了空块/多出空行"
 
 
+def test_context_block_returns_nothing_for_blank_input():
+    """空值契约单独守（#297 复审）：纯函数层断言，不靠「两条同路径相等」。
+
+    上面那条只比较「默认参数」与「显式传空」两份请求——两条都走同一个渲染器，
+    把块改成**无条件返回**（空值也吐出 ``"\\n\\n"``）时两者照样相等，守卫会静默
+    变摆设。这里直接咬住外部可观察的字节：空串与纯空白不产生块，有内容才带前后
+    换行（spec S2 的空值口径）。
+    """
+    from minimax_h3_prompt.director.prompts import _context_block
+
+    assert _context_block("") == "", "空串被渲染成了块"
+    assert _context_block("   ") == "", "纯空白被渲染成了块"
+    assert _context_block("\n \t\n") == "", "多行空白被渲染成了块"
+    assert _context_block("X") == "\nX\n", "有内容的块没有前后换行"
+
+
 def test_segment_request_places_revision_after_images_and_before_story():
     """修订块的位置（#297 顺序约束）：本段给图/起点之后、剧情概述之前。"""
     from minimax_h3_prompt.director.prompts import build_segment_request

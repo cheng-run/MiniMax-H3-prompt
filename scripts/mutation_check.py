@@ -250,10 +250,10 @@ MUTATIONS: tuple[Mutation, ...] = (
         "director_context_block_empty_leaks_blank_lines",
         "src/minimax_h3_prompt/director/prompts.py",
         '    return f"\\n{body}\\n" if body else ""',
-        '    return f"\\n{body}\\n" if value else ""',
+        '    return f"\\n{body}\\n"',
         ("tests/test_director_prompts.py::"
-         "test_segment_request_leaves_no_trace_when_the_context_blocks_are_empty",),
-        "空值契约失效＝调用方渲染出的纯空白被当成有内容，请求里多出空块与空行"
+         "test_context_block_returns_nothing_for_blank_input",),
+        "空值契约失效＝空串/纯空白也渲染成块，请求里多出空块与空行"
         "（请求字节随阶段 1 有没有产物漂，#298 AC2 消失）",
     ),
     Mutation(
