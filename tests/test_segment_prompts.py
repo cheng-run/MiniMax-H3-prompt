@@ -1510,14 +1510,18 @@ def test_camera_speed_guidance_reaches_all_four_segment_requests():
     只断言模板常量是「被测物自身的单测」——常量对了、请求组装时漏掉，照样不报红。
     本仓已多次吃过「规则在、接线不在」，所以这里在四个调用点直接钉：
     首尾帧 v2 / 首尾帧回退 / 多参 v2 / 多参回退。
+
+    #313 起 marker 用真源常量全文：只钉「机位速度按剧情选」这几个字的话，各处仍可
+    各留一份缩水拷贝而不报红——单源化的验收物就是「出站请求里是同一整句」。
     """
     from minimax_h3_prompt.segment_prompts import (
         build_segment_v2_request,
         rewrite_ref_segment_prompt,
         rewrite_segment_prompt,
     )
+    from minimax_h3_prompt.writing_disciplines import CAMERA_SPEED_DISCIPLINE
 
-    marker = "机位速度按剧情选"
+    marker = CAMERA_SPEED_DISCIPLINE
 
     plans = _v2_plans()
     base_v2 = build_segment_v2_request(plans[1], plans, {"shot_table": "x"})
@@ -1539,6 +1543,21 @@ def test_camera_speed_guidance_reaches_all_four_segment_requests():
         llm=ref_llm,
     )
     assert marker in ref_llm.requests[-1], "多参回退请求没带上机位速度指引"
+
+
+def test_director_write_modes_carry_the_single_camera_speed_discipline():
+    """导演台四种写段模式的指令都携带真源全文，旧措辞「不要把「静态」当默认」绝迹（#313）。
+
+    导演台侧由占位符取值（#312），这里守的是**替换后的出站文本**：真源一改，四种模式
+    同时生效；旧措辞若从某处漏回来，说明还有第二份拷贝。
+    """
+    from minimax_h3_prompt.director.prompts import load_instruction
+    from minimax_h3_prompt.writing_disciplines import CAMERA_SPEED_DISCIPLINE
+
+    for mode in ("t2v", "i2v", "fl2v", "r2v"):
+        text = load_instruction(mode)
+        assert CAMERA_SPEED_DISCIPLINE in text, f"{mode} 缺机位速度真源全文"
+        assert "不要把「静态」当默认" not in text, f"{mode} 仍带旧措辞"
 
 
 def test_future_events_discipline_reaches_all_four_segment_requests():

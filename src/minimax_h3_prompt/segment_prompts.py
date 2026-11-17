@@ -39,6 +39,7 @@ from .tools.h3_validator import (
     validate_ref,
 )
 from .user_revisions import pending_revisions, render_revision_block
+from .writing_disciplines import CAMERA_SPEED_DISCIPLINE
 
 # 镜头块标记：[Shot N]（允许中括号与数字间任意空白）；判据单一来源见 text_patterns。
 # 镜头块首的绝对时间戳：[Shot 2] At 00:03.500, the camera ...
@@ -486,8 +487,7 @@ _REWRITE_INSTRUCTION = f"""你是 H3 视频提示词工程师。把整条视频�
   **每个 Shot 块必须以 edge-stability 原句收尾**（逐字符照抄，不改写、不译文）：
   `{EDGE_STABILITY_SENTENCE}`
   要求它的理由就是本流程的桥接帧链——抽出的尾帧要保持轮廓锐利，留给下一段当首帧参考；
-  **机位速度按剧情选**：静场、克制段落才用 `Static Shot`；有动作的段写完整的「运动类型 + 幅度 +
-  速度」自然句（词表见下），不要把「静态/慢速中景」当默认；
+  {CAMERA_SPEED_DISCIPLINE}
   **时间窗外剧情禁区**：{FUTURE_EVENTS_DISCIPLINE}——本段时间窗之外的事件出现即本段作废；
 - overall_soundscape: **为本段重写**（不是从整条裁切，按段重写）：1-4 句 English 连续段落，
   描述本段时间窗内的环境声与动作声，无时间戳（官方 §4.6）；
@@ -582,8 +582,7 @@ H3 是执行型模型：你写什么它就做什么，含糊等于失控；把**
      它必须是**该块的最后一句**；**多镜段里每个 `[Shot N]` 块各加一次**，不是只在段尾加一次，
      逐字符照抄、不改写不译文（本仓硬要求；理由见下）：
      `{EDGE_STABILITY_SENTENCE}`
-   - **机位速度按剧情选**：静场、克制段落才用 `Static Shot`；有动作的段写完整的「运动类型 + 幅度 +
-     速度」自然句（词表见下），不要把「静态/慢速中景」当默认——全片默认静态会让动作被摊平、成片像慢放
+   - {CAMERA_SPEED_DISCIPLINE}
 2. `overall_soundscape:` **为本段重写**英文摘要句（官方 §4.6）：1-4 句 English 连续段落，描述本段的环境声与动作声；**无时间戳**。
 3. `non_diegetic_music:` **为本段重写**英文摘要句（官方 §4.7）：1-3 句 English，写观众能听到、角色听不到的配乐（乐器/速度/节奏）；无声时只写 `N/A`；**无时间戳**。
 
@@ -1185,7 +1184,7 @@ H3 是执行型模型：你写什么它就做什么，含糊等于失控。要�
 - **禁止指代前文的措辞**（as mentioned before / as described earlier / the previous segment / 如前所述 等）：每段是独立生成，**模型无跨段记忆**，此类措辞是无效信息；被指代的内容要么改写成本段自足的表述，要么不写
 
 ## 机位速度
-- **机位速度按剧情选**：静场、克制段落才用 `Static Shot`；有动作的段写完整的「运动类型 + 幅度 + 速度」自然句，不要把「静态/慢速中景」当默认——全片默认静态会把动作摊平，成片像慢放
+- {CAMERA_SPEED_DISCIPLINE}
 
 ## 结构（严格官方 ref-en.txt 六段式，全部英文）
 1. `subject_definitions:` **原样复制**请求给定的定义块，一字不改（定义性段落逐段重复；标签语义必须与给定一致，不得新造标签）
