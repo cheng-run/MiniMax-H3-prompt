@@ -247,6 +247,53 @@ MUTATIONS: tuple[Mutation, ...] = (
         "串进本段（#301 缺口的原形）",
     ),
     Mutation(
+        "director_context_block_empty_leaks_blank_lines",
+        "src/minimax_h3_prompt/director/prompts.py",
+        '    return f"\\n{body}\\n" if body else ""',
+        '    return f"\\n{body}\\n" if value else ""',
+        ("tests/test_director_prompts.py::"
+         "test_segment_request_leaves_no_trace_when_the_context_blocks_are_empty",),
+        "空值契约失效＝调用方渲染出的纯空白被当成有内容，请求里多出空块与空行"
+        "（请求字节随阶段 1 有没有产物漂，#298 AC2 消失）",
+    ),
+    Mutation(
+        "director_request_block_order_swapped",
+        "src/minimax_h3_prompt/director/prompts.py",
+        "    _request_revision_block,\n"
+        "    _request_film_end_block,\n"
+        "    _request_story_block,\n",
+        "    _request_film_end_block,\n"
+        "    _request_story_block,\n"
+        "    _request_revision_block,\n",
+        ("tests/test_director_prompts.py::"
+         "test_segment_request_places_revision_after_images_and_before_story",),
+        "块的唯一顺序真源被改坏＝用户累积修订跑到剧情概述之后，"
+        "「越靠近产出的越靠后」这条顺序约束消失（#297 AC 的顺序断言变摆设）",
+    ),
+    Mutation(
+        "director_visual_decision_not_threaded",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "                revision_context=context.revision_context,\n"
+        "                visual_decision=context.visual_decision,\n",
+        "                revision_context=context.revision_context,\n"
+        '                visual_decision="",\n',
+        ("tests/test_api_director_planning.py::"
+         "test_director_write_context_threads_the_two_request_blocks",),
+        "写段出口不取上下文的画面决策块＝阶段 1 的镜头评审锁定与画面细化"
+        "回不到续跑补写的请求（「会拼、没传」本仓反复栽的那一处）",
+    ),
+    Mutation(
+        "director_visual_decision_ignores_window_shots",
+        "src/minimax_h3_prompt/director/prompts.py",
+        "    return lambda segment: _visual_decision_block_for_request(\n"
+        "        state, window_shot_numbers(shot_table, segment.start_s, segment.end_s))\n",
+        "    return lambda segment: _visual_decision_block_for_request(state)\n",
+        ("tests/test_director_prompts.py::"
+         "test_visual_decision_source_renders_the_block_per_segment_window",),
+        "不喂本段窗口镜头号＝块首纪律退回「本段时间窗内的镜头」，"
+        "请求里不再点名本段该写哪几镜（#299 的按段约束消失）",
+    ),
+    Mutation(
         "asset_modes_drop_r2v",
         "src/minimax_h3_prompt/brief_parser.py",
         'DIRECTOR_ASSET_MODES = ("r2v",)',
