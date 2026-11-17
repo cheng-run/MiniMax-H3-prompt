@@ -224,6 +224,18 @@ MUTATIONS: tuple[Mutation, ...] = (
         "（#297 缺口的原形：模型只剩分镜表摘要）",
     ),
     Mutation(
+        "director_revision_context_not_wired",
+        "src/minimax_h3_prompt/ui/wizard.py",
+        "                revision_context=render_revision_context(state),\n"
+        "                visual_decision=visual_decision_source(state, shot_table),",
+        "                revision_context=\"\",\n"
+        "                visual_decision=visual_decision_source(state, shot_table),",
+        ("tests/test_director_prompts.py::"
+         "test_wizard_director_flow_passes_revision_context_into_write_requests",),
+        "修订块不接线＝用户在对话里提的累积要求到不了导演台写段请求"
+        "（组装会拼、调用方没传，本仓反复栽的那一处）",
+    ),
+    Mutation(
         "asset_modes_drop_r2v",
         "src/minimax_h3_prompt/brief_parser.py",
         'DIRECTOR_ASSET_MODES = ("r2v",)',

@@ -2395,3 +2395,58 @@ def test_rewrite_round_passes_visual_decision_from_this_sessions_state(
     assert VISUAL_DECISION_HEADER in request, "改词出口漏传画面决策块"
     assert "身后侧" in request, "画面细化没有进改词请求（空块或错源）"
     assert "本段只取 Shot 1 的内容" in request, "改词的窗口镜头号不对"
+
+
+def test_rewrite_round_passes_revision_context_from_this_sessions_state(
+        tmp_path, monkeypatch):
+    """#300 AC1：按 e 的改词出口拿到**与首写同源**的待落地修订块。
+
+    改词若漏传，按 e 改一次就把用户在对话里提的要求改丢。断言模型收到的出站请求
+    （``_RewritingLLM`` 记录器），标题从共享常量派生；已落地的设定级修订不再叠加。
+    """
+    from minimax_h3_prompt.director.planning import plan_path, write_plan_json
+    from minimax_h3_prompt.director.prompts import segment_path
+    from minimax_h3_prompt.segment_prompts import REVISION_CONTEXT_HEADER
+    from minimax_h3_prompt.session_store import (
+        STATUS_DIRECTOR_SEGMENTS_RUNNING, SessionState,
+    )
+    from minimax_h3_prompt.ui import wizard
+
+    directory = tmp_path / "GEN001"
+    plan = _plan_types(("opening",), mode="i2v")
+    write_plan_json(plan_path(directory), plan)
+    path = segment_path(directory, 1)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("段 1 的提示词\n", encoding="utf-8")
+    image = directory / "director" / "assets" / "01" / "start.png"
+    image.parent.mkdir(parents=True, exist_ok=True)
+    image.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    shot_table = ("**[Shot 1]**\n- 时长与切点：2.0秒（首镜，无时间戳）\n\n"
+                  "**[Shot 2]**\n- 时长与切点：2.0秒；切入 At 00:06.000。\n")
+    session = SessionState(
+        directory=directory,
+        brief=_director_brief(director_mode="i2v", duration=4.0,
+                              director_node_id="365", director_cache_name=""),
+        stage_state={
+            "shot_table": shot_table,
+            # 真实条目形态：已落地的设定级修订与待落地的画面级修订并存。
+            "user_revisions": [
+                {"round": 1, "layer": "story",
+                 "text": "改到庭院：全片不要森林。", "applied": True},
+                {"round": 2, "layer": "frame",
+                 "text": "别拿手机：她全程不碰手机。"},
+            ],
+        },
+        status=STATUS_DIRECTOR_SEGMENTS_RUNNING)
+    config = _run_config(monkeypatch, tmp_path)
+    monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
+
+    llm = _RewritingLLM(_REWRITTEN_BODY)
+    wizard._rewrite_director_segment_round(
+        plan, plan.segments[0], session, config=config, llm=llm)
+
+    assert llm.requests, "改词出口没有发出请求"
+    request = llm.requests[0]
+    assert REVISION_CONTEXT_HEADER in request, "改词出口漏传修订块"
+    assert "别拿手机" in request, "待落地的修订没有进改词请求（空块或错源）"
+    assert "改到庭院" not in request, "已落地的修订被重复注入"

@@ -677,3 +677,87 @@ def test_director_write_context_renders_visual_decision_from_this_sessions_state
     assert VISUAL_DECISION_HEADER in planned, "当轮规划的写段上下文没带画面决策块"
     assert planned == resumed, "续跑重建的画面决策块与当轮规划不一致"
     assert "身后侧" in planned, "画面细化没有进请求（空块或错源）"
+
+
+# ---------------------------------------------------------------------------
+# #300 累积用户修订进写段请求：两个构造点都从本会话 stage_state 渲染
+# ---------------------------------------------------------------------------
+
+_REVISION_ENTRIES = [
+    {"round": 1, "layer": "story", "text": "改到庭院：全片不要森林。",
+     "applied": True},
+    {"round": 2, "layer": "frame", "text": "别拿手机：她全程不碰手机。"},
+]
+
+
+def test_director_write_context_renders_revision_context_from_this_sessions_state(
+        tmp_path):
+    """#300 AC4：当轮规划与续跑重建两条出口都渲染出**逐字相同**的修订块。
+
+    续跑若读了实例级残留或退回空串，同一张段表就会出现两套写作前提。断言取渲染后
+    的块（与共享渲染器逐字相同），并核「只取待落地」——已落地的设定级修订不再叠加。
+    """
+    import threading
+
+    from minimax_h3_prompt.api.jobs import JobRunner
+    from minimax_h3_prompt.segment_prompts import (
+        REVISION_CONTEXT_HEADER,
+        render_revision_context,
+    )
+
+    shot_table = "[Shot 1] 雨夜便利店……"
+    state = {"shot_table": shot_table, "user_revisions": list(_REVISION_ENTRIES)}
+    session = SimpleNamespace(brief=SimpleNamespace(duration=4.0), stage_state=state)
+    runner = SimpleNamespace(
+        fake_pipeline=True,
+        _emit_progress=lambda *args, **kwargs: None,
+        _write_active_job=lambda *args, **kwargs: None,
+        _director_ref_context=lambda *args, **kwargs: ((), None),
+    )
+
+    _plan, planned_context = JobRunner._plan_director_project(
+        runner, "session", "job", threading.Event(), session, state,
+        shot_table, "t2v", tmp_path)
+    resume_context = JobRunner._director_resume_context(
+        SimpleNamespace(_director_ref_context=lambda *args, **kwargs: ((), None)),
+        tmp_path, session, "t2v", shot_table)
+
+    expected = render_revision_context(state)
+    assert REVISION_CONTEXT_HEADER in expected, "共享渲染器没有产出块标题"
+    assert planned_context.revision_context == expected, \
+        "当轮规划的写段上下文没带修订块（或来源不是本会话 stage_state）"
+    assert resume_context.revision_context == expected, \
+        "续跑重建的修订块与当轮规划不一致"
+    assert "别拿手机" in planned_context.revision_context
+    assert "改到庭院" not in planned_context.revision_context, \
+        "已落地的设定级修订被重复注入"
+
+
+def test_revision_block_reaches_the_writer_request_through_the_workbench(workbench):
+    """#300 AC1（真实规划分支）：工作台跑一次导演台阶段 2，写段请求带修订块。
+
+    修订在 review 通过之前写进会话状态（与「用户先提要求、再确认阶段 1」的真实次序
+    一致），执行器从**盘上的本会话状态**渲染；断言模型实际收到的写段请求。
+    """
+    from minimax_h3_prompt.segment_prompts import REVISION_CONTEXT_HEADER
+
+    app, model, root = workbench
+    with workbench_client(app) as client:
+        session_id = _create(client, "t2v")
+        review = _run_to_review(client, session_id)
+
+        session_file = root / Path(session_id) / SESSION_FILENAME
+        raw = json.loads(session_file.read_text(encoding="utf-8"))
+        raw["stage_state"]["user_revisions"] = [
+            {"round": 1, "layer": "frame",
+             "text": "别拿手机：她全程不碰手机。"}]
+        session_file.write_text(
+            json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+
+        _plan_and_write(client, session_id, review)
+
+        writes = [request for request in model.requests if "本段编号：" in request]
+        assert writes, "本次执行没有发出写段请求"
+        assert all(REVISION_CONTEXT_HEADER in request for request in writes), \
+            "工作台真实规划分支没有把修订块传给写段请求"
+        assert all("别拿手机" in request for request in writes)

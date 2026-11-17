@@ -885,9 +885,9 @@ def _run_director_flow(session: SessionState) -> int:
                 # 与段表清单同一份判据：ending 段（单段时是 opening）的请求带终点图
                 # 描述，段词与图冲突时以图为准（#160）。
                 film_end_description=film_end_description,
-                # #298／#299：画面决策块从本会话阶段 1 产物渲染（#300 的修订块仍是
-                # 空位）。改词那条出口必须用同一份来源，否则首写与改词两套前提。
-                revision_context="",
+                # #298／#299／#300：两个上下文块都从本会话阶段 1 产物渲染；改词那条
+                # 出口必须用同一份来源，否则首写与改词两套写作前提。
+                revision_context=render_revision_context(state),
                 visual_decision=visual_decision_source(state, shot_table),
             )
     except (RuntimeError, ValueError) as exc:
@@ -1268,7 +1268,7 @@ def _rewrite_director_segment_round(plan, segment, session: SessionState, *,
         visual_decision_source,
     )
     from ..ref_segments import log_segment_rewrite_round
-    from ..segment_prompts import MAX_SEGMENT_ATTEMPTS
+    from ..segment_prompts import MAX_SEGMENT_ATTEMPTS, render_revision_context
 
     path = segment_path(session.directory, segment.index)
     try:
@@ -1308,9 +1308,9 @@ def _rewrite_director_segment_round(plan, segment, session: SessionState, *,
                 # 与首写同一份上下文：单段 fl2v 的给图行要照旧写「首+尾」（#147）。
                 film_end=film_end,
                 film_end_description=film_end_description,
-                # #298／#299：改词与首写共用同一份请求组装与同一份画面决策来源，
-                # 否则按 e 改一次就把首写有的事实改丢（#300 的修订块仍是空位）。
-                revision_context="",
+                # #298／#299／#300：改词与首写共用同一份请求组装与同一份上下文来源
+                # （画面决策＋待落地的累积修订），否则按 e 改一次就把首写有的事实改丢。
+                revision_context=render_revision_context(state),
                 visual_decision=visual_decision_source(
                     state, str(state.get("shot_table", ""))),
             )

@@ -1994,3 +1994,114 @@ def test_segment_request_places_the_rendered_visual_decision_block_after_story()
     assert build_segment_request(plan, segment, shot_table=_VISUAL_SHOT_TABLE,
                                  visual_decision=empty) == default
     assert VISUAL_DECISION_HEADER not in default
+
+
+# ---------------------------------------------------------------------------
+# #300 累积用户修订进写段请求：只取待落地、无修订时逐字节无痕
+# ---------------------------------------------------------------------------
+
+# 条目的真实形态（``user_revisions.record_user_revision`` 写入的形状）：``applied``
+# 只在设定级重跑成功之后才出现，已落地的条目不再进注入通道。
+_LANDED_REVISION = {"round": 1, "layer": "story",
+                    "text": "改到庭院：全片不要森林。", "applied": True}
+_PENDING_REVISION = {"round": 2, "layer": "frame",
+                     "text": "别拿手机：她全程不碰手机。"}
+_REVISION_STATE = {"user_revisions": [_LANDED_REVISION, _PENDING_REVISION]}
+
+
+def test_revision_block_reaches_batch_first_write_and_rewrite_requests(tmp_path):
+    """#300 AC1（S1 主接缝）：记录型桩模型抓**批量首写**与**改词**的出站请求。
+
+    渲染走共享渲染器 ``render_revision_context``：块标题与优先序都在那一处，这里
+    不从测试侧重抄字面（``REVISION_CONTEXT_HEADER`` 一改即报红）。同时断言只取
+    待落地那部分——已落地的设定级修订的要求已经在设定产物里，不许再叠加一次。
+    """
+    from minimax_h3_prompt.director import prompts
+    from minimax_h3_prompt.segment_prompts import (
+        REVISION_CONTEXT_HEADER,
+        render_revision_context,
+    )
+
+    plan = _fl2v_plan("opening", "continue", "ending")
+    context = render_revision_context(_REVISION_STATE)
+    assert REVISION_CONTEXT_HEADER in context, "共享渲染器没有产出块标题"
+
+    # 出口 1：批量首写
+    batch = _DialectLLM(lambda index: _single_reply(plan.segments[index - 1], plan))
+    prompts.write_director_segments(plan, llm=batch, session_dir=tmp_path,
+                                    revision_context=context)
+    assert len(batch.requests) == 3
+    assert all(REVISION_CONTEXT_HEADER in request for request in batch.requests), \
+        "批量首写漏传修订块"
+    for request in batch.requests:
+        assert _PENDING_REVISION["text"] in request, "待落地的修订没有进写段请求"
+        assert _LANDED_REVISION["text"] not in request, "已落地的修订被重复注入"
+
+    # 出口 2：改词（与首写同一份请求组装）
+    rewrite = _DialectLLM(lambda index: _single_reply(plan.segments[1], plan))
+    outcome = prompts.rewrite_director_segment(
+        plan, plan.segments[1], llm=rewrite,
+        current_text=_single_text(plan.segments[1], plan),
+        revision_context=context)
+    assert outcome.errors == ()
+    assert REVISION_CONTEXT_HEADER in rewrite.requests[0], "改词出口漏传修订块"
+    assert _PENDING_REVISION["text"] in rewrite.requests[0]
+    assert _LANDED_REVISION["text"] not in rewrite.requests[0]
+
+
+def test_revision_block_is_absent_and_byte_identical_without_pending_revisions():
+    """#300 AC2／AC3：三种「无修订」下请求逐字节不变，不多空块也不多空行。
+
+    缺失 ``user_revisions``（旧会话）、空表、以及只剩已落地的设定级修订，都要与
+    不传该块**逐字节相同**——多一行空行也是注入。
+    """
+    from minimax_h3_prompt.director.prompts import build_segment_request
+    from minimax_h3_prompt.segment_prompts import (
+        REVISION_CONTEXT_HEADER,
+        render_revision_context,
+    )
+
+    plan = _fl2v_plan("opening", "continue", "ending")
+    segment = plan.segments[1]
+    default = build_segment_request(plan, segment, shot_table="[Shot 1] ...")
+    assert REVISION_CONTEXT_HEADER not in default
+
+    for state in ({}, {"user_revisions": []},
+                  {"user_revisions": [_LANDED_REVISION]}):
+        rendered = render_revision_context(state)
+        assert rendered == "", f"没有待落地修订却渲染出了块：{state!r}"
+        assert build_segment_request(
+            plan, segment, shot_table="[Shot 1] ...",
+            revision_context=rendered) == default, \
+            f"无修订时请求字节变了：{state!r}"
+
+
+def test_wizard_director_flow_passes_revision_context_into_write_requests(
+        tmp_path, monkeypatch):
+    """#300 AC1：向导批量首写这条出口把本会话 stage_state 的待落地修订传给模型。
+
+    拦在 ``write_director_segments`` 一层不够——本仓栽过的正是「组装会拼、调用方
+    没传」。这里跑真实向导流程，抓模型收到的写段请求（规划请求不含「本段编号」）。
+    """
+    from minimax_h3_prompt import model_factory
+    from minimax_h3_prompt.director.planning import parse_director_plan
+    from minimax_h3_prompt.segment_prompts import REVISION_CONTEXT_HEADER
+    from minimax_h3_prompt.ui import wizard
+
+    plan = parse_director_plan(_PLAN_JSON, 30.0, mode="t2v")
+    llm = _DirectorFlowLLM(plan)
+    monkeypatch.setattr(model_factory, "build_chat_model", lambda: llm)
+    monkeypatch.setattr(wizard, "_prompt", lambda text: "q")
+    monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
+    session = _director_session(tmp_path)
+    session.stage_state.update(_REVISION_STATE)
+
+    assert wizard._run_director_flow(session) == 0
+
+    writes = [request for request in llm.requests if "本段编号：" in request]
+    assert len(writes) == 5
+    assert all(REVISION_CONTEXT_HEADER in request for request in writes), \
+        "向导批量首写漏传修订块"
+    for request in writes:
+        assert _PENDING_REVISION["text"] in request, "待落地的修订没有进写段请求"
+        assert _LANDED_REVISION["text"] not in request, "已落地的修订被重复注入"
