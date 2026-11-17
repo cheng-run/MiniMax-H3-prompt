@@ -132,7 +132,6 @@ def shot_excerpt_for_window(shot_table: str, start_s: float, end_s: float) -> st
     return window_shot_excerpt(shot_table, start_s, end_s)[0]
 
 
-
 def window_shot_numbers(shot_table: str, start_s: float,
                         end_s: float) -> tuple[int, ...]:
     """本段窗口覆盖到的镜头号（含起点所在那一镜）；解析不出镜头块时为空元组。

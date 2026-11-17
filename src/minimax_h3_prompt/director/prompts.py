@@ -884,7 +884,6 @@ def _request_shot_table_block(ctx: _SegmentRequestContext) -> str:
     return f"\n{wording.format(start=ctx.start_s, window=ctx.duration_s)}\n{excerpt}\n"
 
 
-
 def _request_definitions_block(ctx: _SegmentRequestContext) -> str:
     return (_definitions_block(_require_r2v_sections(ctx.sections))
             if ctx.plan.mode == "r2v" else "")
