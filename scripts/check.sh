@@ -90,6 +90,9 @@ FAST_TESTS=(
   tests/test_path_root_guard.py
   tests/test_wizard_size.py
   tests/test_spike_exe.py
+  # 三族纪律的单源与跨路线守卫（#316）：真源一清空，这两处要当场红，不等全量。
+  tests/test_writing_disciplines.py
+  tests/test_writing_disciplines_guard.py
 )
 
 # 变更集＝「工作区 ∪ 本分支相对 main 的已提交改动」（retro 2026-11-14）。

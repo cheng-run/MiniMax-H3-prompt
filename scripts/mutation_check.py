@@ -620,6 +620,20 @@ MUTATIONS: tuple[Mutation, ...] = (
         "写段器照抄「如前所述」再被校验器判死，白耗一轮有界重写（#315）",
     ),
     Mutation(
+        "camera_speed_discipline_cleared",
+        # 锚点取常量赋值**整行**（并行票已证明 import 行会在汇合处失效）；清空后
+        # 五条写段路径同时失去这条纪律，守卫必须先自证真源非空才会红。
+        "src/minimax_h3_prompt/writing_disciplines.py",
+        'CAMERA_SPEED_DISCIPLINE = "**机位速度按剧情选**：静场、克制段落才用 `Static Shot`；'
+        '有动作的段写完整的「运动类型 + 幅度 + 速度」自然句，不要把「静态/慢速中景」当默认'
+        '——全片默认静态会把动作摊平，成片像慢放"',
+        'CAMERA_SPEED_DISCIPLINE = ""',
+        ("tests/test_writing_disciplines_guard.py::"
+         "test_every_write_route_sends_the_family_discipline",),
+        "清空机位速度真源＝五条写段路径同时失去这条纪律；守卫若不自证真源非空，"
+        "``\"\" in text`` 恒真就会永远不红（#316）",
+    ),
+    Mutation(
         "music_guided_segment_writes_na",
         "src/minimax_h3_prompt/prompts/segment_writer_director.md",
         "**不许写 `N/A`**",

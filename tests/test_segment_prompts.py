@@ -1561,12 +1561,12 @@ def test_write_ref_segment_v2_retries_on_errors_bounded():
     assert text is not None  # 仍不合格交回原文（当面给用户看），不返回 None 装死
 
 
-def test_camera_speed_guidance_reaches_all_four_segment_requests():
-    """「机位速度按剧情选」必须真发到**四条**写段请求里（2026-10-26 撤禁令时的接线断言）。
+def test_camera_speed_guidance_reaches_all_five_segment_requests():
+    """「机位速度按剧情选」必须真发到**五条**写段路径（2026-10-26 撤禁令时的接线断言）。
 
     只断言模板常量是「被测物自身的单测」——常量对了、请求组装时漏掉，照样不报红。
-    本仓已多次吃过「规则在、接线不在」，所以这里在四个调用点直接钉：
-    首尾帧 v2 / 首尾帧回退 / 多参 v2 / 多参回退。
+    本仓已多次吃过「规则在、接线不在」，所以这里在五个调用点直接钉：
+    首尾帧 v2 / 首尾帧回退 / 多参 v2 / 多参回退 / 导演台（#316 补齐第五个消费者）。
 
     #313 起 marker 用真源常量全文：只钉「机位速度按剧情选」这几个字的话，各处仍可
     各留一份缩水拷贝而不报红——单源化的验收物就是「出站请求里是同一整句」。
@@ -1600,6 +1600,11 @@ def test_camera_speed_guidance_reaches_all_four_segment_requests():
         llm=ref_llm,
     )
     assert marker in ref_llm.requests[-1], "多参回退请求没带上机位速度指引"
+
+    # 第五个消费者：导演台的写段模型先读系统提示，指令里没有这句话就整条路线缺失。
+    from minimax_h3_prompt.director.prompts import load_instruction
+
+    assert marker in load_instruction("r2v"), "导演台写段指令没带上机位速度指引"
 
 
 def test_director_write_modes_carry_the_single_camera_speed_discipline():
