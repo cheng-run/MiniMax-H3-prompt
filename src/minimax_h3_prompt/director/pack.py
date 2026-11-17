@@ -2,8 +2,9 @@
 
 导演包是**给插件吃的数据**，不是我们的中间产物：插件导入时只按字节读它，错了不会
 报错，只会「导入成功但图没了」「时间线长度对不上」「切镜段的图悄悄被剥掉」。所以本模块
-的纪律是**严格失败优先于静默回落**（设计 §1 第 2 条）：六条装配约束全部在**写盘之前**
-校验，违规即 ``ValueError`` 并点名字段。
+的纪律是**严格失败优先于静默回落**（设计 §1 第 2 条）：装配约束全部在**写盘之前**
+校验，违规即 ``ValueError`` 并点名字段；出站报告的逐条结论与这些校验同出一张注册表
+（``ASSEMBLY_CONSTRAINTS``），条数、编号与顺序都从表里派生。
 
 三份口径的住处（设计 §1 第 3 条「一个契约只住一处」）：
 
@@ -31,7 +32,7 @@ import string
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 from ..asset_ledger import load_asset_ledger, resolve_asset_path
 from ..errors import ConfigError
@@ -255,7 +256,7 @@ class DirectorPackJob:
 
 
 # ---------------------------------------------------------------------------
-# 装配约束（六条，逐条拒绝；违反即 ValueError，写盘之前调用）
+# 装配约束（有序注册表驱动，逐条拒绝；违反即 ValueError，写盘之前调用）
 # ---------------------------------------------------------------------------
 
 def is_ascii_pack_path(rel: str) -> bool:
@@ -271,7 +272,7 @@ def is_ascii_pack_path(rel: str) -> bool:
 
 
 def validate_pack_paths(paths: Iterable[str]) -> None:
-    """约束 1：包内路径一律 ASCII（中文语义名留在提示词与账本，包内用 ASCII 名）。
+    """包内路径一律 ASCII（中文语义名留在提示词与账本，包内用 ASCII 名）。
 
     为什么必须自己拦：导入侧对非 ASCII 条目**直接拒包**（``pack.py:673``），而报错
     只有一句英文文件名——用户看不出是哪张素材。这里先点名。
@@ -287,7 +288,7 @@ def validate_pack_paths(paths: Iterable[str]) -> None:
 
 
 def validate_common_disabled(shared_params: dict, timeline: dict) -> None:
-    """约束 2：``commonEnabled`` 必须是 ``false``，两处都要。
+    """``commonEnabled`` 必须是 ``false``，两处都要。
 
     为真时插件把全局词以 ``{common}\\n\\n{segment}`` 拼到每段前（``plan.py:202-212``），
     还把全局参考图按槽位并进段内（``merge_indexed_refs``）——段词里的 ``<Picture N>``
@@ -306,7 +307,7 @@ def validate_common_disabled(shared_params: dict, timeline: dict) -> None:
 
 
 def validate_canvas(width: int, height: int) -> None:
-    """约束 3：画布宽高都是 32 的倍数（``lib/image_prep.py:23-33`` 的断言）。
+    """画布宽高都是 32 的倍数（``lib/image_prep.py:23-33`` 的断言）。
 
     后端的 ``assert_minimax_canvas`` 只在**点运行**时才炸；那时用户已经导入、配好了
     段，返工代价最大。打包前拦下。
@@ -321,7 +322,7 @@ def validate_canvas(width: int, height: int) -> None:
 
 
 def validate_ref_image_size(value: str) -> None:
-    """约束 4：``refImageSize`` 只允许 ``match`` / ``max``（官方节点口径）。
+    """``refImageSize`` 只允许 ``match`` / ``max``（官方节点口径）。
 
     其它值（含导演台内部档 ``"1024"``）在官方节点上会被静默归一成 ``match``：
     用户以为压到了 1024，实际按原图送——属于「参数写了没生效」。
@@ -333,7 +334,7 @@ def validate_ref_image_size(value: str) -> None:
 
 
 def validate_reference_capacity(segments: Sequence[dict]) -> None:
-    """约束 5：每段参考图 ≤ 9 张，且 ``refs[].index`` 从 0 连续。
+    """每段参考图 ≤ 9 张，且 ``refs[].index`` 从 0 连续。
 
     两条判据必须一起：插件把 ``refs[].index`` 直接当槽号传给官方节点的
     ``reference_image_{index}``（``plan.py:1073-1074``、``lib/ref_images.py:44-46``）。
@@ -348,8 +349,8 @@ def validate_reference_capacity(segments: Sequence[dict]) -> None:
                 f"段 {number} 挂了 {len(refs)} 张参考图，超过插件槽位上限 "
                 f"{PICTURE_SLOT_LIMIT}（Picture1–{PICTURE_SLOT_LIMIT}）："
                 "超出的图插件读不到，段词里的 <Picture N> 会悬空")
-        indexes = [ref.get("index") for ref in refs]
-        if indexes != list(range(len(indexes))):
+        if not _refs_are_continuous(refs):
+            indexes = [ref.get("index") for ref in refs]
             raise ValueError(
                 f"段 {number} 的 refs[].index 不是从 0 连续：{indexes!r}——"
                 "插件把 index 直接当槽号（reference_image_{index}），跳号会让 "
@@ -357,7 +358,7 @@ def validate_reference_capacity(segments: Sequence[dict]) -> None:
 
 
 def validate_output_config(output: dict) -> None:
-    """约束 7：``output`` 必含五条引导/导出配置，生成类还要 ``mode="fixed"``。
+    """``output`` 必含五条引导/导出配置，生成类还要 ``mode="fixed"``。
 
     写成别处不算数：UI 导出载荷会删掉 timeline 根级的同名键
     （``web/js/minimax_timeline.js:271-277``），最终包里就没了。
@@ -383,6 +384,30 @@ def validate_output_config(output: dict) -> None:
             f"实际 {output.get('mode')!r}（long_edge 只对编辑型/源视频成立）")
 
 
+def _gen_and_start_files(segment: dict) -> tuple[str, str]:
+    """段对象里的 ``(genImage.imageFile, startImage.imageFile)``，缺省为空串。
+
+    校验器与出站结论共用这一处取值口径与 ``_files_conflict`` 判据（「同一契约不许
+    两处口径」）；但结论不调用校验器、也不复用它的返回值，校验器被架空时结论照旧
+    算出「不通过」（``_AssemblyConstraint`` 的纪律）。
+    """
+    gen = segment.get("genImage") or {}
+    start = segment.get("startImage") or {}
+    if not isinstance(gen, dict) or not isinstance(start, dict):
+        return "", ""
+    return str(gen.get("imageFile") or ""), str(start.get("imageFile") or "")
+
+
+def _files_conflict(gen_file: str, start_file: str) -> bool:
+    """同段两图都非空且指向不同文件＝导出时后一张会被静默跳过。"""
+    return bool(gen_file and start_file and gen_file != start_file)
+
+
+def _gen_and_start_conflict(segment: dict) -> bool:
+    """段对象层面的同一判据（结论侧用），取值口径与校验器共用。"""
+    return _files_conflict(*_gen_and_start_files(segment))
+
+
 def validate_segment_media_fields(segments: Sequence[dict]) -> None:
     """同一段不许给出内容不同的 ``genImage`` 与 ``startImage``。
 
@@ -391,13 +416,8 @@ def validate_segment_media_fields(segments: Sequence[dict]) -> None:
     ``genImage``+``imageFile``；fl2v 用 ``genImage``（首帧）+ ``endImage``。
     """
     for segment in segments:
-        gen = segment.get("genImage") or {}
-        start = segment.get("startImage") or {}
-        if not isinstance(gen, dict) or not isinstance(start, dict):
-            continue
-        gen_file = str(gen.get("imageFile") or "")
-        start_file = str(start.get("imageFile") or "")
-        if gen_file and start_file and gen_file != start_file:
+        gen_file, start_file = _gen_and_start_files(segment)
+        if _files_conflict(gen_file, start_file):
             raise ValueError(
                 f"段 {segment.get('id') or '?'} 的 genImage 与 startImage 指向不同文件"
                 f"（{gen_file} ≠ {start_file}）：导出时两者都落 start.<ext>，"
@@ -999,54 +1019,133 @@ def _refs_are_continuous(refs: object) -> bool:
     return [row.get("index") for row in rows] == list(range(len(rows)))
 
 
-def _render_conclusions(timeline: dict[str, Any],
-                        shared: dict[str, Any],
-                        all_paths: Sequence[str]) -> tuple[str, ...]:
-    """六条装配约束的逐条结论——**从实际值/校验结果生成**，不是手写的「通过」常量（复审 H5）。
+@dataclass(frozen=True)
+class _AssemblyContext:
+    """一次打包的全部装配校验输入（注册表里的校验与结论读同一份）。"""
 
-    为什么不能手写：校验器被改坏（或被删空）时，报告照样写六行「通过」，而包已经
-    导不进去——那份报告正是用户判断「能不能导入」的唯一依据。这里每条结论都各自
-    重算一次判据并带上实际值（路径数、画布、模式、最多几张图），写错的结论至少能被
-    读报告的人当场看出（用例 ``test_conclusions_report_failure_when_a_validator_is_emptied``
-    就是把这个形态钉死）。
+    timeline: dict[str, Any]
+    pack_json: dict[str, Any]
+    shared: dict[str, Any]
+    all_paths: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _AssemblyConstraint:
+    """一条装配约束：``validate`` 违规即抛，``conclude`` 独立重算判据并给出结论行。
+
+    ``conclude`` **不许调用 ``validate``、也不许复用它的返回值**：校验器被改坏或
+    被删空时，结论仍要自己算出「不通过」——报告是用户判断「能不能导入」的唯一依据。
     """
-    rows = timeline["segments"]
-    output = timeline["output"]
 
-    bad_paths = [path for path in all_paths if not is_ascii_pack_path(path)]
-    shared_common = shared.get("commonEnabled")
-    timeline_common = timeline.get("global", {}).get("commonEnabled")
+    validate: Callable[[_AssemblyContext], None]
+    conclude: Callable[[_AssemblyContext], str]
+
+
+def _conclude_pack_paths(context: _AssemblyContext) -> str:
+    bad_paths = [path for path in context.all_paths if not is_ascii_pack_path(path)]
+    return (f"包内路径 ASCII：{_pass_fail(not bad_paths)}"
+            f"（共 {len(context.all_paths)} 个路径，不合规 {len(bad_paths)} 个）")
+
+
+def _conclude_common_disabled(context: _AssemblyContext) -> str:
+    shared_common = context.shared.get("commonEnabled")
+    timeline_common = context.timeline.get("global", {}).get("commonEnabled")
+    return (f"commonEnabled=false（shared_params={shared_common!r} / "
+            f"timeline.global={timeline_common!r}）："
+            f"{_pass_fail(shared_common is False and timeline_common is False)}")
+
+
+def _conclude_canvas(context: _AssemblyContext) -> str:
+    width = context.timeline["width"]
+    height = context.timeline["height"]
+    return (f"画布 {width}×{height} 是 {CANVAS_ALIGN} 的倍数："
+            f"{_pass_fail(_canvas_is_aligned(width) and _canvas_is_aligned(height))}")
+
+
+def _conclude_ref_image_size(context: _AssemblyContext) -> str:
+    value = context.timeline["output"].get("refImageSize")
+    return (f"refImageSize={value!r}（只认 {'/'.join(REF_IMAGE_SIZES)}）："
+            f"{_pass_fail(value in REF_IMAGE_SIZES)}")
+
+
+def _conclude_reference_capacity(context: _AssemblyContext) -> str:
+    rows = context.timeline["segments"]
     max_refs = max((len(row.get("refs") or []) for row in rows), default=0)
     refs_ok = (max_refs <= PICTURE_SLOT_LIMIT
                and all(_refs_are_continuous(row.get("refs")) for row in rows))
-    missing_output = {
-        key: output.get(key) for key, value in REQUIRED_OUTPUT.items()
-        if output.get(key) != value}
-    output_ok = (not missing_output
-                 and output.get("mode") == OUTPUT_MODE_FIXED
+    return (f"每段参考图 ≤ {PICTURE_SLOT_LIMIT} 且 index 从 0 连续："
+            f"{_pass_fail(refs_ok)}（最多 {max_refs} 张/段）")
+
+
+def _conclude_output_config(context: _AssemblyContext) -> str:
+    output = context.timeline["output"]
+    missing = [key for key, value in REQUIRED_OUTPUT.items() if output.get(key) != value]
+    output_ok = (not missing and output.get("mode") == OUTPUT_MODE_FIXED
                  and bool(str(output.get("continuityMode") or "").strip()))
-    return (
-        f"1. 包内路径 ASCII：{_pass_fail(not bad_paths)}"
-        f"（共 {len(all_paths)} 个路径，不合规 {len(bad_paths)} 个）",
-        f"2. commonEnabled=false（shared_params={shared_common!r} / "
-        f"timeline.global={timeline_common!r}）："
-        f"{_pass_fail(shared_common is False and timeline_common is False)}",
-        f"3. 画布 {timeline['width']}×{timeline['height']} 是 {CANVAS_ALIGN} 的倍数："
-        f"{_pass_fail(_canvas_is_aligned(timeline['width']) and _canvas_is_aligned(timeline['height']))}",
-        f"4. refImageSize={output.get('refImageSize')!r}（只认 "
-        f"{'/'.join(REF_IMAGE_SIZES)}）：{_pass_fail(output.get('refImageSize') in REF_IMAGE_SIZES)}",
-        f"5. 每段参考图 ≤ {PICTURE_SLOT_LIMIT} 且 index 从 0 连续："
-        f"{_pass_fail(refs_ok)}（最多 {max_refs} 张/段）",
-        f"6. output 五条引导/导出配置齐备且挂在 output 下：{_pass_fail(output_ok)}"
-        f"（mode={output.get('mode')!r}，continuityMode={output.get('continuityMode')!r}，"
-        f"continuityOverlapFrames={output.get('continuityOverlapFrames')!r}）",
-    )
+    return (f"output 五条引导/导出配置齐备且挂在 output 下：{_pass_fail(output_ok)}"
+            f"（mode={output.get('mode')!r}，continuityMode={output.get('continuityMode')!r}，"
+            f"continuityOverlapFrames={output.get('continuityOverlapFrames')!r}）")
+
+
+def _conclude_segment_media_fields(context: _AssemblyContext) -> str:
+    rows = context.timeline["segments"]
+    conflicts = [str(row.get("id") or "?") for row in rows
+                 if _gen_and_start_conflict(row)]
+    detail = f"：{'、'.join(conflicts)}" if conflicts else ""
+    return (f"同段 genImage 与 startImage 指向同一文件：{_pass_fail(not conflicts)}"
+            f"（检查 {len(rows)} 段，冲突 {len(conflicts)} 段{detail}）")
+
+
+def _conclude_task_type(context: _AssemblyContext) -> str:
+    widgets_value = context.pack_json.get("widgets", {}).get("task_type")
+    timeline_value = context.timeline.get("global", {}).get("taskType")
+    return ("pack.json.widgets.task_type 与 timeline.global.taskType 一致："
+            f"{_pass_fail(widgets_value == timeline_value)}"
+            f"（widgets={widgets_value!r} / timeline={timeline_value!r}）")
+
+
+# 装配约束的**唯一来源**：条数、编号与顺序都从这张表派生。每项把一道校验与它
+# 对应的结论配对，报告里看到的每一条都对应一道真跑过的校验（#308）。
+ASSEMBLY_CONSTRAINTS: tuple[_AssemblyConstraint, ...] = (
+    _AssemblyConstraint(
+        validate=lambda context: validate_pack_paths(context.all_paths),
+        conclude=_conclude_pack_paths),
+    _AssemblyConstraint(
+        validate=lambda context: validate_common_disabled(context.shared, context.timeline),
+        conclude=_conclude_common_disabled),
+    _AssemblyConstraint(
+        validate=lambda context: validate_canvas(context.timeline["width"],
+                                                 context.timeline["height"]),
+        conclude=_conclude_canvas),
+    _AssemblyConstraint(
+        validate=lambda context: validate_ref_image_size(
+            context.timeline["output"]["refImageSize"]),
+        conclude=_conclude_ref_image_size),
+    _AssemblyConstraint(
+        validate=lambda context: validate_reference_capacity(context.timeline["segments"]),
+        conclude=_conclude_reference_capacity),
+    _AssemblyConstraint(
+        validate=lambda context: validate_output_config(context.timeline["output"]),
+        conclude=_conclude_output_config),
+    _AssemblyConstraint(
+        validate=lambda context: validate_segment_media_fields(context.timeline["segments"]),
+        conclude=_conclude_segment_media_fields),
+    _AssemblyConstraint(
+        validate=lambda context: validate_pack_task_type(context.pack_json, context.timeline),
+        conclude=_conclude_task_type),
+)
+
+
+def _render_conclusions(context: _AssemblyContext) -> tuple[str, ...]:
+    """按注册表顺序渲染逐条结论；编号由位置派生，条数即注册表长度（#308）。"""
+    return tuple(f"{number}. {constraint.conclude(context)}"
+                 for number, constraint in enumerate(ASSEMBLY_CONSTRAINTS, 1))
 
 
 def _validate_all(timeline: dict[str, Any], pack_json: dict[str, Any],
                   shared: dict[str, Any], segments: Sequence[PackedSegment],
                   media: Sequence[PackedMedia]) -> tuple[str, ...]:
-    """跑六条装配约束并返回逐条结论（**写盘之前**调用；违规抛 ValueError）。
+    """跑注册表里的全部装配约束并返回逐条结论（**写盘之前**调用；违规抛 ValueError）。
 
     路径清单与写盘用的是同一个目录命名（``asset_groups/NN``，NN 是 1 起的段号补两位）：
     两处各拼一次的话，一处改了另一处不会报错——只会导出一个空目录加一堆找不到的图。
@@ -1054,15 +1153,11 @@ def _validate_all(timeline: dict[str, Any], pack_json: dict[str, Any],
     json_paths = ["pack.json", "timeline.json", "shared_params/shared_params.json"] + [
         f"asset_groups/{segment.index:02d}/group.json" for segment in segments]
     all_paths = json_paths + [item.pack_rel for item in media]
-    validate_pack_paths(all_paths)
-    validate_common_disabled(shared, timeline)
-    validate_canvas(timeline["width"], timeline["height"])
-    validate_ref_image_size(timeline["output"]["refImageSize"])
-    validate_reference_capacity(timeline["segments"])
-    validate_output_config(timeline["output"])
-    validate_segment_media_fields(timeline["segments"])
-    validate_pack_task_type(pack_json, timeline)
-    return _render_conclusions(timeline, shared, all_paths)
+    context = _AssemblyContext(timeline=timeline, pack_json=pack_json, shared=shared,
+                               all_paths=tuple(all_paths))
+    for constraint in ASSEMBLY_CONSTRAINTS:
+        constraint.validate(context)
+    return _render_conclusions(context)
 
 
 def _write_pack(pack_dir: Path, zip_path: Path, pack_json: dict[str, Any],
@@ -1111,7 +1206,7 @@ def prepare_director_pack(session_dir: str | Path, plan: DirectorPlan, *,
                           ) -> tuple[DirectorPackJob, str]:
     """把段表、段提示词与素材打成导演包，返回 ``(job, report)``。
 
-    **顺序是契约**：先读齐输入、再把整份包在内存里装好、跑完六条约束，最后才落盘
+    **顺序是契约**：先读齐输入、再把整份包在内存里装好、跑完全部装配约束，最后才落盘
     （设计 §3.4「不得先写包后校验」）。落在半路的坏包会被用户直接拿去导入，插件不会
     替我们拒绝它——它只会「成功了但少几张图」。
     """
@@ -1166,7 +1261,7 @@ def prepare_director_pack(session_dir: str | Path, plan: DirectorPlan, *,
 
 def render_pack_report(job: DirectorPackJob, *, conclusions: Sequence[str] = (),
                        budget_note: str | None = None) -> str:
-    """出站清单：两个总帧数、逐段段类型/给图/包内路径、六条约束结论、包路径。
+    """出站清单：两个总帧数、逐段段类型/给图/包内路径、装配约束逐条结论、包路径。
 
     **必须同时写两个总帧数**（设计 §3.2「两套坐标」）：导演台里显示的是时间线长度
     （Σ 声明帧），成片会因「保完整」每段多 12 帧而更长——只写一个数，用户会以为
@@ -1202,13 +1297,14 @@ def render_pack_report(job: DirectorPackJob, *, conclusions: Sequence[str] = (),
             f"  段{packed.index} {packed.label}  {packed.task_type}  "
             f"给图：{images}  → {media_text}")
     lines.append("")
-    lines.append("装配约束（六条，逐条结论）：")
+    # 条数从实际渲染出的结论派生，不手写数字：注册表增删条目时报告不会自说自话。
+    lines.append(f"装配约束（{len(conclusions)} 条，逐条结论）：")
     for conclusion in conclusions:
         lines.append(f"  {conclusion}")
     lines.append("")
     if budget_note:
-        # 独立成段而不是混进六条约束：预算校验是打包期额外的核对（#189），
-        # 六条约束的条数与编号都不动。
+        # 独立成段而不是混进装配约束：预算校验是打包期额外的核对（#189），
+        # 装配约束的条数与编号都不动。
         lines.append(budget_note)
         lines.append("")
     # 说清「哪些给图故意不在包里」：用户最容易在这里以为打包漏了图。终点画面要靠

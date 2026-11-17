@@ -641,7 +641,7 @@ class SegmentAssemblyRefused(RuntimeError):
 class DirectorPackFailed(WorkbenchError):
     """导演包装配失败（D8 spec §9.1 / §15）：消息逐字来自打包器，已点名约束与段。
 
-    打包器在**落盘之前**跑完八条约束；这里只把 ``ValueError`` 翻成稳定的
+    打包器在**落盘之前**跑完全部装配约束；这里只把 ``ValueError`` 翻成稳定的
     ``pack_build_failed``，不改写它点名的那句话——用户要照着它去改画布/素材/段表。
     """
 
@@ -2929,8 +2929,8 @@ class JobRunner:
                       cancel_event: threading.Event) -> dict[str, Any]:
         """导演台打包 job（D8 §9.1 / #263）：段表 + 段词 → ``director/pack/`` + zip。
 
-        **顺序是契约**：``prepare_director_pack`` 自己先读齐输入、内存装配、跑完八条
-        约束，最后才落盘。这里不先建目录再校验——半份包会被用户直接拿去导入，插件
+        **顺序是契约**：``prepare_director_pack`` 自己先读齐输入、内存装配、跑完全部
+        装配约束，最后才落盘。这里不先建目录再校验——半份包会被用户直接拿去导入，插件
         不会替我们拒绝它（它只会「成功了但少几张图」）。
 
         zip 已在时**不重建**（spec §9.4：初始包是计划，改词不重打包），但仍要补缺失
@@ -2976,7 +2976,7 @@ class JobRunner:
                     continuity_mode=continuity_mode)
                 skipped = False
         except ValueError as exc:
-            # 八条装配约束与坏段表都是 ValueError；打包器已点名是哪一条、哪一段，
+            # 装配约束与坏段表都是 ValueError；打包器已点名是哪一条、哪一段，
             # 这里只翻成稳定错误码，不改写那句话（用户要照着它去改）。
             raise DirectorPackFailed(str(exc)) from exc
         if not skipped:

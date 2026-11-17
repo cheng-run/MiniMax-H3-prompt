@@ -1769,6 +1769,26 @@ MUTATIONS: tuple[Mutation, ...] = (
         "段过滤失效＝`--segment N` 照样导出全部段，改前/改后对照的根本不是同一段"
         "（#306 AC4）",
     ),
+    Mutation(
+        "director_report_renders_only_six_conclusions",
+        "src/minimax_h3_prompt/director/pack.py",
+        "                 for number, constraint in enumerate(ASSEMBLY_CONSTRAINTS, 1))",
+        "                 for number, constraint in enumerate(ASSEMBLY_CONSTRAINTS[:6], 1))",
+        ("tests/test_director_pack.py::"
+         "test_report_lists_both_totals_constraints_and_the_handoff_line",),
+        "报告只渲染注册表前六项＝两条看不见的校验又回来了（#308 修的正是这个形态），"
+        "用户会拿到「6 条全绿但打包被拒」",
+    ),
+    Mutation(
+        "director_conclusion_stops_recomputing_canvas",
+        "src/minimax_h3_prompt/director/pack.py",
+        '            f"{_pass_fail(_canvas_is_aligned(width) and _canvas_is_aligned(height))}")',
+        '            f"{_pass_fail(True)}")',
+        ("tests/test_director_pack.py::"
+         "test_every_conclusion_recomputes_its_own_criterion",),
+        "结论不再独立重算判据（写死通过）＝校验器被架空时报告仍全绿，正是 #308 要防"
+        "的形态：报告是用户判断「能不能导入」的唯一依据",
+    ),
 )
 
 

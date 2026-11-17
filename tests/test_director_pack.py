@@ -12,14 +12,18 @@
 """
 from __future__ import annotations
 
+import copy
+import dataclasses
 import json
 import re
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from minimax_h3_prompt.director.planning import parse_director_plan
+from minimax_h3_prompt.director import pack as director_pack
 from minimax_h3_prompt.director import prompts as director_prompts
 
 # 30 秒五段（1 开场 + 4 续接）：设计 §3.2 的算例——时间线 671 帧（Σ 声明）/
@@ -190,10 +194,11 @@ def test_zip_entries_are_ascii_by_the_plugin_regex(tmp_path):
 
 
 def test_report_lists_both_totals_constraints_and_the_handoff_line(tmp_path):
-    """出站清单：两个总帧数、逐段段类型/给图/包内路径、六条约束逐条结论、包路径。
+    """出站清单：两个总帧数、逐段段类型/给图/包内路径、全部装配约束逐条结论、包路径。
 
     只报一个总帧数会让用户以为导演台里显示的 27.958s 是错的（设计 §3.2「两套坐标」）；
-    末行必须说明逐段执行由 #105 跟进，不让用户以为现在就能跑。
+    末行必须说明逐段执行由 #105 跟进，不让用户以为现在就能跑。约束条数从注册表派生：
+    报告头声明的条数必须等于实际结论行数（#308）。
     """
     from minimax_h3_prompt.director.pack import prepare_director_pack
 
@@ -202,26 +207,36 @@ def test_report_lists_both_totals_constraints_and_the_handoff_line(tmp_path):
     assert "时间线总帧" in report and str(_TIMELINE_TOTAL) in report
     assert "成片预计帧" in report and str(_FILM_TOTAL) in report
     assert "段1" in report and "开场" in report and "段5" in report and "续接" in report
-    for number in range(1, 7):
-        assert re.search(rf"^\s*{number}\. ", report, re.MULTILINE), f"缺约束 {number} 的结论行"
+    rows = [line.strip() for line in report.splitlines()
+            if re.match(r"^\d+\. ", line.strip())]
+    assert len(rows) == len(director_pack.ASSEMBLY_CONSTRAINTS), report
+    assert [int(row.split(".", 1)[0]) for row in rows] == list(range(1, len(rows) + 1))
+    header = re.search(r"装配约束（(\d+) 条，逐条结论）：", report)
+    assert header, report
+    assert int(header.group(1)) == len(rows), "报告头声明的条数与实际结论行数不符"
     assert str(job.pack_dir) in report and str(job.zip_path) in report
     assert report.rstrip().splitlines()[-1].strip().endswith("#105 跟进")
 
 
 def test_report_drops_mixed_only_constraints_and_renumbers(tmp_path):
-    """#170：报告只保留六条装配约束，编号连续；mixed 专用两条随校验器一起删除。"""
+    """#170/#308：报告按注册表顺序列出全部装配约束，编号连续；mixed 专用两条不复活。
+
+    第 7、8 条是 #308 新增的（同段两图 / 两侧 taskType），必须排在原 1–6 之后。
+    """
     from minimax_h3_prompt.director.pack import prepare_director_pack
 
     plan = _plan("t2v")
     _, report = prepare_director_pack(_session(tmp_path, plan), plan, settings=_settings())
     rows = [line.strip() for line in report.splitlines()
             if re.match(r"^\d+\. ", line.strip())]
-    assert len(rows) == 6, report
+    assert len(rows) == len(director_pack.ASSEMBLY_CONSTRAINTS), report
     assert rows[0].startswith("1. 包内路径 ASCII")
     assert rows[5].startswith("6. output 五条引导/导出配置")
+    assert "genImage" in rows[6] and "startImage" in rows[6], rows[6]
+    assert "task_type" in rows[7] and "taskType" in rows[7], rows[7]
     constraint_block = "\n".join(rows)
     assert "mixed" not in constraint_block, constraint_block
-    assert "装配约束（六条，逐条结论）：" in report, report
+    assert re.search(r"装配约束（\d+ 条，逐条结论）：", report), report
 
 
 # ---------------------------------------------------------------------------
@@ -923,7 +938,10 @@ def test_constraint_5_guard_follows_the_slot_limit(monkeypatch):
 
 
 def test_gen_and_start_image_conflicts_are_rejected():
-    """同段给出内容不同的 ``genImage`` 与 ``startImage``：导出时后一张会静默消失。"""
+    """同段给出内容不同的 ``genImage`` 与 ``startImage``：导出时后一张会静默消失。
+
+    报错必须点名**段号与两个文件名**——只写「冲突」用户没法定位是哪一段的哪两张图。
+    """
     from minimax_h3_prompt.director.pack import validate_segment_media_fields
 
     validate_segment_media_fields([{
@@ -931,16 +949,20 @@ def test_gen_and_start_image_conflicts_are_rejected():
         "genImage": {"imageFile": "asset_groups/01/start.png"},
         "startImage": {"imageFile": "asset_groups/01/start.png"},
     }])
-    with pytest.raises(ValueError, match="startImage"):
+    with pytest.raises(ValueError) as caught:
         validate_segment_media_fields([{
             "id": "seg01",
             "genImage": {"imageFile": "asset_groups/01/start.png"},
             "startImage": {"imageFile": "asset_groups/01/other.png"},
         }])
+    message = str(caught.value)
+    assert "seg01" in message, message
+    assert "asset_groups/01/start.png" in message, message
+    assert "asset_groups/01/other.png" in message, message
 
 
 def test_constraint_7_output_requires_every_continuity_setting():
-    """约束 7：五条配置缺一不可，且生成类 ``output.mode`` 必须是 fixed。"""
+    """设计 §3.4 约束 7：五条配置缺一不可，且生成类 ``output.mode`` 必须是 fixed。"""
     from minimax_h3_prompt.director.pack import REQUIRED_OUTPUT, validate_output_config
 
     good = {**REQUIRED_OUTPUT, "continuityMode": "guide", "mode": "fixed"}
@@ -1277,7 +1299,7 @@ def test_wizard_does_not_ask_again_when_the_answers_are_known(tmp_path, monkeypa
 
 
 def test_wizard_flow_packs_and_prints_the_report(tmp_path, monkeypatch, capsys):
-    """写段之后真的打包：出站含两个总帧数、六条约束结论与包路径，末行指向 #105。"""
+    """写段之后真的打包：出站含两个总帧数、装配约束逐条结论与包路径，末行指向 #105。"""
     from minimax_h3_prompt.ui import wizard
 
     _stub_llm(monkeypatch, "t2v")
@@ -1411,43 +1433,159 @@ def test_pack_task_type_mismatch_is_refused():
 
     一致性检查抽成纯函数后，可以**直接构造**不匹配入参证明它咬得住——此前内联在
     ``_validate_all`` 末尾，两侧都由 ``plan.mode`` 构造，正常流程不可能触发，
-    也没有任何用例能证明这道闸真的存在。
+    也没有任何用例能证明这道闸真的存在。报错必须点名两侧各自的取值。
     """
     from minimax_h3_prompt.director.pack import validate_pack_task_type
 
     timeline = {"global": {"taskType": "r2v"}}
     validate_pack_task_type({"widgets": {"task_type": "r2v"}}, timeline)
-    with pytest.raises(ValueError, match="task_type"):
+    with pytest.raises(ValueError) as caught:
         validate_pack_task_type({"widgets": {"task_type": "t2v"}}, timeline)
+    message = str(caught.value)
+    assert "t2v" in message and "r2v" in message, message
     with pytest.raises(ValueError, match="task_type"):
         validate_pack_task_type({}, timeline)
 
 
-def test_conclusions_report_failure_when_a_validator_is_emptied(tmp_path, monkeypatch):
-    """H5：结论由**实际值/校验结果**生成，校验器被改坏时结论必须写成「不通过」。
+# ---------------------------------------------------------------------------
+# 结论与校验同源（#308）：注册表是条数、编号与顺序的唯一来源
+# ---------------------------------------------------------------------------
 
-    手写「通过」常量的话，校验器删空、包已经导不进去，报告照样全绿——用户判断
-    「能不能导入」的唯一依据就是这份报告。这里把画布校验改成空操作、把画布改成
-    100（不是 32 的倍数），结论第 3 条必须自己报红并带上实际值。
+def _pack_arguments(job) -> dict:
+    """把 ``_validate_all`` 的入参从**真实包**里读回（不放假对象）。"""
+    return {
+        "timeline": json.loads((job.pack_dir / "timeline.json").read_text(encoding="utf-8")),
+        "pack_json": json.loads((job.pack_dir / "pack.json").read_text(encoding="utf-8")),
+        "shared": json.loads(
+            (job.pack_dir / "shared_params" / "shared_params.json").read_text(encoding="utf-8")),
+        "segments": job.segments,
+        "media": director_pack._collect_media(job.segments),
+    }
+
+
+def _violate_pack_paths(arguments):
+    arguments["media"] = [SimpleNamespace(pack_rel="画面1.png")]
+
+
+def _violate_common_enabled(arguments):
+    arguments["timeline"]["global"]["commonEnabled"] = True
+
+
+def _violate_canvas(arguments):
+    arguments["timeline"]["width"] = 100
+
+
+def _violate_ref_image_size(arguments):
+    arguments["timeline"]["output"]["refImageSize"] = "1024"
+
+
+def _violate_reference_capacity(arguments):
+    arguments["timeline"]["segments"][0]["refs"] = [{"index": 0}, {"index": 2}]
+
+
+def _violate_output_config(arguments):
+    arguments["timeline"]["output"]["mode"] = "long_edge"
+
+
+def _violate_segment_media_fields(arguments):
+    segment = arguments["timeline"]["segments"][0]
+    segment["genImage"] = {"imageFile": "asset_groups/01/start.png",
+                           "fileName": "start.png"}
+    segment["startImage"] = {"imageFile": "asset_groups/01/other.png",
+                             "fileName": "other.png"}
+
+
+def _violate_task_type(arguments):
+    arguments["pack_json"]["widgets"]["task_type"] = "r2v"
+
+
+# 顺序与注册表一一对应；每个函数只违反自己那一条，其余约束仍通过。
+_CONSTRAINT_VIOLATIONS = (
+    _violate_pack_paths,
+    _violate_common_enabled,
+    _violate_canvas,
+    _violate_ref_image_size,
+    _violate_reference_capacity,
+    _violate_output_config,
+    _violate_segment_media_fields,
+    _violate_task_type,
+)
+
+
+@pytest.mark.parametrize(
+    "position", range(len(director_pack.ASSEMBLY_CONSTRAINTS)),
+    ids=[f"constraint-{number}"
+         for number in range(1, len(director_pack.ASSEMBLY_CONSTRAINTS) + 1)])
+def test_every_conclusion_recomputes_its_own_criterion(position, tmp_path, monkeypatch):
+    """H5/#308：把注册表某一项换成空实现，对应那条结论仍须自己算出「不通过」。
+
+    结论若复用校验函数的返回值（或写死「通过」），校验器被删空时报告会继续全绿——
+    而这份报告是用户判断「能不能导入」的唯一依据。原用例只覆盖画布一条，这里按
+    注册表**逐项**覆盖。
     """
-    from minimax_h3_prompt.director import pack
+    assert len(_CONSTRAINT_VIOLATIONS) == len(director_pack.ASSEMBLY_CONSTRAINTS), (
+        "每条约束都要有对应的坏入参：注册表加了条目却没补用例")
 
     plan = _plan("t2v")
-    job, _ = pack.prepare_director_pack(_session(tmp_path, plan), plan,
-                                        settings=_settings())
-    timeline = json.loads((job.pack_dir / "timeline.json").read_text(encoding="utf-8"))
-    pack_json = json.loads((job.pack_dir / "pack.json").read_text(encoding="utf-8"))
-    shared = json.loads(
-        (job.pack_dir / "shared_params" / "shared_params.json").read_text(encoding="utf-8"))
+    job, _ = director_pack.prepare_director_pack(_session(tmp_path, plan), plan,
+                                                 settings=_settings())
+    arguments = _pack_arguments(job)
+    _CONSTRAINT_VIOLATIONS[position](arguments)
+    with pytest.raises(ValueError):
+        # 没架空校验时，这条坏入参真的会抛（证明坏入参确实踩中这一条）
+        director_pack._validate_all(**arguments)
 
-    timeline["width"] = 100
-    monkeypatch.setattr(pack, "validate_canvas", lambda *args, **kwargs: None)
-    conclusions = pack._validate_all(
-        timeline, pack_json, shared, job.segments,
-        pack._collect_media(job.segments))
+    emptied = tuple(
+        dataclasses.replace(constraint, validate=lambda context: None)
+        if number == position else constraint
+        for number, constraint in enumerate(director_pack.ASSEMBLY_CONSTRAINTS))
+    monkeypatch.setattr(director_pack, "ASSEMBLY_CONSTRAINTS", emptied)
+    conclusions = director_pack._validate_all(**arguments)
 
-    assert "不通过" in conclusions[2], f"结论没有反映失败的校验：{conclusions[2]}"
-    assert "100" in conclusions[2]
+    assert conclusions[position].startswith(f"{position + 1}. "), conclusions[position]
+    assert "不通过" in conclusions[position], (
+        f"结论没有反映被架空的校验：{conclusions[position]}")
+
+    report = director_pack.render_pack_report(job, conclusions=conclusions)
+    report_rows = [line.strip() for line in report.splitlines()
+                   if re.match(rf"^{position + 1}\. ", line.strip())]
+    assert report_rows and "不通过" in report_rows[0], report
+
+
+def _artifact_bytes(job) -> dict[str, bytes]:
+    """包内四份 JSON 的字节 ＋ zip 的条目清单与每项内容（不比整份 zip：时间戳会变）。"""
+    artifacts = {
+        "pack.json": (job.pack_dir / "pack.json").read_bytes(),
+        "timeline.json": (job.pack_dir / "timeline.json").read_bytes(),
+        "shared_params.json": (
+            job.pack_dir / "shared_params" / "shared_params.json").read_bytes(),
+    }
+    for group_path in sorted((job.pack_dir / "asset_groups").glob("*/group.json")):
+        artifacts[f"group/{group_path.parent.name}.json"] = group_path.read_bytes()
+    with zipfile.ZipFile(job.zip_path) as archive:
+        for name in archive.namelist():
+            artifacts[f"zip/{name}"] = archive.read(name)
+    return artifacts
+
+
+def test_pack_artifacts_are_stable_and_untouched_by_the_report_pass(tmp_path):
+    """#308：报告多两条结论不改包内容——同输入两次打包逐字节一致，校验/报告只读不写。"""
+    from minimax_h3_prompt.director.pack import prepare_director_pack
+
+    plan = _plan("t2v")
+    first, _ = prepare_director_pack(_session(tmp_path, plan), plan, settings=_settings())
+    snapshot = _artifact_bytes(first)
+
+    second_plan = _plan("t2v")
+    second, _ = prepare_director_pack(_session(tmp_path / "again", second_plan), second_plan,
+                                      settings=_settings())
+    assert _artifact_bytes(second) == snapshot, "同一份输入的打包产物不一致"
+
+    arguments = _pack_arguments(first)
+    before = copy.deepcopy(arguments)
+    director_pack._validate_all(**arguments)
+    assert arguments == before, "校验/结论渲染改动了入参"
+    assert _artifact_bytes(first) == snapshot, "校验/结论渲染改动了包产物"
 
 
 def test_group_json_mirrors_the_timeline_segment(tmp_path):

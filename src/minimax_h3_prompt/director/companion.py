@@ -161,7 +161,7 @@ def _export_forms(plan: DirectorPlan,
                   segment: DirectorSegment) -> tuple[tuple[int, int], ...]:
     """该段可能出现在的合并导出形态：``(前 k 段, 累计导出帧)``，k 从本段到末段。
 
-    导演包固定 ``exportMode="all"``（``pack.py`` 的装配约束 7）：「全部导出」拼的是
+    导演包固定 ``exportMode="all"``（``pack.py`` 的 ``REQUIRED_OUTPUT``）：「全部导出」拼的是
     时间线上**所有已有帧的段**，未勾的段从缓存填（插件 ``executor_core.py:467-471``、
     ``:1833-1837``）。所以跑第 N 段贴回来的视频，总帧数是 **``end_frame[N]``**（前
     N 段），不是本段的 ``export_frames``——2026-10-31 现场 226 ＝ 39 + 187。
