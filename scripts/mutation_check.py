@@ -1757,6 +1757,18 @@ MUTATIONS: tuple[Mutation, ...] = (
         "加载口只取模式小节、丢掉 common＝动作动机（连同时间窗、门槛、道具归属）到不了"
         "模型眼前，「规则在、接线不在」（#303）",
     ),
+    Mutation(
+        "director_dump_segment_filter_ignored",
+        "scripts/director_request_dump.py",
+        "        if segment is not None and item.index != segment:\n"
+        "            continue",
+        "        if False:\n"
+        "            continue",
+        ("tests/test_director_request_dump.py::"
+         "test_segment_filter_exports_only_the_requested_segment",),
+        "段过滤失效＝`--segment N` 照样导出全部段，改前/改后对照的根本不是同一段"
+        "（#306 AC4）",
+    ),
 )
 
 
