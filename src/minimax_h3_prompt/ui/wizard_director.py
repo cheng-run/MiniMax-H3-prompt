@@ -9,10 +9,30 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # 只为注解：运行时走函数内的延迟导入，别把规划栈拖进模块入口
     from ..director.planning import AssetBudget, DirectorPlan
+
+
+def write_context_blocks(state: dict, shot_table: str) -> dict[str, Any]:
+    """导演台写段请求的两个上下文块（#299／#300）：画面决策按段渲染、修订单份。
+
+    为什么住这里：``ui/wizard.py`` 的体量受 ``tests/test_wizard_size.py`` 的闸管着，
+    纯渲染／纯组装按仓库纪律搬进 ``wizard_*.py``。首写（``_run_director_flow``）与
+    改词（``_rewrite_director_segment_round``）两个出口共用这一处，否则同一份上下文
+    会写成两套来源（「同一契约两处口径」）。
+
+    逐字节等价：两个值只由本会话的 ``stage_state`` 决定，与原先在两个调用点各写一次
+    的表达式相同；搬迁前后用记录型桩模型对照过出站请求，diff 为空。
+    """
+    from ..director.prompts import visual_decision_source
+    from ..segment_prompts import render_revision_context
+
+    return {
+        "revision_context": render_revision_context(state),
+        "visual_decision": visual_decision_source(state, shot_table),
+    }
 
 
 def persist_director_plan(session_dir: str | Path, plan: DirectorPlan,
