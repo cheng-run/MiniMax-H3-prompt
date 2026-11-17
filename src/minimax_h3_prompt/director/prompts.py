@@ -639,17 +639,18 @@ def _fl2v_start_block(plan: DirectorPlan, segment: DirectorSegment) -> str:
             f"（{previous.end_hook}）只作剧情先后参考，不要写成同一空间。\n")
 
     # continue / camera_same / ending：都是引导段，第一拍从上一段终点接着写。
+    # 两种模式的句子只有括注不同，前半逐字相同——两处各抄一遍，改一句就只改一半，
+    # 而这段文本没有校验器看得住「哪一半忘了改」。
     if plan.mode == "t2v":
         # 2026-11-17 coord 裁定：t2v 一个图槽都没有，措辞必须说「没有可挂的图」；
         # 不得出现「首帧图」——那句话在无图槽的模式里就是一个假指称。
-        return (
-            "\n【本段起点】上一段落定画面："
-            f"{previous.end_hook}\n"
-            "（本段第一拍从这里接着写；本模式没有图槽，也没有可挂的图。）\n")
+        note = "本模式没有图槽，也没有可挂的图。"
+    else:
+        note = "本段没有首帧图。"
     return (
         "\n【本段起点】上一段落定画面："
         f"{previous.end_hook}\n"
-        "（本段第一拍从这里接着写；本段没有首帧图。）\n")
+        f"（本段第一拍从这里接着写；{note}）\n")
 
 
 def _film_end_block(plan: DirectorPlan, segment: DirectorSegment, *,
