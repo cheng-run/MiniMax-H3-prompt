@@ -736,7 +736,10 @@ MUTATIONS: tuple[Mutation, ...] = (
         'PROP_OWNERSHIP_DISCIPLINE = "**同一件穿戴物或道具，一段里只写一处归属**：帽子、头盔、背包、箱子、手机这类一眼能数清的物件，全段只写一次「在谁身上／在谁手里」；后文不要再把它改写成「放在某处」或「另一个人拿着」——两处归属会让成品长出两件。正例：`The helmet stays on his head; the box beside him holds no second helmet.`"',
         'PROP_OWNERSHIP_DISCIPLINE = ""',
         ("tests/test_writing_disciplines.py::"
-         "test_three_disciplines_reach_every_director_mode_from_the_source_module",),
+         "test_three_disciplines_reach_every_director_mode_from_the_source_module",
+         # 常量级守卫：清空后 ``assert value.strip()`` 直接响，别再让它无变异覆盖。
+         "tests/test_writing_disciplines.py::"
+         "test_three_discipline_constants_are_non_empty_text"),
         "清空道具归属真源＝导演台四条模式的出站系统提示里整条纪律变成空串（占位符照替、"
         "纪律内容没了）；守卫若不自证真源非空，``\"\" in text`` 恒真就会永远不红（#328）",
     ),
@@ -750,7 +753,10 @@ MUTATIONS: tuple[Mutation, ...] = (
         'MUSIC_CUE_DISCIPLINE_BASE = "**配乐按「同一支 cue 延续」写，不按「本段各写各的」写**：`non_diegetic_music` 写观众能听到、角色听不到的那支配乐；本段与相邻段是同一支 cue——乐器与速度一致，只允许力度与织体变化，写清本段里配器与力度如何变化。**不许写 `N/A`**，只有用户明确要求全片静音时才写 `N/A`。"',
         'MUSIC_CUE_DISCIPLINE_BASE = ""',
         ("tests/test_writing_disciplines_guard.py::"
-         "test_music_cue_discipline_reaches_base_but_not_ref",),
+         "test_music_cue_discipline_reaches_base_but_not_ref",
+         # 常量级守卫：清空后 ``assert text`` 直接响，别再让它无变异覆盖。
+         "tests/test_writing_disciplines_guard.py::"
+         "test_base_music_discipline_keeps_silence_exception_only"),
         "清空配乐弱化版真源＝base 两条写段路径同时失去 cue 延续纪律，接缝电平台阶原样复发"
         "（#194 实测 −9.8/+26.6 dB）；守卫若不自证真源非空，``\"\" in text`` 恒真就会永远不红（#330）",
     ),

@@ -19,6 +19,7 @@ from __future__ import annotations
 import pytest
 
 from minimax_h3_prompt import writing_disciplines as wd
+from minimax_h3_prompt.director.frames import SEGMENT_TYPE_LABELS
 from minimax_h3_prompt.director.prompts import build_segment_request, load_instruction
 from minimax_h3_prompt.segment_prompts import (
     build_ref_segment_v2_request,
@@ -157,8 +158,32 @@ def test_music_cue_discipline_reaches_base_but_not_ref():
             assert director_text not in out, f"{route} 的{label}被加上了配乐强化版（本票刻意不做）"
 
 
+# 导演台「按段类型分叉」的候选措辞分两段，缺一段就漏一类判据：
+# 1) 段类型标识符（camera_cut 等）＋中文标签（运镜·切镜 等）：从真源
+#    ``SEGMENT_TYPE_LABELS`` 派生。字面重抄一份会在强化版改词时**静默失效**（被测的
+#    正是「base 弱化版不含这套分叉措辞」，抄的词对不上就恒绿）。这十个词已逐个 ``in``
+#    实测过 ``MUSIC_CUE_DISCIPLINE_BASE``（2026-11-18）：确实全部不含才放进来。
+# 2) 段类型**复合称谓**「引导段／切镜段／开场段」：强化版正文里括号前那三个词
+#    （「引导段（续接 continue / 运镜·同场景 camera_same / 收尾定格 ending）」等），
+#    #330 的 AC 点名要防的正是这套分档规则。这三个词**派生不出来**：
+#    ``GUIDED_SEGMENT_TYPES`` 是英文标识符集合（continue / camera_same / ending），
+#    ``SEGMENT_TYPE_LABELS`` 只有「续接」「运镜·同场景」这类标签，库里没有任何常量写着
+#    「引导段」这种「中文＋段」的复合称谓。所以这三个是**显式字面例外**，不是漏派生——
+#    写在这里免得下一个人以为该从常量取。它们已核实：在强化版
+#    ``MUSIC_CUE_DISCIPLINE_DIRECTOR`` 里确实出现（否则这条断言就是在防不存在的措辞），
+#    在 base 版里逐个 ``in`` 实测均不含（2026-11-18），加回来不会误伤。
+# 判据是「真的不含」不是「应该不含」——将来若某个短标签（如「续接」）撞上 base 的
+# 自然语言，就把它从对应一段剔掉并在本注释写明原因，别留个会误伤的词。
+_SEGMENT_TYPE_WORDS = (
+    tuple(SEGMENT_TYPE_LABELS)
+    + tuple(SEGMENT_TYPE_LABELS.values())
+    + ("引导段", "切镜段", "开场段")
+)
+
+
 def test_base_music_discipline_keeps_silence_exception_only():
-    """弱化版的形态约束：保留静音例外，且**不许**混入导演台那套按段类型分叉的措辞。
+    """弱化版的形态约束：保留静音例外（官方 base-en.txt §4.6 overall_soundscape 的口径，
+    不是 §4.7 non_diegetic_music），且**不许**混入导演台那套按段类型分叉的措辞。
 
     这条对真源常量断言，断言的是两条**反向排斥**（该有的一句在、导演台专有的词一个
     都不在），不是「常量等于某个值」——后者才是被测物自证。真源形态一漂，上面那条
@@ -166,9 +191,10 @@ def test_base_music_discipline_keeps_silence_exception_only():
     """
     text = wd.MUSIC_CUE_DISCIPLINE_BASE
     assert text, "配乐弱化版真源为空"
-    assert "用户明确要求全片静音" in text, "弱化版丢了静音例外句（官方 base-en.txt 的既有对齐）"
+    assert "用户明确要求全片静音" in text, \
+        "弱化版丢了静音例外句（官方 base-en.txt §4.6 overall_soundscape 的静音例外）"
     assert "同一支 cue" in text, "弱化版没写「同一支 cue 延续」"
-    for word in ("camera_cut", "camera_same", "引导段", "切镜段", "开场段"):
+    for word in _SEGMENT_TYPE_WORDS:
         assert word not in text, f"弱化版混入了导演台的段类型分叉措辞「{word}」"
 
 

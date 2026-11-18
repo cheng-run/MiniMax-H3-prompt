@@ -56,7 +56,7 @@ THREE_DISCIPLINE_CONSTANTS = (
 )
 
 # 导演台指令文件里那三处内联正文换成的占位符所指向的常量：导演台只吃「强化版」，
-# 弱化版是给 base 两条写段路径的（#329／#330），本票只创建不接线。
+# 弱化版是给 base 两条写段路径的（#329／#330 已接进）。
 DIRECTOR_DISCIPLINE_CONSTANTS = (
     "PROP_OWNERSHIP_DISCIPLINE",
     "THRESHOLD_CROSSING_DISCIPLINE_DIRECTOR",
