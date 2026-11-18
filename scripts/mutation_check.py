@@ -1888,6 +1888,34 @@ MUTATIONS: tuple[Mutation, ...] = (
         "（#306 AC4）",
     ),
     Mutation(
+        "director_dump_opening_still_sidecar_miss_silently_skipped",
+        "scripts/director_request_dump.py",
+        "    if cached is None:\n"
+        "        raise DumpError(\n"
+        '            f"开场首帧图在盘上（{image}），但读图描述 sidecar 缺失或已过期："',
+        "    if cached is None:\n"
+        '        return ""\n'
+        "    if False:\n"
+        "        raise DumpError(\n"
+        '            f"开场首帧图在盘上（{image}），但读图描述 sidecar 缺失或已过期："',
+        ("tests/test_director_request_dump.py::"
+         "test_missing_or_stale_opening_sidecar_fails_with_the_image_path",),
+        "有图但 sidecar 缺失/过期时静默少一块＝改前/改后对照少一块而没人发现，"
+        "正是 #325 存在的理由（票面 AC2）",
+    ),
+    Mutation(
+        "director_dump_opening_still_ignores_the_giving_contract",
+        "scripts/director_request_dump.py",
+        "    start_frame_image = (start_still(session_dir, 1)\n"
+        "                         if needs_first_frame_image(FIRST_SEGMENT_TYPE, plan.mode)\n"
+        "                         else None)",
+        "    start_frame_image = start_still(session_dir, 1)",
+        ("tests/test_director_request_dump.py::"
+         "test_modes_without_a_first_frame_slot_ignore_a_stray_image",),
+        "判据不看给图契约＝t2v/r2v 盘上残留一张 start 图就让离线导出为不存在的首帧槽"
+        "要 sidecar（#325：判据问给图契约，不写模式字面量）",
+    ),
+    Mutation(
         "director_report_renders_only_six_conclusions",
         "src/minimax_h3_prompt/director/pack.py",
         "                 for number, constraint in enumerate(ASSEMBLY_CONSTRAINTS, 1))",

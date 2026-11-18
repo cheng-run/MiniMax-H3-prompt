@@ -15,11 +15,11 @@
 由 ``ui.wizard_director.write_context_blocks`` 取（与向导首写、改词同一个出口，也与
 工作台那两处同源）。本脚本不另拼任何一段请求文本。
 
-**只读**：不写会话目录——``--out`` 是唯一的写口，且拒绝落进会话目录。全片尾帧的
-读图 sidecar 缺失时**报错而不现场读图**：读图是付费视觉调用、还会写会话目录，
-离线导出复现不了那一次调用。会话状态文件（``session-state.json``）缺失时仍可导出
-（票面最低要求是 ``plan.json`` ＋ 分镜表），但两个上下文块按空处理并**打警告**说破
-它与真实写段不一定逐字节相同。
+**只读**：不写会话目录——``--out`` 是唯一的写口，且拒绝落进会话目录。读图 sidecar
+（全片尾帧、开场首帧）缺失或过期时**报错而不现场读图**：读图是付费视觉调用、还会写
+会话目录，离线导出复现不了那一次调用。会话状态文件（``session-state.json``）缺失时
+仍可导出（票面最低要求是 ``plan.json`` ＋ 分镜表），但两个上下文块按空处理并**打
+警告**说破它与真实写段不一定逐字节相同。
 
 没有 ``--out`` 时把请求全文打到 stdout；给了 ``--out`` 时落
 ``segment-NN.request.txt``（UTF-8 原字节，sha256 即对这份文件算）与 ``index.json``，
@@ -76,6 +76,9 @@ class SegmentDump:
     window_shots: tuple[int, ...]
     revision_context: str
     visual_decision: str
+    # 本段请求里「本段起点画面」块原文（不带时为空串）：报告据此说破本段带没带起点块，
+    # 由 provider 的同一份判据算出，不在这里另写一遍「开场段 × 有首帧槽」。
+    opening_still_block: str
     request: str
 
     @property
@@ -92,6 +95,8 @@ class SessionDump:
     # 段表的总段数：``--segment`` 只筛导出项，标题里的「第几段/共几段」仍按整张表念。
     total_segments: int
     segments: tuple[SegmentDump, ...]
+    # 这次导出用的开场首帧图（没有就是空串）：验收对照时要知道「改后那份用的是哪张图」。
+    opening_still_image: str = ""
     # 没有会话状态时的降级说明（此时两个上下文块为空）；有状态时为空串。
     state_note: str = ""
 
@@ -156,6 +161,29 @@ def _film_end_description(image: Path) -> str:
     return cached
 
 
+def _opening_still_description(image: Path) -> str:
+    """只读开场首帧图（``assets/01/start``）的读图 sidecar；缓存缺失时报错，绝不现场读图。
+
+    与 ``_film_end_description`` 是同一条契约，差异只在 ``kind``（用途标记）与消息里
+    那句「哪张图」：调用 ``get_opening_still_description`` 会在缓存失效时调视觉模型并
+    写会话目录——正是 #325 明令导出脚本不许做的事。判据仍走
+    ``still_description.read_cached_description`` 这一处，不在导出脚本里重写命中规则。
+    """
+    from minimax_h3_prompt.director.opening_still import OPENING_STILL_KIND
+    from minimax_h3_prompt.director.still_description import read_cached_description
+
+    try:
+        cached = read_cached_description(image, kind=OPENING_STILL_KIND)
+    except OSError as exc:
+        raise DumpError(f"开场首帧图读图 sidecar 读不出（图：{image}）：{exc}") from exc
+    if cached is None:
+        raise DumpError(
+            f"开场首帧图在盘上（{image}），但读图描述 sidecar 缺失或已过期："
+            "真实写段会当场调视觉模型重读（付费、且会写会话目录），离线导出复现不了"
+            "那一次调用。先在能联网的环境里走一次收集/写段把它落盘")
+    return cached
+
+
 def _sections_and_budget(session_dir: Path, mode: str) -> tuple[dict[str, str] | None, Any | None]:
     """r2v 的英文定义块与段内素材预算；其它模式都没有参考素材。"""
     if mode != "r2v":
@@ -186,11 +214,16 @@ def dump_session(session_dir: str | Path, *, segment: int | None = None) -> Sess
         raise DumpError(f"会话目录不存在：{session_dir}")
 
     from minimax_h3_prompt.director.firstframe import window_shot_numbers
-    from minimax_h3_prompt.director.pack import film_end_still
+    from minimax_h3_prompt.director.frames import (
+        FIRST_SEGMENT_TYPE,
+        needs_first_frame_image,
+    )
+    from minimax_h3_prompt.director.pack import film_end_still, start_still
     from minimax_h3_prompt.director.planning import plan_path, read_plan_json
     # 手工按段解析画面决策工厂的那一行与 ``write_director_segments`` 是同一条分支：
     # 这里不做第二次判断，直接用它的私有小件（重写一遍「callable 就调用」迟早分叉）。
     from minimax_h3_prompt.director.prompts import (
+        _opening_still_block,
         _resolve_visual_decision,
         build_segment_request,
     )
@@ -232,6 +265,15 @@ def dump_session(session_dir: str | Path, *, segment: int | None = None) -> Sess
     film_end = film_end_image is not None
     film_end_description = (_film_end_description(film_end_image)
                             if film_end_image is not None else "")
+    # 开场首帧图同理（#325）：判据只有一条——该模式的开场段**有没有首帧槽**。问给图
+    # 契约而不是写模式字面量：t2v 一个图槽都没有、r2v 的画面来源是参考素材，它们的
+    # 盘上残留一张 ``assets/01/start`` 也不该让导出去要 sidecar（真实写段同样不会读）。
+    start_frame_image = (start_still(session_dir, 1)
+                         if needs_first_frame_image(FIRST_SEGMENT_TYPE, plan.mode)
+                         else None)
+    start_frame = start_frame_image is not None
+    start_frame_description = (_opening_still_description(start_frame_image)
+                               if start_frame_image is not None else "")
     # 两个上下文块走与向导首写/改词同一个出口，不在这里另取一遍 state 键。
     blocks = write_context_blocks(state, table.text)
 
@@ -251,6 +293,8 @@ def dump_session(session_dir: str | Path, *, segment: int | None = None) -> Sess
             request = build_segment_request(
                 plan, item, shot_table=table.text, sections=sections,
                 film_end=film_end, film_end_description=film_end_description,
+                start_frame=start_frame,
+                start_frame_description=start_frame_description,
                 budget=budget.for_segment(item.index) if budget is not None else None,
                 revision_context=blocks["revision_context"],
                 visual_decision=visual)
@@ -271,6 +315,11 @@ def dump_session(session_dir: str | Path, *, segment: int | None = None) -> Sess
                 table.text, item.start_s, item.end_s),
             revision_context=blocks["revision_context"],
             visual_decision=visual,
+            # 报告里「本段带没带起点块」问的就是 provider 本人的判据（白问一遍同一个
+            # 函数）：另写一份「开场段 × 有首帧槽」迟早与真实注入分家。
+            opening_still_block=_opening_still_block(
+                plan, item, start_frame=start_frame,
+                description=start_frame_description),
             request=request,
         ))
     return SessionDump(
@@ -280,6 +329,7 @@ def dump_session(session_dir: str | Path, *, segment: int | None = None) -> Sess
         shot_table=table,
         total_segments=len(plan.segments),
         segments=tuple(dumped),
+        opening_still_image=str(start_frame_image) if start_frame_image else "",
         state_note=state_note,
     )
 
@@ -304,6 +354,8 @@ def render_report(dump: SessionDump, *, echo_requests: bool) -> str:
         lines.append(f"[警告] {dump.state_note}")
     if dump.shot_table.warning:
         lines.append(f"[警告] {dump.shot_table.warning}")
+    if dump.opening_still_image:
+        lines.append(f"开场首帧图：{dump.opening_still_image}")
     for item in dump.segments:
         lines += [
             "",
@@ -317,6 +369,9 @@ def render_report(dump: SessionDump, *, echo_requests: bool) -> str:
             "  画面决策块（visual_decision_source(state, shot_table) 按本段窗口）："
             + ("（空）" if not item.visual_decision.strip()
                else f"sha256={_sha256(item.visual_decision)}"),
+            "  起点画面块（开场首帧图，只对带首帧槽的开场段）："
+            + ("（不带）" if not item.opening_still_block.strip()
+               else f"sha256={_sha256(item.opening_still_block)}"),
         ]
         if item.revision_context.strip():
             lines.append(_indent(item.revision_context))
@@ -370,6 +425,10 @@ def write_outputs(dump: SessionDump, out_dir: Path) -> list[Path]:
                                         if item.revision_context.strip() else ""),
             "visual_decision_sha256": (_sha256(item.visual_decision)
                                        if item.visual_decision.strip() else ""),
+            # 「本段带没带起点块」：0 就是不带，非空时给得出 sha 供跨次对照。
+            "opening_still_block_chars": len(item.opening_still_block.strip()),
+            "opening_still_block_sha256": (_sha256(item.opening_still_block)
+                                           if item.opening_still_block.strip() else ""),
             "file": path.name,
             "bytes": len(item.request.encode("utf-8")),
             "sha256": item.sha256,
@@ -380,6 +439,7 @@ def write_outputs(dump: SessionDump, out_dir: Path) -> list[Path]:
         "total_frames": dump.total_frames,
         "shot_table_source": dump.shot_table.source,
         "shot_table_sha256": dump.shot_table.sha256,
+        "opening_still_image": dump.opening_still_image,
         "state_note": dump.state_note,
         "segments": rows,
     }
