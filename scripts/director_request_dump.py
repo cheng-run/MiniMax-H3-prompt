@@ -138,14 +138,14 @@ def _film_end_description(image: Path) -> str:
     """只读全片尾帧的读图 sidecar；缓存缺失时报错，绝不现场读图。
 
     ``get_film_end_description`` 在缓存失效时会调视觉模型并**写会话目录**——那是
-    导出脚本不该做的事（付费、改现场）。判据复用 ``film_end._cached_description``
-    这一处（同一条缓存命中契约），不在这里再写一遍 kind/指纹比较。
+    导出脚本不该做的事（付费、改现场）。判据复用 ``still_description.read_cached_description``
+    这一处（同一条缓存命中契约，与真实写段同一个口），不在这里再写一遍 kind/指纹比较。
     """
-    from minimax_h3_prompt.director import film_end as film_end_module
-    from minimax_h3_prompt.director.frame_meta import sha256_file
+    from minimax_h3_prompt.director.film_end import FILM_END_KIND
+    from minimax_h3_prompt.director.still_description import read_cached_description
 
     try:
-        cached = film_end_module._cached_description(image, sha256_file(image))
+        cached = read_cached_description(image, kind=FILM_END_KIND)
     except OSError as exc:
         raise DumpError(f"全片尾帧读图 sidecar 读不出（图：{image}）：{exc}") from exc
     if cached is None:

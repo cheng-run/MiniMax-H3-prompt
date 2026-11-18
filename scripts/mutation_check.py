@@ -420,12 +420,26 @@ MUTATIONS: tuple[Mutation, ...] = (
     ),
     Mutation(
         "film_end_sidecar_never_hits",
-        "src/minimax_h3_prompt/director/film_end.py",
+        # 判据自 #318 起住共享读图实现（全片尾帧与开场首帧同一份）。锚点跟着挪，
+        # 用例同时挂两条：共享实现自己的契约，以及全片尾帧改造后仍不变的行为。
+        "src/minimax_h3_prompt/director/still_description.py",
         '    if not fingerprint or meta.get("image_sha256") != fingerprint:\n'
         "        return None",
         "    if True:\n        return None",
-        ("tests/test_director_film_end.py::test_matching_fingerprint_reuses_the_sidecar_without_reading_again",),
-        "尾帧 sidecar 永不命中＝图没换也重读，续跑重复付费且不报错（#160）",
+        ("tests/test_director_film_end.py::test_matching_fingerprint_reuses_the_sidecar_without_reading_again",
+         "tests/test_director_still_description.py::test_matching_fingerprint_reuses_the_sidecar_without_reading_again"),
+        "尾帧 sidecar 永不命中＝图没换也重读，续跑重复付费且不报错（#160／#318）",
+    ),
+    Mutation(
+        "still_description_kind_check_dropped",
+        # #318 把 ``kind`` 从写死字面量改成参数：去掉这条比较，全片尾帧就会把开场
+        # 首帧留下的 sidecar 当成自己的缓存——「同一张图在不同用途下各自读」失守。
+        "src/minimax_h3_prompt/director/still_description.py",
+        '    if meta.get("kind") != kind:\n        return None\n',
+        "",
+        ("tests/test_director_still_description.py::test_sidecar_written_for_another_kind_is_not_reused",),
+        "用途标记比较被去掉＝别的用途写的 sidecar 被当成自己的缓存，段词拿着另一张图"
+        "的描述约束画面（#318）",
     ),
     Mutation(
         "doc_reference_untracked",
