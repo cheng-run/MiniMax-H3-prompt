@@ -1892,12 +1892,12 @@ MUTATIONS: tuple[Mutation, ...] = (
         "scripts/director_request_dump.py",
         "    if cached is None:\n"
         "        raise DumpError(\n"
-        '            f"开场首帧图在盘上（{image}），但读图描述 sidecar 缺失或已过期："',
+        '            f"{image_label}在盘上（{image}），但读图描述 sidecar 缺失或已过期："',
         "    if cached is None:\n"
         '        return ""\n'
         "    if False:\n"
         "        raise DumpError(\n"
-        '            f"开场首帧图在盘上（{image}），但读图描述 sidecar 缺失或已过期："',
+        '            f"{image_label}在盘上（{image}），但读图描述 sidecar 缺失或已过期："',
         ("tests/test_director_request_dump.py::"
          "test_missing_or_stale_opening_sidecar_fails_with_the_image_path",),
         "有图但 sidecar 缺失/过期时静默少一块＝改前/改后对照少一块而没人发现，"
@@ -1956,6 +1956,34 @@ MUTATIONS: tuple[Mutation, ...] = (
          "test_every_conclusion_recomputes_its_own_criterion",),
         "结论不再独立重算判据（写死通过）＝校验器被架空时报告仍全绿，正是 #308 要防"
         "的形态：报告是用户判断「能不能导入」的唯一依据",
+    ),
+    Mutation(
+        "director_api_start_frame_fact_not_passed",
+        "src/minimax_h3_prompt/api/jobs.py",
+        "                start_frame=facts.start_frame,\n"
+        "                start_frame_description=facts.start_frame_description,\n"
+        "                budget=result.budget,",
+        "                start_frame=False,\n"
+        "                start_frame_description=facts.start_frame_description,\n"
+        "                budget=result.budget,",
+        ("tests/test_api_director_opening_still.py::"
+         "test_planner_and_first_write_receive_the_opening_still_fact",),
+        "工作台当轮规划后的写段上下文丢掉「盘上真有首帧图」＝请求里的起点画面块永远"
+        "不出现，而组装层矩阵用例照绿——本仓咬过六次的「规则在、接线不在」（#324／#326）",
+    ),
+    Mutation(
+        "wizard_start_frame_fact_not_passed",
+        "src/minimax_h3_prompt/ui/wizard.py",
+        "                # （同一个缓存口取回），首写与规划不会各说一套（#322 的注入判据在\n"
+        "                # 请求组装里按段类型与给图契约再守一道）。\n"
+        "                start_frame=facts.start_frame,",
+        "                # （同一个缓存口取回），首写与规划不会各说一套（#322 的注入判据在\n"
+        "                # 请求组装里按段类型与给图契约再守一道）。\n"
+        "                start_frame=False,",
+        ("tests/test_wizard_opening_still.py::"
+         "test_wizard_flow_reads_the_opening_still_before_planning_on_resume",),
+        "CLI 首写调用点丢掉「盘上真有首帧图」＝续跑形态下开场段的起点画面块静默消失，"
+        "规划期看到图、写段期不看图，两条口径当场分家（#323／#326）",
     ),
 )
 

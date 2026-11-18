@@ -129,6 +129,43 @@ def test_no_block_without_the_image_on_disk_or_without_a_description():
         assert OPENING_STILL_BLOCK_HEAD not in request, f"{label}时不该出现起点画面块"
 
 
+def test_give_images_line_and_opening_block_never_disagree():
+    """「本段给图」行与起点块在同一份请求里必须说同一件事（spec #317 a-2）。
+
+    无首帧槽（t2v／r2v）：盘上真有一张 start 图、描述也传了进来，给图行不许点名
+    首帧，起点事实句也不许指向一张本模式挂不上的首帧图，更不能出现起点画面块；
+    有首帧槽（i2v／fl2v）：给图行点「首帧」，起点块的画面事实讲的就是这张图，而
+    起点事实句不再说「没有首帧图」——两处互斥的指称不许同段落共存。
+    """
+    from minimax_h3_prompt.director.opening_still import OPENING_STILL_BLOCK_HEAD
+
+    def fact_line(request: str, prefix: str) -> str:
+        return next(line for line in request.splitlines() if line.startswith(prefix))
+
+    for mode in ("t2v", "r2v"):
+        plan, segment = _single("opening", mode)
+        request = _request(plan, segment, start_frame=True,
+                           start_frame_description=_DESCRIPTION)
+        give = fact_line(request, "【本段给图】")
+        start = fact_line(request, "【本段起点】")
+        assert OPENING_STILL_BLOCK_HEAD not in request
+        assert "首帧" not in give, f"{mode} 没有首帧槽，给图行却点名首帧：{give}"
+        assert "首帧" not in start, f"{mode} 的起点事实句指向了不存在的首帧图：{start}"
+        assert "首帧图" not in request, f"{mode} 的请求里出现了首帧图指称"
+
+    for mode in ("i2v", "fl2v"):
+        plan, segment = _single("opening", mode)
+        request = _request(plan, segment, start_frame=True,
+                           start_frame_description=_DESCRIPTION)
+        give = fact_line(request, "【本段给图】")
+        start = fact_line(request, "【本段起点】")
+        assert "首帧" in give, f"{mode} 有首帧槽且有图，给图行必须点名首帧：{give}"
+        assert request.count(OPENING_STILL_BLOCK_HEAD) == 1
+        assert _DESCRIPTION in request, "给图行说有首帧，起点块却没讲清这张图是什么"
+        assert "没有首帧图" not in start, \
+            f"{mode} 的起点事实句与起点块互相打架：{start}"
+
+
 def test_default_parameters_are_exactly_the_pre_change_request():
     """新形参的默认值必须是「没有这张图、没有描述」：默认路径与改前调用同一条。
 

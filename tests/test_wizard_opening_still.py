@@ -106,6 +106,33 @@ def test_prepare_does_not_read_for_modes_without_a_first_frame_slot(
     assert not _start_sidecar(session.directory).exists()
 
 
+@pytest.mark.parametrize("mode,expected", [
+    ("t2v", False), ("r2v", False), ("i2v", True), ("fl2v", True)])
+def test_facts_flag_a_start_frame_only_where_the_contract_has_a_first_slot(
+        tmp_path, monkeypatch, mode, expected):
+    """``start_frame`` 与 ``film_end`` 同一口径：无首帧槽的模式盘上残留 start 图也不置真。
+
+    只判盘面不看模式时，t2v/r2v 会把一张本模式挂不上的图当成「本段有首帧图」，
+    给图行与起点块在同一份请求里互相打架（spec #317 a-2）。
+    """
+    from minimax_h3_prompt.ui.wizard_director import prepare_director_still_facts
+
+    session = _session(tmp_path, mode=mode)
+    _start_image(session.directory)
+    calls = _patch_describe(monkeypatch, _by_image)
+
+    facts = prepare_director_still_facts(session.directory, mode)
+
+    assert facts.ok
+    assert facts.start_frame is expected
+    if expected:
+        assert facts.start_frame_description == _OPENING
+        assert calls, "有首帧槽的模式应真的读一次图"
+    else:
+        assert facts.start_frame_description == ""
+        assert calls == [], "无首帧槽的模式不许读图，更不该把这张图当成事实"
+
+
 def test_prepare_reads_the_image_once_and_cache_holds_on_the_second_call(
         tmp_path, monkeypatch):
     """有图：读一次并返回描述；第二次（续跑/改词）命中 sidecar，不重复付费。"""

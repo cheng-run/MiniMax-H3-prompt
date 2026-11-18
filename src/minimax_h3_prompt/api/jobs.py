@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:  # 只用于段级注入卡写入口的签名，运行时按鸭子类型调用
     from ..director.prompts import VisualDecisionSource
     from ..ref_segments import RefSegmentJob
+    from ..ui.wizard_director import DirectorStillFacts
 
 from .. import step_machine
 from ..brief_parser import is_director_mode, is_ref_mode, route_uses_asset_ledger
@@ -741,6 +742,16 @@ class _DirectorWriteContext:
     # 「字符串或按段工厂」这套口径只有那一处真源，重写一遍 ``str | Callable[...]``
     # 就会退化成各写一份、迟早在一边放宽成 Any。
     visual_decision: VisualDecisionSource = ""
+
+
+def _still_failure_reason(facts: DirectorStillFacts) -> str:
+    """读图失败时给用户看的病因：点名哪张图，正常路径上原样带回视觉模型的报错。
+
+    规划与续写两处失败分支原先各写一次 ``facts.failure_reason or …``：两处一旦
+    漂开，同一场失败在两个 job 里会说成两种原因。``failed_image`` 只是兜底——
+    正常路径必有病因原文（``prepare_director_still_facts`` 从异常里取）。
+    """
+    return facts.failure_reason or f"{facts.failed_image}读图失败"
 
 
 def _director_segment_rows(
@@ -3305,8 +3316,8 @@ class JobRunner:
             facts = prepare_director_still_facts(directory, mode)
             if not facts.ok:
                 # 点名是哪张图、原样带回病因：用户手上两张可换，只说「读图失败」
-                # 等于没给病因。``failed_image`` 是兜底（正常路径必有病因原文）。
-                reason = facts.failure_reason or f"{facts.failed_image}读图失败"
+                # 等于没给病因。兜底与拼装住 ``_still_failure_reason`` 一处。
+                reason = _still_failure_reason(facts)
                 raise RuntimeError(f"{reason}：没有做段规划、没有写段")
             result = plan_director_segments(
                 shot_table, session.brief.duration, build_chat_model(),
@@ -3366,7 +3377,7 @@ class JobRunner:
         # 续写缺段必须与首写看到**同一份**描述，否则续写段词会悄悄换口径。
         facts = prepare_director_still_facts(directory, mode)
         if not facts.ok:
-            reason = facts.failure_reason or f"{facts.failed_image}读图失败"
+            reason = _still_failure_reason(facts)
             raise RuntimeError(f"{reason}：不能续写段词")
         return _DirectorWriteContext(
             shot_table=shot_table,

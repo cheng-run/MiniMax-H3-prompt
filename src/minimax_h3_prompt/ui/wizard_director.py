@@ -101,9 +101,10 @@ def _prepare_film_end_description(
         session_dir: str | Path) -> tuple[bool, str, str]:
     """``prepare_film_end_description`` 的内部形态：多交一份失败病因（#324）。
 
-    工作台的 job 失败原因要把病因带进事件详情，而公开口只返回 ``(ok, description)``
-    （CLI 的三个调用点与既有用例都按这个形状写）。文案与打印仍是同一处：公开口就是
-    本函数的薄包装，不许各写一套。
+    工作台的 job 失败原因要把病因带进事件详情，CLI 的规划/写段调用点也经
+    ``prepare_director_still_facts`` 走这里取病因。公开口只返回 ``(ok, description)``，
+    留给只需要这两个值的调用点（收集处）；文案与打印仍是同一处，公开口就是本函数的
+    薄包装，不许各写一套。
     """
     from ..director.film_end import get_film_end_description
     from ..director.pack import film_end_still
@@ -124,8 +125,10 @@ def prepare_film_end_description(session_dir: str | Path) -> tuple[bool, str]:
     打印图路径与病因并返回 ``(False, "")``：**与坏 sidecar 的宽容分开**，坏 sidecar
     可以重读，读不出图就必须停（不带着「终点全靠猜」的段词往下跑）。
 
-    收集与规划前两个调用点共用这一处文案：各写一套时，同一场失败会在两处说成
-    两件事（「图没有就位」/「读图失败」），用户分不清要不要重交图。
+    收集处仍走这个公开口（它只需要 ``(ok, description)``）；规划/写段期已改经
+    ``prepare_director_still_facts`` 聚合取数（描述、盘面与失败病因一次取齐），两者
+    共用同一处文案：各写一套时，同一场失败会在两处说成两件事（「图没有就位」/
+    「读图失败」），用户分不清要不要重交图。
     """
     ok, description, _reason = _prepare_film_end_description(session_dir)
     return ok, description
@@ -139,9 +142,9 @@ class DirectorStillFacts(NamedTuple):
     调用点上逐处展开会让 6000 行的编排文件继续变长；收进这里之后每个调用点只多
     一两行。
 
-    ``film_end`` / ``start_frame`` 是**盘上真有这张图**的判断，与描述分开放：给图行
-    按「图在不在」写、事实块按描述写，两者不同源就会写出指向空气的段词（#322 的
-    注入判据同理）。
+    ``film_end`` / ``start_frame`` 是**盘上真有这张图**的判断（``start_frame`` 还叠
+    一道给图契约：本模式确有首帧槽才算），与描述分开放：给图行按「图在不在」写、
+    事实块按描述写，两者不同源就会写出指向空气的段词（#322 的注入判据同理）。
 
     ``failed_image``（#324）是**哪张图**的读图失败了（「全片尾帧」/「开场首帧」）。
     只有 ``ok`` 分不出是哪张时，工作台的 job 失败原因就只能说「读图失败」，而用户
@@ -157,6 +160,18 @@ class DirectorStillFacts(NamedTuple):
     start_frame_description: str
     failed_image: str = ""
     failure_reason: str = ""
+
+    @classmethod
+    def failed(cls, image: str, reason: str) -> "DirectorStillFacts":
+        """读图失败时的唯一构造点：五个「空/假」值 + 哪张图 + 病因原文。
+
+        为什么收成类方法：两处失败分支原先各写一次位置构造（``False, False, "",
+        False, ""``），字段顺序一改就会把值错配到相邻槽位，而 NamedTuple 一样能
+        正常跑——错得静默。用关键字参数只在这里写一次，字段增删只改这一个地方。
+        """
+        return cls(ok=False, film_end=False, film_end_description="",
+                   start_frame=False, start_frame_description="",
+                   failed_image=image, failure_reason=reason)
 
 
 def _prepare_opening_still_description(
@@ -264,25 +279,26 @@ def prepare_director_still_facts(
     是哪张图、``failure_reason`` 带回病因原文（工作台的 job 失败原因要能说清该换
     哪一张、为什么读不出来）。
     """
+    from ..director.frames import FIRST_SEGMENT_TYPE, needs_first_frame_image
     from ..director.pack import film_end_still, start_still
 
     ok, film_end_description, reason = _prepare_film_end_description(session_dir)
     if not ok:
-        return DirectorStillFacts(
-            False, False, "", False, "",
-            failed_image="全片尾帧", failure_reason=reason)
+        return DirectorStillFacts.failed("全片尾帧", reason)
     ok, start_frame_description, reason = _prepare_opening_still_description(
         session_dir, mode)
     if not ok:
-        return DirectorStillFacts(
-            False, False, "", False, "",
-            failed_image="开场首帧", failure_reason=reason)
+        return DirectorStillFacts.failed("开场首帧", reason)
     return DirectorStillFacts(
         ok=True,
         # 全片尾帧只在 fl2v 有；「盘上真有」与描述分开判，理由见类 docstring。
         film_end=mode == "fl2v" and film_end_still(session_dir) is not None,
         film_end_description=film_end_description,
-        start_frame=start_still(session_dir, position=1) is not None,
+        # 首帧同理问给图契约（不写模式字面量）：t2v 一个图槽都没有、r2v 的画面来源
+        # 是参考素材，盘上残留一张 ``assets/01/start`` 也不该被当成「本段有首帧图」
+        # ——否则给图行会点名一张本模式挂不上的图，与起点块当场互相打架（#317 a-2）。
+        start_frame=(needs_first_frame_image(FIRST_SEGMENT_TYPE, mode)
+                     and start_still(session_dir, position=1) is not None),
         start_frame_description=start_frame_description,
     )
 

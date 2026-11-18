@@ -139,49 +139,51 @@ def _shot_table(session_dir: Path, state: dict) -> ShotTable:
         "导出的不是当时那一份请求")
 
 
-def _film_end_description(image: Path) -> str:
-    """只读全片尾帧的读图 sidecar；缓存缺失时报错，绝不现场读图。
+def _cached_or_dump_error(image: Path, *, kind: str, label: str,
+                          image_label: str) -> str:
+    """只读一张用户交来的图的读图 sidecar；缓存缺失时报错，绝不现场读图。
 
-    ``get_film_end_description`` 在缓存失效时会调视觉模型并**写会话目录**——那是
-    导出脚本不该做的事（付费、改现场）。判据复用 ``still_description.read_cached_description``
-    这一处（同一条缓存命中契约，与真实写段同一个口），不在这里再写一遍 kind/指纹比较。
+    ``get_film_end_description`` / ``get_opening_still_description`` 在缓存失效时都会
+    调视觉模型并**写会话目录**——那是导出脚本不该做的事（付费、改现场）。判据复用
+    ``still_description.read_cached_description`` 这一处（同一条缓存命中契约，与真实
+    写段同一个口），不在这里再写一遍 kind/指纹比较。
+
+    ``label`` / ``image_label`` 分开传：既有文案里两处名词的「图」后缀不一致
+    （「全片尾帧读图 sidecar」对「开场首帧图读图 sidecar」），它们是用户已经见过的
+    原文；抽公共件只收结构，不顺手统一措辞。
     """
-    from minimax_h3_prompt.director.film_end import FILM_END_KIND
     from minimax_h3_prompt.director.still_description import read_cached_description
 
     try:
-        cached = read_cached_description(image, kind=FILM_END_KIND)
+        cached = read_cached_description(image, kind=kind)
     except OSError as exc:
-        raise DumpError(f"全片尾帧读图 sidecar 读不出（图：{image}）：{exc}") from exc
+        raise DumpError(f"{label}读图 sidecar 读不出（图：{image}）：{exc}") from exc
     if cached is None:
         raise DumpError(
-            f"全片尾帧图在盘上（{image}），但读图描述 sidecar 缺失或已过期："
+            f"{image_label}在盘上（{image}），但读图描述 sidecar 缺失或已过期："
             "真实写段会当场调视觉模型重读（付费、且会写会话目录），离线导出复现不了"
             "那一次调用。先在能联网的环境里走一次收集/写段把它落盘")
     return cached
+
+
+def _film_end_description(image: Path) -> str:
+    """只读全片尾帧的读图 sidecar；缓存缺失时报错，绝不现场读图。"""
+    from minimax_h3_prompt.director.film_end import FILM_END_KIND
+
+    return _cached_or_dump_error(
+        image, kind=FILM_END_KIND, label="全片尾帧", image_label="全片尾帧图")
 
 
 def _opening_still_description(image: Path) -> str:
     """只读开场首帧图（``assets/01/start``）的读图 sidecar；缓存缺失时报错，绝不现场读图。
 
-    与 ``_film_end_description`` 是同一条契约，差异只在 ``kind``（用途标记）与消息里
-    那句「哪张图」：调用 ``get_opening_still_description`` 会在缓存失效时调视觉模型并
-    写会话目录——正是 #325 明令导出脚本不许做的事。判据仍走
-    ``still_description.read_cached_description`` 这一处，不在导出脚本里重写命中规则。
+    与 ``_film_end_description`` 是同一条只读契约，差异只在 ``kind``（用途标记）与
+    文案里「哪张图」；两者共用 ``_cached_or_dump_error``，命中规则不在这里重写。
     """
     from minimax_h3_prompt.director.opening_still import OPENING_STILL_KIND
-    from minimax_h3_prompt.director.still_description import read_cached_description
 
-    try:
-        cached = read_cached_description(image, kind=OPENING_STILL_KIND)
-    except OSError as exc:
-        raise DumpError(f"开场首帧图读图 sidecar 读不出（图：{image}）：{exc}") from exc
-    if cached is None:
-        raise DumpError(
-            f"开场首帧图在盘上（{image}），但读图描述 sidecar 缺失或已过期："
-            "真实写段会当场调视觉模型重读（付费、且会写会话目录），离线导出复现不了"
-            "那一次调用。先在能联网的环境里走一次收集/写段把它落盘")
-    return cached
+    return _cached_or_dump_error(
+        image, kind=OPENING_STILL_KIND, label="开场首帧图", image_label="开场首帧图")
 
 
 def _sections_and_budget(session_dir: Path, mode: str) -> tuple[dict[str, str] | None, Any | None]:

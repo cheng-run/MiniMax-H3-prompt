@@ -40,12 +40,14 @@ from ..kinds import KIND_PICTURE
 from ..ref_capacity import MAX_PICTURES
 from ..text_patterns import PICTURE_TAG as _SLOT_TOKEN_RE
 from .frames import (
+    FIRST_SEGMENT_TYPE,
     FPS,
     PLAN_MODES,
     SEGMENT_TYPE_LABELS,
     DirectorPlan,
     DirectorSegment,
     duration_sec_for_declared,
+    needs_first_frame_image,
     validate_segment_types,
 )
 from .planning import (
@@ -557,8 +559,12 @@ def opening_start_still_missing(session_dir: str | Path, mode: str) -> Path | No
     扩展名偏好与落点目录是打包的契约：向导另写一份，换了扩展名列表就会「向导说放好了、
     打包说没有」。调用点＝阶段 1 收尾之前的那道等待（2026-10-30 真实跑现场：用户拿到
     生图提示词后没有机会在图就位前停下来，直接撞上「第 1 段缺开场首帧」）。
+
+    「哪些模式需要这张图」问给图契约（``needs_first_frame_image``），与写段请求的
+    注入判据同一条：写死模式字面量时，将来加模式/改槽位要回来改第二处（CONTEXT
+    「模式差异只住给图契约一处」）。
     """
-    if mode not in ("i2v", "fl2v"):
+    if not needs_first_frame_image(FIRST_SEGMENT_TYPE, mode):
         return None
     directory = Path(session_dir)
     if _find_still(directory, 1, START_STEM) is not None:
