@@ -163,3 +163,76 @@ def test_own_module_scan_recognises_only_own_modules(tmp_path: Path) -> None:
 
     assert len(bad) == 1, f"只该抓住本仓那一处：{bad}"
     assert "segment_prompts.py:666" in bad[0]
+
+
+# ---------------------------------------------------------------------------
+# 指向 CONTEXT.md 命名节／词条的指针必须能解析（retro 2026-11-18）
+# ---------------------------------------------------------------------------
+# **为什么需要它**：``CONTEXT.md`` 是术语真源，代码注释与活文档常写「见 CONTEXT.md 的
+# 『某某清单』」。这类指针**指向的是一个名字**，不是文件——名字不存在时没人报错，
+# grep 也只会告诉你「有这一句」。2026-11-18 spec #327 实测：#328 往写作纪律真源写了
+# 三处「见 CONTEXT.md 的不迁清单」，而那份清单当时**在仓里根本不存在**，全靠协调会话
+# 手工 grep 才发现，最后由 #331 补建。
+#
+# 扫的是「会被 agent 读到」的位置：``src/``、``tests/`` 与 ``docs/agents/`` 的源码/活文档，
+# 加上根目录两份活文档。``docs/adr/``、``docs/design/``、``docs/research/`` 是历史记录，
+# 按产物落点规则不改写，不在此列。
+#
+# 判据只认**带「」的形态**（``CONTEXT.md …「名字」``）：名字包在括号里，边界才是确定的。
+# 裸写（「CONTEXT.md 的不迁清单」）实测会误伤——「CONTEXT.md 定义的术语用词」里的
+# 「定义的术语用词」不是节名。所以想被这条守卫覆盖的指针**请给名字加「」**。
+
+CONTEXT_POINTER = re.compile(r"CONTEXT\.md[^\n]{0,12}?「([^」]+)」")
+CONTEXT_SCAN_DIRS = (ROOT / "src", ROOT / "tests", ROOT / "docs" / "agents")
+CONTEXT_SCAN_FILES = (ROOT / "AGENTS.md", ROOT / "CODING_STANDARDS.md")
+# 本文件自己的断言消息与反例夹具里必然出现「CONTEXT.md『…』」形态（夹具里那个名字
+# 故意的就是不存在），不排除它，守卫会被自己绊倒。先例：``test_doc_references_tracked``
+# 排除 ``scripts/mutation_check.py``。
+CONTEXT_SCAN_EXCLUDE = {Path(__file__).resolve()}
+
+
+def context_pointer_hits(paths: Iterable[Path], context_text: str) -> list[str]:
+    """返回 ``[引用方:行 -> CONTEXT.md「名字」]``；名字在 CONTEXT.md 里找不到即命中。"""
+    bad: list[str] = []
+    for path in paths:
+        if not path.is_file():
+            continue
+        for number, line in enumerate(
+                path.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
+            for match in CONTEXT_POINTER.finditer(line):
+                name = match.group(1)
+                if name not in context_text:
+                    bad.append(f"{path}:{number} -> CONTEXT.md「{name}」")
+    return bad
+
+
+def _context_scan_paths() -> list[Path]:
+    paths: list[Path] = []
+    for directory in CONTEXT_SCAN_DIRS:
+        for pattern in ("*.py", "*.md"):
+            paths.extend(sorted(directory.rglob(pattern)))
+    paths.extend(path for path in CONTEXT_SCAN_FILES if path.is_file())
+    return [path for path in paths if path.resolve() not in CONTEXT_SCAN_EXCLUDE]
+
+
+def test_context_md_named_pointers_resolve() -> None:
+    """指名引用 ``CONTEXT.md`` 某节／某词条的，那个名字必须真的在里面。"""
+    context_text = (ROOT / "CONTEXT.md").read_text(encoding="utf-8")
+    bad = context_pointer_hits(_context_scan_paths(), context_text)
+    assert not bad, (
+        "这些地方指向 CONTEXT.md 里不存在的名字（读的人按名字找不到东西，"
+        "而文件本身还在，任何检查都不会报错——先把名字补进 CONTEXT.md，"
+        "或改成实际存在的那个）：\n  " + "\n  ".join(bad))
+
+
+def test_context_pointer_scan_catches_a_dangling_name(tmp_path: Path) -> None:
+    """守卫自身会响：存在的名字放行，不存在的点名。"""
+    doc = tmp_path / "sample.py"
+    doc.write_text(
+        "# 见 CONTEXT.md 的「存在的词条」与 CONTEXT.md 的「不存在的清单」。\n",
+        encoding="utf-8")
+
+    bad = context_pointer_hits([doc], "## 存在的词条：\n")
+
+    assert len(bad) == 1, f"只该抓住悬空的那个：{bad}"
+    assert "不存在的清单" in bad[0]

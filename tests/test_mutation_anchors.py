@@ -114,3 +114,49 @@ def test_a_missing_test_node_is_reported() -> None:
             tests=("tests/test_not_a_file.py::test_anything",)),
     ))
     assert len(missing) == 3
+
+
+# ---------------------------------------------------------------------------
+# 真源常量必须有变异（retro 2026-11-18）
+# ---------------------------------------------------------------------------
+# 上面两节守的是「已有变异指向的东西还在」；这一节守的是**反向**——真源里每个公开
+# 常量都得有至少一条变异拿它当锚点。为什么：仓规「新加守卫必须补一条变异」靠人记，
+# 2026-11-18 spec #327 交付时就漏了两条（`MUSIC_CUE_DISCIPLINE_DIRECTOR` 与
+# `THRESHOLD_CROSSING_DISCIPLINE_DIRECTOR`），两轴复审只抓到「新用例没变异」，没抓到
+# 「新常量没变异」。实测清空这两条会让 8 条守卫报红——变异可杀，只是没人写。
+
+
+def constants_without_mutation(mutations, names) -> list[str]:
+    """``names`` 里没有出现在任何一条变异锚点中的那些。"""
+    anchors = "\n".join(str(mutation.old) for mutation in mutations)
+    return [name for name in names if name not in anchors]
+
+
+def _writing_discipline_constants() -> list[str]:
+    """``writing_disciplines`` 的公开 str 常量名。
+
+    只认 ``str``：那个模块的约定是「只放文本、不放逻辑」，出现非文本本身就是
+    ``test_module_holds_only_text_constants`` 该报的错，不该混进这条判据。
+    """
+    from minimax_h3_prompt import writing_disciplines
+
+    return sorted(
+        name for name, value in vars(writing_disciplines).items()
+        if not name.startswith("_") and isinstance(value, str)
+    )
+
+
+def test_every_writing_discipline_constant_has_a_mutation() -> None:
+    """真源里每个公开常量都要有一条变异清空/改坏它，否则那条纪律没有「会红」的证明。"""
+    module = _load_checker()
+    missing = constants_without_mutation(module.MUTATIONS, _writing_discipline_constants())
+    assert not missing, (
+        "这些真源常量没有任何变异覆盖（清空它不会有守卫报红＝那条纪律没人守）：\n  "
+        + "\n  ".join(missing))
+
+
+def test_a_constant_without_mutation_is_reported() -> None:
+    """守卫自身会响：被覆盖的放行、没覆盖的点名。"""
+    missing = constants_without_mutation(
+        (SimpleNamespace(old='COVERED = "x"'),), ("COVERED", "MISSING"))
+    assert missing == ["MISSING"]

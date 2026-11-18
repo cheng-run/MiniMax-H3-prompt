@@ -791,6 +791,72 @@ MUTATIONS: tuple[Mutation, ...] = (
         "``\"\" in text`` 恒真就会永远不红（#329）",
     ),
     Mutation(
+        "director_threshold_crossing_discipline_cleared",
+        # 锚点取常量赋值**整行**（全仓恰好一次）：真源自己就是被测断言的那份文本，
+        # 只改其中几个字不会让「出站文本含真源全文」那条红——只有清空才让
+        # 「先自证非空」那句响。retro 2026-11-18 补：真源里每个公开常量都要有变异。
+        "src/minimax_h3_prompt/writing_disciplines.py",
+        'THRESHOLD_CROSSING_DISCIPLINE_DIRECTOR = "**跨门槛／门口／门洞的动作，逐人写清门内门外与移动方向**：任何一人跨门槛、穿门口或进门洞，都在同一句里写死他**此刻在门内还是门外**、**朝哪边移动**；同段里没动的人也要交代相对位置（谁在屋内、谁在谁身后一步）——只写「走进门」而不写谁已经在里面，成品会让屋外的人跟着一起进来。正例：`The father is already inside the house, the mother stands one step behind him, and the man outside steps across the threshold into the room.`"',
+        'THRESHOLD_CROSSING_DISCIPLINE_DIRECTOR = ""',
+        (
+         "tests/test_writing_disciplines_guard.py::test_detail_disciplines_reach_only_the_routes_that_should_carry_them",
+        ),
+        "清空门槛强化版真源＝导演台四条模式的出站系统提示里那条纪律变成空串（段类型分叉版只此一份）；导演台吃的是这一个常量，base 走弱化版不受影响（#328）",
+    ),
+    Mutation(
+        "director_music_cue_discipline_cleared",
+        # 锚点取常量赋值**整行**（全仓恰好一次）：真源自己就是被测断言的那份文本，
+        # 只改其中几个字不会让「出站文本含真源全文」那条红——只有清空才让
+        # 「先自证非空」那句响。retro 2026-11-18 补：真源里每个公开常量都要有变异。
+        "src/minimax_h3_prompt/writing_disciplines.py",
+        'MUSIC_CUE_DISCIPLINE_DIRECTOR = "**配乐按「同一支 cue 延续」写，不按「本段各写各的」写**：`non_diegetic_music` 写观众能听到、角色听不到的那支配乐。**引导段**（续接 continue / 运镜·同场景 camera_same / 收尾定格 ending）的音画已被段间引导钉在上一段上，配乐必须写成同一支 cue 在本段的延续——写清配器与力度如何变化，**不许写 `N/A`**；**切镜段**（运镜·切镜 camera_cut）与相邻段写同一支 cue——乐器与速度一致，只允许力度与织体变化；**开场段**（开场 opening）确立全片那支 cue，后面的段都延续它。"',
+        'MUSIC_CUE_DISCIPLINE_DIRECTOR = ""',
+        (
+         "tests/test_writing_disciplines_guard.py::test_music_cue_discipline_reaches_base_but_not_ref",
+        ),
+        "清空配乐强化版真源＝导演台四条模式的出站系统提示里配乐分档纪律整条消失，接缝电平台阶原样复发（#194 实测 −9.8/+26.6 dB）；base 走弱化版不受影响（#328）",
+    ),
+    Mutation(
+        "future_events_title_cleared",
+        # 锚点取常量赋值**整行**（全仓恰好一次）：真源自己就是被测断言的那份文本，
+        # 只改其中几个字不会让「出站文本含真源全文」那条红——只有清空才让
+        # 「先自证非空」那句响。retro 2026-11-18 补：真源里每个公开常量都要有变异。
+        "src/minimax_h3_prompt/writing_disciplines.py",
+        'FUTURE_EVENTS_TITLE = "【时间窗外剧情禁区】以下事件属于其他视频段，本段绝对不能出现其中任何一个："',
+        'FUTURE_EVENTS_TITLE = ""',
+        (
+         "tests/test_writing_disciplines_guard.py::test_every_write_route_sends_the_family_discipline",
+        ),
+        "清空时间窗外标题句＝三条块形态路线的请求只剩清单、没有「以下事件属于其他视频段」这句前置约束，模型会把清单读成剧情素材（#314）",
+    ),
+    Mutation(
+        "context_unmigration_list_renamed",
+        # retro 2026-11-18：三处代码注释写着「见 CONTEXT.md 的「不迁清单」」。把 CONTEXT.md
+        # 里那一节的标题改名，名字就从全文消失——注释不改、文件不改别的行，任何既有检查
+        # 都不报错，只有「指名指针必须能解析」那条会红。这正是 #328 当初踩的形态
+        # （注释指向一份当时根本不存在的清单）。
+        "CONTEXT.md",
+        "## 不迁清单（刻意不搬的导演台纪律）",
+        "## 迁移决定（刻意不搬的导演台纪律）",
+        ("tests/test_doc_pointer_shape.py::test_context_md_named_pointers_resolve",),
+        "CONTEXT.md 的节名被改＝代码与活文档里指名它的指针集体悬空，读的人按名字找不到东西"
+        "（#327 实测：三处注释指向一份不存在的清单，靠人工 grep 才发现）",
+    ),
+    Mutation(
+        "writing_discipline_constant_without_mutation",
+        # retro 2026-11-18：往真源模块加一个公开常量**而不给它变异**，正是「新加守卫必须
+        # 补一条变异」要防的形态。锚点取唯一的一行注释，插在它后面（模块级赋值，合法位置）。
+        "src/minimax_h3_prompt/writing_disciplines.py",
+        "# 配乐纪律的**base 弱化版**（已由 #330 接进 base 的两条写段路径）：",
+        "# 配乐纪律的**base 弱化版**（已由 #330 接进 base 的两条写段路径）："
+        "\n"
+        'UNGUARDED_PROBE_DISCIPLINE = "探针：没有任何变异清空它"',
+        ("tests/test_mutation_anchors.py::"
+         "test_every_writing_discipline_constant_has_a_mutation",),
+        "真源里多一个没人管的常量＝那条纪律没有任何「会红」的证明；2026-11-18 spec #327 "
+        "交付时就漏了两条（导演台门槛与配乐强化版），两轴复审都没抓到",
+    ),
+    Mutation(
         "end_hook_placement_guard_off",
         "src/minimax_h3_prompt/director/planning.py",
         "    text = str(end_hook or \"\")\n"
