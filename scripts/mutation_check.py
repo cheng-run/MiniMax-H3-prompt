@@ -741,6 +741,36 @@ MUTATIONS: tuple[Mutation, ...] = (
         "纪律内容没了）；守卫若不自证真源非空，``\"\" in text`` 恒真就会永远不红（#328）",
     ),
     Mutation(
+        "base_prop_ownership_discipline_cleared",
+        # 锚点与 ``director_prop_ownership_discipline_cleared`` 是同一行常量赋值：两条
+        # 变异各跑各的目标用例（一条钉导演台、一条钉 base 两条写段路径），清空后两边
+        # 都该红。锚点判据 ``anchor_problems`` 只看**单条变异内部** ``old`` 出现几次，
+        # 跨变异共用同一锚点不会报错（2026-11-18 读 ``_anchor_occurrences`` 复核）。
+        # 为什么不是「把值改成别的文本」：真源自己就是被测断言的那份文本，改词后出站
+        # 文本跟着变，「出站含真源全文」照样成立——只有清空能让「先自证非空」那句响。
+        "src/minimax_h3_prompt/writing_disciplines.py",
+        'PROP_OWNERSHIP_DISCIPLINE = "**同一件穿戴物或道具，一段里只写一处归属**：帽子、头盔、背包、箱子、手机这类一眼能数清的物件，全段只写一次「在谁身上／在谁手里」；后文不要再把它改写成「放在某处」或「另一个人拿着」——两处归属会让成品长出两件。正例：`The helmet stays on his head; the box beside him holds no second helmet.`"',
+        'PROP_OWNERSHIP_DISCIPLINE = ""',
+        ("tests/test_writing_disciplines_guard.py::"
+         "test_detail_disciplines_reach_only_the_routes_that_should_carry_them",),
+        "清空道具归属真源＝base 的 v2 与回退两条写段请求同时失去这条纪律"
+        "（一段里长出两个头盔的实测形态原样复发）；守卫若不自证真源非空，"
+        "``\"\" in text`` 恒真就会永远不红（#329）",
+    ),
+    Mutation(
+        "base_threshold_crossing_discipline_cleared",
+        # 干净的新常量，锚点全仓恰好一次：清空后 base 两条写段路径失去弱化版门槛纪律，
+        # 导演台仍拿强化版（它走另一个常量），正好证明两版没有互相顶替。
+        "src/minimax_h3_prompt/writing_disciplines.py",
+        'THRESHOLD_CROSSING_DISCIPLINE_BASE = "**跨门槛／门口／门洞的动作，逐人写清门内门外与移动方向**：写到的每个人都要交代他此刻在门内还是门外、朝哪边移动，同段里提到位置的人彼此不得自相矛盾（不要一句写他在屋内、另一句又让他从门外进来）——里外不分会让屋里屋外的人一起跟着进门。正例：`The father is already inside the house, the mother stands one step behind him, and the man outside steps across the threshold into the room.`"',
+        'THRESHOLD_CROSSING_DISCIPLINE_BASE = ""',
+        ("tests/test_writing_disciplines_guard.py::"
+         "test_detail_disciplines_reach_only_the_routes_that_should_carry_them",),
+        "清空门槛弱化版真源＝base 两条写段请求失去「门内门外逐人交代」纪律"
+        "（屋里的人跟着一起进门的实测形态原样复发）；守卫若不自证真源非空，"
+        "``\"\" in text`` 恒真就会永远不红（#329）",
+    ),
+    Mutation(
         "end_hook_placement_guard_off",
         "src/minimax_h3_prompt/director/planning.py",
         "    text = str(end_hook or \"\")\n"

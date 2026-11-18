@@ -116,6 +116,56 @@ def test_every_write_route_sends_the_family_discipline(route, family, constant_n
 
 
 # ---------------------------------------------------------------------------
+# 两条「一眼看穿」的细节纪律（#329）：只发往「该带的那几条」路线
+# ---------------------------------------------------------------------------
+# 为什么不能塞进上面的 ``_FAMILIES``：那一族是**无差别**的「五条路线全含」，而这两条
+# 恰恰有路线刻意不做——ref 两条路径明确不加（用户 2026-11-18 裁定，#327），门槛那条
+# 还有强弱两版（base 弱化、导演台强化）。所以这里按路线写明「该带哪几个常量」，
+# 不在表里的常量就断言**不含**：正向与反向都是决定的一部分，缺哪一半都会让
+# 「有人顺手给 ref 加上」或「有人把强化版塞进 base」静默通过。
+_CARRIED_DETAIL_DISCIPLINES = {
+    "base_v2": ("PROP_OWNERSHIP_DISCIPLINE", "THRESHOLD_CROSSING_DISCIPLINE_BASE"),
+    "base_fallback": ("PROP_OWNERSHIP_DISCIPLINE", "THRESHOLD_CROSSING_DISCIPLINE_BASE"),
+    # ref 刻意不做（#327 不迁清单）：它那两条指令是与 base 无耦合的独立常量，
+    # 加进去会改动已验收的多参产物措辞。
+    "ref_v2": (),
+    "ref_fallback": (),
+    # 导演台走同一个道具归属常量（逐字共用），门槛取**强化版**——不是 BASE 版。
+    "director": ("PROP_OWNERSHIP_DISCIPLINE", "THRESHOLD_CROSSING_DISCIPLINE_DIRECTOR"),
+}
+
+# 这一族全部候选常量：某路线没带的，逐个反向断言「不含」。
+_DETAIL_DISCIPLINE_CONSTANTS = tuple(sorted({
+    name for names in _CARRIED_DETAIL_DISCIPLINES.values() for name in names
+}))
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_detail_disciplines_reach_only_the_routes_that_should_carry_them(route):
+    """该带的路线含全文，不该带的路线**一个字都不含**（#329）。
+
+    先自证真源非空：空串让 ``in`` 恒真、让 ``not in`` 恒假，正向与反向会同时失效。
+    刻意不把这两条并进 ``_FAMILIES``：那里是「五条路线全含」，而 ref 两条的决定
+    正是不含——并进去就只能靠删路线来迁就，等于把「刻意不做」这条决定抹掉。
+    """
+    for name in _DETAIL_DISCIPLINE_CONSTANTS:
+        assert getattr(wd, name), \
+            f"{name} 为空——空串让正向断言恒真、反向断言恒假，守卫会失效"
+
+    carried = _CARRIED_DETAIL_DISCIPLINES[route]
+    outbound = _outbound(route)
+    assert outbound, f"{route} 没有取到任何出站文本"
+    for label, text in outbound:
+        assert text, f"{route} 的{label}是空的"
+        for name in carried:
+            assert getattr(wd, name) in text, f"{route} 的{label}缺 {name} 纪律"
+        for name in set(_DETAIL_DISCIPLINE_CONSTANTS) - set(carried):
+            assert getattr(wd, name) not in text, (
+                f"{route} 的{label}不该带 {name}"
+                "（#327 的路线分工：ref 刻意不做，base 只取门槛弱化版）")
+
+
+# ---------------------------------------------------------------------------
 # 帧一致性纪律（#319）：只发往首尾帧两条路径，且全句在源码里只许有一份
 # ---------------------------------------------------------------------------
 

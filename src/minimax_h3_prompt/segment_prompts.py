@@ -44,6 +44,8 @@ from .writing_disciplines import (
     FRAME_CONSISTENCY_DISCIPLINE,
     FUTURE_EVENTS_DISCIPLINE,
     FUTURE_EVENTS_TITLE,
+    PROP_OWNERSHIP_DISCIPLINE,
+    THRESHOLD_CROSSING_DISCIPLINE_BASE,
 )
 
 # 镜头块标记：[Shot N]（允许中括号与数字间任意空白）；判据单一来源见 text_patterns。
@@ -494,6 +496,8 @@ _REWRITE_INSTRUCTION = f"""你是 H3 视频提示词工程师。把整条视频�
   `{EDGE_STABILITY_SENTENCE}`
   要求它的理由就是本流程的桥接帧链——抽出的尾帧要保持轮廓锐利，留给下一段当首帧参考；
   {CAMERA_SPEED_DISCIPLINE}
+  {PROP_OWNERSHIP_DISCIPLINE}
+  {THRESHOLD_CROSSING_DISCIPLINE_BASE}
   **时间窗外剧情禁区**：{FUTURE_EVENTS_DISCIPLINE}——本段时间窗之外的事件出现即本段作废；
 - overall_soundscape: **为本段重写**（不是从整条裁切，按段重写）：1-4 句 English 连续段落，
   描述本段时间窗内的环境声与动作声，无时间戳（官方 §4.6）；
@@ -590,6 +594,8 @@ H3 是执行型模型：你写什么它就做什么，含糊等于失控；把**
      逐字符照抄、不改写不译文（本仓硬要求；理由见下）：
      `{EDGE_STABILITY_SENTENCE}`
    - {CAMERA_SPEED_DISCIPLINE}
+   - {PROP_OWNERSHIP_DISCIPLINE}
+   - {THRESHOLD_CROSSING_DISCIPLINE_BASE}
 2. `overall_soundscape:` **为本段重写**英文摘要句（官方 §4.6）：1-4 句 English 连续段落，描述本段的环境声与动作声；**无时间戳**。
 3. `non_diegetic_music:` **为本段重写**英文摘要句（官方 §4.7）：1-3 句 English，写观众能听到、角色听不到的配乐（乐器/速度/节奏）；无声时只写 `N/A`；**无时间戳**。
 
