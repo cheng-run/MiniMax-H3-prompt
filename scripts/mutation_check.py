@@ -1916,6 +1916,28 @@ MUTATIONS: tuple[Mutation, ...] = (
         "要 sidecar（#325：判据问给图契约，不写模式字面量）",
     ),
     Mutation(
+        "opening_still_injection_criterion_dropped",
+        "src/minimax_h3_prompt/director/prompts.py",
+        "    if not needs_first_frame_image(segment.type, plan.mode):\n"
+        "        return \"\"",
+        "    if False:\n"
+        "        return \"\"",
+        ("tests/test_director_opening_still_request.py::"
+         "test_injection_matrix_covers_four_modes_by_five_segment_types",),
+        "注入判据改宽＝t2v（一个图槽都没有）与 r2v（画面来源是参考素材）的开场段也"
+        "拿到「本段起点画面」，模型会照一张不存在的开场首帧图写第一拍（#326）",
+    ),
+    Mutation(
+        "opening_still_block_not_registered",
+        "src/minimax_h3_prompt/director/prompts.py",
+        "    _request_start_still_block,\n",
+        "",
+        ("tests/test_opening_still_wiring.py::"
+         "test_cli_entry_sends_the_opening_block_only_on_the_opening_segment",),
+        "块 provider 没排进请求清单＝组装函数还在、矩阵用例照绿（它直接调 "
+        "provider），但模型眼前的请求里永远没有这块——本仓咬过六次的「规则在、接线不在」（#326）",
+    ),
+    Mutation(
         "director_report_renders_only_six_conclusions",
         "src/minimax_h3_prompt/director/pack.py",
         "                 for number, constraint in enumerate(ASSEMBLY_CONSTRAINTS, 1))",

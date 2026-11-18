@@ -36,6 +36,7 @@ from minimax_h3_prompt.director.prompts import segment_path
 from minimax_h3_prompt.graph import pipeline
 from minimax_h3_prompt.session_store import SESSION_FILENAME
 from minimax_h3_prompt.tools import reference_auditor
+from minimax_h3_prompt.writing_disciplines import FRAME_CONSISTENCY_DISCIPLINE
 from workbench_client import workbench_client
 from workbench_deterministic import DEFAULT_REPLIES, DeterministicChatModel
 
@@ -227,13 +228,17 @@ def test_planner_and_first_write_receive_the_opening_still_fact(workbench, monke
         planners = _requests(model, "planner")
         writers = _requests(model, "writer")
         assert planners and writers
-        # 规划期：块 + 描述 + planning 那半句（拿它来规划本段边界与落定画面）。
-        assert BLOCK_HEAD in planners[-1]
+        # 规划期：块 + 描述 + 纪律句 + planning 那半句（拿它来规划本段边界与落定画面）。
+        # 三条同源事实一起断言（#326）：只查描述会漏掉「标题或纪律句丢了、模型不知道
+        # 这堆字是画面事实」这种半接线。
+        assert planners[-1].count(BLOCK_HEAD) == 1
         assert opening in planners[-1]
+        assert FRAME_CONSISTENCY_DISCIPLINE in planners[-1]
         assert "规划本段的边界、summary 与 end_hook 时以它为准" in planners[-1]
-        # 当轮构造点：首写请求带同一份描述，块措辞切到「写本段正文时」。
-        assert BLOCK_HEAD in writers[-1]
+        # 当轮构造点：首写请求带同一份描述、同一句纪律，块措辞切到「写本段正文时」。
+        assert writers[-1].count(BLOCK_HEAD) == 1
         assert opening in writers[-1]
+        assert FRAME_CONSISTENCY_DISCIPLINE in writers[-1]
         assert "写本段正文时以它为准" in writers[-1]
 
 
