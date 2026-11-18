@@ -670,6 +670,51 @@ MUTATIONS: tuple[Mutation, ...] = (
         "``\"\" in text`` 恒真就会永远不红（#316）",
     ),
     Mutation(
+        "frame_consistency_discipline_cleared",
+        # 锚点取常量赋值**整段**（含隐式拼接的各行，全仓恰好一次）：只改其中一行字面量
+        # 杀不死守卫——真源自己就是被测断言的那份文本，改词后「含真源全文」照样成立。
+        # 清空后首尾帧两条写段请求整族失去这条纪律，守卫必须先自证真源非空才会红。
+        "src/minimax_h3_prompt/writing_disciplines.py",
+        'FRAME_CONSISTENCY_DISCIPLINE = (\n'
+        '    "本段开场状态必须与这张图逐项一致，双向对齐："\n'
+        '    "**图中已有的事物绝不可写成不存在、尚未出现或「等它登场」**"\n'
+        '    "（例如图中猫已站在店内，就不能写「空店」「无猫」「No cat is visible in the frame」"\n'
+        '    "或让它在本段才推门进来）；"\n'
+        '    "**图中没有的事物也绝不可写成已经存在或正在入场**"\n'
+        '    "（例如图中门是关着的、没有猫，就不能写「门被推开」「猫冲进店内」"\n'
+        '    "或「clerk swings into frame」这类与首帧矛盾的开场）。"\n'
+        '    "分镜表、上文「本段剧情概述」与这张图冲突时，一律以画面为准。"\n'
+        ')',
+        'FRAME_CONSISTENCY_DISCIPLINE = ""',
+        ("tests/test_writing_disciplines_guard.py::"
+         "test_frame_consistency_discipline_reaches_both_base_route_write_requests",),
+        "清空帧一致性真源＝首尾帧 v2 与回退两条写段请求同时失去这条纪律，"
+        "写段器照剧本推断写开场状态（GEN004 段 2 原样复发）；"
+        "守卫若不自证真源非空，``\"\" in text`` 恒真就会永远不红（#319）",
+    ),
+    Mutation(
+        "frame_consistency_discipline_second_copy",
+        # 把整句抄进另一个写段路径模块：出站文本仍旧含它，只有「源码里只许一份」那条
+        # 会红。锚点取**使用行**（本票独有、别族不会在同一处汇合，且不随 import 增删漂）。
+        "src/minimax_h3_prompt/segment_prompts.py",
+        "    lines.append(FRAME_CONSISTENCY_DISCIPLINE)\n",
+        '    _second_copy = (\n'
+        '        "本段开场状态必须与这张图逐项一致，双向对齐："\n'
+        '        "**图中已有的事物绝不可写成不存在、尚未出现或「等它登场」**"\n'
+        '        "（例如图中猫已站在店内，就不能写「空店」「无猫」"\n'
+        '        "「No cat is visible in the frame」或让它在本段才推门进来）；"\n'
+        '        "**图中没有的事物也绝不可写成已经存在或正在入场**"\n'
+        '        "（例如图中门是关着的、没有猫，就不能写「门被推开」「猫冲进店内」"\n'
+        '        "或「clerk swings into frame」这类与首帧矛盾的开场）。"\n'
+        '        "分镜表、上文「本段剧情概述」与这张图冲突时，一律以画面为准。"\n'
+        '    )\n'
+        "    lines.append(FRAME_CONSISTENCY_DISCIPLINE)\n",
+        ("tests/test_writing_disciplines_guard.py::"
+         "test_frame_consistency_discipline_has_no_second_copy_in_source",),
+        "第二份整句硬拷贝＝两条路线看着同一句话、实际各改各的；出站断言杀不死它"
+        "（请求里照样含这句），只有源码扫描那条会红（#319）",
+    ),
+    Mutation(
         "music_guided_segment_writes_na",
         "src/minimax_h3_prompt/prompts/segment_writer_director.md",
         "**不许写 `N/A`**",

@@ -9,6 +9,10 @@
 
 每条断言前先断言真源常量非空：否则「把常量清空」的变异会被 ``"" in text`` 恒真
 骗过，守卫永远不红——本票的变异条目正是清空 ``CAMERA_SPEED_DISCIPLINE``。
+
+末节是帧一致性纪律（#319）：它目前只发往首尾帧两条路径（v2 与回退），导演台要到
+#321/#322 才接，所以不并进上面的五路线参数化——单独钉它真正该到的两处，外加一条
+「源码里不许出现第二份」：纪律句被整句抄进别的文件时，出站文本断言照样绿。
 """
 from __future__ import annotations
 
@@ -109,3 +113,71 @@ def test_every_write_route_sends_the_family_discipline(route, family, constant_n
         assert wd.FUTURE_EVENTS_TITLE, "时间窗外真源标题句为空"
         assert wd.FUTURE_EVENTS_TITLE in outbound[-1][1], \
             f"{route} 的{outbound[-1][0]}缺时间窗外真源标题句"
+
+
+# ---------------------------------------------------------------------------
+# 帧一致性纪律（#319）：只发往首尾帧两条路径，且全句在源码里只许有一份
+# ---------------------------------------------------------------------------
+
+# 源码根：真源与全部写段路径都住在 ``src/minimax_h3_prompt`` 下，提示词文件在它的
+# ``prompts/`` 子目录里——两处都扫，`prompts/*.md` 的同义改写同样算第二份拷贝。
+from pathlib import Path  # noqa: E402 - 只服务本节扫描，别把 import 提到文件头扰乱既有分组
+import ast  # noqa: E402 - 同上：扫描器只在末节用
+
+_SRC_ROOT = Path(wd.__file__).resolve().parent
+_SCANNED_SUFFIXES = (".py", ".md")
+
+
+def _frame_discipline() -> str:
+    return wd.FRAME_CONSISTENCY_DISCIPLINE
+
+
+def test_frame_consistency_discipline_reaches_both_base_route_write_requests():
+    """首尾帧 v2 与回退两条写段请求都要带帧一致性真源全文（#319）。
+
+    先断言真源非空再断言 ``in``：清空常量时空串让 ``in`` 恒真，守卫永远不会红，
+    本票的变异条目就杀不死它。
+    """
+    text = _frame_discipline()
+    assert text, "帧一致性真源为空——空串让 in 断言恒真，守卫会失效"
+    for route in ("base_v2", "base_fallback"):
+        outbound = _outbound(route)
+        assert outbound, f"{route} 没有取到任何出站文本"
+        for label, out in outbound:
+            assert out, f"{route} 的{label}是空的"
+            assert text in out, f"{route} 的{label}缺帧一致性纪律"
+
+
+def test_frame_consistency_discipline_has_no_second_copy_in_source():
+    """整句在源码与提示词文件里**只出现一次**（就在真源模块里）。
+
+    为什么光有出站断言不够：把整句抄进 ``segment_prompts`` 的另一处（或某个
+    ``prompts/*.md``）时，出站文本仍旧含它，上面那条照样绿——第二份拷贝从此各自漂。
+    这里用整句做判据（不是特征词组）：真源措辞一改，抄的那份立刻数得出来。
+
+    判据要同时看**源码原文**与**Python 字符串常量的值**：长句在本仓按源码行宽拆成
+    多段隐式拼接（真源自身就是），原文里根本没有连着的整句——只扫原文会 0 命中，
+    守卫就成了永远绿的空转。``ast`` 把隐式拼接折成一个常量，抄一份的写法再变也逃不掉。
+    """
+    text = _frame_discipline()
+    assert text, "帧一致性真源为空——空串会让「出现在任何文件」恒真"
+
+    def _carries(path: Path) -> bool:
+        raw = path.read_text(encoding="utf-8")
+        if text in raw:
+            return True
+        if path.suffix != ".py":
+            return False
+        return any(
+            isinstance(node, ast.Constant) and isinstance(node.value, str)
+            and text in node.value
+            for node in ast.walk(ast.parse(raw))
+        )
+
+    hits = sorted(
+        str(path.relative_to(_SRC_ROOT)).replace("\\", "/")
+        for path in _SRC_ROOT.rglob("*")
+        if path.is_file() and path.suffix in _SCANNED_SUFFIXES and _carries(path)
+    )
+    assert hits == ["writing_disciplines.py"], \
+        f"帧一致性纪律句在源码里应只出现一份（真源模块），实际：{hits}"

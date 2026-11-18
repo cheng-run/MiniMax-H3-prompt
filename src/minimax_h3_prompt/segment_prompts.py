@@ -36,11 +36,12 @@ from .tools.h3_validator import (
     validate_ref,
 )
 from .user_revisions import pending_revisions, render_revision_block
-# 三族写作纪律的唯一可写来源（#312 建源、#313–#315 按族收口）：纪律文本只住那边一处，
-# 本模块与其他写段路径一样取常量，不再各留一份会各自漂的硬拷贝。
+# 三族写作纪律的唯一可写来源（#312 建源、#313–#315 按族收口；#319 补帧一致性）：
+# 纪律文本只住那边一处，本模块与其他写段路径一样取常量，不再各留一份会各自漂的硬拷贝。
 from .writing_disciplines import (
     ANAPHORA_DISCIPLINE,
     CAMERA_SPEED_DISCIPLINE,
+    FRAME_CONSISTENCY_DISCIPLINE,
     FUTURE_EVENTS_DISCIPLINE,
     FUTURE_EVENTS_TITLE,
 )
@@ -631,22 +632,6 @@ def frame_anchor_context(state: dict) -> str:
     )
 
 
-# 双向开场一致性纪律句（issue #12，所有段共用）。
-# 正向（issue #6，2026-09-22）：图中已有的事物不得写成不存在/尚未出现；
-# 反向（issue #12，GEN004 段 2 坏的正是这一半）：图中没有的事物不得写成已存在/
-# 从外部进入——桥接帧是门完整关闭、没有猫，正文却写「门被推开、猫已在店内」。
-_FRAME_CONSISTENCY_DISCIPLINE = (
-    "本段开场状态必须与这张图逐项一致，双向对齐："
-    "**图中已有的事物绝不可写成不存在、尚未出现或「等它登场」**"
-    "（例如图中猫已站在店内，就不能写「空店」「无猫」「No cat is visible in the frame」"
-    "或让它在本段才推门进来）；"
-    "**图中没有的事物也绝不可写成已经存在或正在入场**"
-    "（例如图中门是关着的、没有猫，就不能写「门被推开」「猫冲进店内」"
-    "或「clerk swings into frame」这类与首帧矛盾的开场）。"
-    "分镜表、上文「本段剧情概述」与这张图冲突时，一律以画面为准。"
-)
-
-
 def _bridge_frame_descriptions(state: dict) -> dict[int, str]:
     """从 state 取各段桥接帧的读图结果 ``{0-based 段号: 描述}``。
 
@@ -680,7 +665,8 @@ def _frame_anchor_note(is_first: bool, is_last: bool, state: dict,
     不可能写出与桥接帧一致的开场状态）；没有读图结果时只声明图片是唯一事实源。
     末段的尾帧 = 用户提交的尾帧图 → 正文结尾必须落到该状态。
 
-    双向一致性纪律句（``_FRAME_CONSISTENCY_DISCIPLINE``）对**所有**段发出，
+    双向一致性纪律句（``FRAME_CONSISTENCY_DISCIPLINE``，真源在 ``writing_disciplines``）
+    对**所有**段发出，
     不只第 1 段——GEN004 段 2 正是在中间段把「图中没有的」写成了「正在入场」。
     """
     descriptions = real_frame_descriptions(state)
@@ -704,7 +690,7 @@ def _frame_anchor_note(is_first: bool, is_last: bool, state: dict,
         lines.append("Picture 1 是用户提交的首帧图（图片是唯一事实源）")
     else:
         lines.append("Picture 1 是上一段剥出的桥接帧（上一段末尾画面），图片是唯一事实源")
-    lines.append(_FRAME_CONSISTENCY_DISCIPLINE)
+    lines.append(FRAME_CONSISTENCY_DISCIPLINE)
     if is_last and "last" in descriptions:
         lines.append(
             f"本段是最后一段，视频结束时必须落到用户提交的尾帧实际画面（读图结果，唯一事实源）：\n{descriptions['last']}"
