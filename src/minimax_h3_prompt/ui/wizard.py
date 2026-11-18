@@ -694,28 +694,13 @@ def _collect_director_opening_still(session: SessionState, config: Config) -> bo
             continue
         break
 
-    from ..director.pack import FILM_END_STEM, START_STEM
-    from .wizard_director import prepare_film_end_description, store_director_still
+    from .wizard_director import store_and_read_director_stills
 
-    if first_path is None:  # 首帧必填；空输入在这里拦下，不把 None 传进落点
-        print("[错误] 首帧路径为空。")
+    # 落图、当场读图、失败停下都收在同一个出口（#160／#323）：本文件受
+    # ``tests/test_wizard_size.py`` 的体量闸管着，这段纯文件操作搬出去。
+    if not store_and_read_director_stills(
+            directory, brief.director_mode, first=first_path, last=last_path):
         return False
-    target = store_director_still(first_path, directory, START_STEM)
-    print(f"[已就位] 首帧：{target}")
-    if last_path is not None:
-        # 全片尾帧落 assets 根（``film-end``），不落 ``assets/01/end``：后者是**第 1 段**
-        # 的终点画面。多段时这张图由你在导演台的**最后一段**尾帧槽里挂；单段时打包器
-        # 会把它当作这一段的终点（``pack._plan_media``）。
-        film_end = store_director_still(last_path, directory, FILM_END_STEM, segment=None)
-        print(f"[已就位] 全片尾帧（最后一段的终点画面）：{film_end}")
-        # #160：收集时读一次图（落 sidecar），失败立刻停——续跑跳过本步时规划前还会补读。
-        ok, description = prepare_film_end_description(directory)
-        if not ok:
-            print("  已停下：没有继续规划、没有写段、也没有落描述 sidecar。"
-                  "修好视觉模型后重跑向导会回到这一步。")
-            return False
-        if description:
-            print(f"[已读图] 全片终点画面：{description}")
     save_session(directory, brief, session.stage_state, status=session.status)
     return True
 
@@ -829,18 +814,16 @@ def _run_director_flow(session: SessionState) -> int:
                 _drain_stdin()
             refdefs.save_ref_sections(session.directory, sections)
             print(f"[定义块] 已生成并落盘：{refdefs.sections_path(session.directory)}")
-    # #160：续跑时收集步骤会被跳过，规划前仍要经同一个口取描述（缓存命中或补读）；
-    # 读图失败就停在段规划之前，不带着「终点全靠猜」的表往下跑。
-    from ..director.pack import film_end_still
-    from .wizard_director import prepare_film_end_description
+    # #160／#323：续跑时收集步骤会被跳过，规划前仍要经同一个口取两张图的描述
+    # （缓存命中或补读）；读图失败就停在段规划之前，不带着「终点/起点全靠猜」的
+    # 表往下跑。盘面判断与描述在同一处取回，给图行与事实块不会各说一套。
+    from .wizard_director import prepare_director_still_facts
 
-    film_end = (brief.director_mode == "fl2v"
-                and film_end_still(session.directory) is not None)
-    # 不前置 `film_end` 闸：没有图时取描述口自己返回 (True, "")（#157 复审）。
-    ok, film_end_description = prepare_film_end_description(session.directory)
-    if not ok:
+    facts = prepare_director_still_facts(session.directory, brief.director_mode)
+    if not facts.ok:
         print("  已停下：没有做段规划、没有写段。")
         return 1
+    film_end = facts.film_end
     try:
         with step_scope("正在按导演台帧网格规划分段"):
             result = plan_director_segments(
@@ -850,7 +833,10 @@ def _run_director_flow(session: SessionState) -> int:
                 frame_context=frame_anchor_context(state),
                 revision_context=render_revision_context(state),
                 # 让最后一段的边界与落定画面按图写，不只按标题写（#160）。
-                film_end_description=film_end_description,
+                film_end_description=facts.film_end_description,
+                # #323：规划师也看见开场首帧的画面事实，第一段的边界与落定画面才
+                # 与成片第一帧对齐，而不是规划一套、写段另一套（spec #317 §6）。
+                start_frame_description=facts.start_frame_description,
                 # #186：r2v 规划师要看见素材台账才能按编号挑图；闭包用同一份英文定义块。
                 # 其它模式没有参考素材，两个参数保持空值（返回空预算、不落文件）。
                 registry=registry,
@@ -884,7 +870,12 @@ def _run_director_flow(session: SessionState) -> int:
                 film_end=film_end,
                 # 与段表清单同一份判据：ending 段（单段时是 opening）的请求带终点图
                 # 描述，段词与图冲突时以图为准（#160）。
-                film_end_description=film_end_description,
+                film_end_description=facts.film_end_description,
+                # #323：开场首帧图的事实只在开场段进请求；与规划期是**同一份**描述
+                # （同一个缓存口取回），首写与规划不会各说一套（#322 的注入判据在
+                # 请求组装里按段类型与给图契约再守一道）。
+                start_frame=facts.start_frame,
+                start_frame_description=facts.start_frame_description,
                 # #298／#299／#300：两个上下文块从同一处渲染（write_context_blocks）。
                 **write_context_blocks(state, shot_table),
             )
@@ -1075,7 +1066,7 @@ def _rewrite_director_segment_round(plan, segment, session: SessionState, *,
     与 ``director/delivery.py`` 的「导演台 UI 内修改」区分开（两种来源混在一处，
     事后分不清哪笔改动是项目侧做的，哪笔是用户在导演台里做的）。
     """
-    from ..director.pack import film_end_still, prepare_director_pack
+    from ..director.pack import prepare_director_pack
     from ..director.prompts import rewrite_director_segment, segment_path
     from ..ref_segments import log_segment_rewrite_round
     from ..segment_prompts import MAX_SEGMENT_ATTEMPTS
@@ -1099,16 +1090,15 @@ def _rewrite_director_segment_round(plan, segment, session: SessionState, *,
 
     state = dict(session.stage_state)
     sections = split_ref_sections(before) if plan.mode == "r2v" else None
-    # #160：改词也是写段请求，必须带同一份终点描述，否则按 e 改一次就把约束改丢。
-    from .wizard_director import prepare_film_end_description, write_context_blocks
+    # #160／#323：改词也是写段请求，必须带同一份起点/终点画面事实，否则按 e 改一次
+    # 就把「以图为准」的约束改丢。盘面判断与描述同一处取回（续跑命中缓存不重读）。
+    from .wizard_director import prepare_director_still_facts, write_context_blocks
 
-    film_end = (plan.mode == "fl2v"
-                and film_end_still(session.directory) is not None)
-    # 同首写路径：没有图时取描述口自己返回 (True, "")，不再前置一次闸（#157 复审）。
-    ok, film_end_description = prepare_film_end_description(session.directory)
-    if not ok:
+    facts = prepare_director_still_facts(session.directory, plan.mode)
+    if not facts.ok:
         print("  本轮改词没有执行，本段提示词保持原样；可重选出路（贴视频 / 再按 e / q）。")
         return "retry"
+    film_end = facts.film_end
     try:
         with step_scope(f"正在改写第 {segment.index}/{len(plan.segments)} 段提示词"):
             outcome = rewrite_director_segment(
@@ -1117,7 +1107,10 @@ def _rewrite_director_segment_round(plan, segment, session: SessionState, *,
                 sections=sections,
                 # 与首写同一份上下文：单段 fl2v 的给图行要照旧写「首+尾」（#147）。
                 film_end=film_end,
-                film_end_description=film_end_description,
+                film_end_description=facts.film_end_description,
+                # #323：起点画面事实与规划期、首写是同一份（同一个缓存口取回）。
+                start_frame=facts.start_frame,
+                start_frame_description=facts.start_frame_description,
                 # #298／#299／#300：改词与首写共用同一份上下文来源（write_context_blocks）。
                 **write_context_blocks(state, str(state.get("shot_table", ""))),
             )

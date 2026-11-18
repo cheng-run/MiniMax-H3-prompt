@@ -2156,6 +2156,10 @@ def test_rewrite_round_on_a_single_segment_tells_the_user_to_click_run(
     config = _run_config(monkeypatch, tmp_path)
 
     monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
+    # #323：改词前会读取开场首帧图（i2v 的开场源图）。本用例不测读图，桩住视觉调用。
+    monkeypatch.setattr(
+        "minimax_h3_prompt.tools.reference_auditor.describe_image",
+        lambda path, instruction=None: "她立在门前，旧木格长窗在身后。")
 
     outcome = wizard._rewrite_director_segment_round(
         plan, plan.segments[0], session, config=config,
@@ -2385,6 +2389,10 @@ def test_rewrite_round_passes_visual_decision_from_this_sessions_state(
         status=STATUS_DIRECTOR_SEGMENTS_RUNNING)
     config = _run_config(monkeypatch, tmp_path)
     monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
+    # #323：改词前会读取开场首帧图（i2v 的开场源图）。本用例不测读图，桩住视觉调用。
+    monkeypatch.setattr(
+        "minimax_h3_prompt.tools.reference_auditor.describe_image",
+        lambda path, instruction=None: "她立在门前，旧木格长窗在身后。")
 
     llm = _RewritingLLM(_REWRITTEN_BODY)
     wizard._rewrite_director_segment_round(
@@ -2440,6 +2448,10 @@ def test_rewrite_round_passes_revision_context_from_this_sessions_state(
         status=STATUS_DIRECTOR_SEGMENTS_RUNNING)
     config = _run_config(monkeypatch, tmp_path)
     monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
+    # #323：改词前会读取开场首帧图（i2v 的开场源图）。本用例不测读图，桩住视觉调用。
+    monkeypatch.setattr(
+        "minimax_h3_prompt.tools.reference_auditor.describe_image",
+        lambda path, instruction=None: "她立在门前，旧木格长窗在身后。")
 
     llm = _RewritingLLM(_REWRITTEN_BODY)
     wizard._rewrite_director_segment_round(

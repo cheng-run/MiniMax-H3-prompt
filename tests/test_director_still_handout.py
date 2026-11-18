@@ -69,6 +69,11 @@ def test_tail_frame_can_be_skipped_with_a_second_confirmation(tmp_path, monkeypa
     session = _session(tmp_path)
     first = _still(tmp_path, "first.png")
     _patch_prompts(monkeypatch, answers=[str(first), ""], confirms=[True])
+    # #323：收图之后立刻读一次开场首帧（给用户看读图结果）。本用例的接缝是落点，
+    # 不打桩就会真的调视觉模型（出网守卫会拦、拖慢全量）。
+    monkeypatch.setattr(
+        "minimax_h3_prompt.tools.reference_auditor.describe_image",
+        lambda path, instruction=None: "雾中的绿皮火车正驶向洞口。")
 
     assert wizard._collect_director_opening_still(session, config=None) is True
 
@@ -107,6 +112,10 @@ def test_first_frame_stays_required(tmp_path, monkeypatch):
     session = _session(tmp_path)
     first = _still(tmp_path, "first.png")
     asked = _patch_prompts(monkeypatch, answers=["", str(first), ""], confirms=[True])
+    # #323：收图之后立刻读一次开场首帧；桩住视觉调用（出网守卫会拦）。
+    monkeypatch.setattr(
+        "minimax_h3_prompt.tools.reference_auditor.describe_image",
+        lambda path, instruction=None: "雾中的绿皮火车正驶向洞口。")
 
     assert wizard._collect_director_opening_still(session, config=None) is True
 

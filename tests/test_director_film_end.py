@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 import pytest
 
@@ -365,7 +366,11 @@ def test_collecting_the_film_end_reads_it_once_and_caches(tmp_path, monkeypatch,
     calls = _patch_describe(monkeypatch, lambda _n, _p: _DESCRIPTION)
 
     assert wizard._collect_director_opening_still(session, config=None) is True
-    assert len(calls) == 1, "收集时应当读图一次"
+    # #323 起收图之后就多读一次开场首帧（同一张图交进来时立刻给用户看读图结果），
+    # 本用例钉的是全片尾帧那一半：它仍只读一次。
+    read = [Path(path).name for path in calls]
+    assert read.count("film-end.png") == 1, "收集时应当读全片尾帧一次"
+    assert read.count("start.png") == 1, "开场首帧在收图之后也要读一次（#323）"
     assert _sidecar(session.directory).is_file()
     out = capsys.readouterr().out
     assert _DESCRIPTION in out, "读到的终点画面描述要打给用户"
@@ -383,8 +388,11 @@ def test_collecting_the_film_end_stops_when_the_visual_call_fails(
     last.write_bytes(b"film-end-bytes")
     _patch_collect_inputs(monkeypatch, [str(first), str(last)])
 
-    def fail(_path, instruction=None):
-        raise RuntimeError("视觉网关 502")
+    def fail(path):
+        # 只有全片尾帧读不出来：#323 起开场首帧在同一处也会读，别让它先撞红。
+        if "film-end" in str(path):
+            raise RuntimeError("视觉网关 502")
+        return _DESCRIPTION
 
     monkeypatch.setattr(
         "minimax_h3_prompt.tools.reference_auditor.describe_image", fail)
@@ -473,7 +481,8 @@ def test_wizard_flow_reads_the_description_before_planning_on_resume(
     assert wizard._run_director_flow(session) == 0
 
     assert events and events[0] == "vision", "续跑时必须在规划之前补读尾帧图"
-    assert events.count("vision") == 1, "同一个口只读一次（收集被跳过时由规划前补上）"
+    # #323 起开场首帧也在规划前补读：两张图的 sidecar 都不在，各读一次、各落一份。
+    assert events.count("vision") == 2, "开场首帧与全片尾帧各补读一次（收集被跳过时由规划前补上）"
     planner_request = next(request for request in llm.requests
                            if "分段规划师" in request)
     assert _DESCRIPTION in planner_request, "规划请求没带终点画面描述"

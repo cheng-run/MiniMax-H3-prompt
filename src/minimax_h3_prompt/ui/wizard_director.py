@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:  # 只为注解：运行时走函数内的延迟导入，别把规划栈拖进模块入口
     from ..director.planning import AssetBudget, DirectorPlan
@@ -117,6 +117,140 @@ def prepare_film_end_description(session_dir: str | Path) -> tuple[bool, str]:
     except (RuntimeError, OSError) as exc:
         print(f"[错误] 全片尾帧读图失败：{exc}")
         return False, ""
+
+
+class DirectorStillFacts(NamedTuple):
+    """规划/写段期两张用户交来的图的事实（#323）。
+
+    合成一个出口的理由与 ``write_context_blocks`` 相同：``ui/wizard.py`` 受
+    ``tests/test_wizard_size.py`` 的体量闸管着，而「取描述 → 判失败 → 判盘面」在三处
+    调用点上逐处展开会让 6000 行的编排文件继续变长；收进这里之后每个调用点只多
+    一两行。
+
+    ``film_end`` / ``start_frame`` 是**盘上真有这张图**的判断，与描述分开放：给图行
+    按「图在不在」写、事实块按描述写，两者不同源就会写出指向空气的段词（#322 的
+    注入判据同理）。
+    """
+
+    ok: bool
+    film_end: bool
+    film_end_description: str
+    start_frame: bool
+    start_frame_description: str
+
+
+def prepare_opening_still_description(
+        session_dir: str | Path, mode: str) -> tuple[bool, str]:
+    """取开场首帧图的画面描述（#323）：返回 ``(ok, description)``。
+
+    为什么与 ``prepare_film_end_description`` 并排、同形状：三处调用点（收图之后、
+    规划前、写段前）会撞上**同一场**失败（视觉模型挂了），三处各写一套文案时用户会
+    看到三种说法，分不清这次读图到底卡在哪、要不要重交图。收集处与规划/写段处的
+    失败文案因此都由这里统一说。
+
+    没有这张图时返回 ``(True, "")``（不是每条路线都有这张图）；``mode`` 判据问给图
+    契约（``needs_first_frame_image``），不写模式字面量——``t2v``/``r2v`` 的开场段
+    没有首帧槽，问它会自动排除，将来加模式也不用回来改这里。读图失败打印图路径与
+    病因并返回 ``(False, "")``：绝不带着「起点画面全靠猜」的段词往下跑（与全片尾帧
+    同一条口径）。
+    """
+    from ..director.frames import FIRST_SEGMENT_TYPE, needs_first_frame_image
+    from ..director.opening_still import get_opening_still_description
+
+    if not needs_first_frame_image(FIRST_SEGMENT_TYPE, mode):
+        return True, ""
+    try:
+        return True, get_opening_still_description(session_dir) or ""
+    except (RuntimeError, OSError) as exc:
+        print(f"[错误] 开场首帧图读图失败：{exc}")
+        return False, ""
+
+
+def read_opening_still_after_collect(session_dir: str | Path, mode: str) -> bool:
+    """收图之后**立刻**读一次并打印读图结果（#323）；读不出来返回 ``False`` 停下。
+
+    为什么要在收图那一刻读：用户刚把图交进来，当场看到「这张图被读懂成了什么」才能
+    判断要不要换一张，而不是跑完视频才发现图与预期不符。打印形态与全片尾帧同一处
+    手感（``[已读图] …``）。没有这张图时什么都不打印（``prepare_*`` 返回空描述）。
+    """
+    ok, description = prepare_opening_still_description(session_dir, mode)
+    if not ok:
+        print("  已停下：没有继续规划、没有写段、也没有落描述 sidecar。"
+              "修好视觉模型后重跑向导会回到这一步。")
+        return False
+    if description:
+        print(f"[已读图] 开场首帧画面：{description}")
+    return True
+
+
+def store_and_read_director_stills(
+        session_dir: str | Path, mode: str, *, first: Path | None,
+        last: Path | None) -> bool:
+    """收起首帧/尾帧并**当场读图**：返回 ``False`` 表示该停在收图之后。
+
+    从 ``ui.wizard._collect_director_opening_still`` 搬来（#323）：本函数只做文件
+    落点与读图，不依赖向导状态，而 ``wizard.py`` 受 ``tests/test_wizard_size.py``
+    的体量闸管着。文案与次序逐字保留：
+
+    - 首帧必填（``None`` 在这里拦下，不把 ``None`` 传进落点）；
+    - 首帧落在 ``assets/01/start``，收下后**立刻**读一次（#323）；
+    - 全片尾帧落 assets 根（``film-end``），不落 ``assets/01/end``：后者是**第 1 段**
+      的终点画面。多段时这张图由用户在导演台的**最后一段**尾帧槽里挂；单段时打包器
+      会把它当作这一段的终点（``pack._plan_media``）。收下后同样读一次（#160）。
+
+    任一读图失败都返回 ``False``（病因已打印），调用方停下——续跑跳过本步时，规划前
+    还会经 ``prepare_director_still_facts`` 补读。
+    """
+    from ..director.pack import FILM_END_STEM, START_STEM
+
+    # 落点口（``store_director_still``）只收 ``Path``，这里归一一次。
+    session_dir = Path(session_dir)
+    if first is None:
+        print("[错误] 首帧路径为空。")
+        return False
+    target = store_director_still(first, session_dir, START_STEM)
+    print(f"[已就位] 首帧：{target}")
+    if not read_opening_still_after_collect(session_dir, mode):
+        return False
+    if last is not None:
+        film_end = store_director_still(
+            last, session_dir, FILM_END_STEM, segment=None)
+        print(f"[已就位] 全片尾帧（最后一段的终点画面）：{film_end}")
+        ok, description = prepare_film_end_description(session_dir)
+        if not ok:
+            print("  已停下：没有继续规划、没有写段、也没有落描述 sidecar。"
+                  "修好视觉模型后重跑向导会回到这一步。")
+            return False
+        if description:
+            print(f"[已读图] 全片终点画面：{description}")
+    return True
+
+
+def prepare_director_still_facts(
+        session_dir: str | Path, mode: str) -> DirectorStillFacts:
+    """一次取齐规划/写段要用的两张图的画面事实（#323 起开场首帧也在这里）。
+
+    ``ok`` 为 ``False`` 表示有一张图的读图失败了（病因与图路径已由对应的
+    ``prepare_*_description`` 打印）——调用方停在自己那一步之前并打**自己的**停语：
+    规划前与改词前的停语不同（一个是不做段规划、一个是本轮改词不执行），不该由这里
+    替它们说。失败时其余字段一律空/假，调用方据此不用再判。
+    """
+    from ..director.pack import film_end_still, start_still
+
+    ok, film_end_description = prepare_film_end_description(session_dir)
+    if not ok:
+        return DirectorStillFacts(False, False, "", False, "")
+    ok, start_frame_description = prepare_opening_still_description(session_dir, mode)
+    if not ok:
+        return DirectorStillFacts(False, False, "", False, "")
+    return DirectorStillFacts(
+        ok=True,
+        # 全片尾帧只在 fl2v 有；「盘上真有」与描述分开判，理由见类 docstring。
+        film_end=mode == "fl2v" and film_end_still(session_dir) is not None,
+        film_end_description=film_end_description,
+        start_frame=start_still(session_dir, position=1) is not None,
+        start_frame_description=start_frame_description,
+    )
 
 
 def build_director_llm(purpose: str = "写终点画面提示词"):

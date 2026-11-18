@@ -1345,6 +1345,11 @@ def test_wizard_pack_failure_is_loud_and_returns_nonzero(tmp_path, monkeypatch, 
 
     monkeypatch.setattr(pack_module, "prepare_director_pack", boom)
     monkeypatch.setattr(wizard, "_drain_stdin", lambda: None)
+    # #323：收图之后的读图在规划前也会补一次（本用例的首图是直接写盘的）。桩住视觉
+    # 调用，否则会真出网；本用例验的是打包失败的报错纪律，不是读图。
+    monkeypatch.setattr(
+        "minimax_h3_prompt.tools.reference_auditor.describe_image",
+        lambda path, instruction=None: "雨夜便利店的门口，灯箱在左侧。")
     # #158 起 i2v 在段规划前会做画幅预检（本机 image.yaml 的 qwen 画布与 director 声明
     # 不符）：回车继续即可。别的问题在本用例里不该出现。
     monkeypatch.setattr(
