@@ -41,6 +41,9 @@ from ..writing_disciplines import (
     FUTURE_EVENTS_TITLE,
 )
 from .film_end import render_film_end_block
+# 开场首帧图的画面事实（#322）：渲染器与规划期共用同一份措辞（#321 落地），
+# 写段侧不另拼一套「以画面为准」的说法。
+from .opening_still import render_opening_still_block
 from ..segment_refs import (
     SegmentAssetOverflowError,
     compute_segment_scope,
@@ -78,12 +81,17 @@ from ..tools.h3_validator import (
     split_ref_sections,
 )
 from .frames import (
+    FIRST_SEGMENT_TYPE,
     FPS,
     PLAN_MODES,
     DirectorPlan,
     DirectorSegment,
     is_guided,
     mode_has_image_slots,
+    # 开场首帧块「该不该出现」的唯一判据：给图契约里有没有首帧槽（#322）。
+    # 在调用点写模式字面量或段类型清单，等于把给图规则抄第二份——r2v 的开场段
+    # 没有首帧槽，照类型名判就会给它塞一句指向不存在图的话。
+    needs_first_frame_image,
 )
 # 窗口镜头号与分镜表切片共用同一份镜头块解析（#299）：块首的「本段只取 Shot N」
 # 与分镜表节选必须落在同一个边界上，两处各切一套就会出现自相矛盾的请求。
@@ -763,6 +771,10 @@ class _SegmentRequestContext:
     sections: dict[str, str] | None
     film_end: bool
     film_end_description: str
+    # 开场首帧图（#322）：盘上真有这张图 + 读图结果。判据只在 provider 里判一次，
+    # 这里只负责把调用方给的事实带到块前面。
+    start_frame: bool
+    start_frame_description: str
     budget: SegmentBudget | None
     # 调用方渲染好的整块文本（标题、正文、优先序都在里面，见 ``_context_block``）。
     revision_context: str
@@ -813,8 +825,41 @@ def _request_give_images_block(ctx: _SegmentRequestContext) -> str:
     return f"【本段给图】{give_images}\n"
 
 
+def _opening_still_block(plan: DirectorPlan, segment: DirectorSegment, *,
+                         start_frame: bool, description: str) -> str:
+    """开场首帧图的画面事实（#322）：只进**开场段**、且该模式确有首帧槽的请求。
+
+    判据三合一（spec #317 §5），且全部从事实与契约取、不写模式字面量：
+
+    - ``segment.type == FIRST_SEGMENT_TYPE``：这张图是**全片第一帧**（用户交的开场
+      图），只对开场段成立。``fl2v`` 的切镜段也有首帧槽，但那张图是段循环里逐段产出
+      的段首帧图，写段时盘上还不存在——照槽位名放进来就会指一张不存在的图；
+    - ``needs_first_frame_image(...)``：给图契约说这模式这类型有没有首帧槽。r2v 的
+      开场段没有（画面来源只有参考素材），t2v 一个图槽都没有；
+    - ``start_frame``：盘上真收了这张图。与 ``_film_end_block`` 的 ``film_end`` 同理，
+      只凭描述字符串「碰巧」注入就会在无图会话里写出指向空气的段词。
+
+    描述为空不产生块（``render_opening_still_block`` 自己返回空串，再叠一层
+    ``_context_block`` 式的空值契约在这里没有意义——模板本身以换行开头）。
+    """
+    if not start_frame or not str(description).strip():
+        return ""
+    if segment.type != FIRST_SEGMENT_TYPE:
+        return ""
+    if not needs_first_frame_image(segment.type, plan.mode):
+        return ""
+    return render_opening_still_block(str(description))
+
+
 def _request_start_block(ctx: _SegmentRequestContext) -> str:
     return _fl2v_start_block(ctx.plan, ctx.segment)
+
+
+def _request_start_still_block(ctx: _SegmentRequestContext) -> str:
+    """「起点画面是什么」：紧贴「本段起点是哪」，文字事实与画面事实相邻（spec §5）。"""
+    return _opening_still_block(ctx.plan, ctx.segment,
+                                start_frame=ctx.start_frame,
+                                description=ctx.start_frame_description)
 
 
 def _request_revision_block(ctx: _SegmentRequestContext) -> str:
@@ -963,6 +1008,9 @@ _SEGMENT_REQUEST_BLOCKS = (
     _request_header_block,
     _request_give_images_block,
     _request_start_block,
+    # 「本段起点是哪」之后紧跟「起点画面是什么」（spec #317 §5）：同一件事的文字
+    # 事实与画面事实相邻，模型不必跨过用户修订去拼两条互不相干的线索。
+    _request_start_still_block,
     _request_revision_block,
     _request_film_end_block,
     _request_story_block,
@@ -982,6 +1030,8 @@ def build_segment_request(plan: DirectorPlan, segment: DirectorSegment, *,
                           sections: dict[str, str] | None = None,
                           film_end: bool = False,
                           film_end_description: str = "",
+                          start_frame: bool = False,
+                          start_frame_description: str = "",
                           budget: SegmentBudget | None = None,
                           revision_context: str = "",
                           visual_decision: str = "") -> str:
@@ -994,6 +1044,10 @@ def build_segment_request(plan: DirectorPlan, segment: DirectorSegment, *,
     provider，块之间不共享拼接现场的局部变量。``revision_context`` /
     ``visual_decision`` 接的是调用方用共享渲染器拼好的整块文本（本模块不读 state、
     也不另拼标题）；空串/纯空白时不出现、也不多出空行（#298）。
+
+    ``start_frame`` / ``start_frame_description`` 是开场首帧图的事实（#322）：
+    盘上真有这张图，以及它被读懂成什么。注入判据只在 provider 里判一次——段类型是
+    开场段、给图契约说这模式有首帧槽、描述非空（spec #317 §5）。
     """
     _require_write_mode(plan.mode)
     ctx = _SegmentRequestContext(
@@ -1003,6 +1057,8 @@ def build_segment_request(plan: DirectorPlan, segment: DirectorSegment, *,
         sections=sections,
         film_end=film_end,
         film_end_description=film_end_description,
+        start_frame=start_frame,
+        start_frame_description=start_frame_description,
         budget=budget,
         revision_context=revision_context,
         visual_decision=visual_decision,
@@ -1197,6 +1253,8 @@ def build_rewrite_request(plan: DirectorPlan, segment: DirectorSegment, *,
                           sections: dict[str, str] | None = None,
                           film_end: bool = False,
                           film_end_description: str = "",
+                          start_frame: bool = False,
+                          start_frame_description: str = "",
                           revision_context: str = "",
                           visual_decision: VisualDecisionSource = "") -> str:
     """一轮改词的请求（#113）：**同一份写段上下文** ＋ 当前段提示词 ＋ 只改正文的要求。
@@ -1217,6 +1275,8 @@ def build_rewrite_request(plan: DirectorPlan, segment: DirectorSegment, *,
         plan, segment, shot_table=shot_table,
         sections=sections, film_end=film_end,
         film_end_description=film_end_description,
+        start_frame=start_frame,
+        start_frame_description=start_frame_description,
         revision_context=revision_context,
         visual_decision=_resolve_visual_decision(visual_decision, segment))
     start_s = segment.start_frame / FPS
@@ -1243,6 +1303,8 @@ def rewrite_director_segment(plan: DirectorPlan, segment: DirectorSegment, *, ll
                              current_text: str, shot_table: str = "",
                              sections=None, film_end: bool = False,
                              film_end_description: str = "",
+                             start_frame: bool = False,
+                             start_frame_description: str = "",
                              revision_context: str = "",
                              visual_decision: VisualDecisionSource = "") -> RewriteOutcome:
     """按「看过成片、不满意」重写一段（#113）：与 ``write_director_segment`` 同形。
@@ -1268,6 +1330,8 @@ def rewrite_director_segment(plan: DirectorPlan, segment: DirectorSegment, *, ll
         plan, segment, current_text=current_text, shot_table=shot_table,
         sections=sections, film_end=film_end,
         film_end_description=film_end_description,
+        start_frame=start_frame,
+        start_frame_description=start_frame_description,
         revision_context=revision_context, visual_decision=visual_decision)
     result = _write_validated(
         plan, segment, llm=llm, base_request=base_request, sections=sections,
@@ -1394,6 +1458,8 @@ def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
                             registry: Iterable[Sequence] = (),
                             film_end: bool = False,
                             film_end_description: str = "",
+                            start_frame: bool = False,
+                            start_frame_description: str = "",
                             revision_context: str = "",
                             visual_decision: VisualDecisionSource = "",
                             only_missing: bool = False) -> list[WrittenSegment]:
@@ -1425,6 +1491,10 @@ def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
     （#298／#299）：逐段穿给 ``build_segment_request``；画面决策块可以是按段渲染的
     工厂，逐段以本段窗口镜头号求值。调用方（工作台、向导）从同一份写段上下文取值；
     续跑重建的那一份也必须来自本会话盘上事实，不读实例级残留。
+
+    ``start_frame`` / ``start_frame_description`` 是开场首帧图的事实（#322）：盘上
+    真有这张图、以及它被读懂成了什么。原样逐段透传——该不该注入由 provider 按给图
+    契约判，调用方只负责把事实交进来。
     """
     _require_write_mode(plan.mode)
     global_sections = _sections_mapping(sections)
@@ -1458,6 +1528,10 @@ def write_director_segments(plan: DirectorPlan, *, llm, session_dir: str | Path,
         base_request = build_segment_request(
             plan, segment, shot_table=shot_table, sections=global_sections,
             film_end=film_end, film_end_description=film_end_description,
+            # 开场首帧图的事实原样透传；「该不该出现」只在 provider 里判一次，
+            # 这里不重复判据（两处各判一次，改一处漏一处时请求会悄悄多一块）。
+            start_frame=start_frame,
+            start_frame_description=start_frame_description,
             budget=segment_budget,
             revision_context=revision_context,
             visual_decision=_resolve_visual_decision(visual_decision, segment))

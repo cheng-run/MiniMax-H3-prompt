@@ -19,7 +19,11 @@ from typing import Iterable, Mapping, Sequence
 
 from ..ref_capacity import MAX_PICTURES
 from .film_end import render_film_end_block
+# 开场首帧图的画面事实（#322）：与写段侧共用同一份渲染器（#321），差异只在
+# ``for_planning=True`` 那半句——规划师定的第一段边界与落定画面正是要跟图对齐的那处。
+from .opening_still import render_opening_still_block
 from .frames import (
+    FIRST_SEGMENT_TYPE,
     FPS,
     GRID_OFFSET,
     GRID_STEP,
@@ -38,6 +42,9 @@ from .frames import (
     max_segments_for_mode,
     max_total_seconds_for_mode,
     mode_has_image_slots,
+    # 开场首帧块「该不该出现」的唯一判据（#322）：给图契约里有没有首帧槽。
+    # 在规划层写 ``mode == "fl2v"`` 等于把给图规则抄第二份，多一个模式就漏一处。
+    needs_first_frame_image,
     optional_images_for,
     segment_type_label,
     segment_types_for_mode,
@@ -292,6 +299,7 @@ def plan_director_segments(shot_table: str, total_s: float, llm, *, mode: str,
                            frame_context: str = "",
                            revision_context: str = "",
                            film_end_description: str = "",
+                           start_frame_description: str = "",
                            registry: Iterable[Sequence] = (),
                            subject_definitions: str = "") -> DirectorPlanningResult:
     """调 LLM 规划导演台分段（直调走看门狗，与 ``plan_segments`` 同形）。
@@ -303,6 +311,10 @@ def plan_director_segments(shot_table: str, total_s: float, llm, *, mode: str,
     ``frame_context`` / ``revision_context`` 与 ``plan_segments`` 同源同义：真实
     关键帧读图结果压过分镜表，用户累积修订按注入优先序进来。本函数**不依赖 state**，
     「规划层到底看到了什么」在调用点一眼可见（issue #26 的教训）。
+
+    ``start_frame_description`` 是开场首帧图的画面事实（#322），与 ``film_end_description``
+    同位同形：调用方按盘面判一次（``get_opening_still_description`` 非 ``None``），
+    这里再按给图契约守一道——只有开场段真有首帧槽的模式才注入，描述为空不产生块。
 
     ``registry`` / ``subject_definitions`` 只对 r2v 有意义（#186）：前者是素材台账
     （编号 + 语义名），进请求的「素材清单」；后者是全片英文定义块，算预算闭包用。
@@ -337,6 +349,16 @@ def plan_director_segments(shot_table: str, total_s: float, llm, *, mode: str,
         render_film_end_block(film_end_description, for_planning=True)
         if mode == "fl2v" and film_end_description.strip() else ""
     )
+    # 开场首帧图的画面事实（#322）：与全片尾帧**同位同形**——调用方按盘面判过
+    # （有图才给描述），这里再按给图契约守一道（i2v / fl2v 的开场段才有首帧槽；
+    # r2v 的画面来源是参考素材，t2v 一个图槽都没有）。空描述不产生块。
+    # 位置在终点块**之前**：与写段请求的块序（起点 → 终点）一致，模型在两个请求里
+    # 读到同一件事的先后顺序不会颠倒。
+    start_frame_block = (
+        render_opening_still_block(start_frame_description, for_planning=True)
+        if needs_first_frame_image(FIRST_SEGMENT_TYPE, mode)
+        and start_frame_description.strip() else ""
+    )
     allowed = segment_types_for_mode(mode)
     # 允许清单是**本次请求的数据**（系统提示词是五型共用一份，不知道模式）：写死在
     # 提示词里，i2v 就会照着别的模式的口径判运镜段，用户已经付过规划的钱才发现。
@@ -362,6 +384,7 @@ def plan_director_segments(shot_table: str, total_s: float, llm, *, mode: str,
         f"{mode_scope}"
         f"{material_block}"
         f"{frame_block}"
+        f"{start_frame_block}"
         f"{film_end_block}"
         f"{revision_block}"
         f"\n分镜表：\n{shot_table}"
