@@ -44,6 +44,7 @@ from .writing_disciplines import (
     FRAME_CONSISTENCY_DISCIPLINE,
     FUTURE_EVENTS_DISCIPLINE,
     FUTURE_EVENTS_TITLE,
+    MUSIC_CUE_DISCIPLINE_BASE,
     PROP_OWNERSHIP_DISCIPLINE,
     THRESHOLD_CROSSING_DISCIPLINE_BASE,
 )
@@ -501,7 +502,7 @@ _REWRITE_INSTRUCTION = f"""你是 H3 视频提示词工程师。把整条视频�
   **时间窗外剧情禁区**：{FUTURE_EVENTS_DISCIPLINE}——本段时间窗之外的事件出现即本段作废；
 - overall_soundscape: **为本段重写**（不是从整条裁切，按段重写）：1-4 句 English 连续段落，
   描述本段时间窗内的环境声与动作声，无时间戳（官方 §4.6）；
-- non_diegetic_music: **为本段重写**：1-3 句 English，或无声时只写 N/A，无时间戳（官方 §4.7）。
+- non_diegetic_music: **为本段重写**的英文摘要句（1-3 句 English，无时间戳，官方 §4.7）：{MUSIC_CUE_DISCIPLINE_BASE}
 
 {_WRITING_WORDLIST}
 """
@@ -597,7 +598,7 @@ H3 是执行型模型：你写什么它就做什么，含糊等于失控；把**
    - {PROP_OWNERSHIP_DISCIPLINE}
    - {THRESHOLD_CROSSING_DISCIPLINE_BASE}
 2. `overall_soundscape:` **为本段重写**英文摘要句（官方 §4.6）：1-4 句 English 连续段落，描述本段的环境声与动作声；**无时间戳**。
-3. `non_diegetic_music:` **为本段重写**英文摘要句（官方 §4.7）：1-3 句 English，写观众能听到、角色听不到的配乐（乐器/速度/节奏）；无声时只写 `N/A`；**无时间戳**。
+3. `non_diegetic_music:` **为本段重写**英文摘要句（官方 §4.7）：1-3 句 English，**无时间戳**。{MUSIC_CUE_DISCIPLINE_BASE}
 
 ## 禁止（官方 base-en.txt 不存在的自创结构，出现即作废）
 - 不写 `GLOBAL_LOCK:` 集中定义区（实体外观只进首次出场的 Shot）

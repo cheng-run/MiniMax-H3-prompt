@@ -116,6 +116,63 @@ def test_every_write_route_sends_the_family_discipline(route, family, constant_n
 
 
 # ---------------------------------------------------------------------------
+# 配乐 cue 延续纪律（#330）：base 两条走弱化版、导演台走强化版、ref 刻意不做
+# ---------------------------------------------------------------------------
+# 为什么不并进上面的 ``_FAMILIES`` 参数化：那里的语义是「五条路线都要有」。配乐这条
+# 恰好相反——ref 两条路线**刻意不做**（用户 2026-11-18 裁定，见 CONTEXT.md 不迁清单），
+# 并进去就只能靠 skip 列表把它摘出来，摘漏一次就是给已验收的多参产物悄悄加了新措辞。
+# 「不做」本身也要钉住：反向断言在这里，顺手加上的人会当场红。
+
+
+def test_music_cue_discipline_reaches_base_but_not_ref():
+    """base 两条路径带弱化版全文，导演台带强化版全文，ref 两条一条都不带。
+
+    先断言两份真源都非空：清空常量时 ``"" in text`` 恒真，守卫就永远不红
+    （本票的变异条目「清空配乐弱化版」正靠这句先响）。
+    """
+    base_text = wd.MUSIC_CUE_DISCIPLINE_BASE
+    director_text = wd.MUSIC_CUE_DISCIPLINE_DIRECTOR
+    assert base_text, "配乐弱化版真源为空——空串让 in 断言恒真，守卫会失效"
+    assert director_text, "配乐强化版真源为空——上面那条 in 断言会恒真"
+
+    for route in ("base_v2", "base_fallback"):
+        outbound = _outbound(route)
+        assert outbound, f"{route} 没有取到任何出站文本"
+        for label, out in outbound:
+            assert out, f"{route} 的{label}是空的"
+            assert base_text in out, f"{route} 的{label}缺配乐弱化版纪律"
+            # 旧措辞与 cue 延续纪律互相矛盾：模型同时收到「同一支 cue」与「无声写 N/A」
+            # 时按后者写，接缝处的电平台阶原样复发（#194 实测 −9.8 / +26.6 dB）。
+            assert "无声时只写" not in out, f"{route} 的{label}还留着「无声时只写 N/A」的旧措辞"
+            assert "无声写 `N/A`" not in out, f"{route} 的{label}还留着「无声写 N/A」的旧措辞"
+
+    for label, out in _outbound("director"):
+        assert director_text in out, f"导演台的{label}缺配乐强化版纪律"
+        assert base_text not in out, f"导演台的{label}不该拿到弱化版（段类型分叉是导演台专有）"
+
+    for route in ("ref_v2", "ref_fallback"):
+        for label, out in _outbound(route):
+            assert out, f"{route} 的{label}是空的"
+            assert base_text not in out, f"{route} 的{label}被加上了配乐弱化版（本票刻意不做）"
+            assert director_text not in out, f"{route} 的{label}被加上了配乐强化版（本票刻意不做）"
+
+
+def test_base_music_discipline_keeps_silence_exception_only():
+    """弱化版的形态约束：保留静音例外，且**不许**混入导演台那套按段类型分叉的措辞。
+
+    这条对真源常量断言，断言的是两条**反向排斥**（该有的一句在、导演台专有的词一个
+    都不在），不是「常量等于某个值」——后者才是被测物自证。真源形态一漂，上面那条
+    出站断言只会证明「漂过的那份确实送到了」，看不出它已经不是规格要求的那份。
+    """
+    text = wd.MUSIC_CUE_DISCIPLINE_BASE
+    assert text, "配乐弱化版真源为空"
+    assert "用户明确要求全片静音" in text, "弱化版丢了静音例外句（官方 base-en.txt 的既有对齐）"
+    assert "同一支 cue" in text, "弱化版没写「同一支 cue 延续」"
+    for word in ("camera_cut", "camera_same", "引导段", "切镜段", "开场段"):
+        assert word not in text, f"弱化版混入了导演台的段类型分叉措辞「{word}」"
+
+
+# ---------------------------------------------------------------------------
 # 两条「一眼看穿」的细节纪律（#329）：只发往「该带的那几条」路线
 # ---------------------------------------------------------------------------
 # 为什么不能塞进上面的 ``_FAMILIES``：那一族是**无差别**的「五条路线全含」，而这两条

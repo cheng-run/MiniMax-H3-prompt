@@ -741,6 +741,20 @@ MUTATIONS: tuple[Mutation, ...] = (
         "纪律内容没了）；守卫若不自证真源非空，``\"\" in text`` 恒真就会永远不红（#328）",
     ),
     Mutation(
+        "base_music_cue_discipline_cleared",
+        # 锚点取常量赋值**整行**（全仓恰好一次，同 ``camera_speed_discipline_cleared``）：
+        # 只改其中几个字不会让「出站文本含真源全文」那条红——真源自己就是被测断言的那份
+        # 文本。清空后 base 两条写段路径的 f-string 才真的把整条配乐纪律换成了空串，
+        # 守卫的先自证非空那一句必须响。导演台吃的是强化版，不受这条变异影响。
+        "src/minimax_h3_prompt/writing_disciplines.py",
+        'MUSIC_CUE_DISCIPLINE_BASE = "**配乐按「同一支 cue 延续」写，不按「本段各写各的」写**：`non_diegetic_music` 写观众能听到、角色听不到的那支配乐；本段与相邻段是同一支 cue——乐器与速度一致，只允许力度与织体变化，写清本段里配器与力度如何变化。**不许写 `N/A`**，只有用户明确要求全片静音时才写 `N/A`。"',
+        'MUSIC_CUE_DISCIPLINE_BASE = ""',
+        ("tests/test_writing_disciplines_guard.py::"
+         "test_music_cue_discipline_reaches_base_but_not_ref",),
+        "清空配乐弱化版真源＝base 两条写段路径同时失去 cue 延续纪律，接缝电平台阶原样复发"
+        "（#194 实测 −9.8/+26.6 dB）；守卫若不自证真源非空，``\"\" in text`` 恒真就会永远不红（#330）",
+    ),
+    Mutation(
         "base_prop_ownership_discipline_cleared",
         # 锚点与 ``director_prop_ownership_discipline_cleared`` 是同一行常量赋值：两条
         # 变异各跑各的目标用例（一条钉导演台、一条钉 base 两条写段路径），清空后两边
