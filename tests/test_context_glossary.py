@@ -115,6 +115,25 @@ def test_nothing_follows_an_avoid_line_without_a_heading() -> None:
         + "\n  ".join(bad))
 
 
+# #320：导演台有两张名字都带「首帧」的图——开场首帧图（全片第一帧，收在阶段 1 之后）
+# 与段首帧图（切镜段逐段挂的那张，写段时还不存在）。混用会直接推出错误实现，所以
+# 「两条词条同时在场」本身是契约：只写一条、或把两条并成一条，读的人就无法分辨。
+# 只钉标题原文（与 ``_HEADING`` 同一口径），不钉正文措辞——正文怎么改都行，名字不能少。
+_DISTINCT_FRAME_IMAGES = (
+    "**开场首帧图（opening still）**:",
+    "**段首帧图（segment first frame）**:",
+)
+
+
+def test_opening_and_segment_first_frames_stay_distinct_terms() -> None:
+    """两张「首帧图」必须各有一条词条，且分属两个标题（#320）。"""
+    headings = {block[0][1] for block in _blocks(_lines()) if _is_heading(block)}
+    missing = [heading for heading in _DISTINCT_FRAME_IMAGES if heading not in headings]
+    assert not missing, (
+        "这两张图的词条必须同时在场（混用它们会推出错误实现方案）：\n  "
+        + "\n  ".join(missing))
+
+
 def test_a_section_does_not_go_back_to_prose_after_its_terms() -> None:
     """同一节内出现过词条块之后，不许再出现散文块。
 

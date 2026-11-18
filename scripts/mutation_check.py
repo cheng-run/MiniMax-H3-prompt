@@ -388,6 +388,16 @@ MUTATIONS: tuple[Mutation, ...] = (
         "活文档指针退回行号＝提示词一插行就静默漂移（retro 2026-11-03）",
     ),
     Mutation(
+        "glossary_merges_the_two_first_frames",
+        "CONTEXT.md",
+        "**段首帧图（segment first frame）**:",
+        "**首帧图（first frame）**:",
+        ("tests/test_context_glossary.py::"
+         "test_opening_and_segment_first_frames_stay_distinct_terms",),
+        "两张「首帧图」并成一条＝开场段与切镜段的起点画面重新混用，"
+        "「切镜段首帧也要在写段时读」这类错误方案又会有人推出来（#320）",
+    ),
+    Mutation(
         "aspect_check_inverted",
         "src/minimax_h3_prompt/director/aspect.py",
         "        exceeds=relative_delta > tolerance + _TOLERANCE_EPSILON,",
