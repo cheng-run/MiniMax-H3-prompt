@@ -716,11 +716,29 @@ MUTATIONS: tuple[Mutation, ...] = (
     ),
     Mutation(
         "music_guided_segment_writes_na",
-        "src/minimax_h3_prompt/prompts/segment_writer_director.md",
-        "**不许写 `N/A`**",
-        "**无声写 `N/A`**",
+        # #328 把配乐纪律从指令文件搬进真源，锚点跟着搬家：指令文件里只剩
+        # ``{{MUSIC_CUE_DISCIPLINE}}``，再把锚点留在那里就是 0 次（变异已不守任何东西）。
+        # 锚点取**强化版独有的一小段**：``**不许写 `N/A`**`` 现在导演台与 base 两个
+        # 版本各有一处，用短句会命中两次。
+        "src/minimax_h3_prompt/writing_disciplines.py",
+        "配器与力度如何变化，**不许写 `N/A`**；",
+        "配器与力度如何变化，**无声写 `N/A`**；",
         ("tests/test_director_prompts.py::test_music_rule_continues_one_cue_across_segments",),
         "引导段配乐退回「无声写 N/A」＝段间持续曲重新断开（#194，实测 −9.8/+26.6 dB 台阶）",
+    ),
+    Mutation(
+        "director_prop_ownership_discipline_cleared",
+        # 锚点取常量赋值**整行**（全仓恰好一次，同 ``camera_speed_discipline_cleared``）：
+        # 只改其中几个字不会让「出站文本含真源全文」那条红——真源自己就是被测断言的那份
+        # 文本。清空后指令文件里的 ``{{PROP_OWNERSHIP_DISCIPLINE}}`` 才真的把整条纪律
+        # 换成了空串，守卫的先自证非空那一句必须响。
+        "src/minimax_h3_prompt/writing_disciplines.py",
+        'PROP_OWNERSHIP_DISCIPLINE = "**同一件穿戴物或道具，一段里只写一处归属**：帽子、头盔、背包、箱子、手机这类一眼能数清的物件，全段只写一次「在谁身上／在谁手里」；后文不要再把它改写成「放在某处」或「另一个人拿着」——两处归属会让成品长出两件。正例：`The helmet stays on his head; the box beside him holds no second helmet.`"',
+        'PROP_OWNERSHIP_DISCIPLINE = ""',
+        ("tests/test_writing_disciplines.py::"
+         "test_three_disciplines_reach_every_director_mode_from_the_source_module",),
+        "清空道具归属真源＝导演台四条模式的出站系统提示里整条纪律变成空串（占位符照替、"
+        "纪律内容没了）；守卫若不自证真源非空，``\"\" in text`` 恒真就会永远不红（#328）",
     ),
     Mutation(
         "end_hook_placement_guard_off",
