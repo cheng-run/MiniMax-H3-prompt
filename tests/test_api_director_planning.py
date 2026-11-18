@@ -362,7 +362,14 @@ def _png(size: tuple[int, int]) -> bytes:
     return buffer.getvalue()
 
 
-def test_start_image_submit_enters_planning_instead_of_revising_stage1(workbench):
+def test_start_image_submit_enters_planning_instead_of_revising_stage1(
+        workbench, monkeypatch):
+    from minimax_h3_prompt.tools import reference_auditor
+
+    # #324：规划前会读开场首帧图；视觉调用必须桩住，否则用例真的出网（#56 同款）。
+    monkeypatch.setattr(
+        reference_auditor, "describe_image",
+        lambda _path: "开场首帧画面：撑黑伞的女性站在积水前，窗在她身后")
     app, model, root = workbench
     with workbench_client(app) as client:
         session_id = _create(client, "i2v")
@@ -433,9 +440,13 @@ def test_film_end_description_does_not_leak_across_sessions(workbench, monkeypat
     """JobRunner 是进程级单实例：A 会话的尾帧描述不能被 B 的续写请求读走。"""
     from minimax_h3_prompt.tools import reference_auditor
 
+    # #324 起开场首帧图也会被读：按文件名分流，尾帧描述只挂在尾帧图上——否则
+    # 「B 的请求里不该出现隧道深处」会被 B 自己那张首帧图的描述误伤。
     monkeypatch.setattr(
         reference_auditor, "describe_image",
-        lambda _path: "A 会话的终点画面：隧道深处，车灯由远及近")
+        lambda path: ("A 会话的终点画面：隧道深处，车灯由远及近"
+                      if "film-end" in str(path).lower()
+                      else "开场首帧画面：撑黑伞的女性站在积水前"))
 
     app, model, root = workbench
     with workbench_client(app) as client:

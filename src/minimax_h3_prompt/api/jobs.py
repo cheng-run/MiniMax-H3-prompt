@@ -722,6 +722,12 @@ class _DirectorWriteContext:
     # 全片尾帧（fl2v）与它的读图描述：与段表清单同一份判据，写段请求要带。
     film_end: bool = False
     film_end_description: str = ""
+    # 开场首帧图（i2v／fl2v）与它的读图描述（#324）：与 ``film_end`` 并排、同样显式
+    # 传参。``start_frame`` 是**盘上真有这张图**，描述是它被读懂成了什么——两者
+    # 不同源时写段请求会指向空气。该不该注入由请求 provider 按给图契约判，这里只管
+    # 把事实传到；绝不能挪到 runner 实例属性上（理由见类 docstring，#298 同一场事故）。
+    start_frame: bool = False
+    start_frame_description: str = ""
     # 只有**本轮真的做了规划**才有预算；续跑读到 plan.json 时预算文件是规划期的
     # 产物，不补写、也不从任何残留值补。
     budget: Any = None
@@ -3283,27 +3289,35 @@ class JobRunner:
             context = _DirectorWriteContext(
                 shot_table=shot_table, sections=sections, registry=registry,
                 budget=budget,
+                # #324：桩分支同样**显式**填起点画面的两个槽位（与真实分支同形）。
+                # 桩不读图、也没有图可读：填「盘上没有、没有描述」，而不是让字段
+                # 悄悄吃默认值——漏传与「本来就没有」在用例里必须分得开。
+                start_frame=False, start_frame_description="",
                 # #298／#299／#300：桩模式同样显式填两个块的槽位；两个块都从**本会话**
                 # 的 stage_state 现渲染（与真实分支、续跑重建同一份口径）。
                 revision_context=render_revision_context(state),
                 visual_decision=visual_decision_source(state, shot_table))
         else:
-            from ..director.pack import film_end_still
-            from ..ui.wizard_director import prepare_film_end_description
+            from ..ui.wizard_director import prepare_director_still_facts
 
-            film_end = (mode == "fl2v"
-                        and film_end_still(directory) is not None)
-            ok, description = prepare_film_end_description(directory)
-            if not ok:
-                raise RuntimeError(
-                    "全片尾帧读图失败：没有做段规划、没有写段")
+            # #324：两张用户交来的图一次取齐，盘面判断与描述同源（与 CLI 规划前
+            # 共用 ``prepare_director_still_facts``，同一场失败不在两处说成两件事）。
+            facts = prepare_director_still_facts(directory, mode)
+            if not facts.ok:
+                # 点名是哪张图、原样带回病因：用户手上两张可换，只说「读图失败」
+                # 等于没给病因。``failed_image`` 是兜底（正常路径必有病因原文）。
+                reason = facts.failure_reason or f"{facts.failed_image}读图失败"
+                raise RuntimeError(f"{reason}：没有做段规划、没有写段")
             result = plan_director_segments(
                 shot_table, session.brief.duration, build_chat_model(),
                 mode=mode,
                 # 与 base 的规划调用同源：真实关键帧画面压过分镜表、修订按优先序注入。
                 frame_context=frame_anchor_context(state),
                 revision_context=render_revision_context(state),
-                film_end_description=description,
+                film_end_description=facts.film_end_description,
+                # #324：规划师也看见开场首帧的画面事实，第一段的边界与落定画面才与
+                # 成片第一帧对齐（spec #317 §6／§7）。
+                start_frame_description=facts.start_frame_description,
                 registry=registry,
                 subject_definitions=subject_definitions,
             )
@@ -3312,8 +3326,12 @@ class JobRunner:
                 shot_table=shot_table,
                 sections=sections,
                 registry=registry,
-                film_end=film_end,
-                film_end_description=description,
+                film_end=facts.film_end,
+                film_end_description=facts.film_end_description,
+                # #324：当轮规划这个构造点把起点画面事实填进上下文；写段出口与
+                # 续跑重建都从这份显式上下文取值，不读任何实例级残留。
+                start_frame=facts.start_frame,
+                start_frame_description=facts.start_frame_description,
                 budget=result.budget,
                 # #298／#299／#300：两个上下文块都从本会话阶段 1 产物渲染；修订块
                 # 只取待落地那部分（共享渲染器的判据，这里不另判一次）。
@@ -3332,29 +3350,32 @@ class JobRunner:
     ) -> _DirectorWriteContext:
         """续写缺段时的上下文：**只从本会话的盘上事实**重建，不继承任何别的执行。
 
-        定义块与全片尾帧描述都可能已经在盘上（上一轮或 CLI 产出）：写段请求要与
-        当初规划时看到的一致，所以按本会话目录重新取一份。预算**不取**——续跑没有
-        重新规划，预算文件是规划期的产物，不该被覆盖。
+        定义块、全片尾帧与开场首帧描述都可能已经在盘上（上一轮或 CLI 产出）：写段
+        请求要与当初规划时看到的一致，所以按本会话目录重新取一份。预算**不取**——
+        续跑没有重新规划，预算文件是规划期的产物，不该被覆盖。
         """
-        from ..director.pack import film_end_still
         from ..director.prompts import visual_decision_source
         from ..segment_prompts import render_revision_context
-        from ..ui.wizard_director import prepare_film_end_description
+        from ..ui.wizard_director import prepare_director_still_facts
 
         # 定义块与登记表只从本会话的盘上事实取：缓存命中就复用；盘上没有（例如
         # 段表已落盘、定义块被删）就重生成一次——续写段词没有定义块就是半份空定义。
         registry, sections = self._director_ref_context(
             session, session.stage_state, directory, mode)
-        film_end = mode == "fl2v" and film_end_still(directory) is not None
-        ok, description = prepare_film_end_description(directory)
-        if not ok:
-            raise RuntimeError("全片尾帧读图失败：不能续写段词")
+        # #324：起点/终点画面事实与当轮规划同一个取数口（描述命中 sidecar 不重读）。
+        # 续写缺段必须与首写看到**同一份**描述，否则续写段词会悄悄换口径。
+        facts = prepare_director_still_facts(directory, mode)
+        if not facts.ok:
+            reason = facts.failure_reason or f"{facts.failed_image}读图失败"
+            raise RuntimeError(f"{reason}：不能续写段词")
         return _DirectorWriteContext(
             shot_table=shot_table,
             sections=sections,
             registry=registry,
-            film_end=film_end,
-            film_end_description=description,
+            film_end=facts.film_end,
+            film_end_description=facts.film_end_description,
+            start_frame=facts.start_frame,
+            start_frame_description=facts.start_frame_description,
             # #298／#299／#300：两个上下文块必须与当轮规划同源。两块都从这里
             # **按本会话**（``session.stage_state``，也就是本会话盘上事实）现渲染，
             # 绝不读 runner 上的实例属性。
@@ -3419,6 +3440,10 @@ class JobRunner:
                 registry=context.registry,
                 film_end=context.film_end,
                 film_end_description=context.film_end_description,
+                # #324：起点画面事实从**同一份**写段上下文取值（当轮规划或续跑重建
+                # 各自的那一份），首写与续写同源、互不串味。
+                start_frame=context.start_frame,
+                start_frame_description=context.start_frame_description,
                 # #298：两个上下文块从**同一份**写段上下文取值，首写与续跑同源。
                 revision_context=context.revision_context,
                 visual_decision=context.visual_decision,

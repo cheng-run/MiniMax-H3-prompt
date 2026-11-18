@@ -97,6 +97,26 @@ def store_director_still(source: Path, generation_dir: Path, stem: str, *,
     return target
 
 
+def _prepare_film_end_description(
+        session_dir: str | Path) -> tuple[bool, str, str]:
+    """``prepare_film_end_description`` 的内部形态：多交一份失败病因（#324）。
+
+    工作台的 job 失败原因要把病因带进事件详情，而公开口只返回 ``(ok, description)``
+    （CLI 的三个调用点与既有用例都按这个形状写）。文案与打印仍是同一处：公开口就是
+    本函数的薄包装，不许各写一套。
+    """
+    from ..director.film_end import get_film_end_description
+    from ..director.pack import film_end_still
+
+    if film_end_still(session_dir) is None:
+        return True, "", ""
+    try:
+        return True, get_film_end_description(session_dir) or "", ""
+    except (RuntimeError, OSError) as exc:
+        print(f"[错误] 全片尾帧读图失败：{exc}")
+        return False, "", str(exc)
+
+
 def prepare_film_end_description(session_dir: str | Path) -> tuple[bool, str]:
     """取全片尾帧的画面描述（#160）：返回 ``(ok, description)``。
 
@@ -107,16 +127,8 @@ def prepare_film_end_description(session_dir: str | Path) -> tuple[bool, str]:
     收集与规划前两个调用点共用这一处文案：各写一套时，同一场失败会在两处说成
     两件事（「图没有就位」/「读图失败」），用户分不清要不要重交图。
     """
-    from ..director.film_end import get_film_end_description
-    from ..director.pack import film_end_still
-
-    if film_end_still(session_dir) is None:
-        return True, ""
-    try:
-        return True, get_film_end_description(session_dir) or ""
-    except (RuntimeError, OSError) as exc:
-        print(f"[错误] 全片尾帧读图失败：{exc}")
-        return False, ""
+    ok, description, _reason = _prepare_film_end_description(session_dir)
+    return ok, description
 
 
 class DirectorStillFacts(NamedTuple):
@@ -130,6 +142,12 @@ class DirectorStillFacts(NamedTuple):
     ``film_end`` / ``start_frame`` 是**盘上真有这张图**的判断，与描述分开放：给图行
     按「图在不在」写、事实块按描述写，两者不同源就会写出指向空气的段词（#322 的
     注入判据同理）。
+
+    ``failed_image``（#324）是**哪张图**的读图失败了（「全片尾帧」/「开场首帧」）。
+    只有 ``ok`` 分不出是哪张时，工作台的 job 失败原因就只能说「读图失败」，而用户
+    手上有两张图可换——不知道换哪张等于没给病因。``failure_reason`` 是那条病因原文
+    （图路径与视觉模型的报错），供 job 失败详情原样带回。两个都是加性字段：默认空
+    串，CLI 不读它们，既有文案一字不动。
     """
 
     ok: bool
@@ -137,6 +155,23 @@ class DirectorStillFacts(NamedTuple):
     film_end_description: str
     start_frame: bool
     start_frame_description: str
+    failed_image: str = ""
+    failure_reason: str = ""
+
+
+def _prepare_opening_still_description(
+        session_dir: str | Path, mode: str) -> tuple[bool, str, str]:
+    """``prepare_opening_still_description`` 的内部形态：多交一份失败病因（#324）。"""
+    from ..director.frames import FIRST_SEGMENT_TYPE, needs_first_frame_image
+    from ..director.opening_still import get_opening_still_description
+
+    if not needs_first_frame_image(FIRST_SEGMENT_TYPE, mode):
+        return True, "", ""
+    try:
+        return True, get_opening_still_description(session_dir) or "", ""
+    except (RuntimeError, OSError) as exc:
+        print(f"[错误] 开场首帧图读图失败：{exc}")
+        return False, "", str(exc)
 
 
 def prepare_opening_still_description(
@@ -154,16 +189,8 @@ def prepare_opening_still_description(
     病因并返回 ``(False, "")``：绝不带着「起点画面全靠猜」的段词往下跑（与全片尾帧
     同一条口径）。
     """
-    from ..director.frames import FIRST_SEGMENT_TYPE, needs_first_frame_image
-    from ..director.opening_still import get_opening_still_description
-
-    if not needs_first_frame_image(FIRST_SEGMENT_TYPE, mode):
-        return True, ""
-    try:
-        return True, get_opening_still_description(session_dir) or ""
-    except (RuntimeError, OSError) as exc:
-        print(f"[错误] 开场首帧图读图失败：{exc}")
-        return False, ""
+    ok, description, _reason = _prepare_opening_still_description(session_dir, mode)
+    return ok, description
 
 
 def read_opening_still_after_collect(session_dir: str | Path, mode: str) -> bool:
@@ -233,16 +260,23 @@ def prepare_director_still_facts(
     ``ok`` 为 ``False`` 表示有一张图的读图失败了（病因与图路径已由对应的
     ``prepare_*_description`` 打印）——调用方停在自己那一步之前并打**自己的**停语：
     规划前与改词前的停语不同（一个是不做段规划、一个是本轮改词不执行），不该由这里
-    替它们说。失败时其余字段一律空/假，调用方据此不用再判。
+    替它们说。失败时其余字段一律空/假，调用方据此不用再判；``failed_image`` 点名
+    是哪张图、``failure_reason`` 带回病因原文（工作台的 job 失败原因要能说清该换
+    哪一张、为什么读不出来）。
     """
     from ..director.pack import film_end_still, start_still
 
-    ok, film_end_description = prepare_film_end_description(session_dir)
+    ok, film_end_description, reason = _prepare_film_end_description(session_dir)
     if not ok:
-        return DirectorStillFacts(False, False, "", False, "")
-    ok, start_frame_description = prepare_opening_still_description(session_dir, mode)
+        return DirectorStillFacts(
+            False, False, "", False, "",
+            failed_image="全片尾帧", failure_reason=reason)
+    ok, start_frame_description, reason = _prepare_opening_still_description(
+        session_dir, mode)
     if not ok:
-        return DirectorStillFacts(False, False, "", False, "")
+        return DirectorStillFacts(
+            False, False, "", False, "",
+            failed_image="开场首帧", failure_reason=reason)
     return DirectorStillFacts(
         ok=True,
         # 全片尾帧只在 fl2v 有；「盘上真有」与描述分开判，理由见类 docstring。
