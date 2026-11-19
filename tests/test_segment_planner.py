@@ -357,6 +357,111 @@ def test_plan_segments_ref_mode_rejects_off_cut_reply():
                          mode="ref", shot_cuts=(0, 5, 8, 12)) is None
 
 
+def test_base_planner_request_states_boundaries_off_shot_cuts():
+    """#343：base 规划请求必须在**模型眼前的请求全文**里写出「边界不得落在切点」。
+
+    判据只在 ``parse_segment_plan`` 里、指令不写，模型就只能凭自身偏好收口到切点，
+    每条合规规划都被拒、回退机械拆分（它恰恰按切点切）——主修静默失效。
+    同一句禁令也不得出现在多参请求里：两套规则方向相反，抄串就是串线。
+    """
+    base_llm = FakeLLM()
+    plan_segments("分镜表：[Shot 1] At 00:00.000 ……", 9, base_llm)
+    assert "内部段边界不得落在镜头切点上" in base_llm.last_request
+
+    ref_llm = FakeLLM(_REF_PLAN_JSON)
+    plan_segments("分镜表：[Shot 1] At 00:00.000 ……", 9, ref_llm,
+                  mode="ref", shot_cuts=(0, 5, 9))
+    assert "内部段边界不得落在镜头切点上" not in ref_llm.last_request
+    # 反方向同样要防：多参那条「边界落在镜头切点」的硬规则不得被抄进 base 指令。
+    assert "边界落在镜头切点**（不均匀硬切）" not in base_llm.last_request
+
+
+# ---------------------------------------------------------------------------
+# base 段边界避开镜头切点（#343 / spec #342）
+#
+# base 长片靠尾帧桥接串段：内部段边界落在镜头切点上，段 2 的开场就是另一次机位，
+# 桥接帧作为 first_frame 与段词打架（spec #342 的问题陈述：画面差量 50.8 vs 基线 7.4）。
+# 多参的判据方向正好相反（边界**必须**落在切点上），两套各自只在自己的 mode 里生效。
+# ---------------------------------------------------------------------------
+
+_BASE_ON_CUT_REPLY = (
+    '{"segments": ['
+    '{"index": 0, "start_s": 0, "end_s": 6, "shots_in_segment": [1], "summary": "A",'
+    ' "end_hook": "她停在栏杆边"},'
+    '{"index": 1, "start_s": 6, "end_s": 12, "shots_in_segment": [2], "summary": "B",'
+    ' "end_hook": "她坐下"}]}'
+)
+_BASE_OFF_CUT_REPLY = (
+    '{"segments": ['
+    '{"index": 0, "start_s": 0, "end_s": 7, "shots_in_segment": [1], "summary": "A",'
+    ' "end_hook": "她停在栏杆边"},'
+    '{"index": 1, "start_s": 7, "end_s": 12, "shots_in_segment": [2], "summary": "B",'
+    ' "end_hook": "她坐下"}]}'
+)
+
+
+def test_base_plan_rejects_internal_boundary_on_shot_cut():
+    """base：内部段边界落在镜头切点上（6s）→ 拒收，调用方回退机械拆分。"""
+    assert parse_segment_plan(_BASE_ON_CUT_REPLY, total_s=12, shot_cuts=(0, 6, 12)) is None
+
+
+def test_base_plan_accepts_internal_boundary_off_shot_cut():
+    """base：边界避开切点（7s，落在 Shot 2 内部）→ 接受。"""
+    plans = parse_segment_plan(_BASE_OFF_CUT_REPLY, total_s=12, shot_cuts=(0, 6, 12))
+    assert plans is not None
+    assert [plan.end_s for plan in plans[:-1]] == [7]
+
+
+def test_base_plan_without_shot_cuts_skips_the_constraint():
+    """切点抽不出来（传 None）时该约束不生效：同一份「边界在切点」的规划照常接受。"""
+    assert parse_segment_plan(_BASE_ON_CUT_REPLY, total_s=12) is not None
+
+
+def test_ref_plan_judges_the_same_replies_the_opposite_way():
+    """多参同一份回复的判定与 base 相反（防两条判据串线）。"""
+    cuts = (0, 6, 12)
+    on_cut_ref = _BASE_ON_CUT_REPLY.replace(
+        '"summary"', '"start_state": "s", "summary"')
+    off_cut_ref = _BASE_OFF_CUT_REPLY.replace(
+        '"summary"', '"start_state": "s", "summary"')
+    assert parse_segment_plan(on_cut_ref, total_s=12, mode="ref", shot_cuts=cuts) is not None
+    assert parse_segment_plan(off_cut_ref, total_s=12, mode="ref", shot_cuts=cuts) is None
+
+
+def test_old_plan_json_reads_even_if_its_boundary_sits_on_a_cut():
+    """已落盘旧 plan.json 的兼容读口不受影响：``from_dict`` 不做切点校验。"""
+    plan = SegmentPlan.from_dict({
+        "index": 0, "start_s": 0, "end_s": 6, "shots_in_segment": [1],
+        "summary": "旧规划", "end_hook": "钩子"})
+    assert plan.end_s == 6  # 6s 恰是切点，但兼容读口不看切点表
+
+
+# ---------------------------------------------------------------------------
+# 切点抽取（#343）：复用多参侧 ``_shot_blocks`` 这一份实现——两套路线的边界规则
+# 方向相反，但「切点在哪」必须是同一个答案。
+# ---------------------------------------------------------------------------
+
+from minimax_h3_prompt.segment_planner import shot_cuts_from_table  # noqa: E402
+
+
+def test_shot_cuts_from_table_reads_shot_timestamps():
+    table = (
+        "分镜镜头表：\n"
+        "[Shot 1] At 00:00.000, a medium shot of the woman under the umbrella.\n"
+        "[Shot 2] At 00:06.400, a closer shot as she walks through the puddle."
+    )
+    # 时间戳按整数秒取整（ComfyUI 只有整数时长档），表尾补总时长。
+    assert shot_cuts_from_table(table, 12) == (0, 6, 12)
+
+
+def test_shot_cuts_from_table_returns_none_when_unextractable():
+    """抽不出切点 → None（不做边界约束）：无时间戳、单镜、空表都算抽不出。"""
+    assert shot_cuts_from_table("[Shot 1] 深夜空店内……", 12) is None
+    assert shot_cuts_from_table(
+        "[Shot 1] At 00:00.000, 深夜空店内……\n[Shot 2] 猫走进来", 12) is None
+    assert shot_cuts_from_table("", 12) is None
+
+
 # ---------------------------------------------------------------------------
 # 机械拆段（issue #46「不均匀硬切，边界落在镜头切点」）：规划失败回退的确定性底座
 # ---------------------------------------------------------------------------

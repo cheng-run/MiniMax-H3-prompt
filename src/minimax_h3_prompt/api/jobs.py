@@ -4395,14 +4395,18 @@ class JobRunner:
         return [self._segment_row(index, plan) for index, plan in enumerate(plans)]
 
     def _plan_base_segments(self, session: Any, shot_table: str) -> Any:
-        """base 路线的分段规划：一字不变地走 ``plan_segments(mode="base")``。"""
+        """base 路线的分段规划：走 ``plan_segments(mode="base")`` 同一份实现。
+
+        与 CLI 同一组入参（图锚、修订、切点表），切点表是 #343 的「边界避开镜头切点」
+        判据的输入——两个 base 调用点各传一次，规则才不会只活在一个入口里。
+        """
         if self.fake_pipeline:
             # 桩模式一个模型都不建（D4 spec §11）：桩规划与真实规划同一份段长上限。
             from .fake_pipeline import segment_plan
 
             return segment_plan(int(round(session.brief.duration)))
         from ..model_factory import build_chat_model
-        from ..segment_planner import plan_segments
+        from ..segment_planner import plan_segments, shot_cuts_from_table
         from ..segment_prompts import frame_anchor_context, render_revision_context
 
         return plan_segments(
@@ -4410,7 +4414,10 @@ class JobRunner:
             # 图是用户提交的产物、分镜表是计划：冲突以图为准（与 CLI 同源）。
             frame_context=frame_anchor_context(session.stage_state),
             revision_context=render_revision_context(session.stage_state),
-            mode="base")
+            mode="base",
+            # #343：切点表让规划层把内部段边界挪离镜头切点（base 方向与多参相反）。
+            # 抽不出（无时间戳/单镜）时返回 None＝不做该约束，调用方照常接受规划。
+            shot_cuts=shot_cuts_from_table(shot_table, session.brief.duration))
 
     def _plan_ref_segments(self, session_id: str, job_id: str,
                            directory: Path, session: Any) -> Any:

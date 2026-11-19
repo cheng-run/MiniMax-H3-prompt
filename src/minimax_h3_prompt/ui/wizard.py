@@ -5423,7 +5423,7 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
     import json
 
     from ..model_factory import build_chat_model
-    from ..segment_planner import plan_segments
+    from ..segment_planner import plan_segments, shot_cuts_from_table
     from ..segment_prompts import (
         frame_anchor_context,
         render_revision_context,
@@ -5478,11 +5478,15 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
             # 重试/生成中都是事件，必须有订阅者才会变成终端上的行；横幅与订阅成对
             # 出现（step_scope），不留下「打了横幅却听不到心跳」的半套接线。
             with step_scope("正在分段规划"):
+                shot_table = str(state.get("shot_table", ""))
                 plans = plan_segments(
-                    str(state.get("shot_table", "")), brief.duration, llm,
+                    shot_table, brief.duration, llm,
                     frame_context=frame_anchor_context(state),
                     # 修订经**显式入参**交给规划层：它不依赖 state（issue #26 AC-4）
                     revision_context=render_revision_context(state),
+                    # #343：切点表让规划层把内部段边界挪离镜头切点（base 方向与多参
+                    # 相反）。抽不出（无时间戳/单镜）时 None＝不做该约束。
+                    shot_cuts=shot_cuts_from_table(shot_table, brief.duration),
                 )
             # 规划是长阻塞：用户此时误敲的键会滞留在行缓冲里，被下一个 input() 吞掉
             # （「跳问」）。这一句原先挂在 `_progress_scope` 的退出路径上，换成

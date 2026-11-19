@@ -226,9 +226,11 @@ def parse_segment_plan(text: str, total_s: int, *, mode: str = "base",
       当约束（issue #95，此前写段器完全看不到），锚帧语义校验拿它当判据；
     - ref 另外要求 ``start_state`` 也非空——多参没有桥接帧，起止状态声明是段间
       叙事衔接的唯一显式依据，缺一个整段产物就不合格（拒收→调用方回退机械拆分）；
-    - 给定 ``shot_cuts``（镜头切点表）时，内部段边界必须落在切点上（「不均匀硬切，
-      边界落在镜头切点」）；唯一例外是镜头本身超过执行窗口（> MAX_SEG_S）时允许
-      镜内切——长镜头拆段本来就没有切点可用。
+    - 给定 ``shot_cuts``（镜头切点表）时两条路线**方向相反**（#343 / spec #342）：
+      ref 要求内部段边界落在切点上（「不均匀硬切，边界落在镜头切点」；唯一例外是
+      镜头本身超过执行窗口（> MAX_SEG_S）时允许镜内切——长镜头拆段本来就没有切点
+      可用）；base 要求内部段边界**避开**切点（段间接缝落在镜头内部，桥接帧作为
+      first_frame 才是上一镜的延续，不会与段词打架）。
 
     严格化只作用于**新写的**规划（本函数解析模型输出）；已落盘的旧 plan.json
     走 ``SegmentPlan.from_dict``，缺键读成空串，不在此处拒收（issue #95）。
@@ -279,9 +281,56 @@ def parse_segment_plan(text: str, total_s: int, *, mode: str = "base",
     # 最后一段 end 可以略超 total（留余量）但不许欠
     if plans[-1].end_s < total_s:
         return None
-    if mode == "ref" and shot_cuts is not None and not _boundaries_on_cuts(plans, shot_cuts):
-        return None
+    if shot_cuts is not None:
+        # 两条路线的边界规则**方向相反**（#343 / spec #342）：多参要求内部段边界落在
+        # 切点上（不均匀硬切）；base 要求避开切点（段间接缝落在镜头内部，桥接帧作为
+        # first_frame 才是上一镜的延续）。各自只在自己的 mode 里判，别串成一条。
+        if mode == "ref":
+            if not _boundaries_on_cuts(plans, shot_cuts):
+                return None
+        elif not _base_boundaries_off_cuts(plans, shot_cuts):
+            return None
     return plans
+
+
+def _base_boundaries_off_cuts(plans: list[SegmentPlan],
+                              shot_cuts: tuple[int, ...]) -> bool:
+    """base：每个内部段边界都**不得**落在镜头切点上。
+
+    只判内部边界（``plans[:-1].end_s``）：末段的终点就是全片时长，它本来就在切点表里。
+    与多参相反，这里**没有**「超长镜头镜内切」例外需要处理——边界避开切点从来不与
+    「长镜头装不进执行窗口」冲突，段边界落在镜头内部正是这条规则要的形态。
+    """
+    cuts = set(shot_cuts)
+    return all(plan.end_s not in cuts for plan in plans[:-1])
+
+
+def shot_cuts_from_table(shot_table: str, total_s: float) -> tuple[int, ...] | None:
+    """从分镜表 ``[Shot N]`` 时间戳抽镜头切点表（含 0 与总时长）；抽不出返回 None。
+
+    抽取复用 ``segment_prompts._shot_blocks``——多参机械切片与分段规划用的是同一份
+    实现（spec #342：「切点抽取只有一处实现」）。两套路线的边界规则方向相反，但
+    「切点在哪」必须是同一个答案，各写一份迟早改一处漏一处。
+
+    None 是**降级口径**（与多参一致）：分镜表没有时间戳、只规划出单镜、或时间戳彼此
+    重合（取整后只剩一个起点）时，切点表不可信，调用方按「不做边界约束」处理——
+    约束悄悄变成「所有边界都不合格」和「约束从来没生效」是两种同样坏的静默失效。
+    """
+    # 延迟导入：本模块被 --brief 快路径直接 import，抽取器拉起的正则与提示词栈
+    # 不该压在入口期（理由同 ``plan_segments`` 的延迟导入）。
+    from .segment_prompts import _shot_blocks  # noqa: PLC0415
+
+    total_int = int(round(total_s))
+    if total_int <= 0:
+        return None
+    blocks = _shot_blocks(shot_table)
+    # 钳进 [0, total)：时间戳按整数秒取整（ComfyUI 只有整数时长档，与 _shot_blocks 同口径）
+    starts = sorted({int(at) for _n, at, _t in blocks if 0 <= int(at) < total_int})
+    if len(starts) < 2:
+        return None
+    if starts[0] != 0:
+        starts = [0, *starts]
+    return tuple([*starts, total_int])
 
 
 def _boundaries_on_cuts(plans: list[SegmentPlan], shot_cuts: tuple[int, ...]) -> bool:

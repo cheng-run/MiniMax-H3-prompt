@@ -198,6 +198,9 @@ def test_planning_reuses_plan_segments_with_base_mode(workbench, monkeypatch):
     assert "[Shot 1]" in calls[0]["shot_table"]
     assert calls[0]["total_s"] == 12.0
     assert calls[0]["mode"] == "base"
+    # #343：切点表必须真的交给规划层（规则在、接线在）——抽自分镜表 [Shot N] 时间戳，
+    # 含 0 与总时长；不传就等于「边界避开切点」的判据静默失效。
+    assert calls[0]["shot_cuts"] == (0, 2, 12)
     # 覆盖镜头原样带进详情（规划器给什么就是什么，不重算）。
     assert [segment["shots_in_segment"] for segment in detail["segments"]] == [[1], [2]]
 
