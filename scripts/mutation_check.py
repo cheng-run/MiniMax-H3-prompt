@@ -2536,6 +2536,62 @@ MUTATIONS: tuple[Mutation, ...] = (
         "编剧层丢掉动机来源限定＝三条路线（base／ref／导演台）的剧本都能靠发明输入里"
         "没有的动作来「有动机」，而出站文本没有任何一处会报红（#351 / spec #349 C2-2）",
     ),
+    # ------------------------------------------------------------------
+    # 动作动机纪律的 base 弱化版（#353）：
+    # 清空真源 / 只删 v2 注入 / 只删回退注入 / 误注入 ref——前三条钉「这条纪律真的
+    # 送到了」，第四条钉「没送到不该去的地方」。两条注入行缩进不同（v2 是 ``   - {…}``
+    # 三空格、回退是 ``  {…}`` 两空格），拿裸常量名当锚点会命中两处。
+    # ------------------------------------------------------------------
+    Mutation(
+        "base_motive_discipline_cleared",
+        # 锚点取常量赋值**整行**（全仓恰好一次）：真源自己就是被测断言的那份文本，
+        # 只改几个字不会让「出站文本含真源全文」那条红——只有清空才让守卫的
+        # 「先自证非空」那句响。
+        "src/minimax_h3_prompt/writing_disciplines.py",
+        'MOTIVE_DISCIPLINE_BASE = "**动作必须带动机**：每个动作都要让观众读得出人物**想要什么、为什么此刻做**；动机只许取自请求里真实给出的两份事实——**本段剧情概述**与**分镜表**写明的用意／事件，这两份里都读不出来，就说明此刻本来没有动机，不要自行补一个理由。**不得**为动机发明分镜表没有的动作、道具或事件——宁可少一个动作，也不要多一个观众看不懂的操作。两份事实都取不到动机时，写无动作状态（停顿、视线、呼吸），**不加一个小动作**。"',
+        'MOTIVE_DISCIPLINE_BASE = ""',
+        ("tests/test_writing_disciplines_guard.py::"
+         "test_motive_discipline_reaches_base_only",),
+        "清空动机弱化版真源＝base 两条写段路径同时失去动机纪律，动作句退回「只写做什么」"
+        "（#350 基线：base 戏剧动机 0/9）；守卫若不自证真源非空，``\"\" in text`` 恒真"
+        "就会永远不红（#353 / spec #349）",
+    ),
+    Mutation(
+        "base_motive_discipline_not_injected_v2",
+        # v2 的注入行（缩进 3 空格，全仓恰好一次）：删掉后回退路径仍带、v2 不带，
+        # 证明两条路径各自接线，不是「插了一次就以为两条都有」。
+        "src/minimax_h3_prompt/segment_prompts.py",
+        "   - {MOTIVE_DISCIPLINE_BASE}\n",
+        "",
+        ("tests/test_writing_disciplines_guard.py::"
+         "test_motive_discipline_reaches_base_only",),
+        "动机弱化版不进 v2 写段请求＝规划式长片（默认路径）的段词又只剩动作没有动机，"
+        "而回退路径仍带——「规则在、接线不在」的静默形态（#353 / spec #349 C2-3）",
+    ),
+    Mutation(
+        "base_motive_discipline_not_injected_fallback",
+        # 回退的注入行（缩进 2 空格，全仓恰好一次）：这条路径只在规划失败时才走，
+        # 漏了要等规划真的失败才现形——正是 #26 一类「只在回退路径上掉档次」的坑。
+        "src/minimax_h3_prompt/segment_prompts.py",
+        "  {MOTIVE_DISCIPLINE_BASE}\n",
+        "",
+        ("tests/test_writing_disciplines_guard.py::"
+         "test_motive_discipline_reaches_base_only",),
+        "动机弱化版不进回退写段请求＝规划一失败，段词就掉回「只写做什么」，而这条路径"
+        "恰恰是规划失败时唯一在跑的（#353 / spec #349 C2-3）",
+    ),
+    Mutation(
+        "base_motive_discipline_leaked_into_ref",
+        # 把弱化版插进多参的纪律块（``## 机位速度`` 那一对行全仓恰好一次）：
+        # 正向断言照旧全绿，只有「ref 一个字都不含」的反向断言能当场报红。
+        "src/minimax_h3_prompt/segment_prompts.py",
+        "## 机位速度\n- {CAMERA_SPEED_DISCIPLINE}",
+        "## 机位速度\n- {CAMERA_SPEED_DISCIPLINE}\n- {MOTIVE_DISCIPLINE_BASE}",
+        ("tests/test_writing_disciplines_guard.py::"
+         "test_motive_discipline_reaches_base_only",),
+        "动机弱化版误注入多参段写纪律块＝已验收的多参产物措辞被动过（2026-11-18／19 两次"
+        "裁定 ref 不做段写层动机），而 base 侧的守卫全部照绿（#353 / spec #349）",
+    ),
 )
 
 

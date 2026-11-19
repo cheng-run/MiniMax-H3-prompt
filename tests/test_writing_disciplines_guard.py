@@ -363,3 +363,60 @@ def test_storyboard_prompt_splits_support_shift_actions_into_multiple_anchors():
     text = load_role_prompt("storyboard")
     assert "改变支撑面" in text, "分镜师提示词没点名「改变支撑面的动作」"
     assert "多个时间锚" in text, "分镜师提示词没要求这类动作在分镜阶段拆成多个时间锚"
+
+
+# ---------------------------------------------------------------------------
+# 动作动机纪律的 base 弱化版（#353，父 spec #349）：只发往 base 的 v2 与回退
+# ---------------------------------------------------------------------------
+# 为什么不并进 ``_FAMILIES``：那是「五条路线全含」，而这条恰好相反——ref 与导演台
+# **刻意不做**。导演台在 ``prompts/segment_writer_director.md`` 的 ``## common`` 里
+# 有原版那一句（逐字不动），ref 只经共享编剧层间接受益（2026-11-18／19 两次裁定）。
+# 反向断言与正向同等重要：有人顺手把弱化版塞进 ``_REF_SEGMENT_DISCIPLINES`` 或导演台
+# 占位符表时，正向断言照样绿——只有「ref/导演台一个字都不含」能当场报红。
+#
+# 判据落在出站请求全文（记录型桩模型／真实组装函数），不直读模板常量：常量对了、
+# 某条路径漏插值，正是本票要防的「规则在、接线不在」。
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_motive_discipline_reaches_base_only(route):
+    """base 两条写段路径含弱化版全文；ref 两条与导演台**一个字都不含**（#353）。
+
+    先断言真源非空：空串让 ``in`` 恒真、``not in`` 恒假，正向与反向会同时失效
+    （本票的四条变异里「清空新常量」那条正靠这句先响）。
+    """
+    text = wd.MOTIVE_DISCIPLINE_BASE
+    assert text, "MOTIVE_DISCIPLINE_BASE 为空——空串让 in 恒真、not in 恒假，守卫会失效"
+
+    outbound = _outbound(route)
+    assert outbound, f"{route} 没有取到任何出站文本"
+    for label, out in outbound:
+        assert out, f"{route} 的{label}是空的"
+        if route in ("base_v2", "base_fallback"):
+            assert text in out, f"{route} 的{label}缺动机纪律弱化版"
+        else:
+            assert text not in out, \
+                f"{route} 的{label}不该带动机弱化版（#353：ref 刻意不做，导演台走原版）"
+
+
+def test_base_motive_discipline_states_only_the_two_fact_sources_base_really_has():
+    """弱化版的形态约束：只认 base 请求里**真实存在**的两份事实源。
+
+    票 #353 面原文写「本段剧情概述、人物／剧本设计」，但 base 的两条写段请求里
+    **没有**人物设计与剧本全文（v2 只有剧情概述＋分镜表＋末态＋锚定＋修订＋画面决策；
+    回退只有整片提示词＋目标镜头＋锚定＋修订＋画面决策）。照抄就是让模型引用它看不见
+    的输入——所以实现改成本段剧情概述与分镜表写明的用意，差异记在 2026-11-19 的裁定里
+    （见真源注释）。
+
+    这条对真源常量断言：断言的是两条**反向排斥**（该有的词在、悬空来源名一个都不在），
+    不是「常量等于某个值」——后者是自证自。真源措辞一漂，出站断言只会证明「漂过的
+    那份确实送到了」，看不出它引用了 base 没有的输入。
+    """
+    text = wd.MOTIVE_DISCIPLINE_BASE
+    assert text, "MOTIVE_DISCIPLINE_BASE 为空"
+    for word in ("本段剧情概述", "分镜表"):
+        assert word in text, f"弱化版没写真正存在的事实源「{word}」"
+    for word in ("人物设计", "人物／剧本设计", "剧本设计"):
+        assert word not in text, f"弱化版引用了 base 请求里不存在的来源「{word}」"
+    assert "不加一个小动作" in text, "弱化版丢了「取不到动机就写无动作状态」的钳制"
+    assert "不得" in text and "发明" in text, "弱化版丢了「不得为动机发明分镜表没有的动作」"
