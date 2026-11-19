@@ -2523,8 +2523,10 @@ MUTATIONS: tuple[Mutation, ...] = (
         # 摘掉新加动机条目里的来源限定半句（全仓恰好一次）：模型仍被告知动作要有
         # 动机，却不知道动机从哪来——最省事的来源就是自己发明，而 #350 基线测到的
         # 恰恰是「缺动机的表述」而不是「动作太多」，发明动作正是要防的那一侧。
+        # 来源限定只许点名编剧节点真正收到的三份输入（2026-11-19 协调会话裁定，
+        # 见 tests/test_role_prompts.py 同名用例 docstring）。
         "src/minimax_h3_prompt/prompts/screenwriter.md",
-        "动机只能取自导演阐述、制作计划、人物设计三者之一",
+        "动机只能取自导演阐述、原始剧情、起步澄清三者之一",
         "",
         ("tests/test_role_prompts.py::"
          "test_screenwriter_actions_carry_their_motive",),

@@ -206,6 +206,13 @@ def test_no_role_prompt_md_hardcodes_official_text():
 def test_screenwriter_actions_carry_their_motive():
     """编剧层动作条目必须要求动机，且限定来源、给出「取不到」的钳制（#351）。
 
+    来源限定必须点名编剧节点**真正收到**的输入（``graph/nodes.py`` 的
+    ``_make_screenwriter_node``：原始剧情、起步澄清、设定级修订、导演阐述、
+    创意锁定）。2026-11-19 协调会话裁定把原措辞的「制作计划」与「人物设计」
+    换成「原始剧情」「起步澄清」：前者编剧节点根本收不到，后者由 ``parallel_designers``
+    产出、在 ``_STAGE1_CHAIN`` 里排在编剧之后——点名它们就是 spec #349 US3 要防的
+    悬空指针。
+
     判据取 ``load_role_prompt`` 的返回值（模型眼前的系统提示），不查文件本身：
     加载口若哪天把这段摘掉，查文件的断言会照绿（同 #30 缝 1）。只做子串断言，
     不钉整段措辞——措辞会漂。
@@ -214,8 +221,8 @@ def test_screenwriter_actions_carry_their_motive():
 
     assert "想要什么" in prompt and "为什么此刻做" in prompt, \
         "编剧提示词没要求动作读得出「想要什么／为什么此刻做」"
-    assert "动机只能取自导演阐述、制作计划、人物设计" in prompt, \
-        "编剧提示词没把动机的来源限定在导演阐述／制作计划／人物设计"
+    assert "动机只能取自导演阐述、原始剧情、起步澄清" in prompt, \
+        "编剧提示词没把动机的来源限定在编剧节点真正收到的导演阐述／原始剧情／起步澄清"
     assert "无动作状态" in prompt and "不加一个小动作" in prompt, \
         "编剧提示词缺「取不到动机就写无动作状态、不加一个小动作」的钳制"
     assert "为动机发明输入里没有的动作、道具或事件" in prompt, \
