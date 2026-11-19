@@ -46,6 +46,8 @@ from .wizard_display import (
     render_asset_model_line as _render_asset_model_line,
     render_director_segment_briefing as _render_director_segment_briefing,
     update_prompt_text as _update_prompt_text,
+    NODE_LABELS as _NODE_LABELS,
+    report_node as _report_node,
 )
 from . import wizard_base
 from .wizard_base import skips_base_frame_loop as _skips_base_frame_loop
@@ -481,28 +483,8 @@ def _ask_custom_canvas(label: str) -> tuple[int, int]:
             print(f"[提示] {exc}，请重输。")
 
 
-# LangGraph 节点名 → 用户可读环节名（用于节点级进度）。
-_NODE_LABELS = {
-    "producer": "制作人",
-    "director": "导演",
-    "creative_rt": "创意圆桌",
-    "screenwriter": "编剧",
-    "parallel_designers": "人物/场景/道具设计",
-    "art_director": "美术指导",
-    "parallel_image_prompts": "资产图生图提示词",
-    "storyboard": "分镜设计",
-    "parallel_decisions": "镜头/身份决策",
-    "parallel_visual": "摄影与一致性校验",
-    "fl2va_frame_prompts": "首尾帧生图提示词",
-    "parallel_sound": "声音设计与配乐",
-    "prompt_engineer": "视频提示词组装",
-    "finalize": "终检收尾",
-}
-
-
-def _report_node(node_name: str) -> None:
-    label = _NODE_LABELS.get(node_name, node_name)
-    print(f"—— 环节：{label} ——", flush=True)
+# LangGraph 节点名 → 用户可读环节名的映射与打印已搬进 ``wizard_display``（#342 复审：
+# 向导体量闸要求涨行数必须用搬迁换）。这里保留同名别名，既有引用与用例不用改。
 
 
 def _progress_saver(generation_dir: Path, brief: Brief) -> Callable[[str, dict], None]:
@@ -5470,15 +5452,19 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
                                       plans_from_cache=True, progress=progress)
 
     plans = None
+    shot_table = str(state.get("shot_table", ""))
+    # 切点表提到 try 之前：#343 的「边界避开切点」判据靠它，规划回复不合格回退时
+    # 也要靠它判断这次到底有没有切点约束（spec #342 US10：边界仍落切点要留可见记录）。
+    shot_cuts = shot_cuts_from_table(shot_table, brief.duration) if shot_table else None
+    planning_crashed = False
     try:
         llm = build_chat_model()
-        if state.get("shot_table"):
+        if shot_table:
             # 帧图实际画面一并交给规划层：分镜表只是计划，用户可能复用/改了图（冲突时以图为准）
             # 步骤横幅＋等待心跳（issue #67 / ADR 0019）：拆段走直调看门狗后，卡住/
             # 重试/生成中都是事件，必须有订阅者才会变成终端上的行；横幅与订阅成对
             # 出现（step_scope），不留下「打了横幅却听不到心跳」的半套接线。
             with step_scope("正在分段规划"):
-                shot_table = str(state.get("shot_table", ""))
                 plans = plan_segments(
                     shot_table, brief.duration, llm,
                     frame_context=frame_anchor_context(state),
@@ -5486,18 +5472,27 @@ def _run_segmented_flow(brief: Brief, session: SessionState, prompt: str, summar
                     revision_context=render_revision_context(state),
                     # #343：切点表让规划层把内部段边界挪离镜头切点（base 方向与多参
                     # 相反）。抽不出（无时间戳/单镜）时 None＝不做该约束。
-                    shot_cuts=shot_cuts_from_table(shot_table, brief.duration),
+                    shot_cuts=shot_cuts,
                 )
             # 规划是长阻塞：用户此时误敲的键会滞留在行缓冲里，被下一个 input() 吞掉
             # （「跳问」）。这一句原先挂在 `_progress_scope` 的退出路径上，换成
             # step_scope 后必须在这里补回来，否则这一步之后的所有问答都会受影响。
             _drain_stdin()
     except Exception as exc:  # noqa: BLE001 - 规划失败回退旧路径
+        planning_crashed = True
         print(f"[提示] 分段规划失败（{exc}），回退到按 [Shot N] 机械拆分。")
 
     if plans:
         print(f"[分段规划] 规划了 {len(plans)} 段：" + ", ".join(f"{p.start_s}-{p.end_s}s" for p in plans))
         return _run_segmented_flow_v2(session, plans, state, llm, summary=summary)
+
+    # US10（spec #342）：规划器没给合格回复（含「内部边界仍落在切点」）时，回退的
+    # 机械拆分恰恰按镜头切点切——接缝处可能换机位。这是**可见记录、不是静默降级**。
+    # 异常分支上面已打印自己的诊断（带病因与次数），这里只管「回复不合格」这一种，
+    # 别把两种失败压成同一句。
+    if not planning_crashed and shot_cuts is not None:
+        print("[提示] 分段规划回复不合格（含内部边界仍落在镜头切点），回退按 [Shot N] "
+              "机械拆分：机械拆分按镜头切点切，接缝处可能换机位，由写段纪律兜底。")
 
     # ② 回退：依旧按 [Shot N] 拆分
     segments = split_shots_from_prompt(prompt, total_duration=brief.duration)

@@ -2426,7 +2426,7 @@ MUTATIONS: tuple[Mutation, ...] = (
         # 被接受，下一段开场就是一次硬换镜头（spec #342 的问题陈述原样复发）。
         # 锚点取整个 elif 分支（含缩进，全仓恰好一次）；if 主体不受影响，语法仍成立。
         "src/minimax_h3_prompt/segment_planner.py",
-        "        elif not _base_boundaries_off_cuts(plans, shot_cuts):\n"
+        "        elif mode == \"base\" and not _base_boundaries_off_cuts(plans, shot_cuts):\n"
         "            return None\n",
         "",
         ("tests/test_segment_planner.py::"
@@ -2441,7 +2441,7 @@ MUTATIONS: tuple[Mutation, ...] = (
         # 而是整条降级（spec #342：抽不出时按「没有约束」处理，但绝不能悄悄变成
         # 「恒通过」或「恒不通过」）。
         "src/minimax_h3_prompt/segment_planner.py",
-        "    starts = sorted({int(at) for _n, at, _t in blocks if 0 <= int(at) < total_int})\n",
+        "    starts = sorted({int(round(at)) for _n, at, _t in blocks if 0 <= int(round(at)) < total_int})\n",
         "    starts = []\n",
         ("tests/test_segment_planner.py::test_shot_cuts_from_table_reads_shot_timestamps",
          "tests/test_wizard_segment_cuts.py::test_segmented_flow_hands_shot_cuts_to_planner"),
@@ -2479,12 +2479,25 @@ MUTATIONS: tuple[Mutation, ...] = (
         # 被抹平成一条，base 反过来要求边界落在切点上——串线守卫当场红。
         # 锚点只圈 elif 那一行（全仓恰好一次；两条 base 用例一起变红，证明结论确实相反）。
         "src/minimax_h3_prompt/segment_planner.py",
-        "        elif not _base_boundaries_off_cuts(plans, shot_cuts):\n",
-        "        elif not _boundaries_on_cuts(plans, shot_cuts):\n",
+        "        elif mode == \"base\" and not _base_boundaries_off_cuts(plans, shot_cuts):\n",
+        "        elif mode == \"base\" and not _boundaries_on_cuts(plans, shot_cuts):\n",
         ("tests/test_segment_planner.py::test_base_plan_rejects_internal_boundary_on_shot_cut",
          "tests/test_segment_planner.py::test_base_plan_accepts_internal_boundary_off_shot_cut"),
         "base 判据与多参同向＝落在切点上的规划被放行、避开切点的反而被拒，两条路线"
         "口径串成一条（spec #342「两套判据各自只在自己的模式里生效」失守）",
+    ),
+    Mutation(
+        "fallback_boundary_record_silent",
+        # 关掉「回复不合格回退机械拆分」的可见记录：规划回复不合格（含内部边界仍落在
+        # 切点）时用户只看到机械拆分，而机械拆分恰恰按镜头切点切——接缝可能换机位这件
+        # 事被静默藏起来（spec #342 US10）。
+        "src/minimax_h3_prompt/ui/wizard.py",
+        "    if not planning_crashed and shot_cuts is not None:\n",
+        "    if False:  # 变异：可见记录被静默\n",
+        ("tests/test_wizard_segment_cuts.py::"
+         "test_segmented_flow_hands_shot_cuts_to_planner",),
+        "规划回复不合格回退机械拆分不留可见记录＝「边界仍落切点、接缝可能换机位」"
+        "被静默吞掉（spec #342 US10 的可见记录形同虚设）",
     ),
     Mutation(
         "base_planner_instruction_drops_off_cut_rule",

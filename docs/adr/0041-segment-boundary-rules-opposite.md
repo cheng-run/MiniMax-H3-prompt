@@ -10,7 +10,7 @@
 
 1. **base 的内部段边界不得落在镜头切点上，落在某个镜头的内部。** 边界一旦避开切点，每段的开场画面就是上一段末帧那一镜的延续，桥接帧作为 `first_frame` 输入与段词指向同一套机位，两者不再互相抵消。
    - 判据住在 `segment_planner.parse_segment_plan` 的 base 分支：给定切点表时，内部段边界命中任一镜头切点即判不合格。
-   - 切点表从分镜表 `[Shot N]` 的时间戳抽取，由 `segment_planner.shot_cuts_from_table` 一处提供（复用 `segment_prompts._shot_blocks`），**不新写一份**；多参在 `ref_segments.prepare_ref_segmentation` 里经 `segment_planner.plan_segments` 的 `shot_cuts` 传入，base 走同一入口、同一参数。
+   - 切点从分镜表 `[Shot N]` 的时间戳抽取，起点由 `segment_planner.shot_cut_starts` 一处提供（复用 `segment_prompts._shot_blocks`），**不新写一份**；base 的切点表 `segment_planner.shot_cuts_from_table` 与多参 `ref_segments.prepare_ref_segmentation` 的机械窗口都从这份起点派生，多参再经 `segment_planner.plan_segments` 的 `shot_cuts` 传入，base 走同一入口、同一参数。
 2. **多参的内部段边界必须落在镜头切点上，这条不变。** 多参没有桥接帧，段间靠参考素材与起止状态声明衔接；边界落切点保证「一个执行段＝整数个镜头」，镜内切会把一个镜头劈进两个执行段，两段都只看到半个镜头。
    - 既有唯一例外保留：单个镜头本身超过执行窗口（> `segment_planner.MAX_SEG_S`）时允许镜内切——长镜头拆段本来就没有切点可用。
 3. **两条判据各住各的模式。** 都由 `segment_planner.parse_segment_plan` 的 `mode` 分派，各自的守卫都验证「同一条回复在另一模式下结论相反」，防止串线。

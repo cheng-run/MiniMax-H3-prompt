@@ -4387,7 +4387,8 @@ class JobRunner:
                 raise JobCancelled(SEGMENT_PLAN_NODE)
             if not plans:
                 raise RuntimeError(
-                    "分段规划回复不合格（段长档/边界/段尾钩子），没有可用的段表")
+                    "分段规划回复不合格（段长档/内部边界须避开镜头切点/段尾钩子），"
+                    "没有可用的段表")
             self._write_segment_plan(directory, plans)
         self._emit_progress(
             session_id, job_id, SEGMENT_PLAN_NODE, "done",

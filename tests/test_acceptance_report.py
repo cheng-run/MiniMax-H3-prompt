@@ -1,4 +1,4 @@
-"""#346：``scripts/accept_longform.py`` 的秒级守卫。
+"""#346：``scripts/acceptance_report.py`` 的秒级守卫。
 
 取数脚本的外部契约只有两条：给一个会话目录，把五类事实打到屏幕上；给一个不存在
 的目录，给可读错误并非零退出。用例不碰真实 ``output/sessions``——那里的会话会随
@@ -12,12 +12,12 @@ import json
 import sys
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "accept_longform.py"
-SPEC = importlib.util.spec_from_file_location("accept_longform", SCRIPT)
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "acceptance_report.py"
+SPEC = importlib.util.spec_from_file_location("acceptance_report", SCRIPT)
 assert SPEC and SPEC.loader
-accept_longform = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = accept_longform
-SPEC.loader.exec_module(accept_longform)
+acceptance_report = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = acceptance_report
+SPEC.loader.exec_module(acceptance_report)
 
 # 段词里只有 non_diegetic_music 一节是断言材料；其余字段刻意留空，
 # 让「取配乐原文」这件事不与正文措辞耦合。
@@ -91,7 +91,7 @@ def test_reports_the_five_fact_groups(tmp_path, capsys):
     """正常会话目录：会话参数、成片、段账、配乐原文、桥接帧五类都要出现。"""
     root = _write_session(tmp_path / "GEN001")
 
-    code = accept_longform.main(["accept_longform.py", str(root)])
+    code = acceptance_report.main(["acceptance_report.py", str(root)])
     out = capsys.readouterr().out
 
     assert code == 0
@@ -131,7 +131,7 @@ def test_frame_fields_are_printed_when_the_ledger_records_them(tmp_path, capsys)
         json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8"
     )
 
-    code = accept_longform.main(["accept_longform.py", str(root)])
+    code = acceptance_report.main(["acceptance_report.py", str(root)])
     out = capsys.readouterr().out
 
     assert code == 0
@@ -144,7 +144,7 @@ def test_missing_directory_is_a_readable_error(tmp_path, capsys):
     """目录不存在：点名那个路径、非零退出，而不是抛 traceback。"""
     missing = tmp_path / "没有这个会话"
 
-    code = accept_longform.main(["accept_longform.py", str(missing)])
+    code = acceptance_report.main(["acceptance_report.py", str(missing)])
     out = capsys.readouterr().out
 
     assert code != 0
@@ -157,6 +157,6 @@ def test_does_not_write_into_the_session_directory(tmp_path, capsys):
     root = _write_session(tmp_path / "GEN003")
     before = _snapshot(root)
 
-    accept_longform.main(["accept_longform.py", str(root)])
+    acceptance_report.main(["acceptance_report.py", str(root)])
 
     assert _snapshot(root) == before

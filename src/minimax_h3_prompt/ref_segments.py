@@ -67,6 +67,7 @@ from .segment_planner import (
     SegmentPlan,
     pack_shots_into_segments,
     plan_segments,
+    shot_cut_starts,
 )
 from .segment_refs import (
     SegmentAssetScope,
@@ -1327,10 +1328,10 @@ def prepare_ref_segmentation(*, whole_prompt: str, total_s: float, out_dir: Path
         refs_per_segment = workflow_settings().refs_per_segment
 
     if blocks:
-        # 切点钳进 [0, total]：块时间超 total（调用方时长与整片不一致）时不得把窗外切点带进打包
-        starts = sorted({int(at) for _n, at, _t in blocks if 0 <= int(at) < total_int})
-        if not starts or starts[0] != 0:
-            starts = [0, *starts]
+        # 切点钳进 [0, total]：块时间超 total（调用方时长与整片不一致）时不得把窗外切点
+        # 带进打包。起点抽取与 base 的切点表共用 ``shot_cut_starts``——两套路线边界规则
+        # 相反，但「切点在哪」是同一个答案（spec #342）。抽不出起点时退化成整片一个窗口。
+        starts = shot_cut_starts(body, total_s) or [0]
         windows = [(starts[i], starts[i + 1]) for i in range(len(starts) - 1)]
         windows.append((starts[-1], total_int))
         windows = [(s, e) for s, e in windows if e > s] or [(0, total_int)]

@@ -105,7 +105,7 @@ FAST_TESTS=(
   # 让 fast 绿着过、全量才炸（同 test_wizard_size 的教训）。三份合计约 2s。
   tests/test_segment_planner.py
   tests/test_wizard_segment_cuts.py
-  tests/test_accept_longform.py
+  tests/test_acceptance_report.py
 )
 
 # 变更集＝「工作区 ∪ 本分支相对 main 的已提交改动」（retro 2026-11-14）。

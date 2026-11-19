@@ -455,7 +455,7 @@ _Avoid_: 与**闸门遭遇记录**（gate-log）混用（那是锚帧语义校�
 
 **分段规划（segment plan）**:
 长视频阶段 2 的第一步：把整条视频拆成整数执行段（首尾帧链 4–10 秒保守档，多参 4–15 秒且边界落镜头切点），输出每段的 start_s/end_s（整数边界）、包含的 Shot、剧情概述和段尾钩子；不写正文。
-**两条路线的内部段边界规则方向相反（#342，理由见 ADR 0041）**：**base 的内部段边界不得落在镜头切点上**——它落在某个镜头的**内部**，于是每段的开场画面天然是上一段末帧那一镜的延续，桥接帧（见**尾帧桥接**）作为 `first_frame` 与段词不打架；**多参的内部段边界必须落在切点上**——多参没有桥接帧，段间靠参考素材与起止状态声明衔接，边界落切点才让「一个执行段＝整数个镜头」成立。两条判据同住 `segment_planner.parse_segment_plan`，按 `mode` 各管各的模式；切点表只由 `segment_planner.shot_cuts_from_table` 从分镜块时间戳抽取（复用 `segment_prompts._shot_blocks`；多参在 `ref_segments.prepare_ref_segmentation` 里经 `segment_planner.plan_segments` 的 `shot_cuts` 传入，base 走同一入口）；抽不出切点即传 `None`、该约束不生效，与多参「抽不出切点只靠指令约束」同一条降级口径。约束不满足与「回复不合格」同路：返回空，调用方回退机械拆分。
+**两条路线的内部段边界规则方向相反（#342，理由见 ADR 0041）**：**base 的内部段边界不得落在镜头切点上**——它落在某个镜头的**内部**，于是每段的开场画面天然是上一段末帧那一镜的延续，桥接帧（见**尾帧桥接**）作为 `first_frame` 与段词不打架；**多参的内部段边界必须落在切点上**——多参没有桥接帧，段间靠参考素材与起止状态声明衔接，边界落切点才让「一个执行段＝整数个镜头」成立。两条判据同住 `segment_planner.parse_segment_plan`，按 `mode` 各管各的模式；镜头起点由 `segment_planner.shot_cut_starts` 一处从分镜块时间戳抽取（复用 `segment_prompts._shot_blocks`），base 的切点表由 `segment_planner.shot_cuts_from_table` 在这份起点上补齐，多参在 `ref_segments.prepare_ref_segmentation` 里用同一份起点构造机械窗口、再经 `segment_planner.plan_segments` 的 `shot_cuts` 传入；抽不出切点即传 `None`、该约束不生效，与多参「抽不出切点只靠指令约束」同一条降级口径。约束不满足与「回复不合格」同路：返回空，调用方回退机械拆分。
 _Avoid_: 以为两条边界规则里必有一条写反了（相反是有意的，见 ADR 0041）、把 base 的边界约束写进多参模式或反之（串线会让两侧产物一起坏）
 
 **段尾钩子（end_hook）**:

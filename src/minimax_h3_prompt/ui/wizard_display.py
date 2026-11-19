@@ -324,3 +324,30 @@ def semantic_reference(previous_text: str | None) -> str | None:
         return None
     lines = [line.strip() for line in previous_text.strip().splitlines() if line.strip()]
     return lines[-1] if lines else None
+
+
+# LangGraph 节点名 → 用户可读环节名（用于节点级进度）。
+# 2026-11-19 从 ``wizard.py`` 搬来（#342 复审）：纯展示，且向导体量闸要求
+# 「加代码必须用搬迁换」——这张表与它的打印正是最合适的一搬。
+NODE_LABELS = {
+    "producer": "制作人",
+    "director": "导演",
+    "creative_rt": "创意圆桌",
+    "screenwriter": "编剧",
+    "parallel_designers": "人物/场景/道具设计",
+    "art_director": "美术指导",
+    "parallel_image_prompts": "资产图生图提示词",
+    "storyboard": "分镜设计",
+    "parallel_decisions": "镜头/身份决策",
+    "parallel_visual": "摄影与一致性校验",
+    "fl2va_frame_prompts": "首尾帧生图提示词",
+    "parallel_sound": "声音设计与配乐",
+    "prompt_engineer": "视频提示词组装",
+    "finalize": "终检收尾",
+}
+
+
+def report_node(node_name: str) -> None:
+    """节点级进度行：把 LangGraph 内部名换成用户可读环节名再打印。"""
+    label = NODE_LABELS.get(node_name, node_name)
+    print(f"—— 环节：{label} ——", flush=True)

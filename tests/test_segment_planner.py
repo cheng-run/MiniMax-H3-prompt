@@ -373,7 +373,15 @@ def test_base_planner_request_states_boundaries_off_shot_cuts():
                   mode="ref", shot_cuts=(0, 5, 9))
     assert "内部段边界不得落在镜头切点上" not in ref_llm.last_request
     # 反方向同样要防：多参那条「边界落在镜头切点」的硬规则不得被抄进 base 指令。
-    assert "边界落在镜头切点**（不均匀硬切）" not in base_llm.last_request
+    # 规则行从 ref 指令真源**派生**、不字面重抄：抄一份字符串，ref 一改措辞它就
+    # 恒不命中，守卫永不为红（原写法正是这个形态）。先断言派生源找得到规则行，
+    # 找不到说明抽取条件失效，同样要让这条红。
+    ref_rule_lines = [line.strip() for line in _load_instruction("ref").splitlines()
+                      if "边界落在镜头切点" in line]
+    assert ref_rule_lines, "多参规划指令里找不到「边界落在镜头切点」规则行——派生源失效"
+    for line in ref_rule_lines:
+        assert line not in base_llm.last_request, \
+            f"多参的「边界落在镜头切点」规则被抄进了 base 指令（两路线方向相反）：{line}"
 
 
 # ---------------------------------------------------------------------------

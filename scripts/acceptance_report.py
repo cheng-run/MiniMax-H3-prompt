@@ -4,13 +4,17 @@
 把会话参数、成片参数、段账逐段、每段 ``non_diegetic_music`` 原文、桥接帧清单一口气
 打出来，人对着读。脚本只取数、不下结论，也不往会话目录写任何文件。
 
+**命名**：本脚本不进 ``scripts/accept_*.py`` 族——那族是**真实环境验收驱动器**，会
+启动被测程序、且启动前必须断言生效配置的来源（见 ``docs/agents/engineering-cadence.md``）；
+本脚本只读盘上产物、连模型都不建，叫 ``accept_*`` 会让人以为跑它等于跑了一轮验收。
+
 用法（仓库根）：
 
-    PYTHONPATH=src .venv/Scripts/python.exe scripts/accept_longform.py <会话目录>
+    PYTHONPATH=src .venv/Scripts/python.exe scripts/acceptance_report.py <会话目录>
 
 例：
 
-    PYTHONPATH=src .venv/Scripts/python.exe scripts/accept_longform.py \
+    PYTHONPATH=src .venv/Scripts/python.exe scripts/acceptance_report.py \
         "output/sessions/一个日本女高中生-傍晚放学之后-背着书包-84080c09/GEN001"
 
 两条路线的段账都认：首尾帧链是 ``segments/shot-ledger.jsonl``（只有通过行、记秒），

@@ -288,7 +288,9 @@ def parse_segment_plan(text: str, total_s: int, *, mode: str = "base",
         if mode == "ref":
             if not _boundaries_on_cuts(plans, shot_cuts):
                 return None
-        elif not _base_boundaries_off_cuts(plans, shot_cuts):
+        # 显式点名 base：将来第三条路线传 ``shot_cuts`` 时不许被静默套上 base 语义
+        # （``elif not …`` 会把所有非 ref 模式都当 base）。
+        elif mode == "base" and not _base_boundaries_off_cuts(plans, shot_cuts):
             return None
     return plans
 
@@ -305,16 +307,17 @@ def _base_boundaries_off_cuts(plans: list[SegmentPlan],
     return all(plan.end_s not in cuts for plan in plans[:-1])
 
 
-def shot_cuts_from_table(shot_table: str, total_s: float) -> tuple[int, ...] | None:
-    """从分镜表 ``[Shot N]`` 时间戳抽镜头切点表（含 0 与总时长）；抽不出返回 None。
+def shot_cut_starts(shot_table: str, total_s: float) -> list[int]:
+    """从分镜表 ``[Shot N]`` 时间戳抽**镜头起点**（整数秒、钳在 ``[0, total)``）。
 
-    抽取复用 ``segment_prompts._shot_blocks``——多参机械切片与分段规划用的是同一份
-    实现（spec #342：「切点抽取只有一处实现」）。两套路线的边界规则方向相反，但
-    「切点在哪」必须是同一个答案，各写一份迟早改一处漏一处。
+    抽取复用 ``segment_prompts._shot_blocks``——base 的切点表与多参的机械窗口都由
+    这一份起点派生（spec #342：「切点抽取只有一处实现」）。两套路线的边界规则方向
+    相反，但「切点在哪」必须是同一个答案，各写一份迟早改一处漏一处。
 
-    None 是**降级口径**（与多参一致）：分镜表没有时间戳、只规划出单镜、或时间戳彼此
-    重合（取整后只剩一个起点）时，切点表不可信，调用方按「不做边界约束」处理——
-    约束悄悄变成「所有边界都不合格」和「约束从来没生效」是两种同样坏的静默失效。
+    返回**起点序列**而不是完整的切点表：首点非 0 时补 0（``[Shot 1]`` 的起点就是
+    0），一个起点都抽不出时返回 ``[]``。这里**不**做「起点不足两个即不可信」的降级
+    ——那是 base 切点表自己的口径（见 ``shot_cuts_from_table``），多参拿到空序列时
+    退化成整片一个窗口。
     """
     # 延迟导入：本模块被 --brief 快路径直接 import，抽取器拉起的正则与提示词栈
     # 不该压在入口期（理由同 ``plan_segments`` 的延迟导入）。
@@ -322,14 +325,32 @@ def shot_cuts_from_table(shot_table: str, total_s: float) -> tuple[int, ...] | N
 
     total_int = int(round(total_s))
     if total_int <= 0:
-        return None
+        return []
     blocks = _shot_blocks(shot_table)
-    # 钳进 [0, total)：时间戳按整数秒取整（ComfyUI 只有整数时长档，与 _shot_blocks 同口径）
-    starts = sorted({int(at) for _n, at, _t in blocks if 0 <= int(at) < total_int})
+    # 钳进 [0, total)：时间戳已由 _shot_blocks 四舍五入，这里再 round 一次只为读起来
+    # 不像是截断（ComfyUI 只有整数时长档，与 _shot_blocks 同口径）。
+    starts = sorted({int(round(at)) for _n, at, _t in blocks if 0 <= int(round(at)) < total_int})
+    if starts and starts[0] != 0:
+        starts = [0, *starts]
+    return starts
+
+
+def shot_cuts_from_table(shot_table: str, total_s: float) -> tuple[int, ...] | None:
+    """从分镜表 ``[Shot N]`` 时间戳抽镜头切点表（含 0 与总时长）；抽不出返回 None。
+
+    起点由 ``shot_cut_starts`` 提供（与多参机械窗口同一份实现）；本函数只补上自己的
+    口径：起点不足两个（没有内部切点）、总时长非正时切点表不可信，返回 None。
+
+    None 是**降级口径**（与多参一致）：分镜表没有时间戳、只规划出单镜、或时间戳彼此
+    重合（取整后只剩一个起点）时，切点表不可信，调用方按「不做边界约束」处理——
+    约束悄悄变成「所有边界都不合格」和「约束从来没生效」是两种同样坏的静默失效。
+    """
+    total_int = int(round(total_s))
+    if total_int <= 0:
+        return None
+    starts = shot_cut_starts(shot_table, total_s)
     if len(starts) < 2:
         return None
-    if starts[0] != 0:
-        starts = [0, *starts]
     return tuple([*starts, total_int])
 
 
@@ -366,8 +387,9 @@ def plan_segments(shot_table: str, total_s: float, llm, *, frame_context: str = 
 
     ``mode="ref"``（多参分段，issue #46）：换 ref 规划指令（镜头切点边界、4–15s、
     起止状态英文进提示词），解析侧同时启用 ref 契约（状态必填 + 切点对齐）。
-    ``shot_cuts``：镜头切点表（含 0 与 total），供「边界落在镜头切点」的确定性校验；
-    抽不出切点时传 None，只靠指令约束。
+    ``shot_cuts``：镜头切点表（含 0 与 total），供**方向相反**的两条路线做确定性
+    边界校验——ref 要求内部边界**落在**切点上，base 要求**避开**切点；抽不出切点时
+    传 None，只靠指令约束。
 
     **调用走直调等待看门狗**（issue #67 / ADR 0019）：首字节心跳、仅首字节前的卡住
     重试、调用预算与 token 记账都与角色调用同源。两种失败分开表达，别压成一句：

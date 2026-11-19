@@ -23,7 +23,7 @@ TWO_SHOT_PROMPT = (
 )
 
 
-def test_segmented_flow_hands_shot_cuts_to_planner(tmp_path, monkeypatch):
+def test_segmented_flow_hands_shot_cuts_to_planner(tmp_path, monkeypatch, capsys):
     brief = Brief(mode="base", variant="I2VA", duration=12.0, style="写实", plot="雨夜旧信")
     directory = tmp_path / "GEN001"
     directory.mkdir()
@@ -56,3 +56,9 @@ def test_segmented_flow_hands_shot_cuts_to_planner(tmp_path, monkeypatch):
     assert len(calls) == 1
     # 切点表由同一份分镜表抽出：含 0 与总时长，内部切点在 6s。
     assert calls[0]["shot_cuts"] == (0, 6, 12)
+
+    # US10（spec #342）：回复不合格回退机械拆分时必须留下可见记录——机械拆分按镜头
+    # 切点切，接缝处可能换机位。静默回退等于把这一结构风险藏起来。
+    out = capsys.readouterr().out
+    assert "回复不合格" in out
+    assert "机械拆分按镜头切点切" in out
