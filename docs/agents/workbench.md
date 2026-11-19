@@ -12,6 +12,7 @@
 | `workbench_store.py` | 会话仓库：`workbench.v1` 快照、原子写、每会话线程锁、`mutate`、事件日志 `EventLog`、幂等登记表、产物登记 |
 | `api/jobs.py` | `JobRunner`：每会话 asyncio 锁、`to_thread` 跑 LangGraph、节点边界取消、`active-job.json`、启动对账、阶段 1/2 执行 |
 | `api/routes/sessions.py` | `/api/v1` 全部会话端点；**路由顺序即契约**：`{session_id:path}` 会吞斜杠，`/jobs`、`/events`、`/action-items` 必须注册在详情路由之前 |
+| `api/routes/clarification.py` | `GET /api/v1/clarification-questions`：建会话**之前**按主题现生成起步澄清问题（#338）。路径独立于会话资源——提问发生在会话还没有标识的时候；上限缺省取 `pipeline.max_clarification_rounds`，`<= 0` 直接返回空表且不建模型，生成失败回 502 `clarification_generation_failed` |
 | `api/routes/assets.py` | 上传素材的收、列与删除（`POST/GET/DELETE /sessions/{id}/assets`）；整只路由器在 `create_app` 里排在 `sessions` 之前，顺序不靠人记 |
 | `api/routes/media.py` | 素材字节读取（`GET/HEAD /media/{asset_id:path}`）；同样排在 `sessions` 之前 |
 | `api/media.py` | 单段 Range 解析、416 与字节流响应；素材与成片的 content 端点**共用这一份** |
@@ -54,6 +55,11 @@
 - **产物分区不按变体判断**：登记表里有哪几件就显示哪几件（T2VA 两件、帧链多两帧词）；
   复制/下载都走 content 端点（下载是 `<a download>` + Cookie），媒体按 `kind` 通用渲染，
   不按文件名特判成片。阶段 2 成功即 `completed`，**没有交付确认闸门**（ADR 0034）。
+- **澄清答案只在后端渲染**（#338）：创建请求收自由文本 `clarifications` 或结构化
+  `clarification_pairs`（二选一，同给内容的回 422 `clarification_conflict`，空串与空表
+  都算「没提供」）。问答对由 `clarification.render_clarification_block` 落成
+  `Brief.clarifications`，与 CLI 逐字同形——前端不拼「1. Q → A」文本，同一个格式不许
+  两处实现。提问发生在**建会话之前**：`Brief` 只有创建时那一处构造口。
 - **先写事件、后写快照**；快照 `last_event_seq` 落后时按 `seq > last_event_seq` 重放，重放幂等。
 - **SSE 新订阅补发两条**（#271）：先补 `seq > 游标` 的事件，再补游标之前最近一条
   `job.progress`。刷新后快照序号就是游标、节点只住在旧事件里，没有第二条就只剩

@@ -123,6 +123,17 @@ class DirectorContinuityInvalid(ProblemError):
     code = "director_continuity_invalid"
 
 
+class ClarificationConflict(ProblemError):
+    """自由文本 ``clarifications`` 与结构化问答对同时提交（#338 / spec #332 E1）。
+
+    系统不猜哪个优先：两种形态都落进 ``Brief.clarifications``，靠猜就会让用户答过的
+    那一条静默消失。空串按「没提供」处理，只有**两边都有内容**才算冲突。
+    """
+
+    status_code = 422
+    code = "clarification_conflict"
+
+
 def _validate_duration(duration: float) -> None:
     if DURATION_MIN_SECONDS <= duration <= DURATION_MAX_SECONDS:
         return
@@ -194,6 +205,17 @@ def _validate_route_parameters(payload: SessionCreate) -> None:
         raise DirectorContinuityInvalid(str(exc)) from exc
 
 
+class ClarificationPair(BaseModel):
+    """一条澄清问答对（#338 / spec #332 E1）：问题原样回传、回答由用户填。
+
+    结构化成对提交而不是让前端拼 ``1. Q → A`` 文本：渲染只在后端
+    （``clarification.render_clarification_block``），CLI 与工作台因此逐字同形。
+    """
+
+    question: str
+    answer: str
+
+
 class SessionCreate(BaseModel):
     """建会话的 brief 一次性给全（spec §7；D7 §4.1 放开 ``ref``，D8 放开 ``director``）。
 
@@ -217,6 +239,9 @@ class SessionCreate(BaseModel):
     language: str = "Chinese"
     plot: str = Field(min_length=1)
     clarifications: str = ""
+    # 结构化澄清问答对（#338）：与 ``clarifications`` 二选一，同时给内容回 422
+    # ``clarification_conflict``。空表与省略同义（没提供）。
+    clarification_pairs: list[ClarificationPair] = Field(default_factory=list)
     draft: str = ""
     canvases: dict[str, tuple[int, int]] = Field(default_factory=dict)
     video_output: VideoOutputIn | None = None
@@ -345,6 +370,31 @@ def _runner(request: Request):
     return request.app.state.job_runner
 
 
+def _clarification_text(payload: SessionCreate) -> str:
+    """把创建请求里的两种澄清形态落成 ``Brief.clarifications`` 的正文（#338）。
+
+    自由文本与问答对只认一种：两边都有内容即 422，不猜哪个优先。问答对走
+    ``clarification.render_clarification_block``——那是 CLI 与渲染的唯一实现
+    （编号 + ``问题 → 回答`` + 效力说明），这里绝不自己拼一份，否则同一格式会有
+    两处口径。只答了问题没填答案的条目由渲染函数滤掉（空回答＝没澄清）。
+    """
+    free_text = payload.clarifications.strip()
+    pairs = [
+        (item.question, item.answer)
+        for item in payload.clarification_pairs
+        if item.answer.strip()
+    ]
+    if free_text and pairs:
+        raise ClarificationConflict(
+            "clarifications（自由文本）与 clarification_pairs（问答对）不能同时提交："
+            "两者都写进会话的澄清块，请二选一。")
+    if not pairs:
+        return payload.clarifications
+    from ...clarification import render_clarification_block
+
+    return render_clarification_block(pairs)
+
+
 def _brief_from_payload(payload: SessionCreate) -> Brief:
     video_output = None
     if payload.video_output is not None:
@@ -380,7 +430,7 @@ def _brief_from_payload(payload: SessionCreate) -> Brief:
         style=payload.style,
         language=payload.language,
         plot=payload.plot,
-        clarifications=payload.clarifications,
+        clarifications=_clarification_text(payload),
         draft=payload.draft,
         canvases=dict(payload.canvases),
         video_output=video_output,

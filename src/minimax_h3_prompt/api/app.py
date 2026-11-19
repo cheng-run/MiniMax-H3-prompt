@@ -21,6 +21,9 @@ from .jobs import JobRunner
 from .problems import apply_problem_media_type_openapi, install_problem_handlers
 from .routes.assets import router as assets_router
 from .routes.auth import router as auth_router
+# 起步澄清问题（#338）：路径独立于会话资源（提问发生在建会话之前），
+# 也不与 ``{session_id:path}`` 交叉；排在这里只为让「非会话端点」聚在一起。
+from .routes.clarification import router as clarification_router
 # 诊断包（D5-4 / #239）：路径在 /api 下、不与其他路由的 ``{session_id:path}`` 交叉。
 from .routes.diagnostics import router as diagnostics_router
 from .routes.health import router as health_router
@@ -108,6 +111,7 @@ def create_app(
     # 诊断包（#239）：固定路径、不吞斜杠，注册顺序不影响匹配；排在会话路由前只是
     # 让「非会话端点」聚在一起。
     app.include_router(diagnostics_router)
+    app.include_router(clarification_router)
     # 顺序是契约（#222 §9）：``{session_id:path}`` 会吞掉斜杠，``/sessions/{id}/assets``
     # 必须先于 ``GET /sessions/{session_id:path}`` 注册，否则详情路由会把 ``assets``
     # 当作会话标识的一部分。assets 路由器整只排在 sessions 之前，这条顺序不靠人记。

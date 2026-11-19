@@ -46,6 +46,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/clarification-questions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Clarification Questions
+         * @description 按主题现生成起步澄清问题（只读，不建会话、不落盘）。
+         *
+         *     上限 <= 0 时**连模型都不建**：关闭澄清的路由不该为一次跳过付客户端构造代价，
+         *     这条也由 ``clarification.generate_clarifying_questions`` 自己再守一道
+         *     （``limit <= 0`` 直接返回空列表）。
+         */
+        get: operations["list_clarification_questions_api_v1_clarification_questions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/diagnostics/bundle": {
         parameters: {
             query?: never;
@@ -600,6 +624,19 @@ export interface components {
             video_output?: components["schemas"]["VideoOutputOut"] | null;
         };
         /**
+         * ClarificationPair
+         * @description 一条澄清问答对（#338 / spec #332 E1）：问题原样回传、回答由用户填。
+         *
+         *     结构化成对提交而不是让前端拼 ``1. Q → A`` 文本：渲染只在后端
+         *     （``clarification.render_clarification_block``），CLI 与工作台因此逐字同形。
+         */
+        ClarificationPair: {
+            /** Answer */
+            answer: string;
+            /** Question */
+            question: string;
+        };
+        /**
          * FrameSelection
          * @description 帧槽选择（D4 spec §9）：首/尾各绑本会话一个 D3 素材，都可留空。
          *
@@ -919,6 +956,8 @@ export interface components {
                     number
                 ];
             };
+            /** Clarification Pairs */
+            clarification_pairs?: components["schemas"]["ClarificationPair"][];
             /**
              * Clarifications
              * @default
@@ -1353,6 +1392,85 @@ export interface operations {
             };
             /** @description 服务器内部错误（problem+json） */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+        };
+    };
+    list_clarification_questions_api_v1_clarification_questions_get: {
+        parameters: {
+            query: {
+                /** @description 视频主题；问题按它现生成 */
+                topic: string;
+                /** @description 条数上限；省略时取 pipeline.max_clarification_rounds，<= 0 表示不问 */
+                limit?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": string[];
+                };
+            };
+            /** @description 缺少或无效的工作台访问令牌（problem+json） */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Host/Origin 不是本机回环地址（problem+json） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 资源不存在（problem+json） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 请求参数校验失败（problem+json） */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 服务器内部错误（problem+json） */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 澄清问题生成失败：网关/超时/空输出（problem+json） */
+            502: {
                 headers: {
                     [name: string]: unknown;
                 };

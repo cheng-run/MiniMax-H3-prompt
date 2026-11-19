@@ -469,6 +469,25 @@
         "title": "BriefOut",
         "type": "object"
       },
+      "ClarificationPair": {
+        "description": "一条澄清问答对（#338 / spec #332 E1）：问题原样回传、回答由用户填。\n\n结构化成对提交而不是让前端拼 ``1. Q → A`` 文本：渲染只在后端\n（``clarification.render_clarification_block``），CLI 与工作台因此逐字同形。",
+        "properties": {
+          "answer": {
+            "title": "Answer",
+            "type": "string"
+          },
+          "question": {
+            "title": "Question",
+            "type": "string"
+          }
+        },
+        "required": [
+          "question",
+          "answer"
+        ],
+        "title": "ClarificationPair",
+        "type": "object"
+      },
       "FrameSelection": {
         "description": "帧槽选择（D4 spec §9）：首/尾各绑本会话一个 D3 素材，都可留空。\n\n两个字段都是 ``asset_id``（``<会话标识>/<16 位内容哈希>``），不是路径；服务端\n负责归属与存在性校验。首尾都空＝显式跳过（降级为纯文字），不是「没带载荷」。",
         "properties": {
@@ -1053,6 +1072,13 @@
             },
             "title": "Canvases",
             "type": "object"
+          },
+          "clarification_pairs": {
+            "items": {
+              "$ref": "#/components/schemas/ClarificationPair"
+            },
+            "title": "Clarification Pairs",
+            "type": "array"
           },
           "clarifications": {
             "default": "",
@@ -1870,6 +1896,124 @@
         "summary": "Get Auth Token",
         "tags": [
           "auth"
+        ]
+      }
+    },
+    "/api/v1/clarification-questions": {
+      "get": {
+        "description": "按主题现生成起步澄清问题（只读，不建会话、不落盘）。\n\n上限 <= 0 时**连模型都不建**：关闭澄清的路由不该为一次跳过付客户端构造代价，\n这条也由 ``clarification.generate_clarifying_questions`` 自己再守一道\n（``limit <= 0`` 直接返回空列表）。",
+        "operationId": "list_clarification_questions_api_v1_clarification_questions_get",
+        "parameters": [
+          {
+            "description": "视频主题；问题按它现生成",
+            "in": "query",
+            "name": "topic",
+            "required": true,
+            "schema": {
+              "description": "视频主题；问题按它现生成",
+              "minLength": 1,
+              "title": "Topic",
+              "type": "string"
+            }
+          },
+          {
+            "description": "条数上限；省略时取 pipeline.max_clarification_rounds，<= 0 表示不问",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "条数上限；省略时取 pipeline.max_clarification_rounds，<= 0 表示不问",
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "title": "Response List Clarification Questions Api V1 Clarification Questions Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "缺少或无效的工作台访问令牌（problem+json）"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "Host/Origin 不是本机回环地址（problem+json）"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "资源不存在（problem+json）"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "请求参数校验失败（problem+json）"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "服务器内部错误（problem+json）"
+          },
+          "502": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "澄清问题生成失败：网关/超时/空输出（problem+json）"
+          }
+        },
+        "summary": "List Clarification Questions",
+        "tags": [
+          "clarification"
         ]
       }
     },

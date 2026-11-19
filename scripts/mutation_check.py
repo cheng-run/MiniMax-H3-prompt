@@ -2227,6 +2227,21 @@ MUTATIONS: tuple[Mutation, ...] = (
         "丢掉「不得推翻主题」约束＝澄清问题会去问「要不要换个地点」，答案与主题打架、"
         "首帧节点被地点守卫打回重试，用户的回答在此处失效（#337 票面「既有约束必须仍在」）",
     ),
+    Mutation(
+        "clarification_route_drops_generation",
+        # 摘掉新端点里那一行生成调用（改成直接返回空列表）：路由照常 200、契约照常
+        # 声明 200，返回体却永远是「这个主题不需要澄清」。接线守卫断言两件事——返回
+        # 的问题等于桩模型给的那几句、桩模型收到的出站请求带主题与上限——任何一件
+        # 失守都会红，所以这行被摘掉时不会静默绿（spec #332 US15「规则在、接线不在」
+        # 不能第七次重演）。
+        "src/minimax_h3_prompt/api/routes/clarification.py",
+        "        return generate_clarifying_questions(topic, jobs.build_chat_model(), limit)\n",
+        "        return []\n",
+        ("tests/test_api_clarification_questions.py::"
+         "test_endpoint_returns_the_stub_questions_and_sends_the_full_request",),
+        "新端点摘掉生成调用＝前端永远拿到空问题列表，用户在建会话前一条澄清都问不到，"
+        "而端点、契约与鉴权全都照常（#338 接线守卫）",
+    ),
 )
 
 
