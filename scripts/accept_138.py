@@ -85,8 +85,8 @@ def main() -> int:
         style=STYLE,
         language="Chinese",
         plot=PLOT,
-        # 澄清不走 brief 文件解析（brief_parser.py:87-91 只由向导写入），这里按会话里
-        # 同一字段原样给，等价于 A/B 那次向导跑出来的 brief。
+        # 澄清不走 brief 文件解析（``brief_parser.parse_brief`` 不解析它，只由向导写入），
+        # 这里按会话里同一字段原样给，等价于 A/B 那次向导跑出来的 brief。
         clarifications=CLARIFY,
     )
     _write("brief-source.md", "# 本次 brief（脚本内构造，字段与 #137 冻结 brief 相同）\n\n"

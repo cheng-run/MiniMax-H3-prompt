@@ -177,6 +177,37 @@ def test_generation_failure_returns_502_problem_json(app):
     assert "gateway boom" in body["detail"], "失败响应里没带病因，排障时看不出是哪一层"
 
 
+def test_config_error_from_model_build_is_500_not_upstream_failure(app, monkeypatch):
+    """模型构造失败（缺 API key → ``ConfigError``）是本机配置问题，不是上游故障。
+
+    spec #332 的口径：502 只留给「生成失败」这一条路。把缺 key / 提示词文件缺失报成
+    「上游服务响应失败」，会让用户以为「等一会儿再来」，而不是「去把 key 配上」。所以
+    落 500 problem+json，且**不带** ``clarification_generation_failed``——那个码的语义
+    是「上游挂了、可重试」，与「本机配置缺陷」是两条出路。
+    """
+    from minimax_h3_prompt.api import jobs as jobs_module
+    from minimax_h3_prompt.errors import ConfigError
+
+    def _raise_config() -> None:
+        raise ConfigError("缺失 MINIMAX_API_KEY：请在 config/agent.yaml 中配置")
+
+    monkeypatch.setattr(jobs_module, "build_chat_model", _raise_config)
+
+    # ``raise_server_exceptions=False``：通用 500 由 Starlette 的 ``ServerErrorMiddleware``
+    # 兜底，而 TestClient 默认会把它原样抛出。生产里（uvicorn）它落成 500 响应，这里
+    # 关掉重抛才是同一条路径。
+    client = workbench_client(app, raise_server_exceptions=False)
+    resp = client.get("/api/v1/clarification-questions",
+                      params={"topic": "秋日庭院里的橘猫"})
+
+    assert resp.status_code == 500
+    assert resp.headers["content-type"].startswith("application/problem+json")
+    body = resp.json()
+    assert body["status"] == 500
+    assert body.get("code") != "clarification_generation_failed", (
+        "本机配置缺陷被报成了「上游故障、可重试」")
+
+
 def test_endpoint_requires_the_local_token(app):
     """新端点不申请鉴权豁免：没凭据就是 401，与其余 ``/api/v1`` 端点同一条边界。"""
     unauthorized = TestClient(app, base_url="http://127.0.0.1")

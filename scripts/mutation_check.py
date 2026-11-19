@@ -2343,6 +2343,77 @@ MUTATIONS: tuple[Mutation, ...] = (
         "新端点摘掉生成调用＝前端永远拿到空问题列表，用户在建会话前一条澄清都问不到，"
         "而端点、契约与鉴权全都照常（#338 接线守卫）",
     ),
+    # ------------------------------------------------------------------
+    # #332 复审补齐的五条变异（「新加守卫必须有变异」，否则守卫不算守卫）
+    # ------------------------------------------------------------------
+    Mutation(
+        "qa_loop_input_key_renamed_to_removed_field",
+        # 把阶段 1 质检循环的真入参键改回 #334 已删的 ``qa_issues``：入参键与「已删键」
+        # 混成一处，``test_qa_loops_use_their_own_input_key_not_a_state_field`` 的
+        # ``"qa_issues" not in source`` 当场红（docstring 自述过这条变异，此前没登记）。
+        "src/minimax_h3_prompt/graph/pipeline.py",
+        '        state["frame_prompt_issues"] = [it.message for it in errors]\n',
+        '        state["qa_issues"] = [it.message for it in errors]\n',
+        ("tests/test_state_single_sided_fields.py::"
+         "test_qa_loops_use_their_own_input_key_not_a_state_field",),
+        "质检循环的入参键被改回已删的 qa_issues＝「删了一半」的形态复活，"
+        "两处读者分不清哪个才是真入参（#334 的裁定依据失效）",
+    ),
+    Mutation(
+        "clarification_pairs_bypass_the_shared_renderer",
+        # 把后端唯一渲染口换成前端拼接形态（缺效力说明那行）：逐字同形断言当场红。
+        # spec #332「变异检验」第三条正是「把渲染换成前端拼接 → 逐字同形断言变红」。
+        "src/minimax_h3_prompt/api/routes/sessions.py",
+        '    return render_clarification_block(pairs)\n',
+        '    return "\\n".join(f"{i}. {q} → {a}" for i, (q, a) in enumerate(pairs, 1))\n',
+        ("tests/test_api_clarification_questions.py::"
+         "test_creating_a_session_with_pairs_renders_the_cli_identical_block",),
+        "后端绕开共享渲染器、自己拼一份＝CLI 与工作台的澄清块逐字不同形，"
+        "同一格式两处口径且不报错（#338 / spec #332「渲染只在后端一处」）",
+    ),
+    Mutation(
+        "roundtable_graph_structure_changed",
+        # 把「最后一位发言者接主持人」改成「第一位」：非空清单的图结构断言当场红。
+        "src/minimax_h3_prompt/graph/roundtable.py",
+        '    g.add_edge(f"speak_{participants[-1]}", "moderator")\n',
+        '    g.add_edge(f"speak_{participants[0]}", "moderator")\n',
+        ("tests/test_roundtable.py::"
+         "test_non_empty_participants_still_build_the_same_graph",),
+        "主持人接错发言者＝修空清单时顺手改掉了正常路径的接线，"
+        "圆桌从「最后一位发言后收束」变成「第一位发言后就收束」（#333 的护栏失效）",
+    ),
+    Mutation(
+        "removed_state_keys_are_still_read",
+        # 在分镜节点里加回一句读 ``qa_issues``（赋给一个不使用的局部变量，不改变行为）：
+        # 纯源码 AST 守卫 ``test_removed_keys_are_not_read_or_written_anywhere_in_the_pipeline``
+        # 当场红——它按 AST 找字符串常量，不看这段代码有没有副作用。
+        "src/minimax_h3_prompt/graph/nodes.py",
+        '        shot_table = run_agent(agents["storyboard"], msg)\n',
+        '        _stale_qa = state.get("qa_issues")\n'
+        '        shot_table = run_agent(agents["storyboard"], msg)\n',
+        ("tests/test_state_single_sided_fields.py::"
+         "test_removed_keys_are_not_read_or_written_anywhere_in_the_pipeline",),
+        "已删键重新长出读者＝「删了一半」的形态；行为上看不出，只有 AST 守卫会红"
+        "（#334 的删除证据必须能咬住这类静默复活）",
+    ),
+    Mutation(
+        "fake_pipeline_skips_clarification_shortcut",
+        # 删掉桩管线的澄清接管分支：桩下澄清端点会去建真模型（test 里把 build_chat_model
+        # 打成 _forbidden，一建就抛 AssertionError），「桩下不建任何模型」这条不变量失守。
+        "src/minimax_h3_prompt/api/routes/clarification.py",
+        "    if request.app.state.job_runner.fake_pipeline:\n"
+        "        # 桩管线（D4 §11）：澄清与阶段 1/2 同属「桩下不建任何模型」这条判据。创建表单\n"
+        "        # 每次提交前都会问一次，桩若不接管，这里就会去建真模型——CI 无密钥当场 502、\n"
+        "        # 本机有密钥则真调网关（#339 实测）。\n"
+        "        from ..fake_pipeline import clarification_questions\n"
+        "\n"
+        "        return clarification_questions(topic, limit)\n",
+        "",
+        ("tests/test_api_fake_pipeline.py::"
+         "test_fake_pipeline_answers_clarifications_without_building_a_model",),
+        "桩管线不接管澄清端点＝CI（无密钥）当场 502、本机（有密钥）真调网关，"
+        "「桩管线跑完整个闭环不建任何模型」被新接线打破（#339）",
+    ),
 )
 
 

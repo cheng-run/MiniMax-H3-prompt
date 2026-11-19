@@ -10,14 +10,15 @@ import 期绑定，桩才换得掉。
 
 **为什么失败落 502 而不是空列表**：空列表的语义是「这个主题不需要澄清」，与「网关
 挂了」是两件事；前端要靠状态码区别「没有问题」与「生成失败，可直接开始」（spec #332
-User Story 4 / 17）。
+User Story 4 / 17）。502 只留给**生成失败**（``RuntimeError``）；本机配置/打包缺陷
+（缺 API key 的 ``ConfigError``、提示词文件缺失的 ``OSError``）故意不捕获，走通用 500
+——它们是「本机没配好」，与「上游可重试」是两条出路，混成 502 会误导排障方向。
 """
 from __future__ import annotations
 
 from fastapi import APIRouter, Query, Request
 
 from ...clarification import generate_clarifying_questions
-from ...errors import ConfigError
 from ..problems import AUTH_ERROR_RESPONSES, COMMON_ERROR_RESPONSES, ProblemDetail, ProblemError
 
 router = APIRouter(prefix="/api/v1", tags=["clarification"],
@@ -74,8 +75,10 @@ def list_clarification_questions(
         return clarification_questions(topic, limit)
     try:
         return generate_clarifying_questions(topic, jobs.build_chat_model(), limit)
-    except (RuntimeError, ConfigError, OSError) as exc:
-        # 模型构造（缺 key → ConfigError）与生成失败（RuntimeError）同属「这一次拿不到
-        # 问题」，对前端是同一条出路；只把病因写进 detail，不让它变成 500 堆栈。
+    except RuntimeError as exc:
+        # 只有「生成失败」（网关/超时/空输出 → RuntimeError）落 502。``ConfigError``（缺
+        # API key）与 ``OSError``（提示词文件缺失）是本机配置/打包缺陷，**故意不在这里
+        # 捕获**：让它们走通用 500，明确是「本机没配好」而不是「上游挂了、可换时间重试」
+        # ——报成 502 会把「去配 key」误导成「等一会儿再来」（spec #332 的失败分档）。
         raise ClarificationGenerationFailed(
             f"澄清问题生成失败：{exc}") from exc

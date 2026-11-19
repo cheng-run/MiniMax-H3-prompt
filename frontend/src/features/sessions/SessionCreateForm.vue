@@ -143,7 +143,8 @@ async function onSubmit(): Promise<void> {
     questions = await listClarificationQuestions(form.plot.trim())
   } catch (error) {
     // 生成失败不阻断创建（spec US4）：显示一行提示，把出口留在同一个按钮上。
-    // 只有 502 那一类算「这一次拿不到问题」；其余错误（鉴权、网络）仍按提交失败说话。
+    // 502 与网络错误（``status === 0``，拿不到响应体）都算「这一次拿不到问题」→ 降级
+    // 为直接建会话；只有 401/403 等其它状态码按提交失败说话（鉴权/请求错误要让用户看见）。
     const status = error instanceof ApiError ? error.status : 0
     if (status === 502 || status === 0) {
       clarificationStage.value = 'failed'
@@ -195,20 +196,21 @@ async function submitClarifications(): Promise<void> {
   if (submitting.value) {
     return
   }
-  const pairs = collectPairs()
-  // 自由文本与问答对同时有内容，服务端会 422 `clarification_conflict`。前端先在本地
-  // 拦下并说清楚：用户不必等一次往返才知道「二选一」。
-  if (pairs.length > 0 && form.clarifications.trim().length > 0) {
-    submitError.value = '「补充说明」与逐条作答不能同时提交：两者都写进会话的澄清块，请二选一。'
-    return
-  }
-  await createWithClarifications(pairs)
+  await createWithClarifications(collectPairs())
 }
 
 async function createWithClarifications(
   pairs: { question: string; answer: string }[],
 ): Promise<void> {
   if (submitting.value) {
+    return
+  }
+  // 自由文本与问答对同时有内容，服务端会 422 `clarification_conflict`。前端先在本地
+  // 拦下并说清楚：用户不必等一次往返才知道「二选一」。拦截收在**唯一**最终提交口
+  // 这里（onSubmit 两条分支、面板「继续创建」、跳过都经过它），才不会有一条路径绕过
+  // ——用户在面板展开时点主按钮「创建并开始」也照样先被本地拦下，而不是吃服务端 422。
+  if (pairs.length > 0 && form.clarifications.trim().length > 0) {
+    submitError.value = '「补充说明」与逐条作答不能同时提交：两者都写进会话的澄清块，请二选一。'
     return
   }
   submitting.value = true

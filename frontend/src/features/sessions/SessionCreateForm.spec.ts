@@ -571,6 +571,29 @@ describe('SessionCreateForm 起步澄清', () => {
     expect(wrapper.find('[role="alert"]').text()).toContain('二选一')
   })
 
+  it('面板展开时点主按钮「创建并开始」也先被本地拦下（拦截在唯一提交口）', async () => {
+    const calls = stubFlow()
+
+    const { wrapper } = mountWithPlugins(SessionCreateForm, { withRouter: true })
+    await wrapper.find('textarea[name="plot"]').setValue('雨夜旧信')
+    await wrapper.find('textarea[name="clarifications"]').setValue('窗必须在人物右边')
+
+    // 第一次提交拉问题、展开面板（还不会建会话）。
+    await wrapper.find('form').trigger('submit')
+    await settle()
+    expect(wrapper.find('[data-panel="clarification"]').exists()).toBe(true)
+    await answer(wrapper, 0).setValue('窗在人物右侧')
+
+    // 展开面板后点**主按钮**（表单 submit）而不是面板的「继续创建」：走 onSubmit 的
+    // asking 分支 → createWithClarifications。拦截若只留在 submitClarifications，这条
+    // 会直接发出创建请求、吃服务端 422；收进唯一提交口后本地就拦下。
+    await wrapper.find('form').trigger('submit')
+    await settle()
+
+    expect(calls.create).toBe(0)
+    expect(wrapper.find('[role="alert"]').text()).toContain('二选一')
+  })
+
   it('没有任何问题时不展开面板，直接建会话且不带问答对', async () => {
     let body: Record<string, unknown> | null = null
     const calls = stubFlow({ questions: [], created: (payload) => (body = payload) })

@@ -376,7 +376,10 @@ def _clarification_text(payload: SessionCreate) -> str:
     自由文本与问答对只认一种：两边都有内容即 422，不猜哪个优先。问答对走
     ``clarification.render_clarification_block``——那是 CLI 与渲染的唯一实现
     （编号 + ``问题 → 回答`` + 效力说明），这里绝不自己拼一份，否则同一格式会有
-    两处口径。只答了问题没填答案的条目由渲染函数滤掉（空回答＝没澄清）。
+    两处口径。构造 ``pairs`` 时这里先用 ``if item.answer.strip()`` 滤一遍空白回答：
+    它是 422 判据的一部分（空白回答不算「提供了问答对」，不会与自由文本冲突）；
+    渲染函数内部还会再滤一次空回答——两道是同一条「空回答＝没澄清」判据的幂等重复
+    （先滤只为拿到准确的 422 判据），不是两处口径。
     """
     free_text = payload.clarifications.strip()
     pairs = [

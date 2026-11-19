@@ -145,10 +145,9 @@ _STATE_KEYS = (
 # 这就是「光看 schema 或 grep 都拼不出完整状态契约」的机读版本。
 #
 # 理由一律指向 ``模块.符号``，**不写行号**（#334）：行号会随重构漂移而没有任何检查会
-# 报错——2026-11-18 全表核过一遍，``pipeline.py:297``/``:284``、``user_revisions.py:89``/
-# ``:142``/``:131``、``wizard.py:477``/``:1846``/``:4755``、``segment_prompts.py:647`` 全都
-# 已经指不到它声称的那行。符号名不会漂；``tests/test_state_contract.py`` 里有一条用例
-# 把这些指针逐个 import/反射核对，写错或重命名会红。
+# 报错——2026-11-18 核过一遍，全表 8 个行号没有一个指得到它声称的那行。符号名不会漂；
+# ``tests/test_state_contract.py`` 里有一条用例把这些指针逐个 import/反射核对，写错或
+# 重命名会红。
 PERSISTENCE_EXCLUSIONS: dict[str, str] = {
     # brief 对象单独序列化（``SessionState.brief``），路线级选择只住 brief 一份。
     "brief": "单独序列化为 SessionState.brief",

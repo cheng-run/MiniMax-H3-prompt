@@ -48,3 +48,8 @@ def test_non_empty_participants_still_build_the_same_graph() -> None:
     # 条件边 ``route`` 的两条落点：首位发言者与 END——首位一旦取错（如 ``[-1]``），
     # 循环就从最后一位重新开始，本条红。
     assert {"__end__"} <= set(graph.get_graph().nodes)
+    # 主持人由**最后一位**发言者接入（``participants[-1]``），首位发言者与之后的条件边
+    # 回到同一位。交错一位（把 ``[-1]`` 改成 ``[0]``）不改变节点集合、也不改变条件边，
+    # 只有这条「入边」断言能抓住——#332 复审实测：原用例只钉节点集，变异存活。
+    edges = {(edge.source, edge.target) for edge in graph.get_graph().edges}
+    assert ("speak_director", "moderator") in edges, edges
