@@ -136,9 +136,14 @@ def test_planner_request_carries_revisions_through_the_real_call_site(tmp_path, 
     monkeypatch.setattr(segment_prompts, "write_segment_v2", lambda *a, **k: "SEGMENT")
 
     seen: list[str] = []
+    cuts: list[tuple[int, ...] | None] = []
 
-    def fake_plan(shot_table, total_s, llm, *, frame_context="", revision_context=""):
+    # 桩必须接住真实调用点的**全部**入参（#342 复审：漏接 shot_cuts 会让本用例只测到
+    # 一半接线，另半边靠全量才暴露）。默认值只为保持可读，下面断言它确实被传进来。
+    def fake_plan(shot_table, total_s, llm, *, frame_context="", revision_context="",
+                  shot_cuts=None):
         seen.append(revision_context)
+        cuts.append(shot_cuts)
         return _plans2()
 
     monkeypatch.setattr(segment_planner, "plan_segments", fake_plan)
@@ -148,6 +153,8 @@ def test_planner_request_carries_revisions_through_the_real_call_site(tmp_path, 
     assert seen, "分段规划没有被调用"
     assert REVISION_TEXT in seen[0], "向导没把累积修订交给分段规划"
     assert REVISION_PRIORITY_MARKER in seen[0], "交给规划层的修订块缺优先序声明"
+    # #343：分镜表切点表也必须从向导真的交给规划层（base 的「边界避开切点」判据靠它）
+    assert cuts[0] == (0, 6, 12), f"向导没把分镜切点表交给分段规划：{cuts[0]!r}"
 
 
 def test_display_pairs_revisions_with_frame_read_before_writing(tmp_path, monkeypatch, capsys):
