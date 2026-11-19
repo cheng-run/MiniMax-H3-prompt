@@ -398,6 +398,41 @@ MUTATIONS: tuple[Mutation, ...] = (
         "「切镜段首帧也要在写段时读」这类错误方案又会有人推出来（#320）",
     ),
     Mutation(
+        "glossary_merges_the_two_spatial_relations",
+        # #335：两类空间关系并成一条，C1 事故里「改的是朝向、接触关系没变」这句关键事实
+        # 就再也说不清。锚点取**标题整行**（与 #320 那条同一口径）。
+        "CONTEXT.md",
+        "**接触关系（contact relation）**:",
+        "**空间关系（spatial relation）**:",
+        ("tests/test_context_glossary.py::"
+         "test_orientation_and_contact_relations_stay_distinct_terms",),
+        "两类空间关系并成一条＝「窗在身后」是一类、「她靠着窗」是另一类这件事重新被读成同一件事，"
+        "C1 那句「接触关系没变」失去可指的名字（#335）",
+    ),
+    Mutation(
+        "glossary_frame_description_priority_unbounded",
+        # #335：把「守卫对这两类关系都看不见」这句改反，读图结果就会被读成「已经有守卫盯着
+        # 朝向/接触」，N6 那类读偏再发生时没人会回头查上游。锚点取整句（全仓恰好一处）。
+        "CONTEXT.md",
+        "**现有守卫对朝向/接触这两类关系都看不见**：",
+        "**现有守卫能看见朝向/接触这两类关系**：",
+        ("tests/test_context_glossary.py::"
+         "test_frame_description_states_its_layer_boundary",),
+        "把「现有守卫两类关系都看不见」改反＝读者以为朝向被读反时机检会响，"
+        "于是照旧只看绿灯出片（#335；N6 正是这么一路绿到成片）",
+    ),
+    Mutation(
+        "glossary_n6_ruling_dropped",
+        # #335：删掉延后方向那句，「明确不做」就只剩现象、没有归宿——下一轮照旧会把它
+        # 当成「还没排期」重新开一遍讨论。锚点取整句（全仓恰好一处）。
+        "CONTEXT.md",
+        "实现留到**共享编剧层**那批（三条路线同变，不在单条路线的写段请求里打补丁）。",
+        "",
+        ("tests/test_context_glossary.py::test_n6_ruling_is_recorded_as_not_done_yet",),
+        "N6 的延后方向没落档＝「实现留到共享编剧层那批」失传，读者只看到一个已知现象、"
+        "不知道它归哪一层，下一轮重新讨论一遍要不要改优先级（#335）",
+    ),
+    Mutation(
         "aspect_check_inverted",
         "src/minimax_h3_prompt/director/aspect.py",
         "        exceeds=relative_delta > tolerance + _TOLERANCE_EPSILON,",

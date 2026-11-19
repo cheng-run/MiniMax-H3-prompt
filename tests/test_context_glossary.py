@@ -134,6 +134,75 @@ def test_opening_and_segment_first_frames_stay_distinct_terms() -> None:
         + "\n  ".join(missing))
 
 
+# #335：两类空间关系必须分开命名。C1 事故（「窗在人物左侧」被改写成「窗在身后」）改的是
+# **朝向**，而她「靠不靠窗」在改写前后没变——把两者并成一个「空间关系」，事后既说不清
+# 改了什么，也会让守卫的缺口看起来比实际更宽。与 #320 同款判据：只钉标题原文与互相点名，
+# 不钉正文措辞。
+_SPATIAL_RELATION_TERMS = (
+    "**朝向关系（orientation relation）**:",
+    "**接触关系（contact relation）**:",
+)
+
+
+def _section_text(keyword: str) -> str:
+    """取标题里含 ``keyword`` 那一节的全部正文（到下一个标题为止）。"""
+    lines = _lines()
+    start = next((index for index, text in enumerate(lines)
+                  if _SECTION.match(text) and keyword in text), None)
+    if start is None:
+        return ""
+    body = []
+    for text in lines[start + 1:]:
+        if _SECTION.match(text):
+            break
+        body.append(text)
+    return "\n".join(body)
+
+
+def _term_body(heading: str) -> list[str]:
+    """取某条词条的正文行（不含标题行，空表＝这条词条不在）。"""
+    for block in _blocks(_lines()):
+        if _is_heading(block) and block[0][1] == heading:
+            return [text for _number, text in block[1:]]
+    return []
+
+
+def test_orientation_and_contact_relations_stay_distinct_terms() -> None:
+    """两类空间关系各有一条词条，且互相点名（#335）。"""
+    missing = [heading for heading in _SPATIAL_RELATION_TERMS if not _term_body(heading)]
+    assert not missing, (
+        "这两条词条必须同时在场（并成一条就说不清 C1 改的是哪一类关系）：\n  "
+        + "\n  ".join(missing))
+    orientation, contact = (_term_body(heading) for heading in _SPATIAL_RELATION_TERMS)
+    assert any("接触关系" in line for line in orientation), (
+        "「朝向关系」正文必须点名「接触关系」，否则读一条找不到另一条")
+    assert any("朝向关系" in line for line in contact), (
+        "「接触关系」正文必须点名「朝向关系」，否则读一条找不到另一条")
+
+
+def test_frame_description_states_its_layer_boundary() -> None:
+    """「关键帧实际画面」要写清效力只覆盖画面层，并注明现有守卫对两类关系都看不见（#335）。"""
+    body = "\n".join(_term_body("**关键帧实际画面（frame description）**:"))
+    assert body, "「关键帧实际画面」词条不见了"
+    for token in ("画面层", "设定层", "看不见"):
+        assert token in body, (
+            f"「关键帧实际画面」的边界必须写明「{token}」——"
+            "读者要能看出它的优先级管不到设定层、也没有机读守卫盯着这两类关系")
+    # 补边界是**就地追加**：原有的事实源表述一条都不许丢（不删历史正文）。
+    for original in ("唯一画面事实源", "分镜表只是计划", "两者冲突时一律以画面为准"):
+        assert original in body, f"既有正文被改写了，原文片段「{original}」必须保留"
+
+
+def test_n6_ruling_is_recorded_as_not_done_yet() -> None:
+    """N6 的裁定（维持以画面为准、根因归首帧图、实现留到共享编剧层）要落在「明确不做」里（#335）。"""
+    rulings = _section_text("明确不做")
+    assert rulings, "CONTEXT.md 没有「明确不做」一节，N6 的裁定无处可落"
+    for token in ("N6", "以画面为准", "首帧图", "共享编剧层"):
+        assert token in rulings, (
+            f"「明确不做」里的 N6 条目必须写明「{token}」——理由与延后方向缺一样，"
+            "下一轮就会当成「还没发现」重新讨论一遍")
+
+
 def test_a_section_does_not_go_back_to_prose_after_its_terms() -> None:
     """同一节内出现过词条块之后，不许再出现散文块。
 
