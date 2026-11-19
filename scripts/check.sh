@@ -93,6 +93,9 @@ FAST_TESTS=(
   # 三族纪律的单源与跨路线守卫（#316）：真源一清空，这两处要当场红，不等全量。
   tests/test_writing_disciplines.py
   tests/test_writing_disciplines_guard.py
+  # 画质结论必须带 steps 档位与分辨率（#336）：规则行落在 CODING_STANDARDS.md，
+  # 数字要对得上 ``PACK_WIDGETS`` 与 ADR 0003 的出处——两处任一漂走，这条当场红。
+  tests/test_quality_claim_steps_guard.py
 )
 
 # 变更集＝「工作区 ∪ 本分支相对 main 的已提交改动」（retro 2026-11-14）。

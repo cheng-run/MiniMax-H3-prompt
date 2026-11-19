@@ -2155,6 +2155,16 @@ MUTATIONS: tuple[Mutation, ...] = (
         "规划期看到图、写段期不看图，两条口径当场分家（#323／#326）",
     ),
     Mutation(
+        "quality_claim_rule_drops_resolution",
+        "CODING_STANDARDS.md",
+        "**画质／听感结论必须同时写明 steps 档位与分辨率**",
+        "**画质／听感结论必须同时写明 steps 档位**",
+        ("tests/test_quality_claim_steps_guard.py::"
+         "test_quality_claims_rule_requires_steps_and_resolution",),
+        "规则只剩采样档位、丢了分辨率＝两次画质结论仍不可比（同一档步数配不同画布），"
+        "而没有任何检查会报（#336）",
+    ),
+    Mutation(
         "clarifier_orientation_dimension_dropped",
         # 锚点取整个维度小句（含「人物朝向与空间站位」起头到收尾括号）：提示词是
         # 一整行七项清单，只删半句「左／右／前／后」不够——「朝向」「站位」两词还在，

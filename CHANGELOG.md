@@ -127,6 +127,12 @@
 
 ### 工程化
 
+- **画质／听感结论必须写明 steps 档位与分辨率**（#336，父 spec #332）：规则落进
+  `CODING_STANDARDS.md` 第三节，三套口径各自给出处——导演包控件默认 25 步
+  （`director.pack.PACK_WIDGETS`）、仓内真实产物按 PNG 元数据为准（本机 72 份实测
+  4/8/14/24/32/33 步都有，不是固定数字）、ADR 0003 的闪动 A/B 用 8 步。守卫
+  `tests/test_quality_claim_steps_guard.py` 进快档：规则行被删、丢了分辨率，或导演包
+  档的步数与 `PACK_WIDGETS` 对不上，当场变红；配变异 `quality_claim_rule_drops_resolution`。
 - 两条「守卫的守卫」进快档（retro 2026-11-18 二次）：`tests/test_mutation_anchors.py` 新增
   「写作纪律真源里每个公开常量都必须有一条变异清空／改坏它」——#327 交付时导演台的门槛与
   配乐两条强化版常量就没有变异，两轴复审只抓到「新用例没变异」，没抓到「新常量没变异」；
