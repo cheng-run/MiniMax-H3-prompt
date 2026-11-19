@@ -791,8 +791,7 @@ def _frame_model_line(model: str) -> str:
     而关键帧现在可以按 ``config/image.yaml`` 的 ``frame:`` 换成 Qwen/MOSS——不说，
     模型会照例交 ``zimage``，产物里就出现「按 Qwen 的纪律写的词、挂 Z-Image 的牌子」。
     """
-    from ..generation import IMAGE_FAMILY_LABELS
-
+    # ``IMAGE_FAMILY_LABELS`` 模块顶层已导入，函数内再导一次没有延迟效果（#333）。
     return (f"本次关键帧按 {IMAGE_FAMILY_LABELS[model]}（{model}）出图："
             f"JSON 里的模型子键用 `{model}`，不要用别的家族名。")
 
@@ -805,7 +804,7 @@ def _frame_discipline_block(model: str) -> str:
     **本次请求的数据**（用户在 image.yaml 里改），本来就该随请求下发——与【画布】
     【场景词】同一形态。纪律文件缺失时 ``discipline_text`` 会大声报，不静默少一块。
     """
-    from ..generation import IMAGE_FAMILY_LABELS
+    # ``IMAGE_FAMILY_LABELS`` 模块顶层已导入（#333）；``discipline_text`` 只在这一处用。
     from ..tools.image_prompt_discipline import discipline_text
 
     return (f"以下为 {IMAGE_FAMILY_LABELS[model]} 的写词纪律；"

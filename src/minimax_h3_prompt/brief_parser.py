@@ -240,7 +240,6 @@ def route_uses_asset_ledger(brief: Brief) -> bool:
     if is_director_mode(brief.mode):
         return brief.director_mode == "r2v"
     return is_ref_mode(brief.mode)
-    return is_ref_mode(brief.mode)
 
 
 def director_frame_variant(brief: Brief) -> str:

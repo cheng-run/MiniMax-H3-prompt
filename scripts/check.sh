@@ -93,6 +93,10 @@ FAST_TESTS=(
   # 三族纪律的单源与跨路线守卫（#316）：真源一清空，这两处要当场红，不等全量。
   tests/test_writing_disciplines.py
   tests/test_writing_disciplines_guard.py
+  # 不可达语句与函数内重复导入（#333）：都是「读 src 做 AST 断言」的秒级结构守卫，
+  # 放进全量等于让 fast 绿着过、全量才炸（同 test_wizard_size 的教训）。
+  tests/test_unreachable_code.py
+  tests/test_duplicate_function_imports.py
   # 画质结论必须带 steps 档位与分辨率（#336）：规则行落在 CODING_STANDARDS.md，
   # 数字要对得上 ``PACK_WIDGETS`` 与 ADR 0003 的出处——两处任一漂走，这条当场红。
   tests/test_quality_claim_steps_guard.py

@@ -13,6 +13,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 
 from ..agents import _content_to_text
+from ..errors import ConfigError
 
 DISCUSSION_PERSONAS = {
     "producer": "你是制片人：关注任务类型、时长、风格约束、成本与可交付性。",
@@ -128,9 +129,12 @@ def build_roundtable(model: BaseChatModel, participants: list[str], max_rounds: 
         return {"lock": reply, "round": current_round + 1}
 
     g = StateGraph(RoundTableState)
-    first = participants[0]  # 空清单在调用方就被拦了；这里再兜一次，别让 add_edge(None)
+    # 先判空再取首个参与者（#333）：顺序写反时空清单先抛 IndexError，紧跟的业务错误
+    # 永不执行，注释还写着「调用方已经拦了」——一句谎报把真实缺口藏了起来。原子图
+    # 装配参数错属配置错，故用 ``ConfigError``（仍是 ValueError，存量处理器不受影响）。
     if not participants:
-        raise ValueError("圆桌至少需要一个参与者")
+        raise ConfigError("圆桌至少需要一个参与者")
+    first = participants[0]
     prev: str | None = None
     for role in participants:
         g.add_node(f"speak_{role}", make_speaker(role))

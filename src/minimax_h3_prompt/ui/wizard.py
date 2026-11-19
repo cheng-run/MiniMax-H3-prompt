@@ -435,9 +435,10 @@ def _choose_canvas(label: str, *, title: str | None = None) -> tuple[int, int]:
     ``title`` 只换问句抬头（导演台问「成片画幅」，别的问题文本照旧）：菜单、校验与
     回显全共用同一条实现，免得两套选择器各漂。
     """
+    # 延迟导入（入口期不拉起生成栈的其余符号）；``canvas_display`` 模块顶层已导入，
+    # 函数内再导一次没有延迟效果（#333）。
     from ..generation import (
         CANVAS_RATIO_PRESETS,
-        canvas_display,
         canvas_family,
         composition_hint,
     )
@@ -1774,7 +1775,9 @@ def _session_dir(config: Config, topic: str) -> Path:
     同一个 GEN 的段产物会被新一轮交付整份覆盖，而**追加式**的账（多参的段产出账）
     不会——所以新一次交付开头要把它挪开（``ref_segments.rotate_segment_ledger``）。
     """
-    from ..session_store import RESUMABLE_STATUSES, load_session
+    # ``load_session`` 模块顶层已导入，函数内再导一次没有延迟效果（#333）；
+    # ``RESUMABLE_STATUSES`` 只在这一处用，留作延迟导入。
+    from ..session_store import RESUMABLE_STATUSES
 
     slug_dir = Path(config.sessions_root) / _topic_slug(topic)
     existing = sorted(slug_dir.glob("GEN*"), key=lambda p: p.name)

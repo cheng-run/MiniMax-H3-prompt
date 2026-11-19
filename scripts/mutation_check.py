@@ -2155,6 +2155,40 @@ MUTATIONS: tuple[Mutation, ...] = (
         "规划期看到图、写段期不看图，两条口径当场分家（#323／#326）",
     ),
     Mutation(
+        "unreachable_return_after_return",
+        "src/minimax_h3_prompt/brief_parser.py",
+        "    if is_director_mode(brief.mode):\n"
+        "        return brief.director_mode == \"r2v\"\n"
+        "    return is_ref_mode(brief.mode)",
+        "    if is_director_mode(brief.mode):\n"
+        "        return brief.director_mode == \"r2v\"\n"
+        "    return is_ref_mode(brief.mode)\n"
+        "    return is_ref_mode(brief.mode)",
+        ("tests/test_unreachable_code.py::"
+         "test_src_has_no_statements_after_return_or_raise",),
+        "把不可达的重复 return 加回去＝#333 的结构守卫应当当场红；ruff 的可达性规则"
+        "不报这种形态（实测 All checks passed），这条用例是唯一证据",
+    ),
+    Mutation(
+        "function_reimports_module_level_symbol",
+        "src/minimax_h3_prompt/ui/wizard.py",
+        "    # 延迟导入（入口期不拉起生成栈的其余符号）；``canvas_display`` 模块顶层已导入，\n"
+        "    # 函数内再导一次没有延迟效果（#333）。\n"
+        "    from ..generation import (\n"
+        "        CANVAS_RATIO_PRESETS,\n"
+        "        canvas_family,",
+        "    # 延迟导入（入口期不拉起生成栈的其余符号）；``canvas_display`` 模块顶层已导入，\n"
+        "    # 函数内再导一次没有延迟效果（#333）。\n"
+        "    from ..generation import (\n"
+        "        CANVAS_RATIO_PRESETS,\n"
+        "        canvas_display,\n"
+        "        canvas_family,",
+        ("tests/test_duplicate_function_imports.py::"
+         "test_no_function_reimports_a_module_level_symbol",),
+        "把与模块顶层重复的导入加回函数内＝#333 的重复导入守卫应当当场红；"
+        "ruff 的 F811/F401 对这种形态全绿（实测 All checks passed），别无其它抓手",
+    ),
+    Mutation(
         "quality_claim_rule_drops_resolution",
         "CODING_STANDARDS.md",
         "**画质／听感结论必须同时写明 steps 档位与分辨率**",
