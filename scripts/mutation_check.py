@@ -2557,6 +2557,21 @@ MUTATIONS: tuple[Mutation, ...] = (
         "就会永远不红（#353 / spec #349）",
     ),
     Mutation(
+        "base_motive_discipline_shape_clamp_dropped",
+        # 摘掉弱化版里「不加一个小动作」这条钳制（带粗体标记的整段在本文件恰好一次；
+        # 上方注释里那句不带 ``**``，不会撞）。出站断言只证明「漂过的那份确实送到了」，
+        # 常量少了钳制它照样绿——只有形态守卫钉住这一条。清空整条的那条变异也杀不到
+        # 这种「常量还在、少了一个要素」的退化形态。
+        "src/minimax_h3_prompt/writing_disciplines.py",
+        "，**不加一个小动作**。",
+        "。",
+        ("tests/test_writing_disciplines_guard.py::"
+         "test_base_motive_discipline_names_only_sources_base_paths_really_have",),
+        "弱化版丢掉「不加一个小动作」＝取不到动机时模型被默许硬塞小动作，"
+        "正是 US3/US4 要防的那一侧（#350 基线：缺的是动机表述、不是动作数量）"
+        "（#353 复审 / spec #349）",
+    ),
+    Mutation(
         "base_motive_discipline_not_injected_v2",
         # v2 的注入行（缩进 3 空格，全仓恰好一次）：删掉后回退路径仍带、v2 不带，
         # 证明两条路径各自接线，不是「插了一次就以为两条都有」。
