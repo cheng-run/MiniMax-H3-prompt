@@ -19,6 +19,7 @@ from __future__ import annotations
 import pytest
 
 from minimax_h3_prompt import writing_disciplines as wd
+from minimax_h3_prompt.agents import load_role_prompt
 from minimax_h3_prompt.director.frames import SEGMENT_TYPE_LABELS
 from minimax_h3_prompt.director.prompts import build_segment_request, load_instruction
 from minimax_h3_prompt.segment_prompts import (
@@ -314,3 +315,51 @@ def test_frame_consistency_discipline_has_no_second_copy_in_source():
     )
     assert hits == ["writing_disciplines.py"], \
         f"帧一致性纪律句在源码里应只出现一份（真源模块），实际：{hits}"
+
+
+# ---------------------------------------------------------------------------
+# 段首机位承接 ＋ 动作分拍（#344）：只发往 base 的 v2 与回退两条路径
+# ---------------------------------------------------------------------------
+# 为什么不并进上面的 ``_FAMILIES``：那一族是**无差别**的「五条路线全含」，而这两条
+# 恰恰是 base 专有的兜底——多参靠共享参考素材跨段、导演台靠潜空间引导／显式切镜段
+# 承接，段间衔接机制不同（#342 的「两条路线边界规则相反」），把这两条塞进去会改变
+# 已验收的两条路线措辞。正向与反向都断言：删掉这两条时 base 路线报红，有人顺手给
+# ref／导演台加上时也会报红。判据落在**出站请求全文**上（记录型桩模型／真实组装函数），
+# 不直读提示词文件。
+_BASE_ONLY_CONTINUITY_DISCIPLINES = (
+    "OPENING_CAMERA_CONTINUITY_DISCIPLINE",
+    "SUPPORT_SHIFT_ACTION_DISCIPLINE",
+)
+
+
+@pytest.mark.parametrize("name", _BASE_ONLY_CONTINUITY_DISCIPLINES)
+@pytest.mark.parametrize("route", ROUTES)
+def test_opening_and_action_disciplines_reach_base_only(route, name):
+    """base v2 与回退两条路径含全文；ref 两条与导演台**一个字都不含**（#344）。
+
+    先断言真源非空：空串让 ``in`` 恒真、``not in`` 恒假，正向与反向会同时失效。
+    """
+    text = getattr(wd, name)
+    assert text, f"{name} 为空——空串让 in 恒真、not in 恒假，守卫会失效"
+
+    outbound = _outbound(route)
+    assert outbound, f"{route} 没有取到任何出站文本"
+    for label, out in outbound:
+        assert out, f"{route} 的{label}是空的"
+        if route in ("base_v2", "base_fallback"):
+            assert text in out, f"{route} 的{label}缺 {name} 纪律"
+        else:
+            assert text not in out, \
+                f"{route} 的{label}不该带 {name}（#344：这两条是 base 专有兜底）"
+
+
+def test_storyboard_prompt_splits_support_shift_actions_into_multiple_anchors():
+    """分镜阶段就要把改变支撑面的动作拆成多个时间锚（#344）。
+
+    断言落在加载口返回值（``load_role_prompt`` 就是进 system prompt 的那份文本，
+    模型眼前的出站系统提示）上——只查 ``storyboard.md`` 的话，有人把这句话抄进
+    别的角色也照样绿；出站文本没有它则立刻红。
+    """
+    text = load_role_prompt("storyboard")
+    assert "改变支撑面" in text, "分镜师提示词没点名「改变支撑面的动作」"
+    assert "多个时间锚" in text, "分镜师提示词没要求这类动作在分镜阶段拆成多个时间锚"
