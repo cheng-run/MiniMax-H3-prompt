@@ -119,7 +119,7 @@ _STATE_KEYS = (
     # 续跑时账上已通过的那段不再过闸门、不再剥帧读图，锚只能从这条键读回；save 时静默
     # 丢掉它，下一段的写段请求就退回「图片是唯一事实源」——桥接链在中断处断掉且不报错。
     "bridge_frame_descriptions",
-    "sound_design", "music", "final_prompt", "final_report", "_progress",
+    "sound_design", "music", "final_prompt", "_progress",
     "user_revisions", "frame_round", "asset_proofreads", "asset_loop",
     "resume_answers", "asset_proofread_progress",
     # 尺寸差一档的确认记录（#176）：向导侧键、不进图。键名住在
@@ -143,40 +143,47 @@ _STATE_KEYS = (
 # - 白名单里的键既不在 schema、也不在 ``OUTSIDE_GRAPH`` → 红（漏声明）。
 #
 # 这就是「光看 schema 或 grep 都拼不出完整状态契约」的机读版本。
+#
+# 理由一律指向 ``模块.符号``，**不写行号**（#334）：行号会随重构漂移而没有任何检查会
+# 报错——2026-11-18 全表核过一遍，``pipeline.py:297``/``:284``、``user_revisions.py:89``/
+# ``:142``/``:131``、``wizard.py:477``/``:1846``/``:4755``、``segment_prompts.py:647`` 全都
+# 已经指不到它声称的那行。符号名不会漂；``tests/test_state_contract.py`` 里有一条用例
+# 把这些指针逐个 import/反射核对，写错或重命名会红。
 PERSISTENCE_EXCLUSIONS: dict[str, str] = {
     # brief 对象单独序列化（``SessionState.brief``），路线级选择只住 brief 一份。
     "brief": "单独序列化为 SessionState.brief",
     "mode": "由 brief 承载（同上）",
     "variant": "由 brief 承载（同上）",
     "duration": "由 brief 承载（同上）",
-    "ref_meta": "阶段 2 由 brief.refs / ref_asset_registry 现算（pipeline.run_stage2）",
+    "ref_meta": "阶段 2 由 brief.refs / ref_asset_registry 现算（graph.pipeline.run_stage2）",
     "director_mode": (
         "由 brief 承载；落一份进 stage_state 就是同一契约两处口径（issue #101）"),
-    "shot_duration_warning": (
-        "只进阶段产物 output/stages/*.txt（pipeline.py:297），无代码读者"),
-    "qa_issues": "单轮质检的入参（pipeline.py:284 起手清零），不是产物",
     "setting_revision": (
-        "本轮那条设定级修订（user_revisions.py:89），只在这一次截断重跑里有效，"
-        "留下来会让续接后的每次重跑都回灌同一条要求"),
+        "本轮那条设定级修订（user_revisions.SETTING_REVISION_KEY），只在这一次截断重跑里"
+        "有效，留下来会让续接后的每次重跑都回灌同一条要求"),
     "iterations": "单次运行的质检轮计数，续跑重新计",
 }
 
 # 持久化、但**不进 LangGraph 图**的键：它们由向导侧读写（续跑书签、循环进度），
 # 不参与 ``StateGraph`` 搬运，故不需要在 ``PipelineState`` 里声明。
+#
+# 指针一律写 ``模块.符号``（#334），坐标见上一条注释。
 PERSISTED_OUTSIDE_GRAPH: dict[str, str] = {
-    "_progress": "阶段 1 断点书签：wizard.py:477 写、:1846 读",
-    "frame_round": "画面级修订轮次：user_revisions.py:142 写、:131 读",
-    "asset_loop": "素材循环进度：asset_loop.py:29 的 ASSET_LOOP_KEY",
-    "resume_answers": "续跑问答答案账：resume_point.py:15 的 ANSWERS_KEY",
-    "asset_proofread_progress": "读图校对中途进度：asset_proofread.py:466 的 PROGRESS_KEY",
+    "_progress": (
+        "阶段 1 断点书签：ui.wizard._progress_saver 写、ui.wizard._resume_stage1 读"),
+    "frame_round": "画面级修订轮次：user_revisions.begin_round 写、user_revisions.next_round 读",
+    "asset_loop": "素材循环进度：asset_loop.ASSET_LOOP_KEY",
+    "resume_answers": "续跑问答答案账：resume_point.ANSWERS_KEY",
+    "asset_proofread_progress": "读图校对中途进度：asset_proofread.PROGRESS_KEY",
     "bridge_frame_descriptions": (
-        "各段桥接帧读图结果：wizard.py:4755 写、segment_prompts.py:647 读"
-        "（分段陪跑走向导侧，不进图）"),
+        "各段桥接帧读图结果：ui.wizard._anchor_state 写、"
+        "segment_prompts._bridge_frame_descriptions 读（分段陪跑走向导侧，不进图）"),
     "film_size_confirm": (
-        "尺寸差一档的确认：director/aspect_flow.py 的 FILM_SIZE_CONFIRM_KEY"
+        "尺寸差一档的确认：director.aspect_flow.FILM_SIZE_CONFIRM_KEY"
         "（逐段贴回与最终交付共用；任一边数值变化即作废重问）"),
     FRAME_SUBMISSION_KEY: (
-        "帧提交交接键：api/jobs.py 在决议时写入、阶段 2 任务读后摘掉"
+        "帧提交交接键：api.jobs.JobRunner.resolve 写入、"
+        "api.jobs.JobRunner._execute_stage2 读后摘掉"
         "（只在两次落盘之间有效，不参与 StateGraph 搬运）"),
 }
 

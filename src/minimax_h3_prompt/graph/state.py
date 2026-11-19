@@ -56,7 +56,10 @@ class PipelineState(TypedDict, total=False):
 
     # 视觉（分镜 → 并行决策 → 并行制作）
     shot_table: str  # 分镜
-    shot_duration_warning: str  # 分镜镜头时长均分警告（重试仍未修正时记录）
+    # 这里曾声明 ``shot_duration_warning``（均分警告）。它只有写者没有读者，
+    # 于 #334 删除：警告本来就会打控制台（``[警告] 分镜时长仍是均分``），写进 state
+    # 的那一份只被 ``output/stages/*.txt`` 抄成一段给人读的文本——那条路走的是
+    # ``StageSaver`` 对任意字符串字段的通用落盘，不需要 schema 里有这个键。
     shot_review_lock: str  # 镜头评审会（圆桌 2）锁定
     visual_design: str  # 摄影指导
     fl2va_prompt_bundle: dict  # FL2VA 融合首帧/尾帧提示词
@@ -70,9 +73,14 @@ class PipelineState(TypedDict, total=False):
 
     # 组装 / 质检
     final_prompt: str
-    qa_issues: list[str]
+    # 这两个键与 ``final_report``（同批）于 #334 删除，留一段说明免得后来者再发明一遍：
+    # - ``qa_issues``：只有读者没有写者——自首个提交起就没人写过它，两处读者拿到的
+    #   永远是空串；真正的质检问题走的是独立入参键 ``frame_prompt_issues`` 与循环里的
+    #   局部变量。
+    # - ``final_report``：只有写者没有读者——``finalize`` 把它写进 state，唯一「读」它
+    #   的地方是阶段 2 的两处剔除集合（``pipeline`` 里 ``k not in (...)``），那只是
+    #   别名集合，不构成读者。
     iterations: int
-    final_report: str
 
     # 人的累积修订与它的一轮入参。**必须在这里声明**：LangGraph 只搬运 schema 里声明过的
     # 键，未声明的键在图外传得进去、到节点手上却没了——静默、不报错。2026-09-25（issue #28）

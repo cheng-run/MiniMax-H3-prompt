@@ -38,7 +38,6 @@ from ..generation import (
     variant_frame_names,
 )
 from ..observability import interactions
-from ..tools.h3_validator import validate_prompt
 from ..tools.image_prompt_discipline import check_image_prompt, check_self_contained
 from ..tools.ref_metadata import format_ref_meta
 from ..tools.theme_guard import theme_requirements_text
@@ -1098,7 +1097,6 @@ def _make_storyboard_node(agents: dict) -> Callable:
         from ..segment_prompts import is_degenerate_durations
 
         brief: Brief = state["brief"]
-        issues = "\n".join(state.get("qa_issues") or []) or ""
         scale = derive_shot_scale(brief.duration)
         msg = (
             "请给出分镜镜头表（视频总时长 "
@@ -1110,12 +1108,10 @@ def _make_storyboard_node(agents: dict) -> Callable:
                    分场剧本=state.get("script", ""), 美术设计=state.get("art_design", ""),
                    人物设计=state.get("character_design", ""),
                    背景设计=state.get("background_design", ""),
-                   道具设计=state.get("prop_design", ""),
-                   上一轮质检问题=issues)
+                   道具设计=state.get("prop_design", ""))
         )
         shot_table = run_agent(agents["storyboard"], msg)
         durations = _shot_durations_from_table(shot_table, brief.duration)
-        warning = ""
         if is_degenerate_durations(durations):
             # 均分 = 无视情节节拍的偷懒输出：自动重试一次（带明确指出问题）
             retry_msg = msg + (
@@ -1126,10 +1122,12 @@ def _make_storyboard_node(agents: dict) -> Callable:
             shot_table = run_agent(agents["storyboard"], retry_msg)
             durations = _shot_durations_from_table(shot_table, brief.duration)
             if is_degenerate_durations(durations):
-                warning = ("SHOT_DURATIONS_UNIFORM: 重试后镜头仍为均分（"
-                           f"{durations[0]:.1f}s × {len(durations)}），请人工检查节奏")
-                print(f"[警告] 分镜时长仍是均分：{durations[0]:.1f}s × {len(durations)}")
-        return {"shot_table": shot_table, **({"shot_duration_warning": warning} if warning else {})}
+                # 重试仍均分：只打控制台（#334 删掉了 state 里的 ``shot_duration_warning``
+                # ——它没有读者，唯一的「消费」是被 ``StageSaver`` 抄成阶段产物里的一段
+                # 人读文本；那句话与该字段的注释曾是它仅有的两处痕迹）。
+                print(f"[警告] SHOT_DURATIONS_UNIFORM: 重试后分镜时长仍是均分（"
+                      f"{durations[0]:.1f}s × {len(durations)}），请人工检查节奏", flush=True)
+        return {"shot_table": shot_table}
     return node
 
 
@@ -1297,7 +1295,8 @@ def _make_prompt_engineer_node(agents: dict) -> Callable:
             # 编号登记 + 指称纪律（issue #41）：语义名为主、<Picture N> 格式处兜底、
             # 画面描述以生图提示词为描述主体（素材画面事实）。
             参考资产=_ref_assets_block(state, brief),
-            质检问题=("\n".join(state.get("qa_issues") or []) or ""),
+            # 这里曾注入【质检问题】（``state["qa_issues"]``）。那个键自首个提交起就没有
+            # 写者，注入的永远是空串；#334 把键与这行一起删掉，别再加回去。
         )
 
     def node(state: PipelineState) -> dict:
@@ -1311,31 +1310,22 @@ def _make_prompt_engineer_node(agents: dict) -> Callable:
 
 
 def _make_finalize_node() -> Callable:
+    """终检收尾：只做**确定性格式修复**，把修好的正文写回 ``final_prompt``。
+
+    这里曾经还写一个 ``final_report``（组装说明 + 校验问题清单）。它没有读者：
+    唯一「读」它的地方是阶段 2 的两处剔除集合（``k not in (...)``），那不是消费。
+    #334 删掉报告与字段，保留修复——修复是 ``final_prompt`` 的一部分行为。
+    校验问题仍然**不会静默**：阶段 2 的质检精修循环（``pipeline._run_stage2``）用同一个
+    校验器核一遍并把结论写进 ``qa_refine_*`` 阶段产物；交付那一刻的结论由各交付路径
+    自己当着用户打（向导的 ``_gate_segment_text`` / ``_deliver_ref_single_segment``）。
+    """
     def node(state: PipelineState) -> dict:
         from ..output.assembler import assemble_and_repair
-        from ..tools.theme_guard import theme_fidelity_issues
 
         brief: Brief = state["brief"]
-        repaired, report = assemble_and_repair(state.get("final_prompt", ""), brief.mode)
-        issues = validate_prompt(
-            repaired, brief.mode, duration=brief.duration, variant=brief.variant, ref_meta=state.get("ref_meta")
-        )
-        extra = state.get("fl2va_prompt_bundle")
-        groups: tuple[tuple[str, ...], ...] = ()
-        if isinstance(extra, dict):
-            groups = tuple(
-                tuple(str(term) for term in group)
-                for group in extra.get("required_scene_terms", [])
-                if group
-            )
-        issues += theme_fidelity_issues(repaired, plot=brief.plot, mode=brief.mode, extra_groups=groups)
-        return {"final_prompt": repaired, "final_report": report + "\n" + format_issues_text(issues)}
+        repaired, _notes = assemble_and_repair(state.get("final_prompt", ""), brief.mode)
+        return {"final_prompt": repaired}
     return node
-
-
-def format_issues_text(issues) -> str:
-    from ..tools.h3_validator import format_issues
-    return format_issues(issues)
 
 
 def make_nodes(agents: dict, model, brief: Brief, config: Config) -> dict[str, Callable]:

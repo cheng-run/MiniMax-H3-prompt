@@ -23,8 +23,14 @@ import sys
 import traceback
 from pathlib import Path
 
-sys.stdout.reconfigure(encoding="utf-8")
-sys.stderr.reconfigure(encoding="utf-8")
+# 标准流在 mypy 眼里是 TextIO（没有 ``reconfigure``）：用 getattr 探测，非 TTY 也能跑。
+# 同 ``scripts/accept_140.py`` 的写法——直接调 ``sys.stdout.reconfigure`` 会让
+# ``check.sh fast`` 的脚本 mypy 档报 union-attr（本文件在 #334 之前没被改动过，
+# 所以那条错误一直没暴露）。
+for _stream in (sys.stdout, sys.stderr):
+    _reconfigure = getattr(_stream, "reconfigure", None)
+    if _reconfigure is not None:
+        _reconfigure(encoding="utf-8")
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "output" / "accept-138"
@@ -97,7 +103,6 @@ def main() -> int:
         "duration": brief.duration,
         "ref_meta": to_tuple(brief.refs),
         "iterations": 0,
-        "qa_issues": [],
     }
     state: dict = dict(initial)
     for chunk in graph.stream(initial, stream_mode="updates"):

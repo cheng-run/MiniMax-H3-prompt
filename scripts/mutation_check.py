@@ -891,6 +891,107 @@ MUTATIONS: tuple[Mutation, ...] = (
         "真源里多一个没人管的常量＝那条纪律没有任何「会红」的证明；2026-11-18 spec #327 "
         "交付时就漏了两条（导演台门槛与配乐强化版），两轴复审都没抓到",
     ),
+    # ------------------------------------------------------------------
+    # #334 三处单边字段的删除证据（票面 AC「每处删除配一条能变红的用例」）
+    # ------------------------------------------------------------------
+    Mutation(
+        "qa_issues_field_resurrected",
+        # 把删掉的 ``qa_issues`` 加回 schema 而**不**登记出处：状态契约双向核对当场红。
+        # 这就是「删除必须同步三处」的机读证明——只加声明不加白名单/排除表就是删了一半。
+        "src/minimax_h3_prompt/graph/state.py",
+        "    iterations: int",
+        "    qa_issues: list[str]\n    iterations: int",
+        ("tests/test_state_contract.py"
+         "::test_every_schema_key_is_persisted_or_explicitly_excluded",),
+        "qa_issues 复活且没有持久化归属＝契约本体又一次对不上（#334 删它的理由是"
+        "「自首个提交起就没有写者」，不是「暂时不用」）",
+    ),
+    Mutation(
+        "persistence_pointer_back_to_line_number",
+        # 把持久化表的理由改回行号：指针守卫必须红。行号会随重构漂移且没有任何检查会
+        # 报错——#334 之前全表 8 个行号没有一个指得到它声称的那行。
+        "src/minimax_h3_prompt/session_store.py",
+        "阶段 1 断点书签：ui.wizard._progress_saver 写、ui.wizard._resume_stage1 读",
+        "阶段 1 断点书签：wizard.py:477 写、:1846 读",
+        ("tests/test_state_contract.py"
+         "::test_persistence_reasons_point_at_symbols_not_line_numbers",),
+        "理由写回行号＝读的人按注释找代码会扑空（#334 票面点名的形态），"
+        "而文件本身还在、任何检查都不会报错",
+    ),
+    Mutation(
+        "persistence_whitelist_keeps_a_removed_key",
+        # 反向：白名单里留着已删的键（删除时忘了同步持久化表）。反向核对当场红——
+        # 这正是票面 AC「若删除字段，状态声明与持久化契约同步更新」的机读证明。
+        "src/minimax_h3_prompt/session_store.py",
+        '"sound_design", "music", "final_prompt", "_progress",',
+        '"sound_design", "music", "final_prompt", "final_report", "_progress",',
+        ("tests/test_state_contract.py"
+         "::test_every_persisted_key_is_in_the_schema_or_runs_outside_the_graph",),
+        "白名单留着一个 schema 里没有、也没登记成「图外」的键＝保存时把它当产物写盘，"
+        "而状态契约上它根本不存在（#334 删除 final_report 时忘了同步就是这种形态）",
+    ),
+
+    Mutation(
+        "persistence_pointer_names_missing_symbol",
+        # 指针写成真模块 + 不存在的符号：解析守卫必须红（模块名对、符号错了也要抓）。
+        "src/minimax_h3_prompt/session_store.py",
+        "ui.wizard._progress_saver 写",
+        "ui.wizard._no_such_saver 写",
+        ("tests/test_state_contract.py::test_persistence_reason_pointers_resolve",),
+        "指针解析不到＝「模块.符号」退化成一句安慰；符号被重命名时这条守卫是唯一会响的"
+        "（行号时代的等价缺陷没有任何检查能报）",
+    ),
+    Mutation(
+        "finalize_stops_repairing_the_prompt",
+        # 删报告时顺手把修复也删掉：「删除字段」与「删除行为」是两件事。这条证明后者
+        # 有回归用例兜着。
+        "src/minimax_h3_prompt/graph/nodes.py",
+        '        repaired, _notes = assemble_and_repair(state.get("final_prompt", ""), brief.mode)\n'
+        '        return {"final_prompt": repaired}',
+        '        repaired, _notes = assemble_and_repair(state.get("final_prompt", ""), brief.mode)\n'
+        '        return {}',
+        ("tests/test_state_single_sided_fields.py"
+         "::test_finalize_still_repairs_the_prompt_it_writes_back",),
+        "finalize 不再写回修好的正文＝抽围栏/补段头整条静默失效，产物形状退回模型原样"
+        "（#334 删的是报告字段，不是修复）",
+    ),
+    Mutation(
+        "stage2_refine_loop_stops_running_the_format_validator",
+        # ``finalize`` 删掉 validate_prompt/theme_fidelity_issues 的前提，是精修循环里
+        # 同一对校验器照旧在跑（而且结论会驱动重写，比「只进报告」多）。把这一处掐掉＝
+        # 阶段 2 的确定性校验整条消失，产物可能带着格式错误进交付。
+        "src/minimax_h3_prompt/graph/pipeline.py",
+        "        issues = validate_prompt(prompt, brief.mode, duration=brief.duration,\n"
+        "                                 variant=brief.variant, ref_meta=ref_meta)",
+        "        issues = []",
+        ("tests/test_state_single_sided_fields.py::"
+         "test_stage2_refine_loop_runs_the_same_two_validators_finalize_dropped",),
+        "阶段 2 不再跑格式校验＝「finalize 的那对校验器已由精修循环覆盖」这条等价性作废，"
+        "而它正是 #334 删 finalize 校验调用的唯一理由",
+    ),
+    Mutation(
+        "removed_keys_survive_a_resave",
+        # 白名单里加回任一已删键：旧会话再保存时它会被**留在文件里**（而不是静默收敛）。
+        # 这条钉住「删除也要能续跑」的另一半——残留读回来无害，但必须被后续保存淘汰。
+        "src/minimax_h3_prompt/session_store.py",
+        '"sound_design", "music", "final_prompt", "_progress",',
+        '"sound_design", "music", "final_prompt", "shot_duration_warning", "_progress",',
+        ("tests/test_state_single_sided_fields.py"
+         "::test_old_session_files_with_removed_keys_still_resume",),
+        "已删键留在白名单＝旧会话里的残留每次保存都被原样抄回去，删了等于没删",
+    ),
+    Mutation(
+        "storyboard_uniform_warning_silenced",
+        # 警告只剩控制台这一个出口（state 字段已删）：把这个出口也掐掉就彻底静默了。
+        "src/minimax_h3_prompt/graph/nodes.py",
+        '                print(f"[警告] SHOT_DURATIONS_UNIFORM: 重试后分镜时长仍是均分（"\n'
+        '                      f"{durations[0]:.1f}s × {len(durations)}），请人工检查节奏", flush=True)',
+        '                pass',
+        ("tests/test_state_single_sided_fields.py"
+         "::test_storyboard_warns_on_console_and_writes_no_warning_field",),
+        "均分重试仍失败却没有警告＝用户拿到节奏平的分镜且不知情；该字段删掉后控制台是"
+        "唯一出口（#334）",
+    ),
     Mutation(
         "end_hook_placement_guard_off",
         "src/minimax_h3_prompt/director/planning.py",

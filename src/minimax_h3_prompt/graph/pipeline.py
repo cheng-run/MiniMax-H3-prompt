@@ -337,9 +337,10 @@ def _run_stage1(brief: Brief, config: Config, *, on_node=None,
         "duration": brief.duration,
         "ref_meta": ref_meta,
         "iterations": 0,
-        "qa_issues": [],
         **base_state,  # 续跑时的已有产物
     }
+    # 这里曾初始化 ``qa_issues: []``（#334 删）：那个键没有写者，两处读者拿到的永远是
+    # 空串——初始化一个永远为空的键只是让人以为「质检结论在这里」。
     # 这里**不清零**计量表（issue #52）：阶段入口清零＝进阶段 2 就把阶段 1 的成本抹掉，
     # 而「跑完的成本」正是指整条流程的累计。账的边界是**一份生成**（换新生成由向导开新账），
     # 不是阶段；续跑进程则先在续跑入口把上一次的成本表接回来（``TokenMeter.restore``）。
@@ -459,8 +460,10 @@ def _run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_nod
     if checkpoint is not None:
         # 值是动态 state 产物（str/dict/list），用 Any 如实表达；用 object 会让
         # 后续 ``merged.get(...)`` 全部变成 object，反而要到处 cast。
+        # 只剔 ``final_prompt``：下面会用断点里的草稿重新过一遍组装，旧正文带进来就是
+        # 两份口径。#334 起这里不再剔 ``final_report``——那个键已经删掉了（它没有读者）。
         merged: dict[str, Any] = {
-            k: v for k, v in state.items() if k not in ("final_prompt", "final_report")}
+            k: v for k, v in state.items() if k not in ("final_prompt",)}
         merged["ref_meta"] = ref_meta
         prompt = str(checkpoint["prompt_draft"])
         # 断点里带着组装那一刻的成本表（issue #52）：组装的钱花在上一个进程里，而它
@@ -482,7 +485,7 @@ def _run_stage2(state: dict, brief: Brief, config: Config, *, model=None, on_nod
             # ref_meta 不从旧 state 继承：阶段 1 落下的那份是 brief.refs 的旧口径，
             # 放它覆盖新登记，N 张覆盖式校验就静默退回空清单（issue #41 的接线点）。
             **{k: v for k, v in state.items()
-               if k not in ("final_prompt", "final_report", "brief", "ref_meta")},
+               if k not in ("final_prompt", "brief", "ref_meta")},
         }
         merged = dict(initial)
         for chunk in graph.stream(initial, stream_mode="updates"):
