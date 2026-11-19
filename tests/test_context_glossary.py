@@ -194,13 +194,22 @@ def test_frame_description_states_its_layer_boundary() -> None:
 
 
 def test_n6_ruling_is_recorded_as_not_done_yet() -> None:
-    """N6 的裁定（维持以画面为准、根因归首帧图、实现留到共享编剧层）要落在「明确不做」里（#335）。"""
+    """N6 的裁定（维持以画面为准、根因归首帧图、延后方向归 N6 自己的批次）要落在「明确不做」里（#335）。
+
+    延后方向在 2026-11-19（#352）改成「**归 N6 自己的批次**，**不**并入共享编剧层那批」。
+    旧 token「共享编剧层」靠否定句也能满足——把裁定改回「并入共享编剧层那批」时，那四个
+    字仍在、用例照样绿，断言已失去区分力。所以 token 换成「归 N6 自己的批次」，并另断言
+    否定形态本身在：只有「不并入」这半句还在，N6 才不会被顺回动机批次。
+    """
     rulings = _section_text("明确不做")
     assert rulings, "CONTEXT.md 没有「明确不做」一节，N6 的裁定无处可落"
-    for token in ("N6", "以画面为准", "首帧图", "共享编剧层"):
+    for token in ("N6", "以画面为准", "首帧图", "归 N6 自己的批次"):
         assert token in rulings, (
             f"「明确不做」里的 N6 条目必须写明「{token}」——理由与延后方向缺一样，"
             "下一轮就会当成「还没发现」重新讨论一遍")
+    assert "**不**并入共享编剧层那批" in rulings, (
+        "N6 的延后方向必须明确「不并入共享编剧层那批」——只留「归 N6 自己的批次」"
+        "仍可能被读成与动机批次同批；改回并入写法时正需要这条报红")
 
 
 def test_a_section_does_not_go_back_to_prose_after_its_terms() -> None:
