@@ -9,6 +9,7 @@ import {
   createSession,
   getHealth,
   getSession,
+  listClarificationQuestions,
   listSessions,
   resetSessionToken,
   reopenSessionAsset,
@@ -342,5 +343,69 @@ describe('api client 会话资源', () => {
     )
     expect(seenKey).toBe('reopen-key-1')
     expect(item.asset_index).toBe(1)
+  })
+})
+
+// 起步澄清问题（#339 / spec #332 E1）：提问发生在建会话之前，端点是独立路径。
+// 这里钉住请求形状（topic 必带、limit 只在给了才发）与响应解析，组件不自己拼 URL。
+describe('api client 澄清问题', () => {
+  beforeEach(() => {
+    resetSessionToken()
+  })
+
+  it('listClarificationQuestions 只发 topic 时查询串没有 limit', async () => {
+    let query: URLSearchParams | null = null
+    server.use(
+      http.get('http://localhost/api/v1/clarification-questions', ({ request }) => {
+        query = new URL(request.url).searchParams
+        return HttpResponse.json(['窗在人物哪一侧？', '人物面朝哪边？'])
+      }),
+    )
+
+    const questions = await listClarificationQuestions('雨夜旧信')
+
+    expect(query!.get('topic')).toBe('雨夜旧信')
+    // 省略 limit 时服务端回落到配置（pipeline.max_clarification_rounds）；
+    // 带一个 `limit=undefined` 会被服务端 422。
+    expect(query!.has('limit')).toBe(false)
+    expect(questions).toEqual(['窗在人物哪一侧？', '人物面朝哪边？'])
+  })
+
+  it('listClarificationQuestions 显式 limit 时进查询串', async () => {
+    let query: URLSearchParams | null = null
+    server.use(
+      http.get('http://localhost/api/v1/clarification-questions', ({ request }) => {
+        query = new URL(request.url).searchParams
+        return HttpResponse.json([])
+      }),
+    )
+
+    await listClarificationQuestions('雨夜旧信', 0)
+
+    expect(query!.get('limit')).toBe('0')
+  })
+
+  it('生成失败时透出 502 的 problem（前端据此降级而不是当成空列表）', async () => {
+    server.use(
+      http.get('http://localhost/api/v1/clarification-questions', () =>
+        HttpResponse.json(
+          {
+            type: 'about:blank',
+            title: '澄清问题生成失败',
+            status: 502,
+            detail: '网关超时',
+            instance: '/api/v1/clarification-questions',
+            code: 'clarification_generation_failed',
+          },
+          { status: 502, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+
+    const err = (await listClarificationQuestions('雨夜旧信').catch((e: unknown) => e)) as ApiError
+
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err.status).toBe(502)
+    expect(err.problem?.code).toBe('clarification_generation_failed')
   })
 })

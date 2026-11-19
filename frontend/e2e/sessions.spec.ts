@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
+import { skipClarifications } from './clarification'
 
 // D4-3（#230）：真实浏览器 + 真实 FastAPI，但管线走 serve-e2e.mjs 注入的确定性桩
 // （MINIMAX_FAKE_PIPELINE=1）。覆盖「创建 → 自动起跑 → 刷新恢复」与 created 兜底。
@@ -52,6 +53,8 @@ test('表单创建即自动起跑，跳转工作台且刷新可恢复', async ({
   // 事件流请求在进入工作台后才发：先挂监听，再点创建（自动起跑）。
   const eventsRequest = page.waitForRequest((request) => request.url().includes('/events'))
   await page.getByRole('button', { name: '创建并开始' }).click()
+  // 起步澄清（#339）：桩管线也会问，面板展开后跳过，创建照旧一步到位。
+  await skipClarifications(page)
 
   // 两请求连做：POST /sessions 201 后立刻 POST /jobs，然后跳详情。
   await expect(page).toHaveURL(/\/sessions\/.+/)

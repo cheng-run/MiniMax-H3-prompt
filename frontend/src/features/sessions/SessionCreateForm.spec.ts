@@ -379,3 +379,211 @@ describe('SessionCreateForm 导演台路线（D8-1）', () => {
     expect(wrapper.text()).toContain('节点 id')
   })
 })
+
+// 起步澄清问答面板（#339 / spec #332 E1）：点「创建」先拉问题、内联展开、逐条作答或
+// 跳过，提交时带结构化问答对——渲染文本归后端（`render_clarification_block`），前端
+// 只交 (question, answer)，不拼「1. Q → A」。
+describe('SessionCreateForm 起步澄清', () => {
+  const questionsUrl = 'http://localhost/api/v1/clarification-questions'
+
+  // 默认把「拉问题 → 建会话 → 起跑」三段都接上，只在各用例覆盖自己关心的那一段。
+  function stubFlow({
+    questions = ['窗在人物哪一侧？', '人物身体面朝哪边？'] as string[] | null,
+    questionsStatus = 200,
+    created = () => {},
+  }: {
+    questions?: string[] | null
+    questionsStatus?: number
+    created?: (body: Record<string, unknown> | null) => void
+  } = {}) {
+    const calls = { questions: 0, create: 0 }
+    server.use(
+      http.get(questionsUrl, () => {
+        calls.questions += 1
+        if (questionsStatus >= 400) {
+          return HttpResponse.json(
+            {
+              type: 'about:blank',
+              title: '澄清问题生成失败',
+              status: questionsStatus,
+              detail: '网关超时',
+              instance: '/api/v1/clarification-questions',
+              code: 'clarification_generation_failed',
+            },
+            { status: questionsStatus, headers: { 'Content-Type': 'application/problem+json' } },
+          )
+        }
+        return HttpResponse.json(questions ?? [])
+      }),
+      http.post(createUrl, async ({ request }) => {
+        calls.create += 1
+        created((await request.json()) as Record<string, unknown>)
+        return HttpResponse.json(makeDetail({ session_id: 'sess-1', status: 'created' }), {
+          status: 201,
+        })
+      }),
+      http.post(jobsUrl, () => HttpResponse.json(makeJob(), { status: 202 })),
+    )
+    return calls
+  }
+
+  // 面板上的回答框按问题顺序编号，用例据此逐条作答。
+  function answer(wrapper: VueWrapper, index: number) {
+    return wrapper.find(`[name="clarification-answer-${index}"]`)
+  }
+
+  it('点创建先拉问题并展开面板，逐条作答后提交结构化问答对', async () => {
+    let body: Record<string, unknown> | null = null
+    const calls = stubFlow({ created: (payload) => (body = payload) })
+
+    const { wrapper, router } = mountWithPlugins(SessionCreateForm, { withRouter: true })
+    await router!.isReady()
+    await wrapper.find('textarea[name="plot"]').setValue('雨夜旧信')
+
+    await wrapper.find('form').trigger('submit')
+    await settle()
+
+    // 拉到了问题：面板展开，问题文字逐条可见；这时**还没有**建会话。
+    expect(calls.questions).toBe(1)
+    expect(calls.create).toBe(0)
+    expect(wrapper.find('[data-panel="clarification"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('窗在人物哪一侧？')
+    expect(wrapper.text()).toContain('人物身体面朝哪边？')
+
+    await answer(wrapper, 0).setValue('窗在人物右侧')
+    await answer(wrapper, 1).setValue('人物面朝画面左侧')
+
+    // 面板上的「继续创建」把问答对随会话提交。
+    await wrapper.find('[data-action="clarification-submit"]').trigger('click')
+    await settle()
+
+    expect(calls.create).toBe(1)
+    expect(body).toMatchObject({
+      plot: '雨夜旧信',
+      clarification_pairs: [
+        { question: '窗在人物哪一侧？', answer: '窗在人物右侧' },
+        { question: '人物身体面朝哪边？', answer: '人物面朝画面左侧' },
+      ],
+    })
+    // 渲染文本归后端：前端绝不自己拼「1. Q → A」。
+    expect(JSON.stringify(body)).not.toContain('→')
+    expect(router!.currentRoute.value.path).toBe('/sessions/sess-1')
+  })
+
+  it('跳过 = 不提交任何问答对，直接建会话', async () => {
+    let body: Record<string, unknown> | null = null
+    const calls = stubFlow({ created: (payload) => (body = payload) })
+
+    const { wrapper, router } = mountWithPlugins(SessionCreateForm, { withRouter: true })
+    await router!.isReady()
+    await wrapper.find('textarea[name="plot"]').setValue('雨夜旧信')
+
+    await wrapper.find('form').trigger('submit')
+    await settle()
+    expect(calls.create).toBe(0)
+
+    await answer(wrapper, 0).setValue('窗在人物右侧')
+    await wrapper.find('[data-action="clarification-skip"]').trigger('click')
+    await settle()
+
+    expect(calls.create).toBe(1)
+    // 跳过是「一条都不交」：答过的那条也不带走。
+    expect(body).not.toHaveProperty('clarification_pairs')
+    expect(router!.currentRoute.value.path).toBe('/sessions/sess-1')
+  })
+
+  it('生成失败显示一行提示并允许无问题继续创建', async () => {
+    let body: Record<string, unknown> | null = null
+    const calls = stubFlow({ questionsStatus: 502, created: (payload) => (body = payload) })
+
+    const { wrapper } = mountWithPlugins(SessionCreateForm, { withRouter: true })
+    await wrapper.find('textarea[name="plot"]').setValue('雨夜旧信')
+
+    await wrapper.find('form').trigger('submit')
+    await settle()
+
+    expect(calls.questions).toBe(1)
+    expect(wrapper.text()).toContain('澄清问题生成失败，可直接开始')
+    // 不展开作答面板，但提交入口还在（不能把用户卡在表单上）。
+    expect(wrapper.find('[data-panel="clarification"]').exists()).toBe(false)
+    expect(submitButton(wrapper).attributes('disabled')).toBeUndefined()
+
+    await wrapper.find('form').trigger('submit')
+    await settle()
+
+    expect(calls.create).toBe(1)
+    expect(body).not.toHaveProperty('clarification_pairs')
+  })
+
+  it('拉问题期间按钮进入加载态，重复提交不会并行发两次请求', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    let questionCalls = 0
+    let createCalls = 0
+    server.use(
+      http.get(questionsUrl, async () => {
+        questionCalls += 1
+        await gate
+        return HttpResponse.json(['窗在人物哪一侧？'])
+      }),
+      http.post(createUrl, () => {
+        createCalls += 1
+        return HttpResponse.json(makeDetail({ session_id: 'sess-1' }), { status: 201 })
+      }),
+      http.post(jobsUrl, () => HttpResponse.json(makeJob(), { status: 202 })),
+    )
+
+    const { wrapper } = mountWithPlugins(SessionCreateForm, { withRouter: true })
+    await wrapper.find('textarea[name="plot"]').setValue('雨夜旧信')
+
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    // 问题还没回来：按钮已禁用、文案进入加载态，且**一次会话都没建**。
+    expect(submitButton(wrapper).attributes('disabled')).toBeDefined()
+    expect(submitButton(wrapper).text()).toContain('正在')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+    expect(questionCalls).toBe(1)
+    expect(createCalls).toBe(0)
+
+    release()
+    await settle()
+    expect(wrapper.find('[data-panel="clarification"]').exists()).toBe(true)
+  })
+
+  it('补充说明已填内容时答问答对先被拦下，不发创建请求', async () => {
+    const calls = stubFlow()
+
+    const { wrapper } = mountWithPlugins(SessionCreateForm, { withRouter: true })
+    await wrapper.find('textarea[name="plot"]').setValue('雨夜旧信')
+    await wrapper.find('textarea[name="clarifications"]').setValue('窗必须在人物右边')
+
+    await wrapper.find('form').trigger('submit')
+    await settle()
+    await answer(wrapper, 0).setValue('窗在人物右侧')
+
+    await wrapper.find('[data-action="clarification-submit"]').trigger('click')
+    await settle()
+
+    // 两边都有内容服务端会 422，但在客户端先拦下：用户不必等一次往返才知道。
+    expect(calls.create).toBe(0)
+    expect(wrapper.find('[role="alert"]').text()).toContain('二选一')
+  })
+
+  it('没有任何问题时不展开面板，直接建会话且不带问答对', async () => {
+    let body: Record<string, unknown> | null = null
+    const calls = stubFlow({ questions: [], created: (payload) => (body = payload) })
+
+    const { wrapper } = mountWithPlugins(SessionCreateForm, { withRouter: true })
+    await wrapper.find('textarea[name="plot"]').setValue('雨夜旧信')
+
+    await wrapper.find('form').trigger('submit')
+    await settle()
+
+    expect(calls.questions).toBe(1)
+    expect(calls.create).toBe(1)
+    expect(wrapper.find('[data-panel="clarification"]').exists()).toBe(false)
+    expect(body).not.toHaveProperty('clarification_pairs')
+  })
+})

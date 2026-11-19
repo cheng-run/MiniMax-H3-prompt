@@ -29,6 +29,18 @@ const healthHandler = http.get('http://localhost/api/v1/health', () =>
   }),
 )
 
-// MSW 服务器：默认只放行引导端点、空会话列表与健康资源，其余请求由测试用
+// 起步澄清问题（#339）：创建表单在提交前总会先问一次。默认桩给空列表——「这个主题
+// 不需要澄清」是不展开问答面板的那条路，既有创建用例的行为因此与加澄清之前一致；
+// 要测面板的用例自己 server.use 覆盖（优先级更高）。
+const emptyClarificationsHandler = http.get('http://localhost/api/v1/clarification-questions', () =>
+  HttpResponse.json([]),
+)
+
+// MSW 服务器：默认只放行引导端点、空会话列表、健康资源与空澄清问题，其余请求由测试用
 // server.use(...) 逐条注入。
-export const server = setupServer(tokenHandler, emptySessionsHandler, healthHandler)
+export const server = setupServer(
+  tokenHandler,
+  emptySessionsHandler,
+  healthHandler,
+  emptyClarificationsHandler,
+)

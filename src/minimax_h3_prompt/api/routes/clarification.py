@@ -65,6 +65,13 @@ def list_clarification_questions(
         limit = int(request.app.state.job_runner.config.max_clarification_rounds)
     if limit <= 0:
         return []
+    if request.app.state.job_runner.fake_pipeline:
+        # 桩管线（D4 §11）：澄清与阶段 1/2 同属「桩下不建任何模型」这条判据。创建表单
+        # 每次提交前都会问一次，桩若不接管，这里就会去建真模型——CI 无密钥当场 502、
+        # 本机有密钥则真调网关（#339 实测）。
+        from ..fake_pipeline import clarification_questions
+
+        return clarification_questions(topic, limit)
     try:
         return generate_clarifying_questions(topic, jobs.build_chat_model(), limit)
     except (RuntimeError, ConfigError, OSError) as exc:

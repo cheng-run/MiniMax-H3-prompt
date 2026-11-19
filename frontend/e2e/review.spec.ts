@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { skipClarifications } from './clarification'
 
 // D4-5（#232）：真实浏览器 + 真实 FastAPI，管线走 serve-e2e.mjs 注入的确定性桩
 // （MINIMAX_FAKE_PIPELINE=1）。覆盖「审查 → 修订一轮 → 再审查」的完整回路：
@@ -11,6 +12,8 @@ test('审查 → 修订一轮 → 新待办回闸门，历史累积', async ({ p
   await page.getByRole('button', { name: '新建会话' }).click()
   await page.locator('textarea[name="plot"]').fill(PLOT)
   await page.getByRole('button', { name: '创建并开始' }).click()
+  // 起步澄清（#339）：桩管线也会问，面板展开后跳过，创建照旧一步到位。
+  await skipClarifications(page)
 
   await expect(page).toHaveURL(/\/sessions\/.+/)
   // 桩阶段 1 跑完即停在人工闸门。
@@ -50,6 +53,8 @@ test('空意见即时提示且不发请求', async ({ page }) => {
   await page.getByRole('button', { name: '新建会话' }).click()
   await page.locator('textarea[name="plot"]').fill(`${PLOT} 空意见`)
   await page.getByRole('button', { name: '创建并开始' }).click()
+  // 起步澄清（#339）：桩管线也会问，面板展开后跳过，创建照旧一步到位。
+  await skipClarifications(page)
 
   await expect(page.getByText('等待人工').first()).toBeVisible({ timeout: 15_000 })
   await page.getByRole('tab', { name: '审查与待办' }).click()

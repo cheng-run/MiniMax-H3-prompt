@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { expect, test } from '@playwright/test'
+import { skipClarifications } from './clarification'
 
 // D7 修订（#279 / #285）：ref 多参路线的浏览器全闭环证据。
 //
@@ -71,6 +72,8 @@ async function createRefSession(page: import('@playwright/test').Page, plot: str
   await page.locator('input[name="duration"]').fill(String(REF_SECONDS))
   // 「创建并开始」：ref 零素材直接起跑（#279 删掉了 asset_required 门槛）。
   await page.getByRole('button', { name: '创建并开始' }).click()
+  // 起步澄清（#339）：桩管线也会问，面板展开后跳过，创建照旧一步到位。
+  await skipClarifications(page)
   await expect(page).toHaveURL(/\/sessions\/.+/)
   return page.url()
 }

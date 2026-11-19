@@ -2,7 +2,7 @@
 import { computed, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
-import { ApiError, createSession, startSessionJob } from '@/api/client'
+import { ApiError, createSession, listClarificationQuestions, startSessionJob } from '@/api/client'
 import Button from '@/components/ui/Button.vue'
 import ErrorNotice from '@/components/ui/ErrorNotice.vue'
 
@@ -60,6 +60,22 @@ const submitting = ref(false)
 const plotMissing = ref(false)
 const submitError = ref<string | null>(null)
 
+// 起步澄清（#339 / spec #332 E1）：提问发生在**建会话之前**——Brief 只有创建时那一处
+// 构造口，建完再问要么新开存储、要么绕开起跑前的副本变换。所以点「创建」先拉问题，
+// 在表单内联展开问答面板，答案随创建请求以结构化问答对提交。
+//
+// 面板状态机：idle（还没问）→ asking（问题在眼前，等用户答或跳过）／failed（生成失败，
+// 换一条降级出路：直接建会话）；拉取期由 submitting 表达，不另设一档。
+type ClarificationStage = 'idle' | 'asking' | 'failed'
+const clarificationStage = ref<ClarificationStage>('idle')
+const clarificationQuestions = ref<string[]>([])
+// 回答与问题一一对应（下标即问题序号）：按序号渲染输入框，别用问题文本当键。
+const clarificationAnswers = ref<string[]>([])
+// 生成失败是**不阻断**的一行提示：它不是错误，用户下一步照常能建会话。
+const clarificationNotice = ref<string | null>(null)
+// 创建进行中的阶段只影响按钮文案：拉问题与建会话是两次等待，不能让用户以为卡住了。
+const createStage = ref<'questions' | 'creating'>('creating')
+
 // 时长两端都限；越界即时提示，不用等提交后才由服务端 422 回来。
 const durationError = computed(() => {
   const value = Number(form.duration)
@@ -108,7 +124,95 @@ async function onSubmit(): Promise<void> {
     return
   }
 
+  // 面板已经问过（答或跳过）就直接提交：再次点「创建」不该把问题重问一遍，也不该
+  // 把用户已经填好的回答冲掉。
+  if (clarificationStage.value === 'asking') {
+    await createWithClarifications(collectPairs())
+    return
+  }
+  // 生成失败过一次：不再重试拉问题（用户可能本来就想无问题开始），直接建会话。
+  if (clarificationStage.value === 'failed') {
+    await createWithClarifications([])
+    return
+  }
+
   submitting.value = true
+  createStage.value = 'questions'
+  let questions: string[]
+  try {
+    questions = await listClarificationQuestions(form.plot.trim())
+  } catch (error) {
+    // 生成失败不阻断创建（spec US4）：显示一行提示，把出口留在同一个按钮上。
+    // 只有 502 那一类算「这一次拿不到问题」；其余错误（鉴权、网络）仍按提交失败说话。
+    const status = error instanceof ApiError ? error.status : 0
+    if (status === 502 || status === 0) {
+      clarificationStage.value = 'failed'
+      clarificationNotice.value = '澄清问题生成失败，可直接开始'
+      submitting.value = false
+      return
+    }
+    submitError.value = errorMessage(error)
+    submitting.value = false
+    return
+  }
+
+  // 拉取这一段结束了：无论下一步是展开面板还是直接建会话，都要先放开 loading，
+  // 否则「创建」那条自身的重入守卫会把紧接着的建会话挡回去。
+  submitting.value = false
+
+  if (questions.length === 0) {
+    // 没有问题＝这个主题不需要澄清（端点 0 条上限时也一样）：不展开面板，直接建。
+    clarificationStage.value = 'idle'
+    await createWithClarifications([])
+    return
+  }
+
+  // 拉到问题了：展开面板，交出「答或跳过」的决定权。此时**还不建会话**。
+  clarificationQuestions.value = questions
+  clarificationAnswers.value = questions.map(() => '')
+  clarificationStage.value = 'asking'
+}
+
+/** 面板上的答案按「有回答的条目」收成结构化问答对；空回答＝没澄清，服务端也会滤掉。 */
+function collectPairs(): { question: string; answer: string }[] {
+  return clarificationQuestions.value
+    .map((question, index) => ({
+      question,
+      answer: (clarificationAnswers.value[index] ?? '').trim(),
+    }))
+    .filter((pair) => pair.answer.length > 0)
+}
+
+// 跳过＝一条问答对都不交。答过的内容也不带走（「跳过」就是全部跳过，不是「提交部分」）。
+function skipClarifications(): void {
+  if (submitting.value) {
+    return
+  }
+  void createWithClarifications([])
+}
+
+async function submitClarifications(): Promise<void> {
+  if (submitting.value) {
+    return
+  }
+  const pairs = collectPairs()
+  // 自由文本与问答对同时有内容，服务端会 422 `clarification_conflict`。前端先在本地
+  // 拦下并说清楚：用户不必等一次往返才知道「二选一」。
+  if (pairs.length > 0 && form.clarifications.trim().length > 0) {
+    submitError.value = '「补充说明」与逐条作答不能同时提交：两者都写进会话的澄清块，请二选一。'
+    return
+  }
+  await createWithClarifications(pairs)
+}
+
+async function createWithClarifications(
+  pairs: { question: string; answer: string }[],
+): Promise<void> {
+  if (submitting.value) {
+    return
+  }
+  submitting.value = true
+  createStage.value = 'creating'
   creationKey ??= newIdempotencyKey()
 
   let sessionId: string
@@ -123,6 +227,9 @@ async function onSubmit(): Promise<void> {
         language: form.language.trim() || 'Chinese',
         clarifications: form.clarifications,
         draft: form.draft,
+        // 结构化问答对（#338）：渲染成澄清块是**后端**的事，前端不拼「1. Q → A」——
+        // 免得同一格式两处实现。没有问答对时整个键都不带（空表与省略同义）。
+        ...(pairs.length > 0 ? { clarification_pairs: pairs } : {}),
         // 非 director 路线一个导演台参数都不带：服务端会按 director_param_missing
         // 拒掉「带了却用不上」的那一份。
         ...(isDirector.value
@@ -313,9 +420,62 @@ async function onSubmit(): Promise<void> {
       </div>
     </details>
 
+    <!-- 起步澄清面板（#339）：拉到问题后内联展开，逐条作答或一键跳过。放在提交按钮
+         之前——视觉顺序与动作顺序一致：先答（或跳），再创建。 -->
+    <section
+      v-if="clarificationStage === 'asking'"
+      class="clarification"
+      data-panel="clarification"
+      aria-label="起步澄清"
+    >
+      <h3>起步澄清（{{ clarificationQuestions.length }} 条）</h3>
+      <p class="field-hint">逐条作答会随会话一起提交；没想好的可以留空，或直接跳过全部。</p>
+      <div
+        v-for="(question, index) in clarificationQuestions"
+        :key="index"
+        class="field clarification-item"
+      >
+        <label :for="`clarification-answer-${index}`">{{ question }}</label>
+        <textarea
+          :id="`clarification-answer-${index}`"
+          v-model="clarificationAnswers[index]"
+          :name="`clarification-answer-${index}`"
+          rows="2"
+        />
+      </div>
+      <div class="clarification-actions">
+        <Button
+          variant="secondary"
+          data-action="clarification-skip"
+          :disabled="submitting"
+          @click="skipClarifications"
+        >
+          跳过
+        </Button>
+        <Button
+          data-action="clarification-submit"
+          :disabled="submitting"
+          @click="submitClarifications"
+        >
+          继续创建
+        </Button>
+      </div>
+    </section>
+    <!-- 生成失败／跳过后的出口仍挂在同一个提交按钮上；这一行只是让用户知道
+         「没有问到问题」不是他漏做了什么。 -->
+    <p v-else-if="clarificationNotice" class="field-hint" data-notice="clarification">
+      {{ clarificationNotice }}
+    </p>
+
     <div class="actions">
       <Button type="submit" :disabled="submitting">
-        {{ submitting ? '正在创建…' : '创建并开始' }}
+        {{
+          submitting
+            ? createStage === 'questions'
+              ? '正在获取澄清问题…'
+              : '正在创建…'
+            : '创建并开始'
+        }}
       </Button>
     </div>
   </form>
@@ -382,5 +542,32 @@ async function onSubmit(): Promise<void> {
 .actions {
   display: flex;
   justify-content: flex-end;
+}
+/* 澄清面板纵向堆叠：每条问题一行输入，窄屏不换列、不引入横向滚动。内层不进
+   .field-row（那是给并排字段的 flex-wrap）。 */
+.clarification {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+.clarification h3 {
+  font-size: 1rem;
+}
+.clarification-item label {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.clarification-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  justify-content: flex-end;
+}
+.clarification-actions > * {
+  flex: 0 1 auto;
 }
 </style>

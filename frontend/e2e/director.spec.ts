@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { expect, test } from '@playwright/test'
+import { skipClarifications } from './clarification'
 
 // D8-7（#266）：导演台整条路线的浏览器证据。
 //
@@ -116,6 +117,8 @@ test('导演台三段：阶段 1 → 首帧 → 打包下载 → 两种段回交
   await page.locator('input[name="director_node_id"]').fill('e2e-node-266')
   await page.locator('input[name="duration"]').fill('14')
   await page.getByRole('button', { name: '创建并开始' }).click()
+  // 起步澄清（#339）：桩管线也会问，面板展开后跳过，创建照旧一步到位。
+  await skipClarifications(page)
   await expect(page).toHaveURL(/\/sessions\/.+/)
 
   // --- 阶段 1 审查通过 ---
@@ -274,6 +277,8 @@ test('导演台 r2v：台账素材 → 素材循环（被拒重开）→ 规划/
   await page.locator('input[name="director_node_id"]').fill('e2e-node-268')
   await page.locator('input[name="duration"]').fill('4')
   await page.getByRole('button', { name: '创建并开始' }).click()
+  // 起步澄清（#339）：桩管线也会问，面板展开后跳过，创建照旧一步到位。
+  await skipClarifications(page)
   await expect(page).toHaveURL(/\/sessions\/.+/)
   await expect(page.getByRole('button', { name: '开始' })).toBeVisible({ timeout: 20_000 })
 

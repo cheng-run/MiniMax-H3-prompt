@@ -239,6 +239,28 @@ export async function cancelSessionJob(sessionId: string, jobId: string): Promis
   return data
 }
 
+/**
+ * 取起步澄清问题（#339 / spec #332 E1）。
+ *
+ * 提问发生在**建会话之前**——会话还没有标识，所以端点是独立路径而不是会话子资源。
+ * `limit` 省略时服务端回落到 `pipeline.max_clarification_rounds`；这里不给默认值，
+ * 否则前端会成为条数配置的第二处口径。生成失败回 502 problem+json，由统一错误拦截
+ * 抛 `ApiError`——前端靠状态码区分「没有问题」（空数组）与「生成失败」（降级提示）。
+ */
+export async function listClarificationQuestions(topic: string, limit?: number): Promise<string[]> {
+  const query: { topic: string; limit?: number } = { topic }
+  if (limit !== undefined) {
+    query.limit = limit
+  }
+  const { data } = await apiClient.GET('/api/v1/clarification-questions', {
+    params: { query },
+  })
+  if (data === undefined) {
+    throw new ApiError(0, null)
+  }
+  return data
+}
+
 /** 会话标识本身含斜杠（`<slug>/GEN001`）：逐段编码后仍保留路径分隔。 */
 function encodeSessionPath(identifier: string): string {
   return identifier.split('/').map(encodeURIComponent).join('/')

@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
+import { skipClarifications } from './clarification'
 
 // D4-7（#234）：全闭环交付用例。T2VA 直通与 FL2VA 帧提交两条路径都走到
 // `completed`，并在产物分区里真的复制到最终提示词、真的触发下载。
@@ -35,6 +36,8 @@ async function createSession(page: Page, plot: string, variant: 'T2VA' | 'FL2VA'
   await page.locator('textarea[name="plot"]').fill(plot)
   await page.locator('select[name="variant"]').selectOption(variant)
   await page.getByRole('button', { name: '创建并开始' }).click()
+  // 起步澄清（#339）：桩管线也会问，面板展开后跳过，创建照旧一步到位。
+  await skipClarifications(page)
   await expect(page).toHaveURL(/\/sessions\/.+/)
   await expect(page.getByText('等待人工').first()).toBeVisible({ timeout: 20_000 })
 }

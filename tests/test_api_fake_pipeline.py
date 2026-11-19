@@ -219,3 +219,33 @@ def test_startup_log_announces_the_switch(workbench, monkeypatch, caplog):
         with workbench_client(app):
             pass
     assert any(ENV in record.getMessage() for record in caplog.records)
+
+
+def test_fake_pipeline_answers_clarifications_without_building_a_model(
+        workbench, monkeypatch):
+    """桩管线覆盖起步澄清端点（#339 / spec #332 E1）。
+
+    为什么属于「桩管线不建任何模型」那条判据：澄清端点（#338）自己调
+    ``build_chat_model``，而 E2E 的创建流程现在**每次提交前都会先问一次**。桩下若
+    它还去建真模型，CI（无密钥）当场 502、本机（有密钥）则真调网关——「桩管线跑完
+    整个闭环不建任何模型」这条不变量就被这条新接线打破了。
+    """
+    monkeypatch.setenv(ENV, "1")
+    root, _model = workbench
+
+    def _forbidden():
+        raise AssertionError("桩管线不许建真实模型")
+
+    monkeypatch.setattr(model_factory, "build_chat_model", _forbidden)
+    app = create_app(sessions_root=root, runtime_config=RUNTIME)
+
+    with workbench_client(app) as client:
+        # 上限显式给：缺省要读运行期配置的 ``max_clarification_rounds``，而本文件的
+        # RUNTIME 只带阶段 1/2 用到的几项（路由刻意不在缺键时回落，见 #338）。
+        resp = client.get("/api/v1/clarification-questions",
+                          params={"topic": "雨夜旧信", "limit": 3})
+
+    assert resp.status_code == 200, resp.text
+    questions = resp.json()
+    assert questions, "桩下澄清端点返回空列表＝前端永远不展开问答面板"
+    assert all("？" in question for question in questions)

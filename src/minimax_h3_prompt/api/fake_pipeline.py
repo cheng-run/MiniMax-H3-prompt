@@ -203,6 +203,25 @@ def fake_asset_drops() -> tuple[int, ...]:
     return tuple(drops)
 
 
+def clarification_questions(topic: str, limit: int) -> list[str]:
+    """桩澄清问题（#339 / spec #332 E1）：桩模式下不建模型，返回固定问句。
+
+    为什么桩必须覆盖这个端点：创建表单现在**每次提交前都先问一次**，而 E2E 整套
+    跑在桩管线上。桩若不接管，澄清端点会去建真模型——CI（无密钥）当场 502、本机
+    （有密钥）真的往网关发请求，「桩管线一个模型都不建」这条不变量当场破掉。
+    返回的问句写成问号收尾、形状与真实一致（``parse_questions`` 的判据是行内有问号）。
+    """
+    if limit <= 0:
+        return []
+    subject = str(topic).strip() or "这个主题"
+    questions = [
+        f"{subject}——主要人物与关键环境物（窗、门、桌、床）各自在画面的左／右／前／后？",
+        "主要人物面朝哪个方向、身体朝向哪一面？",
+        "这个场景发生在什么时代、什么季节？",
+    ]
+    return questions[:limit]
+
+
 def asset_prompt_text(name: str) -> str:
     """桩资产图词：按语义名固定成一句可直接复制的画面描述（D7-6）。
 
@@ -691,6 +710,7 @@ __all__ = [
     "asset_prompt_text",
     "asset_proofread_verdict",
     "asset_reword_text",
+    "clarification_questions",
     "director_firstframe_prompt",
     "director_ref_sections",
     "director_segment_reply",

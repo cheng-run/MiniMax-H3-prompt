@@ -3,6 +3,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { expect, test } from '@playwright/test'
+import { skipClarifications } from './clarification'
 
 // D6-7（#250 / #273）：长片路径的浏览器证据。18 秒 → 3 段 × 6 秒（H3 只有 4/5/6 秒档），
 // 走「建会话 → 审查通过 → 段列表 → 三段全部交完 → 自动拼接 → completed」，
@@ -46,6 +47,8 @@ test('长片 18 秒：建会话 → 段列表 → 三段全部交完 → 拼接 
   await page.locator('select[name="variant"]').selectOption('T2VA')
   await page.locator('input[name="duration"]').fill('18')
   await page.getByRole('button', { name: '创建并开始' }).click()
+  // 起步澄清（#339）：桩管线也会问，面板展开后跳过，创建照旧一步到位。
+  await skipClarifications(page)
   await expect(page).toHaveURL(/\/sessions\/.+/)
   await expect(page.getByText('等待人工').first()).toBeVisible({ timeout: 20_000 })
 

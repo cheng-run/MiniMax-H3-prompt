@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
+import { skipClarifications } from './clarification'
 
 // D4-6（#233）：真实浏览器 + 真实 FastAPI，管线走 serve-e2e.mjs 注入的确定性桩。
 // 覆盖「上传素材 → 选首/尾帧槽 → 提交 → 阶段 2 完成」。
@@ -70,6 +71,8 @@ test('素材上传 → 首尾帧选择 → 提交 → 阶段 2 完成', async ({
   await page.locator('textarea[name="plot"]').fill(PLOT)
   await expect(page.locator('select[name="variant"]')).toHaveValue('FL2VA')
   await page.getByRole('button', { name: '创建并开始' }).click()
+  // 起步澄清（#339）：桩管线也会问，面板展开后跳过，创建照旧一步到位。
+  await skipClarifications(page)
 
   await expect(page).toHaveURL(/\/sessions\/.+/)
   await expect(page.getByText('等待人工')).toBeVisible({ timeout: 20_000 })

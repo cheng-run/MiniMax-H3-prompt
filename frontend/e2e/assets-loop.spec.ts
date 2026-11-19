@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { skipClarifications } from './clarification'
 
 // 素材分区的三态（D7 修订 #283 / #279「素材分区」）：起跑前只给引导文案，循环里列出
 // 全部 N 行并指出「就是这一件在等你」，循环走完后是 N 行 + 补交视频/音频 + 现算容量条。
@@ -32,6 +33,8 @@ async function createRefSession(page: import('@playwright/test').Page, plot: str
   await page.locator('input[name="duration"]').fill('10')
   // 「创建并开始」：ref 零素材直接起跑（#279 删掉了 asset_required 门槛）。
   await page.getByRole('button', { name: '创建并开始' }).click()
+  // 起步澄清（#339）：桩管线也会问，面板展开后跳过，创建照旧一步到位。
+  await skipClarifications(page)
   await expect(page).toHaveURL(/\/sessions\/.+/)
 }
 
