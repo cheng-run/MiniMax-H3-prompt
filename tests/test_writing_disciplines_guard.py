@@ -399,14 +399,15 @@ def test_motive_discipline_reaches_base_only(route):
                 f"{route} 的{label}不该带动机弱化版（#353：ref 刻意不做，导演台走原版）"
 
 
-def test_base_motive_discipline_states_only_the_two_fact_sources_base_really_has():
-    """弱化版的形态约束：只认 base 请求里**真实存在**的两份事实源。
+def test_base_motive_discipline_names_only_sources_base_paths_really_have():
+    """弱化版的形态约束：点名的来源必须是两条 base 写段路径之一真的给出的块。
 
     票 #353 面原文写「本段剧情概述、人物／剧本设计」，但 base 的两条写段请求里
     **没有**人物设计与剧本全文（v2 只有剧情概述＋分镜表＋末态＋锚定＋修订＋画面决策；
-    回退只有整片提示词＋目标镜头＋锚定＋修订＋画面决策）。照抄就是让模型引用它看不见
-    的输入——所以实现改成本段剧情概述与分镜表写明的用意，差异记在 2026-11-19 的裁定里
-    （见真源注释）。
+    回退只有完整提示词＋目标镜头＋锚定＋修订＋画面决策）。第一版实现改成「本段剧情
+    概述＋分镜表」，却又在回退路径上留下悬空指针——那条请求里既没有剧情概述块、也没有
+    分镜表块，只有「完整提示词」。所以现行措辞是两条路径的并集：v2 的「本段剧情概述」
+    「分镜表」，回退的「完整提示词」（2026-11-19 协调会话裁定，见真源注释的裁定记录）。
 
     这条对真源常量断言：断言的是两条**反向排斥**（该有的词在、悬空来源名一个都不在），
     不是「常量等于某个值」——后者是自证自。真源措辞一漂，出站断言只会证明「漂过的
@@ -414,9 +415,9 @@ def test_base_motive_discipline_states_only_the_two_fact_sources_base_really_has
     """
     text = wd.MOTIVE_DISCIPLINE_BASE
     assert text, "MOTIVE_DISCIPLINE_BASE 为空"
-    for word in ("本段剧情概述", "分镜表"):
-        assert word in text, f"弱化版没写真正存在的事实源「{word}」"
+    for word in ("本段剧情概述", "分镜表", "完整提示词"):
+        assert word in text, f"弱化版没写 base 两条路径真正存在的来源「{word}」"
     for word in ("人物设计", "人物／剧本设计", "剧本设计"):
         assert word not in text, f"弱化版引用了 base 请求里不存在的来源「{word}」"
     assert "不加一个小动作" in text, "弱化版丢了「取不到动机就写无动作状态」的钳制"
-    assert "不得" in text and "发明" in text, "弱化版丢了「不得为动机发明分镜表没有的动作」"
+    assert "不得" in text and "发明" in text, "弱化版丢了「不得为动机发明…的动作」"
