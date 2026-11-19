@@ -194,3 +194,29 @@ def test_no_role_prompt_md_hardcodes_official_text():
 
     # 指针必须留下——「见官方规范」这种含糊说法指不到注入块，模型不知道文末那块是干嘛的。
     # 逐角色的指针由 test_every_declared_role_leaves_a_pointer_to_the_injected_block 钉住。
+
+
+# ── 编剧层动作动机（#351 / spec #349 C2-2） ──
+# 三条路线（base／ref／导演台）共用同一个编剧阶段：编剧层不要求动机，下游没有
+# 一处补得回来。#350 基线实测改前戏剧动机 1/20（base 0/9），缺的是「动机的表述」，
+# 不是「动作太多」——所以这里钉两条：既要求写出想要什么／为什么此刻做，也要求
+# 取不到动机时写无动作状态，不许硬塞小动作。
+
+
+def test_screenwriter_actions_carry_their_motive():
+    """编剧层动作条目必须要求动机，且限定来源、给出「取不到」的钳制（#351）。
+
+    判据取 ``load_role_prompt`` 的返回值（模型眼前的系统提示），不查文件本身：
+    加载口若哪天把这段摘掉，查文件的断言会照绿（同 #30 缝 1）。只做子串断言，
+    不钉整段措辞——措辞会漂。
+    """
+    prompt = load_role_prompt("screenwriter")
+
+    assert "想要什么" in prompt and "为什么此刻做" in prompt, \
+        "编剧提示词没要求动作读得出「想要什么／为什么此刻做」"
+    assert "动机只能取自导演阐述、制作计划、人物设计" in prompt, \
+        "编剧提示词没把动机的来源限定在导演阐述／制作计划／人物设计"
+    assert "无动作状态" in prompt and "不加一个小动作" in prompt, \
+        "编剧提示词缺「取不到动机就写无动作状态、不加一个小动作」的钳制"
+    assert "为动机发明输入里没有的动作、道具或事件" in prompt, \
+        "编剧提示词没禁止为动机发明输入里没有的动作、道具或事件"

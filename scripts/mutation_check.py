@@ -2518,6 +2518,19 @@ MUTATIONS: tuple[Mutation, ...] = (
         "规划指令删掉「内部段边界不得落在镜头切点上」＝模型只被告知选剧情节拍，很容易"
         "正落在切点上，解析器拒收后回退机械拆分又按切点切，主修静默失效（#343）",
     ),
+    Mutation(
+        "screenwriter_motive_source_dropped",
+        # 摘掉新加动机条目里的来源限定半句（全仓恰好一次）：模型仍被告知动作要有
+        # 动机，却不知道动机从哪来——最省事的来源就是自己发明，而 #350 基线测到的
+        # 恰恰是「缺动机的表述」而不是「动作太多」，发明动作正是要防的那一侧。
+        "src/minimax_h3_prompt/prompts/screenwriter.md",
+        "动机只能取自导演阐述、制作计划、人物设计三者之一",
+        "",
+        ("tests/test_role_prompts.py::"
+         "test_screenwriter_actions_carry_their_motive",),
+        "编剧层丢掉动机来源限定＝三条路线（base／ref／导演台）的剧本都能靠发明输入里"
+        "没有的动作来「有动机」，而出站文本没有任何一处会报红（#351 / spec #349 C2-2）",
+    ),
 )
 
 
