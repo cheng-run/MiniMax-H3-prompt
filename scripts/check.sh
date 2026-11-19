@@ -100,6 +100,12 @@ FAST_TESTS=(
   # 画质结论必须带 steps 档位与分辨率（#336）：规则行落在 CODING_STANDARDS.md，
   # 数字要对得上 ``PACK_WIDGETS`` 与 ADR 0003 的出处——两处任一漂走，这条当场红。
   tests/test_quality_claim_steps_guard.py
+  # base 长片分段规划与写段兜底（#343/#344/#346）：切点判据（纯函数）、两条 base
+  # 调用点的接线、长片验收取数脚本（tmp_path 造最小会话）都是秒级守卫；放全量等于
+  # 让 fast 绿着过、全量才炸（同 test_wizard_size 的教训）。三份合计约 2s。
+  tests/test_segment_planner.py
+  tests/test_wizard_segment_cuts.py
+  tests/test_accept_longform.py
 )
 
 # 变更集＝「工作区 ∪ 本分支相对 main 的已提交改动」（retro 2026-11-14）。

@@ -2414,6 +2414,97 @@ MUTATIONS: tuple[Mutation, ...] = (
         "桩管线不接管澄清端点＝CI（无密钥）当场 502、本机（有密钥）真调网关，"
         "「桩管线跑完整个闭环不建任何模型」被新接线打破（#339）",
     ),
+    # ------------------------------------------------------------------
+    # #342 base 段边界避开镜头切点（#343）＋段首机位承接与动作分拍（#344）
+    # 的守卫变异（#347 收口）。锚点都取「被删掉就会静默失效」的那一处：
+    # 删掉判据、让切点抽取恒空、摘掉纪律注入、把 base 判据翻成多参同向、
+    # 删掉规划指令——每条都必须让对应守卫当场红。
+    # ------------------------------------------------------------------
+    Mutation(
+        "base_boundary_check_dropped",
+        # 删掉 base 的「边界不得落在切点」判据：少了这一支，落在切点上的规划照样
+        # 被接受，下一段开场就是一次硬换镜头（spec #342 的问题陈述原样复发）。
+        # 锚点取整个 elif 分支（含缩进，全仓恰好一次）；if 主体不受影响，语法仍成立。
+        "src/minimax_h3_prompt/segment_planner.py",
+        "        elif not _base_boundaries_off_cuts(plans, shot_cuts):\n"
+        "            return None\n",
+        "",
+        ("tests/test_segment_planner.py::"
+         "test_base_plan_rejects_internal_boundary_on_shot_cut",),
+        "base 边界落在切点上也被接受＝段间接缝成了一次硬换镜头，桥接帧当 first_frame "
+        "却与段词打架，而解析器一声不响（#343 / spec #342 主修静默失效）",
+    ),
+    Mutation(
+        "shot_cuts_extraction_always_empty",
+        # 锚点取构造 starts 的那一行：改成空表后 len(starts) < 2 立判 None，切点表
+        # 永远抽不出来。这条钉的是「约束真的依赖切点」——抽取失效时判据不会恰好通过，
+        # 而是整条降级（spec #342：抽不出时按「没有约束」处理，但绝不能悄悄变成
+        # 「恒通过」或「恒不通过」）。
+        "src/minimax_h3_prompt/segment_planner.py",
+        "    starts = sorted({int(at) for _n, at, _t in blocks if 0 <= int(at) < total_int})\n",
+        "    starts = []\n",
+        ("tests/test_segment_planner.py::test_shot_cuts_from_table_reads_shot_timestamps",
+         "tests/test_wizard_segment_cuts.py::test_segmented_flow_hands_shot_cuts_to_planner"),
+        "切点抽取恒返回空＝base 的边界约束整条降级成「没有约束」，两条 base 调用点"
+        "传进去的永远是 None，规则在、接线却静默断开（#343）",
+    ),
+    Mutation(
+        "opening_camera_discipline_not_injected",
+        # 锚点取 v2 指令里那一行（缩进 3 空格，全仓恰好一次；回退指令里同一纪律是
+        # 2 空格缩进，拿裸常量名当锚点会命中两处）。old 含常量名，快档那条
+        # ``test_every_writing_discipline_constant_has_a_mutation`` 靠它认出已有变异。
+        "src/minimax_h3_prompt/segment_prompts.py",
+        "   - {OPENING_CAMERA_CONTINUITY_DISCIPLINE}\n",
+        "",
+        ("tests/test_writing_disciplines_guard.py::"
+         "test_opening_and_action_disciplines_reach_base_only",),
+        "段首沿用机位纪律不进 v2 写段请求＝规划器避不开切点时再没有兜底，段 2 的首帧"
+        "与上一段末帧落在不同机位，接缝成硬切且不报错（#344 / spec #342 US4）",
+    ),
+    Mutation(
+        "support_shift_action_discipline_not_injected",
+        # 同上的 v2 注入行（缩进 3 空格，全仓恰好一次）：摘掉后「改变支撑面的动作必须
+        # 分拍」这条兜底纪律在 v2 路径消失，落座又会被压成一个拍点。
+        "src/minimax_h3_prompt/segment_prompts.py",
+        "   - {SUPPORT_SHIFT_ACTION_DISCIPLINE}\n",
+        "",
+        ("tests/test_writing_disciplines_guard.py::"
+         "test_opening_and_action_disciplines_reach_base_only",),
+        "动作分拍纪律不进 v2 写段请求＝落座／起身这类动作又被压成一个拍点，模型按最快"
+        "插值补完，成片像自由落体（#344 / spec #342 US5）",
+    ),
+    Mutation(
+        "base_boundary_check_switched_to_cut_aligned",
+        # 把 base 的判据换成与多参同向（_boundaries_on_cuts）：两条路线方向相反的约定
+        # 被抹平成一条，base 反过来要求边界落在切点上——串线守卫当场红。
+        # 锚点只圈 elif 那一行（全仓恰好一次；两条 base 用例一起变红，证明结论确实相反）。
+        "src/minimax_h3_prompt/segment_planner.py",
+        "        elif not _base_boundaries_off_cuts(plans, shot_cuts):\n",
+        "        elif not _boundaries_on_cuts(plans, shot_cuts):\n",
+        ("tests/test_segment_planner.py::test_base_plan_rejects_internal_boundary_on_shot_cut",
+         "tests/test_segment_planner.py::test_base_plan_accepts_internal_boundary_off_shot_cut"),
+        "base 判据与多参同向＝落在切点上的规划被放行、避开切点的反而被拒，两条路线"
+        "口径串成一条（spec #342「两套判据各自只在自己的模式里生效」失守）",
+    ),
+    Mutation(
+        "base_planner_instruction_drops_off_cut_rule",
+        # 删掉规划指令里的整条「内部段边界不得落在镜头切点上」（含解释段，全仓恰好
+        # 一次）：模型眼前的请求里不再有这条硬规则，只能凭自身偏好收口到切点，
+        # 合规规划全被拒、回退机械拆分（它恰恰按切点切）——主修静默失效。
+        "src/minimax_h3_prompt/prompts/segment_planner.md",
+        "- **内部段边界不得落在镜头切点上**（首尾帧链专用）：分镜表里每个 `[Shot N]` 的 `At MM:SS.mmm`\n"
+        "  时刻都是一次镜头切换，而段与段之间靠**上一段剥出的尾帧**作为下一段首帧接着演——\n"
+        "  边界落在切点时刻上，下一段开场就是一次硬切，桥接帧与段词互相打架。\n"
+        "  所以段的结尾／下一段的开头必须落在某个镜头的**内部**（切点在 3 / 8 / 14 秒时，边界就不能取 8 或 14 秒）。\n"
+        "  把边界放在**镜内、动作落定的剧情节拍处**——这两件事是同一件事：先按动作与剧情节拍找落点，\n"
+        "  再确认这个整数秒不在切点时刻上；与切点冲突时把边界挪进镜头内部（前后 1-2 秒），\n"
+        "  不要为了对齐切点牺牲动作完整。\n",
+        "",
+        ("tests/test_segment_planner.py::"
+         "test_base_planner_request_states_boundaries_off_shot_cuts",),
+        "规划指令删掉「内部段边界不得落在镜头切点上」＝模型只被告知选剧情节拍，很容易"
+        "正落在切点上，解析器拒收后回退机械拆分又按切点切，主修静默失效（#343）",
+    ),
 )
 
 
