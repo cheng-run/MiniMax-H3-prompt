@@ -2119,6 +2119,35 @@ MUTATIONS: tuple[Mutation, ...] = (
         "CLI 首写调用点丢掉「盘上真有首帧图」＝续跑形态下开场段的起点画面块静默消失，"
         "规划期看到图、写段期不看图，两条口径当场分家（#323／#326）",
     ),
+    Mutation(
+        "clarifier_orientation_dimension_dropped",
+        # 锚点取整个维度小句（含「人物朝向与空间站位」起头到收尾括号）：提示词是
+        # 一整行七项清单，只删半句「左／右／前／后」不够——「朝向」「站位」两词还在，
+        # 模型仍被告知要问一遍，出站断言照绿。必须把小句整段摘掉，四个锚词一起消失，
+        # 守卫才有「被删掉该维度」的真实形态可咬。
+        "src/minimax_h3_prompt/prompts/clarifier.md",
+        "人物朝向与空间站位（主要人物与关键环境物——窗、门、桌、床——各自在画面的"
+        "左／右／前／后，人物面朝哪个方向、身体朝向哪一面）。",
+        "。",
+        ("tests/test_clarification.py::"
+         "test_outbound_request_asks_for_orientation_and_spatial_placement",),
+        "删掉朝向与空间站位维度＝模型不再被告知问人物面朝哪边、窗门桌床在左还是右，"
+        "C1 事故的编造形态（窗被编到身后）从提示词一侧重新打开（#332 E2／#337）",
+    ),
+    Mutation(
+        "clarifier_topic_constraint_dropped",
+        # 锚点只取那条约束的标题半句（全仓恰好一次）：去掉「不得推翻」后模型仍会
+        # 被告知「只能细化」，但「问出来会和主题打架」这层禁止没了——用户答「改到
+        # 庭院」时地点守卫仍要求 forest，答案在首帧节点被打回重试（模块 docstring
+        # 记的已知残余风险就是这样被重新打开的）。守卫断言三个锚词，缺一即红。
+        "src/minimax_h3_prompt/prompts/clarifier.md",
+        "- **只能细化，不得推翻**：",
+        "- **只能细化**：",
+        ("tests/test_clarification.py::"
+         "test_outbound_request_keeps_the_do_not_overturn_the_topic_rule",),
+        "丢掉「不得推翻主题」约束＝澄清问题会去问「要不要换个地点」，答案与主题打架、"
+        "首帧节点被地点守卫打回重试，用户的回答在此处失效（#337 票面「既有约束必须仍在」）",
+    ),
 )
 
 

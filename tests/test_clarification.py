@@ -140,3 +140,37 @@ def test_instruction_file_exists_and_forbids_preamble():
     instruction = clarification._load_instruction()
     assert "问号" in instruction
     assert clarification.CLARIFY_PROMPT_PATH.is_file()
+
+
+# ---------------------------------------------------------------------------
+# 出站请求守卫：朝向与空间站位维度（#337）
+# ---------------------------------------------------------------------------
+# 断言落在**模型眼前收到的请求全文**上，不直读 ``clarifier.md``：提示词措辞会漂，
+# 文件内容断言会随句子改写一起失效，而「模型有没有被告知要问这一块」才是要守的事实。
+# 锚词取语义单元的组合（朝向／站位／左／右），不取整句——整句一改守卫就假红。
+_ORIENTATION_ANCHORS = ("朝向", "站位", "左", "右")
+
+# 「不得问会推翻主题的物件」约束的语义锚（#337 票面要求它必须仍在）。同取组合：
+# 单看「主题」满篇都是，单看「推翻」也可能是别的句子，三个一起才是那条约束。
+_TOPIC_CONSTRAINT_ANCHORS = ("细化", "推翻", "主题")
+
+
+def test_outbound_request_asks_for_orientation_and_spatial_placement():
+    """模型必须被要求问人物朝向与关键环境物的左右前后（#337）。
+
+    变异检验：删掉提示词里那条维度后本条变红（``clarifier_orientation_dimension_dropped``）。
+    """
+    llm = _FakeLLM("庭院是哪个朝代？")
+    generate_clarifying_questions("秋日庭院里的橘猫", llm, 1)
+    request = llm.requests[0]
+    missing = [anchor for anchor in _ORIENTATION_ANCHORS if anchor not in request]
+    assert not missing, f"出站请求里没有朝向/站位的问法锚词：{missing}"
+
+
+def test_outbound_request_keeps_the_do_not_overturn_the_topic_rule():
+    """补了新维度也不能丢掉「只能细化，不得推翻主题」的既有约束（#337 票面）。"""
+    llm = _FakeLLM("庭院是哪个朝代？")
+    generate_clarifying_questions("秋日庭院里的橘猫", llm, 1)
+    request = llm.requests[0]
+    missing = [anchor for anchor in _TOPIC_CONSTRAINT_ANCHORS if anchor not in request]
+    assert not missing, f"出站请求里缺少「不得推翻主题」约束的锚词：{missing}"
