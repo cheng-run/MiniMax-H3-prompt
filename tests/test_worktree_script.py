@@ -61,6 +61,10 @@ def test_add_copies_untracked_notes_without_nested_directories(tmp_path):
 
     result = _run(repo, "add", "900")
     assert result.returncode == 0, result.stderr
+    # 带进来的未跟踪文件要打在屏幕上：混在 status 里很容易被顺手提交进某一票
+    # （2026-11-19 #342 实测一份旧探针被无声带进 5 棵树）。只断言文件名——这是临时
+    # 仓里的 fixture，写成仓内 docs 路径会被 test_doc_references_tracked 当成悬空引用。
+    assert "untracked.md" in result.stdout, "add 没列出带入的未跟踪文件"
     target = repo / "worktree" / "ticket-900"
     assert target.is_dir(), "工作树没建出来"
     assert (target / "docs" / "research" / "untracked.md").is_file(), \

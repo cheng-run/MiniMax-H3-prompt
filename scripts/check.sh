@@ -106,6 +106,11 @@ FAST_TESTS=(
   tests/test_segment_planner.py
   tests/test_wizard_segment_cuts.py
   tests/test_acceptance_report.py
+  # 共享函数的**真实调用点接线**（#342 复审 retro）：向导把修订/切点交给分段规划、
+  # API 侧把切点交给规划层。2026-11-19 实测：给 plan_segments 加 shot_cuts 后，
+  # 这里的桩没接住，fast 绿着过、全量跑到第 7 分钟才红——两份合计 5 秒就能拦住。
+  tests/test_wizard_segment_revisions.py
+  tests/test_api_segment_planning.py
 )
 
 # 变更集＝「工作区 ∪ 本分支相对 main 的已提交改动」（retro 2026-11-14）。

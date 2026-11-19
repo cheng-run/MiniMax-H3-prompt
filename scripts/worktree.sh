@@ -301,6 +301,14 @@ case "${1:-}" in
       base_snapshot="$MAIN_ROOT/worktree/.base-$id/tests"
     fi
 
+    # 主树的未跟踪文件被带进工作树：必须让建树的人看见。否则它们混在 status 里，
+    # 很容易被顺手 `git add` 进某一票的提交（2026-11-19 #342 实测：一份旧探针
+    # 被无声带进 5 棵树，每份简报都要手写「别提交它」）。
+    if [ -s "$backfilled" ]; then
+      echo "带入主树未跟踪文件（不是本工作树的新增，不要提交）："
+      sed 's/^/  - /' "$backfilled"
+    fi
+
     cat <<EOF
 已建工作树：$target
   分支：$branch（基线 $base）

@@ -3,7 +3,7 @@
 生成 MiniMax H3 视频生成提示词并把长视频拆成可逐段执行的工具。
 项目术语与架构见 `CONTEXT.md`；动手前先读它。
 skills 文档里说的 `GLOSSARY.md` 即本仓 `CONTEXT.md`——新词条一律写进 `CONTEXT.md`。
-查代码用 Grep 工具，不要用 Git Bash 的 `grep -r`——本仓中文路径/中文模式下它会静默 0 命中（2026-11-15 实测）。本机 shell 里的 `rg` 只是个落到 `rtk` 的函数、真正调用报 not found（2026-11-17 实测），别指望它。
+查代码一律用 Grep 工具，不要用 Bash 的 `grep`（含单文件 `grep -n`）——本机 shell 里的 `rg` 只是个落到 `rtk` 的函数、真正调用报 not found（2026-11-17 实测），而 `rtk` 会把多命中的 grep 结果摘要化成「N matches + 剩余见某个 log 文件」（2026-11-19 实测，单文件 `grep -n '^def '` 也被截断）；`grep -r` 另有中文路径/中文模式下静默 0 命中（2026-11-15 实测）。
 
 ## Agent skills
 
