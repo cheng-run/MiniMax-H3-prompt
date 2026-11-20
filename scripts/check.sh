@@ -111,6 +111,12 @@ FAST_TESTS=(
   # 这里的桩没接住，fast 绿着过、全量跑到第 7 分钟才红——两份合计 5 秒就能拦住。
   tests/test_wizard_segment_revisions.py
   tests/test_api_segment_planning.py
+  # 提示词「## 输入」声明的来源必须真的进了节点请求（retro 2026-11-20）。#351 的悬空输入
+  # 是靠人读代码发现的，两轴复审都报了它、仓里却零机检；约 1.4s。
+  tests/test_role_prompt_inputs.py
+  # #348 的 5xx 日志守卫（约 0.9s）：原先只在全量跑，改坏 _log_server_fault 时
+  # 提交仍然绿，要等 14 分钟才响——正是「新守卫没挂快档」的老毛病。
+  tests/test_api_problems.py
 )
 
 # 变更集＝「工作区 ∪ 本分支相对 main 的已提交改动」（retro 2026-11-14）。
