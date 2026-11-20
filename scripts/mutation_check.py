@@ -2622,6 +2622,21 @@ MUTATIONS: tuple[Mutation, ...] = (
         "5xx 不留痕＝服务端故障在 logs/app-*.log 里查不到，病因只能靠复现猜"
         "（2026-11-19 #340 的 502 原样复发，#348）",
     ),
+    # ------------------------------------------------------------------
+    # retro 2026-11-20：提示词声明的输入必须真的进了节点请求
+    # ------------------------------------------------------------------
+    Mutation(
+        "role_prompt_declares_an_input_the_node_lacks",
+        # 把编剧提示词的「## 输入」改回 #351 之前的错措辞（声明制作计划与分场剧本，
+        # 而节点一个都不传）。这正是 #351 被两轴复审抓到的形态，只是当时没有机检。
+        "src/minimax_h3_prompt/prompts/screenwriter.md",
+        "导演阐述 + 原始剧情 + 起步澄清（+ 创意锁定）。",
+        "导演阐述 + 制作计划 + 分场剧本。",
+        ("tests/test_role_prompt_inputs.py::"
+         "test_declared_inputs_reach_the_node_request",),
+        "提示词声明了节点拿不到的输入＝模型被要求引用看不见的事实，只能编（#351 复审"
+        "两轴都报过；retro 2026-11-20 补机检）",
+    ),
     Mutation(
         "problem_log_threshold_widened_to_4xx",
         # 把下界放宽到 400：4xx 也记 error。反向断言（409/404 静默）当场红。
