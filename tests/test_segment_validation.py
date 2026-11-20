@@ -120,14 +120,27 @@ def test_build_prompt_only_checks_key_facts_and_excludes_unobservable_details():
     """判据提示词改「关键事实冲突」口径：场景/地点/在场/大动作/关键道具。
 
     自身左右、具体哪只手、视线朝向、未入画部位不参与判定；描述没覆盖也不算不符。
+    #360 在既有两类上各补一项（支撑面 / 道具形态或类型），并把「这两项不在排除
+    清单内」写进提示词——这条区分本身是判据的一部分，不能只靠模型领会。
     """
     prompt = build_end_hook_prompt("人物停在门口，双脚一前一后", "画面仍是暗的")
     assert "人物停在门口，双脚一前一后" in prompt
     assert "画面仍是暗的" in prompt
     assert "关键事实" in prompt
     assert "场景" in prompt and "在场" in prompt and "道具" in prompt
-    for excluded in ("左右", "哪只手", "视线", "未入画"):
-        assert excluded in prompt
+    # 两个新增项必须落在**判据那一行**：只出现在排除清单里就等于没纳入判定。
+    criterion = next(line for line in prompt.splitlines() if "场景/地点" in line)
+    assert "支撑面" in criterion
+    assert "形态" in criterion
+    # 排除清单仍完整保留原四项，且新增的两项**不在**其中（#360 的区分句）。
+    excluded = next(line for line in prompt.splitlines() if "不算不符" in line)
+    for word in ("左右", "哪只手", "视线", "未入画"):
+        assert word in excluded
+    assert "支撑面" not in excluded
+    assert "形态" not in excluded
+    distinction = next(line for line in prompt.splitlines() if "排除清单" in line)
+    assert "支撑面" in distinction and "形态" in distinction
+    assert "不在排除清单内" in distinction
 
 
 def test_semantic_warning_text_keeps_plan_and_actual_tail_for_review():

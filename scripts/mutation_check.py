@@ -1633,6 +1633,30 @@ MUTATIONS: tuple[Mutation, ...] = (
         "每段都挂一条假提示（#270；ADR 0039 起语义检查只提示、不阻断）",
     ),
     Mutation(
+        "end_hook_prompt_drops_support_surface",
+        "src/minimax_h3_prompt/segment_validation.py",
+        '        "只判断**关键事实**是否冲突：场景/地点（含人物所坐或所靠的支撑面，"\n'
+        '        "如堤顶还是矮墙、桥面还是台阶）、主体是否在场、本段的大动作是否发生、"\n',
+        '        "只判断**关键事实**是否冲突：场景/地点、主体是否在场、'
+        '本段的大动作是否发生、"\n',
+        ("tests/test_segment_validation.py"
+         "::test_build_prompt_only_checks_key_facts_and_excludes_unobservable_details",),
+        "「场景/地点」类丢掉「人物所坐或所靠的支撑面」＝坐在矮墙而计划是堤顶这类偏离"
+        "重新看不见，判据退回 #360 之前的口径",
+    ),
+    Mutation(
+        "end_hook_prompt_excludes_support_surface",
+        "src/minimax_h3_prompt/segment_validation.py",
+        '        "以下情况不算不符：人物自身的左右、具体是哪只手、视线朝向、'
+        '描述里没有覆盖到的内容、"\n',
+        '        "以下情况不算不符：人物自身的左右、具体是哪只手、视线朝向、'
+        '人物所坐或所靠的支撑面、描述里没有覆盖到的内容、"\n',
+        ("tests/test_segment_validation.py"
+         "::test_build_prompt_only_checks_key_facts_and_excludes_unobservable_details",),
+        "把「支撑面」塞进排除清单＝同一件事既要求核又说不算不符，判据自相矛盾且"
+        "那条区分句被架空（#360 明确要求「不在排除清单内」）",
+    ),
+    Mutation(
         "event_log_latest_of_type_takes_the_first_match",
         "src/minimax_h3_prompt/workbench_store.py",
         "        return matches[-1] if matches else None\n",
