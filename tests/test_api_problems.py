@@ -69,3 +69,60 @@ def test_openapi_contains_problem_detail_and_common_error_responses() -> None:
     health_responses = schema["paths"]["/api/v1/health"]["get"]["responses"]
     for code in ("404", "422", "500"):
         assert code in health_responses
+
+
+# ---------------------------------------------------------------------------
+# 5xx 才记 error 日志（#348，父 #296 的 F5）
+# ---------------------------------------------------------------------------
+# 为什么要有：按异常类型分发的三个处理器（StarletteHTTPException / ProblemError /
+# WorkbenchError）原先**一条日志都不写**，2026-11-19 #340 验收里的一次 502
+# （clarification_generation_failed）在 logs/app-*.log 里毫无记录，病因只能靠复现猜。
+# 判据是「状态码 ≥ 500」——4xx 是正常客户端错误，记 error 只会淹没真故障。
+
+
+def _problem_logs(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records
+            if r.name.startswith("minimax_h3_prompt.api.problems")]
+
+
+def test_server_error_domain_fault_is_logged_with_code_and_path(caplog) -> None:
+    """502 走领域错误处理器时要留一条 error 日志，含错误码、方法与路径、异常类名。"""
+    import logging
+
+    with caplog.at_level(logging.ERROR, logger="minimax_h3_prompt.api.problems"):
+        resp = _test_client().get("/api/v1/_probe/fault")
+
+    assert resp.status_code == 502
+    # 响应体一字不变：改了日志不许动契约。
+    body = _assert_is_problem(resp)
+    assert body["status"] == 502
+    assert body["code"] == "upstream_fault"
+
+    messages = _problem_logs(caplog)
+    assert messages, "5xx 领域错误没有产生任何日志（#348 的原始缺陷）"
+    joined = "\n".join(messages)
+    assert "upstream_fault" in joined, "日志里没有错误码"
+    assert "/api/v1/_probe/fault" in joined, "日志里没有请求路径"
+    assert "UpstreamFault" in joined, "日志里没有异常类名"
+
+
+def test_client_error_domain_fault_stays_silent(caplog) -> None:
+    """4xx 不写 error 日志：正常失败路径保持静默，否则真故障会被刷屏淹掉。"""
+    import logging
+
+    with caplog.at_level(logging.ERROR, logger="minimax_h3_prompt.api.problems"):
+        resp = _test_client().get("/api/v1/_probe/client-error")
+
+    assert resp.status_code == 409
+    assert _problem_logs(caplog) == [], "4xx 不该产生 error 日志（#348）"
+
+
+def test_not_found_stays_silent(caplog) -> None:
+    """HTTPException 那一路的 4xx 同样静默。"""
+    import logging
+
+    with caplog.at_level(logging.ERROR, logger="minimax_h3_prompt.api.problems"):
+        resp = _test_client().get("/api/v1/this-path-does-not-exist")
+
+    assert resp.status_code == 404
+    assert _problem_logs(caplog) == [], "404 不该产生 error 日志（#348）"

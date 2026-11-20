@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 # Problem Details 的媒体类型：前端据此识别「这是本服务的标准错误」。
 PROBLEM_CONTENT_TYPE = "application/problem+json"
 
+# 记 error 日志的状态码下界（#348）：5xx 说明服务端或上游故障、必须留痕；4xx 是正常的
+# 客户端错误，记 error 只会把真故障淹掉。判据只此一处，三个分发处理器共用。
+_SERVER_ERROR_THRESHOLD = 500
+
 # 常见状态码的中文短标题；未登记的退回 HTTP 标准短语。
 _TITLE_BY_STATUS = {
     400: "请求无法解析",
@@ -130,6 +134,32 @@ def _problem_response(
         status, detail, request.url.path, code=code, errors=errors)
 
 
+def _log_server_fault(
+    status: int, request: Request, exc: Exception, code: str | None
+) -> None:
+    """状态码 ≥ 500 才写 error 日志（#348）。
+
+    为什么只记 5xx：4xx 是正常的客户端错误（400/401/404/422），逐条记 error 会把
+    真故障淹掉；而 5xx 说明服务端或上游出了故障，必须留痕——2026-11-19 #340 验收里
+    一次 502（`clarification_generation_failed`）在 `logs/app-*.log` 里毫无记录，
+    病因只能靠复现猜。
+
+    判据只在这里写一次（``_SERVER_ERROR_THRESHOLD``），三个分发处理器各调一次，
+    不各抄一份字面量——抄三份就会有一份跟着改、另两份漂。
+    """
+    if status < _SERVER_ERROR_THRESHOLD:
+        return
+    from ..workbench_store import WorkbenchError
+
+    logger.error(
+        "服务端故障 %s %s -> %s（%s）：%s",
+        request.method, request.url.path, status,
+        type(exc).__name__, code or "-",
+        # 领域错误是**预期内**的失败路径，堆栈只会淹没有用信息；未预期异常才带堆栈。
+        exc_info=not isinstance(exc, (ProblemError, WorkbenchError)),
+    )
+
+
 def install_problem_handlers(app: FastAPI) -> None:
     """把三类失败路径都挂到统一的 problem+json 处理器上。"""
 
@@ -137,6 +167,7 @@ def install_problem_handlers(app: FastAPI) -> None:
     async def _handle_http_exception(
         request: Request, exc: StarletteHTTPException
     ) -> JSONResponse:
+        _log_server_fault(exc.status_code, request, exc, None)
         return _problem_response(exc.status_code, str(exc.detail), request)
 
     @app.exception_handler(RequestValidationError)
@@ -153,6 +184,7 @@ def install_problem_handlers(app: FastAPI) -> None:
     async def _handle_problem_error(
         request: Request, exc: ProblemError
     ) -> JSONResponse:
+        _log_server_fault(exc.status_code, request, exc, exc.code)
         return _problem_response(
             exc.status_code, exc.detail, request, code=exc.code)
 
@@ -164,6 +196,7 @@ def install_problem_handlers(app: FastAPI) -> None:
     async def _handle_workbench_error(
         request: Request, exc: WorkbenchError
     ) -> JSONResponse:
+        _log_server_fault(exc.status_code, request, exc, exc.code)
         return _problem_response(
             exc.status_code, str(exc), request, code=exc.code)
 
