@@ -20,3 +20,31 @@ def validate(count: int) -> dict[str, int]:
 def boom() -> None:
     """故意抛未处理异常，且消息里塞入密钥与绝对路径，用来验证 500 响应会滤掉它们。"""
     raise RuntimeError("secret-token=abc123 at D:\\secret\\internal\\path.py")
+
+
+@router.get("/fault")
+def fault() -> None:
+    """抛一个 5xx 的**领域**错误（走 ``ProblemError`` 处理器，不是兜底那一档）。
+
+    #348：按异常类型分发的处理器原先一条日志都不写，#340 验收里的一次 502 就这样
+    在服务端日志里毫无记录。这条路由让「5xx 要留痕、4xx 不写」可被测试驱动。
+    """
+    from ..problems import ProblemError
+
+    class UpstreamFault(ProblemError):
+        status_code = 502
+        code = "upstream_fault"
+
+    raise UpstreamFault("上游服务响应失败。")
+
+
+@router.get("/client-error")
+def client_error() -> None:
+    """抛一个 4xx 的领域错误：它**不该**产生 error 日志（#348 的反向断言）。"""
+    from ..problems import ProblemError
+
+    class ClientFault(ProblemError):
+        status_code = 409
+        code = "client_conflict"
+
+    raise ClientFault("资源状态冲突。")

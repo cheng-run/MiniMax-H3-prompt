@@ -2607,6 +2607,32 @@ MUTATIONS: tuple[Mutation, ...] = (
         "动机弱化版误注入多参段写纪律块＝已验收的多参产物措辞被动过（2026-11-18／19 两次"
         "裁定 ref 不做段写层动机），而 base 侧的守卫全部照绿（#353 / spec #349）",
     ),
+    # ------------------------------------------------------------------
+    # #348：5xx 才记 error 日志（父 #296 的 F5）
+    # ------------------------------------------------------------------
+    Mutation(
+        "problem_server_fault_not_logged",
+        # 锚点取那行提前返回（全仓恰好一次）：整个日志调用变成死代码，5xx 又回到
+        # 「服务端日志毫无记录」的原始缺陷（2026-11-19 #340 那次 502 就是这样丢的）。
+        "src/minimax_h3_prompt/api/problems.py",
+        "    if status < _SERVER_ERROR_THRESHOLD:\n        return\n",
+        "    return\n",
+        ("tests/test_api_problems.py::"
+         "test_server_error_domain_fault_is_logged_with_code_and_path",),
+        "5xx 不留痕＝服务端故障在 logs/app-*.log 里查不到，病因只能靠复现猜"
+        "（2026-11-19 #340 的 502 原样复发，#348）",
+    ),
+    Mutation(
+        "problem_log_threshold_widened_to_4xx",
+        # 把下界放宽到 400：4xx 也记 error。反向断言（409/404 静默）当场红。
+        # 锚点取赋值整行（全仓恰好一次）。
+        "src/minimax_h3_prompt/api/problems.py",
+        "_SERVER_ERROR_THRESHOLD = 500",
+        "_SERVER_ERROR_THRESHOLD = 400",
+        ("tests/test_api_problems.py::test_client_error_domain_fault_stays_silent",
+         "tests/test_api_problems.py::test_not_found_stays_silent"),
+        "判据放宽到 ≥400＝正常客户端错误也记 error，日志被刷屏、真故障被淹没（#348）",
+    ),
 )
 
 
