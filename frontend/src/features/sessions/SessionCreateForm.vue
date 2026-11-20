@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { ApiError, createSession, listClarificationQuestions, startSessionJob } from '@/api/client'
@@ -73,8 +73,16 @@ const clarificationQuestions = ref<string[]>([])
 const clarificationAnswers = ref<string[]>([])
 // 生成失败是**不阻断**的一行提示：它不是错误，用户下一步照常能建会话。
 const clarificationNotice = ref<string | null>(null)
+// 失败态下一次「重试拉取」正在飞：失败提示与按钮继续留在原地（按钮进加载态），
+// 否则阶段一置回 idle，用户看到的是提示整块消失、又没别的东西在转。
+const clarificationRetrying = ref(false)
 // 创建进行中的阶段只影响按钮文案：拉问题与建会话是两次等待，不能让用户以为卡住了。
 const createStage = ref<'questions' | 'creating'>('creating')
+
+// 失败块（提示 + 重试按钮）的可见条件：停在失败态，或正为失败态重试。
+const showsClarificationFailure = computed(
+  () => clarificationStage.value === 'failed' || clarificationRetrying.value,
+)
 
 // 时长两端都限；越界即时提示，不用等提交后才由服务端 422 回来。
 const durationError = computed(() => {
@@ -142,18 +150,15 @@ async function onSubmit(): Promise<void> {
   try {
     questions = await listClarificationQuestions(form.plot.trim())
   } catch (error) {
+    submitting.value = false
     // 生成失败不阻断创建（spec US4）：显示一行提示，把出口留在同一个按钮上。
     // 502 与网络错误（``status === 0``，拿不到响应体）都算「这一次拿不到问题」→ 降级
     // 为直接建会话；只有 401/403 等其它状态码按提交失败说话（鉴权/请求错误要让用户看见）。
-    const status = error instanceof ApiError ? error.status : 0
-    if (status === 502 || status === 0) {
-      clarificationStage.value = 'failed'
-      clarificationNotice.value = '澄清问题生成失败，可直接开始'
-      submitting.value = false
+    if (isDegradableClarificationError(error)) {
+      enterClarificationFailed()
       return
     }
     submitError.value = errorMessage(error)
-    submitting.value = false
     return
   }
 
@@ -168,11 +173,88 @@ async function onSubmit(): Promise<void> {
     return
   }
 
+  showClarificationPanel(questions)
+}
+
+/**
+ * 显式重试（#359）：失败态下点提示旁的按钮＝把阶段置回空闲并**重新拉一次**。
+ *
+ * 与走 `onSubmit` 的区别只在于入口：拉取成功后一样展开面板，失败仍停在失败态
+ * （按钮保持可点），不另走一条「有问题就建会话」的分支。加载态复用 `submitting`——
+ * 与主按钮同一把重入锁，两个按钮都打不出并行请求。
+ */
+async function retryClarifications(): Promise<void> {
+  if (submitting.value || clarificationRetrying.value) {
+    return
+  }
+  submitError.value = null
+  // 阶段按票面置回空闲态；失败块靠 clarificationRetrying 留在原地（否则提示整块消失、
+  // 又没别的东西在转）。
+  clarificationStage.value = 'idle'
+  submitting.value = true
+  clarificationRetrying.value = true
+  createStage.value = 'questions'
+
+  let questions: string[]
+  try {
+    questions = await listClarificationQuestions(form.plot.trim())
+  } catch (error) {
+    submitting.value = false
+    clarificationRetrying.value = false
+    // 任何一种失败都留在失败态：换了一种错误不该把重试入口一并收走（那又只剩刷新页面）。
+    enterClarificationFailed()
+    if (!isDegradableClarificationError(error)) {
+      // 鉴权/请求错误照常让用户看见；降级失败只有那一行提示，不当成错误。
+      submitError.value = errorMessage(error)
+    }
+    return
+  }
+
+  submitting.value = false
+  clarificationRetrying.value = false
+
+  if (questions.length === 0) {
+    // 这一次没问到问题＝这个主题不需要澄清：清掉失败痕迹，但不顺手建会话——
+    // 用户点的是「重试拉取」，没有表达「现在创建」。
+    clarificationStage.value = 'idle'
+    clarificationNotice.value = null
+    return
+  }
+  showClarificationPanel(questions)
+}
+
+/** 502 与网络错误同属「这一次拿不到问题」：降级为直接建会话，不算提交失败。 */
+function isDegradableClarificationError(error: unknown): boolean {
+  const status = error instanceof ApiError ? error.status : 0
+  return status === 502 || status === 0
+}
+
+function enterClarificationFailed(): void {
+  clarificationStage.value = 'failed'
+  clarificationNotice.value = '澄清问题生成失败，可直接开始'
+}
+
+function showClarificationPanel(questions: string[]): void {
   // 拉到问题了：展开面板，交出「答或跳过」的决定权。此时**还不建会话**。
+  // 失败痕迹一并清掉——上一次的失败与这一次的问题不是同一回事。
   clarificationQuestions.value = questions
   clarificationAnswers.value = questions.map(() => '')
+  clarificationNotice.value = null
   clarificationStage.value = 'asking'
 }
+
+// 剧情变了＝换了一个主题（#359）：旧失败态描述的是上一次的提问结果，留着会让用户
+// 改完主题再点「创建」时拿走旧失败态直接建会话——那等于重试按钮只治了一半。
+// 只在 failed 复位：面板已展开（asking）时的一次文本编辑不该把用户的作答冲掉。
+watch(
+  () => form.plot,
+  () => {
+    if (clarificationStage.value === 'failed') {
+      clarificationStage.value = 'idle'
+      clarificationNotice.value = null
+    }
+  },
+)
 
 /** 面板上的答案按「有回答的条目」收成结构化问答对；空回答＝没澄清，服务端也会滤掉。 */
 function collectPairs(): { question: string; answer: string }[] {
@@ -464,10 +546,22 @@ async function createWithClarifications(
       </div>
     </section>
     <!-- 生成失败／跳过后的出口仍挂在同一个提交按钮上；这一行只是让用户知道
-         「没有问到问题」不是他漏做了什么。 -->
-    <p v-else-if="clarificationNotice" class="field-hint" data-notice="clarification">
-      {{ clarificationNotice }}
-    </p>
+         「没有问到问题」不是他漏做了什么。
+         #359：旁边给一个显式恢复入口——不点它、不改剧情时行为与此前完全一致
+         （再点「创建并开始」仍直接建会话，不携带问答对）。 -->
+    <div v-else-if="showsClarificationFailure" class="clarification-failure">
+      <p class="field-hint" data-notice="clarification">
+        {{ clarificationNotice }}
+      </p>
+      <Button
+        variant="secondary"
+        data-action="clarification-retry"
+        :disabled="clarificationRetrying || submitting"
+        @click="retryClarifications"
+      >
+        {{ clarificationRetrying || submitting ? '正在重新获取…' : '重试拉取澄清' }}
+      </Button>
+    </div>
 
     <div class="actions">
       <Button type="submit" :disabled="submitting">
@@ -571,5 +665,15 @@ async function createWithClarifications(
 }
 .clarification-actions > * {
   flex: 0 1 auto;
+}
+/* 失败块的按钮跟在提示右侧：提示是内联降级语，不是整行占位的错误面板。 */
+.clarification-failure {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.clarification-failure .field-hint {
+  flex: 1 1 200px;
 }
 </style>

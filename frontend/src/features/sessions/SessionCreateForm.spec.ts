@@ -386,32 +386,41 @@ describe('SessionCreateForm 导演台路线（D8-1）', () => {
 describe('SessionCreateForm 起步澄清', () => {
   const questionsUrl = 'http://localhost/api/v1/clarification-questions'
 
+  // 生成失败的 problem+json：502 与网络错误同属「这一次拿不到问题」的降级信号。
+  function failedResponse(status = 502) {
+    return HttpResponse.json(
+      {
+        type: 'about:blank',
+        title: '澄清问题生成失败',
+        status,
+        detail: '网关超时',
+        instance: '/api/v1/clarification-questions',
+        code: 'clarification_generation_failed',
+      },
+      { status, headers: { 'Content-Type': 'application/problem+json' } },
+    )
+  }
+
   // 默认把「拉问题 → 建会话 → 起跑」三段都接上，只在各用例覆盖自己关心的那一段。
+  // ``questionsStatus`` 传数组＝按次给状态（重试用例要「先失败、后成功」）。
   function stubFlow({
     questions = ['窗在人物哪一侧？', '人物身体面朝哪边？'] as string[] | null,
     questionsStatus = 200,
     created = () => {},
   }: {
     questions?: string[] | null
-    questionsStatus?: number
+    questionsStatus?: number | number[]
     created?: (body: Record<string, unknown> | null) => void
   } = {}) {
     const calls = { questions: 0, create: 0 }
+    const statuses = Array.isArray(questionsStatus) ? questionsStatus : [questionsStatus]
     server.use(
       http.get(questionsUrl, () => {
+        // 用掉的次数超过给定序列时沿用最后一个状态（序列只描述开头几次）。
+        const status = statuses[Math.min(calls.questions, statuses.length - 1)]
         calls.questions += 1
-        if (questionsStatus >= 400) {
-          return HttpResponse.json(
-            {
-              type: 'about:blank',
-              title: '澄清问题生成失败',
-              status: questionsStatus,
-              detail: '网关超时',
-              instance: '/api/v1/clarification-questions',
-              code: 'clarification_generation_failed',
-            },
-            { status: questionsStatus, headers: { 'Content-Type': 'application/problem+json' } },
-          )
+        if (status >= 400) {
+          return failedResponse(status)
         }
         return HttpResponse.json(questions ?? [])
       }),
@@ -507,10 +516,140 @@ describe('SessionCreateForm 起步澄清', () => {
     // 不展开作答面板，但提交入口还在（不能把用户卡在表单上）。
     expect(wrapper.find('[data-panel="clarification"]').exists()).toBe(false)
     expect(submitButton(wrapper).attributes('disabled')).toBeUndefined()
+    // 失败态有显式恢复入口（#359）：不必刷新页面重填表单就能再问一次。
+    expect(wrapper.find('[data-action="clarification-retry"]').exists()).toBe(true)
 
     await wrapper.find('form').trigger('submit')
     await settle()
 
+    expect(calls.create).toBe(1)
+    expect(body).not.toHaveProperty('clarification_pairs')
+  })
+
+  it('点重试会重新拉取澄清问题并展开面板', async () => {
+    // 第一次 502（降级失败态），第二次成功：序列只描述前两次，之后沿用最后一个。
+    const calls = stubFlow({ questionsStatus: [502, 200] })
+
+    const { wrapper } = mountWithPlugins(SessionCreateForm, { withRouter: true })
+    await wrapper.find('textarea[name="plot"]').setValue('雨夜旧信')
+
+    await wrapper.find('form').trigger('submit')
+    await settle()
+    expect(calls.questions).toBe(1)
+    expect(wrapper.find('[data-panel="clarification"]').exists()).toBe(false)
+
+    await wrapper.find('[data-action="clarification-retry"]').trigger('click')
+    await settle()
+
+    // 重试真的重发了一次请求，并把面板展出来；这时仍然没有建会话。
+    expect(calls.questions).toBe(2)
+    expect(calls.create).toBe(0)
+    expect(wrapper.find('[data-panel="clarification"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('窗在人物哪一侧？')
+    // 失败提示随面板展开退场，不再与面板并存。
+    expect(wrapper.text()).not.toContain('澄清问题生成失败，可直接开始')
+    expect(wrapper.find('[data-action="clarification-retry"]').exists()).toBe(false)
+  })
+
+  it('点重试再次失败时仍停在失败态，提示仍在且按钮可再点', async () => {
+    const calls = stubFlow({ questionsStatus: 502 })
+
+    const { wrapper } = mountWithPlugins(SessionCreateForm, { withRouter: true })
+    await wrapper.find('textarea[name="plot"]').setValue('雨夜旧信')
+
+    await wrapper.find('form').trigger('submit')
+    await settle()
+    expect(wrapper.find('[data-action="clarification-retry"]').exists()).toBe(true)
+
+    await wrapper.find('[data-action="clarification-retry"]').trigger('click')
+    await settle()
+
+    expect(calls.questions).toBe(2)
+    expect(calls.create).toBe(0)
+    expect(wrapper.text()).toContain('澄清问题生成失败，可直接开始')
+    expect(wrapper.find('[data-panel="clarification"]').exists()).toBe(false)
+    // 失败后按钮回到可点状态：再点一次应当能发出第三次请求。
+    const retry = wrapper.find('[data-action="clarification-retry"]')
+    expect(retry.attributes('disabled')).toBeUndefined()
+    await retry.trigger('click')
+    await settle()
+    expect(calls.questions).toBe(3)
+  })
+
+  it('拉取期间重试按钮进加载态，重复点击不会并行发多次请求', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    let questionCalls = 0
+    let createCalls = 0
+    server.use(
+      http.get(questionsUrl, async () => {
+        questionCalls += 1
+        if (questionCalls === 1) {
+          return failedResponse(502)
+        }
+        await gate
+        return HttpResponse.json(['窗在人物哪一侧？'])
+      }),
+      http.post(createUrl, () => {
+        createCalls += 1
+        return HttpResponse.json(makeDetail({ session_id: 'sess-1' }), { status: 201 })
+      }),
+      http.post(jobsUrl, () => HttpResponse.json(makeJob(), { status: 202 })),
+    )
+
+    const { wrapper } = mountWithPlugins(SessionCreateForm, { withRouter: true })
+    await wrapper.find('textarea[name="plot"]').setValue('雨夜旧信')
+
+    await wrapper.find('form').trigger('submit')
+    await settle()
+    expect(questionCalls).toBe(1)
+
+    await wrapper.find('[data-action="clarification-retry"]').trigger('click')
+    await flushPromises()
+
+    // 第二次请求还挂着：按钮已禁用，重复点击不会再发一次。
+    const retry = wrapper.find('[data-action="clarification-retry"]')
+    expect(retry.attributes('disabled')).toBeDefined()
+    await retry.trigger('click')
+    await flushPromises()
+    expect(questionCalls).toBe(2)
+    expect(createCalls).toBe(0)
+
+    release()
+    await settle()
+    expect(wrapper.find('[data-panel="clarification"]').exists()).toBe(true)
+  })
+
+  it('失败态下改剧情复位到空闲态：再点创建会重新拉问题而不是直接建会话', async () => {
+    let body: Record<string, unknown> | null = null
+    const calls = stubFlow({ questionsStatus: [502, 200], created: (payload) => (body = payload) })
+
+    const { wrapper } = mountWithPlugins(SessionCreateForm, { withRouter: true })
+    await wrapper.find('textarea[name="plot"]').setValue('雨夜旧信')
+
+    await wrapper.find('form').trigger('submit')
+    await settle()
+    // 失败态在：提示与重试按钮都在。
+    expect(wrapper.text()).toContain('澄清问题生成失败，可直接开始')
+    expect(calls.questions).toBe(1)
+
+    // 改剧情＝换了主题，旧失败态不再代表这一次的提问结果，复位到空闲态。
+    await wrapper.find('textarea[name="plot"]').setValue('清晨海港')
+    expect(wrapper.text()).not.toContain('澄清问题生成失败，可直接开始')
+    expect(wrapper.find('[data-action="clarification-retry"]').exists()).toBe(false)
+
+    await wrapper.find('form').trigger('submit')
+    await settle()
+
+    // 复位后再点创建是「重新拉问题」，不是拿旧失败态直接建会话。
+    expect(calls.questions).toBe(2)
+    expect(calls.create).toBe(0)
+    expect(wrapper.find('[data-panel="clarification"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('窗在人物哪一侧？')
+
+    // 面板上的「跳过」仍然能走到创建，且不携带问答对。
+    await wrapper.find('[data-action="clarification-skip"]').trigger('click')
+    await settle()
     expect(calls.create).toBe(1)
     expect(body).not.toHaveProperty('clarification_pairs')
   })

@@ -168,6 +168,39 @@ MUTATIONS: tuple[Mutation, ...] = (
         runner="vitest",
     ),
     Mutation(
+        "frontend_clarification_retry_does_not_refetch",
+        "frontend/src/features/sessions/SessionCreateForm.vue",
+        "async function retryClarifications(): Promise<void> {\n"
+        "  if (submitting.value || clarificationRetrying.value) {\n"
+        "    return\n"
+        "  }",
+        "async function retryClarifications(): Promise<void> {\n"
+        "  if (true) {\n"
+        "    return\n"
+        "  }",
+        ("src/features/sessions/SessionCreateForm.spec.ts"
+         "::点重试会重新拉取澄清问题并展开面板",),
+        "重试按钮点了不重拉＝失败态仍然只有一个出口（刷新整页重填表单），"
+        "按钮成了摆设（spec #356 缝 4）",
+        runner="vitest",
+    ),
+    Mutation(
+        "frontend_clarification_failure_survives_plot_edit",
+        "frontend/src/features/sessions/SessionCreateForm.vue",
+        "    if (clarificationStage.value === 'failed') {\n"
+        "      clarificationStage.value = 'idle'\n"
+        "      clarificationNotice.value = null\n"
+        "    }",
+        "    if (clarificationStage.value === 'failed') {\n"
+        "      clarificationNotice.value = null\n"
+        "    }",
+        ("src/features/sessions/SessionCreateForm.spec.ts"
+         "::失败态下改剧情复位到空闲态：再点创建会重新拉问题而不是直接建会话",),
+        "改剧情不复位失败态＝用户改了主题再点创建仍带着旧失败态直接建会话，"
+        "重试按钮只治了一半（spec #356 缝 4 的隐藏出口）",
+        runner="vitest",
+    ),
+    Mutation(
         "session_detail_leaks_stage_state",
         "src/minimax_h3_prompt/workbench_store.py",
         "    artifacts: list[ArtifactInfo] = Field(default_factory=list)\n"
