@@ -788,7 +788,7 @@ MUTATIONS: tuple[Mutation, ...] = (
         # 文本。清空后 base 两条写段路径的 f-string 才真的把整条配乐纪律换成了空串，
         # 守卫的先自证非空那一句必须响。导演台吃的是强化版，不受这条变异影响。
         "src/minimax_h3_prompt/writing_disciplines.py",
-        'MUSIC_CUE_DISCIPLINE_BASE = "**配乐按「同一支 cue 延续」写，不按「本段各写各的」写**：`non_diegetic_music` 写观众能听到、角色听不到的那支配乐；本段与相邻段是同一支 cue——乐器与速度一致，只允许力度与织体变化，写清本段里配器与力度如何变化。**不许写 `N/A`**，只有用户明确要求全片静音时才写 `N/A`。"',
+        'MUSIC_CUE_DISCIPLINE_BASE = "**配乐按「同一支 cue 延续」写，不按「本段各写各的」写**：`non_diegetic_music` 写观众能听到、角色听不到的那支配乐；本段与相邻段是同一支 cue——乐器与速度一致，只允许力度与织体变化，写清本段里力度与织体的变化。**不许写 `N/A`**，只有用户明确要求全片静音时才写 `N/A`。"',
         'MUSIC_CUE_DISCIPLINE_BASE = ""',
         ("tests/test_writing_disciplines_guard.py::"
          "test_music_cue_discipline_reaches_base_but_not_ref",
@@ -797,6 +797,22 @@ MUTATIONS: tuple[Mutation, ...] = (
          "test_base_music_discipline_keeps_silence_exception_only"),
         "清空配乐弱化版真源＝base 两条写段路径同时失去 cue 延续纪律，接缝电平台阶原样复发"
         "（#194 实测 −9.8/+26.6 dB）；守卫若不自证真源非空，``\"\" in text`` 恒真就会永远不红（#330）",
+    ),
+    Mutation(
+        "base_music_asks_for_orchestration_again",
+        # 要求句改回「配器与力度如何变化」＝同句前半句已经禁止的那件事又被要求一遍，
+        # 模型同时收到两条打架的要求（spec #356 的 N7）。这条变异专门杀「矛盾以另一种
+        # 措辞回来」：静音例外、同一支 cue、段类型词三条既有断言都会照绿，只有
+        # ``test_base_music_discipline_never_asks_for_orchestration_changes`` 的
+        # 「配器…变化」反向断言会响，所以目标用例点它。
+        # 锚点取改后那句要求的小半句（不再含「配器」，与上面清空变异的整行锚点互不遮蔽）。
+        "src/minimax_h3_prompt/writing_disciplines.py",
+        "写清本段里力度与织体的变化",
+        "写清本段里配器与力度如何变化",
+        ("tests/test_writing_disciplines_guard.py::"
+         "test_base_music_discipline_never_asks_for_orchestration_changes",),
+        "弱化版重新要求写「配器…变化」＝与同句「只允许力度与织体变化」自相矛盾，"
+        "模型只能二选一（spec #356 的 N7）；既有三条反向断言全绿，只有这条新反证会响（#357）",
     ),
     Mutation(
         "base_prop_ownership_discipline_cleared",

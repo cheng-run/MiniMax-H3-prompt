@@ -16,6 +16,8 @@
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from minimax_h3_prompt import writing_disciplines as wd
@@ -197,6 +199,30 @@ def test_base_music_discipline_keeps_silence_exception_only():
     assert "同一支 cue" in text, "弱化版没写「同一支 cue 延续」"
     for word in _SEGMENT_TYPE_WORDS:
         assert word not in text, f"弱化版混入了导演台的段类型分叉措辞「{word}」"
+
+
+def test_base_music_discipline_never_asks_for_orchestration_changes():
+    """弱化版**不得**要求写「配器…变化」——那是它前半句已经禁止的东西（#357）。
+
+    为什么要这条反证：弱化版同一句里曾同时写「只允许力度与织体变化」（禁配器变化）与
+    「写清本段里配器与力度如何变化」（要求写配器变化），模型同时收到两条打架的要求，
+    只能二选一（spec #356 的 N7）。删掉后半句的「配器」只解决这一次；若有人顺手把要求
+    改回「配器与力度如何变化」，静音例外、同一支 cue、段类型词三条既有断言**全都照绿**
+    ——矛盾会以另一种措辞静默回来。所以这里对「要求句」本身做反向断言。
+
+    判据取「配器…变化」落在**同一分句内**（不含句号／分号／破折号）这一形态，不是裸词
+    「配器」：将来若某句合理地写「配器不变」，裸词会误伤；而「要求写配器变化」永远长成
+    这个形态。正向同时钉住改后确实要求的是「力度与织体」的变化——只删不补会让这句
+    变成半句话，模型拿不到该写什么。
+    """
+    text = wd.MUSIC_CUE_DISCIPLINE_BASE
+    assert text, "配乐弱化版真源为空——空串让下面的反向断言恒真，守卫会失效"
+    assert not re.search(r"配器[^。；;—]*变化", text), (
+        "弱化版又在要求写「配器…变化」——与同句前半句「只允许力度与织体变化」自相矛盾"
+        "（spec #356 的 N7）")
+    assert re.search(r"力度[^。；;—]*织体", text), "弱化版丢了「只允许力度与织体变化」的前半句"
+    assert re.search(r"写清[^。；;—]*力度[^。；;—]*织体", text), (
+        "弱化版没要求写「力度与织体」的变化——删掉「配器」后要补上该写什么")
 
 
 # ---------------------------------------------------------------------------
