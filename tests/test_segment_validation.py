@@ -103,6 +103,33 @@ def test_judge_end_hook_consistent_returns_empty_note():
     assert judge_end_hook("人物停在门口", "尾帧里人物停在门口", _StubLlm("一致\n无")) == ""
 
 
+def test_semantic_difference_reaches_the_three_part_review_notice():
+    """判据返回差异说明时仍不阻断（spec #356 缝 3）：差异→提示正文，不是判决。
+
+    两条纯函数串起来才是调用方拿到的那份载荷：``judge_end_hook`` 的返回值喂进
+    ``semantic_warning_text``，产出仍是「差异说明／计划末态／尾帧画面」三件，且它只是一段
+    文本（不是布尔、不抛错）——调用方唯一能做的是把它写进提示，没有任何分支能据此把段
+    判为不合格。上游 ``test_api_segment_loop`` 那条钉的是请求链路（job 成功、会话继续推进），
+    这一条钉的是函数层的返回值形态，两者失效面不同。
+    """
+    end_hook = "人物停在门口，双肩下沉、重心落在左脚"
+    description = "人物仍在画面深处走，肩线是抬起的"
+    note = judge_end_hook(end_hook, description, _StubLlm("冲突\n人物还在走，没有停下"))
+
+    # 差异说明是文本本身：不是 True/False 那一类判决值，也不会在差异路径上抛错。
+    assert isinstance(note, str)
+    assert not isinstance(note, bool)
+    assert note == "人物还在走，没有停下"
+
+    warning = semantic_warning_text(note, end_hook, description)
+    assert warning.startswith("语义检查提示：")
+    assert note in warning
+    assert f"计划末态：{end_hook}" in warning
+    assert f"尾帧画面：{description}" in warning
+    # 载荷仍是三件：分隔符恰好两处，缺一件就少一处。
+    assert warning.count("｜") == 2
+
+
 def test_judge_end_hook_unparseable_reply_raises():
     """判据服务给了没法用的回复＝语义检查未完成，由调用方降级成提示。"""
     with pytest.raises(ValueError):

@@ -170,11 +170,12 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "frontend_clarification_retry_does_not_refetch",
         "frontend/src/features/sessions/SessionCreateForm.vue",
-        "async function retryClarifications(): Promise<void> {\n"
+        # 锚点只圈**守卫本身**，不带函数签名：给这个函数加注释、改签名或调折行时，
+        # 锚点不该跟着 0 命中（收窄前是全函数头 4 行；这只守重入守卫这一件事，
+        # 签名那半行不承载「点了不重拉」这个行为）。
         "  if (submitting.value || clarificationRetrying.value) {\n"
         "    return\n"
         "  }",
-        "async function retryClarifications(): Promise<void> {\n"
         "  if (true) {\n"
         "    return\n"
         "  }",
@@ -1631,6 +1632,27 @@ MUTATIONS: tuple[Mutation, ...] = (
         ("tests/test_segment_validation.py::test_parse_end_hook_reply",),
         "无冲突类后判＝「无冲突」里含「冲突」，一致的尾帧被读成冲突，"
         "每段都挂一条假提示（#270；ADR 0039 起语义检查只提示、不阻断）",
+    ),
+    Mutation(
+        "end_hook_difference_becomes_a_blocking_path",
+        # spec #356 缝 3 的新用例钉「差异说明仍不阻断」：判据返回非空差异时**抛错**，
+        # 就重新长出一条能把段判死的分支（ADR 0039／0040 已封口）。锚点取 ``judge_end_hook``
+        # 返回前那一段（全仓恰好一次）。
+        "src/minimax_h3_prompt/segment_validation.py",
+        '    warning = parse_end_hook_reply(result.text)\n'
+        "    if warning is None:\n"
+        '        raise ValueError(f"语义判据回复不可解析：{result.text!r}")\n'
+        "    return warning",
+        '    warning = parse_end_hook_reply(result.text)\n'
+        "    if warning is None:\n"
+        '        raise ValueError(f"语义判据回复不可解析：{result.text!r}")\n'
+        "    if warning:\n"
+        '        raise ValueError(f"尾帧与本段末态冲突：{warning}")\n'
+        "    return warning",
+        ("tests/test_segment_validation.py"
+         "::test_semantic_difference_reaches_the_three_part_review_notice",),
+        "差异说明变成阻断路径＝判据重新长出「能把段判死」的分支，一次读图说不准就让"
+        "整条长片卡死，而提示文案与载荷形状照旧（spec #356 缝 3；ADR 0039／0040）",
     ),
     Mutation(
         "end_hook_prompt_drops_support_surface",
