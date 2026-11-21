@@ -1,0 +1,343 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-21T11:00:00Z",
+  "title": "Design System: MiniMax H3 工作台",
+  "extensions": {
+    "colorMeta": {
+      "canvas": {
+        "role": "neutral",
+        "displayName": "画布灰",
+        "canonical": "#f7f7f8",
+        "tonalRamp": [
+          "#141416",
+          "#2b2b2f",
+          "#444449",
+          "#5f5f66",
+          "#7c7c84",
+          "#9c9ca4",
+          "#bdbdc4",
+          "#dededf"
+        ]
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "卡面白",
+        "canonical": "#ffffff",
+        "tonalRamp": [
+          "#18181b",
+          "#303036",
+          "#4a4a51",
+          "#66666e",
+          "#84848c",
+          "#a4a4ac",
+          "#c8c8ce",
+          "#f2f2f5"
+        ]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "正文墨",
+        "canonical": "#1c1c1e",
+        "tonalRamp": [
+          "#0e0e10",
+          "#222226",
+          "#3a3a40",
+          "#55555c",
+          "#72727a",
+          "#91919a",
+          "#b3b3bb",
+          "#d8d8dd"
+        ]
+      },
+      "ink-muted": {
+        "role": "neutral",
+        "displayName": "次要灰",
+        "canonical": "#5a5a62",
+        "tonalRamp": [
+          "#151518",
+          "#2a2a2f",
+          "#414147",
+          "#5a5a62",
+          "#77777f",
+          "#97979f",
+          "#b8b8c0",
+          "#dbdbe1"
+        ]
+      },
+      "border": {
+        "role": "neutral",
+        "displayName": "分隔线",
+        "canonical": "#d7d7dd",
+        "tonalRamp": [
+          "#1a1a1d",
+          "#313136",
+          "#4a4a50",
+          "#65656c",
+          "#82828a",
+          "#a2a2aa",
+          "#c2c2c9",
+          "#ebeaf0"
+        ]
+      },
+      "accent": {
+        "role": "primary",
+        "displayName": "工作蓝",
+        "canonical": "#2f6feb",
+        "tonalRamp": [
+          "#04122e",
+          "#0a2352",
+          "#12397b",
+          "#1b51a8",
+          "#2f6feb",
+          "#588df0",
+          "#8bb0f5",
+          "#c3d6fa"
+        ]
+      },
+      "focus": {
+        "role": "primary",
+        "displayName": "焦点蓝",
+        "canonical": "#1a73e8",
+        "tonalRamp": [
+          "#031226",
+          "#08254a",
+          "#0f3d75",
+          "#1657a6",
+          "#1a73e8",
+          "#4a93ee",
+          "#85b6f4",
+          "#c4dbf9"
+        ]
+      },
+      "ok-bg": {
+        "role": "neutral",
+        "displayName": "成功底",
+        "canonical": "#e6f4ea",
+        "tonalRamp": [
+          "#0b1f12",
+          "#153a23",
+          "#205636",
+          "#2c7449",
+          "#4e9c6d",
+          "#79bb95",
+          "#aed8bf",
+          "#e6f4ea"
+        ]
+      },
+      "ok-ink": {
+        "role": "neutral",
+        "displayName": "成功字",
+        "canonical": "#1b5e20",
+        "tonalRamp": [
+          "#081c09",
+          "#0f3512",
+          "#154f1b",
+          "#1b5e20",
+          "#38873e",
+          "#62aa68",
+          "#97cc9b",
+          "#d6eed8"
+        ]
+      },
+      "error-bg": {
+        "role": "neutral",
+        "displayName": "失败底",
+        "canonical": "#fdecea",
+        "tonalRamp": [
+          "#2a0b08",
+          "#4d1610",
+          "#73231a",
+          "#9b3326",
+          "#c9503f",
+          "#e07d6f",
+          "#f2b3a9",
+          "#fdecea"
+        ]
+      },
+      "error-ink": {
+        "role": "neutral",
+        "displayName": "失败字",
+        "canonical": "#b3261e",
+        "tonalRamp": [
+          "#230605",
+          "#420e0a",
+          "#661812",
+          "#8c221a",
+          "#b3261e",
+          "#d05449",
+          "#e58c84",
+          "#f7cfca"
+        ]
+      },
+      "accent-on-canvas": {
+        "role": "primary",
+        "displayName": "画布上的工作蓝",
+        "canonical": "#2c66e0",
+        "tonalRamp": [
+          "#04122e",
+          "#0a2352",
+          "#12397b",
+          "#1b51a8",
+          "#2f6feb",
+          "#588df0",
+          "#8bb0f5",
+          "#c3d6fa"
+        ],
+        "note": "落在画布灰 #f7f7f8 上的文字链接。#2f6feb 在画布上只有 4.27:1，不到 AA 的 4.5:1；换这档更深的值到 4.80:1。白卡面仍用 accent。"
+      }
+    },
+    "typographyMeta": {
+      "title": {
+        "displayName": "标题",
+        "purpose": "页面主标题。目前与正文差距过小，是层级不足的直接原因。"
+      },
+      "body": {
+        "displayName": "正文",
+        "purpose": "正文、表单项、按钮文字。"
+      },
+      "label": {
+        "displayName": "标签",
+        "purpose": "元信息、辅助说明、错误提示。使用频次最高的一档。"
+      }
+    },
+    "shadows": [],
+    "motion": [],
+    "breakpoints": [
+      {
+        "value": "1200px",
+        "description": "详情页量宽从 880px 放宽到 1080px（2026-11-21 补）。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "页面主操作：新建会话、创建并开始。",
+      "html": "<button class=\"ds-btn-primary\">新建会话</button>",
+      "css": ".ds-btn-primary { background: var(--color-accent, #2f6feb); color: #fff; border: 1px solid var(--color-accent, #2f6feb); border-radius: var(--radius-sm, 4px); padding: var(--space-2, 8px) var(--space-3, 16px); font: inherit; cursor: pointer; } .ds-btn-primary:hover { background: #255ecb; border-color: #255ecb; } .ds-btn-primary:focus-visible { outline: 2px solid var(--color-focus, #1a73e8); outline-offset: 2px; }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "次要操作：复制、翻页、重试。",
+      "html": "<button class=\"ds-btn-secondary\">复制</button>",
+      "css": ".ds-btn-secondary { background: var(--color-surface, #fff); color: var(--color-text, #1c1c1e); border: 1px solid var(--color-border, #d7d7dd); border-radius: var(--radius-sm, 4px); padding: var(--space-2, 8px) var(--space-3, 16px); font: inherit; cursor: pointer; } .ds-btn-secondary:hover { background: #f1f1f4; } .ds-btn-secondary:disabled { opacity: 0.5; cursor: default; } .ds-btn-secondary:focus-visible { outline: 2px solid var(--color-focus, #1a73e8); outline-offset: 2px; }"
+    },
+    {
+      "name": "Status Badge — completed",
+      "kind": "chip",
+      "description": "已完成状态徽标。必须始终带文字，不只靠颜色。",
+      "html": "<span class=\"ds-badge-ok\">已完成</span>",
+      "css": ".ds-badge-ok { display: inline-block; padding: 2px var(--space-2, 8px); border-radius: var(--radius-sm, 4px); font-size: 0.875rem; line-height: 1.5; white-space: nowrap; background: var(--color-ok-bg, #e6f4ea); color: var(--color-ok-text, #1b5e20); border: 1px solid var(--color-ok-text, #1b5e20); }"
+    },
+    {
+      "name": "Status Badge — failed",
+      "kind": "chip",
+      "description": "失败/中断状态徽标。",
+      "html": "<span class=\"ds-badge-error\">已中断</span>",
+      "css": ".ds-badge-error { display: inline-block; padding: 2px var(--space-2, 8px); border-radius: var(--radius-sm, 4px); font-size: 0.875rem; line-height: 1.5; white-space: nowrap; background: var(--color-error-bg, #fdecea); color: var(--color-error-text, #b3261e); border: 1px solid var(--color-error-text, #b3261e); }"
+    },
+    {
+      "name": "Status Badge — neutral",
+      "kind": "chip",
+      "description": "已创建/运行中/已取消等中性状态。",
+      "html": "<span class=\"ds-badge-neutral\">运行中</span>",
+      "css": ".ds-badge-neutral { display: inline-block; padding: 2px var(--space-2, 8px); border-radius: var(--radius-sm, 4px); font-size: 0.875rem; line-height: 1.5; white-space: nowrap; color: var(--color-text, #1c1c1e); border: 1px solid var(--color-border, #d7d7dd); }"
+    },
+    {
+      "name": "Card",
+      "kind": "card",
+      "description": "会话行、素材卡、产物块。平面分层：无阴影，靠边框与底色差。",
+      "html": "<div class=\"ds-card\"><p class=\"ds-card-title\">内容标题</p><p class=\"ds-card-meta\">元信息</p></div>",
+      "css": ".ds-card { background: var(--color-surface, #fff); border: 1px solid var(--color-border, #d7d7dd); border-radius: var(--radius-md, 8px); padding: var(--space-2, 8px) var(--space-3, 16px); } .ds-card-title { margin: 0; color: var(--color-text, #1c1c1e); } .ds-card-meta { margin: 0; color: var(--color-text-muted, #5a5a62); font-size: 0.875rem; }"
+    },
+    {
+      "name": "Tabs",
+      "kind": "nav",
+      "description": "工作台四/六分区切换。WAI-ARIA tabs，roving tabindex。",
+      "html": "<div class=\"ds-tabs\" role=\"tablist\"><button class=\"ds-tab ds-tab--active\" role=\"tab\" aria-selected=\"true\">概览与进度</button><button class=\"ds-tab\" role=\"tab\" aria-selected=\"false\">审查与待办</button></div>",
+      "css": ".ds-tabs { display: flex; gap: var(--space-1, 4px); border-bottom: 1px solid var(--color-border, #d7d7dd); } .ds-tab { padding: var(--space-2, 8px) var(--space-3, 16px); border: 1px solid transparent; border-bottom: none; border-radius: var(--radius-sm, 4px) var(--radius-sm, 4px) 0 0; background: transparent; color: var(--color-text, #1c1c1e); font: inherit; cursor: pointer; } .ds-tab:hover { background: #f1f1f4; } .ds-tab--active { background: var(--color-surface, #fff); border-color: var(--color-border, #d7d7dd); font-weight: 600; } .ds-tab:focus-visible { outline: 2px solid var(--color-focus, #1a73e8); outline-offset: 2px; }"
+    },
+    {
+      "name": "Error Notice",
+      "kind": "custom",
+      "description": "错误提示，role=alert 立即播报。操作按钮由使用方插槽注入。",
+      "html": "<div class=\"ds-error\" role=\"alert\"><p class=\"ds-error-msg\">加载失败，请稍后重试。</p></div>",
+      "css": ".ds-error { padding: var(--space-3, 16px); border: 1px solid var(--color-error-text, #b3261e); background: var(--color-error-bg, #fdecea); color: var(--color-error-text, #b3261e); border-radius: var(--radius-md, 8px); } .ds-error-msg { margin: 0; }"
+    },
+    {
+      "name": "Form Field",
+      "kind": "input",
+      "description": "表单项容器。注意：输入控件本身无自定义样式，用浏览器默认外观——这是已知缺口。",
+      "html": "<div class=\"ds-field\"><label class=\"ds-field-label\" for=\"ds-in\">剧情（必填）</label><textarea class=\"ds-field-input\" id=\"ds-in\"></textarea><p class=\"ds-field-hint\">描述要生成的故事或场景</p></div>",
+      "css": ".ds-field { display: flex; flex-direction: column; gap: var(--space-1, 4px); } .ds-field-label { font-weight: 600; } .ds-field-input { border: 1px solid var(--color-border, #d7d7dd); border-radius: var(--radius-sm, 4px); padding: var(--space-2, 8px); background: var(--color-surface, #fff); color: var(--color-text, #1c1c1e); font: inherit; min-height: 64px; } .ds-field-input:focus-visible { outline: 2px solid var(--color-focus, #1a73e8); outline-offset: 2px; } .ds-field-hint { margin: 0; color: var(--color-text-muted, #5a5a62); font-size: 0.875rem; }"
+    },
+    {
+      "name": "Step Band",
+      "kind": "custom",
+      "description": "详情页顶部的流程指示器。承载「知道自己在哪」的核心诉求，当前形态待重新设计。",
+      "html": "<ol class=\"ds-steps\"><li class=\"ds-step ds-step--done\">阶段 1</li><li class=\"ds-step ds-step--current\">审查</li><li class=\"ds-step\">帧提交</li></ol>",
+      "css": ".ds-steps { display: flex; flex-wrap: wrap; gap: var(--space-1, 4px); margin: 0; padding: 0; list-style: none; } .ds-step { padding: 2px var(--space-2, 8px); border: 1px solid var(--color-border, #d7d7dd); border-radius: var(--radius-sm, 4px); color: var(--color-text-muted, #5a5a62); font-size: 0.875rem; } .ds-step--done { border-color: var(--color-ok-text, #1b5e20); color: var(--color-text, #1c1c1e); } .ds-step--current { border-color: var(--color-focus, #1a73e8); color: var(--color-text, #1c1c1e); font-weight: 600; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "无形的仪表盘",
+    "overview": "这套界面服务于单人完成一件复杂的、多阶段的手工活。它的成功标准不是被看见，而是不打扰：用户盯着它的时候，应该只看见「我现在在哪一步、下一步做什么」，看不见界面本身。因此视觉纪律全部投向信息密度、状态可辨、术语一致，而不是表达欲。\n\n密度是紧凑的。列表一条一行，卡片不堆叠阴影，分隔靠 1px 边框而不是色块。所有产物都是有价值的（真实的剧本、分镜、提示词），界面不该用装饰去和内容抢注意力。\n\n系统当前处于部分建成状态：颜色、间距、圆角三组 token 已经建立且产品代码 100% 遵守；字号刻度、表单控件、响应式、动效四块是空缺。本文件记录既有事实，同时标出缺口，供后续补齐。",
+    "keyCharacteristics": [
+      "冷灰中性底 + 白色卡面 + 单一蓝色强调",
+      "平面分层（无阴影），靠 1px 边框与底色差表达层级",
+      "系统字体栈，不引入 web font",
+      "零过渡动效，交互反馈靠即时的状态切换",
+      "状态不只靠颜色传达（同时有文字标签）"
+    ],
+    "rules": [
+      {
+        "name": "The One Accent Rule",
+        "body": "蓝色是唯一的强调色，且只出现在「可以点」或「当前所在」的元素上。没有装饰性的蓝色，没有次要强调色。",
+        "section": "colors"
+      },
+      {
+        "name": "The Never-Color-Alone Rule",
+        "body": "任何状态都不能只靠颜色表达。徽标同时带文字标签，错误同时带 role=alert 与说明文字。",
+        "section": "colors"
+      },
+      {
+        "name": "The Four-Step Rule",
+        "body": "字号只有 4 档。新加一档必须先证明现有四档放不下它。",
+        "section": "typography"
+      },
+      {
+        "name": "The Flat-By-Default Rule",
+        "body": "系统不使用阴影表达层级。深度由底色差与 1px 边框表达。",
+        "section": "elevation"
+      },
+      {
+        "name": "The Centered-Measure Rule",
+        "body": "每一页都有一条居中的量宽：列表页 880px，详情页 880px / ≥1200px 放宽到 1080px，两处都 margin-inline: auto。只设上限不居中，宽屏下内容会贴着左边，右半屏空着（2026-11-21 两页都犯过这个毛病）。",
+        "section": "layout"
+      }
+    ],
+    "dos": [
+      "Do 所有颜色、间距、圆角走 CSS 变量，不写裸值",
+      "Do 状态同时用文字与颜色表达，徽标永远带标签",
+      "Do 用 1px 边框与底色差分层次，不用阴影",
+      "Do 焦点态用 2px 描边 + 2px 偏移，覆盖所有交互元素",
+      "Do 在 prefers-reduced-motion 下关闭一切动效",
+      "Do 术语与 CONTEXT.md 保持一致",
+      "Do 用 aria-current=\"step\" 标出当前位置，并给读屏一句完整播报",
+      "Do 把等待人工的提示做成可点的入口，指向真正挂着那张卡的分区",
+      "Do 失败/取消/中断要说清原因与重试的后果"
+    ],
+    "donts": [
+      "Don't 引入第二个强调色",
+      "Don't 用阴影做卡片浮起效果",
+      "Don't 把状态表达成纯色块或纯图标",
+      "Don't 新增字号档位，除非现有四档放不下",
+      "Don't 在界面里编造数据、进度百分比或评价",
+      "Don't 用中间点连接元信息后不加层级"
+    ]
+  }
+}

@@ -158,6 +158,9 @@ function copyBaseUrl(): Promise<void> {
 <style scoped>
 .sessions {
   max-width: 880px;
+  /* 与详情页同一处毛病：只设了上限没居中，1440 宽下右侧空出 536px
+     （2026-11-21 layout 实测）——内容贴在左侧像一张没排完的表。 */
+  margin-inline: auto;
 }
 .sessions__header {
   display: flex;
@@ -242,6 +245,10 @@ function copyBaseUrl(): Promise<void> {
 .session-meta {
   color: var(--color-text-muted);
   font-size: 0.875rem;
+  /* 变体 + 修订号是一个整体，不能折成「T2VA ·／修订 73」两行（2026-11-21 layout：
+     某些行在 1440 下就折了，行高不齐像错位）。它也不该被链接挤到换行。 */
+  white-space: nowrap;
+  flex: none;
 }
 .pager {
   display: flex;
