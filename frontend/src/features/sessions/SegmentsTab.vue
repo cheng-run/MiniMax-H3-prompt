@@ -128,35 +128,38 @@ function startFrameFor(index: number): ArtifactInfo | null {
 .segments {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-4);
 }
+/* 进度一句是这一格的主结论：正文墨色 + 中等字重，不靠字号。 */
 .progress {
   margin: 0;
-  font-weight: 600;
+  color: var(--color-ink);
+  font-weight: 500;
 }
 .notes {
   margin: 0;
-  padding-left: 1.25rem;
-  color: var(--color-text-muted);
+  padding-left: var(--space-4);
+  color: var(--color-ink-soft);
 }
+/* 段与段之间靠一道 1px 发光线，不套卡片。 */
 .segment-list {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-4);
   margin: 0;
   padding: 0;
   list-style: none;
 }
 .segment {
-  padding: var(--space-3);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-rule);
 }
+/* 当前段：上缘换成钠黄，点名「就是这一段」。 */
 .segment--current {
-  border-color: var(--color-accent);
+  border-top-color: var(--color-signal);
 }
 .muted {
-  color: var(--color-text-muted);
+  margin: 0;
+  color: var(--color-ink-soft);
 }
 </style>

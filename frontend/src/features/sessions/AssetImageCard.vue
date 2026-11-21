@@ -446,22 +446,25 @@ async function confirmAbandon(): Promise<void> {
 </template>
 
 <style scoped>
+/* 素材待办卡不再套白卡：整块 tint 让它从板面上浮起，底部一条全宽钠黄基线点名
+   「这一件在等你」，方角、贴画布底。信号本该是一条基线，不是盒子一侧的色条。 */
 .asset-card {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  padding: var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-plate-raised);
+  border-bottom: 1px solid var(--color-signal);
 }
 .asset-card h2 {
   margin: 0;
-  font-size: var(--font-size-title);
+  font-size: var(--text-lead);
+  font-weight: 500;
 }
 .asset-card h3 {
   margin: 0 0 var(--space-1);
-  font-size: var(--font-size-subtitle);
+  font-size: var(--text-body);
+  font-weight: 500;
 }
 .prompt__head {
   display: flex;
@@ -471,46 +474,49 @@ async function confirmAbandon(): Promise<void> {
 }
 .file-name {
   margin-left: var(--space-2);
-  color: var(--color-text-muted);
-  font-size: var(--font-size-caption);
+  color: var(--color-ink-soft);
+  font-family: var(--font-data);
+  font-size: var(--text-micro);
   font-weight: 400;
 }
+/* 提示词正文是「照抄的接线清单」：发光线围出的一块面，等宽小字。 */
+/* 提示词正文用正文字体与字号；等宽只留给文件名这类纯技术标识（见 .file-name）。
+   等宽正文在 `ui-monospace` 回落时会变成系统衬线，读起来像另一套设计（2026-11-21 目检）。 */
 .prompt__text,
 .diff__text {
   margin: 0;
-  padding: var(--space-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-bg);
+  padding: var(--space-3);
+  border: 1px solid var(--color-rule);
+  background: var(--color-plate);
+  font-family: var(--font-sans);
+  font-size: var(--text-body);
+  line-height: 1.75;
   white-space: pre-wrap;
   word-break: break-word;
-  font-size: var(--font-size-label);
 }
+/* 差异块用错误色描一道线，仍是线不是色块。 */
 .diff {
-  padding: var(--space-2);
-  border: 1px solid var(--color-error-text);
-  border-radius: var(--radius-md);
-  background: var(--color-error-bg);
+  padding: var(--space-3);
+  border: 1px solid var(--color-error);
 }
 .restore {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  padding: var(--space-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-bg);
+  padding: var(--space-3);
+  border: 1px solid var(--color-rule);
+  background: var(--color-plate);
 }
 .exits {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: var(--space-2);
-  margin-top: var(--space-2);
 }
 .exits__hint {
   margin: 0;
-  font-size: var(--font-size-caption);
+  color: var(--color-ink-soft);
+  font-size: var(--text-micro);
 }
 .upload {
   display: flex;
@@ -522,12 +528,13 @@ async function confirmAbandon(): Promise<void> {
   justify-content: flex-end;
   gap: var(--space-2);
 }
+/* 放弃入口：与正文一道发光线隔开。 */
 .abandon {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  padding-top: var(--space-2);
-  border-top: 1px solid var(--color-border);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-rule);
 }
 .abandon__confirm {
   display: flex;
@@ -536,17 +543,18 @@ async function confirmAbandon(): Promise<void> {
 }
 .abandon__cost {
   margin: 0;
-  color: var(--color-text-muted);
-  font-size: var(--font-size-label);
+  color: var(--color-ink-soft);
+  font-size: var(--text-micro);
 }
 .abandon__note {
   margin: 0;
 }
 .field-error {
   margin: 0;
-  color: var(--color-error-text);
+  color: var(--color-error);
 }
 .muted {
-  color: var(--color-text-muted);
+  margin: 0;
+  color: var(--color-ink-soft);
 }
 </style>

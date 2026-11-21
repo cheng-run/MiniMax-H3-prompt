@@ -26,7 +26,9 @@ describe('App 应用壳', () => {
     await router!.push('/does-not-exist')
     await flushPromises()
 
-    expect(wrapper.text()).toContain('页面不存在')
+    // 2026-11-21 重做：404 文案换成「这个地址没有对应的页面」，断言跟着改；
+    // 检查的语义没变——仍然要有一段说明 + 一条回首页的链接。
+    expect(wrapper.text()).toContain('这个地址没有对应的页面')
     const homeLink = wrapper.findAll('a').find((a) => a.attributes('href') === '/')
     expect(homeLink).toBeTruthy()
   })

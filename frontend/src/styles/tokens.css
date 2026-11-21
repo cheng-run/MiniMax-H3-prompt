@@ -1,56 +1,111 @@
-/* 设计令牌：颜色、字体、间距、圆角。组件只用这些变量，方便后续统一替换主题。 */
+/* ---------------------------------------------------------------------------
+   设计令牌：「状态是线段」
+
+   暗房里的分光板：炭灰连续底、骨白铭牌，颜色只以一条 1px 发光线出现。
+   全站一种字号、一种无衬线体，靠字距与墨色深浅建立层级，靠线型（实/虚/半高/
+   划过/加倍）表达状态。钠黄是唯一亮色，只给「现在最要紧的那一条」。
+
+   两套主题：深色为默认（暗房看片的实际场景），浅色是纸上校对版。
+   语义变量在这里定义一次，Tailwind 主题层与组件都只读这些变量。
+--------------------------------------------------------------------------- */
+
 :root {
-  --font-sans: system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif;
+  /* 字体：一种无衬线体走完全站。Archivo 是窄体建筑感的 grotesk——它在小字号
+     下字面紧凑、字距稳定，正适合「一行一续」的导轨密度；中文回落到系统黑体。 */
+  --font-sans:
+    'Archivo', system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif;
+  /* 数字与代码：波长、修订号走等宽，免得列对齐时数字跳动。 */
+  --font-data: ui-monospace, 'SF Mono', Consolas, 'Cascadia Mono', monospace;
 
-  --color-bg: #f7f7f8;
-  --color-surface: #ffffff;
-  --color-text: #1c1c1e;
-  --color-text-muted: #5a5a62;
-  --color-border: #d7d7dd;
-  --color-accent: #2f6feb;
-  /* 画布底上的链接文字：--color-accent 在 #f7f7f8 上只有 4.27:1，低于 AA 的
-     4.5:1（2026-11-21 critique 实测）。白卡面用 accent 仍有 4.57:1，故只给
-     落在画布底上的文字链接换这档更深的蓝，强调色本身不动。 */
-  --color-accent-on-canvas: #2c66e0;
-  /* 悬停/按下时的深一档。全站此前没有任何 hover 反馈（2026-11-21 polish 实测：
-     `.btn` 与 `a` 都没有 :hover 规则，鼠标移上去界面毫无反应）。深 12% 而不是
-     加阴影或位移——本系统是平面分层，反馈只能靠颜色。 */
-  --color-accent-hover: #2159c9;
-  --color-accent-active: #1b4aa8;
-  --color-focus: #1a73e8;
+  /* 字号：只有四档。层级不靠字号，靠字距与墨色。 */
+  --text-micro: 0.6875rem; /* 11px 铭牌、波长轴、刻度标签 */
+  --text-body: 0.875rem; /* 14px 正文与列表行 */
+  --text-lead: 1rem; /* 16px 板面标题 */
+  --text-display: 1.75rem; /* 28px 产品名，全站只出现一次 */
 
-  --color-ok-bg: #e6f4ea;
-  --color-ok-text: #1b5e20;
-  --color-error-bg: #fdecea;
-  --color-error-text: #b3261e;
-  /* 「要你做事」这一档（2026-11-21 critique：等待人工此前是 neutral，与已创建/
-     已取消同貌）。浅蓝底 + 深蓝字，7.02:1；不是新颜色，是 accent 的浅色调。 */
-  --color-attention-bg: #e8effd;
-  --color-attention-text: #1b4aa8;
-
-  /* 蓝底上的前景色与视频播放器背板。这两处此前写成裸 `#fff` / `#000`（7 处）——
-     不是主题色而是「无论主题如何都必须纯白／纯黑」的固定值，规范地放在这里，
-     免得组件里散落裸色值（2026-11-21 polish）。 */
-  --color-on-accent: #ffffff;
-  --color-media-backdrop: #000000;
+  /* 字距：层级的主要手段。 */
+  --track-wide: 0.14em; /* 全大写小标签 */
+  --track-mid: 0.04em;
+  --track-tight: -0.02em; /* 大字号收紧 */
 
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 16px;
   --space-4: 24px;
   --space-5: 32px;
+  --space-6: 48px;
 
-  /* 字号六档。此前卡片内 h3 小标题各写 0.95rem（7 处裸值，介于 Label 与 Body
-     之间且语义一致）——这不是随手写的，是系统真的缺了这一档：卡片标题要压过
-     正文又不能和页面标题抢。升格成令牌后，新加卡片标题不必再猜一个数
-     （2026-11-21 polish）。count 档只用于徽标里的单个数字。 */
-  --font-size-title: 1.125rem;
-  --font-size-subtitle: 0.95rem;
-  --font-size-body: 1rem;
-  --font-size-label: 0.875rem;
-  --font-size-caption: 0.8125rem;
-  --font-size-count: 0.75rem;
+  /* 零圆角：这是刻度板，不是卡片流。留 2px 只给按钮与输入框，免得像没画完。 */
+  --radius-sm: 2px;
 
-  --radius-sm: 4px;
-  --radius-md: 8px;
+  --duration-fast: 120ms;
+  --duration-base: 220ms;
+  --duration-slow: 400ms;
+  /* 动效：全站只承认一种「近-远」节奏——指数缓出，起步快、尾巴长。
+     最初给导轨的落位线写了会过冲的弹簧曲线（cubic-bezier(.34,1.56,.64,1)），
+     检测器判它是 bounce/elastic：真实物体是减速停住，弹一下属于年代感装饰。
+     改成 expo-out，落位仍然「一下就到了然后稳住」，但不回弹。 */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-expo: cubic-bezier(0.19, 1, 0.22, 1);
+}
+
+/* 深色（默认）：暗房。炭灰连续底由两道极近的灰叠出「连续谱」的层次。 */
+:root,
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --color-canvas: #111314; /* 页面底：炭灰连续谱的下端 */
+  --color-plate: #191c1e; /* 板面：压在炭灰上的灰板 */
+  --color-plate-raised: #212528; /* 浮起一档：选中的刻度线、悬停行 */
+  --color-rule: #2c3134; /* 1px 分隔与刻度基线 */
+  --color-rule-strong: #3d4448; /* 强调分隔、输入框边框 */
+
+  --color-ink: #e6e3da; /* 骨白：正文 */
+  --color-ink-soft: #a8a89f; /* 次要：铭牌、说明、元信息 */
+  --color-ink-faint: #6f7476; /* 最弱：未开始的刻度、禁用 */
+
+  /* 钠黄：唯一亮色。只给「现在最要紧的那一条」——等待人工、当前步骤、焦点。 */
+  --color-signal: #e0a93b;
+  --color-signal-ink: #1a1408; /* 钠黄底上的字 */
+
+  /* 状态语义：不用红绿蓝三色，全部落在骨白/灰/钠黄三档上。
+     线型是主信号，这里的深浅只是辅助，色觉障碍下仍然读得出。 */
+  --color-state-live: #e6e3da; /* 进行中：实线全高、最亮 */
+  --color-state-done: #8d9295; /* 已完成：半高、中灰 */
+  --color-state-pending: #4d5356; /* 未开始：极暗 */
+  --color-state-dead: #6f7476; /* 失败/中断/取消：划过 */
+
+  /* 错误仍需要一眼分开，单给一档偏红的钠黄，避免与「要你做事」混淆。 */
+  --color-error: #d9573d;
+
+  --color-selection: #3a3222; /* 文本选中底色 */
+  --color-media-backdrop: #000000;
+}
+
+/* 浅色：纸上校对。同样的线型语法，底与墨对调。 */
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --color-canvas: #efeee9;
+  --color-plate: #f8f7f3;
+  --color-plate-raised: #ffffff;
+  --color-rule: #d6d4cc;
+  --color-rule-strong: #b3b0a6;
+
+  --color-ink: #1b1d1e;
+  --color-ink-soft: #5c5f60;
+  --color-ink-faint: #8b8e8f;
+
+  --color-signal: #b8791a;
+  --color-signal-ink: #fffaf0;
+
+  --color-state-live: #1b1d1e;
+  --color-state-done: #5c5f60;
+  --color-state-pending: #b3b0a6;
+  --color-state-dead: #8b8e8f;
+
+  --color-error: #b23a24;
+
+  --color-selection: #e8dcc0;
+  --color-media-backdrop: #000000;
 }

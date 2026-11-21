@@ -1,9 +1,10 @@
 <script setup lang="ts">
 // 原生 button：键盘 Enter/Space 天生可用，不额外造键盘处理。
+// primary = 这一步唯一要你做的那一下；secondary = 同组的其他出口；ghost = 不抢视线的第三档。
 withDefaults(
   defineProps<{
     type?: 'button' | 'submit' | 'reset'
-    variant?: 'primary' | 'secondary'
+    variant?: 'primary' | 'secondary' | 'ghost'
   }>(),
   { type: 'button', variant: 'primary' },
 )
@@ -17,54 +18,67 @@ withDefaults(
 
 <style scoped>
 .btn {
-  padding: var(--space-2) var(--space-3);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* 高度写死 32px：三种变体基线一致，并排时不会一高一低。正文行高 1.55 比按钮内高
+     略大，靠 flex 居中让它溢出居中而不是裁字。 */
+  height: 32px;
+  padding: 0 var(--space-3);
+  border: 1px solid transparent;
   border-radius: var(--radius-sm);
-  border: 1px solid var(--color-border);
+  font-size: var(--text-body);
   cursor: pointer;
-  font: inherit;
+  transition:
+    background-color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
+
+/* 主按钮：钠黄只在这里出现一次——它是「现在该点的那一下」。
+   悬停靠提亮而不是换色，色相保持不变，主题切换时两种底都成立。 */
 .btn--primary {
-  background: var(--color-accent);
-  color: var(--color-on-accent);
-  border-color: var(--color-accent);
+  background: var(--color-signal);
+  border-color: var(--color-signal);
+  color: var(--color-signal-ink);
 }
 .btn--primary:hover {
-  background: var(--color-accent-hover);
-  border-color: var(--color-accent-hover);
+  filter: brightness(1.08);
 }
-.btn--primary:active {
-  background: var(--color-accent-active);
-  border-color: var(--color-accent-active);
-}
+
+/* 次按钮：透明底 + 一根发光线。悬停时线先亮起来，再垫一层浮起底。 */
 .btn--secondary {
-  background: var(--color-surface);
-  color: var(--color-text);
+  background: transparent;
+  border-color: var(--color-rule-strong);
+  color: var(--color-ink);
 }
-/* 次要按钮悬停靠底色下沉一档（画布灰）——平面分层里不加阴影、不位移。 */
 .btn--secondary:hover {
-  background: var(--color-bg);
-  border-color: var(--color-text-muted);
+  background: var(--color-plate-raised);
+  border-color: var(--color-ink-soft);
 }
 .btn--secondary:active {
-  background: var(--color-border);
+  background: var(--color-plate);
 }
-/* 禁用态显式覆盖：主按钮的实心底色会盖住全局 :disabled 的透明度观感，
-   这里同时压暗悬停反馈，避免「看着能点」。文字也退到次要灰——白底次要按钮
-   在灰画布上只靠 0.45 透明度，扫一眼仍像能点（2026-11-21 polish 实测「上一页／
-   下一页」并排几乎同貌）。 */
-.btn:disabled,
-.btn:disabled:hover,
-.btn:disabled:active {
-  opacity: 0.45;
-  cursor: not-allowed;
+
+/* 幽灵按钮：没有线也没有底，只有字；用于同一区域里的第三档出口。 */
+.btn--ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--color-ink-soft);
 }
-.btn--primary:disabled {
-  background: var(--color-accent);
-  border-color: var(--color-accent);
+.btn--ghost:hover {
+  background: var(--color-plate-raised);
+  color: var(--color-ink);
 }
-.btn--secondary:disabled {
-  background: var(--color-surface);
-  border-color: var(--color-border);
-  color: var(--color-text-muted);
+.btn--ghost:active {
+  background: var(--color-plate);
+}
+
+/* 禁用态：全局 :disabled 已给透明度与 not-allowed，不再叠加悬停反馈。
+   主按钮额外去饱和——高饱和的钠黄会读成「还能点」。 */
+.btn--primary:disabled,
+.btn--primary:disabled:hover,
+.btn--primary:disabled:active {
+  filter: saturate(0.2);
 }
 </style>

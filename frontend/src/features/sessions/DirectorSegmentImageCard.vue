@@ -142,18 +142,20 @@ async function submit(): Promise<void> {
 </template>
 
 <style scoped>
+/* 段首图待办卡：与开场首帧卡同一语法——整块 tint 浮起，底部一条全宽钠黄基线，
+   方角、不进白卡。信号只作基线，不铺在盒子某一侧。 */
 .segment-image-card {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  padding: var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-plate-raised);
+  border-bottom: 1px solid var(--color-signal);
 }
 .segment-image-card h2 {
   margin: 0;
-  font-size: var(--font-size-body);
+  font-size: var(--text-lead);
+  font-weight: 500;
 }
 .upload {
   display: flex;
@@ -168,6 +170,6 @@ async function submit(): Promise<void> {
 }
 .muted {
   margin: 0;
-  color: var(--color-text-muted);
+  color: var(--color-ink-soft);
 }
 </style>

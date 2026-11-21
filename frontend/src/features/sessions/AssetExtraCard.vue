@@ -205,22 +205,25 @@ async function skip(): Promise<void> {
 </template>
 
 <style scoped>
+/* 素材补交待办卡：与图卡同一语法——整块 tint 浮起，底部一条全宽钠黄基线点名
+   「这一件在等你」，方角、不进白卡。不用单边色条，那只是盒子的装饰。 */
 .extra-card {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  padding: var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-plate-raised);
+  border-bottom: 1px solid var(--color-signal);
 }
 .extra-card h2 {
   margin: 0;
-  font-size: var(--font-size-title);
+  font-size: var(--text-lead);
+  font-weight: 500;
 }
 .extra-list {
   margin: 0;
-  padding-left: var(--space-3);
+  padding-left: var(--space-4);
+  color: var(--color-ink-soft);
 }
 .upload {
   display: flex;
@@ -235,11 +238,12 @@ async function skip(): Promise<void> {
   flex-wrap: wrap;
 }
 .file-name {
-  color: var(--color-text-muted);
-  font-size: var(--font-size-caption);
+  color: var(--color-ink-soft);
+  font-family: var(--font-data);
+  font-size: var(--text-micro);
 }
 .muted {
   margin: 0;
-  color: var(--color-text-muted);
+  color: var(--color-ink-soft);
 }
 </style>

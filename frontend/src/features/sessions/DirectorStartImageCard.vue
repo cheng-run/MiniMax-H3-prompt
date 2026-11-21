@@ -229,22 +229,25 @@ async function submit(confirmAspectMismatch: boolean): Promise<void> {
 </template>
 
 <style scoped>
+/* 开场首帧待办卡：整块 tint 浮起，底部一条全宽钠黄基线点名「这一件在等你」，
+   方角、不进白卡。信号只作基线，不铺在盒子某一侧。 */
 .start-card {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  padding: var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-plate-raised);
+  border-bottom: 1px solid var(--color-signal);
 }
 .start-card h2 {
   margin: 0;
-  font-size: var(--font-size-title);
+  font-size: var(--text-lead);
+  font-weight: 500;
 }
 .start-card h3 {
   margin: 0;
-  font-size: var(--font-size-subtitle);
+  font-size: var(--text-body);
+  font-weight: 500;
 }
 .slots {
   display: flex;
@@ -258,23 +261,24 @@ async function submit(confirmAspectMismatch: boolean): Promise<void> {
   min-width: 220px;
 }
 .upload-label {
-  color: var(--color-text-muted);
-  font-size: var(--font-size-label);
+  color: var(--color-ink-soft);
+  font-size: var(--text-micro);
+  letter-spacing: var(--track-wide);
 }
+/* 比例不合的警告：错误色描一道线，仍是线不是色块。 */
 .aspect {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  padding: var(--space-2);
-  border: 1px solid var(--color-error-text);
-  border-radius: var(--radius-md);
-  background: var(--color-error-bg);
+  padding: var(--space-3);
+  border: 1px solid var(--color-error);
 }
 .aspect pre {
   margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
-  font-size: var(--font-size-label);
+  font-family: var(--font-data);
+  font-size: var(--text-micro);
 }
 .aspect__confirm {
   display: flex;
@@ -286,6 +290,7 @@ async function submit(confirmAspectMismatch: boolean): Promise<void> {
   gap: var(--space-2);
 }
 .muted {
-  color: var(--color-text-muted);
+  margin: 0;
+  color: var(--color-ink-soft);
 }
 </style>

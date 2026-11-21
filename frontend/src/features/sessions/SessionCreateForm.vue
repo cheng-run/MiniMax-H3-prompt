@@ -581,15 +581,14 @@ async function createWithClarifications(
 </template>
 
 <style scoped>
+/* 新建表单不再套白卡：区块之间靠 1px 发光线与间距分层，直接落在画布上。 */
 .create-form {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-4);
   max-width: 720px;
-  padding: var(--space-3);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-rule-strong);
 }
 .field {
   display: flex;
@@ -606,11 +605,13 @@ async function createWithClarifications(
 }
 .field-error {
   margin: 0;
-  color: var(--color-error-text);
-  font-size: var(--font-size-label);
+  color: var(--color-error);
+  font-size: var(--text-micro);
 }
 .field-label {
-  font-weight: 600;
+  color: var(--color-ink-soft);
+  font-size: var(--text-micro);
+  letter-spacing: var(--track-wide);
 }
 .mode-options {
   display: flex;
@@ -624,16 +625,18 @@ async function createWithClarifications(
 }
 .field-hint {
   margin: 0;
-  color: var(--color-text-muted);
-  font-size: var(--font-size-label);
+  color: var(--color-ink-soft);
+  font-size: var(--text-micro);
 }
 .advanced {
-  border-top: 1px solid var(--color-border);
+  border-top: 1px solid var(--color-rule);
   padding-top: var(--space-2);
 }
 .advanced summary {
+  color: var(--color-ink-soft);
+  font-size: var(--text-micro);
+  letter-spacing: var(--track-wide);
   cursor: pointer;
-  color: var(--color-text-muted);
 }
 .advanced .field {
   margin-top: var(--space-2);
@@ -643,21 +646,22 @@ async function createWithClarifications(
   justify-content: flex-end;
 }
 /* 澄清面板纵向堆叠：每条问题一行输入，窄屏不换列、不引入横向滚动。内层不进
-   .field-row（那是给并排字段的 flex-wrap）。 */
+   .field-row（那是给并排字段的 flex-wrap）。1px 发光线围成整圈，面板作为一个
+   整体嵌在表单里——单边线只是盒子一侧的装饰，已改回全边框。 */
 .clarification {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
   padding: var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
+  border: 1px solid var(--color-rule);
 }
 .clarification h3 {
-  font-size: var(--font-size-body);
+  margin: 0;
+  font-size: var(--text-body);
+  font-weight: 500;
 }
 .clarification-item label {
-  font-weight: 600;
+  font-weight: 500;
   overflow-wrap: anywhere;
 }
 .clarification-actions {

@@ -67,13 +67,22 @@ async function copyPrompt(): Promise<void> {
 }
 .director-prompt h3 {
   margin: 0;
-  font-size: var(--font-size-subtitle);
+  color: var(--color-ink-soft);
+  font-size: var(--text-micro);
+  font-weight: 400;
+  letter-spacing: var(--track-wide);
 }
+/* 按需词正文是照抄物：发光线围出的一个面，可滚。
+   正文用正文字体与字号——等宽在这里只是「技术感」的戏服，而且 `ui-monospace`
+   在某些环境下回落到系统衬线，读起来像另一套设计（2026-11-21 目检）。 */
 .prompt__text {
   margin: 0;
-  padding: var(--space-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  border: 1px solid var(--color-rule);
+  background: var(--color-plate);
+  font-family: var(--font-sans);
+  font-size: var(--text-body);
+  line-height: 1.75;
   white-space: pre-wrap;
   word-break: break-word;
   max-height: 20rem;
@@ -86,23 +95,29 @@ async function copyPrompt(): Promise<void> {
 }
 .copy {
   padding: var(--space-1) var(--space-3);
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--color-rule-strong);
   border-radius: var(--radius-sm);
-  background: var(--color-surface);
-  color: var(--color-text);
+  background: transparent;
+  color: var(--color-ink-soft);
   font: inherit;
+  font-size: var(--text-micro);
+  letter-spacing: var(--track-mid);
   cursor: pointer;
+  transition: color var(--duration-fast) var(--ease-out);
+}
+.copy:hover {
+  color: var(--color-ink);
+  border-color: var(--color-ink-soft);
 }
 .copy:disabled {
   cursor: not-allowed;
-  opacity: 0.6;
 }
 .muted {
   margin: 0;
-  color: var(--color-text-muted);
+  color: var(--color-ink-soft);
 }
 .file-error {
   margin: 0;
-  color: var(--color-error-text);
+  color: var(--color-error);
 }
 </style>

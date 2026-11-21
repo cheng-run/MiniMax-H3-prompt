@@ -1,307 +1,77 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-11-21T11:00:00Z",
+  "generatedAt": "2026-11-21T19:20:00Z",
   "title": "Design System: MiniMax H3 工作台",
   "extensions": {
     "colorMeta": {
       "canvas": {
         "role": "neutral",
-        "displayName": "画布灰",
-        "canonical": "#f7f7f8",
-        "tonalRamp": [
-          "#141416",
-          "#2b2b2f",
-          "#444449",
-          "#5f5f66",
-          "#7c7c84",
-          "#9c9ca4",
-          "#bdbdc4",
-          "#dededf"
-        ]
+        "displayName": "炭灰连续底",
+        "canonical": "#111314",
+        "tonalRamp": ["#0a0b0c", "#111314", "#191c1e", "#212528", "#2c3134", "#3d4448", "#4d5356", "#6f7476"]
       },
-      "surface": {
+      "plate": {
         "role": "neutral",
-        "displayName": "卡面白",
-        "canonical": "#ffffff",
-        "tonalRamp": [
-          "#18181b",
-          "#303036",
-          "#4a4a51",
-          "#66666e",
-          "#84848c",
-          "#a4a4ac",
-          "#c8c8ce",
-          "#f2f2f5"
-        ]
+        "displayName": "板面",
+        "canonical": "#191c1e",
+        "tonalRamp": ["#0d0f10", "#131618", "#191c1e", "#212528", "#2a2f32", "#353b3e", "#41484c", "#4d5356"]
       },
       "ink": {
         "role": "neutral",
-        "displayName": "正文墨",
-        "canonical": "#1c1c1e",
-        "tonalRamp": [
-          "#0e0e10",
-          "#222226",
-          "#3a3a40",
-          "#55555c",
-          "#72727a",
-          "#91919a",
-          "#b3b3bb",
-          "#d8d8dd"
-        ]
+        "displayName": "骨白",
+        "canonical": "#e6e3da",
+        "tonalRamp": ["#2a2926", "#4a4843", "#6a6861", "#8a877f", "#a8a89f", "#c4c1b8", "#d6d3ca", "#e6e3da"]
       },
-      "ink-muted": {
-        "role": "neutral",
-        "displayName": "次要灰",
-        "canonical": "#5a5a62",
-        "tonalRamp": [
-          "#151518",
-          "#2a2a2f",
-          "#414147",
-          "#5a5a62",
-          "#77777f",
-          "#97979f",
-          "#b8b8c0",
-          "#dbdbe1"
-        ]
-      },
-      "border": {
-        "role": "neutral",
-        "displayName": "分隔线",
-        "canonical": "#d7d7dd",
-        "tonalRamp": [
-          "#1a1a1d",
-          "#313136",
-          "#4a4a50",
-          "#65656c",
-          "#82828a",
-          "#a2a2aa",
-          "#c2c2c9",
-          "#ebeaf0"
-        ]
-      },
-      "accent": {
+      "signal": {
         "role": "primary",
-        "displayName": "工作蓝",
-        "canonical": "#2f6feb",
-        "tonalRamp": [
-          "#04122e",
-          "#0a2352",
-          "#12397b",
-          "#1b51a8",
-          "#2f6feb",
-          "#588df0",
-          "#8bb0f5",
-          "#c3d6fa"
-        ]
+        "displayName": "钠黄",
+        "canonical": "#e0a93b",
+        "tonalRamp": ["#2b2010", "#4a3618", "#6b4d1e", "#8c6424", "#ad7d2d", "#c99434", "#e0a93b", "#f2cd83"]
       },
-      "focus": {
-        "role": "primary",
-        "displayName": "焦点蓝",
-        "canonical": "#1a73e8",
-        "tonalRamp": [
-          "#031226",
-          "#08254a",
-          "#0f3d75",
-          "#1657a6",
-          "#1a73e8",
-          "#4a93ee",
-          "#85b6f4",
-          "#c4dbf9"
-        ]
-      },
-      "ok-bg": {
-        "role": "neutral",
-        "displayName": "成功底",
-        "canonical": "#e6f4ea",
-        "tonalRamp": [
-          "#0b1f12",
-          "#153a23",
-          "#205636",
-          "#2c7449",
-          "#4e9c6d",
-          "#79bb95",
-          "#aed8bf",
-          "#e6f4ea"
-        ]
-      },
-      "ok-ink": {
-        "role": "neutral",
-        "displayName": "成功字",
-        "canonical": "#1b5e20",
-        "tonalRamp": [
-          "#081c09",
-          "#0f3512",
-          "#154f1b",
-          "#1b5e20",
-          "#38873e",
-          "#62aa68",
-          "#97cc9b",
-          "#d6eed8"
-        ]
-      },
-      "error-bg": {
-        "role": "neutral",
-        "displayName": "失败底",
-        "canonical": "#fdecea",
-        "tonalRamp": [
-          "#2a0b08",
-          "#4d1610",
-          "#73231a",
-          "#9b3326",
-          "#c9503f",
-          "#e07d6f",
-          "#f2b3a9",
-          "#fdecea"
-        ]
-      },
-      "error-ink": {
-        "role": "neutral",
-        "displayName": "失败字",
-        "canonical": "#b3261e",
-        "tonalRamp": [
-          "#230605",
-          "#420e0a",
-          "#661812",
-          "#8c221a",
-          "#b3261e",
-          "#d05449",
-          "#e58c84",
-          "#f7cfca"
-        ]
-      },
-      "accent-on-canvas": {
-        "role": "primary",
-        "displayName": "画布上的工作蓝",
-        "canonical": "#2c66e0",
-        "tonalRamp": [
-          "#04122e",
-          "#0a2352",
-          "#12397b",
-          "#1b51a8",
-          "#2f6feb",
-          "#588df0",
-          "#8bb0f5",
-          "#c3d6fa"
-        ],
-        "note": "落在画布灰 #f7f7f8 上的文字链接。#2f6feb 在画布上只有 4.27:1，不到 AA 的 4.5:1；换这档更深的值到 4.80:1。白卡面仍用 accent。"
-      },
-      "accent-hover": {
-        "role": "primary",
-        "displayName": "工作蓝·悬停",
-        "canonical": "#2159c9",
-        "tonalRamp": [
-          "#04122e",
-          "#0a2352",
-          "#12397b",
-          "#1b51a8",
-          "#2f6feb",
-          "#588df0",
-          "#8bb0f5",
-          "#c3d6fa"
-        ]
-      },
-      "accent-active": {
-        "role": "primary",
-        "displayName": "工作蓝·按下",
-        "canonical": "#1b4aa8",
-        "tonalRamp": [
-          "#04122e",
-          "#0a2352",
-          "#12397b",
-          "#1b51a8",
-          "#2f6feb",
-          "#588df0",
-          "#8bb0f5",
-          "#c3d6fa"
-        ]
-      },
-      "on-accent": {
-        "role": "neutral",
-        "displayName": "蓝底前景",
-        "canonical": "#ffffff",
-        "tonalRamp": []
-      },
-      "media-backdrop": {
-        "role": "neutral",
-        "displayName": "媒体背板",
-        "canonical": "#000000",
-        "tonalRamp": []
-      },
-      "attention-bg": {
-        "role": "primary",
-        "displayName": "等你动手·底",
-        "canonical": "#e8effd",
-        "tonalRamp": [
-          "#04122e",
-          "#0a2352",
-          "#12397b",
-          "#1b51a8",
-          "#2f6feb",
-          "#588df0",
-          "#8bb0f5",
-          "#c3d6fa"
-        ],
-        "note": "attention tone 的浅底；与 attention-text 组合 7.02:1"
-      },
-      "attention-text": {
-        "role": "primary",
-        "displayName": "等你动手·字/框",
-        "canonical": "#1b4aa8",
-        "tonalRamp": [
-          "#04122e",
-          "#0a2352",
-          "#12397b",
-          "#1b51a8",
-          "#2f6feb",
-          "#588df0",
-          "#8bb0f5",
-          "#c3d6fa"
-        ],
-        "note": "awaiting_human 的徽标字与整行边框"
+      "error": {
+        "role": "tertiary",
+        "displayName": "错误红",
+        "canonical": "#d9573d",
+        "tonalRamp": ["#2d1109", "#4d1d0f", "#6e2a16", "#8e371d", "#a94625", "#c24e30", "#d9573d", "#eda48f"]
       }
     },
     "typographyMeta": {
-      "title": {
-        "displayName": "标题",
-        "purpose": "页面主标题。目前与正文差距过小，是层级不足的直接原因。"
-      },
-      "body": {
-        "displayName": "正文",
-        "purpose": "正文、表单项、按钮文字。"
-      },
-      "label": {
-        "displayName": "标签",
-        "purpose": "元信息、辅助说明、错误提示。使用频次最高的一档。"
-      },
-      "subtitle": {
-        "displayName": "卡片内 h3 小标题",
-        "fontSize": "0.95rem",
-        "fontWeight": 400,
-        "lineHeight": "1.5",
-        "fontFamily": "system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif"
-      },
-      "caption": {
-        "displayName": "少量密集信息",
-        "fontSize": "0.8125rem",
-        "fontWeight": 400,
-        "lineHeight": "1.5",
-        "fontFamily": "system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif"
-      },
-      "count": {
-        "displayName": "分区 tab 待办计数徽标（只用于单个数字）",
-        "fontSize": "0.75rem",
-        "fontWeight": 600,
-        "lineHeight": "1.5",
-        "fontFamily": "system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif"
-      }
+      "display": { "displayName": "Display", "purpose": "产品名，全站只出现一次。" },
+      "lead": { "displayName": "Lead", "purpose": "页面标题、板面标题。" },
+      "body": { "displayName": "Body", "purpose": "列表行、正文、按钮。" },
+      "micro": { "displayName": "Micro", "purpose": "铭牌、元信息、刻度标签、计数。" },
+      "data": { "displayName": "Data", "purpose": "数字与路径，等宽 + tabular-nums。" }
     },
     "shadows": [],
-    "motion": [],
-    "breakpoints": [
+    "motion": [
       {
-        "value": "1200px",
-        "description": "详情页量宽从 880px 放宽到 1080px（2026-11-21 补）。"
+        "name": "ease-out",
+        "value": "cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "默认：悬停、颜色、边框切换，120ms。"
+      },
+      {
+        "name": "ease-expo",
+        "value": "cubic-bezier(0.19, 1, 0.22, 1)",
+        "purpose": "签名动效：导轨指示线落位，220ms，指数缓出、不回弹。"
+      },
+      {
+        "name": "duration-fast",
+        "value": "120ms",
+        "purpose": "悬停与焦点反馈。"
+      },
+      {
+        "name": "duration-base",
+        "value": "220ms",
+        "purpose": "导轨指示线落位。"
+      },
+      {
+        "name": "duration-slow",
+        "value": "400ms",
+        "purpose": "留白：只在确实需要「慢一点」时用。"
       }
+    ],
+    "breakpoints": [
+      { "name": "narrow", "value": "720px", "note": "导轨收窄、行折两行、悬停指示线关闭。" }
     ]
   },
   "components": [
@@ -309,133 +79,93 @@
       "name": "Primary Button",
       "kind": "button",
       "refersTo": "button-primary",
-      "description": "页面主操作：新建会话、创建并开始。",
+      "description": "页面上「现在该点的那一下」。钠黄底 + 深色字。",
       "html": "<button class=\"ds-btn-primary\">新建会话</button>",
-      "css": ".ds-btn-primary { background: var(--color-accent, #2f6feb); color: #fff; border: 1px solid var(--color-accent, #2f6feb); border-radius: var(--radius-sm, 4px); padding: var(--space-2, 8px) var(--space-3, 16px); font: inherit; cursor: pointer; } .ds-btn-primary:hover { background: #255ecb; border-color: #255ecb; } .ds-btn-primary:focus-visible { outline: 2px solid var(--color-focus, #1a73e8); outline-offset: 2px; }"
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: center; height: 32px; padding: 0 16px; border: 1px solid var(--color-signal, #e0a93b); border-radius: 2px; background: var(--color-signal, #e0a93b); color: var(--color-signal-ink, #1a1408); font-size: 0.875rem; font-family: inherit; cursor: pointer; transition: filter 120ms cubic-bezier(0.16,1,0.3,1); } .ds-btn-primary:hover { filter: brightness(1.08); } .ds-btn-primary:focus-visible { outline: 2px solid var(--color-signal, #e0a93b); outline-offset: 2px; }"
     },
     {
       "name": "Secondary Button",
       "kind": "button",
       "refersTo": "button-secondary",
-      "description": "次要操作：复制、翻页、重试。",
-      "html": "<button class=\"ds-btn-secondary\">复制</button>",
-      "css": ".ds-btn-secondary { background: var(--color-surface, #fff); color: var(--color-text, #1c1c1e); border: 1px solid var(--color-border, #d7d7dd); border-radius: var(--radius-sm, 4px); padding: var(--space-2, 8px) var(--space-3, 16px); font: inherit; cursor: pointer; } .ds-btn-secondary:hover { background: #f1f1f4; } .ds-btn-secondary:disabled { opacity: 0.5; cursor: default; } .ds-btn-secondary:focus-visible { outline: 2px solid var(--color-focus, #1a73e8); outline-offset: 2px; }"
+      "description": "透明底 + 1px 发光线。" ,
+      "html": "<button class=\"ds-btn-secondary\">上一页</button>",
+      "css": ".ds-btn-secondary { display: inline-flex; align-items: center; justify-content: center; height: 32px; padding: 0 16px; border: 1px solid var(--color-rule-strong, #3d4448); border-radius: 2px; background: transparent; color: var(--color-ink, #e6e3da); font-size: 0.875rem; font-family: inherit; cursor: pointer; transition: background-color 120ms cubic-bezier(0.16,1,0.3,1), border-color 120ms cubic-bezier(0.16,1,0.3,1); } .ds-btn-secondary:hover { background: var(--color-plate-raised, #212528); border-color: var(--color-ink-soft, #a8a89f); } .ds-btn-secondary:focus-visible { outline: 2px solid var(--color-signal, #e0a93b); outline-offset: 2px; }"
     },
     {
-      "name": "Status Badge — completed",
-      "kind": "chip",
-      "description": "已完成状态徽标。必须始终带文字，不只靠颜色。",
-      "html": "<span class=\"ds-badge-ok\">已完成</span>",
-      "css": ".ds-badge-ok { display: inline-block; padding: 2px var(--space-2, 8px); border-radius: var(--radius-sm, 4px); font-size: 0.875rem; line-height: 1.5; white-space: nowrap; background: var(--color-ok-bg, #e6f4ea); color: var(--color-ok-text, #1b5e20); border: 1px solid var(--color-ok-text, #1b5e20); }"
+      "name": "Ghost Button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "无线无底，只有次要灰的字。",
+      "html": "<button class=\"ds-btn-ghost\">收起</button>",
+      "css": ".ds-btn-ghost { display: inline-flex; align-items: center; justify-content: center; height: 32px; padding: 0 16px; border: 1px solid transparent; border-radius: 2px; background: transparent; color: var(--color-ink-soft, #a8a89f); font-size: 0.875rem; font-family: inherit; cursor: pointer; transition: color 120ms cubic-bezier(0.16,1,0.3,1), background-color 120ms cubic-bezier(0.16,1,0.3,1); } .ds-btn-ghost:hover { background: var(--color-plate-raised, #212528); color: var(--color-ink, #e6e3da); } .ds-btn-ghost:focus-visible { outline: 2px solid var(--color-signal, #e0a93b); outline-offset: 2px; }"
     },
     {
-      "name": "Status Badge — failed",
-      "kind": "chip",
-      "description": "失败/中断状态徽标。",
-      "html": "<span class=\"ds-badge-error\">已中断</span>",
-      "css": ".ds-badge-error { display: inline-block; padding: 2px var(--space-2, 8px); border-radius: var(--radius-sm, 4px); font-size: 0.875rem; line-height: 1.5; white-space: nowrap; background: var(--color-error-bg, #fdecea); color: var(--color-error-text, #b3261e); border: 1px solid var(--color-error-text, #b3261e); }"
+      "name": "Status Badge（等待人工）",
+      "kind": "custom",
+      "description": "左侧双线 + 右侧文字。双线表示「现在最要紧的那一条」，钠黄。",
+      "html": "<span class=\"ds-badge ds-badge-attention\"><span class=\"ds-badge-line\" aria-hidden=\"true\"></span><span>等待人工</span></span>",
+      "css": ".ds-badge { display: inline-flex; align-items: center; gap: 8px; font-size: 0.6875rem; letter-spacing: 0.04em; white-space: nowrap; font-family: inherit; } .ds-badge-attention { color: var(--color-signal, #e0a93b); font-weight: 500; } .ds-badge-attention .ds-badge-line { display: block; flex: none; width: 14px; height: 6px; background: repeating-linear-gradient(to bottom, var(--color-signal, #e0a93b) 0 2px, transparent 2px 4px); }"
     },
     {
-      "name": "Status Badge — neutral",
-      "kind": "chip",
-      "description": "已创建/运行中/已取消等中性状态。",
-      "html": "<span class=\"ds-badge-neutral\">运行中</span>",
-      "css": ".ds-badge-neutral { display: inline-block; padding: 2px var(--space-2, 8px); border-radius: var(--radius-sm, 4px); font-size: 0.875rem; line-height: 1.5; white-space: nowrap; color: var(--color-text, #1c1c1e); border: 1px solid var(--color-border, #d7d7dd); }"
+      "name": "Status Badge（已完成）",
+      "kind": "custom",
+      "description": "单根实线 + 次要灰的字。",
+      "html": "<span class=\"ds-badge ds-badge-ok\"><span class=\"ds-badge-line\" aria-hidden=\"true\"></span><span>已完成</span></span>",
+      "css": ".ds-badge { display: inline-flex; align-items: center; gap: 8px; font-size: 0.6875rem; letter-spacing: 0.04em; white-space: nowrap; font-family: inherit; } .ds-badge-ok { color: var(--color-ink-soft, #a8a89f); } .ds-badge-ok .ds-badge-line { display: block; flex: none; width: 14px; height: 2px; background: var(--color-state-done, #8d9295); }"
     },
     {
-      "name": "Card",
-      "kind": "card",
-      "description": "会话行、素材卡、产物块。平面分层：无阴影，靠边框与底色差。",
-      "html": "<div class=\"ds-card\"><p class=\"ds-card-title\">内容标题</p><p class=\"ds-card-meta\">元信息</p></div>",
-      "css": ".ds-card { background: var(--color-surface, #fff); border: 1px solid var(--color-border, #d7d7dd); border-radius: var(--radius-md, 8px); padding: var(--space-2, 8px) var(--space-3, 16px); } .ds-card-title { margin: 0; color: var(--color-text, #1c1c1e); } .ds-card-meta { margin: 0; color: var(--color-text-muted, #5a5a62); font-size: 0.875rem; }"
+      "name": "Rail Row（会话行）",
+      "kind": "custom",
+      "description": "导轨刻度 + 标题 + 状态 + 元信息。等待人工整行浮起，刻度变双线钠黄。",
+      "html": "<div class=\"ds-rail-row\"><span class=\"ds-rail-tick\" aria-hidden=\"true\"></span><span class=\"ds-rail-title\">在明朝，一个穿汉服的女子依靠在窗边吹风</span><span class=\"ds-rail-badge\"><span class=\"ds-rail-badge-line\" aria-hidden=\"true\"></span><span>已完成</span></span><span class=\"ds-rail-meta\">T2VA · 修订 55</span></div>",
+      "css": ".ds-rail-row { display: grid; grid-template-columns: minmax(0,1fr) auto auto; align-items: center; gap: 16px 24px; height: 44px; padding-left: 0; border-bottom: 1px solid var(--color-rule, #2c3134); position: relative; font-family: inherit; } .ds-rail-row::before { content: ''; position: absolute; left: 0; top: 50%; width: 9px; height: 2px; transform: translateY(-50%); background: var(--color-state-done, #8d9295); } .ds-rail-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-ink, #e6e3da); font-size: 0.875rem; } .ds-rail-badge { display: inline-flex; align-items: center; gap: 8px; font-size: 0.6875rem; letter-spacing: 0.04em; color: var(--color-ink-soft, #a8a89f); white-space: nowrap; } .ds-rail-badge-line { display: block; width: 14px; height: 2px; background: var(--color-state-done, #8d9295); } .ds-rail-meta { font-family: ui-monospace, 'SF Mono', Consolas, monospace; font-size: 0.6875rem; color: var(--color-ink-soft, #a8a89f); font-variant-numeric: tabular-nums; white-space: nowrap; }"
     },
     {
-      "name": "Tabs",
+      "name": "Navigation Link（当前项）",
       "kind": "nav",
-      "description": "工作台四/六分区切换。WAI-ARIA tabs，roving tabindex。",
-      "html": "<div class=\"ds-tabs\" role=\"tablist\"><button class=\"ds-tab ds-tab--active\" role=\"tab\" aria-selected=\"true\">概览与进度</button><button class=\"ds-tab\" role=\"tab\" aria-selected=\"false\">审查与待办</button></div>",
-      "css": ".ds-tabs { display: flex; gap: var(--space-1, 4px); border-bottom: 1px solid var(--color-border, #d7d7dd); } .ds-tab { padding: var(--space-2, 8px) var(--space-3, 16px); border: 1px solid transparent; border-bottom: none; border-radius: var(--radius-sm, 4px) var(--radius-sm, 4px) 0 0; background: transparent; color: var(--color-text, #1c1c1e); font: inherit; cursor: pointer; } .ds-tab:hover { background: #f1f1f4; } .ds-tab--active { background: var(--color-surface, #fff); border-color: var(--color-border, #d7d7dd); font-weight: 600; } .ds-tab:focus-visible { outline: 2px solid var(--color-focus, #1a73e8); outline-offset: 2px; }"
-    },
-    {
-      "name": "Error Notice",
-      "kind": "custom",
-      "description": "错误提示，role=alert 立即播报。操作按钮由使用方插槽注入。",
-      "html": "<div class=\"ds-error\" role=\"alert\"><p class=\"ds-error-msg\">加载失败，请稍后重试。</p></div>",
-      "css": ".ds-error { padding: var(--space-3, 16px); border: 1px solid var(--color-error-text, #b3261e); background: var(--color-error-bg, #fdecea); color: var(--color-error-text, #b3261e); border-radius: var(--radius-md, 8px); } .ds-error-msg { margin: 0; }"
-    },
-    {
-      "name": "Form Field",
-      "kind": "input",
-      "description": "表单项容器。注意：输入控件本身无自定义样式，用浏览器默认外观——这是已知缺口。",
-      "html": "<div class=\"ds-field\"><label class=\"ds-field-label\" for=\"ds-in\">剧情（必填）</label><textarea class=\"ds-field-input\" id=\"ds-in\"></textarea><p class=\"ds-field-hint\">描述要生成的故事或场景</p></div>",
-      "css": ".ds-field { display: flex; flex-direction: column; gap: var(--space-1, 4px); } .ds-field-label { font-weight: 600; } .ds-field-input { border: 1px solid var(--color-border, #d7d7dd); border-radius: var(--radius-sm, 4px); padding: var(--space-2, 8px); background: var(--color-surface, #fff); color: var(--color-text, #1c1c1e); font: inherit; min-height: 64px; } .ds-field-input:focus-visible { outline: 2px solid var(--color-focus, #1a73e8); outline-offset: 2px; } .ds-field-hint { margin: 0; color: var(--color-text-muted, #5a5a62); font-size: 0.875rem; }"
-    },
-    {
-      "name": "Step Band",
-      "kind": "custom",
-      "description": "详情页顶部的流程指示器。承载「知道自己在哪」的核心诉求，当前形态待重新设计。",
-      "html": "<ol class=\"ds-steps\"><li class=\"ds-step ds-step--done\">阶段 1</li><li class=\"ds-step ds-step--current\">审查</li><li class=\"ds-step\">帧提交</li></ol>",
-      "css": ".ds-steps { display: flex; flex-wrap: wrap; gap: var(--space-1, 4px); margin: 0; padding: 0; list-style: none; } .ds-step { padding: 2px var(--space-2, 8px); border: 1px solid var(--color-border, #d7d7dd); border-radius: var(--radius-sm, 4px); color: var(--color-text-muted, #5a5a62); font-size: 0.875rem; } .ds-step--done { border-color: var(--color-ok-text, #1b5e20); color: var(--color-text, #1c1c1e); } .ds-step--current { border-color: var(--color-focus, #1a73e8); color: var(--color-text, #1c1c1e); font-weight: 600; }"
+      "description": "顶栏导航项。当前项是骨白 + 底部 2px 钠黄下划线。",
+      "html": "<nav class=\"ds-nav\"><a href=\"/\" class=\"ds-nav-link ds-nav-link-current\" aria-current=\"page\">会话</a><a href=\"/diagnostics\" class=\"ds-nav-link\">诊断</a></nav>",
+      "css": ".ds-nav { display: flex; gap: 24px; font-family: inherit; font-size: 0.875rem; } .ds-nav-link { display: inline-flex; align-items: center; position: relative; height: 56px; color: var(--color-ink-soft, #a8a89f); text-decoration: none; transition: color 120ms cubic-bezier(0.16,1,0.3,1); } .ds-nav-link:hover { color: var(--color-ink, #e6e3da); } .ds-nav-link-current { color: var(--color-ink, #e6e3da); } .ds-nav-link-current::after { content: ''; position: absolute; inset-inline: 0; bottom: 0; height: 2px; background: var(--color-signal, #e0a93b); }"
     }
   ],
   "narrative": {
-    "northStar": "无形的仪表盘",
-    "overview": "这套界面服务于单人完成一件复杂的、多阶段的手工活。它的成功标准不是被看见，而是不打扰：用户盯着它的时候，应该只看见「我现在在哪一步、下一步做什么」，看不见界面本身。因此视觉纪律全部投向信息密度、状态可辨、术语一致，而不是表达欲。\n\n密度是紧凑的。列表一条一行，卡片不堆叠阴影，分隔靠 1px 边框而不是色块。所有产物都是有价值的（真实的剧本、分镜、提示词），界面不该用装饰去和内容抢注意力。\n\n系统当前处于部分建成状态：颜色、间距、圆角三组 token 已经建立且产品代码 100% 遵守；字号刻度、表单控件、响应式、动效四块是空缺。本文件记录既有事实，同时标出缺口，供后续补齐。",
+    "northStar": "状态是线段",
+    "overview": "这套界面借的是暗房里的分光板：一块炭灰连续底，上面只有 1px 的发光细线，每条线代表一个会话、一个步骤、一条待办。它的主张是状态不该靠颜色传达——色觉之外还得读得出「这条在跑、这条停了、这条在等你」，而线天生就能同时承载这么多种差异。因此全站只有一种无衬线体、一种字号层级。层级靠字距、墨色深浅与线的形态。钠黄是唯一亮色，只出现在「现在最要紧的那一条」上。",
     "keyCharacteristics": [
-      "冷灰中性底 + 白色卡面 + 单一蓝色强调",
-      "平面分层（无阴影），靠 1px 边框与底色差表达层级",
-      "系统字体栈，不引入 web font",
-      "零过渡动效，交互反馈靠即时的状态切换",
-      "状态不只靠颜色传达（同时有文字标签）"
+      "炭灰连续底 + 骨白铭牌 + 单一钠黄",
+      "一种字号，靠字距与墨色分层",
+      "1px 发光线取代全部边框与阴影；零圆角（控件留 2px）",
+      "状态 = 线的形态（实／双／短／划）",
+      "深色为默认（暗房看片），浅色是纸上校对版"
     ],
     "rules": [
-      {
-        "name": "The One Accent Rule",
-        "body": "蓝色是唯一的强调色，且只出现在「可以点」或「当前所在」的元素上。没有装饰性的蓝色，没有次要强调色。",
-        "section": "colors"
-      },
-      {
-        "name": "The Never-Color-Alone Rule",
-        "body": "任何状态都不能只靠颜色表达。徽标同时带文字标签，错误同时带 role=alert 与说明文字。",
-        "section": "colors"
-      },
-      {
-        "name": "The Token-Scale Rule",
-        "body": "字号只从 --font-size-* 取。新加一档必须先写进 tokens.css 并说清它回答什么问题——裸 font-size: 0.95rem 既不成体系、也无从追问语义。",
-        "section": "typography"
-      },
-      {
-        "name": "The Flat-By-Default Rule",
-        "body": "系统不使用阴影表达层级。深度由底色差与 1px 边框表达。",
-        "section": "elevation"
-      },
-      {
-        "name": "The Centered-Measure Rule",
-        "body": "每一页都有一条居中的量宽：列表页 880px，详情页 880px / ≥1200px 放宽到 1080px，两处都 margin-inline: auto。只设上限不居中，宽屏下内容会贴着左边，右半屏空着（2026-11-21 两页都犯过这个毛病）。",
-        "section": "layout"
-      }
+      { "name": "The Signal Rarity Rule", "body": "钠黄只出现在「现在最要紧的那一条」上。它不是品牌色，是警报色——用多了就不响了。", "section": "colors" },
+      { "name": "The Never-Colour-Alone Rule", "body": "状态永远同时有线型与文字标签。只看颜色分不出状态，等于没分。", "section": "colors" },
+      { "name": "The One Type Size Rule", "body": "层级靠字距与墨色，不靠字号。全站四档字号，display 一次只出现一次。", "section": "typography" },
+      { "name": "The No-Tracking-On-Chinese Rule", "body": "中文标题不加字距。--track-wide 只给全大写的西文铭牌。", "section": "typography" },
+      { "name": "The Tabular Rule", "body": "任何会变化的数字走等宽 + tabular-nums，否则 9→10 时整列错位。", "section": "typography" },
+      { "name": "The Rail Owns The Left Rule", "body": "左导轨是列表页的骨架，不是装饰。任何新增行状态都必须先回答「它在导轨上长什么样」。", "section": "elevation" },
+      { "name": "The Flat-By-Default Rule", "body": "表面一律平。层次靠灰阶差与 1px 线，不靠 box-shadow。", "section": "elevation" }
     ],
     "dos": [
-      "Do 所有颜色、间距、圆角走 CSS 变量，不写裸值",
-      "Do 状态同时用文字与颜色表达，徽标永远带标签",
-      "Do 用 1px 边框与底色差分层次，不用阴影",
-      "Do 焦点态用 2px 描边 + 2px 偏移，覆盖所有交互元素",
-      "Do 在 prefers-reduced-motion 下关闭一切动效",
-      "Do 术语与 CONTEXT.md 保持一致",
-      "Do 用 aria-current=\"step\" 标出当前位置，并给读屏一句完整播报",
-      "Do 把等待人工的提示做成可点的入口，指向真正挂着那张卡的分区",
-      "Do 失败/取消/中断要说清原因与重试的后果",
-      "Do 用 --font-size-* 令牌写字号，不写裸值",
-      "Do 交互元素要有 hover / active / disabled 三态，平面系统靠颜色不用阴影",
-      "Do 让「要你动手」的状态在列表里跳出来，并把状态写进 document.title"
+      "Do 让状态同时有线型与文字。刻度、徽标、步骤带都是这样。",
+      "Do 钠黄只给「现在最要紧的那一条」。",
+      "Do 用 1px 线与灰阶差分层次，不用阴影。",
+      "Do 数字一律等宽 + tabular-nums。",
+      "Do 焦点态统一 2px 钠黄描边 + 2px 偏移，覆盖所有交互元素。",
+      "Do 在 prefers-reduced-motion 下关掉一切动效。",
+      "Do 术语与 CONTEXT.md 保持一致。",
+      "Do 让「要你动手」的状态在列表里跳出来，并把状态写进 document.title。"
     ],
     "donts": [
-      "Don't 引入第二个强调色",
-      "Don't 用阴影做卡片浮起效果",
-      "Don't 把状态表达成纯色块或纯图标",
-      "Don't 新增字号档位，除非现有四档放不下",
-      "Don't 在界面里编造数据、进度百分比或评价",
-      "Don't 用中间点连接元信息后不加层级"
+      "Don't 引入第二个强调色。红只给错误，不是第二个强调色。",
+      "Don't 用「盒子一侧的色条」（border-left / inset box-shadow / 伪元素）标记任何状态。",
+      "Don't 用阴影、渐变文字、玻璃拟态。",
+      "Don't 给中文标题加字距。",
+      "Don't 把状态表达成纯色块或纯图标。",
+      "Don't 在圆角白卡里装列表——这个世界没有卡片流。",
+      "Don't 用回弹／弹性缓动（bounce / elastic 曲线）。落位用指数缓出。",
+      "Don't 在界面里编造数据、进度百分比或评价——服务端是唯一真源。"
     ]
   }
 }

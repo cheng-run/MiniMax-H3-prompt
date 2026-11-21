@@ -13,12 +13,18 @@ defineProps<{ message: string }>()
 </template>
 
 <style scoped>
+/* 整块用全边框而不是一侧色条：一侧色条在圆角盒上读起来像装饰，
+   全边框才和「1px 发光线取代边框与阴影」的语法一致。 */
 .error-notice {
   padding: var(--space-3);
-  border: 1px solid var(--color-error-text);
-  background: var(--color-error-bg);
-  color: var(--color-error-text);
-  border-radius: var(--radius-md);
+  background: var(--color-plate);
+  border: 1px solid var(--color-error);
+  border-radius: var(--radius-sm);
+  color: var(--color-error);
+  font-size: var(--text-body);
+}
+.error-notice__message {
+  margin: 0;
 }
 .error-notice__actions {
   margin-top: var(--space-2);

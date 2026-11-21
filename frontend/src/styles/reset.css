@@ -1,4 +1,4 @@
-/* 最小全局 reset：只做浏览器默认样式的归零，不引入任何框架。 */
+/* 最小全局 reset。令牌在 tokens.css，主题映射在 main.css 的 @theme 层。 */
 *,
 *::before,
 *::after {
@@ -15,44 +15,89 @@ body,
 
 body {
   font-family: var(--font-sans);
-  color: var(--color-text);
-  background: var(--color-bg);
-  line-height: 1.5;
+  font-size: var(--text-body);
+  color: var(--color-ink);
+  background: var(--color-canvas);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 h1,
 h2,
 h3,
+h4,
 p,
 dl,
-dd {
+dd,
+figure {
   margin: 0;
 }
 
 a {
-  /* 落在画布灰上的链接用深一档的蓝（2026-11-21 critique：accent 在 #f7f7f8 上
-     只有 4.27:1，不到 AA 的 4.5:1）。白卡面上的链接由组件自己用 --color-accent。 */
-  color: var(--color-accent-on-canvas);
-  /* 全站链接此前没有任何悬停反馈（2026-11-21 polish 实测）。平面系统不加位移，
-     靠颜色加深 + 下划线变粗表示「这个能点」。 */
+  color: inherit;
+  text-decoration: none;
+}
+
+/* 链接的「能点」信号来自下划线本身：静止时一道极细的线，悬停时变亮变实。
+   这是纸面上铅笔划线的逻辑，不是蓝字逻辑。 */
+a.ink-link {
+  text-decoration: underline;
   text-decoration-thickness: 1px;
-  text-underline-offset: 2px;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--color-rule-strong);
+  transition: text-decoration-color var(--duration-fast) var(--ease-out);
 }
-a:hover {
-  color: var(--color-accent-hover);
-  text-decoration-thickness: 2px;
-}
-a:active {
-  color: var(--color-accent-active);
+a.ink-link:hover {
+  text-decoration-color: var(--color-ink);
 }
 
 :focus-visible {
-  outline: 2px solid var(--color-focus);
+  outline: 2px solid var(--color-signal);
   outline-offset: 2px;
 }
 
-/* 只给读屏读、不占视觉空间的一层。视觉标签是它的缩写（如步骤带的「阶段 1」），
-   完整的话（位置 + 状态）放这里，两边的信息不会各说各的。 */
+/* 浏览器自己画的部件也属于设计系统（craft floor）：选中、光标、滚动条、数字。 */
+::selection {
+  background: var(--color-selection);
+  color: var(--color-ink);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-rule-strong) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-rule-strong);
+  border-radius: 999px;
+  border: 3px solid var(--color-canvas);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-ink-faint);
+}
+
+input,
+textarea,
+select,
+button {
+  font: inherit;
+  color: inherit;
+  caret-color: var(--color-signal);
+}
+
+/* 数字列一律等宽，免得修订号从 9 跳到 10 时整列错位。 */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 只给读屏读、不占视觉空间的一层。 */
 .sr-only {
   position: absolute;
   width: 1px;
@@ -65,13 +110,20 @@ a:active {
   white-space: nowrap;
 }
 
-/* 禁用态必须看起来不可用（2026-11-21 critique 实测：disabled 的主按钮与可用态
-   像素级相同，点了没反应会被当成卡死）。文件选择框也走同一条。
-   光靠透明度不够：白底按钮在灰画布上降到 0.45 只是更接近画布色，扫一眼分不出
-   「上一页」不可点、「下一页」可点（2026-11-21 polish 实测两枚并排几乎同貌）。
-   再叠一层底色下沉与文字变灰，让「不可用」在形状之外也有信号。 */
+/* 禁用态：形状之外还要有信号。 */
 :disabled,
 [aria-disabled='true'] {
-  opacity: 0.45;
+  opacity: 0.38;
   cursor: not-allowed;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

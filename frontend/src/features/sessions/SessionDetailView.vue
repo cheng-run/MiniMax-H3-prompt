@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ArrowLeft } from '@lucide/vue'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, inject, onBeforeUnmount, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
@@ -475,7 +476,11 @@ const errorMessage = computed(() =>
 
 <template>
   <section class="detail">
-    <p class="back"><RouterLink to="/">← 返回会话列表</RouterLink></p>
+    <p class="back">
+      <RouterLink to="/" class="back__link">
+        <ArrowLeft class="back__icon" aria-hidden="true" />返回会话列表
+      </RouterLink>
+    </p>
 
     <LoadingState v-if="isPending" />
 
@@ -484,13 +489,36 @@ const errorMessage = computed(() =>
     </ErrorNotice>
 
     <template v-else-if="data">
-      <h1 class="detail-title" :title="data.plot || data.session_id">
-        {{ data.plot || data.session_id }}
-      </h1>
-      <p class="status-line">
-        <StatusBadge :tone="statusTone(data.status)" :label="statusLabel(data.status)" />
-        <span class="meta">{{ data.session_id }}</span>
-      </p>
+      <header class="head">
+        <h1 class="detail-title" :title="data.plot || data.session_id">
+          {{ data.plot || data.session_id }}
+        </h1>
+        <p class="status-line">
+          <StatusBadge :tone="statusTone(data.status)" :label="statusLabel(data.status)" />
+          <span class="meta">{{ data.session_id }}</span>
+        </p>
+      </header>
+
+      <!-- 步骤带与「等待你操作」（#276）：上移到分区 tab 之外，成为详情页常驻
+           元素——切到分段/产物/审查等任一非概览分区都仍可见。取消按钮有副作用，
+           仍留在概览分区（见下）。 -->
+      <div class="progress-region">
+        <ProgressBand v-if="progressView.steps.length" :view="progressView" />
+        <!-- 有可去的分区时是按钮，点了就切过去；未知待办没有入口，退回只读一行
+             （不能渲染一个点了没反应的按钮）。整行仍是 live region：新待办出现时
+             读屏要听到完整一句，只播报前缀等于没说清在等什么。 -->
+        <p v-if="pendingActionView" role="status" class="pending-hint">
+          等待你操作：<button
+            v-if="pendingTarget"
+            type="button"
+            class="pending-hint__goto"
+            @click="gotoPending"
+          >
+            {{ pendingActionView.text }}
+          </button>
+          <template v-else>{{ pendingActionView.text }}</template>
+        </p>
+      </div>
 
       <div class="tabs" role="tablist" aria-label="工作台分区">
         <button
@@ -515,27 +543,6 @@ const errorMessage = computed(() =>
         >
           {{ tab.label }}
         </button>
-      </div>
-
-      <!-- 步骤带与「等待你操作」（#276）：上移到分区 tab 之外，成为详情页常驻
-           元素——切到分段/产物/审查等任一非概览分区都仍可见。取消按钮有副作用，
-           仍留在概览分区（见下），不上移。 -->
-      <div class="progress-region">
-        <ProgressBand v-if="progressView.steps.length" :view="progressView" />
-        <!-- 有可去的分区时是按钮，点了就切过去；未知待办没有入口，退回只读一行
-             （不能渲染一个点了没反应的按钮）。整行仍是 live region：新待办出现时
-             读屏要听到完整一句，只播报前缀等于没说清在等什么。 -->
-        <p v-if="pendingActionView" role="status" class="pending-hint">
-          等待你操作：<button
-            v-if="pendingTarget"
-            type="button"
-            class="pending-hint__goto"
-            @click="gotoPending"
-          >
-            {{ pendingActionView.text }}
-          </button>
-          <template v-else>{{ pendingActionView.text }}</template>
-        </p>
       </div>
 
       <!-- 概览与进度 -->
@@ -744,12 +751,13 @@ const errorMessage = computed(() =>
   /* 之前只设了上限没居中，1440 宽下右侧空出 536px（2026-11-21 critique）。 */
   margin-inline: auto;
 }
-/* 标题按设计令牌定档，并用两行截断：剧情常常上百字，此前实渲染成浏览器默认
-   32px，1440 下吃掉 96px、420 下吃掉 240px，把 tab 与步骤带挤出首屏。 */
+/* 标题按四档刻度定档（此前实渲染成浏览器默认 32px，1440 下吃掉 96px、420 下
+   吃掉 240px，把 tab 与步骤带挤出首屏），并用两行截断。中文不加字距。 */
 .detail-title {
-  font-size: var(--font-size-title);
-  font-weight: 600;
+  font-size: var(--text-lead);
+  font-weight: 500;
   line-height: 1.5;
+  color: var(--color-ink);
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -763,78 +771,123 @@ const errorMessage = computed(() =>
     max-width: 1080px;
   }
 }
+/* 面包屑：一枚铭牌链接，不是一句带箭头符号的正文——箭头交给图标，字距走铭牌档。 */
 .back {
-  margin: 0 0 var(--space-2);
+  margin: 0 0 var(--space-4);
 }
+.back__link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-ink-soft);
+  font-size: var(--text-micro);
+  letter-spacing: var(--track-wide);
+  transition: color var(--duration-fast) var(--ease-out);
+}
+.back__link:hover {
+  color: var(--color-ink);
+}
+.back__icon {
+  width: 1em;
+  height: 1em;
+  stroke-width: 2;
+}
+.head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+/* 元信息带：徽标 + 会话 ID，同一行且垂直居中。会话 ID 走等宽数据档。 */
 .status-line {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--space-2);
 }
 .meta {
-  color: var(--color-text-muted);
-  font-size: var(--font-size-label);
+  color: var(--color-ink-soft);
+  font-family: var(--font-data);
+  font-size: var(--text-micro);
+  letter-spacing: var(--track-mid);
 }
 .tabs {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-1);
-  margin-top: var(--space-3);
-  border-bottom: 1px solid var(--color-border);
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+  border-bottom: 1px solid var(--color-rule);
 }
+/* Tab：纯文字 + 底部 2px 指示线，没有白底盒子、没有三边框。 */
 .tab {
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid transparent;
-  border-bottom: none;
-  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  padding: var(--space-2) 0;
+  border: 0;
+  border-bottom: 2px solid transparent;
   background: transparent;
-  color: var(--color-text);
+  color: var(--color-ink-soft);
   font: inherit;
+  font-size: var(--text-body);
   cursor: pointer;
+  transition: color var(--duration-fast) var(--ease-out);
   /* 不换行 + 不压缩：窄屏下宁可折到第二行，也不能把「分段」压成单字一行
      （2026-11-21 critique：420 宽下曾各 57px 宽、单字一行）。 */
   white-space: nowrap;
   flex: 0 0 auto;
 }
+.tab:hover {
+  color: var(--color-ink);
+}
 .tab--active {
-  background: var(--color-surface);
-  border-color: var(--color-border);
-  font-weight: 600;
+  color: var(--color-ink);
+  font-weight: 500;
+  border-bottom-color: var(--color-signal);
 }
 /* 待办计数徽标：用伪元素挂数字，这样它不进入 tab 的文本内容——读屏从 aria-label
-   读「审查与待办，1 项等待操作」，可见文本仍是「审查与待办」。 */
+   读「审查与待办，1 项等待操作」，可见文本仍是「审查与待办」。方括号写法，钠黄。 */
 .tab[data-count]::after {
-  content: attr(data-count);
-  display: inline-block;
-  min-width: 1.25rem;
+  content: '[' attr(data-count) ']';
   margin-left: var(--space-1);
-  padding: 0 0.35em;
-  border-radius: 999px;
-  background: var(--color-accent);
-  color: var(--color-on-accent);
-  font-size: var(--font-size-count);
+  color: var(--color-signal);
+  font-family: var(--font-data);
+  font-size: var(--text-micro);
   font-variant-numeric: tabular-nums;
-  font-weight: 600;
-  line-height: 1.4;
-  text-align: center;
 }
 .tab:focus-visible {
-  outline: 2px solid var(--color-focus);
+  outline: 2px solid var(--color-signal);
   outline-offset: 2px;
 }
+/* 内容区直接落在画布上，不进白卡；纵向节奏由各自的块间距给。 */
 .panel {
-  padding-top: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  /* tab 栏自己的 24px 下边距已经把距离给够了，这里再叠一层会让分区首行离 tab
+     有 48px 以上的空档（2026-11-21 目检：素材页首屏像没排完）。 */
+  padding-top: 0;
 }
-/* 步骤带与「等待你操作」常驻在分区 tab 之下、各 panel 之上（#276）。 */
+/* 步骤带与「等待你操作」常驻在标题之下、分区 tab 之上（#276）。 */
 .progress-region {
-  margin-top: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
 }
+/* 「要你动手」条（#276 / 2026-11-21 重做）：整块是一条**满幅横带**——方角、无圆角、
+   无边框，靠底色与上下各一道 1px 钠黄线把它从板面上切出来。
+   不用「圆角盒 + 左侧色条」：那是 craft floor 明令禁止的形态，读起来像卡片装饰而不是
+   「整个流程在这里停住」。整宽横带更接近本世界的语言（一条基线被打亮）。 */
 .pending-hint {
-  margin: 0 0 var(--space-2);
-  padding: var(--space-1) var(--space-2);
-  border-left: 3px solid var(--color-focus);
-  color: var(--color-text);
-  font-size: var(--font-size-label);
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--color-signal);
+  border-bottom: 1px solid var(--color-signal);
+  background: var(--color-plate-raised);
+  color: var(--color-ink);
+  font-size: var(--text-body);
 }
 /* 「等待你操作」的跳转按钮：视觉上仍是那行提示里的文字，但整句可点（有下划线
    与指针，键盘可聚焦）。此前它只是一段灰字，等待人工的会话在概览里无处可点。 */
@@ -842,7 +895,7 @@ const errorMessage = computed(() =>
   padding: 0;
   border: 0;
   background: none;
-  color: var(--color-accent-on-canvas);
+  color: var(--color-signal);
   font: inherit;
   text-align: left;
   text-decoration: underline;
@@ -855,7 +908,9 @@ const errorMessage = computed(() =>
 .run-controls {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--space-3);
+  margin: 0;
 }
 .run-node {
   margin: 0;
@@ -866,25 +921,39 @@ const errorMessage = computed(() =>
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
-  margin-top: var(--space-2);
-  font-size: var(--font-size-label);
+  font-size: var(--text-micro);
 }
 .stop-report p {
   margin: 0;
 }
 .stop-reason {
-  color: var(--color-text);
+  color: var(--color-ink);
 }
 .stop-outcome {
-  color: var(--color-text-muted);
+  color: var(--color-ink-soft);
 }
 .muted {
-  color: var(--color-text-muted);
+  margin: 0;
+  color: var(--color-ink-soft);
 }
+/* 事实表：两列 grid，行间是 1px 发光线；标签走铭牌档（字距 + 次要墨色），值是正文。 */
 .facts {
   display: grid;
   grid-template-columns: max-content 1fr;
-  gap: var(--space-2) var(--space-3);
-  margin-top: var(--space-4);
+  margin: 0;
+}
+.facts dt {
+  padding: var(--space-2) var(--space-4) var(--space-2) 0;
+  border-top: 1px solid var(--color-rule);
+  color: var(--color-ink-soft);
+  font-size: var(--text-micro);
+  letter-spacing: var(--track-wide);
+}
+.facts dd {
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--color-rule);
+  color: var(--color-ink);
+  font-size: var(--text-body);
+  overflow-wrap: anywhere;
 }
 </style>

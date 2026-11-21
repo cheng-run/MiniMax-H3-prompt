@@ -526,12 +526,17 @@ async function onReopen(assetId: string): Promise<void> {
 .assets {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-4);
 }
 .assets h2 {
   margin: 0;
-  font-size: var(--font-size-title);
+  color: var(--color-ink-soft);
+  font-size: var(--text-micro);
+  font-weight: 400;
+  letter-spacing: var(--track-wide);
 }
+/* 容量条：每档一枚方角铭牌，超限的那一枚换钠黄偏红的一档（错误色），
+   不用色块堆。 */
 .capacity {
   display: flex;
   flex-wrap: wrap;
@@ -539,39 +544,39 @@ async function onReopen(assetId: string): Promise<void> {
   list-style: none;
   margin: 0;
   padding: 0;
+  font-family: var(--font-data);
+  font-size: var(--text-micro);
   font-variant-numeric: tabular-nums;
 }
 .capacity li {
-  padding: 2px 8px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-rule-strong);
 }
 .capacity__over {
-  border-color: var(--color-error-text);
-  color: var(--color-error-text);
-  font-weight: 600;
+  border-color: var(--color-error);
+  color: var(--color-error);
+  font-weight: 500;
 }
 .capacity-hint {
   margin: 0;
-  color: var(--color-error-text);
-  font-size: var(--font-size-label);
+  color: var(--color-error);
+  font-size: var(--text-micro);
 }
+/* 回执：上缘发光线 + 贴画布底，不进白卡。 */
 .receipt {
   margin: 0;
-  padding: var(--space-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-rule);
 }
 .receipt__title {
   margin: 0 0 var(--space-1);
-  font-weight: 600;
+  font-weight: 500;
 }
 .receipt__text {
   margin: 0;
   white-space: pre-wrap;
   font: inherit;
-  color: var(--color-text-muted);
+  color: var(--color-ink-soft);
 }
 .upload {
   display: flex;
@@ -580,26 +585,29 @@ async function onReopen(assetId: string): Promise<void> {
   gap: var(--space-2);
 }
 .upload__label {
-  font-weight: 600;
+  color: var(--color-ink-soft);
+  font-size: var(--text-micro);
+  letter-spacing: var(--track-wide);
 }
+/* 素材行：一行一续，行间是 1px 发光线，不套卡片。 */
 .asset-list {
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
 }
 .asset {
   display: flex;
   gap: var(--space-3);
-  padding: var(--space-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--color-rule);
 }
+/* 当前要交的那一件：整行 tint 浮起，并把已有的上边线染成钠黄点名它，
+   其余仍是普通行。行是横向的，信号落在它的基线上，不是左缘一道色条。 */
 .asset[data-current='true'] {
-  border-color: var(--color-focus);
+  background: var(--color-plate-raised);
+  border-top-color: var(--color-signal);
 }
 .asset__preview {
   flex: 0 0 160px;
@@ -622,25 +630,49 @@ async function onReopen(assetId: string): Promise<void> {
   align-items: center;
   gap: var(--space-2);
 }
+/* 素材状态：方括号小字，不说成徽标——这一行已经有名字与规格了。 */
 .asset__status {
-  padding: 0 6px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  font-size: var(--font-size-caption);
+  padding: 0 var(--space-1);
+  color: var(--color-ink-soft);
+  font-family: var(--font-data);
+  font-size: var(--text-micro);
+  letter-spacing: var(--track-mid);
 }
 .asset__status[data-status='passed'] {
-  border-color: var(--color-focus);
+  color: var(--color-ink);
 }
 .asset__status[data-status='abandoned'] {
-  color: var(--color-text-muted);
+  color: var(--color-ink-faint);
   text-decoration: line-through;
 }
+/* 行内动作做成填得很轻的铭牌按钮：描边取自发光线，悬停才亮到墨色。 */
 .asset__delete,
 .asset__goto,
 .asset__reopen {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-rule-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-ink-soft);
+  font-size: var(--text-micro);
+  letter-spacing: var(--track-mid);
   cursor: pointer;
+  transition: color var(--duration-fast) var(--ease-out);
 }
+/* 「去交这一件」是唯一指路的动作：钠黄。 */
+.asset__goto {
+  border-color: var(--color-signal);
+  color: var(--color-signal);
+}
+.asset__delete:hover,
+.asset__reopen:hover,
+.asset__goto:hover {
+  color: var(--color-ink);
+  border-color: var(--color-ink-soft);
+}
+/* 说明文字是正文档：素材分区的这几句是在教人怎么交图，不是铭牌。 */
 .muted {
-  color: var(--color-text-muted);
+  margin: 0;
+  color: var(--color-ink-soft);
 }
 </style>

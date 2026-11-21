@@ -464,50 +464,67 @@ async function submitVideo(): Promise<void> {
 .segment-card {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--space-3);
 }
 .segment__head {
   display: flex;
   align-items: baseline;
+  flex-wrap: wrap;
   gap: var(--space-3);
 }
 .segment__head h2 {
   margin: 0;
-  font-size: var(--font-size-body);
+  font-size: var(--text-lead);
+  font-weight: 500;
 }
 .segment__time {
-  color: var(--color-text-muted);
+  color: var(--color-ink-soft);
+  font-family: var(--font-data);
+  font-size: var(--text-micro);
+  letter-spacing: var(--track-mid);
 }
 .segment__status {
   margin-left: auto;
-  font-weight: 600;
+  color: var(--color-ink);
+  font-family: var(--font-data);
+  font-size: var(--text-micro);
+  letter-spacing: var(--track-mid);
 }
 .segment__shots,
 .segment__summary,
 .segment__assets {
   margin: 0;
 }
+.segment__assets {
+  color: var(--color-ink-soft);
+}
+/* 段事实表：发光线围出的一块刻度板，不是卡片——零圆角、贴画布底。 */
 .segment__grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
-  gap: var(--space-2);
+  gap: var(--space-3);
   margin: 0;
-  padding: var(--space-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  border: 1px solid var(--color-rule);
+  background: var(--color-plate);
 }
 .segment__grid-item dt {
-  color: var(--color-text-muted);
-  font-size: var(--font-size-caption);
+  color: var(--color-ink-soft);
+  font-size: var(--text-micro);
+  letter-spacing: var(--track-wide);
 }
 .segment__grid-item dd {
   margin: 0;
+  color: var(--color-ink);
   font-variant-numeric: tabular-nums;
 }
+/* 语义提示是「你该自己判断」的一句话：整块 tint 浮起、底部一条全宽钠黄基线
+   点名它是待读的，不是闸门。仍用方角、整块 flex 容器——信号不铺在某一侧。 */
 .segment__semantic-warning {
   margin: 0;
-  padding: var(--space-1) var(--space-2);
-  border-left: 3px solid var(--color-accent);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-plate-raised);
+  border-bottom: 1px solid var(--color-signal);
   white-space: pre-wrap;
 }
 .injection-card {
@@ -517,7 +534,10 @@ async function submitVideo(): Promise<void> {
 }
 .injection-card h3 {
   margin: 0;
-  font-size: var(--font-size-subtitle);
+  color: var(--color-ink-soft);
+  font-size: var(--text-micro);
+  font-weight: 400;
+  letter-spacing: var(--track-wide);
 }
 .start-frame {
   display: flex;
@@ -526,38 +546,52 @@ async function submitVideo(): Promise<void> {
 }
 .start-frame h3 {
   margin: 0;
-  font-size: var(--font-size-subtitle);
+  color: var(--color-ink-soft);
+  font-size: var(--text-micro);
+  font-weight: 400;
+  letter-spacing: var(--track-wide);
 }
+/* 起点图是唯一必须纯黑的画片背板。 */
 .start-frame__image {
   align-self: flex-start;
   max-width: 100%;
   max-height: 16rem;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-rule);
   background: var(--color-media-backdrop);
 }
 .start-frame__actions {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-2);
+  gap: var(--space-3);
 }
 .start-frame__link {
-  color: var(--color-accent);
+  color: var(--color-ink-soft);
+  font-size: var(--text-micro);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  transition: color var(--duration-fast) var(--ease-out);
+}
+.start-frame__link:hover {
+  color: var(--color-ink);
 }
 .start-frame__hint {
   margin: 0;
-  color: var(--color-text-muted);
+  color: var(--color-ink-soft);
+  font-size: var(--text-micro);
 }
 .prompt {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
 }
+/* 提示词正文：发光线围出的一个面，等宽小字、可滚。 */
 .prompt__text {
   margin: 0;
-  padding: var(--space-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  border: 1px solid var(--color-rule);
+  background: var(--color-plate);
+  font-family: var(--font-data);
+  font-size: var(--text-micro);
   white-space: pre-wrap;
   word-break: break-word;
   max-height: 20rem;
@@ -568,23 +602,31 @@ async function submitVideo(): Promise<void> {
   align-items: center;
   gap: var(--space-2);
 }
+/* 查看/复制是铭牌按钮：低调描边，悬停才亮到墨色。 */
 .toggle,
 .copy {
   padding: var(--space-1) var(--space-3);
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--color-rule-strong);
   border-radius: var(--radius-sm);
-  background: var(--color-surface);
-  color: var(--color-text);
+  background: transparent;
+  color: var(--color-ink-soft);
   font: inherit;
+  font-size: var(--text-micro);
+  letter-spacing: var(--track-mid);
   cursor: pointer;
+  transition: color var(--duration-fast) var(--ease-out);
+}
+.toggle:hover,
+.copy:hover {
+  color: var(--color-ink);
+  border-color: var(--color-ink-soft);
 }
 .copy:disabled {
   cursor: not-allowed;
-  opacity: 0.6;
 }
 .toggle:focus-visible,
 .copy:focus-visible {
-  outline: 2px solid var(--color-focus);
+  outline: 2px solid var(--color-signal);
   outline-offset: 2px;
 }
 .segment__video {
@@ -592,16 +634,18 @@ async function submitVideo(): Promise<void> {
   max-height: 22rem;
   background: var(--color-media-backdrop);
 }
+/* 本段待办表单：与正文之间一道发光线隔开。 */
 .submission {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  padding-top: var(--space-2);
-  border-top: 1px solid var(--color-border);
+  gap: var(--space-3);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-rule-strong);
 }
 .submission h3 {
   margin: 0;
-  font-size: var(--font-size-subtitle);
+  font-size: var(--text-lead);
+  font-weight: 500;
 }
 .field {
   display: flex;
@@ -622,9 +666,10 @@ async function submitVideo(): Promise<void> {
 }
 .file-error {
   margin: 0;
-  color: var(--color-error-text);
+  color: var(--color-error);
 }
 .muted {
-  color: var(--color-text-muted);
+  margin: 0;
+  color: var(--color-ink-soft);
 }
 </style>

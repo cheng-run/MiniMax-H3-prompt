@@ -256,51 +256,61 @@ async function submitRevision(): Promise<void> {
 .review {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: var(--space-5);
 }
+/* 审查块不套白卡：1px 发光线围成整圈标题板，方角、零阴影——单边线只是盒子
+   一侧的装饰，这里改回全边框，让它作为一个整体从页面底上立起来。 */
 .review-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
   padding: var(--space-3);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  border: 1px solid var(--color-rule);
 }
 .review-file {
-  margin-top: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
 }
 .review-file h3 {
-  margin: 0 0 var(--space-1);
-  font-size: var(--font-size-body);
+  margin: 0;
+  font-size: var(--text-body);
+  font-weight: 500;
 }
 .file-name {
   margin-left: var(--space-2);
-  color: var(--color-text-muted);
-  font-size: var(--font-size-caption);
+  color: var(--color-ink-soft);
+  font-family: var(--font-data);
+  font-size: var(--text-micro);
   font-weight: 400;
 }
+/* 文件正文：发光线围出的一个面，贴画布底，零圆角。 */
 .file-text {
   margin: 0;
-  padding: var(--space-2);
-  background: var(--color-bg);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  border: 1px solid var(--color-rule);
+  background: var(--color-plate);
+  font-family: var(--font-data);
+  font-size: var(--text-micro);
   white-space: pre-wrap;
   word-break: break-word;
   overflow-x: auto;
 }
 .file-error {
-  color: var(--color-error-text);
   margin: 0;
+  color: var(--color-error);
 }
 .muted {
-  color: var(--color-text-muted);
+  margin: 0;
+  color: var(--color-ink-soft);
 }
+/* 决议区：与正文之间一道发光线。 */
 .decision {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  margin-top: var(--space-4);
   padding-top: var(--space-3);
-  border-top: 1px solid var(--color-border);
+  border-top: 1px solid var(--color-rule);
 }
 .decision > .btn {
   align-self: flex-start;
@@ -312,17 +322,29 @@ async function submitRevision(): Promise<void> {
 }
 .layer-note {
   margin: 0 0 var(--space-2);
-  color: var(--color-text-muted);
-  font-size: var(--font-size-label);
+  color: var(--color-ink-soft);
+  font-size: var(--text-micro);
 }
 .field-error {
   margin: 0;
-  color: var(--color-error-text);
-  font-size: var(--font-size-label);
+  color: var(--color-error);
+  font-size: var(--text-micro);
 }
 .actions {
   display: flex;
   justify-content: flex-end;
+}
+.revision-history {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.revision-history h2 {
+  margin: 0;
+  color: var(--color-ink-soft);
+  font-size: var(--text-micro);
+  font-weight: 400;
+  letter-spacing: var(--track-wide);
 }
 .revision-history ol,
 .revision-history ul {
@@ -331,7 +353,11 @@ async function submitRevision(): Promise<void> {
 }
 .layer {
   margin-right: var(--space-2);
-  font-size: var(--font-size-label);
-  color: var(--color-text-muted);
+  color: var(--color-ink-soft);
+  font-size: var(--text-micro);
+  letter-spacing: var(--track-mid);
+}
+.revision-text {
+  color: var(--color-ink);
 }
 </style>

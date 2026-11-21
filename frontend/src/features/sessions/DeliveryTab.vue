@@ -229,25 +229,28 @@ const allSegmentsPassed = computed(
 .delivery {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-4);
 }
 .delivery h2 {
   margin: 0;
-  font-size: var(--font-size-title);
+  color: var(--color-ink-soft);
+  font-size: var(--text-micro);
+  font-weight: 400;
+  letter-spacing: var(--track-wide);
 }
 .delivery h3 {
   margin: 0;
-  font-size: var(--font-size-body);
+  font-size: var(--text-lead);
+  font-weight: 500;
 }
+/* 交付表单与归档结果不再套白卡：上缘一道 1px 发光线，块内靠间距。 */
 .pending,
 .result {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  padding: var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-rule);
 }
 .slots {
   display: flex;
@@ -261,8 +264,9 @@ const allSegmentsPassed = computed(
   min-width: 240px;
 }
 .picked {
-  color: var(--color-text-muted);
-  font-size: var(--font-size-caption);
+  color: var(--color-ink-soft);
+  font-family: var(--font-data);
+  font-size: var(--text-micro);
   word-break: break-all;
 }
 .actions {
@@ -272,8 +276,12 @@ const allSegmentsPassed = computed(
 }
 .facts {
   margin: 0;
-  padding-left: 1.25rem;
+  padding-left: var(--space-4);
 }
+.facts li {
+  color: var(--color-ink-soft);
+}
+/* 成片是本页唯一要看的媒体：黑背板保留。 */
 .facts video {
   display: block;
   width: 100%;
@@ -281,18 +289,20 @@ const allSegmentsPassed = computed(
   margin-top: var(--space-1);
   background: var(--color-media-backdrop);
 }
+/* 交付日志：发光线围出的一个面，等宽小字。 */
 .detail {
   margin: 0;
-  padding: var(--space-2);
-  background: var(--color-bg);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  border: 1px solid var(--color-rule);
+  background: var(--color-plate);
+  font-family: var(--font-data);
+  font-size: var(--text-micro);
   white-space: pre-wrap;
   word-break: break-word;
   overflow-x: auto;
 }
 .muted {
   margin: 0;
-  color: var(--color-text-muted);
+  color: var(--color-ink-soft);
 }
 </style>

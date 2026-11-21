@@ -6,36 +6,63 @@ withDefaults(defineProps<{ label: string; tone?: 'ok' | 'error' | 'neutral' | 'a
 </script>
 
 <template>
-  <span class="badge" :class="`badge--${tone}`">{{ label }}</span>
+  <!-- 线段只是视觉：读屏只读文字标签，形状本身不承载额外语义。 -->
+  <span class="badge" :class="`badge--${tone}`">
+    <span class="badge__line" aria-hidden="true"></span>
+    <span class="badge__label">{{ label }}</span>
+  </span>
 </template>
 
 <style scoped>
 .badge {
-  display: inline-block;
-  padding: 2px var(--space-2);
-  border-radius: var(--radius-sm);
-  font-size: var(--font-size-label);
-  border: 1px solid var(--color-border);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-micro);
+  letter-spacing: var(--track-mid);
   /* 列表行是 flex 容器，徽标会被压缩；不换行才能保住「已完成」这类三字标签
      （2026-11-21 critique：420 宽下折成「已完／成」两行）。 */
   white-space: nowrap;
   flex: none;
 }
-.badge--ok {
-  background: var(--color-ok-bg);
-  color: var(--color-ok-text);
-  border-color: var(--color-ok-text);
+
+/* 线段语言：状态是线，不是色块。一根 14px 的小线段放在标签左侧。
+   未开始/已完成/失败都用 2px 单线，「加倍」的双线只留给等待人工。 */
+.badge__line {
+  display: block;
+  flex: none;
+  width: 14px;
+  height: 2px;
+  background: var(--color-state-pending);
 }
-.badge--error {
-  background: var(--color-error-bg);
-  color: var(--color-error-text);
-  border-color: var(--color-error-text);
+
+.badge--ok .badge__line {
+  background: var(--color-state-done);
 }
-/* 「要你做事」这一档：用强调色的浅底 + 同色字，不引入新颜色。等待人工是本产品
-   的常态，也是唯一必须由人动手的状态，列表里必须一眼跳出来。 */
-.badge--attention {
-  background: var(--color-attention-bg);
-  color: var(--color-attention-text);
-  border-color: var(--color-attention-text);
+.badge--ok .badge__label {
+  color: var(--color-ink-soft);
+}
+
+/* 失败/中断/取消：划过——线断成划痕，与导轨上的斜划同一语义。 */
+.badge--error .badge__line {
+  background: repeating-linear-gradient(to right, var(--color-error) 0 3px, transparent 3px 5px);
+}
+.badge--error .badge__label {
+  color: var(--color-error);
+}
+
+.badge--neutral .badge__label {
+  color: var(--color-ink-faint);
+}
+
+/* 等待人工：两根 2px 平行线、间隔 2px，再加钠黄——全站唯一亮色只给
+   「现在最要紧的那一条」。 */
+.badge--attention .badge__line {
+  height: 6px;
+  background: repeating-linear-gradient(to bottom, var(--color-signal) 0 2px, transparent 2px 4px);
+}
+.badge--attention .badge__label {
+  color: var(--color-signal);
+  font-weight: 500;
 }
 </style>

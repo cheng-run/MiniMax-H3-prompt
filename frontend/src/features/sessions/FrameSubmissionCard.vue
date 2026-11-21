@@ -185,36 +185,41 @@ async function submitFrames(): Promise<void> {
 </template>
 
 <style scoped>
+/* 帧提交待办卡：与素材图卡同一语法——整块 tint 浮起，底部一条全宽钠黄基线，
+   方角、不进白卡。信号只作基线，不铺在盒子某一侧。 */
 .frame-card {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  padding: var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-plate-raised);
+  border-bottom: 1px solid var(--color-signal);
 }
 .frame-card h2 {
   margin: 0;
-  font-size: var(--font-size-title);
+  font-size: var(--text-lead);
+  font-weight: 500;
 }
 .frame-card h3 {
   margin: 0 0 var(--space-1);
-  font-size: var(--font-size-subtitle);
+  font-size: var(--text-body);
+  font-weight: 500;
 }
 .prompts {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--space-3);
 }
+/* 帧提示词正文：发光线围出一个面，等宽小字。 */
 .prompt pre {
   margin: 0;
-  padding: var(--space-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  border: 1px solid var(--color-rule);
+  background: var(--color-plate);
+  font-family: var(--font-data);
+  font-size: var(--text-micro);
   white-space: pre-wrap;
   word-break: break-word;
-  font-size: var(--font-size-label);
 }
 .slots {
   display: flex;
@@ -232,13 +237,13 @@ async function submitFrames(): Promise<void> {
   display: flex;
   gap: var(--space-2);
 }
+/* 二次确认：错误色描一道线，仍是线不是色块。 */
 .confirm {
-  padding: var(--space-2);
-  border: 1px solid var(--color-error-text);
-  border-radius: var(--radius-md);
-  background: var(--color-error-bg);
+  padding: var(--space-3);
+  border: 1px solid var(--color-error);
 }
 .muted {
-  color: var(--color-text-muted);
+  margin: 0;
+  color: var(--color-ink-soft);
 }
 </style>

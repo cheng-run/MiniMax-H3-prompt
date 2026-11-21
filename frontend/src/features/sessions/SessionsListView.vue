@@ -29,6 +29,24 @@ const { data, isPending, isError, error, refetch } = useQuery({
 const items = computed(() => data.value?.items ?? [])
 const hasNext = computed(() => Boolean(data.value?.next_cursor))
 
+// 页眉计数只数当前页：服务端给的是游标不是总数，把「本页 20 条」说成总数会在翻页时撒谎。
+// 「要你动手」是本产品唯一必须由人干预的状态，单独挑出来用钠黄——列表页第一眼要回答的
+// 就是「现在有几条等我」，而它不能靠数颜色，得有一句话。
+const attentionCount = computed(
+  () => items.value.filter((item) => item.status === 'awaiting_human').length,
+)
+
+// 导轨指示线按「行号」落位（translateY(行号 × 行高)），不追鼠标坐标：行高是契约常量，
+// 这样键盘 Tab 也能顺手把那根线带到当前行。null = 指针不在任何一行上。
+// 行号另存一份（pointerIndex）：隐去时线留在原地淡出，而不是先滑回第 0 行。
+const hoverIndex = ref<number | null>(null)
+const pointerIndex = ref(0)
+
+function pointAt(index: number): void {
+  pointerIndex.value = index
+  hoverIndex.value = index
+}
+
 function nextPage(): void {
   const next = data.value?.next_cursor
   if (!next) {
@@ -37,11 +55,14 @@ function nextPage(): void {
   // 截断前进分支：先回退再前进时，旧的前向游标不该残留成第二条分叉。
   cursors.value = [...cursors.value.slice(0, pageIndex.value + 1), next]
   pageIndex.value += 1
+  // 换页后行号全变了，旧指针会停在一条已经不存在的行上。
+  hoverIndex.value = null
 }
 
 function prevPage(): void {
   if (pageIndex.value > 0) {
     pageIndex.value -= 1
+    hoverIndex.value = null
   }
 }
 
@@ -89,12 +110,24 @@ function copyBaseUrl(): Promise<void> {
 
 <template>
   <section class="sessions">
-    <div class="sessions__header">
-      <h1>会话</h1>
+    <header class="sessions__header">
+      <div class="sessions__heading">
+        <h1 class="sessions__title">会话</h1>
+        <!-- 还没拿到数据时不写计数：这一行是事实陈述，宁可空着也不要闪一下 0。 -->
+        <p v-if="!isPending && !isError" class="sessions__count">
+          <span class="tnum">{{ items.length }}</span> 条记录
+          <template v-if="attentionCount > 0">
+            <span aria-hidden="true">·</span>
+            <span class="sessions__count-attention">
+              <span class="tnum">{{ attentionCount }}</span> 条要你动手
+            </span>
+          </template>
+        </p>
+      </div>
       <Button @click="showForm = !showForm">
         {{ showForm ? '收起新建' : '新建会话' }}
       </Button>
-    </div>
+    </header>
 
     <section v-if="baseUrl" class="local-address">
       <p class="local-address__line">
@@ -129,147 +162,409 @@ function copyBaseUrl(): Promise<void> {
 
     <SessionCreateForm v-if="showForm" />
 
-    <LoadingState v-if="isPending" />
+    <!-- 导轨始终占位：有会话时是刻画度的基线，空列表时是一条还没落线的板子。
+         它是纯装饰，读屏与键盘都不进去。 -->
+    <div class="sessions__body">
+      <div class="rail" aria-hidden="true">
+        <span class="rail__line"></span>
+        <span
+          class="rail__pointer"
+          :class="{ 'rail__pointer--on': hoverIndex !== null }"
+          :style="{ '--row-index': String(pointerIndex) }"
+        ></span>
+      </div>
 
-    <ErrorNotice v-else-if="isError" :message="errorMessage">
-      <Button @click="refetch()">重试</Button>
-    </ErrorNotice>
+      <div class="sessions__panel">
+        <LoadingState v-if="isPending" />
 
-    <template v-else>
-      <p v-if="items.length === 0" class="sessions__empty">还没有会话，点击「新建会话」开始。</p>
-      <ul v-else class="session-list">
-        <li
-          v-for="item in items"
-          :key="item.session_id"
-          class="session-item"
-          :class="{ 'session-item--attention': item.status === 'awaiting_human' }"
-        >
-          <RouterLink class="session-link" :to="`/sessions/${item.session_id}`">
-            {{ item.plot || item.session_id }}
-          </RouterLink>
-          <StatusBadge :tone="statusTone(item.status)" :label="statusLabel(item.status)" />
-          <span class="session-meta">{{ item.variant }} · 修订 {{ item.revision }}</span>
-        </li>
-      </ul>
+        <ErrorNotice v-else-if="isError" :message="errorMessage">
+          <Button @click="refetch()">重试</Button>
+        </ErrorNotice>
 
-      <div class="pager">
+        <template v-else>
+          <p v-if="items.length === 0" class="sessions__empty">
+            还没有会话，点击「新建会话」开始。
+          </p>
+          <ul v-else class="session-list" @mouseleave="hoverIndex = null">
+            <li
+              v-for="(item, index) in items"
+              :key="item.session_id"
+              class="session-item"
+              :class="{ 'session-item--attention': item.status === 'awaiting_human' }"
+              :data-status="item.status"
+              @mouseenter="pointAt(index)"
+              @focusin="pointAt(index)"
+              @focusout="hoverIndex = null"
+            >
+              <RouterLink class="session-link" :to="`/sessions/${item.session_id}`">
+                <span class="session-title">{{ item.plot || item.session_id }}</span>
+                <StatusBadge :tone="statusTone(item.status)" :label="statusLabel(item.status)" />
+                <span class="session-end">
+                  <span class="session-meta"
+                    >{{ item.variant }} · 修订 <span class="tnum">{{ item.revision }}</span></span
+                  >
+                  <span v-if="item.status === 'awaiting_human'" class="session-next">NEXT</span>
+                </span>
+              </RouterLink>
+            </li>
+          </ul>
+        </template>
+      </div>
+    </div>
+
+    <div v-if="!isPending && !isError" class="pager">
+      <p class="pager__index">
+        第 <span class="tnum">{{ pageIndex + 1 }}</span> 页
+      </p>
+      <div class="pager__actions">
         <Button variant="secondary" :disabled="pageIndex === 0" @click="prevPage">上一页</Button>
         <Button variant="secondary" :disabled="!hasNext" @click="nextPage">下一页</Button>
       </div>
-    </template>
+    </div>
   </section>
 </template>
 
 <style scoped>
 .sessions {
+  /* 契约定死两个尺度：导轨列 56px、行高 44px（窄屏 28px），刻度长度 18px。间距令牌
+     里没有这几档，但刻度必须落在行的垂直中心、行距必须等距，所以作为本品局部变量
+     在这里各定义一次，只改这一处就整页对齐。 */
+  --rail-w: 56px;
+  --row-h: 44px;
+  --tick-len: 18px;
+
   max-width: 880px;
-  /* 与详情页同一处毛病：只设了上限没居中，1440 宽下右侧空出 536px
-     （2026-11-21 layout 实测）——内容贴在左侧像一张没排完的表。 */
   margin-inline: auto;
 }
+
 .sessions__header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-3);
-  margin-bottom: var(--space-3);
+  margin-bottom: var(--space-4);
 }
-.sessions__empty {
-  color: var(--color-text-muted);
+.sessions__heading {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
 }
-.local-address {
+/* 视觉标就是 h1（页面上只有这一个）。中文没有大小写，rails-contract 又禁止给中文
+   加字距，所以层级只靠 micro 字号 + 次要墨色，不加 --track-wide。 */
+.sessions__title {
+  font-size: var(--text-micro);
+  font-weight: 500;
+  color: var(--color-ink-soft);
+}
+.sessions__count {
+  font-size: var(--text-micro);
+  color: var(--color-ink-soft);
+}
+/* 计数是数据：走等宽数字，翻页时行里的数字不跳宽。 */
+.sessions__count .tnum {
+  font-family: var(--font-data);
+}
+.sessions__count-attention {
+  color: var(--color-signal);
+}
+
+/* 铭牌行：本地地址与缺密钥提示都是「供抄写的一段路径」，不是警告条。
+   1px 发光线 + 板面底，与列表读作同一张板子。 */
+.local-address,
+.config-hint {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-2) var(--space-3);
   margin-bottom: var(--space-3);
   padding: var(--space-2) var(--space-3);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  background: var(--color-plate);
+  border: 1px solid var(--color-rule);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-micro);
+  color: var(--color-ink-soft);
 }
-.local-address__line,
-.local-address__failed {
-  margin: 0;
-  color: var(--color-text-muted);
-  overflow-wrap: anywhere;
+.config-hint {
+  /* 密钥提示是多行说明，竖着排；底色与线仍与地址铭牌同一种，不另造形态。 */
+  flex-direction: column;
+  align-items: flex-start;
 }
 .local-address__line {
   flex: 1 1 auto;
 }
-.config-hint {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--space-2);
-  margin-bottom: var(--space-3);
-  padding: var(--space-3);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+.local-address p,
+.config-hint p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.local-address code,
+.config-hint code {
+  font-family: var(--font-data);
+  color: var(--color-ink);
+}
+.local-address__failed,
+.config-hint__failed {
+  color: var(--color-error);
 }
 .config-hint__title {
   margin: 0;
-  font-size: var(--font-size-body);
-}
-.config-hint__path,
-.config-hint__note,
-.config-hint__failed {
-  margin: 0;
-  color: var(--color-text-muted);
-  overflow-wrap: anywhere;
+  font-size: var(--text-micro);
+  font-weight: 500;
+  color: var(--color-ink);
 }
 .config-hint__keys {
   margin: 0;
-  padding-left: var(--space-4);
+  padding-left: var(--space-3);
 }
+
+/* 主体：左导轨 + 右板面同一个 grid，刻度线才能靠尺寸关系与行对齐。 */
+.sessions__body {
+  display: grid;
+  grid-template-columns: var(--rail-w) 1fr;
+}
+.rail {
+  position: relative;
+}
+/* 纵向基线：一根 1px 发光线取代整页的边框。grid 默认拉伸，空列表时它照样贯通。 */
+.rail__line {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--color-rule);
+}
+/* 全站唯一的签名动效：指示线落到被指向的那一行上，过冲一次再稳住（rail-contract）。
+   行号由每行的 mouseenter/focusin 写成 --row-index，transform 才可插值；
+   别处一律 --ease-out / --duration-fast。线从基线向右伸一格，读作「这一行」。
+
+   默认不可见：没有指向任何行时它不该在首行露头（早先只靠 opacity:0 + 立即 transition，
+   首帧会闪一下）。visibility 参与过渡，隐藏时彻底不参与绘制与命中。 */
+.rail__pointer {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: calc(var(--tick-len) + var(--space-2));
+  height: 1px;
+  background: var(--color-signal);
+  opacity: 0;
+  visibility: hidden;
+  /* 与刻度同芯跨在基线上：指向哪一行，哪一行就被钠黄穿过一次。 */
+  transform: translate(-50%, calc(var(--row-index, 0) * var(--row-h)));
+  transition:
+    transform var(--duration-base) var(--ease-expo),
+    opacity var(--duration-fast) var(--ease-out),
+    visibility 0s linear var(--duration-fast);
+}
+.rail__pointer--on {
+  opacity: 1;
+  visibility: visible;
+  transition:
+    transform var(--duration-base) var(--ease-expo),
+    opacity var(--duration-fast) var(--ease-out),
+    visibility 0s;
+}
+.sessions__panel {
+  min-width: 0;
+}
+
+.sessions__empty {
+  padding-block: var(--space-4);
+  color: var(--color-ink-soft);
+}
+
+/* 行：不用卡片，靠 1px 分隔线；悬停整行压一档底色。
+   高度写在 li 上（含 1px 边框），44px 才是真实行距，与指示线的步进一致。 */
 .session-list {
   list-style: none;
-  padding: 0;
   margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
+  padding: 0;
 }
 .session-item {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-2) var(--space-3);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  position: relative;
+  height: var(--row-h);
+  border-bottom: 1px solid var(--color-rule);
+  transition: background-color var(--duration-fast) var(--ease-out);
 }
-/* 「等你动手」的那一行整行染色（2026-11-21 critique：20 行列表里唯一的等待人工
-   与「已创建」同貌，扫视时读起来像没状态）。用淡底 + 同色边框而不是单边色条——
-   后者是 craft-floor 明令禁止的形态（一侧色条做状态标记）。 */
-.session-item--attention {
-  background: var(--color-attention-bg);
-  border-color: var(--color-attention-text);
-}
-/* 染色底上的链接要换更深的蓝：默认 accent 落在 #e8effd 上只有 3.96:1，
-   accent-on-canvas 也只 4.46:1，都不到 AA。用 attention-text 的同色是 7.02:1。 */
-.session-item--attention .session-link {
-  color: var(--color-attention-text);
+.session-item:hover {
+  background: var(--color-plate);
 }
 .session-link {
-  flex: 1 1 auto;
-  color: var(--color-accent);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--space-4);
+  height: 100%;
+  color: var(--color-ink);
+  font-size: var(--text-body);
+}
+.session-title {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.session-meta {
-  color: var(--color-text-muted);
-  font-size: var(--font-size-label);
-  /* 变体 + 修订号是一个整体，不能折成「T2VA ·／修订 73」两行（2026-11-21 layout：
-     某些行在 1440 下就折了，行高不齐像错位）。它也不该被链接挤到换行。 */
-  white-space: nowrap;
-  flex: none;
+/* 能点的信号来自下划线本身（纸面铅笔划线的逻辑），不是蓝字。 */
+.session-item:hover .session-title {
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--color-rule-strong);
 }
+/* 元信息与行尾铭牌是同一个「行末」区，3 列契约不被 NEXT 撑出第四条空轨。 */
+.session-end {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+.session-meta {
+  font-family: var(--font-data);
+  font-size: var(--text-micro);
+  color: var(--color-ink-soft);
+  white-space: nowrap;
+}
+/* 行尾铭牌只出现在等待人工那一行；英语小件，可以带字距。 */
+.session-next {
+  font-size: var(--text-micro);
+  letter-spacing: var(--track-wide);
+  color: var(--color-signal);
+  white-space: nowrap;
+}
+/* 「等你动手」整行：浮起一档底，标题换钠黄。写在 :hover 之后且补一条 hover 规则——
+   否则 .session-item:hover 的特异性更高，悬停时会把这一行压回普通底色。 */
+.session-item--attention,
+.session-item--attention:hover {
+  background: var(--color-plate-raised);
+}
+.session-item--attention .session-title {
+  color: var(--color-signal);
+}
+
+/* 刻度线挂在行自身上（而不是另造一列等高的 li）：行高变化时刻度仍落在行的垂直中心，
+   「线与线间距 44px」由行高本身保证。形态按 rail-contract 的七态表。
+
+   方向：基线是**纵向**的，所以刻度必须**横向**伸出（18px 长、2px 粗），跨在基线上读作
+   「这一行在这里」。早先写成纵向 2px 粗块压在竖线上，读起来是一个方点、像「盒子一侧
+   的色条」——那是 craft floor 明令禁止的形态。 */
+.session-item::before {
+  content: '';
+  position: absolute;
+  left: calc(var(--rail-w) * -0.5);
+  top: 50%;
+  width: var(--tick-len);
+  height: 2px;
+  /* 跨在纵向基线上、左右各伸一半：刻度是「轴上的刻度」，不是贴边的一截。 */
+  transform: translate(-50%, -50%);
+  background: var(--color-state-live);
+}
+/* 七态线形（rail-contract 的表）：实线全高 / 双线 / 半高 / 叠加斜划 / 极暗。 */
+.session-item[data-status='created']::before {
+  background: var(--color-state-pending);
+}
+.session-item[data-status='completed']::before {
+  /* 半高：18px → 9px，仍跨在基线上。 */
+  width: calc(var(--tick-len) / 2);
+  background: var(--color-state-done);
+}
+.session-item[data-status='interrupted']::before {
+  background: var(--color-state-done);
+}
+.session-item[data-status='cancelled']::before {
+  background: var(--color-state-dead);
+}
+.session-item[data-status='failed']::before {
+  background: var(--color-error);
+}
+/* 等待人工：两根 2px 平行、间隔 2px，钠黄——全站唯一亮色只给这一条。 */
+.session-item[data-status='awaiting_human']::before {
+  height: 6px;
+  background: linear-gradient(
+    to bottom,
+    var(--color-signal) 0 2px,
+    transparent 2px 4px,
+    var(--color-signal) 4px 6px
+  );
+}
+/* 死掉的三态：整根刻度**自己**倾斜成斜线，而不是在横刻度上再叠一根斜线——
+   叠加会读成一个「>」箭头（早先实测：首行被误认成可展开）。与其它刻度同芯旋转，
+   仍跨在基线上。 */
+.session-item[data-status='interrupted']::before,
+.session-item[data-status='cancelled']::before,
+.session-item[data-status='failed']::before {
+  height: 1.5px;
+  transform: translate(-50%, -50%) rotate(-45deg);
+}
+/* 删除线只在「已中断 / 已取消」的标题上：这两态的故事线已经断了
+   （品红色不在本世界，舍弃）。 */
+.session-item[data-status='interrupted'] .session-title,
+.session-item[data-status='cancelled'] .session-title {
+  color: var(--color-ink-faint);
+  text-decoration: line-through;
+  text-decoration-color: var(--color-rule-strong);
+}
+
+/* 分页落在列表右下角：页码说明是一行 micro 文字，按钮在它右侧。
+   左缘让出导轨列，与列表行的起点对齐。 */
 .pager {
   display: flex;
-  gap: var(--space-2);
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+  padding-left: var(--rail-w);
   margin-top: var(--space-3);
+}
+.pager__index {
+  font-size: var(--text-micro);
+  color: var(--color-ink-soft);
+}
+.pager__index .tnum {
+  font-family: var(--font-data);
+}
+.pager__actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+/* 窄屏：导轨收窄，行折成两行（标题占满第一行，状态与元信息第二行），不出横向滚动。
+   44px 步进与悬停指示线都是鼠标桌面的语法，触屏上整条关掉。 */
+@media (max-width: 720px) {
+  .sessions__body {
+    /* 窄屏刻度只有 12px，而导轨列只有 28px：刻度从基线向**左**伸，超出的那截会跑到
+       视口外（2026-11-21 实测左缘露半根斜线）。给板面留出裁剪边界。 */
+    overflow: hidden;
+  }
+  .sessions {
+    --rail-w: 28px;
+    --tick-len: 12px;
+  }
+  /* 窄屏刻度从基线向左伸 12px，而列表项左缘就在视口边上，超出部分会露到框外。
+     不留负 left 偏移，直接把刻度挪进导轨列内（右端仍顶在基线上）。 */
+  .session-item::before {
+    left: 0;
+  }
+  .rail__pointer {
+    display: none;
+  }
+  .session-item {
+    height: auto;
+  }
+  .session-link {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1) var(--space-3);
+    padding-block: var(--space-2);
+  }
+  .session-title {
+    flex: 0 0 100%;
+  }
+  .session-end {
+    /* 元信息推到第二行右端，标题留下的宽度归状态徽标。 */
+    margin-left: auto;
+  }
+  .pager {
+    padding-left: 0;
+  }
 }
 </style>

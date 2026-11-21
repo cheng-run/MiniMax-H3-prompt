@@ -288,7 +288,7 @@ function noteDownload(name: string): void {
 .artifacts {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: var(--space-5);
 }
 .group {
   display: flex;
@@ -297,16 +297,22 @@ function noteDownload(name: string): void {
 }
 .group h2 {
   margin: 0;
-  font-size: var(--font-size-title);
+  color: var(--color-ink-soft);
+  font-size: var(--text-micro);
+  font-weight: 400;
+  letter-spacing: var(--track-wide);
 }
+/* 产物块不再套白卡：上缘一道 1px 发光线分隔，块与块之间靠间距。 */
 .artifact {
-  padding: var(--space-3);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-rule);
 }
+/* 主产物是要抄走的那一份：上缘换成钠黄，仍是一条线而不是盒子。 */
 .artifact--primary {
-  border-color: var(--color-accent);
+  border-top-color: var(--color-signal);
 }
 .artifact__head {
   display: flex;
@@ -315,21 +321,29 @@ function noteDownload(name: string): void {
   gap: var(--space-2);
 }
 .artifact__head h3 {
-  margin: 0 0 var(--space-1);
-  font-size: var(--font-size-body);
+  margin: 0;
+  font-size: var(--text-body);
+  font-weight: 500;
 }
 .file-name {
   margin-left: var(--space-2);
-  color: var(--color-text-muted);
-  font-size: var(--font-size-caption);
+  color: var(--color-ink-soft);
+  font-family: var(--font-data);
+  font-size: var(--text-micro);
   font-weight: 400;
 }
+/* 正文块：发光线围出的一个面，贴画布底，零圆角。 */
 .file-text {
   margin: 0;
-  padding: var(--space-2);
-  background: var(--color-bg);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  border: 1px solid var(--color-rule);
+  background: var(--color-plate);
+  /* 产物正文是可读的长文（剧本、分镜表），不是代码：用正文字体与正文字号。
+     早先按「等宽 + micro」处理，一来 11px 读长文太吃力，二来 `ui-monospace` 在
+     没有等宽字体的环境里会回落到系统衬线，读起来像另一套设计（2026-11-21 目检）。 */
+  font-family: var(--font-sans);
+  font-size: var(--text-body);
+  line-height: 1.75;
   white-space: pre-wrap;
   word-break: break-word;
   overflow-x: auto;
@@ -340,46 +354,62 @@ function noteDownload(name: string): void {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  margin-top: var(--space-2);
 }
+/* 产物上的复制/下载是文字动作：一只铭牌按钮，不靠色块。 */
 .copy,
 .download {
   padding: var(--space-1) var(--space-3);
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--color-rule-strong);
   border-radius: var(--radius-sm);
-  background: var(--color-surface);
-  color: var(--color-text);
+  background: transparent;
+  color: var(--color-ink-soft);
   font: inherit;
+  font-size: var(--text-micro);
+  letter-spacing: var(--track-mid);
   cursor: pointer;
+  transition: color var(--duration-fast) var(--ease-out);
+}
+.copy:hover,
+.download:hover {
+  color: var(--color-ink);
+  border-color: var(--color-ink-soft);
 }
 .copy:disabled {
   cursor: not-allowed;
-  opacity: 0.6;
 }
+/* 主复制按钮：钠黄描边 + 钠黄字，仍是 2px 圆角的小碑，不做实心块。 */
 .copy--primary {
-  padding: var(--space-2) var(--space-4);
-  background: var(--color-accent);
-  border-color: var(--color-accent);
-  color: var(--color-on-accent);
-  /* 曾经是 1.0625rem（唯一一处，介于 Body 与 Title 之间没有语义）。主操作按钮
-     与全站其它按钮同为 Body，靠 600 字重与蓝底区分层级，不靠半个字号。 */
-  font-size: var(--font-size-body);
-  font-weight: 600;
+  border-color: var(--color-signal);
+  color: var(--color-signal);
+  font-weight: 500;
+}
+.copy--primary:hover {
+  color: var(--color-signal);
+  border-color: var(--color-signal);
 }
 .download {
   text-decoration: none;
 }
 .copy:focus-visible,
 .download:focus-visible {
-  outline: 2px solid var(--color-focus);
+  outline: 2px solid var(--color-signal);
   outline-offset: 2px;
+}
+/* 媒体元素自己占一块黑背板——视频与音频是唯一必须纯黑的区域。 */
+.artifact video,
+.artifact audio {
+  width: 100%;
+  max-height: 22rem;
+  background: var(--color-media-backdrop);
 }
 .file-error,
 .copy-error {
   margin: 0;
-  color: var(--color-error-text);
+  color: var(--color-error);
 }
 .muted {
-  color: var(--color-text-muted);
+  margin: 0;
+  color: var(--color-ink-soft);
+  font-size: var(--text-micro);
 }
 </style>

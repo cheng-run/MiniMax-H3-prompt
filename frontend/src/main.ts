@@ -4,9 +4,9 @@ import { createApp } from 'vue'
 
 import App from './app/App.vue'
 import { ensureSessionToken } from './api/client'
+import { initTheme } from './app/theme'
 import { router } from './router'
-import './styles/reset.css'
-import './styles/tokens.css'
+import './styles/main.css'
 
 // 页面一启动就取启动令牌：引导端点同时下发 wb_session Cookie，`<video>` / `<img>`
 // 由浏览器自己发请求、挂不上自定义头，只能靠这个 Cookie（D3-1 / ADR 0033）。
@@ -14,6 +14,9 @@ import './styles/tokens.css'
 void ensureSessionToken().catch((error: unknown) => {
   console.warn('启动令牌获取失败，首次 API 调用会重试', error)
 })
+
+// 主题要在首次绘制前落定，否则会在深色页面上闪一帧浅色（2026-11-21 重做）。
+initTheme()
 
 const app = createApp(App)
 

@@ -108,36 +108,69 @@ async function exportBundle() {
 
 <style scoped>
 .diagnostics {
-  max-width: 640px;
+  max-width: 720px;
 }
 .diagnostics-list {
   display: grid;
   grid-template-columns: max-content 1fr;
-  gap: var(--space-2) var(--space-3);
+  gap: var(--space-2) var(--space-4);
+  margin: var(--space-4) 0;
+  border-top: 1px solid var(--color-rule);
+}
+.diagnostics-list dt {
+  padding-top: var(--space-2);
+  font-size: var(--text-micro);
+  letter-spacing: var(--track-wide);
+  text-transform: uppercase;
+  color: var(--color-ink-soft);
+  border-top: 1px solid var(--color-rule);
+}
+.diagnostics-list dd {
+  padding-top: var(--space-2);
+  font-family: var(--font-data);
+  border-top: 1px solid var(--color-rule);
 }
 .diagnostics-detail {
   margin-top: var(--space-3);
   padding: var(--space-3);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  background: var(--color-plate);
+  border: 1px solid var(--color-rule);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-data);
+  font-size: var(--text-micro);
+  line-height: 1.6;
   overflow-x: auto;
 }
 .bundle {
-  margin-top: var(--space-5);
+  margin-top: var(--space-6);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-rule);
+}
+.bundle h2 {
+  font-size: var(--text-body);
+  font-weight: 500;
 }
 .bundle-items {
-  margin: var(--space-2) 0;
+  margin: var(--space-3) 0;
   padding-left: var(--space-4);
+  font-size: var(--text-micro);
+  color: var(--color-ink-soft);
+  line-height: 1.9;
+}
+/* 条目左边那条短线是装饰，不是「一侧色条卡片」：整块没有边框也没有底色。 */
+.bundle-items li::marker {
+  color: var(--color-ink-faint);
 }
 .bundle-note {
-  color: var(--color-text-muted);
+  font-size: var(--text-micro);
+  color: var(--color-ink-soft);
 }
 /* 下载锚点不显示：用户看到的是按钮，锚点只承担「带 Cookie 的浏览器原生下载」。 */
 .bundle-download {
   display: none;
 }
 .bundle-error {
-  color: var(--color-error-text);
+  font-size: var(--text-micro);
+  color: var(--color-error);
 }
 </style>

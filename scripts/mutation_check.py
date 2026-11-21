@@ -1302,15 +1302,14 @@ MUTATIONS: tuple[Mutation, ...] = (
         </p>
       </div>
 
-      <!-- 概览与进度 -->
-      <section
-        v-if="ui.workbenchTab === 'overview'"
-        id="workbench-panel-overview"
-        role="tabpanel"
-        aria-labelledby="workbench-tab-overview"
-        class="panel"
-      >
-        <ErrorNotice v-if="runError" :message="runError" />''',
+      <div class="tabs" role="tablist" aria-label="工作台分区">
+        <button
+          v-for="tab in tabs"
+          :id="`workbench-tab-${tab.id}`"
+          :key="tab.id"
+          type="button"
+          role="tab"
+          class="tab"''',
         '''      <div class="progress-region">
         <!-- 有可去的分区时是按钮，点了就切过去；未知待办没有入口，退回只读一行
              （不能渲染一个点了没反应的按钮）。整行仍是 live region：新待办出现时
@@ -1328,15 +1327,14 @@ MUTATIONS: tuple[Mutation, ...] = (
         </p>
       </div>
 
-      <!-- 概览与进度 -->
-      <section
-        v-if="ui.workbenchTab === 'overview'"
-        id="workbench-panel-overview"
-        role="tabpanel"
-        aria-labelledby="workbench-tab-overview"
-        class="panel"
-      >
-        <ErrorNotice v-if="runError" :message="runError" />
+      <div class="tabs" role="tablist" aria-label="工作台分区">
+        <button
+          v-for="tab in tabs"
+          :id="`workbench-tab-${tab.id}`"
+          :key="tab.id"
+          type="button"
+          role="tab"
+          class="tab"
 
         <ProgressBand v-if="progressView.steps.length" :view="progressView" />''',
         ("src/features/sessions/SessionDetailView.spec.ts"

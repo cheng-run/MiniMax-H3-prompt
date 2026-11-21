@@ -1,0 +1,38 @@
+@import 'tailwindcss';
+
+/* Tailwind 4 的主题层：把我们的语义令牌映射进去，让 utility 与手写 CSS
+   读同一套变量。只映射语义名，不做 oklch 二次推导——这是设计系统，不是调色板。 */
+@theme {
+  --color-canvas: var(--color-canvas);
+  --color-plate: var(--color-plate);
+  --color-plate-raised: var(--color-plate-raised);
+  --color-rule: var(--color-rule);
+  --color-rule-strong: var(--color-rule-strong);
+  --color-ink: var(--color-ink);
+  --color-ink-soft: var(--color-ink-soft);
+  --color-ink-faint: var(--color-ink-faint);
+  --color-signal: var(--color-signal);
+  --color-signal-ink: var(--color-signal-ink);
+  --color-error: var(--color-error);
+
+  --font-sans: var(--font-sans);
+  --font-data: var(--font-data);
+
+  --text-micro: var(--text-micro);
+  --text-body: var(--text-body);
+  --text-lead: var(--text-lead);
+  --text-display: var(--text-display);
+
+  --spacing-1: var(--space-1);
+  --spacing-2: var(--space-2);
+  --spacing-3: var(--space-3);
+  --spacing-4: var(--space-4);
+  --spacing-5: var(--space-5);
+  --spacing-6: var(--space-6);
+
+  --radius-sm: var(--radius-sm);
+}
+
+@import './fonts.css';
+@import './tokens.css';
+@import './reset.css';

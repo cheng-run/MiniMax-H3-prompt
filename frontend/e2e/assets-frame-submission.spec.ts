@@ -114,6 +114,10 @@ test('素材上传 → 首尾帧选择 → 提交 → 阶段 2 完成', async ({
   await page.getByRole('button', { name: '提交帧并继续' }).click()
 
   // 提交后不再有本地轮询：状态由实时通道（SSE 失效信号）推着走到终点。
-  await expect(page.getByText('已完成')).toBeVisible({ timeout: 30_000 })
+  // 精确取状态徽标：步骤带的 sr-only 播报里也含「已完成」，getByText 会命中多个
+  // （2026-11-21 重做后步骤带补了完整播报，选择器不再唯一）。
+  await expect(page.locator('.badge__label', { hasText: '已完成' })).toBeVisible({
+    timeout: 30_000,
+  })
   await expect(page.getByRole('heading', { name: '提交关键帧' })).toHaveCount(0)
 })
