@@ -1251,3 +1251,241 @@ describe('SessionDetailView 步骤带与等待提示全局化（#276）', () => 
     }
   })
 })
+
+// 2026-11-21 layout：等待人工的会话在概览分区此前无处可点——提示是一行灰字，
+// 用户得自己猜它在哪一格。这三组咬住「指路」：入口、计数、停下来之后的诊断。
+describe('SessionDetailView 指路（2026-11-21 layout）', () => {
+  const briefOf = (overrides: Partial<ReturnType<typeof makeDetail>['brief']>) => ({
+    ...makeDetail().brief,
+    ...overrides,
+  })
+
+  const pendingItem = (kind: string, extra: Record<string, unknown> = {}) => ({
+    item_id: `item-${kind}`,
+    kind,
+    status: 'pending',
+    created_at: '2026-11-11T00:00:00Z',
+    resolved_at: '',
+    reason: '',
+    ...extra,
+  })
+
+  it('「等待你操作」是可点的按钮，点了跳到真正挂着那张卡的分区', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({
+            status: 'awaiting_human',
+            brief: briefOf({ mode: 'ref', duration: 8 }),
+            mode: 'ref',
+            action_items: [pendingItem('asset_extra')],
+          }),
+        ),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    const goto = wrapper.find('.pending-hint__goto')
+    expect(goto.exists()).toBe(true)
+    expect(goto.element.tagName).toBe('BUTTON')
+    expect(goto.text()).toBe('确认要不要补交素材视频/音频')
+
+    // 综合卡挂在「审查与待办」：点一下就该切过去，而不是只把话说完。
+    await goto.trigger('click')
+    await settle()
+    expect(wrapper.find('#workbench-panel-review').exists()).toBe(true)
+    expect(wrapper.find('#workbench-panel-overview').exists()).toBe(false)
+  })
+
+  it('段视频待办指向「分段」，交付待办指向「交付」', async () => {
+    const segments = [
+      {
+        index: 2,
+        start_s: 6,
+        end_s: 12,
+        shots_in_segment: [2],
+        summary: '',
+        end_hook: '',
+        status: 'pending',
+        prompt_artifact_id: '',
+        video_asset_id: '',
+        semantic_warning: '',
+      },
+    ]
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({
+            status: 'awaiting_human',
+            brief: briefOf({ duration: 18 }),
+            segments,
+            action_items: [pendingItem('segment_video', { segment_index: 2 })],
+          }),
+        ),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    await wrapper.find('.pending-hint__goto').trigger('click')
+    await settle()
+    expect(wrapper.find('#workbench-panel-segments').exists()).toBe(true)
+  })
+
+  it('未知待办没有入口分区：那一行退回只读文字，不渲染点了没反应的按钮', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({
+            status: 'awaiting_human',
+            action_items: [pendingItem('future_review')],
+          }),
+        ),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    const hint = wrapper.find('.pending-hint')
+    expect(hint.text()).toBe('等待你操作：有新的待办需要处理')
+    expect(wrapper.find('.pending-hint__goto').exists()).toBe(false)
+  })
+
+  it('分区 tab 显示待办计数，读屏从 aria-label 听到同一件事', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({
+            status: 'awaiting_human',
+            brief: briefOf({ duration: 18 }),
+            action_items: [
+              pendingItem('stage1_review'),
+              pendingItem('asset_image', { asset_index: 1 }),
+              pendingItem('segment_video', { segment_index: 1 }),
+            ],
+          }),
+        ),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    const tabOf = (label: string) =>
+      wrapper.findAll('[role="tab"]').find((t) => t.text() === label)!
+
+    // 视觉文本仍是分区名（计数是伪元素），可访问名带上数量。
+    expect(tabOf('审查与待办').attributes('data-count')).toBe('2')
+    expect(tabOf('审查与待办').attributes('aria-label')).toBe('审查与待办，2 项等待操作')
+    expect(tabOf('分段').attributes('data-count')).toBe('1')
+    expect(tabOf('分段').attributes('aria-label')).toBe('分段，1 项等待操作')
+    // 没有待办的分区既没有计数也没有多余的可访问名。
+    expect(tabOf('素材').attributes('data-count')).toBeUndefined()
+    expect(tabOf('素材').attributes('aria-label')).toBeUndefined()
+  })
+
+  it('失败会话说清原因与重试的后果', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({
+            status: 'failed',
+            jobs: [
+              makeJob({
+                status: 'failed',
+                error_code: 'EXTERNAL_SERVICE',
+                detail: '网关返回 529',
+                finished_at: '2026-11-11T00:02:00Z',
+              }),
+            ],
+          }),
+        ),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    const report = wrapper.find('[data-stop-report]')
+    expect(report.exists()).toBe(true)
+    expect(report.text()).toContain('原因：网关返回 529')
+    // 后果一句：说清重试是续跑，不是从头再来。
+    expect(report.text()).toContain('从上次停下的地方接着跑')
+    expect(report.text()).toContain('不会重做')
+  })
+
+  it('失败但服务端没记 detail 时明说没有记录，不留空白', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({
+            status: 'failed',
+            jobs: [makeJob({ status: 'failed', error_code: 'ModelOutputError', detail: '' })],
+          }),
+        ),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    expect(wrapper.find('[data-stop-report]').text()).toContain(
+      'ModelOutputError（服务端未记录详细说明）',
+    )
+  })
+
+  it('中断没有原因可查：明说是服务重启/断连，不假装知道', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({ status: 'interrupted', jobs: [makeJob({ status: 'interrupted' })] }),
+        ),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    expect(wrapper.find('.stop-reason').text()).toContain('服务端没有记录具体原因')
+  })
+
+  it('取消会话说出停在哪一节点', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({
+            status: 'cancelled',
+            jobs: [makeJob({ status: 'cancelled', cancelled_at_node: 'screenwriter' })],
+          }),
+        ),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    expect(wrapper.find('.stop-reason').text()).toContain('编剧')
+  })
+
+  it('正常状态不出现诊断块', async () => {
+    server.use(http.get(detailUrl, () => HttpResponse.json(makeDetail({ status: 'completed' }))))
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    expect(wrapper.find('[data-stop-report]').exists()).toBe(false)
+  })
+
+  it('步骤带把当前位置与状态说给读屏，当前那格带 aria-current', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({
+            status: 'awaiting_human',
+            brief: briefOf({ duration: 18 }),
+            action_items: [pendingItem('segment_video', { segment_index: 2 })],
+          }),
+        ),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    // 整体一句：不用逐格听才知道走到哪（位置与当前节点合在一行）。
+    expect(wrapper.find('.current').text()).toMatch(/第 \d+ \/ \d+ 步：/)
+
+    const current = wrapper.find('[data-step="segment_loop"]')
+    expect(current.attributes('aria-current')).toBe('step')
+    // 已完成的格子没有 aria-current，读屏不会听到两个「当前」。
+    expect(wrapper.find('[data-step="stage1"]').attributes('aria-current')).toBeUndefined()
+
+    // 每格有一句完整的话（位置 + 状态），可见标签对它只是缩写。
+    expect(current.find('.sr-only').text()).toContain('第')
+    expect(current.find('.sr-only').text()).toContain('进行中')
+  })
+})

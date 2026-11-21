@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
-import { buildProgress, formatElapsed, pendingActionHint, type ProgressInput } from './progress'
+import {
+  buildProgress,
+  formatElapsed,
+  pendingAction,
+  pendingCountsByTarget,
+  type ProgressInput,
+} from './progress'
 
 const start = Date.UTC(2026, 10, 14, 2, 0, 0)
 
@@ -751,23 +757,24 @@ describe('buildProgress：导演台路线', () => {
   })
 })
 
-// #276：「等待你操作」那一行的中文说明——按 kind 翻译，段号/件号取待办自带索引。
-describe('pendingActionHint', () => {
+// #276 / 2026-11-21 layout：「等待你操作」那一行的中文说明与入口分区——按 kind
+// 翻译，段号/件号取待办自带索引；入口必须与卡片实际所在分区一致。
+describe('pendingAction', () => {
   it('按 kind 给出说清「哪一段、哪一步」的中文说明', () => {
-    expect(pendingActionHint(actions('stage1_review'), [])).toBe('审查阶段 1 结果')
-    expect(pendingActionHint(actions('frame_submission'), [])).toBe('提交首帧/尾帧素材')
-    expect(pendingActionHint(actions('director_start_image'), [])).toBe('提交开场首帧')
-    expect(pendingActionHint(actions('director_delivery'), [])).toBe('交付成片与最终包')
+    expect(pendingAction(actions('stage1_review'), [])?.text).toBe('审查阶段 1 结果')
+    expect(pendingAction(actions('frame_submission'), [])?.text).toBe('提交首帧/尾帧素材')
+    expect(pendingAction(actions('director_start_image'), [])?.text).toBe('提交开场首帧')
+    expect(pendingAction(actions('director_delivery'), [])?.text).toBe('交付成片与最终包')
     // 补交口（#284）：循环走完之后的阻塞决定点，不能退化成通用文案。
-    expect(pendingActionHint(actions('asset_extra'), [])).toBe('确认要不要补交素材视频/音频')
+    expect(pendingAction(actions('asset_extra'), [])?.text).toBe('确认要不要补交素材视频/音频')
   })
 
   it('段号 / 件号进说明；素材语义名从 refs 台账取', () => {
     const seg = [{ ...actions('segment_video')[0]!, segment_index: 3 }]
-    expect(pendingActionHint(seg, [])).toBe('提交第 3 段视频')
+    expect(pendingAction(seg, [])?.text).toBe('提交第 3 段视频')
 
     const segImg = [{ ...actions('director_segment_image')[0]!, segment_index: 2 }]
-    expect(pendingActionHint(segImg, [])).toBe('提交第 2 段首帧图')
+    expect(pendingAction(segImg, [])?.text).toBe('提交第 2 段首帧图')
 
     const asset = assetAction(2)
     const refs = [
@@ -780,23 +787,61 @@ describe('pendingActionHint', () => {
         source: 'derived',
       },
     ]
-    expect(pendingActionHint([asset], refs)).toBe('交回第 2 件素材图 · 台灯')
-    expect(pendingActionHint([asset], [])).toBe('交回第 2 件素材图')
+    expect(pendingAction([asset], refs)?.text).toBe('交回第 2 件素材图 · 台灯')
+    expect(pendingAction([asset], [])?.text).toBe('交回第 2 件素材图')
+  })
+
+  it('入口分区与卡片实际所在的那一格一致', () => {
+    // 段视频表单挂在「分段」；交付卡挂在「交付」；其余卡片都挂在「审查与待办」。
+    expect(pendingAction(actions('segment_video'), [])?.target).toBe('segments')
+    expect(pendingAction(actions('director_delivery'), [])?.target).toBe('delivery')
+    for (const kind of [
+      'stage1_review',
+      'frame_submission',
+      'asset_image',
+      'asset_extra',
+      'director_start_image',
+      'director_segment_image',
+    ]) {
+      expect(pendingAction(actions(kind), [])?.target).toBe('review')
+    }
   })
 
   it('没有待处理的人工待办时为 null（已决议的不算）', () => {
-    expect(pendingActionHint([], [])).toBeNull()
-    expect(pendingActionHint(actions('stage1_review', 'resolved'), [])).toBeNull()
+    expect(pendingAction([], [])).toBeNull()
+    expect(pendingAction(actions('stage1_review', 'resolved'), [])).toBeNull()
   })
 
   it('未知 kind 的 pending 待办回退一句通用说明，不静默丢提示', () => {
     // 后端先加了一种前端这版还不认识的待办：整行「等待你操作」不能消失，
     // 否则会话卡在一个没有入口的待办上，用户却以为无事可做。
-    expect(pendingActionHint(actions('future_review'), [])).toBe('有新的待办需要处理')
+    // 入口为 null：前端还没有那类卡片，指过去只会是个空分区。
+    expect(pendingAction(actions('future_review'), [])).toEqual({
+      text: '有新的待办需要处理',
+      target: null,
+    })
   })
 
   it('同时存在已知与未知 pending 时，优先已知 kind 的精确文案', () => {
     const items = [...actions('future_review'), ...actions('stage1_review')]
-    expect(pendingActionHint(items, [])).toBe('审查阶段 1 结果')
+    expect(pendingAction(items, [])?.text).toBe('审查阶段 1 结果')
+  })
+})
+
+describe('pendingCountsByTarget', () => {
+  it('按入口分区给分区 tab 计数：只数 pending，未知 kind 不计入任何一格', () => {
+    const items = [
+      ...actions('stage1_review'),
+      ...actions('asset_image'),
+      ...actions('segment_video'),
+      ...actions('director_delivery'),
+      ...actions('future_review'),
+    ]
+    expect(pendingCountsByTarget(items)).toEqual({ review: 2, segments: 1, delivery: 1 })
+  })
+
+  it('已决议的不计入；没有待办时为空对象', () => {
+    expect(pendingCountsByTarget(actions('stage1_review', 'resolved'))).toEqual({})
+    expect(pendingCountsByTarget([])).toEqual({})
   })
 })

@@ -1286,7 +1286,20 @@ MUTATIONS: tuple[Mutation, ...] = (
         "frontend/src/features/sessions/SessionDetailView.vue",
         '''      <div class="progress-region">
         <ProgressBand v-if="progressView.steps.length" :view="progressView" />
-        <p v-if="pendingHint" role="status" class="pending-hint">等待你操作：{{ pendingHint }}</p>
+        <!-- 有可去的分区时是按钮，点了就切过去；未知待办没有入口，退回只读一行
+             （不能渲染一个点了没反应的按钮）。整行仍是 live region：新待办出现时
+             读屏要听到完整一句，只播报前缀等于没说清在等什么。 -->
+        <p v-if="pendingActionView" role="status" class="pending-hint">
+          等待你操作：<button
+            v-if="pendingTarget"
+            type="button"
+            class="pending-hint__goto"
+            @click="gotoPending"
+          >
+            {{ pendingActionView.text }}
+          </button>
+          <template v-else>{{ pendingActionView.text }}</template>
+        </p>
       </div>
 
       <!-- 概览与进度 -->
@@ -1299,7 +1312,20 @@ MUTATIONS: tuple[Mutation, ...] = (
       >
         <ErrorNotice v-if="runError" :message="runError" />''',
         '''      <div class="progress-region">
-        <p v-if="pendingHint" role="status" class="pending-hint">等待你操作：{{ pendingHint }}</p>
+        <!-- 有可去的分区时是按钮，点了就切过去；未知待办没有入口，退回只读一行
+             （不能渲染一个点了没反应的按钮）。整行仍是 live region：新待办出现时
+             读屏要听到完整一句，只播报前缀等于没说清在等什么。 -->
+        <p v-if="pendingActionView" role="status" class="pending-hint">
+          等待你操作：<button
+            v-if="pendingTarget"
+            type="button"
+            class="pending-hint__goto"
+            @click="gotoPending"
+          >
+            {{ pendingActionView.text }}
+          </button>
+          <template v-else>{{ pendingActionView.text }}</template>
+        </p>
       </div>
 
       <!-- 概览与进度 -->

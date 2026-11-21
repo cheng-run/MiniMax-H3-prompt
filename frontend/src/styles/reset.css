@@ -40,6 +40,20 @@ a {
   outline-offset: 2px;
 }
 
+/* 只给读屏读、不占视觉空间的一层。视觉标签是它的缩写（如步骤带的「阶段 1」），
+   完整的话（位置 + 状态）放这里，两边的信息不会各说各的。 */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 /* 禁用态必须看起来不可用（2026-11-21 critique 实测：disabled 的主按钮与可用态
    像素级相同，点了没反应会被当成卡死）。文件选择框也走同一条。 */
 :disabled,

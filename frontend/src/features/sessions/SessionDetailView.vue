@@ -21,7 +21,8 @@ import FrameSubmissionCard from './FrameSubmissionCard.vue'
 import { newIdempotencyKey } from './keys'
 import {
   buildProgress,
-  pendingActionHint,
+  pendingAction,
+  pendingCountsByTarget,
   type JobProgressView,
   type ProgressView,
 } from './progress'
@@ -230,11 +231,34 @@ const progressView = computed<ProgressView>(() => {
 // 失败/取消/中断后步骤带仍按快照事实保留「走到了哪一步」（pure 函数里同一套推导），
 // 不在组件里另立第二份状态：状态徽章已经说明成败，步骤带只负责最后到达的位置。
 
-// 「等待你操作」只读行（#276）：与步骤带同层常驻，判据是快照里是否有待处理的人工
-// 待办——与步骤带同一份事实，不新增业务状态。它只读，真正带副作用的操作仍在各分区。
-const pendingHint = computed(() =>
-  pendingActionHint(data.value?.action_items ?? [], data.value?.brief.refs ?? []),
+// 「等待你操作」常驻行（#276）：与步骤带同层常驻，判据是快照里是否有待处理的人工
+// 待办——与步骤带同一份事实，不新增业务状态。真正带副作用的操作仍在各分区，所以这
+// 一行只负责把话说到「去哪一格」，点击由上面的按钮完成（2026-11-21 layout：此前它
+// 是一行灰字，等待人工的会话在概览分区里全屏没有一个可点的入口）。
+const pendingActionView = computed(() =>
+  pendingAction(data.value?.action_items ?? [], data.value?.brief.refs ?? []),
 )
+
+// 分区 tab 上的待办计数（2026-11-21 layout）：让「哪一格在等你」在切过去之前就可见。
+// 只给真实挂着卡片的几格计数；未知 kind 不计入——那类卡片前端还没有。
+const pendingCounts = computed(() => pendingCountsByTarget(data.value?.action_items ?? []))
+const TAB_TARGETS: Partial<Record<WorkbenchTab, 'review' | 'segments' | 'delivery'>> = {
+  review: 'review',
+  segments: 'segments',
+  delivery: 'delivery',
+}
+function tabPendingCount(tab: WorkbenchTab): number {
+  const target = TAB_TARGETS[tab]
+  return target ? (pendingCounts.value[target] ?? 0) : 0
+}
+
+// 待办行是不是可点的：未知待办没有入口分区，那一行只能是只读文字。
+const pendingTarget = computed(() => pendingActionView.value?.target ?? null)
+function gotoPending(): void {
+  if (pendingTarget.value) {
+    selectTab(pendingTarget.value)
+  }
+}
 
 // 素材分区的三态（#283）：清单还没派生 / 循环里逐件交 / 循环走完。判据全是快照事实，
 // 不新增业务状态——`stage1_review` 待办与派生落行是同一次写入（#279），它出现即
@@ -313,6 +337,60 @@ const runningStep = computed(() =>
 const cancelRequested = computed(() => data.value?.current_job?.cancel_requested === true)
 const canCancel = computed(
   () => status.value === 'running' && Boolean(data.value?.current_job?.job_id),
+)
+
+// 失败/取消/中断的诊断（2026-11-21 layout）：徽标只说成败，用户看不出「为什么停的、
+// 现在重试会从哪接着跑」。两条都从快照里已有的字段推，不新增业务状态：
+// 原因来自最近一次跑砸的那个 job（`error_code` / `cancelled_at_node` / `detail`），
+// 后果来自服务端的续跑语义（阶段 1 从最后一个已完成节点之后接着跑，见 `stage1_resume`）。
+const lastStoppedJob = computed(() => {
+  if (!canRetry.value) {
+    return null
+  }
+  const jobs = data.value?.jobs ?? []
+  for (let index = jobs.length - 1; index >= 0; index -= 1) {
+    const job = jobs[index]!
+    if (job.status === 'failed' || job.status === 'cancelled' || job.status === 'interrupted') {
+      return job
+    }
+  }
+  return null
+})
+
+// 原因：能说清就说清。失败有 `detail`/`error_code`；取消有「停在哪一节点」；中断是
+// 服务端重启对账补的标记，`job.interrupted` 的载荷是空的——这时**明说没有记录**，
+// 不留一个空白让用户以为界面漏了。
+const stopReason = computed(() => {
+  if (!canRetry.value) {
+    return null
+  }
+  const job = lastStoppedJob.value
+  if (status.value === 'failed') {
+    const detail = job?.detail?.trim()
+    if (detail) {
+      return `原因：${detail}`
+    }
+    return job?.error_code
+      ? `原因：${job.error_code}（服务端未记录详细说明）`
+      : '原因：服务端未记录失败原因。'
+  }
+  if (status.value === 'cancelled') {
+    const node = job?.cancelled_at_node
+    return node
+      ? `原因：你在「${nodeLabel(node)}」这一步之后取消了它。`
+      : '原因：你取消了这次运行。'
+  }
+  return '原因：服务重启或连接中断导致这次运行被标记为中断，服务端没有记录具体原因。'
+})
+
+// 后果：重试不是「从头再来」。阶段 1 已过闸门就接着跑阶段 2，否则从最后一个已完成
+// 节点之后接着跑（`JobRunner._resume_step` / `step_machine.stage1_resume`）。
+// 后果：重试不是「从头再来」。服务端按已落盘的事实续跑——阶段 1 已过闸门就接着跑
+// 阶段 2，否则从最后一个已完成节点之后接着跑（`JobRunner._resume_step` /
+// `step_machine.stage1_resume`）。两种情况的说法本来就一样，不按闸门分叉：分开写
+// 只会在后端续跑语义变化时多一句假话。
+const retryOutcome = computed(() =>
+  canRetry.value ? '重试会从上次停下的地方接着跑，已经跑完的步骤不会重做。' : null,
 )
 
 const busy = ref(false)
@@ -398,6 +476,12 @@ const errorMessage = computed(() =>
           :aria-selected="ui.workbenchTab === tab.id"
           :aria-controls="`workbench-panel-${tab.id}`"
           :tabindex="ui.workbenchTab === tab.id ? 0 : -1"
+          :data-count="tabPendingCount(tab.id) || undefined"
+          :aria-label="
+            tabPendingCount(tab.id)
+              ? `${tab.label}，${tabPendingCount(tab.id)} 项等待操作`
+              : undefined
+          "
           @click="selectTab(tab.id)"
           @keydown="onTabKeydown"
         >
@@ -405,12 +489,25 @@ const errorMessage = computed(() =>
         </button>
       </div>
 
-      <!-- 步骤带与「等待你操作」只读行（#276）：上移到分区 tab 之外，成为详情页常驻
+      <!-- 步骤带与「等待你操作」（#276）：上移到分区 tab 之外，成为详情页常驻
            元素——切到分段/产物/审查等任一非概览分区都仍可见。取消按钮有副作用，
            仍留在概览分区（见下），不上移。 -->
       <div class="progress-region">
         <ProgressBand v-if="progressView.steps.length" :view="progressView" />
-        <p v-if="pendingHint" role="status" class="pending-hint">等待你操作：{{ pendingHint }}</p>
+        <!-- 有可去的分区时是按钮，点了就切过去；未知待办没有入口，退回只读一行
+             （不能渲染一个点了没反应的按钮）。整行仍是 live region：新待办出现时
+             读屏要听到完整一句，只播报前缀等于没说清在等什么。 -->
+        <p v-if="pendingActionView" role="status" class="pending-hint">
+          等待你操作：<button
+            v-if="pendingTarget"
+            type="button"
+            class="pending-hint__goto"
+            @click="gotoPending"
+          >
+            {{ pendingActionView.text }}
+          </button>
+          <template v-else>{{ pendingActionView.text }}</template>
+        </p>
       </div>
 
       <!-- 概览与进度 -->
@@ -447,6 +544,13 @@ const errorMessage = computed(() =>
         <p v-else-if="canRetry" class="run-controls">
           <Button :disabled="busy" @click="runJob">{{ busy ? '正在重试…' : '重试' }}</Button>
         </p>
+
+        <!-- 停下来的诊断：为什么停、重试会从哪接着跑。以前只有一句「失败」徽标与
+             一个重试按钮，用户既不知道为什么，也不知道重试会不会白跑一遍。 -->
+        <div v-if="canRetry" class="stop-report" data-stop-report>
+          <p v-if="stopReason" class="stop-reason">{{ stopReason }}</p>
+          <p v-if="retryOutcome" class="stop-outcome">{{ retryOutcome }}</p>
+        </div>
 
         <dl class="facts">
           <dt>剧情</dt>
@@ -669,6 +773,23 @@ const errorMessage = computed(() =>
   border-color: var(--color-border);
   font-weight: 600;
 }
+/* 待办计数徽标：用伪元素挂数字，这样它不进入 tab 的文本内容——读屏从 aria-label
+   读「审查与待办，1 项等待操作」，可见文本仍是「审查与待办」。 */
+.tab[data-count]::after {
+  content: attr(data-count);
+  display: inline-block;
+  min-width: 1.25rem;
+  margin-left: var(--space-1);
+  padding: 0 0.35em;
+  border-radius: 999px;
+  background: var(--color-accent);
+  color: #fff;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: center;
+}
 .tab:focus-visible {
   outline: 2px solid var(--color-focus);
   outline-offset: 2px;
@@ -687,6 +808,22 @@ const errorMessage = computed(() =>
   color: var(--color-text);
   font-size: 0.875rem;
 }
+/* 「等待你操作」的跳转按钮：视觉上仍是那行提示里的文字，但整句可点（有下划线
+   与指针，键盘可聚焦）。此前它只是一段灰字，等待人工的会话在概览里无处可点。 */
+.pending-hint__goto {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--color-accent-on-canvas);
+  font: inherit;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.pending-hint__goto:hover {
+  text-decoration-thickness: 2px;
+}
 .run-controls {
   display: flex;
   align-items: center;
@@ -694,6 +831,24 @@ const errorMessage = computed(() =>
 }
 .run-node {
   margin: 0;
+}
+/* 停下来之后的诊断：两行说明，不做成卡片也不加单边色条——它解释上面那个按钮，
+   不是并列的一块内容，靠缩进与字号分层就够了。 */
+.stop-report {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+  font-size: 0.875rem;
+}
+.stop-report p {
+  margin: 0;
+}
+.stop-reason {
+  color: var(--color-text);
+}
+.stop-outcome {
+  color: var(--color-text-muted);
 }
 .muted {
   color: var(--color-text-muted);
