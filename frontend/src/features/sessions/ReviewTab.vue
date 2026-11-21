@@ -269,12 +269,12 @@ async function submitRevision(): Promise<void> {
 }
 .review-file h3 {
   margin: 0 0 var(--space-1);
-  font-size: 1rem;
+  font-size: var(--font-size-body);
 }
 .file-name {
   margin-left: var(--space-2);
   color: var(--color-text-muted);
-  font-size: 0.8125rem;
+  font-size: var(--font-size-caption);
   font-weight: 400;
 }
 .file-text {
@@ -313,12 +313,12 @@ async function submitRevision(): Promise<void> {
 .layer-note {
   margin: 0 0 var(--space-2);
   color: var(--color-text-muted);
-  font-size: 0.875rem;
+  font-size: var(--font-size-label);
 }
 .field-error {
   margin: 0;
   color: var(--color-error-text);
-  font-size: 0.875rem;
+  font-size: var(--font-size-label);
 }
 .actions {
   display: flex;
@@ -331,7 +331,7 @@ async function submitRevision(): Promise<void> {
 }
 .layer {
   margin-right: var(--space-2);
-  font-size: 0.875rem;
+  font-size: var(--font-size-label);
   color: var(--color-text-muted);
 }
 </style>

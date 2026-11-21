@@ -473,7 +473,7 @@ async function submitVideo(): Promise<void> {
 }
 .segment__head h2 {
   margin: 0;
-  font-size: 1rem;
+  font-size: var(--font-size-body);
 }
 .segment__time {
   color: var(--color-text-muted);
@@ -498,7 +498,7 @@ async function submitVideo(): Promise<void> {
 }
 .segment__grid-item dt {
   color: var(--color-text-muted);
-  font-size: 0.8125rem;
+  font-size: var(--font-size-caption);
 }
 .segment__grid-item dd {
   margin: 0;
@@ -517,7 +517,7 @@ async function submitVideo(): Promise<void> {
 }
 .injection-card h3 {
   margin: 0;
-  font-size: 0.95rem;
+  font-size: var(--font-size-subtitle);
 }
 .start-frame {
   display: flex;
@@ -526,7 +526,7 @@ async function submitVideo(): Promise<void> {
 }
 .start-frame h3 {
   margin: 0;
-  font-size: 0.95rem;
+  font-size: var(--font-size-subtitle);
 }
 .start-frame__image {
   align-self: flex-start;
@@ -534,7 +534,7 @@ async function submitVideo(): Promise<void> {
   max-height: 16rem;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
-  background: #000;
+  background: var(--color-media-backdrop);
 }
 .start-frame__actions {
   display: flex;
@@ -590,7 +590,7 @@ async function submitVideo(): Promise<void> {
 .segment__video {
   width: 100%;
   max-height: 22rem;
-  background: #000;
+  background: var(--color-media-backdrop);
 }
 .submission {
   display: flex;
@@ -601,7 +601,7 @@ async function submitVideo(): Promise<void> {
 }
 .submission h3 {
   margin: 0;
-  font-size: 0.95rem;
+  font-size: var(--font-size-subtitle);
 }
 .field {
   display: flex;

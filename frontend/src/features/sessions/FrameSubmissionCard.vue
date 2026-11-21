@@ -196,11 +196,11 @@ async function submitFrames(): Promise<void> {
 }
 .frame-card h2 {
   margin: 0;
-  font-size: 1.125rem;
+  font-size: var(--font-size-title);
 }
 .frame-card h3 {
   margin: 0 0 var(--space-1);
-  font-size: 0.95rem;
+  font-size: var(--font-size-subtitle);
 }
 .prompts {
   display: flex;
@@ -214,7 +214,7 @@ async function submitFrames(): Promise<void> {
   border-radius: var(--radius-sm);
   white-space: pre-wrap;
   word-break: break-word;
-  font-size: 0.875rem;
+  font-size: var(--font-size-label);
 }
 .slots {
   display: flex;

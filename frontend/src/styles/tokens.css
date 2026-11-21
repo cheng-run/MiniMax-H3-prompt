@@ -12,6 +12,11 @@
      4.5:1（2026-11-21 critique 实测）。白卡面用 accent 仍有 4.57:1，故只给
      落在画布底上的文字链接换这档更深的蓝，强调色本身不动。 */
   --color-accent-on-canvas: #2c66e0;
+  /* 悬停/按下时的深一档。全站此前没有任何 hover 反馈（2026-11-21 polish 实测：
+     `.btn` 与 `a` 都没有 :hover 规则，鼠标移上去界面毫无反应）。深 12% 而不是
+     加阴影或位移——本系统是平面分层，反馈只能靠颜色。 */
+  --color-accent-hover: #2159c9;
+  --color-accent-active: #1b4aa8;
   --color-focus: #1a73e8;
 
   --color-ok-bg: #e6f4ea;
@@ -19,11 +24,28 @@
   --color-error-bg: #fdecea;
   --color-error-text: #b3261e;
 
+  /* 蓝底上的前景色与视频播放器背板。这两处此前写成裸 `#fff` / `#000`（7 处）——
+     不是主题色而是「无论主题如何都必须纯白／纯黑」的固定值，规范地放在这里，
+     免得组件里散落裸色值（2026-11-21 polish）。 */
+  --color-on-accent: #ffffff;
+  --color-media-backdrop: #000000;
+
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 16px;
   --space-4: 24px;
   --space-5: 32px;
+
+  /* 字号六档。此前卡片内 h3 小标题各写 0.95rem（7 处裸值，介于 Label 与 Body
+     之间且语义一致）——这不是随手写的，是系统真的缺了这一档：卡片标题要压过
+     正文又不能和页面标题抢。升格成令牌后，新加卡片标题不必再猜一个数
+     （2026-11-21 polish）。count 档只用于徽标里的单个数字。 */
+  --font-size-title: 1.125rem;
+  --font-size-subtitle: 0.95rem;
+  --font-size-body: 1rem;
+  --font-size-label: 0.875rem;
+  --font-size-caption: 0.8125rem;
+  --font-size-count: 0.75rem;
 
   --radius-sm: 4px;
   --radius-md: 8px;

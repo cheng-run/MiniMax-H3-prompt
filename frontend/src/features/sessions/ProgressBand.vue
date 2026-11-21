@@ -92,7 +92,7 @@ const line = computed(() => [position.value, summary.value].filter(Boolean).join
 .current {
   margin: var(--space-2) 0 0;
   color: var(--color-text-muted);
-  font-size: 0.875rem;
+  font-size: var(--font-size-label);
 }
 .step {
   display: flex;
@@ -102,7 +102,7 @@ const line = computed(() => [position.value, summary.value].filter(Boolean).join
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   color: var(--color-text-muted);
-  font-size: 0.875rem;
+  font-size: var(--font-size-label);
 }
 .step--done {
   border-color: var(--color-ok-text);

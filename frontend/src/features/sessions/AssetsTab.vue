@@ -530,7 +530,7 @@ async function onReopen(assetId: string): Promise<void> {
 }
 .assets h2 {
   margin: 0;
-  font-size: 1.125rem;
+  font-size: var(--font-size-title);
 }
 .capacity {
   display: flex;
@@ -554,7 +554,7 @@ async function onReopen(assetId: string): Promise<void> {
 .capacity-hint {
   margin: 0;
   color: var(--color-error-text);
-  font-size: 0.875rem;
+  font-size: var(--font-size-label);
 }
 .receipt {
   margin: 0;
@@ -609,7 +609,7 @@ async function onReopen(assetId: string): Promise<void> {
   width: 160px;
   max-height: 120px;
   object-fit: contain;
-  background: #000;
+  background: var(--color-media-backdrop);
 }
 .asset__meta {
   display: flex;
@@ -626,7 +626,7 @@ async function onReopen(assetId: string): Promise<void> {
   padding: 0 6px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
-  font-size: 0.8125rem;
+  font-size: var(--font-size-caption);
 }
 .asset__status[data-status='passed'] {
   border-color: var(--color-focus);

@@ -233,11 +233,11 @@ const allSegmentsPassed = computed(
 }
 .delivery h2 {
   margin: 0;
-  font-size: 1.125rem;
+  font-size: var(--font-size-title);
 }
 .delivery h3 {
   margin: 0;
-  font-size: 1rem;
+  font-size: var(--font-size-body);
 }
 .pending,
 .result {
@@ -262,7 +262,7 @@ const allSegmentsPassed = computed(
 }
 .picked {
   color: var(--color-text-muted);
-  font-size: 0.8125rem;
+  font-size: var(--font-size-caption);
   word-break: break-all;
 }
 .actions {
@@ -279,7 +279,7 @@ const allSegmentsPassed = computed(
   width: 100%;
   max-height: 20rem;
   margin-top: var(--space-1);
-  background: #000;
+  background: var(--color-media-backdrop);
 }
 .detail {
   margin: 0;

@@ -297,7 +297,7 @@ function noteDownload(name: string): void {
 }
 .group h2 {
   margin: 0;
-  font-size: 1.125rem;
+  font-size: var(--font-size-title);
 }
 .artifact {
   padding: var(--space-3);
@@ -316,12 +316,12 @@ function noteDownload(name: string): void {
 }
 .artifact__head h3 {
   margin: 0 0 var(--space-1);
-  font-size: 1rem;
+  font-size: var(--font-size-body);
 }
 .file-name {
   margin-left: var(--space-2);
   color: var(--color-text-muted);
-  font-size: 0.8125rem;
+  font-size: var(--font-size-caption);
   font-weight: 400;
 }
 .file-text {
@@ -360,8 +360,10 @@ function noteDownload(name: string): void {
   padding: var(--space-2) var(--space-4);
   background: var(--color-accent);
   border-color: var(--color-accent);
-  color: #fff;
-  font-size: 1.0625rem;
+  color: var(--color-on-accent);
+  /* 曾经是 1.0625rem（唯一一处，介于 Body 与 Title 之间没有语义）。主操作按钮
+     与全站其它按钮同为 Body，靠 600 字重与蓝底区分层级，不靠半个字号。 */
+  font-size: var(--font-size-body);
   font-weight: 600;
 }
 .download {

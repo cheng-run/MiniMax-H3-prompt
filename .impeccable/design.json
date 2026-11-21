@@ -184,6 +184,48 @@
           "#c3d6fa"
         ],
         "note": "落在画布灰 #f7f7f8 上的文字链接。#2f6feb 在画布上只有 4.27:1，不到 AA 的 4.5:1；换这档更深的值到 4.80:1。白卡面仍用 accent。"
+      },
+      "accent-hover": {
+        "role": "primary",
+        "displayName": "工作蓝·悬停",
+        "canonical": "#2159c9",
+        "tonalRamp": [
+          "#04122e",
+          "#0a2352",
+          "#12397b",
+          "#1b51a8",
+          "#2f6feb",
+          "#588df0",
+          "#8bb0f5",
+          "#c3d6fa"
+        ]
+      },
+      "accent-active": {
+        "role": "primary",
+        "displayName": "工作蓝·按下",
+        "canonical": "#1b4aa8",
+        "tonalRamp": [
+          "#04122e",
+          "#0a2352",
+          "#12397b",
+          "#1b51a8",
+          "#2f6feb",
+          "#588df0",
+          "#8bb0f5",
+          "#c3d6fa"
+        ]
+      },
+      "on-accent": {
+        "role": "neutral",
+        "displayName": "蓝底前景",
+        "canonical": "#ffffff",
+        "tonalRamp": []
+      },
+      "media-backdrop": {
+        "role": "neutral",
+        "displayName": "媒体背板",
+        "canonical": "#000000",
+        "tonalRamp": []
       }
     },
     "typographyMeta": {
@@ -198,6 +240,27 @@
       "label": {
         "displayName": "标签",
         "purpose": "元信息、辅助说明、错误提示。使用频次最高的一档。"
+      },
+      "subtitle": {
+        "displayName": "卡片内 h3 小标题",
+        "fontSize": "0.95rem",
+        "fontWeight": 400,
+        "lineHeight": "1.5",
+        "fontFamily": "system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif"
+      },
+      "caption": {
+        "displayName": "少量密集信息",
+        "fontSize": "0.8125rem",
+        "fontWeight": 400,
+        "lineHeight": "1.5",
+        "fontFamily": "system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif"
+      },
+      "count": {
+        "displayName": "分区 tab 待办计数徽标（只用于单个数字）",
+        "fontSize": "0.75rem",
+        "fontWeight": 600,
+        "lineHeight": "1.5",
+        "fontFamily": "system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif"
       }
     },
     "shadows": [],
@@ -305,8 +368,8 @@
         "section": "colors"
       },
       {
-        "name": "The Four-Step Rule",
-        "body": "字号只有 4 档。新加一档必须先证明现有四档放不下它。",
+        "name": "The Token-Scale Rule",
+        "body": "字号只从 --font-size-* 取。新加一档必须先写进 tokens.css 并说清它回答什么问题——裸 font-size: 0.95rem 既不成体系、也无从追问语义。",
         "section": "typography"
       },
       {
@@ -329,7 +392,9 @@
       "Do 术语与 CONTEXT.md 保持一致",
       "Do 用 aria-current=\"step\" 标出当前位置，并给读屏一句完整播报",
       "Do 把等待人工的提示做成可点的入口，指向真正挂着那张卡的分区",
-      "Do 失败/取消/中断要说清原因与重试的后果"
+      "Do 失败/取消/中断要说清原因与重试的后果",
+      "Do 用 --font-size-* 令牌写字号，不写裸值",
+      "Do 交互元素要有 hover / active / disabled 三态，平面系统靠颜色不用阴影"
     ],
     "donts": [
       "Don't 引入第二个强调色",

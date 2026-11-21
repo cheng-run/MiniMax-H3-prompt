@@ -67,7 +67,7 @@ async function copyPrompt(): Promise<void> {
 }
 .director-prompt h3 {
   margin: 0;
-  font-size: 0.95rem;
+  font-size: var(--font-size-subtitle);
 }
 .prompt__text {
   margin: 0;

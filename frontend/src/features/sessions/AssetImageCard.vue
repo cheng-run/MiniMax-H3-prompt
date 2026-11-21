@@ -457,11 +457,11 @@ async function confirmAbandon(): Promise<void> {
 }
 .asset-card h2 {
   margin: 0;
-  font-size: 1.125rem;
+  font-size: var(--font-size-title);
 }
 .asset-card h3 {
   margin: 0 0 var(--space-1);
-  font-size: 0.95rem;
+  font-size: var(--font-size-subtitle);
 }
 .prompt__head {
   display: flex;
@@ -472,7 +472,7 @@ async function confirmAbandon(): Promise<void> {
 .file-name {
   margin-left: var(--space-2);
   color: var(--color-text-muted);
-  font-size: 0.8125rem;
+  font-size: var(--font-size-caption);
   font-weight: 400;
 }
 .prompt__text,
@@ -484,7 +484,7 @@ async function confirmAbandon(): Promise<void> {
   background: var(--color-bg);
   white-space: pre-wrap;
   word-break: break-word;
-  font-size: 0.875rem;
+  font-size: var(--font-size-label);
 }
 .diff {
   padding: var(--space-2);
@@ -510,7 +510,7 @@ async function confirmAbandon(): Promise<void> {
 }
 .exits__hint {
   margin: 0;
-  font-size: 0.8125rem;
+  font-size: var(--font-size-caption);
 }
 .upload {
   display: flex;
@@ -537,7 +537,7 @@ async function confirmAbandon(): Promise<void> {
 .abandon__cost {
   margin: 0;
   color: var(--color-text-muted);
-  font-size: 0.875rem;
+  font-size: var(--font-size-label);
 }
 .abandon__note {
   margin: 0;

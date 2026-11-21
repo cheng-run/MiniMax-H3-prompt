@@ -153,7 +153,7 @@ async function submit(): Promise<void> {
 }
 .segment-image-card h2 {
   margin: 0;
-  font-size: 1rem;
+  font-size: var(--font-size-body);
 }
 .upload {
   display: flex;

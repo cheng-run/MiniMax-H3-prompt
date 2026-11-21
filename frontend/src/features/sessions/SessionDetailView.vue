@@ -719,7 +719,7 @@ const errorMessage = computed(() =>
 /* 标题按设计令牌定档，并用两行截断：剧情常常上百字，此前实渲染成浏览器默认
    32px，1440 下吃掉 96px、420 下吃掉 240px，把 tab 与步骤带挤出首屏。 */
 .detail-title {
-  font-size: 1.125rem;
+  font-size: var(--font-size-title);
   font-weight: 600;
   line-height: 1.5;
   display: -webkit-box;
@@ -745,7 +745,7 @@ const errorMessage = computed(() =>
 }
 .meta {
   color: var(--color-text-muted);
-  font-size: 0.875rem;
+  font-size: var(--font-size-label);
 }
 .tabs {
   display: flex;
@@ -783,8 +783,8 @@ const errorMessage = computed(() =>
   padding: 0 0.35em;
   border-radius: 999px;
   background: var(--color-accent);
-  color: #fff;
-  font-size: 0.75rem;
+  color: var(--color-on-accent);
+  font-size: var(--font-size-count);
   font-variant-numeric: tabular-nums;
   font-weight: 600;
   line-height: 1.4;
@@ -806,7 +806,7 @@ const errorMessage = computed(() =>
   padding: var(--space-1) var(--space-2);
   border-left: 3px solid var(--color-focus);
   color: var(--color-text);
-  font-size: 0.875rem;
+  font-size: var(--font-size-label);
 }
 /* 「等待你操作」的跳转按钮：视觉上仍是那行提示里的文字，但整句可点（有下划线
    与指针，键盘可聚焦）。此前它只是一段灰字，等待人工的会话在概览里无处可点。 */
@@ -839,7 +839,7 @@ const errorMessage = computed(() =>
   flex-direction: column;
   gap: var(--space-1);
   margin-top: var(--space-2);
-  font-size: 0.875rem;
+  font-size: var(--font-size-label);
 }
 .stop-report p {
   margin: 0;

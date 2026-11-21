@@ -205,7 +205,7 @@ function copyBaseUrl(): Promise<void> {
 }
 .config-hint__title {
   margin: 0;
-  font-size: 1rem;
+  font-size: var(--font-size-body);
 }
 .config-hint__path,
 .config-hint__note,
@@ -244,7 +244,7 @@ function copyBaseUrl(): Promise<void> {
 }
 .session-meta {
   color: var(--color-text-muted);
-  font-size: 0.875rem;
+  font-size: var(--font-size-label);
   /* 变体 + 修订号是一个整体，不能折成「T2VA ·／修订 73」两行（2026-11-21 layout：
      某些行在 1440 下就折了，行高不齐像错位）。它也不该被链接挤到换行。 */
   white-space: nowrap;

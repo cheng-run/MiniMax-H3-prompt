@@ -240,11 +240,11 @@ async function submit(confirmAspectMismatch: boolean): Promise<void> {
 }
 .start-card h2 {
   margin: 0;
-  font-size: 1.125rem;
+  font-size: var(--font-size-title);
 }
 .start-card h3 {
   margin: 0;
-  font-size: 0.95rem;
+  font-size: var(--font-size-subtitle);
 }
 .slots {
   display: flex;
@@ -259,7 +259,7 @@ async function submit(confirmAspectMismatch: boolean): Promise<void> {
 }
 .upload-label {
   color: var(--color-text-muted);
-  font-size: 0.875rem;
+  font-size: var(--font-size-label);
 }
 .aspect {
   display: flex;
@@ -274,7 +274,7 @@ async function submit(confirmAspectMismatch: boolean): Promise<void> {
   margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
-  font-size: 0.875rem;
+  font-size: var(--font-size-label);
 }
 .aspect__confirm {
   display: flex;

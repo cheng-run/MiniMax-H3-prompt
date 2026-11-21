@@ -607,7 +607,7 @@ async function createWithClarifications(
 .field-error {
   margin: 0;
   color: var(--color-error-text);
-  font-size: 0.875rem;
+  font-size: var(--font-size-label);
 }
 .field-label {
   font-weight: 600;
@@ -625,7 +625,7 @@ async function createWithClarifications(
 .field-hint {
   margin: 0;
   color: var(--color-text-muted);
-  font-size: 0.875rem;
+  font-size: var(--font-size-label);
 }
 .advanced {
   border-top: 1px solid var(--color-border);
@@ -654,7 +654,7 @@ async function createWithClarifications(
   background: var(--color-surface);
 }
 .clarification h3 {
-  font-size: 1rem;
+  font-size: var(--font-size-body);
 }
 .clarification-item label {
   font-weight: 600;

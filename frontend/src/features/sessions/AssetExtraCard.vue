@@ -216,7 +216,7 @@ async function skip(): Promise<void> {
 }
 .extra-card h2 {
   margin: 0;
-  font-size: 1.125rem;
+  font-size: var(--font-size-title);
 }
 .extra-list {
   margin: 0;
@@ -236,7 +236,7 @@ async function skip(): Promise<void> {
 }
 .file-name {
   color: var(--color-text-muted);
-  font-size: 0.8125rem;
+  font-size: var(--font-size-caption);
 }
 .muted {
   margin: 0;
