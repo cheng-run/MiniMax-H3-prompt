@@ -378,7 +378,9 @@ const errorMessage = computed(() =>
     </ErrorNotice>
 
     <template v-else-if="data">
-      <h1>{{ data.plot || data.session_id }}</h1>
+      <h1 class="detail-title" :title="data.plot || data.session_id">
+        {{ data.plot || data.session_id }}
+      </h1>
       <p class="status-line">
         <StatusBadge :tone="statusTone(data.status)" :label="statusLabel(data.status)" />
         <span class="meta">{{ data.session_id }}</span>
@@ -607,6 +609,27 @@ const errorMessage = computed(() =>
 <style scoped>
 .detail {
   max-width: 880px;
+  /* 之前只设了上限没居中，1440 宽下右侧空出 536px（2026-11-21 critique）。 */
+  margin-inline: auto;
+}
+/* 标题按设计令牌定档，并用两行截断：剧情常常上百字，此前实渲染成浏览器默认
+   32px，1440 下吃掉 96px、420 下吃掉 240px，把 tab 与步骤带挤出首屏。 */
+.detail-title {
+  font-size: 1.125rem;
+  font-weight: 600;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+/* 1440 下 880px 的内容区两侧各留 280px，读起来像一窄条。把量宽放宽到 1080px，
+   正文行宽仍在可读区间（约 90 字符），同时让标题区不再显得空。 */
+@media (min-width: 1200px) {
+  .detail {
+    max-width: 1080px;
+  }
 }
 .back {
   margin: 0 0 var(--space-2);
@@ -622,6 +645,7 @@ const errorMessage = computed(() =>
 }
 .tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-1);
   margin-top: var(--space-3);
   border-bottom: 1px solid var(--color-border);
@@ -635,6 +659,10 @@ const errorMessage = computed(() =>
   color: var(--color-text);
   font: inherit;
   cursor: pointer;
+  /* 不换行 + 不压缩：窄屏下宁可折到第二行，也不能把「分段」压成单字一行
+     （2026-11-21 critique：420 宽下曾各 57px 宽、单字一行）。 */
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
 .tab--active {
   background: var(--color-surface);

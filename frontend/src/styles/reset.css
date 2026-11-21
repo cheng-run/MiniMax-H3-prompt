@@ -30,10 +30,20 @@ dd {
 }
 
 a {
-  color: var(--color-accent);
+  /* 落在画布灰上的链接用深一档的蓝（2026-11-21 critique：accent 在 #f7f7f8 上
+     只有 4.27:1，不到 AA 的 4.5:1）。白卡面上的链接由组件自己用 --color-accent。 */
+  color: var(--color-accent-on-canvas);
 }
 
 :focus-visible {
   outline: 2px solid var(--color-focus);
   outline-offset: 2px;
+}
+
+/* 禁用态必须看起来不可用（2026-11-21 critique 实测：disabled 的主按钮与可用态
+   像素级相同，点了没反应会被当成卡死）。文件选择框也走同一条。 */
+:disabled,
+[aria-disabled='true'] {
+  opacity: 0.45;
+  cursor: not-allowed;
 }

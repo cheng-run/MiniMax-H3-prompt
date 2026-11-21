@@ -32,4 +32,15 @@ withDefaults(
   background: var(--color-surface);
   color: var(--color-text);
 }
+/* 禁用态显式覆盖：主按钮的实心底色会盖住全局 :disabled 的透明度观感，
+   这里同时压暗悬停反馈，避免「看着能点」。 */
+.btn:disabled,
+.btn:disabled:hover {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.btn--primary:disabled {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
 </style>

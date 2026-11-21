@@ -8,6 +8,10 @@
   --color-text-muted: #5a5a62;
   --color-border: #d7d7dd;
   --color-accent: #2f6feb;
+  /* 画布底上的链接文字：--color-accent 在 #f7f7f8 上只有 4.27:1，低于 AA 的
+     4.5:1（2026-11-21 critique 实测）。白卡面用 accent 仍有 4.57:1，故只给
+     落在画布底上的文字链接换这档更深的蓝，强调色本身不动。 */
+  --color-accent-on-canvas: #2c66e0;
   --color-focus: #1a73e8;
 
   --color-ok-bg: #e6f4ea;
