@@ -226,6 +226,38 @@
         "displayName": "媒体背板",
         "canonical": "#000000",
         "tonalRamp": []
+      },
+      "attention-bg": {
+        "role": "primary",
+        "displayName": "等你动手·底",
+        "canonical": "#e8effd",
+        "tonalRamp": [
+          "#04122e",
+          "#0a2352",
+          "#12397b",
+          "#1b51a8",
+          "#2f6feb",
+          "#588df0",
+          "#8bb0f5",
+          "#c3d6fa"
+        ],
+        "note": "attention tone 的浅底；与 attention-text 组合 7.02:1"
+      },
+      "attention-text": {
+        "role": "primary",
+        "displayName": "等你动手·字/框",
+        "canonical": "#1b4aa8",
+        "tonalRamp": [
+          "#04122e",
+          "#0a2352",
+          "#12397b",
+          "#1b51a8",
+          "#2f6feb",
+          "#588df0",
+          "#8bb0f5",
+          "#c3d6fa"
+        ],
+        "note": "awaiting_human 的徽标字与整行边框"
       }
     },
     "typographyMeta": {
@@ -394,7 +426,8 @@
       "Do 把等待人工的提示做成可点的入口，指向真正挂着那张卡的分区",
       "Do 失败/取消/中断要说清原因与重试的后果",
       "Do 用 --font-size-* 令牌写字号，不写裸值",
-      "Do 交互元素要有 hover / active / disabled 三态，平面系统靠颜色不用阴影"
+      "Do 交互元素要有 hover / active / disabled 三态，平面系统靠颜色不用阴影",
+      "Do 让「要你动手」的状态在列表里跳出来，并把状态写进 document.title"
     ],
     "donts": [
       "Don't 引入第二个强调色",

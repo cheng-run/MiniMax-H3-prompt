@@ -23,6 +23,10 @@
   --color-ok-text: #1b5e20;
   --color-error-bg: #fdecea;
   --color-error-text: #b3261e;
+  /* 「要你做事」这一档（2026-11-21 critique：等待人工此前是 neutral，与已创建/
+     已取消同貌）。浅蓝底 + 深蓝字，7.02:1；不是新颜色，是 accent 的浅色调。 */
+  --color-attention-bg: #e8effd;
+  --color-attention-text: #1b4aa8;
 
   /* 蓝底上的前景色与视频播放器背板。这两处此前写成裸 `#fff` / `#000`（7 处）——
      不是主题色而是「无论主题如何都必须纯白／纯黑」的固定值，规范地放在这里，

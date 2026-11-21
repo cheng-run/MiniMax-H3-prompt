@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 状态徽标：始终带文字，不只靠颜色传达状态（可访问性基线）。
-withDefaults(defineProps<{ label: string; tone?: 'ok' | 'error' | 'neutral' }>(), {
+withDefaults(defineProps<{ label: string; tone?: 'ok' | 'error' | 'neutral' | 'attention' }>(), {
   tone: 'neutral',
 })
 </script>
@@ -30,5 +30,12 @@ withDefaults(defineProps<{ label: string; tone?: 'ok' | 'error' | 'neutral' }>()
   background: var(--color-error-bg);
   color: var(--color-error-text);
   border-color: var(--color-error-text);
+}
+/* 「要你做事」这一档：用强调色的浅底 + 同色字，不引入新颜色。等待人工是本产品
+   的常态，也是唯一必须由人动手的状态，列表里必须一眼跳出来。 */
+.badge--attention {
+  background: var(--color-attention-bg);
+  color: var(--color-attention-text);
+  border-color: var(--color-attention-text);
 }
 </style>

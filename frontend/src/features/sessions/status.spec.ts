@@ -24,4 +24,12 @@ describe('status 步骤标签', () => {
       expect(statusTone(status)).toBeTruthy()
     }
   })
+
+  // 2026-11-21 critique：等待人工是本产品的常态，也是唯一必须由人动手的状态，
+  // 此前与「已创建」「已取消」同为 neutral，20 行列表里扫视像没状态。
+  it('等待人工有专属 tone，不与已创建/已取消同貌', () => {
+    expect(statusTone('awaiting_human')).toBe('attention')
+    expect(statusTone('created')).toBe('neutral')
+    expect(statusTone('cancelled')).toBe('neutral')
+  })
 })

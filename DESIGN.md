@@ -153,10 +153,12 @@ components:
 - **禁用态:** 全局 `:disabled` 给 `opacity: 0.45` + `cursor: not-allowed`（2026-11-21 补：此前禁用按钮与可用态像素级相同，点了没反应像卡死）。
 
 ### Status Badges
-- **Shape:** 4px 圆角，1px 边框，`2px 8px` 内边距，0.875rem 字号
-- **Tone:** `ok`（绿底绿字绿框）/ `error`（红底红字红框）/ `neutral`（默认边框）
+- **Shape:** 4px 圆角，1px 边框，`2px 8px` 内边距，`--font-size-label` 字号
+- **Tone:** `ok`（绿底绿字绿框）/ `error`（红底红字红框）/ `neutral`（默认边框）/ `attention`（淡蓝底 `--color-attention-bg` + 深蓝字 `--color-attention-text`，7.02:1）
 - **行为:** 始终带文字，不只靠颜色。状态名来自集中映射表（`status.ts`），不在组件里硬编码。
+- **`attention` 的唯一使用者是 `awaiting_human`**（2026-11-21 critique：此前它与「已创建」「已取消」同为 neutral，20 行列表里那一行扫视时读起来像「没状态」）。等待人工是本产品的常态、也是唯一必须由人动手的状态，必须在列表里跳出来。用的是 accent 的浅色调，不是第二个强调色。
 - 列表行内 `white-space: nowrap` + `flex: none`（2026-11-21 修：420 宽下曾被压成「已完／成」两行）。
+- 列表里等待人工的**整行**染淡蓝底 + 深蓝边框（不是单边色条——后者是 craft-floor 明令禁止的形态）。该行内的链接同时换成 `--color-attention-text`：默认 accent 落在 `#e8effd` 上只有 3.96:1。
 
 ### Tabs
 - **Style:** 底部边框贯穿整行；选中项白底、上左右三边描边、600 字重，与底边框连成一体
@@ -189,6 +191,7 @@ components:
 - **Do** 焦点态用 2px 描边 + 2px 偏移，覆盖所有交互元素。
 - **Do** 在 `prefers-reduced-motion` 下关闭一切动效。
 - **Do** 术语与 `CONTEXT.md` 保持一致（分段、素材、产物、交付、导演台）。
+- **Do** 让「要你动手」的状态在列表里跳出来（`attention` 档 + 整行染色），并且把状态写进 `document.title`——这个工具的关键一跳常发生在用户切走标签页时。
 
 ### Don't:
 - **Don't** 引入第二个强调色。

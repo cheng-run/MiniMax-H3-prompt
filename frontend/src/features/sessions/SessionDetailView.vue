@@ -135,6 +135,34 @@ function selectTab(tab: WorkbenchTab): void {
   ui.selectWorkbenchTab(tab)
 }
 
+// 页标题（2026-11-21 critique）：这是「跑十几分钟 → 停下 → 人接手」的工具，最关键
+// 那一跳发生在用户切到别的标签页的时候，而此前 `document.title` 全仓零写入，标题
+// 恒为「MiniMax H3 工作台」——切走就再也收不到任何信号。
+// 只在「要人动手」的三态改标题：等待人工 / 失败 / 中断。切回默认态、换会话或离开
+// 本页时一律还原，免得把上一个会话的待办留在标签上。
+const DEFAULT_TITLE = 'MiniMax H3 工作台'
+const ATTENTION_STATUSES: ReadonlySet<string> = new Set(['awaiting_human', 'failed', 'interrupted'])
+const pageTitle = computed(() => {
+  const detail = data.value
+  if (!detail || !ATTENTION_STATUSES.has(detail.status)) {
+    return DEFAULT_TITLE
+  }
+  // 剧情常上百字，标签页只放得下前一小截；取首个换行/标点前的一段。
+  const head = (detail.plot || detail.session_id).trim().split(/[\n。，、；]/)[0] ?? ''
+  const short = head.length > 20 ? `${head.slice(0, 20)}…` : head
+  return `${statusLabel(detail.status)} · ${short} — ${DEFAULT_TITLE}`
+})
+watch(
+  pageTitle,
+  (value) => {
+    document.title = value
+  },
+  { immediate: true },
+)
+onBeforeUnmount(() => {
+  document.title = DEFAULT_TITLE
+})
+
 // 键盘切换沿用 WAI-ARIA tabs 的 roving tabindex：方向键/Home/End 换分区并移焦点。
 // jsdom 不实现 Enter→click，所以真实按键由 Playwright 验证（frontend.md 的坑）。
 function onTabKeydown(event: KeyboardEvent): void {

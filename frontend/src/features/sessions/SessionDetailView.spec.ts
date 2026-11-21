@@ -1489,3 +1489,65 @@ describe('SessionDetailView 指路（2026-11-21 layout）', () => {
     expect(current.find('.sr-only').text()).toContain('进行中')
   })
 })
+
+// 2026-11-21 critique：这个工具的核心循环是「跑十几分钟 → 停下 → 人接手」，最关键
+// 那一跳发生在用户切走标签页的时候。此前 document.title 全仓零写入。
+describe('SessionDetailView 页标题（2026-11-21 critique）', () => {
+  const original = document.title
+  afterEach(() => {
+    document.title = original
+  })
+
+  it('等待人工时把状态写进标签页标题，剧情取短', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({ status: 'awaiting_human', plot: '夏天的海边骑行。后面还有很多字' }),
+        ),
+      ),
+    )
+    await mountDetail(makeStreamFetch())
+
+    expect(document.title).toContain('等待人工')
+    expect(document.title).toContain('夏天的海边骑行')
+    expect(document.title).toContain('MiniMax H3 工作台')
+    // 只取首个句号前那一段，不把整段剧情塞进标签。
+    expect(document.title).not.toContain('后面还有很多字')
+  })
+
+  it('失败与中断同样写标题，完成/运行中不写', async () => {
+    for (const [status, expected] of [
+      ['failed', '失败'],
+      ['interrupted', '已中断'],
+    ] as const) {
+      server.use(
+        http.get(detailUrl, () => HttpResponse.json(makeDetail({ status, plot: '测试剧情' }))),
+      )
+      const { wrapper } = await mountDetail(makeStreamFetch())
+      expect(document.title).toContain(expected)
+      wrapper.unmount()
+    }
+
+    for (const status of ['completed', 'running', 'created'] as const) {
+      server.use(
+        http.get(detailUrl, () => HttpResponse.json(makeDetail({ status, plot: '测试剧情' }))),
+      )
+      const { wrapper } = await mountDetail(makeStreamFetch())
+      expect(document.title).toBe('MiniMax H3 工作台')
+      wrapper.unmount()
+    }
+  })
+
+  it('离开详情页时还原默认标题，不把上一个会话的待办留在标签上', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(makeDetail({ status: 'awaiting_human', plot: '待办会话' })),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+    expect(document.title).toContain('等待人工')
+
+    wrapper.unmount()
+    expect(document.title).toBe('MiniMax H3 工作台')
+  })
+})

@@ -3,7 +3,10 @@ import type { SessionSummary } from '@/api/client'
 // 会话状态的七态展示（spec §4）：状态值来自契约，徽标文案与色调在这里集中，
 // 列表与详情共用，避免两处各写一张表悄悄漂移。
 export type SessionStatus = SessionSummary['status']
-export type StatusTone = 'ok' | 'error' | 'neutral'
+// `attention` 是「要你做事」这一档（2026-11-21 critique：等待人工此前用 neutral，
+// 与「已创建」「已取消」像素级同貌，20 行列表里那一行扫视时读起来像「没状态」）。
+// 用 accent 蓝而不是新颜色——The One Accent Rule 只允许一个强调色。
+export type StatusTone = 'ok' | 'error' | 'neutral' | 'attention'
 
 const LABELS: Record<SessionStatus, string> = {
   created: '已创建',
@@ -18,7 +21,8 @@ const LABELS: Record<SessionStatus, string> = {
 const TONES: Record<SessionStatus, StatusTone> = {
   created: 'neutral',
   running: 'neutral',
-  awaiting_human: 'neutral',
+  // 等待人工是本产品的常态，也是唯一「必须由你动手」的状态：它要在列表里跳出来。
+  awaiting_human: 'attention',
   completed: 'ok',
   failed: 'error',
   cancelled: 'neutral',

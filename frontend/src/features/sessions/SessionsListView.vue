@@ -138,7 +138,12 @@ function copyBaseUrl(): Promise<void> {
     <template v-else>
       <p v-if="items.length === 0" class="sessions__empty">还没有会话，点击「新建会话」开始。</p>
       <ul v-else class="session-list">
-        <li v-for="item in items" :key="item.session_id" class="session-item">
+        <li
+          v-for="item in items"
+          :key="item.session_id"
+          class="session-item"
+          :class="{ 'session-item--attention': item.status === 'awaiting_human' }"
+        >
           <RouterLink class="session-link" :to="`/sessions/${item.session_id}`">
             {{ item.plot || item.session_id }}
           </RouterLink>
@@ -234,6 +239,18 @@ function copyBaseUrl(): Promise<void> {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
+}
+/* 「等你动手」的那一行整行染色（2026-11-21 critique：20 行列表里唯一的等待人工
+   与「已创建」同貌，扫视时读起来像没状态）。用淡底 + 同色边框而不是单边色条——
+   后者是 craft-floor 明令禁止的形态（一侧色条做状态标记）。 */
+.session-item--attention {
+  background: var(--color-attention-bg);
+  border-color: var(--color-attention-text);
+}
+/* 染色底上的链接要换更深的蓝：默认 accent 落在 #e8effd 上只有 3.96:1，
+   accent-on-canvas 也只 4.46:1，都不到 AA。用 attention-text 的同色是 7.02:1。 */
+.session-item--attention .session-link {
+  color: var(--color-attention-text);
 }
 .session-link {
   flex: 1 1 auto;
