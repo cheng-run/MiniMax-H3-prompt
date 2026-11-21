@@ -65,7 +65,10 @@ const submitError = ref<string | null>(null)
 // 在表单内联展开问答面板，答案随创建请求以结构化问答对提交。
 //
 // 面板状态机：idle（还没问）→ asking（问题在眼前，等用户答或跳过）／failed（生成失败，
-// 换一条降级出路：直接建会话）；拉取期由 submitting 表达，不另设一档。
+// 换一条降级出路：直接建会话）。加载态由两个标志分工：`submitting` 管按钮重入与按钮文案
+// （拉问题与建会话共用同一把锁，两个按钮都打不出并行请求）；`clarificationRetrying`
+// 只多管一件事——「为失败态重试中、失败块留在原地」这一档，阶段此时已置回 idle，
+// 没有它失败提示会整块消失、又没别的东西在转（#359）。
 type ClarificationStage = 'idle' | 'asking' | 'failed'
 const clarificationStage = ref<ClarificationStage>('idle')
 const clarificationQuestions = ref<string[]>([])
