@@ -61,8 +61,10 @@
   --color-rule-strong: #3d4448; /* 强调分隔、输入框边框 */
 
   --color-ink: #e6e3da; /* 骨白：正文 */
-  --color-ink-soft: #a8a89f; /* 次要：铭牌、说明、元信息 */
-  --color-ink-faint: #6f7476; /* 最弱：未开始的刻度、禁用 */
+  --color-ink-soft: #a8a89f; /* 次要：铭牌、说明、元信息。对画布 7.78:1 */
+  /* 最弱：极暗分隔的注脚、禁用文字。**不用于任何正文**——#6f7476 对画布只有
+     3.94:1，不到 AA（2026-11-21 复审判定：已中断标题曾用它，读不清）。 */
+  --color-ink-faint: #6f7476;
 
   /* 钠黄：唯一亮色。只给「现在最要紧的那一条」——等待人工、当前步骤、焦点。 */
   --color-signal: #e0a93b;
@@ -96,8 +98,11 @@
   --color-ink-soft: #5c5f60;
   --color-ink-faint: #8b8e8f;
 
-  --color-signal: #b8791a;
-  --color-signal-ink: #fffaf0;
+  /* 浅色的钠黄必须更深：#b8791a 对浅色画布只有 3.12:1、白字压在上面 3.49:1，
+     两处都不到 AA（2026-11-21 复审实测）。#8f5c10 对画布 4.88:1、深色字压上去
+     5.67:1，两种用法都过线。深色主题的 #e0a93b 不动。 */
+  --color-signal: #8f5c10;
+  --color-signal-ink: #fdf8ef;
 
   --color-state-live: #1b1d1e;
   --color-state-done: #5c5f60;

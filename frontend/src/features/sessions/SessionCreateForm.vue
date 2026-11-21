@@ -611,7 +611,6 @@ async function createWithClarifications(
 .field-label {
   color: var(--color-ink-soft);
   font-size: var(--text-micro);
-  letter-spacing: var(--track-wide);
 }
 .mode-options {
   display: flex;
@@ -635,7 +634,6 @@ async function createWithClarifications(
 .advanced summary {
   color: var(--color-ink-soft);
   font-size: var(--text-micro);
-  letter-spacing: var(--track-wide);
   cursor: pointer;
 }
 .advanced .field {

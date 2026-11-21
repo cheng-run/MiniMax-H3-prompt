@@ -344,7 +344,6 @@ async function submitRevision(): Promise<void> {
   color: var(--color-ink-soft);
   font-size: var(--text-micro);
   font-weight: 400;
-  letter-spacing: var(--track-wide);
 }
 .revision-history ol,
 .revision-history ul {

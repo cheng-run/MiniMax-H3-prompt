@@ -300,7 +300,6 @@ function noteDownload(name: string): void {
   color: var(--color-ink-soft);
   font-size: var(--text-micro);
   font-weight: 400;
-  letter-spacing: var(--track-wide);
 }
 /* 产物块不再套白卡：上缘一道 1px 发光线分隔，块与块之间靠间距。 */
 .artifact {

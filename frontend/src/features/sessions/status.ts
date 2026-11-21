@@ -26,7 +26,10 @@ const TONES: Record<SessionStatus, StatusTone> = {
   completed: 'ok',
   failed: 'error',
   cancelled: 'neutral',
-  interrupted: 'error',
+  // 中断与失败**不是**同一档（2026-11-21 复审：曾把 interrupted 映射成 error，
+  // 与 failed 像素级同貌，也与 rail-contract 冲突——那里 interrupted 是中灰斜划，
+  // failed 才是红）。中断是「被打断」，不是「出错了」，用 neutral。
+  interrupted: 'neutral',
 }
 
 /** 全部七态，顺序固定；用例据此断言没有漏掉徽标分支。 */

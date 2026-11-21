@@ -533,7 +533,6 @@ async function onReopen(assetId: string): Promise<void> {
   color: var(--color-ink-soft);
   font-size: var(--text-micro);
   font-weight: 400;
-  letter-spacing: var(--track-wide);
 }
 /* 容量条：每档一枚方角铭牌，超限的那一枚换钠黄偏红的一档（错误色），
    不用色块堆。 */
@@ -587,7 +586,6 @@ async function onReopen(assetId: string): Promise<void> {
 .upload__label {
   color: var(--color-ink-soft);
   font-size: var(--text-micro);
-  letter-spacing: var(--track-wide);
 }
 /* 素材行：一行一续，行间是 1px 发光线，不套卡片。 */
 .asset-list {
@@ -642,7 +640,9 @@ async function onReopen(assetId: string): Promise<void> {
   color: var(--color-ink);
 }
 .asset__status[data-status='abandoned'] {
-  color: var(--color-ink-faint);
+  /* 放弃件仍要读得出来：ink-faint 对画布 3.94:1 不到 AA，统一用 ink-soft，
+     冲淡交给删除线。 */
+  color: var(--color-ink-soft);
   text-decoration: line-through;
 }
 /* 行内动作做成填得很轻的铭牌按钮：描边取自发光线，悬停才亮到墨色。 */

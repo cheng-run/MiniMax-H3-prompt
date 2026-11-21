@@ -178,7 +178,9 @@ const scrollable = computed(() => props.view.steps.length > 7)
   visibility: visible;
 }
 .step-label {
-  color: var(--color-ink-faint);
+  /* 需要读出来的文字走 ink-soft：ink-faint 对画布只有 3.94:1，不到 AA。
+     极暗的区分交给刻度本身（state-pending），文字不承担那个职责。 */
+  color: var(--color-ink-soft);
   font-size: var(--text-body);
   line-height: 1.2;
   white-space: nowrap;

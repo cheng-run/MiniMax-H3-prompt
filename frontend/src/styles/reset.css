@@ -92,6 +92,59 @@ button {
   caret-color: var(--color-signal);
 }
 
+/* 表单控件：DESIGN.md 规定的「透明底 + 1px 发光线 + 2px 圆角」此前只写在文档里，
+   代码里一条都没有——输入框全靠浏览器默认外观（2026-11-21 复审：语义名输入框
+   只剩一行占位文字，悬空无边界）。这里给三类控件统一的线语言。 */
+input:not([type='checkbox'], [type='radio'], [type='range'], [type='file']),
+textarea,
+select {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-rule-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-ink);
+  transition:
+    border-color var(--duration-fast) var(--ease-out),
+    background-color var(--duration-fast) var(--ease-out);
+}
+input:not([type='checkbox'], [type='radio'], [type='range'], [type='file']):hover,
+textarea:hover,
+select:hover {
+  border-color: var(--color-ink-faint);
+}
+/* 焦点把边框转成钠黄：与全局焦点环同色，控件本身也成为「你现在在这里」。 */
+input:not([type='checkbox'], [type='radio'], [type='range'], [type='file']):focus,
+textarea:focus,
+select:focus {
+  border-color: var(--color-signal);
+  outline: none;
+}
+/* 占位文字要够看：0.38 透明度的灰在炭灰上几乎消失。 */
+input::placeholder,
+textarea::placeholder {
+  color: var(--color-ink-faint);
+  opacity: 1;
+}
+
+/* 文件选择器是浏览器原生部件，最容易被忘在设计系统之外。 */
+input[type='file']::file-selector-button {
+  margin-inline-end: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-rule-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-ink);
+  font: inherit;
+  cursor: pointer;
+  transition:
+    background-color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
+}
+input[type='file']::file-selector-button:hover {
+  background: var(--color-plate-raised);
+  border-color: var(--color-ink-soft);
+}
+
 /* 数字列一律等宽，免得修订号从 9 跳到 10 时整列错位。 */
 .tnum {
   font-variant-numeric: tabular-nums;

@@ -236,7 +236,6 @@ const allSegmentsPassed = computed(
   color: var(--color-ink-soft);
   font-size: var(--text-micro);
   font-weight: 400;
-  letter-spacing: var(--track-wide);
 }
 .delivery h3 {
   margin: 0;

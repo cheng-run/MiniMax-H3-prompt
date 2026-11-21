@@ -511,7 +511,6 @@ async function submitVideo(): Promise<void> {
 .segment__grid-item dt {
   color: var(--color-ink-soft);
   font-size: var(--text-micro);
-  letter-spacing: var(--track-wide);
 }
 .segment__grid-item dd {
   margin: 0;
@@ -537,7 +536,6 @@ async function submitVideo(): Promise<void> {
   color: var(--color-ink-soft);
   font-size: var(--text-micro);
   font-weight: 400;
-  letter-spacing: var(--track-wide);
 }
 .start-frame {
   display: flex;
@@ -549,7 +547,6 @@ async function submitVideo(): Promise<void> {
   color: var(--color-ink-soft);
   font-size: var(--text-micro);
   font-weight: 400;
-  letter-spacing: var(--track-wide);
 }
 /* 起点图是唯一必须纯黑的画片背板。 */
 .start-frame__image {

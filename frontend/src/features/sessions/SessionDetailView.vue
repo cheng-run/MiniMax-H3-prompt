@@ -764,12 +764,18 @@ const errorMessage = computed(() =>
   line-clamp: 2;
   overflow: hidden;
 }
-/* 1440 下 880px 的内容区两侧各留 280px，读起来像一窄条。把量宽放宽到 1080px，
-   正文行宽仍在可读区间（约 90 字符），同时让标题区不再显得空。 */
+/* 1440 下 880px 的内容区两侧各留 280px，读起来像一窄条。放宽到 1080px 让标题区
+   不空；但**正文块自己再收窄**——1080 宽的中文正文约 90 字符，超出 65–75ch 的可读
+   区间（2026-11-21 复审）。标题、步骤带、tab 栏仍吃满，只有长文正文收回 72ch。 */
 @media (min-width: 1200px) {
   .detail {
     max-width: 1080px;
   }
+}
+.panel :is(p, pre),
+.facts dd,
+.file-text {
+  max-width: 72ch;
 }
 /* 面包屑：一枚铭牌链接，不是一句带箭头符号的正文——箭头交给图标，字距走铭牌档。 */
 .back {
@@ -781,7 +787,6 @@ const errorMessage = computed(() =>
   gap: var(--space-2);
   color: var(--color-ink-soft);
   font-size: var(--text-micro);
-  letter-spacing: var(--track-wide);
   transition: color var(--duration-fast) var(--ease-out);
 }
 .back__link:hover {
@@ -947,7 +952,6 @@ const errorMessage = computed(() =>
   border-top: 1px solid var(--color-rule);
   color: var(--color-ink-soft);
   font-size: var(--text-micro);
-  letter-spacing: var(--track-wide);
 }
 .facts dd {
   padding: var(--space-2) 0;

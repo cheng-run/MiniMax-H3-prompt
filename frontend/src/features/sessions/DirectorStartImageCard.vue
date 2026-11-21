@@ -263,7 +263,6 @@ async function submit(confirmAspectMismatch: boolean): Promise<void> {
 .upload-label {
   color: var(--color-ink-soft);
   font-size: var(--text-micro);
-  letter-spacing: var(--track-wide);
 }
 /* 比例不合的警告：错误色描一道线，仍是线不是色块。 */
 .aspect {

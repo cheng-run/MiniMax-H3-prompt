@@ -70,7 +70,6 @@ async function copyPrompt(): Promise<void> {
   color: var(--color-ink-soft);
   font-size: var(--text-micro);
   font-weight: 400;
-  letter-spacing: var(--track-wide);
 }
 /* 按需词正文是照抄物：发光线围出的一个面，可滚。
    正文用正文字体与字号——等宽在这里只是「技术感」的戏服，而且 `ui-monospace`

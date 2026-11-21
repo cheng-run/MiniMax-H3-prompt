@@ -129,6 +129,12 @@ function copyBaseUrl(): Promise<void> {
       </Button>
     </header>
 
+    <!-- 波长轴（方向契约 FIRST VIEWPORT 里点名的那一条）：把「这一页有几个会话、
+         哪几个在等你」挤成一行刻度，与本页导轨同一套线语言。
+         位置在列表正上方（不是页眉下方）：它是这批行的「谱」，紧贴它要说明的那一批。
+         每个会话一根竖刻度，等待人工的那根加倍并给钠黄——扫一眼轴就知道本页的分布，
+         不必先读完 20 行。纯装饰：读屏由上面那句计数负责，这里 aria-hidden。 -->
+
     <section v-if="baseUrl" class="local-address">
       <p class="local-address__line">
         本地地址：<code>{{ baseUrl }}</code>
@@ -164,6 +170,15 @@ function copyBaseUrl(): Promise<void> {
 
     <!-- 导轨始终占位：有会话时是刻画度的基线，空列表时是一条还没落线的板子。
          它是纯装饰，读屏与键盘都不进去。 -->
+    <div v-if="!isPending && !isError && items.length > 0" class="spectrum" aria-hidden="true">
+      <span
+        v-for="item in items"
+        :key="item.session_id"
+        class="spectrum__line"
+        :data-status="item.status"
+      ></span>
+    </div>
+
     <div class="sessions__body">
       <div class="rail" aria-hidden="true">
         <span class="rail__line"></span>
@@ -233,8 +248,11 @@ function copyBaseUrl(): Promise<void> {
   --row-h: 44px;
   --tick-len: 18px;
 
-  max-width: 880px;
-  margin-inline: auto;
+  /* 满幅，不锁最大宽度（2026-11-21 复审：草图的构图是「摊开的板面」——
+     行从导轨一路铺到右缘；此前锁 880px 居中，1440 下两侧各空 280px，行被挤成
+     一条窄栏，与那口气质不是同一张图）。正文可读性由行的三段 grid 承担：
+     标题列 minmax(0,1fr) 自己吃剩余宽度，状态与元信息靠右。 */
+  max-width: none;
 }
 
 .sessions__header {
@@ -267,6 +285,56 @@ function copyBaseUrl(): Promise<void> {
 }
 .sessions__count-attention {
   color: var(--color-signal);
+}
+
+/* 波长轴：一页会话压成一行刻度。基线 1px，每个会话一根 2px 竖线挂在基线上（朝上），
+   等待人工的那根加倍 + 钠黄，已死三态矮一截——与下面导轨的七态同构，只是缩成一条。
+   它是页眉与列表之间的一条「谱」，不能贴住任何一侧：上下各留一档间距。 */
+.spectrum {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  /* 高度要给最高的那根（等待人工 12px）留够，否则 flex-end + 固定高度会把它的
+     上半截压扁；border-bottom 是那条轴本身。 */
+  height: 14px;
+  box-sizing: content-box;
+  margin: var(--space-2) 0 var(--space-3);
+  padding-left: var(--rail-w);
+  border-bottom: 1px solid var(--color-rule);
+}
+.spectrum__line {
+  flex: 0 0 2px;
+  height: 8px;
+  /* 刻度不直接坐在基线上：留 1px 空隙，否则它和 border-bottom 糊成一根粗线，
+     远看像被裁掉一截（2026-11-21 目检）。 */
+  margin-bottom: 1px;
+  background: var(--color-state-live);
+}
+.spectrum__line[data-status='completed'] {
+  height: 5px;
+  background: var(--color-state-done);
+}
+.spectrum__line[data-status='created'] {
+  background: var(--color-state-pending);
+}
+.spectrum__line[data-status='cancelled'] {
+  background: var(--color-state-dead);
+}
+.spectrum__line[data-status='interrupted'] {
+  background: var(--color-state-done);
+}
+.spectrum__line[data-status='failed'] {
+  background: var(--color-error);
+}
+.spectrum__line[data-status='awaiting_human'] {
+  flex-basis: 5px;
+  height: 12px;
+  background: linear-gradient(
+    to right,
+    var(--color-signal) 0 2px,
+    transparent 2px 3px,
+    var(--color-signal) 3px 5px
+  );
 }
 
 /* 铭牌行：本地地址与缺密钥提示都是「供抄写的一段路径」，不是警告条。
@@ -396,6 +464,9 @@ function copyBaseUrl(): Promise<void> {
   align-items: center;
   gap: var(--space-4);
   height: 100%;
+  /* 满幅布局下，超宽屏幕上标题会横跨整个屏（120ch 以上），读长句要来回甩头。
+     给行内容一个可读上限：超过就留白，不硬拉。 */
+  max-width: 1500px;
   color: var(--color-ink);
   font-size: var(--text-body);
 }
@@ -495,10 +566,11 @@ function copyBaseUrl(): Promise<void> {
   transform: translate(-50%, -50%) rotate(-45deg);
 }
 /* 删除线只在「已中断 / 已取消」的标题上：这两态的故事线已经断了
-   （品红色不在本世界，舍弃）。 */
+   （品红色不在本世界，舍弃）。标题仍用 ink-soft（7.78:1）——「冲淡」交给删除线
+   与刻度形态就够了；此前退到 ink-faint 只有 3.94:1，整行读不清（2026-11-21 复审）。 */
 .session-item[data-status='interrupted'] .session-title,
 .session-item[data-status='cancelled'] .session-title {
-  color: var(--color-ink-faint);
+  color: var(--color-ink-soft);
   text-decoration: line-through;
   text-decoration-color: var(--color-rule-strong);
 }
@@ -530,18 +602,26 @@ function copyBaseUrl(): Promise<void> {
    44px 步进与悬停指示线都是鼠标桌面的语法，触屏上整条关掉。 */
 @media (max-width: 720px) {
   .sessions__body {
-    /* 窄屏刻度只有 12px，而导轨列只有 28px：刻度从基线向**左**伸，超出的那截会跑到
-       视口外（2026-11-21 实测左缘露半根斜线）。给板面留出裁剪边界。 */
+    /* 窄屏刻度从基线向左伸，导轨列只有 28px，超出的那截会跑到视口外（左缘露半根
+       斜线）。给整块留裁剪边界，刻度仍然贴在基线上。
+       注意：波长轴不在这个容器里，别把它的上半截一起裁掉。 */
     overflow: hidden;
   }
   .sessions {
     --rail-w: 28px;
     --tick-len: 12px;
   }
-  /* 窄屏刻度从基线向左伸 12px，而列表项左缘就在视口边上，超出部分会露到框外。
-     不留负 left 偏移，直接把刻度挪进导轨列内（右端仍顶在基线上）。 */
+  /* 刻度右端仍顶在基线上（基线在导轨列 50% 处）：把 left 从 -rail-w/2 改成
+     -rail-w/2 + 一点点，让 12px 刻度整根落在导轨列内。
+     早先图省事写 left: 0，刻度就从基线**脱开**悬在左侧 8px 处
+     （2026-11-21 复审实测：窄屏是悬空的小横杠，与轴断开）。 */
   .session-item::before {
-    left: 0;
+    left: calc(var(--rail-w) * -0.5 + var(--tick-len));
+  }
+  .session-item[data-status='interrupted']::before,
+  .session-item[data-status='cancelled']::before,
+  .session-item[data-status='failed']::before {
+    transform: translate(-100%, -50%) rotate(-45deg);
   }
   .rail__pointer {
     display: none;

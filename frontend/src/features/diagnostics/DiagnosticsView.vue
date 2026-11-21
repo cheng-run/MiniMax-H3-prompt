@@ -120,7 +120,6 @@ async function exportBundle() {
 .diagnostics-list dt {
   padding-top: var(--space-2);
   font-size: var(--text-micro);
-  letter-spacing: var(--track-wide);
   text-transform: uppercase;
   color: var(--color-ink-soft);
   border-top: 1px solid var(--color-rule);

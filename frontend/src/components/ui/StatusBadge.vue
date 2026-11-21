@@ -52,7 +52,8 @@ withDefaults(defineProps<{ label: string; tone?: 'ok' | 'error' | 'neutral' | 'a
 }
 
 .badge--neutral .badge__label {
-  color: var(--color-ink-faint);
+  /* 徽标文字要读得出来：ink-faint 对画布只有 3.94:1。极暗的表达交给左侧线段。 */
+  color: var(--color-ink-soft);
 }
 
 /* 等待人工：两根 2px 平行线、间隔 2px，再加钠黄——全站唯一亮色只给
