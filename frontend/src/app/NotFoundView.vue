@@ -24,13 +24,16 @@ import { RouterLink } from 'vue-router'
   width: 96px;
   height: 2px;
   margin-bottom: var(--space-4);
-  background: repeating-linear-gradient(90deg, var(--color-ink-faint) 0 6px, transparent 6px 12px);
+  /* 断线是装饰，但用 ink-faint 太淡（浅色主题只有 2.84:1）；改用中灰，
+     既仍是「断的」，又看得出是一条线。 */
+  background: repeating-linear-gradient(90deg, var(--color-state-done) 0 6px, transparent 6px 12px);
 }
 .kicker {
   font-family: var(--font-data);
   font-size: var(--text-micro);
   letter-spacing: var(--track-wide);
-  color: var(--color-ink-faint);
+  /* 404 这行字对画布测过对比：ink-soft 两套主题都过 AA，ink-faint 不过。 */
+  color: var(--color-ink-soft);
 }
 h1 {
   margin: var(--space-2) 0 var(--space-3);

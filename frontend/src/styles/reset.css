@@ -119,10 +119,12 @@ select:focus {
   border-color: var(--color-signal);
   outline: none;
 }
-/* 占位文字要够看：0.38 透明度的灰在炭灰上几乎消失。 */
+/* 占位文字要够看：它也是要读的字，不是装饰。用 ink-soft 而不是 ink-faint——
+   ink-faint 对画布深色只有 3.94:1、浅色只有 2.84:1，两套主题都不到 AA（2026-11-22 实测）。
+   占位文字对输入框底的对比同理成立：输入框是透明底，底就是画布。 */
 input::placeholder,
 textarea::placeholder {
-  color: var(--color-ink-faint);
+  color: var(--color-ink-soft);
   opacity: 1;
 }
 
@@ -170,13 +172,19 @@ input[type='file']::file-selector-button:hover {
   cursor: not-allowed;
 }
 
+/* 减少动效：**不是**把一切压成 0。要求是「去掉位移、保留有意义的反馈」——
+   入场编排（落线）与循环动画整条关掉，颜色/透明度这类状态反馈留 100ms，
+   否则点下去像没反应（2026-11-22 复审：此前一刀切 0.01ms，连焦点与状态变化
+   的过渡都没了）。组件里的位移型动效另在自己文件内降级。 */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    transition-duration: 100ms !important;
+    transition-property: color, background-color, border-color, opacity !important;
     scroll-behavior: auto !important;
   }
 }

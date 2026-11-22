@@ -156,9 +156,11 @@ async function exportBundle() {
   color: var(--color-ink-soft);
   line-height: 1.9;
 }
-/* 条目左边那条短线是装饰，不是「一侧色条卡片」：整块没有边框也没有底色。 */
+/* 条目左边那条短线是装饰，不是「一侧色条卡片」：整块没有边框也没有底色。
+   项目符号用 ink-soft 而不是 ink-faint——浅色主题下 ink-faint 只有 2.84:1。
+   列表符号属于「看得见的小件」，淡过头就读不出还有几条。 */
 .bundle-items li::marker {
-  color: var(--color-ink-faint);
+  color: var(--color-ink-soft);
 }
 .bundle-note {
   font-size: var(--text-micro);

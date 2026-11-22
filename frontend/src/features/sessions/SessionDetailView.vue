@@ -842,6 +842,11 @@ const errorMessage = computed(() =>
 .tab:hover {
   color: var(--color-ink);
 }
+/* 按下时文字再压深一档——tab 是「换一块面板」，按下必须有回应。 */
+.tab:active {
+  color: var(--color-ink);
+  opacity: 0.75;
+}
 .tab--active {
   color: var(--color-ink);
   font-weight: 500;
@@ -869,6 +874,21 @@ const errorMessage = computed(() =>
   /* tab 栏自己的 24px 下边距已经把距离给够了，这里再叠一层会让分区首行离 tab
      有 48px 以上的空档（2026-11-21 目检：素材页首屏像没排完）。 */
   padding-top: 0;
+  /* 分区切换的连续性：新面板从上方 4px 落定，只动 transform——**不动 opacity**。
+     这是「替换型」内容（旧面板被 v-if 移走、新面板挂上来），若从 opacity:0 起播，
+     切换那一帧整块区域是空的，读起来像闪白（2026-11-22 逐帧复审实测：
+     animation-fill-mode: both 让首帧就应用 from 状态，region 全空）。
+     改层的内容不该从「看不见」开始，它该从「差一点到位」开始。
+     180ms 压在一档反馈时长内；用户逐次切分区会反复看到，所以必须短。 */
+  animation: panel-in 180ms var(--ease-out) both;
+}
+@keyframes panel-in {
+  from {
+    transform: translateY(-4px);
+  }
+  to {
+    transform: none;
+  }
 }
 /* 步骤带与「等待你操作」常驻在标题之下、分区 tab 之上（#276）。 */
 .progress-region {
@@ -893,6 +913,20 @@ const errorMessage = computed(() =>
   background: var(--color-plate-raised);
   color: var(--color-ink);
   font-size: var(--text-body);
+  /* 这条横带是「现在轮到你」的信号：它出现时不该静悄悄地贴上去。
+     上下两道钠黄线先亮、整带再落定——用 clip-path 从上下两端向中间揭开，
+     正好呼应「一条被点亮的基线」。 */
+  animation: band-reveal var(--duration-base) var(--ease-out) both;
+}
+@keyframes band-reveal {
+  from {
+    clip-path: inset(50% 0 50% 0);
+    opacity: 0;
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+    opacity: 1;
+  }
 }
 /* 「等待你操作」的跳转按钮：视觉上仍是那行提示里的文字，但整句可点（有下划线
    与指针，键盘可聚焦）。此前它只是一段灰字，等待人工的会话在概览里无处可点。 */
@@ -959,5 +993,14 @@ const errorMessage = computed(() =>
   color: var(--color-ink);
   font-size: var(--text-body);
   overflow-wrap: anywhere;
+}
+
+/* 减少动效：分区切换与等待带都是「位置/揭开」型，关掉动画直接以终态出现；
+   全局规则保留颜色与透明度的 100ms 过渡，反馈不至于是零。 */
+@media (prefers-reduced-motion: reduce) {
+  .panel,
+  .pending-hint {
+    animation: none;
+  }
 }
 </style>

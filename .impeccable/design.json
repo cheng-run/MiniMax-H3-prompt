@@ -168,21 +168,21 @@
       "kind": "custom",
       "description": "左侧双线 + 右侧文字。双线表示「现在最要紧的那一条」，钠黄。",
       "html": "<span class=\"ds-badge ds-badge-attention\"><span class=\"ds-badge-line\" aria-hidden=\"true\"></span><span>等待人工</span></span>",
-      "css": ".ds-badge { display: inline-flex; align-items: center; gap: 8px; font-size: 0.6875rem; letter-spacing: 0.04em; white-space: nowrap; font-family: inherit; } .ds-badge-attention { color: var(--color-signal, #e0a93b); font-weight: 500; } .ds-badge-attention .ds-badge-line { display: block; flex: none; width: 14px; height: 6px; background: repeating-linear-gradient(to bottom, var(--color-signal, #e0a93b) 0 2px, transparent 2px 4px); }"
+      "css": ".ds-badge { display: inline-flex; align-items: center; gap: 8px; font-size: 0.75rem; letter-spacing: 0.04em; white-space: nowrap; font-family: inherit; } .ds-badge-attention { color: var(--color-signal, #e0a93b); font-weight: 500; } .ds-badge-attention .ds-badge-line { display: block; flex: none; width: 14px; height: 6px; background: repeating-linear-gradient(to bottom, var(--color-signal, #e0a93b) 0 2px, transparent 2px 4px); }"
     },
     {
       "name": "Status Badge（已完成）",
       "kind": "custom",
       "description": "单根实线 + 次要灰的字。",
       "html": "<span class=\"ds-badge ds-badge-ok\"><span class=\"ds-badge-line\" aria-hidden=\"true\"></span><span>已完成</span></span>",
-      "css": ".ds-badge { display: inline-flex; align-items: center; gap: 8px; font-size: 0.6875rem; letter-spacing: 0.04em; white-space: nowrap; font-family: inherit; } .ds-badge-ok { color: var(--color-ink-soft, #a8a89f); } .ds-badge-ok .ds-badge-line { display: block; flex: none; width: 14px; height: 2px; background: var(--color-state-done, #8d9295); }"
+      "css": ".ds-badge { display: inline-flex; align-items: center; gap: 8px; font-size: 0.75rem; letter-spacing: 0.04em; white-space: nowrap; font-family: inherit; } .ds-badge-ok { color: var(--color-ink-soft, #a8a89f); } .ds-badge-ok .ds-badge-line { display: block; flex: none; width: 14px; height: 2px; background: var(--color-state-done, #8d9295); }"
     },
     {
       "name": "Rail Row（会话行）",
       "kind": "custom",
       "description": "导轨刻度 + 标题 + 状态 + 元信息。等待人工整行浮起，刻度变双线钠黄。",
       "html": "<div class=\"ds-rail-row\"><span class=\"ds-rail-tick\" aria-hidden=\"true\"></span><span class=\"ds-rail-title\">在明朝，一个穿汉服的女子依靠在窗边吹风</span><span class=\"ds-rail-badge\"><span class=\"ds-rail-badge-line\" aria-hidden=\"true\"></span><span>已完成</span></span><span class=\"ds-rail-meta\">T2VA · 修订 55</span></div>",
-      "css": ".ds-rail-row { display: grid; grid-template-columns: minmax(0,1fr) auto auto; align-items: center; gap: 16px 24px; height: 44px; padding-left: 0; border-bottom: 1px solid var(--color-rule, #2c3134); position: relative; font-family: inherit; } .ds-rail-row::before { content: ''; position: absolute; left: 0; top: 50%; width: 9px; height: 2px; transform: translateY(-50%); background: var(--color-state-done, #8d9295); } .ds-rail-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-ink, #e6e3da); font-size: 0.875rem; } .ds-rail-badge { display: inline-flex; align-items: center; gap: 8px; font-size: 0.6875rem; letter-spacing: 0.04em; color: var(--color-ink-soft, #a8a89f); white-space: nowrap; } .ds-rail-badge-line { display: block; width: 14px; height: 2px; background: var(--color-state-done, #8d9295); } .ds-rail-meta { font-family: ui-monospace, 'SF Mono', Consolas, monospace; font-size: 0.6875rem; color: var(--color-ink-soft, #a8a89f); font-variant-numeric: tabular-nums; white-space: nowrap; }"
+      "css": ".ds-rail-row { display: grid; grid-template-columns: minmax(0,1fr) auto auto; align-items: center; gap: 16px 24px; height: 44px; padding-left: 0; border-bottom: 1px solid var(--color-rule, #2c3134); position: relative; font-family: inherit; } .ds-rail-row::before { content: ''; position: absolute; left: 0; top: 50%; width: 9px; height: 2px; transform: translateY(-50%); background: var(--color-state-done, #8d9295); } .ds-rail-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-ink, #e6e3da); font-size: 0.875rem; } .ds-rail-badge { display: inline-flex; align-items: center; gap: 8px; font-size: 0.75rem; letter-spacing: 0.04em; color: var(--color-ink-soft, #a8a89f); white-space: nowrap; } .ds-rail-badge-line { display: block; width: 14px; height: 2px; background: var(--color-state-done, #8d9295); } .ds-rail-meta { font-family: ui-monospace, 'SF Mono', Consolas, monospace; font-size: 0.75rem; color: var(--color-ink-soft, #a8a89f); font-variant-numeric: tabular-nums; white-space: nowrap; }"
     },
     {
       "name": "Navigation Link（当前项）",

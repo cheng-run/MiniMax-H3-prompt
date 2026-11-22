@@ -129,12 +129,7 @@ function copyBaseUrl(): Promise<void> {
       </Button>
     </header>
 
-    <!-- 波长轴（方向契约 FIRST VIEWPORT 里点名的那一条）：把「这一页有几个会话、
-         哪几个在等你」挤成一行刻度，与本页导轨同一套线语言。
-         位置在列表正上方（不是页眉下方）：它是这批行的「谱」，紧贴它要说明的那一批。
-         每个会话一根竖刻度，等待人工的那根加倍并给钠黄——扫一眼轴就知道本页的分布，
-         不必先读完 20 行。纯装饰：读屏由上面那句计数负责，这里 aria-hidden。 -->
-
+    <!-- 铭牌行：本地地址与缺密钥提示都是「供抄写的一段路径」，不是警告条。 -->
     <section v-if="baseUrl" class="local-address">
       <p class="local-address__line">
         本地地址：<code>{{ baseUrl }}</code>
@@ -168,14 +163,22 @@ function copyBaseUrl(): Promise<void> {
 
     <SessionCreateForm v-if="showForm" />
 
-    <!-- 导轨始终占位：有会话时是刻画度的基线，空列表时是一条还没落线的板子。
-         它是纯装饰，读屏与键盘都不进去。 -->
-    <div v-if="!isPending && !isError && items.length > 0" class="spectrum" aria-hidden="true">
+    <!-- 波长轴：一页会话压成一行刻度，紧贴它要说明的那一批行（在本页导轨正上方）。
+         纯装饰，读屏由页眉那句计数承担，这里 aria-hidden。
+         :key 绑页码而不是会话 id：翻页时刻度树重挂载，落线动效跟着重播——
+         「换了一批谱线，再曝光一次」。同一页内数据刷新不重播。 -->
+    <div
+      v-if="!isPending && !isError && items.length > 0"
+      :key="pageIndex"
+      class="spectrum"
+      aria-hidden="true"
+    >
       <span
-        v-for="item in items"
+        v-for="(item, index) in items"
         :key="item.session_id"
         class="spectrum__line"
         :data-status="item.status"
+        :style="{ '--i': String(index) }"
       ></span>
     </div>
 
@@ -207,6 +210,7 @@ function copyBaseUrl(): Promise<void> {
               class="session-item"
               :class="{ 'session-item--attention': item.status === 'awaiting_human' }"
               :data-status="item.status"
+              :style="{ '--i': String(index) }"
               @mouseenter="pointAt(index)"
               @focusin="pointAt(index)"
               @focusout="hoverIndex = null"
@@ -268,12 +272,14 @@ function copyBaseUrl(): Promise<void> {
   gap: var(--space-1);
   min-width: 0;
 }
-/* 视觉标就是 h1（页面上只有这一个）。中文没有大小写，rails-contract 又禁止给中文
-   加字距，所以层级只靠 micro 字号 + 次要墨色，不加 --track-wide。 */
+/* 视觉标就是 h1（页面上只有这一个）。此前用 micro 字号 + 次要灰，比正文行还小，
+   在 1440 下读起来像页脚注——它是这张板子的名字，不是注释（2026-11-22 复审）。
+   提到 lead 档、骨白、字重 500。中文不加字距（rails-contract 明令）。 */
 .sessions__title {
-  font-size: var(--text-micro);
+  font-size: var(--text-lead);
   font-weight: 500;
-  color: var(--color-ink-soft);
+  line-height: 1.4;
+  color: var(--color-ink);
 }
 .sessions__count {
   font-size: var(--text-micro);
@@ -309,6 +315,22 @@ function copyBaseUrl(): Promise<void> {
      远看像被裁掉一截（2026-11-21 目检）。 */
   margin-bottom: 1px;
   background: var(--color-state-live);
+  /* 落线（DESIGN.md「签名动效：落线」）：刻度从基线向上长出来，按行号依次错开。
+     变形原点在底边＝基线处，所以是「从轴上冒出来」而不是整体淡入。
+     延迟按 index 递进、但封顶 --stagger-cap 格：一页 20 行时总时长仍是
+     120ms(延迟) + 260ms(生长) = 380ms，不再随行数线性膨胀。 */
+  transform-origin: 50% 100%;
+  animation: spectrum-rise var(--duration-line) var(--ease-grow) both;
+  animation-delay: calc(min(var(--i, 0), var(--stagger-cap)) * var(--stagger-line));
+}
+/* 从 0 高 → 自身高度。用 scaleY 而不是 height：不触发布局，20 行同时跑也不掉帧。 */
+@keyframes spectrum-rise {
+  from {
+    transform: scaleY(0);
+  }
+  to {
+    transform: scaleY(1);
+  }
 }
 .spectrum__line[data-status='completed'] {
   height: 5px;
@@ -458,6 +480,11 @@ function copyBaseUrl(): Promise<void> {
 .session-item:hover {
   background: var(--color-plate);
 }
+/* 按下反馈：整行是跳转链接，按下时底色再压一档，松手即离开。
+   写在 :hover 之后、与 attention 行的那对规则并列，保证悬停底色不被覆盖。 */
+.session-item:active {
+  background: var(--color-plate-raised);
+}
 .session-link {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
@@ -502,10 +529,15 @@ function copyBaseUrl(): Promise<void> {
   white-space: nowrap;
 }
 /* 「等你动手」整行：浮起一档底，标题换钠黄。写在 :hover 之后且补一条 hover 规则——
-   否则 .session-item:hover 的特异性更高，悬停时会把这一行压回普通底色。 */
+   否则 .session-item:hover 的特异性更高，悬停时会把这一行压回普通底色。
+   :active 也要点名：等待人工那行本来就停在 plate-raised，按下时改压 plate，
+   否则按下去与悬停像素级同貌，读起来像没点中。 */
 .session-item--attention,
 .session-item--attention:hover {
   background: var(--color-plate-raised);
+}
+.session-item--attention:active {
+  background: var(--color-plate);
 }
 .session-item--attention .session-title {
   color: var(--color-signal);
@@ -527,6 +559,21 @@ function copyBaseUrl(): Promise<void> {
   /* 跨在纵向基线上、左右各伸一半：刻度是「轴上的刻度」，不是贴边的一截。 */
   transform: translate(-50%, -50%);
   background: var(--color-state-live);
+  /* 落线：行刻度从基线上向两侧伸出，与波长轴同一次手势、同一串延迟（同样封顶）。
+     用 clip-path 而不是 scaleX——刻度的宽度承载状态（已完成是半高），
+     scaleX 会把它压扁成另一种长度；clip-path 只裁可见范围，形态不变。
+     原点在横向正中（基线所在），所以是「从轴上向两边长」。 */
+  clip-path: inset(-2px 50% -2px 50%);
+  animation: tick-draw var(--duration-line) var(--ease-grow) both;
+  animation-delay: calc(min(var(--i, 0), var(--stagger-cap)) * var(--stagger-line));
+}
+@keyframes tick-draw {
+  from {
+    clip-path: inset(-2px 50% -2px 50%);
+  }
+  to {
+    clip-path: inset(-2px -2px -2px -2px);
+  }
 }
 /* 七态线形（rail-contract 的表）：实线全高 / 双线 / 半高 / 叠加斜划 / 极暗。 */
 .session-item[data-status='created']::before {
@@ -645,6 +692,22 @@ function copyBaseUrl(): Promise<void> {
   }
   .pager {
     padding-left: 0;
+  }
+}
+
+/* 减少动效：落线是「从零长出来」，属于位移/绘制型，整条关掉，刻度直接以终态出现。
+   全局 reset 已把 animation-delay 归零，这里再把 clip-path/scaleY 复位，
+   保证没有中间态残留（否则定格在 scaleY(0) 会整条看不见）。 */
+@media (prefers-reduced-motion: reduce) {
+  .spectrum__line,
+  .session-item::before {
+    animation: none;
+  }
+  .spectrum__line {
+    transform: none;
+  }
+  .session-item::before {
+    clip-path: none;
   }
 }
 </style>

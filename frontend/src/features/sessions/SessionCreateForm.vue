@@ -589,6 +589,19 @@ async function createWithClarifications(
   max-width: 720px;
   padding-top: var(--space-4);
   border-top: 1px solid var(--color-rule-strong);
+  /* 展开是从无到有的一整块，瞬跳最扎眼：顶线与整块一起淡入，内容轻轻下移 4px。
+     v-if 挂载即播，收起时直接消失（不做过场——收起是用户自己的动作，不需要解释）。 */
+  animation: form-open var(--duration-base) var(--ease-out) both;
+}
+@keyframes form-open {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 .field {
   display: flex;
@@ -680,5 +693,11 @@ async function createWithClarifications(
 }
 .clarification-failure .field-hint {
   flex: 1 1 200px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .create-form {
+    animation: none;
+  }
 }
 </style>

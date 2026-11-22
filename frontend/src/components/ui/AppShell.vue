@@ -126,6 +126,10 @@ function cycleTheme(): void {
 .app-nav__link:hover {
   color: var(--color-ink);
 }
+/* 导航按下时同样给一次反馈：整条链接是跳转，没有按下态会像点了没反应。 */
+.app-nav__link:active {
+  opacity: 0.75;
+}
 /* 当前项：下方一道 2px 钠黄——全站唯一亮色只给「你在这」。 */
 .app-nav__link.is-current {
   color: var(--color-ink);
@@ -159,6 +163,10 @@ function cycleTheme(): void {
 .theme-toggle:hover {
   background: var(--color-plate-raised);
   color: var(--color-ink);
+}
+/* 按下时底色再压一档：三态轮转是「按一下换一个」，没有按下反馈会像没点中。 */
+.theme-toggle:active {
+  background: var(--color-plate);
 }
 
 .app-main {

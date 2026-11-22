@@ -37,13 +37,13 @@ typography:
     lineHeight: 1.55
   micro:
     fontFamily: "Archivo, system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif"
-    fontSize: "0.6875rem"
+    fontSize: "0.75rem"
     fontWeight: 400
     lineHeight: 1.55
     letterSpacing: "0.04em"
   data:
     fontFamily: "ui-monospace, 'SF Mono', Consolas, 'Cascadia Mono', monospace"
-    fontSize: "0.6875rem"
+    fontSize: "0.75rem"
     fontWeight: 400
     lineHeight: 1.55
 rounded:
@@ -111,7 +111,7 @@ components:
 - **强调线** (#3d4448): 输入框边框、次级按钮边框。
 - **骨白** (#e6e3da): 正文。不是纯白，纯白在炭灰上刺眼。
 - **次要灰** (#a8a89f): 铭牌、说明、元信息。对 #111314 是 8.1:1。
-- **最弱灰** (#6f7476): 未开始的刻度、禁用文字。对 #111314 是 3.9:1，只用于非正文。
+- **最弱灰** (#6f7476): 未开始的刻度、禁用文字、失活刻度。对 #111314 是 3.9:1，只用于非正文。**占位文字已从这里撤出**——它是要读的字，改用次要灰（2026-11-22：浅色主题下最弱灰只有 2.84:1，连占位都不合格）。
 
 ### Semantic
 - **进行中** (#e6e3da): 实线全高，最亮。
@@ -129,6 +129,8 @@ components:
 
 **The Measured-Contrast Rule.** 浅色的钠黄是 `#8f5c10` 而不是深色那档（#b8791a 对浅色画布只有 3.12:1）。两套主题的每个前景色都对画布实测过 ≥4.5:1；`--color-ink-faint` 因为 3.94:1 被排除在正文之外。
 
+**The Micro-Is-For-Western Rule.** micro 档（0.75rem）是铭牌与西文小件的尺寸，**不承担中文正文**。微档此前是 11px，徽标、行元信息、计数这些中文 11px 下笔画粘连（2026-11-22 实测）——提到 12px 后仍属于「小字」，但中文可读。真·正文（会话标题、剧本段落）一律 body 档（14px）起步。
+
 ## Typography
 
 **Display Font / Body Font:** Archivo（自托管 woff2，随包分发，EXE 形态不依赖网络）
@@ -140,8 +142,8 @@ components:
 - **Display** (500, 1.75rem, 1.55, -0.02em): 产品名。全站只出现一次。
 - **Lead** (500, 1rem, 1.55): 页面标题、板面标题。
 - **Body** (400, 0.875rem, 1.55): 列表行、正文、按钮。
-- **Micro** (400, 0.6875rem, 0.04em): 铭牌、元信息、刻度标签、计数。
-- **Data** (400, 0.6875rem, 等宽, tabular-nums): 波长、修订号、条数、路径。
+- **Micro** (400, 0.75rem, 0.04em): 铭牌、元信息、刻度标签、计数。
+- **Data** (400, 0.75rem, 等宽, tabular-nums): 波长、修订号、条数、路径。
 
 ### Named Rules
 **The No-Tracking-On-Chinese Rule.** 中文标题不加字距。`--track-wide`（0.14em）只给全大写的西文铭牌，中文加了会散成「一个 一 个 字」。
@@ -217,7 +219,26 @@ components:
 
 **徽标与刻度必须同口径**：`interrupted` 是 neutral（中灰斜划），`failed` 才是 error（红）。两处映射都住在 `status.ts`，改一处必须同时想另一处。
 
-**签名动效：** 被指向的行，导轨上多出一根钠黄指示线，用 `translateY(行号 × 44px)` 落到该行，指数缓出（`cubic-bezier(.19,1,.22,1)`）。键盘 Tab 同样触发。这是全站唯一的动效语言，别处一律 120ms 缓出。
+**签名动效：** 被指向的行，导轨上多出一根钠黄指示线，用 `translateY(行号 × 44px)` 落到该行，指数缓出（`cubic-bezier(.19,1,.22,1)`）。键盘 Tab 同样触发。
+
+### 动效（2026-11-22 增补）
+
+动效只做三件事：**解释入场、解释切换、解释反馈**。全站只有一个编排过的时刻，其余一律短促。
+
+**落线（唯一编排时刻）。** 列表数据到手时，波长轴的刻度从基线上依次向上长出来，同时每行导轨刻度的可见范围从基线向两侧展开。这是「一张谱线板被曝光」——这个世界自己的比喻，不是通用的淡入上升。
+- 刻度：`scaleY(0) → 1`，`transform-origin: 50% 100%`（底边即基线）。
+- 行刻度：`clip-path: inset(−2px 50%) → inset(−2px)`，从横向基线向两边展开。**不用 scaleX**——刻度宽度承载状态（已完成是半宽），scaleX 会把它压成另一种长度。
+- 节奏：`--duration-line` 260ms、`--stagger-line` 10ms、延迟封顶 `--stagger-cap` 12 格，总时长 **120 + 260 = 380ms**，不随行数膨胀（20 行与 12 行同时收尾）。
+- 曲线单独一条 `--ease-grow`（`cubic-bezier(.4,.1,.2,1)`）：生长要前段缓。用 `--ease-expo` 时 40ms 已长到 57%，读起来是「啪一下出现」，不是「长出来」。
+- 翻页重播（`:key="pageIndex"`）；同一页内数据刷新不重播。
+
+**连续性。** 详情页分区切换 180ms、新建表单展开 220ms，都用 `--ease-out`。它们会随用户操作反复出现，所以必须短——Operate 模式不让人等编排。
+
+- **替换型内容只动位置，不动透明度**（The No-Blank-Swap Rule）。分区切换是旧面板被 `v-if` 移走、新面板挂上来；若新面板从 `opacity: 0` 起播（`animation-fill-mode: both` 会让首帧就应用 `from`），切换那一帧整块区域是空的，读起来像闪白。这类内容该从「差一点到位」开始（`translateY(-4px)`），不是从「看不见」开始。**从无到有**的内容（新建表单、等待提示）才用淡入，因为那时候页面上本来就没有东西可被替换。
+
+**反馈。** 「等待你操作」横带 220ms：`clip-path` 从上下两端向中间揭开 + 淡入，呼应「一条被点亮的基线」。按钮、tab、导航、列表行都有 `:active`（按下再压一档），不只 hover。
+
+**预算与降级。** 只用 `transform` / `opacity` / `clip-path`，不触发布局，无滚动监听、无逐元素 JS。`prefers-reduced-motion` 下：入场编排与循环动画整条关掉（刻度直接以终态出现，`clip-path` 复位），颜色与透明度保留 100ms——**不是**把所有动效压成 0，否则点下去像没反应。
 
 ### Signature Component: 波长轴
 列表正上方的一条横轴：本页每个会话压成一根竖刻度挂在 1px 基线上，等待人工那根加倍 + 钠黄，已死三态矮一截。与导轨七态同构，只是缩成一行——扫一眼轴就知道这一页的分布，不必先读二十行。纯装饰，`aria-hidden`；读屏由页眉那句「N 条记录 · M 条要你动手」承担。
@@ -255,7 +276,8 @@ components:
 - **Do** 用 1px 线与灰阶差分层次，不用阴影。
 - **Do** 数字一律等宽 + `tabular-nums`。
 - **Do** 焦点态统一 2px 钠黄描边 + 2px 偏移，覆盖所有交互元素。
-- **Do** 在 `prefers-reduced-motion` 下关掉一切动效。
+- **Do** 在 `prefers-reduced-motion` 下关掉入场编排与循环动画，但保留颜色与透明度的短过渡——反馈不能减到零。
+- **Do** 替换型内容只做位移，从 `opacity: 0` 起播会闪出一帧空白。
 - **Do** 术语与 `CONTEXT.md` 保持一致（分段、素材、产物、交付、导演台）。
 - **Do** 让「要你动手」的状态在列表里跳出来（双线刻度 + 浮起底 + `NEXT` 铭牌），并把状态写进 `document.title`。
 
