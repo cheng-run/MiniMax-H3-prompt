@@ -27,6 +27,7 @@
     "@tailwindcss/vite": "^4.3.5",
     "@tanstack/vue-query": "^5.62.0",
     "class-variance-authority": "^0.7.1",
+    "markdown-it": "^14.1.0",
     "openapi-fetch": "^0.13.0",
     "pinia": "^2.2.6",
     "reka-ui": "^2.11.0",
@@ -38,6 +39,7 @@
   "devDependencies": {
     "@eslint/js": "^9.16.0",
     "@playwright/test": "^1.49.0",
+    "@types/markdown-it": "^14.1.2",
     "@types/node": "^22.10.0",
     "@vitejs/plugin-vue": "^5.2.0",
     "@vitest/coverage-v8": "^2.1.8",

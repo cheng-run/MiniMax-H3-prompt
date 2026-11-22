@@ -2,6 +2,7 @@
 import { ref, watch } from 'vue'
 
 import { getArtifactContent, type ArtifactInfo } from '@/api/client'
+import MarkdownBlock from '@/components/ui/MarkdownBlock.vue'
 
 import { useClipboardCopy } from './useClipboardCopy'
 
@@ -46,7 +47,7 @@ async function copyPrompt(): Promise<void> {
     <p v-if="error" class="file-error">{{ error }}</p>
     <p v-else-if="text === null" role="status" class="muted">加载中…</p>
     <template v-else>
-      <pre class="prompt__text">{{ text }}</pre>
+      <MarkdownBlock class="prompt__text" :text="text" />
       <div class="prompt__actions">
         <button type="button" class="copy" :disabled="text === null" @click="copyPrompt">
           {{ copy.label.value }}
@@ -72,18 +73,12 @@ async function copyPrompt(): Promise<void> {
   font-weight: 400;
 }
 /* 按需词正文是照抄物：发光线围出的一个面，可滚。
-   正文用正文字体与字号——等宽在这里只是「技术感」的戏服，而且 `ui-monospace`
-   在某些环境下回落到系统衬线，读起来像另一套设计（2026-11-21 目检）。 */
+   排版住在 MarkdownBlock（它要管标题、列表、表格），这里只给外框。 */
 .prompt__text {
   margin: 0;
   padding: var(--space-3);
   border: 1px solid var(--color-rule);
   background: var(--color-plate);
-  font-family: var(--font-sans);
-  font-size: var(--text-body);
-  line-height: 1.75;
-  white-space: pre-wrap;
-  word-break: break-word;
   max-height: 20rem;
   overflow-y: auto;
 }

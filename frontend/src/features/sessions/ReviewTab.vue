@@ -5,6 +5,7 @@ import type { ActionItemOut, ArtifactInfo } from '@/api/client'
 import { ApiError, getArtifactContent, resolveActionItem } from '@/api/client'
 import Button from '@/components/ui/Button.vue'
 import ErrorNotice from '@/components/ui/ErrorNotice.vue'
+import MarkdownBlock from '@/components/ui/MarkdownBlock.vue'
 
 import { newIdempotencyKey } from './keys'
 import { artifactGroup, artifactLabel, sortArtifacts } from './artifactKinds'
@@ -181,7 +182,7 @@ async function submitRevision(): Promise<void> {
         <p v-else-if="fileStates[file.name]?.error" class="file-error">
           {{ fileStates[file.name]?.error }}
         </p>
-        <pre v-else class="file-text">{{ fileStates[file.name]?.text }}</pre>
+        <MarkdownBlock v-else class="file-text" :text="fileStates[file.name]?.text ?? ''" />
       </article>
 
       <p v-if="reviewFiles.length === 0" class="muted">暂无可查看的中间产物。</p>
@@ -284,17 +285,13 @@ async function submitRevision(): Promise<void> {
   font-size: var(--text-micro);
   font-weight: 400;
 }
-/* 文件正文：发光线围出的一个面，贴画布底，零圆角。 */
+/* 文件正文：发光线围出的一个面，贴画布底，零圆角。
+   字体与排版住在 MarkdownBlock（它要管标题、列表、表格），这里只给外框。 */
 .file-text {
   margin: 0;
   padding: var(--space-3);
   border: 1px solid var(--color-rule);
   background: var(--color-plate);
-  font-family: var(--font-data);
-  font-size: var(--text-micro);
-  white-space: pre-wrap;
-  word-break: break-word;
-  overflow-x: auto;
 }
 .file-error {
   margin: 0;

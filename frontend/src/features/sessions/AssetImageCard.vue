@@ -13,6 +13,7 @@ import {
 import type { RefOut } from '@/api/client'
 import Button from '@/components/ui/Button.vue'
 import ErrorNotice from '@/components/ui/ErrorNotice.vue'
+import MarkdownBlock from '@/components/ui/MarkdownBlock.vue'
 
 import { assetPromptName } from './artifactKinds'
 import { newIdempotencyKey } from './keys'
@@ -299,7 +300,7 @@ async function confirmAbandon(): Promise<void> {
       </div>
       <p v-if="promptError" class="field-error">{{ promptError }}</p>
       <pre v-else-if="prompt === null" class="muted">词加载中…</pre>
-      <pre v-else class="prompt__text">{{ prompt }}</pre>
+      <MarkdownBlock v-else class="prompt__text" :text="prompt" />
     </div>
 
     <!-- 恢复阶段 1 原文（#291）：只在「无轮次账记录的差异」上出现，所以放在校对四选
@@ -482,7 +483,14 @@ async function confirmAbandon(): Promise<void> {
 /* 提示词正文是「照抄的接线清单」：发光线围出的一块面，等宽小字。 */
 /* 提示词正文用正文字体与字号；等宽只留给文件名这类纯技术标识（见 .file-name）。
    等宽正文在 `ui-monospace` 回落时会变成系统衬线，读起来像另一套设计（2026-11-21 目检）。 */
-.prompt__text,
+/* 资产图词按 markdown 排版（住在 MarkdownBlock），这里只给外框；
+   diff__text 仍是原样的文本块，保留自己的字体声明。 */
+.prompt__text {
+  margin: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--color-rule);
+  background: var(--color-plate);
+}
 .diff__text {
   margin: 0;
   padding: var(--space-3);

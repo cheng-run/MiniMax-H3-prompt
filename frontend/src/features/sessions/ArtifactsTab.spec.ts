@@ -77,7 +77,7 @@ describe('产物分区', () => {
     await vi.waitFor(() => {
       expect(wrapper.text()).toContain('分场剧本正文')
       expect(wrapper.text()).toContain('分镜表正文')
-      expect(wrapper.text()).toContain('# H3 视频提示词')
+      expect(wrapper.text()).toContain('H3 视频提示词')
       expect(wrapper.text()).toContain('中文摘要正文')
     })
 
@@ -88,7 +88,7 @@ describe('产物分区', () => {
   it('复制最终提示词写入剪贴板并给出成功反馈', async () => {
     const { wrapper } = await mountTab()
     await vi.waitFor(() => {
-      expect(wrapper.text()).toContain('# H3 视频提示词')
+      expect(wrapper.text()).toContain('H3 视频提示词')
     })
 
     const copyButton = wrapper.get('[data-copy="video-prompt.md"]')
@@ -102,7 +102,7 @@ describe('产物分区', () => {
   it('下载链接指向 content 端点并带 download 文件名', async () => {
     const { wrapper } = await mountTab()
     await vi.waitFor(() => {
-      expect(wrapper.text()).toContain('# H3 视频提示词')
+      expect(wrapper.text()).toContain('H3 视频提示词')
     })
 
     const link = wrapper.get('[data-download="video-prompt.md"]')
@@ -194,7 +194,7 @@ describe('产物分区', () => {
     ])
 
     await vi.waitFor(() => {
-      expect(wrapper.findAll('pre.file-text')).toHaveLength(3)
+      expect(wrapper.findAll('.markdown-block.file-text')).toHaveLength(3)
     })
     expect(wrapper.get('[data-group="intermediate"]').text()).toContain('资产图词')
     expect(wrapper.get('[data-group="intermediate"]').text()).toContain('多参分镜表')
@@ -213,7 +213,7 @@ describe('产物分区', () => {
     ])
 
     await vi.waitFor(() => {
-      expect(wrapper.findAll('pre.file-text')).toHaveLength(4)
+      expect(wrapper.findAll('.markdown-block.file-text')).toHaveLength(4)
     })
     const names = wrapper
       .findAll('[data-group="intermediate"] article .file-name')

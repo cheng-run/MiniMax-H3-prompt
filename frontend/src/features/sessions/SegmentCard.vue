@@ -16,6 +16,7 @@ import {
 } from '@/api/client'
 import Button from '@/components/ui/Button.vue'
 import ErrorNotice from '@/components/ui/ErrorNotice.vue'
+import MarkdownBlock from '@/components/ui/MarkdownBlock.vue'
 
 import DirectorPromptBlock from './DirectorPromptBlock.vue'
 import { newIdempotencyKey } from './keys'
@@ -375,7 +376,7 @@ async function submitVideo(): Promise<void> {
     <section v-if="cardArtifact" class="injection-card" data-injection-card aria-label="本段注入卡">
       <h3>本段注入卡</h3>
       <p v-if="cardError" class="file-error">{{ cardError }}</p>
-      <pre v-else-if="cardText !== null" class="prompt__text">{{ cardText }}</pre>
+      <MarkdownBlock v-else-if="cardText !== null" class="prompt__text" :text="cardText" />
       <p v-else role="status" class="muted">加载中…</p>
     </section>
 
@@ -387,7 +388,7 @@ async function submitVideo(): Promise<void> {
         <p v-if="promptLoading" role="status" class="muted">加载中…</p>
         <p v-else-if="promptError" class="file-error">{{ promptError }}</p>
         <template v-else>
-          <pre class="prompt__text">{{ promptText }}</pre>
+          <MarkdownBlock class="prompt__text" :text="promptText ?? ''" />
           <div class="prompt__actions">
             <button type="button" class="copy" :disabled="promptText === null" @click="copyPrompt">
               {{ copy.label.value }}
@@ -587,10 +588,6 @@ async function submitVideo(): Promise<void> {
   padding: var(--space-3);
   border: 1px solid var(--color-rule);
   background: var(--color-plate);
-  font-family: var(--font-data);
-  font-size: var(--text-micro);
-  white-space: pre-wrap;
-  word-break: break-word;
   max-height: 20rem;
   overflow-y: auto;
 }

@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 
 import { artifactContentUrl, getArtifactContent, type ArtifactInfo } from '@/api/client'
+import MarkdownBlock from '@/components/ui/MarkdownBlock.vue'
 
 import {
   archiveDownloadLabel,
@@ -162,7 +163,7 @@ function noteDownload(name: string): void {
           <p v-else-if="states[file.name]?.error" class="file-error">
             {{ states[file.name]?.error }}
           </p>
-          <pre v-else class="file-text">{{ states[file.name]?.text }}</pre>
+          <MarkdownBlock v-else class="file-text" :text="states[file.name]?.text ?? ''" />
           <div class="artifact__actions">
             <button
               type="button"
@@ -212,7 +213,7 @@ function noteDownload(name: string): void {
           <p v-else-if="states[file.name]?.error" class="file-error">
             {{ states[file.name]?.error }}
           </p>
-          <pre v-else class="file-text">{{ states[file.name]?.text }}</pre>
+          <MarkdownBlock v-else class="file-text" :text="states[file.name]?.text ?? ''" />
           <div class="artifact__actions">
             <button
               type="button"
@@ -331,21 +332,14 @@ function noteDownload(name: string): void {
   font-size: var(--text-micro);
   font-weight: 400;
 }
-/* 正文块：发光线围出的一个面，贴画布底，零圆角。 */
+/* 正文块：发光线围出的一个面，贴画布底，零圆角。
+   字体与行高住在 MarkdownBlock 里（它还要管标题、列表、表格的排版）；这里只给外框，
+   免得父级的字体声明与子组件抢同一条属性。 */
 .file-text {
   margin: 0;
   padding: var(--space-3);
   border: 1px solid var(--color-rule);
   background: var(--color-plate);
-  /* 产物正文是可读的长文（剧本、分镜表），不是代码：用正文字体与正文字号。
-     早先按「等宽 + micro」处理，一来 11px 读长文太吃力，二来 `ui-monospace` 在
-     没有等宽字体的环境里会回落到系统衬线，读起来像另一套设计（2026-11-21 目检）。 */
-  font-family: var(--font-sans);
-  font-size: var(--text-body);
-  line-height: 1.75;
-  white-space: pre-wrap;
-  word-break: break-word;
-  overflow-x: auto;
   max-height: 24rem;
   overflow-y: auto;
 }

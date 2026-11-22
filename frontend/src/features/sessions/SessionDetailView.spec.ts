@@ -642,7 +642,7 @@ describe('SessionDetailView 产物分区', () => {
     await settle()
 
     expect(wrapper.text()).toContain('已完成')
-    expect(wrapper.text()).toContain('# 最终提示词正文')
+    expect(wrapper.text()).toContain('最终提示词正文')
     expect(wrapper.text()).toContain('摘要正文')
 
     expect(wrapper.find('[data-copy="video-prompt.md"]').exists()).toBe(true)
