@@ -12,17 +12,25 @@
 
 三条路线的逐阶段流程、产物落点、代码入口与「改动影响面清单」**置顶在 [CONTEXT.md](CONTEXT.md)**——开发前先读那一节。
 
-## 当前状态（2026-11-03）
+**两种入口形态、同一套业务语义**：浏览器里的 **Web 工作台**（`start_web.cmd` 一键启动，日常主入口）和终端里的**两阶段向导**（`uv run launch.py`）。工作台把会话状态、审查与修订、素材与帧提交、分段陪跑、交付归档做成网页，桌面 EXE 复用同一套页面；终端向导保留全部路线能力，也是脚本化与排障的入口。二者的分叉点、产物落点与判据一致，差别只在交互形态（分区页 vs 终端问答）。
+
+## 当前状态（2026-11-22）
 
 | 项 | 状态 |
 |---|---|
-| 三条路线 | `base` / `ref` / `director` 都已接进两阶段向导；`--brief` 快路径支持 base 与 ref |
+| 三条路线 | `base` / `ref` / `director` 都已接进两阶段向导与 Web 工作台；`--brief` 快路径支持 base 与 ref |
+| Web 工作台 | 列表页（导轨 + 波长轴）与详情页（步骤带 + 「等待你操作」+ 分区）跑通三条路线全流程：建会话（含建前澄清）、审查与修订、素材循环与读图校对、帧/段视频提交、SSE 实时进度、诊断包下载；另有桌面 EXE 形态 |
 | 首尾帧链 | 阶段 1/2、长片拆段（4–10s）、逐段陪跑（两道闸）、段产出账、系统拼接 `final.mp4` |
 | 多参 | 素材循环、素材库/台账、注入卡、ref 六段式、按需写段、逐段陪跑、拼接与 `ref-concat` |
 | 导演台 | 帧网格段规划、初始导演包、逐段数帧验收、级联重跑、最终包归档；`fl2v` 按给图分支（首＋尾／仅首／仅尾／无图）写段并写明本段起点，切镜段有按需首帧词、首帧路径必填，尾帧参考图按段型分流；`ending` 有全片尾帧时优先；`r2v` 每段只给参考素材、`camera_cut` 不产首帧词；关键帧语言与工作流按出图档（Qwen／MOSS 英文、Z-Image 中文；三档工作流名／节点／画布已登记）；人物参考图默认一张综合板（四种模式：`t2v`/`i2v`/`fl2v`/`r2v`） |
-| 工程守卫 | `scripts/check.sh fast` / `full` / `clean`、`CONTEXT.md` 结构守卫、ADR 引用守卫、提交信息守卫 |
+| 工程守卫 | `scripts/check.sh fast` / `full` / `clean`、`CONTEXT.md` 结构守卫、ADR 引用守卫、提交信息守卫；`full` 另跑前端 eslint/prettier/vue-tsc/vitest、契约漂移与守卫变异检验（前端单独档：`scripts/check.sh frontend`） |
 
 ## 快速开始
+
+**日常用：Web 工作台。** Windows 双击根目录 `start_web.cmd`，或 `uv run python scripts/start_web.py`。
+缺前端产物会按源码 mtime 自动重建，服务起来后自动开浏览器；已在跑就直接开页面。
+
+**脚本化用：终端向导。**
 
 ```powershell
 uv sync
@@ -32,15 +40,46 @@ uv run launch.py --brief examples/brief_fl2va.md
 uv run launch.py --brief your.md --dry-run
 uv run launch.py --brief your.md --variant FL2VA
 
-uv run python -m pytest tests -q          # 全量测试
+uv run python -m pytest tests -q          # 全量测试（Python）
 bash scripts/check.sh fast                # 结构守卫 + 改动文件 lint + 测试
-bash scripts/check.sh full                # 另跑 mypy 与全量测试
+bash scripts/check.sh full                # 另跑 mypy、全量测试、前端守卫、契约漂移与变异检验
 bash scripts/check.sh clean               # 模拟干净检出（摘掉本机 .env）
 ```
 
+**前端工程单独跑**（只在改 `frontend/` 时需要）：
+
+```bash
+cd frontend
+npx pnpm@11.7.0 install                   # 装依赖（下载由你本人执行；一律用这个版本）
+npx --no-install vitest run               # 组件单测
+npx --no-install vite build               # 构建产物 → frontend/dist（工作台同源托管）
+PW_CHANNEL=chrome npx --no-install playwright test   # E2E，复用系统 Chrome 免下载
+```
+
+Node 版本见 `frontend/.node-version`（24）。`PW_CHANNEL`、`E2E_PORT`、工作树借 `.venv` 等本地坑见 [docs/agents/frontend.md](docs/agents/frontend.md)。
+
 项目唯一**命令行**启动入口是 [launch.py](launch.py)，包内 `main()` 只由它调用；不再提供 `uv run minimax-h3-prompt` 或 `python -m minimax_h3_prompt`。
 
-**工作台网页**（Vue + FastAPI 同源）一键启动：Windows 双击根目录 `start_web.cmd`，或 `uv run python scripts/start_web.py`。缺前端产物会先构建，服务起来后自动开浏览器；已在跑就直接打开页面。
+## Web 工作台
+
+Vue 3 + TypeScript + Vite 前端，由 FastAPI 同源托管构建产物（`frontend/dist`）；桌面 EXE 用同一个本地服务加载同一套页面（`python -m minimax_h3_prompt.api` 起服务，`-m minimax_h3_prompt.desktop` 带窗口）。**业务状态全部在服务端**，前端只持有服务端视图、SSE 进度与局部 UI 状态。
+
+**列表页**是「谱线导轨」：每条会话在左侧导轨上刻一道横线，状态靠**线型**表达——实线在跑、双线钠黄是「等待人工」、半高是已完成、斜划是中断/取消/失败。上方一条**波长轴**把本页会话压成一行刻度，扫一眼就知道这一页有几条等你动手；页眉那句「N 条记录 · M 条要你动手」是同一事实的文字版。
+
+**详情页**顶上是**步骤带**（本路线一共几步、现在第几步、当前节点与已耗时）和一行**「等待你操作」**（有若干件就直说哪一件可点，点过去落在能处理它的分区）；下面分区按路线出现（短视频 base 四个，长片与 ref/director 多「分段」，导演台再加「交付」）：
+
+| 分区 | 内容 |
+|---|---|
+| 概览与进度 | 会话元信息、步骤带、当前状态与中断原因 |
+| 审查与待办 | 阶段 1 产物审查与分层修订；**所有人工待办卡**：帧提交、素材交图/校对四选/放弃/换一张图、补交口、导演台开场首帧与段首帧 |
+| 素材 | 素材台账（编号、语义名、四态、生图档位）与素材视频/音频的字节数与时长；已定稿的 Picture 可「换一张图」，起跑前可删行 |
+| 分段 | 段表、段词、按需词（导演台首帧词/尾帧词）、段级注入卡、桥接帧；段视频回交与「换一段」 |
+| 产物 | 登记表里的全部产物，按 kind 分组；文本按 Markdown 排版（`<Picture N>` 等占位符保持字面），媒体可播放（Range）、包可下载 |
+| 交付 | 仅导演台：交回成片与最终包，归档交付记录 |
+
+长片分段与导演台交付都在页面里闭环：段视频交回时同步判技术档（帧数/时长/尺寸），判过才落 `passed`，全部通过后服务端自动拼接（base/ref）或挂交付闸门（导演台）。**没有 URL 里的分区状态**（刷新回概览），深链 `/sessions/<id>` 可分享给自己另开一个标签页。
+
+设计系统见 [DESIGN.md](DESIGN.md)（令牌、线型语言、动效与无障碍约束），产品事实见 [PRODUCT.md](PRODUCT.md)，后端会话/事件/鉴权/冻结形态见 [docs/agents/workbench.md](docs/agents/workbench.md)。
 
 ## 三条路线怎么走
 
@@ -201,7 +240,12 @@ src/minimax_h3_prompt/
 ├── references/              # 官方格式文本（给人读的对照副本）
 ├── knowledge/               # 电影语言词表（视频/生图/尾帧三份真源）
 ├── tools/                   # h3_validator / frame_auditor / preflight / theme_guard 等
-├── ui/                      # 两阶段向导、进度与菜单
+├── ui/                      # 两阶段向导、进度与菜单（终端侧）
+├── api/                     # 工作台服务端：app/routes/jobs/auth/spa/桩管线
+├── workbench_store.py       # 工作台会话真源：快照、事件流、产物登记、单写入者
+├── step_machine.py          # 工作台步骤/触发/闸门的单一声明与续跑起点
+├── paths.py                 # 唯一根路径解析口（只读资源 vs 可写数据、冻结形态）
+├── desktop.py               # 桌面外壳（WebView2 开本地服务页面）
 ├── output/                  # assembler（确定性格式保障）+ renderer
 ├── asset_ledger.py          # 素材台账与素材库解析
 ├── asset_loop.py            # 多参素材循环
@@ -222,6 +266,28 @@ src/minimax_h3_prompt/
 └── task_package.py          # 受控导入
 ```
 
+前端（`frontend/`）是独立的单包，不进 Python 包：
+
+```text
+frontend/
+├── src/
+│   ├── api/                 # client.ts（唯一 API 门面 + 错误归一）+ generated.ts（契约生成，勿手改）
+│   ├── app/                 # 应用壳、主题（深/浅/跟随系统）、404
+│   ├── components/ui/       # AppShell / Button / StatusBadge / MarkdownBlock 等通用件
+│   ├── features/sessions/   # 列表页、详情页、按路线派生的分区、待办卡、步骤带推导（progress.ts）
+│   ├── features/diagnostics/ # 诊断页（服务器健康 + 诊断包下载）
+│   ├── router/              # 会话列表 / 会话详情 / 诊断（深链刷新由服务端 SPA fallback 承接）
+│   ├── stores/              # 仅客户端 UI 状态（分区、主题）；业务状态不进 Pinia
+│   ├── styles/              # tokens.css（设计令牌唯一真源）、reset、字体
+│   └── test/                # 挂载工具、MSW server、会话夹具
+├── e2e/                     # Playwright：13 条，桩管线跑三条路线闭环
+├── scripts/                 # generate-api.mjs（契约 → TS）、serve-e2e.mjs（起真实 API）
+├── dist/                    # 构建产物（工作台同源托管它；gitignore）
+└── *.config.ts              # vite / vitest / playwright / eslint / tsconfig
+```
+
+前端约定：**设计令牌只住 `src/styles/tokens.css`**（与 [DESIGN.md](DESIGN.md) 同一份口径），组件里不写裸色值；**状态与文字的映射集中在一处**（`status.ts` 的七态、`progress.ts` 的步骤与待办文案）；**产物分组按契约 kind 派生**（`artifactKinds.ts`），不抄文件名白名单。
+
 ## 输出与会话目录
 
 ```text
@@ -230,36 +296,45 @@ output/
 ├── stages/                          # 各角色/阶段产物（save_stages）
 └── sessions/
     └── <主题slug>-<hash8>/GEN001/
-        ├── session-state.json       # 会话状态与断点续接
+        ├── session-state.json       # 工作台快照（workbench.v1）；CLI 会话同名文件是向导状态
+        ├── events.jsonl             # 工作台事件流（只追加，seq 严格单调）
         ├── video-prompt.md          # 整片视频提示词
         ├── summary-zh.md / .json    # 中文摘要
+        ├── assets/                  # 工作台上传素材（<sha256前16>.<ext> + .json 边车）
         ├── frame-rounds.jsonl       # 首尾帧链的人机修订台账
-        ├── asset-ledger.json        # 多参素材台账（图在素材库根目录）
+        ├── asset-ledger.json        # 多参素材台账（CLI 侧；工作台的台账住 session-state.json）
         ├── asset-rounds.jsonl       # 多参资产图改写轮次
         ├── injection-card.md        # 多参接线清单（多段另有 segments/injection-card-NN.md）
         ├── frames/                  # 首尾帧图与 source.json
-        ├── bridge_frames/           # 首尾帧链的桥接帧
+        ├── bridge_frames/           # 首尾帧链的桥接帧（CLI 布局；工作台落 segments/bridge_frames/）
         ├── segments/                # 段表、段提示词、段产出账、闸门遭遇
         ├── director/                # 导演台：plan.json、段提示词、导演包、交付
         └── final.mp4                # 成片（base/ref 由系统拼；导演台只把路径记进 director/final-film.json）
 ```
 
-根目录可用 `config/agent.yaml` 的 `defaults.sessions_root` 修改（默认 `output/sessions`）。
+根目录可用 `config/agent.yaml` 的 `defaults.sessions_root` 修改（默认 `output/sessions`）。工作台是**以文件为真源**的：一个会话一个目录，快照 + 事件流 + 产物登记都在目录里，服务重启后照旧能读。
 
 ## 测试与守卫
 
-- `scripts/check.sh fast|full|clean`：结构守卫 + lint + 测试；`full` 另跑 mypy 与全量测试，`clean` 摘掉本机 `.env` 模拟 CI 干净检出。
+- `scripts/check.sh fast|full|clean`：结构守卫 + lint + 测试；`full` 另跑 mypy、全量测试、前端守卫（eslint/prettier/vue-tsc/vitest）、契约漂移与守卫变异，`clean` 摘掉本机 `.env` 模拟 CI 干净检出。
 - `scripts/check.sh mutate`：守卫变异检验（关键实现改坏后用例必须变红）。
+- `scripts/check.sh frontend`：只跑前端那一段（`frontend/` 有改动时 `fast`/`full` 会自动带上）。
 - `tests/test_context_glossary.py`：`CONTEXT.md` 词条结构守卫。
 - `tests/test_adr_guard.py`：`ADR NNNN` 引用必须指向真实文件，状态行格式守卫。
 - `scripts/ac_trace.py`：按 `#NNN` 汇总 issue → 代码 → 测试（不是门禁）。
+
+**前端测试分两层**：`frontend/src/**/*.spec.ts`（Vitest + MSW，24 个）覆盖组件与纯函数；`frontend/e2e/*.spec.ts`（Playwright，13 个）对着真实构建产物 + 真实 FastAPI 跑，桩管线（`MINIMAX_FAKE_PIPELINE=1`）让三条路线的闭环不花模型钱。**契约链**是 `FastAPI → scripts/export_openapi.py → contracts/openapi.json → frontend/scripts/generate-api.mjs → frontend/src/api/generated.ts`，`check.sh full` 与 CI 都逐字节比对，漂移即红。
 
 ## 文档地图
 
 | 文档 | 内容 |
 |---|---|
 | [CONTEXT.md](CONTEXT.md) | **术语表 + 置顶的三路线流程总览**（开发前必读） |
-| `docs/adr/` | 架构决策（路线边界、成片归系统、帧网格、容量上限等） |
+| [DESIGN.md](DESIGN.md) | **前端设计系统**：令牌、线型语言（七态）、步骤带/波长轴、动效与无障碍约束 |
+| [PRODUCT.md](PRODUCT.md) | **前端产品事实**：用户、产品目的、能力与约束、验证优先级 |
+| `docs/adr/` | 架构决策（路线边界、成片归系统、帧网格、容量上限、前端技术栈与工作台形态等） |
+| `docs/agents/frontend.md` | 前端工程实操：版本矩阵、本地命令、E2E 端口、EXE 打包与自检、踩过的坑 |
+| `docs/agents/workbench.md` | 工作台会话/Headless API：模块地图、事件/写入/产物不变量、契约链、冻结形态 |
 | `docs/design/` | 设计与根因分析（含导演台路线实现设计） |
 | `docs/research/` | 调研笔记（电影语言、导演台插件原生格式等） |
 | `docs/agents/` | 工程常态、issue tracker、triage 标签等 agent 规约 |
@@ -272,4 +347,5 @@ output/
 - **首尾帧链 ≤10 秒不出成片**：那条视频本来就是一次生成的结果。
 - **成片实测时长只做「只报短」核对**：H3 产出从不是整数秒（4s 档恒 4.458s），严格相等会把真产物判成伪产物。
 - **耗时与成本**：一次全流程是几十次 LLM 调用；ref 路线更重。可减少圆桌轮数、换更快模型；读图与外部生成成本另计。
+- **工作时只服务本机单人**：服务只绑 `127.0.0.1`，另有 Host/Origin 白名单与每进程随机令牌（不进 URL、不进日志）；没有多用户、权限或团队协作。桌面 EXE 需要系统装有 WebView2。
 - **画布与模型许可**：Qwen-Image 2.1 仅限非商用；换生图模型时要连同 `prompts/image_prompt_disciplines/` 的纪律块一起换。
