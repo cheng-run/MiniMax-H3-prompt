@@ -6,9 +6,11 @@
 """
 from __future__ import annotations
 
+from datetime import timedelta, timezone
+
 # 真实旧会话样本的 ``created_at``（UTC，早于 #161 的 2026-11-04T06:30:59Z）。
 OLD_SESSION = "2026-11-03T13:00:35.825912+00:00"
-# #161 之后创建的会话。
+# #161 之后、画布入口（#369）之前创建的会话：仍放行，但不再叫「旧会话」。
 NEW_SESSION = "2026-11-05T01:00:00+00:00"
 
 
@@ -107,6 +109,103 @@ def test_wizard_glue_forwards_the_session_creation_time(tmp_path, tmp_video, mon
         mode="r2v", film=video, brief=brief, stage_state={},
         ask=lambda text: "", save=lambda: saved.append(1),
         session_created_at=OLD_SESSION) is True
+
+
+def test_session_before_the_first_cutoff_keeps_the_legacy_wording(
+        tmp_path, tmp_video, monkeypatch):
+    """#369：早于第一个截止点的会话缺答案时，行为与文案与改动前逐字一致。
+
+    这一支不读答案，所以「有没有答案」都走同一条返程；拿缺答案的样本钉住，是因为
+    第二个截止点正好插在同一处（``film_size_verdict`` 读不到答案那一支）。
+    """
+    _pin_frame_model(monkeypatch, "z_image")
+    video = tmp_video("film.mp4", width=480, height=864, frames=2)
+
+    ok, note = _verdict(video, _brief_with({}), created_at=OLD_SESSION)
+
+    assert ok is True
+    assert note is not None and "这是旧会话" in note and "放行" in note
+
+
+def test_session_between_the_two_cutoffs_is_not_called_legacy(
+        tmp_path, tmp_video, monkeypatch):
+    """#369：两个截止点之间建的会话仍放行，但文案不再说「这是旧会话」。
+
+    ``NEW_SESSION``（2026-11-05）晚于 #161、早于画布入口：它没有答案属正常，但用户
+    该被告知的是「本会话建于画布入口之前」，而不是「旧会话」——后者指向 2026-11-04
+    之前，这个会话并不是。
+    """
+    _pin_frame_model(monkeypatch, "z_image")
+    video = tmp_video("film.mp4", width=480, height=864, frames=2)
+
+    ok, note = _verdict(video, _brief_with({}), created_at=NEW_SESSION)
+
+    assert ok is True
+    assert note is not None and "画布入口之前" in note and "放行" in note
+    assert "这是旧会话" not in note
+
+
+def test_session_after_the_canvas_entry_without_an_answer_fails(
+        tmp_path, tmp_video, monkeypatch):
+    """#369：晚于第二个截止点且读不到答案 → 返回失败并说明原因，不再静默放行。
+
+    这是本票的核心翻转：入口落地之后建的会话应当在建会话时就有答案（表单选择器
+    #366 已上线），读不到就该停，而不是假装它是旧会话。
+    """
+    _pin_frame_model(monkeypatch, "z_image")
+    video = tmp_video("film.mp4", width=480, height=864, frames=2)
+
+    ok, note = _verdict(
+        video, _brief_with({}), created_at="2026-11-27T00:00:00+00:00")
+
+    assert ok is False
+    assert note is not None and "读不到" in note and "停止" in note
+    assert "放行" not in note
+
+
+def test_session_with_an_answer_is_compared_exactly_as_before(
+        tmp_path, tmp_video, monkeypatch):
+    """#369：本票不碰「有答案」这一支——宽高比对与文案逐字不变。
+
+    防的是把整支判据改坏：新截止点只约束「缺答案」，答案在手时无论会话多新都照旧比。
+    """
+    _pin_frame_model(monkeypatch, "z_image")
+    matching = tmp_video("ok.mp4", width=1920, height=1080, frames=2)
+    ok, note = _verdict(
+        matching, _brief_with({"z_image": (1920, 1080)}),
+        created_at="2026-11-27T00:00:00+00:00")
+    assert (ok, note) == (True, None)
+
+    mismatching = tmp_video("bad.mp4", width=480, height=864, frames=2)
+    ok, note = _verdict(
+        mismatching, _brief_with({"z_image": (1920, 1080)}),
+        created_at="2026-11-27T00:00:00+00:00")
+    assert ok is False
+    assert note is not None and "1920×1080" in note and "480×864" in note
+
+
+def test_canvas_entry_cutoff_splits_the_permitted_generations():
+    """第二个截止点与第一个并列、带时区，边界两侧各归哪一支。
+
+    「正好落地时刻」与 #161 的口径一致：那一刻起算「已有画布入口」，缺答案即失败。
+    只断言两个常量的关系与边界，不重抄字面时间。
+    """
+    from minimax_h3_prompt.director.film_canvas import (
+        FILM_ASPECT_QUESTION_SINCE, FILM_CANVAS_ENTRY_SINCE,
+        film_aspect_session_era,
+    )
+
+    assert FILM_ASPECT_QUESTION_SINCE < FILM_CANVAS_ENTRY_SINCE
+    assert FILM_CANVAS_ENTRY_SINCE.tzinfo is not None
+    entry = FILM_CANVAS_ENTRY_SINCE.isoformat()
+    before = (FILM_CANVAS_ENTRY_SINCE
+              - timedelta(seconds=1)).isoformat()
+    assert film_aspect_session_era(before) == "pre_entry"
+    assert film_aspect_session_era(entry) == "current"
+    # 真实会话文件写 UTC，常量写 +08:00：等价写法必须得出同一支。
+    assert film_aspect_session_era(
+        FILM_CANVAS_ENTRY_SINCE.astimezone(timezone.utc).isoformat()
+    ) == "current"
 
 
 def test_cutoff_is_the_161_commit_time_in_any_equivalent_spelling():

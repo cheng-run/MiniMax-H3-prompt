@@ -183,6 +183,10 @@ def film_size_verdict(
     旧会话直接放行——它 ``canvases`` 里那格是**关键帧画布**，帧模型切回 ``z_image``
     后拿它比就是假硬停。时间**由调用方沿调用链传进来**，判据内部不读盘。
 
+    两个截止点分工（#369）：#161 之后、画布入口之前的会话缺答案仍放行但文案改准；
+    入口之后（``FILM_CANVAS_ENTRY_SINCE``）建的会话缺答案**返回失败**。第二个截止点
+    只约束「缺答案」这一支——有答案时两截会话用同一份比对。
+
     处置分两档：比例超差 → 停（画面会被裁/拉伸，没有「继续」的出口）；只有尺寸差
     一档 → 打印两边数值、比例、来源，**一次确认**，拒绝则停。确认按
     ``(mode, declared, actual)`` 记住，任一边变化即重问。
@@ -191,10 +195,11 @@ def film_size_verdict(
         return True, None
 
     from .film_canvas import (
-        FILM_SIZE_LABEL, film_size_for, is_legacy_film_aspect_session,
+        FILM_SIZE_LABEL, film_aspect_session_era, film_size_for,
     )
 
-    if is_legacy_film_aspect_session(session_created_at):
+    era = film_aspect_session_era(session_created_at)
+    if era == "legacy":
         return True, (
             f"[画幅核对] {label}：这是旧会话（创建于成片画幅问答落地之前，"
             "按创建时间判定），本次放行，不参与比例／尺寸比对；"
@@ -202,8 +207,23 @@ def film_size_verdict(
 
     expected = film_size_for(brief) if brief is not None else None
     if expected is None:
+        # 第二个截止点（#369）只约束这一支：入口之后建的会话应当在建会话时就有画布
+        # 答案，读不到说明入口被绕过了（直连 API / 旧客户端）——静默放行就等于让
+        # 那句「按成片画幅出片」的承诺落空，跑完才发现画幅不对。
+        if era == "current":
+            return False, "\n".join([
+                f"[画幅核对] {label}：会话里读不到成片画幅的答案，**停止**。",
+                "  本会话创建于画布入口之后（按创建时间判定），建会话时应当已经选过"
+                "画布／成片画幅。读不到可能是：这次会话不是从带画布选择的入口建的"
+                "（直连 API／旧客户端），或建完之后关键帧模型换过一档"
+                "（画布按家族键存、不跨档继承，换了档就读不到）。",
+                "  下一步：画布答案在建会话时就落库、之后没有补写口——请回工作台新建"
+                "表单（导演台路线会显示成片画幅选择）重建会话；本会话已有产物不改，"
+                "已通过的段留在账上。",
+                f"  {consequence}",
+            ])
         return True, (
-            f"[画幅核对] {label}：会话里没有成片画幅的答案（旧会话），本次放行；"
+            f"[画幅核对] {label}：本会话建于画布入口之前，没有画布答案，本次放行；"
             "请自行核对导演台节点的 width/height 与你想出的画幅一致。")
 
     actual = _video_size(video)

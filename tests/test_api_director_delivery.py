@@ -465,3 +465,37 @@ def test_final_film_mismatch_uses_the_shared_verdict(director_app):
     # t2v 没有画布判据：同一份成片直接放行。
     runner._validate_final_film(_aspect_current("t2v", (1920, 1088)), film)
 
+
+def test_canvas_entry_session_without_the_answer_stops_before_archiving(director_app):
+    """#369：画布入口之后建的 r2v 会话缺成片画幅答案 → 交付停在归档之前。
+
+    与上一条成对：工作台这一处调用把判据的 ``False`` 翻成 422 ``final_film_mismatch``，
+    而「缺答案」以前是静默放行的一支——放宽回恒放行时这条会变红。
+    """
+    from minimax_h3_prompt.workbench_store import FinalFilmMismatch
+
+    app, _root, tmp_path = director_app
+    runner = app.state.job_runner
+    film = tmp_path / "film.mp4"
+    fake_pipeline.write_director_segment_video(film, 24)  # 736×1280
+
+    def _current_without_answer(mode: str):
+        brief = SimpleNamespace(director_mode=mode, canvases={})
+        return SimpleNamespace(
+            brief=brief, created_at="2026-11-27T00:00:00+00:00",
+            stage_state_snapshot=lambda: {})
+
+    with pytest.raises(FinalFilmMismatch) as excinfo:
+        runner._validate_final_film(_current_without_answer("r2v"), film)
+    message = str(excinfo.value)
+    assert "读不到" in message and "画布入口之后" in message
+
+    # 同一份「没有答案」落在入口之前的会话上仍放行：历史会话不被这次改动卡死。
+    def _between_the_cutoffs(mode: str):
+        brief = SimpleNamespace(director_mode=mode, canvases={})
+        return SimpleNamespace(
+            brief=brief, created_at="2026-11-05T00:00:00+00:00",
+            stage_state_snapshot=lambda: {})
+
+    runner._validate_final_film(_between_the_cutoffs("r2v"), film)
+

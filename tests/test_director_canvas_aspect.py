@@ -236,6 +236,9 @@ def test_r2v_session_without_the_answer_passes_with_one_line(
 
     这里判的是「没有答案」这一支（新会话换了帧模型也会走到）；「创建得早」那一支
     由 ``test_director_legacy_aspect_session.py`` 钉（#179）。
+
+    #369 起文案改准：``NEW_SESSION_CREATED_AT``（2026-11-05）介于两个截止点之间，
+    它建于**画布入口之前**、没有答案属正常，所以不再被称作旧会话。
     """
     _pin_frame_model(monkeypatch)
     video = tmp_video("film.mp4", width=864, height=480, frames=2)
@@ -243,7 +246,8 @@ def test_r2v_session_without_the_answer_passes_with_one_line(
     ok, note = _verdict(video, _r2v_brief(None))
 
     assert ok is True
-    assert note is not None and "没有成片画幅" in note and "放行" in note
+    assert note is not None and "画布入口之前" in note and "放行" in note
+    assert "旧会话" not in note
 
 
 def test_i2v_size_only_gap_still_passes_without_a_question(

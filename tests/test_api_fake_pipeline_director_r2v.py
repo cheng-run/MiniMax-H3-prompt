@@ -166,7 +166,10 @@ def test_fake_r2v_closed_loop_plans_budgets_packs_and_delivers(
         created = client.post("/api/v1/sessions", json={
             "mode": "director", "variant": "T2VA", "duration": 4.0,
             "style": "写实", "language": "Chinese", "plot": "雨夜旧信的 r2v 闭环",
-            "director_mode": "r2v", "director_node_id": "node-r2v"})
+            "director_mode": "r2v", "director_node_id": "node-r2v",
+            # #369 起画布入口之后建的会话必须有成片画幅答案，交付核对要求它与
+            # 桩视频同尺寸（736×1280，已是 32 的倍数，对齐不改值）。
+            "canvas": {"width": 736, "height": 1280}})
         assert created.status_code == 201, created.text
         session_id = created.json()["session_id"]
         registered_cat = _png(1)

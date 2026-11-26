@@ -28,25 +28,52 @@ FILM_ASPECT_QUESTION_SINCE = datetime(
 """
 
 
+FILM_CANVAS_ENTRY_SINCE = datetime(
+    2026, 11, 26, 10, 0, 0, tzinfo=timezone(timedelta(hours=8)))
+"""画布入口落地时刻（#369 / spec #363 US17–US18）。
+
+**为什么是这一天**：工作台的新建表单从 #366 起才有画布选择器（比例 → 尺寸 → 自定义），
+它合入集成分支的时刻是 ``2026-11-26T09:48:22+08:00``；本票紧随其后合入（同一天）。
+取整到整点写死，不写 ``datetime.now()``——判据随运行时刻漂，同一份会话今天放行、
+明天失败，谁也查不出原因。
+
+**它只约束「读不到画布答案」这一支**：会话有答案时，比例／尺寸比对仍只用上面那个
+``FILM_ASPECT_QUESTION_SINCE`` 判旧会话，两截判据互不替代。为什么必须再有一个截止点：
+只按 #161 判，凡是之后建的会话缺答案都会被说成「旧会话」，而它们其实只是「建于画布
+入口之前」——文案对不上，用户也就没法判断该不该补答。
+"""
+
+
+def film_aspect_session_era(created_at: object) -> str:
+    """会话属于哪一截：``legacy``（#161 之前）／``pre_entry``／``current``（入口之后）。
+
+    「缺答案」这一支按它分流：``legacy`` 放行且文案照旧、``pre_entry`` 放行但改准文案、
+    ``current`` 返回失败。缺失／读不出／无时区的时间**按 ``legacy``** 处理——与
+    ``is_legacy_film_aspect_session`` 同一取舍：拿不出判据的数据宁可放行，不制造假停。
+    为什么按时间而不是按「键名撞不撞」：``Brief.canvases`` 不记来源，帧模型切回
+    ``z_image`` 后旧画布那格就会被当成成片画幅参与比对，比例差一次就是假硬停（#179）。
+    """
+    text = str(created_at or "").strip()
+    moment: datetime | None = None
+    if text:
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            parsed = None
+        # 无时区的时间无法与常量可靠比较，同样按最宽的一截处理。
+        if parsed is not None and parsed.tzinfo is not None:
+            moment = parsed
+    if moment is None or moment < FILM_ASPECT_QUESTION_SINCE:
+        return "legacy"
+    return "pre_entry" if moment < FILM_CANVAS_ENTRY_SINCE else "current"
+
+
 def is_legacy_film_aspect_session(created_at: object) -> bool:
     """会话创建时间早于 #161（或缺失／读不出）＝旧会话（#179）。
 
-    为什么按时间而不是按「键名撞不撞」：``Brief.canvases`` 不记来源，帧模型切回
-    ``z_image`` 后旧画布那格就会被当成成片画幅参与比对，比例差一次就是假硬停。
-    缺失或读不出的时间**按旧会话处理**——宁可放行，不制造假停；解析不出就说明
-    这份数据本来就拿不出判据。
+    时间怎么分截只看 ``film_aspect_session_era``，这里不再重抄一份解析。
     """
-    text = str(created_at or "").strip()
-    if not text:
-        return True
-    try:
-        moment = datetime.fromisoformat(text)
-    except ValueError:
-        return True
-    # 无时区的时间无法与常量可靠比较；同样按旧会话处理，不猜。
-    if moment.tzinfo is None:
-        return True
-    return moment < FILM_ASPECT_QUESTION_SINCE
+    return film_aspect_session_era(created_at) == "legacy"
 
 
 def _snap(value: int) -> int:

@@ -276,6 +276,12 @@ test('导演台 r2v：台账素材 → 素材循环（被拒重开）→ 规划/
   await page.locator('select[name="director_mode"]').selectOption('r2v')
   await page.locator('input[name="director_node_id"]').fill('e2e-node-268')
   await page.locator('input[name="duration"]').fill('4')
+  // 成片画幅（#369）：r2v 在画布入口之后建的会话必须在建会话时就有答案，否则交付
+  // 核对会按「读不到成片画幅」停下。9:16 的 720×1280 按 32 网格对齐后正是桩视频的
+  // 736×1280（表单会当场说破这一点），对齐前后都不需要确认。
+  await page.locator('select[name="canvas_ratio"]').selectOption('9:16')
+  await page.locator('select[name="canvas_size"]').selectOption('720x1280')
+  await expect(page.locator('[data-notice="canvas-snapped"]')).toContainText('736×1280')
   await page.getByRole('button', { name: '创建并开始' }).click()
   // 起步澄清（#339）：桩管线也会问，面板展开后跳过，创建照旧一步到位。
   await skipClarifications(page)

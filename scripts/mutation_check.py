@@ -651,22 +651,25 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "legacy_session_check_disabled",
         "src/minimax_h3_prompt/director/film_canvas.py",
-        '    text = str(created_at or "").strip()\n'
-        "    if not text:\n"
-        "        return True\n"
-        "    try:\n"
-        "        moment = datetime.fromisoformat(text)\n"
-        "    except ValueError:\n"
-        "        return True\n"
-        "    # 无时区的时间无法与常量可靠比较；同样按旧会话处理，不猜。\n"
-        "    if moment.tzinfo is None:\n"
-        "        return True\n"
-        "    return moment < FILM_ASPECT_QUESTION_SINCE",
-        "    return False",
+        "    if moment is None or moment < FILM_ASPECT_QUESTION_SINCE:\n"
+        '        return "legacy"\n'
+        '    return "pre_entry" if moment < FILM_CANVAS_ENTRY_SINCE else "current"',
+        '    return "legacy"',
         ("tests/test_director_legacy_aspect_session.py::test_legacy_session_zimage_canvas_is_not_compared_as_a_film_aspect",
          "tests/test_director_legacy_aspect_session.py::test_missing_creation_time_is_treated_as_a_legacy_session",
          "tests/test_director_legacy_aspect_session.py::test_cutoff_is_the_161_commit_time_in_any_equivalent_spelling"),
         "旧会话判据失效＝帧模型切回 z_image 时旧画布被当成成片画幅，比例误判硬停（#179）",
+    ),
+    Mutation(
+        "canvas_entry_cutoff_disabled",
+        "src/minimax_h3_prompt/director/film_canvas.py",
+        '    return "pre_entry" if moment < FILM_CANVAS_ENTRY_SINCE else "current"',
+        '    return "pre_entry"',
+        ("tests/test_director_legacy_aspect_session.py"
+         "::test_session_after_the_canvas_entry_without_an_answer_fails",
+         "tests/test_director_legacy_aspect_session.py"
+         "::test_canvas_entry_cutoff_splits_the_permitted_generations"),
+        "第二个截止点失效＝入口之后建的会话缺画布答案仍被静默放行（#369）",
     ),
     Mutation(
         "interaction_log_drops_answer_len",
