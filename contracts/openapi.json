@@ -469,6 +469,79 @@
         "title": "BriefOut",
         "type": "object"
       },
+      "CanvasIn": {
+        "description": "创建口的高层画布（#364 / spec #363）：一组宽高，**按路线解释**。\n\n同一个字段在 ``ref`` 上落生图侧画布、在 ``director`` 上落成片画幅（对齐到插件\n网格）；解释发生在 ``_canvases_from_payload``，这里只做形状校验。宽高必须是\n正整数——0/负数不是「一个小画布」，而是漏填，让 pydantic 的通用 422 拦下。",
+        "properties": {
+          "height": {
+            "exclusiveMinimum": 0.0,
+            "title": "Height",
+            "type": "integer"
+          },
+          "width": {
+            "exclusiveMinimum": 0.0,
+            "title": "Width",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "width",
+          "height"
+        ],
+        "title": "CanvasIn",
+        "type": "object"
+      },
+      "CanvasPresetsOut": {
+        "description": "比例档表 ＋ 向导会问的家族 ＋ 各生图模型的兜底画布。\n\n``canvas_choice_families`` 是「哪几档会被问画布」（``CANVAS_CHOICE_FAMILIES``）：\n其余档没有选定值，直接回落 ``fallback_canvases`` 里自己那一行。前端用它决定\n选择器影响面，不在界面里硬编码家族名。",
+        "properties": {
+          "canvas_choice_families": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Canvas Choice Families",
+            "type": "array"
+          },
+          "fallback_canvases": {
+            "items": {
+              "$ref": "#/components/schemas/FallbackCanvasOut"
+            },
+            "title": "Fallback Canvases",
+            "type": "array"
+          },
+          "presets": {
+            "items": {
+              "$ref": "#/components/schemas/RatioPresetOut"
+            },
+            "title": "Presets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "presets",
+          "canvas_choice_families",
+          "fallback_canvases"
+        ],
+        "title": "CanvasPresetsOut",
+        "type": "object"
+      },
+      "CanvasSizeOut": {
+        "description": "一档预设尺寸（像素宽高）。字段名与创建口的 ``canvas`` 同形，前端可直接回填。",
+        "properties": {
+          "height": {
+            "title": "Height",
+            "type": "integer"
+          },
+          "width": {
+            "title": "Width",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "width",
+          "height"
+        ],
+        "title": "CanvasSizeOut",
+        "type": "object"
+      },
       "ClarificationPair": {
         "description": "一条澄清问答对（#338 / spec #332 E1）：问题原样回传、回答由用户填。\n\n结构化成对提交而不是让前端拼 ``1. Q → A`` 文本：渲染只在后端\n（``clarification.render_clarification_block``），CLI 与工作台因此逐字同形。",
         "properties": {
@@ -486,6 +559,35 @@
           "answer"
         ],
         "title": "ClarificationPair",
+        "type": "object"
+      },
+      "FallbackCanvasOut": {
+        "description": "某生图模型未选画布时的兜底尺寸（``generation.IMAGE_PROFILE_DEFAULTS`` 的一行）。",
+        "properties": {
+          "height": {
+            "title": "Height",
+            "type": "integer"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "width": {
+            "title": "Width",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "model",
+          "label",
+          "width",
+          "height"
+        ],
+        "title": "FallbackCanvasOut",
         "type": "object"
       },
       "FrameSelection": {
@@ -788,6 +890,38 @@
         "title": "ProofreadOmissionOut",
         "type": "object"
       },
+      "RatioPresetOut": {
+        "description": "比例档（``generation.RatioPreset`` 的投影）。\n\n``w_ratio / h_ratio`` 是比例的宽/高**份数**不是像素——与 ``RatioPreset`` 同名同义，\n前端据此显示「16:9」并知道约分后的份数。",
+        "properties": {
+          "h_ratio": {
+            "title": "H Ratio",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "sizes": {
+            "items": {
+              "$ref": "#/components/schemas/CanvasSizeOut"
+            },
+            "title": "Sizes",
+            "type": "array"
+          },
+          "w_ratio": {
+            "title": "W Ratio",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "w_ratio",
+          "h_ratio",
+          "sizes"
+        ],
+        "title": "RatioPresetOut",
+        "type": "object"
+      },
       "RefOut": {
         "description": "素材台账摘要（D7 spec §12）：语义名 / 官方三型 / 同类编号 / 素材标识。\n\n这里回显的是**台账**（会话状态），不是上传目录的现扫结果；两者语义不同\n（``SessionDetail.assets`` 仍是目录现扫）。``asset_id`` 用来把摘要接到缩略图与\n媒体读取上。**没有本地路径字段**：工作台的素材只能走上传接口（spec §4.1）。",
         "properties": {
@@ -1056,6 +1190,16 @@
       "SessionCreate": {
         "description": "建会话的 brief 一次性给全（spec §7；D7 §4.1 放开 ``ref``，D8 放开 ``director``）。\n\n``mode`` 只作普通字符串：三路线的合法性由 ``_validate_route_parameters`` 判，\n这样未知路线能拿到稳定的 ``director_mode_invalid``，而不是 pydantic 那份没有\n``code`` 的通用 422。``ref`` 的参考素材与 ``director`` 的开场首帧**都不进创建\n表单**：前者是会话内资产（建好后上传），后者要等阶段 1 才有画幅可比。\n\n导演台三个打包参数（节点 id / 段缓存名 / 段间引导模式）在创建时问齐，与 CLI\n「会话开头问一次」是同一时点（``wizard_director.ask_pack_settings``）。``director_mode``\n与 ``director_continuity_mode`` 用 ``None`` 表示「没给」：空串与省略在这两个字段\n上必须分开——引导模式省略要落默认 ``guide``，而不是落一个空串。",
         "properties": {
+          "canvas": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CanvasIn"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "canvases": {
             "additionalProperties": {
               "maxItems": 2,
@@ -1896,6 +2040,78 @@
         "summary": "Get Auth Token",
         "tags": [
           "auth"
+        ]
+      }
+    },
+    "/api/v1/canvas-presets": {
+      "get": {
+        "description": "比例档与兜底画布（只读：不建会话、不落盘）。\n\n数据**现取** ``generation`` 的常量：这张表是 CLI 向导与请求【画布】块的同一份\n真源，投影一份字面量就等于开了第二处口径。",
+        "operationId": "list_canvas_presets_api_v1_canvas_presets_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CanvasPresetsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "缺少或无效的工作台访问令牌（problem+json）"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "Host/Origin 不是本机回环地址（problem+json）"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "资源不存在（problem+json）"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "请求参数校验失败（problem+json）"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            },
+            "description": "服务器内部错误（problem+json）"
+          }
+        },
+        "summary": "List Canvas Presets",
+        "tags": [
+          "canvas"
         ]
       }
     },

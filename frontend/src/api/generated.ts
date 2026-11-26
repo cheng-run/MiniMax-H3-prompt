@@ -46,6 +46,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/canvas-presets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Canvas Presets
+         * @description 比例档与兜底画布（只读：不建会话、不落盘）。
+         *
+         *     数据**现取** ``generation`` 的常量：这张表是 CLI 向导与请求【画布】块的同一份
+         *     真源，投影一份字面量就等于开了第二处口径。
+         */
+        get: operations["list_canvas_presets_api_v1_canvas_presets_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/clarification-questions": {
         parameters: {
             query?: never;
@@ -624,6 +647,46 @@ export interface components {
             video_output?: components["schemas"]["VideoOutputOut"] | null;
         };
         /**
+         * CanvasIn
+         * @description 创建口的高层画布（#364 / spec #363）：一组宽高，**按路线解释**。
+         *
+         *     同一个字段在 ``ref`` 上落生图侧画布、在 ``director`` 上落成片画幅（对齐到插件
+         *     网格）；解释发生在 ``_canvases_from_payload``，这里只做形状校验。宽高必须是
+         *     正整数——0/负数不是「一个小画布」，而是漏填，让 pydantic 的通用 422 拦下。
+         */
+        CanvasIn: {
+            /** Height */
+            height: number;
+            /** Width */
+            width: number;
+        };
+        /**
+         * CanvasPresetsOut
+         * @description 比例档表 ＋ 向导会问的家族 ＋ 各生图模型的兜底画布。
+         *
+         *     ``canvas_choice_families`` 是「哪几档会被问画布」（``CANVAS_CHOICE_FAMILIES``）：
+         *     其余档没有选定值，直接回落 ``fallback_canvases`` 里自己那一行。前端用它决定
+         *     选择器影响面，不在界面里硬编码家族名。
+         */
+        CanvasPresetsOut: {
+            /** Canvas Choice Families */
+            canvas_choice_families: string[];
+            /** Fallback Canvases */
+            fallback_canvases: components["schemas"]["FallbackCanvasOut"][];
+            /** Presets */
+            presets: components["schemas"]["RatioPresetOut"][];
+        };
+        /**
+         * CanvasSizeOut
+         * @description 一档预设尺寸（像素宽高）。字段名与创建口的 ``canvas`` 同形，前端可直接回填。
+         */
+        CanvasSizeOut: {
+            /** Height */
+            height: number;
+            /** Width */
+            width: number;
+        };
+        /**
          * ClarificationPair
          * @description 一条澄清问答对（#338 / spec #332 E1）：问题原样回传、回答由用户填。
          *
@@ -635,6 +698,20 @@ export interface components {
             answer: string;
             /** Question */
             question: string;
+        };
+        /**
+         * FallbackCanvasOut
+         * @description 某生图模型未选画布时的兜底尺寸（``generation.IMAGE_PROFILE_DEFAULTS`` 的一行）。
+         */
+        FallbackCanvasOut: {
+            /** Height */
+            height: number;
+            /** Label */
+            label: string;
+            /** Model */
+            model: string;
+            /** Width */
+            width: number;
         };
         /**
          * FrameSelection
@@ -801,6 +878,23 @@ export interface components {
             fact: string;
         };
         /**
+         * RatioPresetOut
+         * @description 比例档（``generation.RatioPreset`` 的投影）。
+         *
+         *     ``w_ratio / h_ratio`` 是比例的宽/高**份数**不是像素——与 ``RatioPreset`` 同名同义，
+         *     前端据此显示「16:9」并知道约分后的份数。
+         */
+        RatioPresetOut: {
+            /** H Ratio */
+            h_ratio: number;
+            /** Name */
+            name: string;
+            /** Sizes */
+            sizes: components["schemas"]["CanvasSizeOut"][];
+            /** W Ratio */
+            w_ratio: number;
+        };
+        /**
          * RefOut
          * @description 素材台账摘要（D7 spec §12）：语义名 / 官方三型 / 同类编号 / 素材标识。
          *
@@ -949,6 +1043,7 @@ export interface components {
          *     上必须分开——引导模式省略要落默认 ``guide``，而不是落一个空串。
          */
         SessionCreate: {
+            canvas?: components["schemas"]["CanvasIn"] | null;
             /** Canvases */
             canvases?: {
                 [key: string]: [
@@ -1370,6 +1465,71 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AuthTokenResponse"];
+                };
+            };
+            /** @description 资源不存在（problem+json） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 请求参数校验失败（problem+json） */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description 服务器内部错误（problem+json） */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+        };
+    };
+    list_canvas_presets_api_v1_canvas_presets_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CanvasPresetsOut"];
+                };
+            };
+            /** @description 缺少或无效的工作台访问令牌（problem+json） */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
+                };
+            };
+            /** @description Host/Origin 不是本机回环地址（problem+json） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetail"];
                 };
             };
             /** @description 资源不存在（problem+json） */

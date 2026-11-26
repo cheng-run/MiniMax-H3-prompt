@@ -134,6 +134,17 @@ class ClarificationConflict(ProblemError):
     code = "clarification_conflict"
 
 
+class CanvasConflict(ProblemError):
+    """高层 ``canvas`` 与低层逐档 ``canvases`` 同时提交（#364 / spec #363）。
+
+    同 ``ClarificationConflict`` 的口径：两者都写进 ``Brief.canvases``，系统不猜哪个
+    优先——猜错就会让用户选的那一格静默变成另一格。空表与省略同义。
+    """
+
+    status_code = 422
+    code = "canvas_conflict"
+
+
 def _validate_duration(duration: float) -> None:
     if DURATION_MIN_SECONDS <= duration <= DURATION_MAX_SECONDS:
         return
@@ -216,6 +227,18 @@ class ClarificationPair(BaseModel):
     answer: str
 
 
+class CanvasIn(BaseModel):
+    """创建口的高层画布（#364 / spec #363）：一组宽高，**按路线解释**。
+
+    同一个字段在 ``ref`` 上落生图侧画布、在 ``director`` 上落成片画幅（对齐到插件
+    网格）；解释发生在 ``_canvases_from_payload``，这里只做形状校验。宽高必须是
+    正整数——0/负数不是「一个小画布」，而是漏填，让 pydantic 的通用 422 拦下。
+    """
+
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+
+
 class SessionCreate(BaseModel):
     """建会话的 brief 一次性给全（spec §7；D7 §4.1 放开 ``ref``，D8 放开 ``director``）。
 
@@ -243,7 +266,11 @@ class SessionCreate(BaseModel):
     # ``clarification_conflict``。空表与省略同义（没提供）。
     clarification_pairs: list[ClarificationPair] = Field(default_factory=list)
     draft: str = ""
+    # 低层入口：逐档直填的画布（家族 → 宽高）。与高层 ``canvas`` 二选一，见
+    # ``_canvases_from_payload``；空表与省略同义。
     canvases: dict[str, tuple[int, int]] = Field(default_factory=dict)
+    # 高层入口（#364）：一组宽高，服务端按路线解释。省略＝「没选」，落空表。
+    canvas: CanvasIn | None = None
     video_output: VideoOutputIn | None = None
     director_mode: str | None = None
     director_node_id: str | None = None
@@ -398,6 +425,46 @@ def _clarification_text(payload: SessionCreate) -> str:
     return render_clarification_block(pairs)
 
 
+def _canvases_from_payload(payload: SessionCreate) -> dict[str, tuple[int, int]]:
+    """把创建请求的两种画布写法归一成落库的 ``Brief.canvases``（#364 / spec #363）。
+
+    高层 ``canvas`` **按路线解释**，复用向导已有的那一对函数、不新写一套：
+
+    - ``ref``：落生图侧画布家族（``CANVAS_CHOICE_FAMILIES``，今天只有 Z-Image）——
+      它决定道具与场景参考图的尺寸，不影响成片尺寸（#144 D 的「不许跨档继承」仍成立：
+      只写这一档，别的档各自回落 profile 默认）；
+    - ``director``：落成片画幅，先对齐到插件网格（``snap_film_size``）、再按当前
+      关键帧模型家族展开（``film_frame_canvases``）——与 CLI 的成片画幅问答同源；
+    - ``base``：当前零消费者（spec「Out of Scope」），按普通省略处理、**不报错**——
+      表单不显示这一格，旧客户端带了也不该被拒。
+
+    低层 ``canvases`` 与高层 ``canvas`` 同时给**内容**回 422：两者都写同一个落库字段，
+    系统不猜哪个优先（空表与省略同义，同 ``clarification_pairs`` 的口径）。
+    """
+    from ...brief_parser import is_director_mode, is_ref_mode
+    from ...generation import CANVAS_CHOICE_FAMILIES
+
+    if payload.canvas is not None and payload.canvases:
+        raise CanvasConflict(
+            "canvas（按路线解释的一组宽高）与 canvases（逐档直填）不能同时提交："
+            "两者都写进会话的画布表，请二选一。")
+    if payload.canvases:
+        return dict(payload.canvases)
+    if payload.canvas is None:
+        return {}
+    size = (payload.canvas.width, payload.canvas.height)
+    # 路线判据取 ``brief_parser`` 的两枚**唯一真源**（未知路线已在
+    # ``_validate_route_parameters`` 里被拒，这里只剩三条合法分支）。
+    if is_ref_mode(payload.mode):
+        return {family: size for family in CANVAS_CHOICE_FAMILIES}
+    if is_director_mode(payload.mode):
+        from ...director.film_canvas import film_frame_canvases, snap_film_size
+        from ...image_config import load_frame_image_model
+
+        return film_frame_canvases(snap_film_size(*size), load_frame_image_model())
+    return {}
+
+
 def _brief_from_payload(payload: SessionCreate) -> Brief:
     video_output = None
     if payload.video_output is not None:
@@ -435,7 +502,7 @@ def _brief_from_payload(payload: SessionCreate) -> Brief:
         plot=payload.plot,
         clarifications=_clarification_text(payload),
         draft=payload.draft,
-        canvases=dict(payload.canvases),
+        canvases=_canvases_from_payload(payload),
         video_output=video_output,
     )
 
