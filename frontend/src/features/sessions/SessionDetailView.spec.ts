@@ -402,6 +402,49 @@ describe('SessionDetailView 审查与修订回路（#232）', () => {
     expect(wrapper.text()).toContain('第 2 稿')
     expect(wrapper.text()).not.toContain('第 1 稿')
   })
+
+  // 帧提交的尺寸回执（#368）：帧提交卡提交后立刻消失，回执要有一个通过后仍可见的落点。
+  it('已决议帧提交的尺寸回执在「审查与待办」里展示，且帧提交卡已经不在了', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({
+            status: 'running',
+            action_items: [
+              {
+                item_id: 'item-review',
+                kind: 'stage1_review',
+                status: 'resolved',
+                created_at: '2026-11-11T00:00:00Z',
+                resolved_at: '2026-11-11T00:00:30Z',
+                reason: '',
+              },
+              {
+                item_id: 'item-frame',
+                kind: 'frame_submission',
+                status: 'resolved',
+                decision: 'submit_frames',
+                created_at: '2026-11-11T00:01:00Z',
+                resolved_at: '2026-11-11T00:01:30Z',
+                reason:
+                  '关键帧尺寸提示：首帧图 320×240 与当前画布 1920×1088 不一致——不阻断，首帧图照常收下。',
+              },
+            ],
+          }),
+        ),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+    await wrapper.findAll('[role="tab"]')[1]!.trigger('click')
+    await settle()
+
+    const panel = wrapper.find('#workbench-panel-review')
+    expect(panel.find('[data-frame-canvas-receipt]').exists()).toBe(true)
+    expect(panel.text()).toContain('320×240')
+    expect(panel.text()).toContain('1920×1088')
+    // 卡片本身在决议后不再渲染（回执就是为了补上这段空档）。
+    expect(panel.find('.frame-card').exists()).toBe(false)
+  })
 })
 
 // D6-1（#244）：长片多一个只读「分段」分区；短视频的四分区不变。

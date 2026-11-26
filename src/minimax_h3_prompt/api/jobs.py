@@ -621,6 +621,46 @@ def _abandon_asset_note(name: str) -> str:
         "（照抄接线时这一格没有参考图可填）。已经定稿的文本不会被自动改写。")
 
 
+def _frame_canvas_hint(
+    brief: Any, frame_paths: Mapping[str, Path],
+) -> str:
+    """交回的关键帧图逐张核一次尺寸，返回写进待办回执的提示（空串＝无提示）。
+
+    判据只有 ``segment_validation.frame_canvas_warning_text`` 一份（#365，CLI 阶段 2
+    打出来的就是它）；期望画布取 ``director.aspect_flow.frame_canvas``（与段规划预检、
+    回贴核对、CLI 同一份读法，按 ``Brief.canvases`` 的当前关键帧档算），不在这里另算。
+
+    **只提示、不阻断**（#363 spec「尺寸核对」）：用户有时会有意用小尺寸图做快速试跑，
+    不符与读不出都不许拦住交帧。所以判据读图失败一律降级成「没有提示」，而不是把
+    一次决议打成 500——提示是附言，不是闸门。
+
+    每张图一条、换行分隔：首尾两帧可能各自不符，合成一句就会丢掉另一张的数值。
+    """
+    from ..director.aspect_flow import frame_canvas
+    from ..segment_validation import frame_canvas_warning_text
+
+    if not frame_paths:
+        return ""
+    try:
+        expected = frame_canvas(getattr(brief, "canvases", None))
+    except Exception as exc:  # noqa: BLE001 - 画布读不出时没有可核的期望值
+        logger.warning("交回帧图的期望画布取不到，跳过尺寸提示：%s", exc)
+        return ""
+    notes: list[str] = []
+    for role, label in (("first", "首帧"), ("last", "尾帧")):
+        path = frame_paths.get(role)
+        if path is None:
+            continue
+        try:
+            note = frame_canvas_warning_text(path, expected, label=label)
+        except Exception as exc:  # noqa: BLE001 - 量不出尺寸不该拦住交图
+            logger.warning("交回 %s 图的尺寸提示读不出，跳过：%s", label, exc)
+            continue
+        if note:
+            notes.append(note)
+    return "\n".join(notes)
+
+
 class JobCancelled(Exception):
     """协作式取消在节点边界生效；``node`` 是停下时刚跑完的节点。"""
 
@@ -1216,6 +1256,14 @@ class JobRunner:
 
             branch = await asyncio.to_thread(
                 self._resolve_branch, session_id, item_id, decision, frames)
+            # 交帧的尺寸回执（#368）：提示既要进快照（锁内 ``_decide``），也要进决议
+            # 事件——事件 payload 在 ``mutate`` **之前**就构造好了，锁内再算的值到不了
+            # 那里。所以与 ``settle_preview`` 同形，锁外只读预演一次；权威的素材校验
+            # 仍在锁内 ``_decide``（预演失败一律降级成无提示，不许在这里 422）。
+            frame_hint = (
+                await asyncio.to_thread(
+                    self._frame_hint_preview, session_id, frames)
+                if branch == _BRANCH_FRAMES and frames else "")
             # 两道「只挂待办、不起任务」的闸门：base 的帧闸门与导演台的开场首帧。
             # 两者都不产生可等待的执行，所以 job 为 None，会话停在 awaiting_human。
             gate_branch = branch in (
@@ -1366,6 +1414,11 @@ class JobRunner:
                                 self.store.resolve_frame_asset(session_id, frame_asset_id))
                     holder["frames"] = resolved_frames
                     recorded_decision = step_machine.DECISION_SUBMIT_FRAMES
+                    # 交回图的尺寸提示（#368 / spec #363）落在待办回执 ``reason`` 上——
+                    # 与导演台开场首帧的画幅警告同一形态。只提示、不阻断：不符与读不出
+                    # 都照样收下，阶段 2 照常推进（决议与 pass 判定都不读这句话）。
+                    # 值与事件 payload 用的是同一次预演（``frame_hint_preview``）。
+                    holder["reason"] = frame_hint
                     # 帧选择随决议一起落进 stage_state：慢速读图在任务里，崩溃在
                     # 两者之间时续跑仍知道用户交了哪一对素材（而不是静默降级）。
                     session = load_session(self.store.session_directory(session_id))
@@ -1823,6 +1876,10 @@ class JobRunner:
                 # 定稿出路的结果也进事件（#289）：快照落后时重放要能把
                 # 「已按图补入 N 条」补回已决议的卡片（事件类型仍是十种闭合集合）。
                 resolved_payload["reason"] = str(settle_preview.get("note") or "")
+            if branch == _BRANCH_FRAMES and frame_hint:
+                # 交帧的尺寸回执也随事件走（#368）：快照落后时重放要能把它补回来，
+                # 否则刷新一次提示就静默消失。空串不写——没提示就是没有这个事实。
+                resolved_payload["reason"] = frame_hint
             if frames is not None:
                 # 帧槽载荷是用户输入的一部分（D4 §9）：重放与排障要看出用户当时
                 # 选了哪两个素材。审查待办没有这一项，就不写空对象进事件。
@@ -1946,6 +2003,36 @@ class JobRunner:
                 return (_BRANCH_DIRECTOR_START_GATE
                         if session.brief.is_director else _BRANCH_FRAME_GATE)
         return _BRANCH_REVIEW
+
+    def _frame_hint_preview(
+        self, session_id: str, frames: Mapping[str, str] | None,
+    ) -> str:
+        """交帧的尺寸回执，锁外只读预演（#368）。
+
+        为什么要预演：决议事件在 ``mutate`` 之前就要构造好（先写事件、后写快照），
+        而权威的素材校验在锁内 ``_decide`` 里；回执因此要在**这里**先算一次。两边用
+        同一份 ``_frame_canvas_hint``，判据与文案不会分家。
+
+        **预演绝不报错**：素材 id 归属校验、素材不存在、读图失败——任何一步出错都只是
+        「这次没有提示」（返回空串）。提示是附言，不是闸门；锁内那份也只读已经校验
+        通过的文件，所以真正的拒绝仍只发生在 ``_decide``。
+        """
+        if not frames:
+            return ""
+        session = load_session(self.store.session_directory(session_id))
+        if session is None:
+            return ""
+        paths: dict[str, Path] = {}
+        for role in ("first", "last"):
+            asset_id = str(frames.get(role) or "").strip()
+            if not asset_id:
+                continue
+            try:
+                paths[role] = self.store.resolve_frame_asset(session_id, asset_id)
+            except WorkbenchError:
+                # 归属/存在/类型不合格：让锁内 ``_decide`` 回那条 422，答案口径不在这里。
+                continue
+        return _frame_canvas_hint(session.brief, paths)
 
     def _abandon_preview(self, session_id: str, item_id: str) -> tuple[str, str]:
         """放弃一件的只读预判：``(这一件的语义名, 放弃之后那个任务的 kind)``。

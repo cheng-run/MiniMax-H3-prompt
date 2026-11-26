@@ -33,7 +33,7 @@
 | `segment_refs.py` | 段内参考素材子集：`compute_segment_scope` → `compute_asset_closure` → `demote_consistency_anchors`，结果随段只读回显 |
 | `injection_card.py` | 注入卡渲染（整片 / 段级）：给人照抄的接线清单，只显示用量、不做容量拒绝 |
 | `ref_capacity.py` | 多参容量外部契约 9/3/3/12；`asset_ledger.py` / `asset_loop.py` / `asset_proofread.py` 是 CLI 侧台账、循环与校对实现——工作台复用校对判据，不读 CLI 的 `asset-ledger.json` |
-| `frontend/src/features/sessions/` | 工作台五分区：`SessionDetailView`（壳/SSE/运行控制）、`ReviewTab`（审查与修订）、`AssetsTab` + `FrameSubmissionCard` + `DirectorStartImageCard` / `DirectorSegmentImageCard`（素材与帧/段首图提交）、`SegmentsTab` + `SegmentCard` + `DirectorPromptBlock`（长片分段只读展示、`segment_video` 回交、按需词复制、ref 段内素材只读回显与「换一段」）、`ArtifactsTab`（产物查看/复制/下载/通用媒体播放） |
+| `frontend/src/features/sessions/` | 工作台五分区：`SessionDetailView`（壳/SSE/运行控制）、`ReviewTab`（审查与修订）、`AssetsTab` + `FrameSubmissionCard` + `FrameSubmissionReceipt` + `DirectorStartImageCard` / `DirectorSegmentImageCard`（素材与帧/段首图提交；`FrameSubmissionReceipt` 把已决议 `frame_submission` 待办的 `reason` 常驻在审查分区——帧卡提交后即消失，尺寸提示需要提交后仍可见的落点，#368）、`SegmentsTab` + `SegmentCard` + `DirectorPromptBlock`（长片分段只读展示、`segment_video` 回交、按需词复制、ref 段内素材只读回显与「换一段」）、`ArtifactsTab`（产物查看/复制/下载/通用媒体播放） |
 | `frontend/src/api/client.ts` | 生成契约的类型出口与唯一 API 门面：令牌注入、媒体/产物 URL、错误归一成 `ApiError` |
 | `scripts/accept_d2.py` | 真实 HTTP 验收驱动器（手动，不进 CI；启动时先取令牌） |
 | `scripts/accept_d3.py` | 媒体与素材的真实验收驱动器（手动；真实照片上传 + 真实 `final.mp4` 的 Range 与字节核对，报告落 `output/accept-d3/`） |

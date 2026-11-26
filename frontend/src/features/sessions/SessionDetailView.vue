@@ -20,6 +20,7 @@ import DirectorSegmentImageCard from './DirectorSegmentImageCard.vue'
 import DirectorStartImageCard from './DirectorStartImageCard.vue'
 import { canvasFact, filmSizeFact } from './facts'
 import FrameSubmissionCard from './FrameSubmissionCard.vue'
+import FrameSubmissionReceipt from './FrameSubmissionReceipt.vue'
 import { newIdempotencyKey } from './keys'
 import {
   buildProgress,
@@ -662,6 +663,10 @@ const errorMessage = computed(() =>
           :artifacts="data.artifacts ?? []"
           @submitted="invalidateSnapshot"
         />
+        <!-- 交帧的尺寸回执（#368）：帧提交卡提交后卡片消失，而尺寸提示写在已决议
+             待办的 reason 上——这里给它一个提交后仍可见的落点（与段卡片的语义提示
+             同形）。只认 frame_submission，其余 kind 的 reason 有各自的落点。 -->
+        <FrameSubmissionReceipt :action-items="data.action_items ?? []" />
         <DirectorStartImageCard
           v-if="pendingDirectorStartItem"
           :session-id="data.session_id"
