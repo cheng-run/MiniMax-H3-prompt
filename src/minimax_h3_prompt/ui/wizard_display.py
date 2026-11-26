@@ -313,6 +313,32 @@ def print_firstframe_prompt(text: str, *, index: int, path: Path,
           "接着写的尾帧词会以这张图为参考。")
 
 
+def announce_frame_canvas_hints(
+    frames: Sequence[tuple[str, Path | None]], brief: Brief,
+) -> None:
+    """交回的关键帧图逐张核一次尺寸并打印提示（#365）：只提示、不阻断。
+
+    为什么要有这一行：画布是**数据**（帧请求的【画布】块与构图词分套都按它走），
+    而交回的图是不是按这块画布出的，此前全仓没有一处会看——图与画布对不上时，
+    要等到成片裁切或锚点错位才被发现。判据本身在
+    ``segment_validation.frame_canvas_warning_text``（工作台复用同一份），这里只负责
+    「问一句、打出来」。相符时一声不响。
+
+    期望画布取**当前关键帧档**的生效画布（``aspect_flow.frame_canvas``，与段规划
+    预检、回贴核对同一份读法），不在向导里另算一份。
+    """
+    from ..director.aspect_flow import frame_canvas
+    from ..segment_validation import frame_canvas_warning_text
+
+    expected = frame_canvas(brief.canvases)
+    for label, path in frames:
+        if path is None:
+            continue
+        note = frame_canvas_warning_text(path, expected, label=label)
+        if note:
+            print(f"[提示] {note}")
+
+
 def semantic_reference(previous_text: str | None) -> str | None:
     """从一段提示词正文取「该达到的末态」参照：收尾句。
 

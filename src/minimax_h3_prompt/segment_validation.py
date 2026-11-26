@@ -6,6 +6,8 @@
 - **同步提交自检**：段号是不是当前段、文件在不在、可证层有没有 error（``segment_submission_problems``）。
 - **语义提示**：尾帧读图描述与本段 ``end_hook`` 的**关键事实**差异说明（CLI 侧是并排摆给
   人判，``ui/wizard._judge_bridge_semantics``；工作台无人可问，自动生成一句提示）。
+- **交回图尺寸提示**（#365）：用户交回的关键帧图与当前画布的宽高不符时给一句提示
+  （``frame_canvas_warning_text``）；与上面两道同族，只提示、不阻断。
 
 判据本身是纯函数：事实进、结论出。读图与模型调用在调用方（``api/jobs.py``），
 桩管线把「读图 + 判据」一起桩掉（``api/fake_pipeline.py``）。
@@ -158,9 +160,52 @@ def validation_incomplete_text(reason: str) -> str:
     return f"语义检查未完成：{str(reason or '').strip()}"
 
 
+FRAME_CANVAS_HINT_PREFIX = "关键帧尺寸提示"
+
+
+def frame_canvas_warning_text(
+    image_path: Path | str,
+    expected: tuple[int, int],
+    *,
+    label: str = "关键帧",
+) -> str:
+    """交回的关键帧图与实际画布是否对得上：空串＝无提示，非空＝给用户看的一句提示。
+
+    与 :func:`semantic_warning_text` 同族——**只产出提示**，不参与任何 ``passed`` /
+    拒绝判定。用户有时会有意用小尺寸图做快速试跑，不符、读不出都不该拦住他交图。
+
+    三种结论分开（票面 #365）：
+
+    - 尺寸不符 → 一句含**两边数值**的提示（「我该改哪一边」要靠两边数字）；
+    - 尺寸相符 → 空串（没有差异就没有声音）；
+    - 读不出宽高（损坏 / 不是图片）→ 一句「量不出来」的说明。**它不是尺寸不符**：
+      把坏图说成「尺寸错了」会把人的排查方向带偏。
+
+    读图复用 ``director.aspect.image_size``（唯一一份实现）；期望画布由调用方取好
+    再传进来，本函数不读配置。
+    """
+    from .director.aspect import image_size  # noqa: PLC0415 - 只有这一处要 PIL
+
+    expected_width, expected_height = int(expected[0]), int(expected[1])
+    actual = image_size(image_path)
+    if actual is None:
+        return (f"{FRAME_CANVAS_HINT_PREFIX}：读不出{label}图的宽高"
+                f"（文件损坏或不是图片），量不出来；{label}图照常收下。")
+    actual_width, actual_height = actual
+    if (actual_width, actual_height) == (expected_width, expected_height):
+        return ""
+    return (
+        f"{FRAME_CANVAS_HINT_PREFIX}：{label}图 {actual_width}×{actual_height} 与"
+        f"当前画布 {expected_width}×{expected_height} 不一致——"
+        f"生成时会按画布尺寸出图、构图词也按它的画幅族落笔，"
+        f"图是别的尺寸通常意味着用的不是这一档的画布；不阻断，{label}图照常收下。")
+
+
 __all__ = [
+    "FRAME_CANVAS_HINT_PREFIX",
     "SEGMENT_END_HOOK_JUDGE_ROLE",
     "build_end_hook_prompt",
+    "frame_canvas_warning_text",
     "judge_end_hook",
     "parse_end_hook_reply",
     "segment_submission_problems",

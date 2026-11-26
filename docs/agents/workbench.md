@@ -28,7 +28,7 @@
 | `step_machine.py` | 状态/触发/闸门的单一声明；续跑起点；`resolve` 的 approve/revise 去向与 approve 按变体分叉（ref 走 `asset_loop`） |
 | `session_store.py` | 快照文件读写、`atomic_write_text`、向导续接状态与 `RESUMABLE_STATUSES` |
 | `api/fake_pipeline.py` | 确定性桩管线：固定阶段 1/2（含 ref 的资产图词与校对结论）、假读图与假段提示词/段判据/段视频造件，**只认环境变量 `MINIMAX_FAKE_PIPELINE`**（默认关、无 HTTP 入口），真实/桩互斥 |
-| `segment_validation.py` | 段交接的两道判据：同步提交自检（段号/技术档，`segment_submission_problems`）与语义判据（尾帧描述 vs `end_hook`，`judge_end_hook`）；读图与模型调用在 `api/jobs.py` |
+| `segment_validation.py` | 段交接的两道判据：同步提交自检（段号/技术档，`segment_submission_problems`）与语义判据（尾帧描述 vs `end_hook`，`judge_end_hook`）；另有交回关键帧图的尺寸提示（`frame_canvas_warning_text`，#365，只提示不阻断）；读图与模型调用在 `api/jobs.py` |
 | `ref_segments.py` | 多参分段：`prepare_ref_segmentation`（切点/闭包/重编号/段表/顺序卡/四列分镜表）、`RefSegmentJob.write_segment`（单段落盘 + 段级注入卡）、`is_single_segment_route`（≤ `MAX_SEG_S` 即「1 段」） |
 | `segment_refs.py` | 段内参考素材子集：`compute_segment_scope` → `compute_asset_closure` → `demote_consistency_anchors`，结果随段只读回显 |
 | `injection_card.py` | 注入卡渲染（整片 / 段级）：给人照抄的接线清单，只显示用量、不做容量拒绝 |

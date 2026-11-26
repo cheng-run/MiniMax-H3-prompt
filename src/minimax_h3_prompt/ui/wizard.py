@@ -37,6 +37,7 @@ from ..resume_point import recall as recall_answer
 from ..resume_point import remember as remember_answer
 from .wizard_display import (
     announce_film_end_still as _announce_film_end_still,
+    announce_frame_canvas_hints as _announce_frame_canvas_hints,
     clean_path_input as _clean_path_input,
     semantic_reference as _semantic_reference,
     asset_assignment as _asset_assignment,
@@ -4045,6 +4046,8 @@ def _phase2_collect_and_finish(
         print(f"[提示] 未提供完整首尾帧，已切换为{label}。")
     if first_path and last_path and first_path == last_path:
         print("[警告] 首帧与尾帧是同一张图，视频将几乎静止。")
+    # 交回图的尺寸核对（#365）：只提示、不阻断（判据与打印都住 wizard_display）。
+    _announce_frame_canvas_hints((("首帧", first_path), ("尾帧", last_path)), brief)
 
     # 帧图入库 + 读图
     descriptions: list[dict] | None = []
