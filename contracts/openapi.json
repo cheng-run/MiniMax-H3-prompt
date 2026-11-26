@@ -376,6 +376,13 @@
       },
       "BriefOut": {
         "properties": {
+          "canvas_lines": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Canvas Lines",
+            "type": "array"
+          },
           "canvases": {
             "additionalProperties": {
               "items": {
@@ -588,6 +595,55 @@
           "height"
         ],
         "title": "FallbackCanvasOut",
+        "type": "object"
+      },
+      "FilmSizeOut": {
+        "description": "成片尺寸的**推导声明值**（#367 / spec #363 US9）。\n\n它**不是**实测值（CONTEXT「视频输出」：跑出来那条视频的真实宽高以节点为准），\n也不是用户直接填的尺寸——两条路线各有一份既有推导函数，这里只是把它们的结果\n投影给概览页：\n\n- ``film_aspect``（导演台）：``director.film_canvas.film_size_for`` 的成片画幅，\n  即向导唯一问一次的答案；旧会话没有这一问时（``film_size`` 整个为 ``None``，\n  不是这里）本行不出。\n- ``video_output``（base／ref）：注入卡那份「声明优先、画布推导」定案\n  （``injection_card.resolve_video_output``）；``canvas`` 是推导源画布，显式声明\n  三元组时为空，``notes`` 是推导过程的说破行（比例档回退、面积夹档）。\n\n``source`` 让前端按路线换口径文案，而不是在前端再判一次路线；值本身**只由**\n这两份函数算出来（票面 AC：用例直接调该函数比对，前端不另算一遍）。",
+        "properties": {
+          "canvas": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Canvas"
+          },
+          "height": {
+            "title": "Height",
+            "type": "integer"
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Notes",
+            "type": "array"
+          },
+          "source": {
+            "enum": [
+              "film_aspect",
+              "video_output"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "width": {
+            "title": "Width",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "width",
+          "height",
+          "source"
+        ],
+        "title": "FilmSizeOut",
         "type": "object"
       },
       "FrameSelection": {
@@ -1371,6 +1427,16 @@
             },
             "title": "Director Notes",
             "type": "array"
+          },
+          "film_size": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FilmSizeOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "jobs": {
             "items": {

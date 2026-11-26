@@ -18,6 +18,7 @@ import AssetImageCard from './AssetImageCard.vue'
 import DeliveryTab from './DeliveryTab.vue'
 import DirectorSegmentImageCard from './DirectorSegmentImageCard.vue'
 import DirectorStartImageCard from './DirectorStartImageCard.vue'
+import { canvasFact, filmSizeFact } from './facts'
 import FrameSubmissionCard from './FrameSubmissionCard.vue'
 import { newIdempotencyKey } from './keys'
 import {
@@ -264,6 +265,11 @@ const progressView = computed<ProgressView>(() => {
 // 待办——与步骤带同一份事实，不新增业务状态。真正带副作用的操作仍在各分区，所以这
 // 一行只负责把话说到「去哪一格」，点击由上面的按钮完成（2026-11-21 layout：此前它
 // 是一行灰字，等待人工的会话在概览分区里全屏没有一个可点的入口）。
+// 概览事实表的两行派生文案（#367）：值与措辞都由 `facts.ts` 的纯函数给，组件只渲染。
+// 空表（未选画布 / 拿不出声明值）由负责那一行的人自己说清楚——前端不重算尺寸。
+const canvasRow = computed(() => (data.value ? canvasFact(data.value) : null))
+const filmSizeRow = computed(() => (data.value ? filmSizeFact(data.value) : null))
+
 const pendingActionView = computed(() =>
   pendingAction(data.value?.action_items ?? [], data.value?.brief.refs ?? []),
 )
@@ -600,6 +606,19 @@ const errorMessage = computed(() =>
           <dd>{{ data.brief.style }}</dd>
           <dt>语言</dt>
           <dd>{{ data.brief.language }}</dd>
+          <!-- 画布与成片尺寸（#367）：值来自服务端；下一行是「会跑多大」的声明值，
+               不是实测值，文案里已标明（CONTEXT「成片画幅」「视频输出」）。 -->
+          <template v-if="canvasRow">
+            <dt>{{ canvasRow.label }}</dt>
+            <dd>{{ canvasRow.value }}</dd>
+          </template>
+          <template v-if="filmSizeRow">
+            <dt>{{ filmSizeRow.label }}</dt>
+            <dd>
+              {{ filmSizeRow.value
+              }}<span v-if="filmSizeRow.note" class="fact-note"> · {{ filmSizeRow.note }}</span>
+            </dd>
+          </template>
           <template v-if="data.brief.clarifications">
             <dt>补充说明</dt>
             <dd>{{ data.brief.clarifications }}</dd>
@@ -993,6 +1012,12 @@ const errorMessage = computed(() =>
   color: var(--color-ink);
   font-size: var(--text-body);
   overflow-wrap: anywhere;
+}
+/* 事实行附注（#367 的「推导源画布 / 说破行」）：退一档墨色，与值分开但不换行，
+   既读得出是同一句补充，也不会被当成第二个值。 */
+.fact-note {
+  color: var(--color-ink-soft);
+  font-size: var(--text-micro);
 }
 
 /* 减少动效：分区切换与等待带都是「位置/揭开」型，关掉动画直接以终态出现；

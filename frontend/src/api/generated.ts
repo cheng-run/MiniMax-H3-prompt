@@ -596,6 +596,8 @@ export interface components {
         };
         /** BriefOut */
         BriefOut: {
+            /** Canvas Lines */
+            canvas_lines?: string[];
             /** Canvases */
             canvases?: {
                 [key: string]: number[];
@@ -710,6 +712,39 @@ export interface components {
             label: string;
             /** Model */
             model: string;
+            /** Width */
+            width: number;
+        };
+        /**
+         * FilmSizeOut
+         * @description 成片尺寸的**推导声明值**（#367 / spec #363 US9）。
+         *
+         *     它**不是**实测值（CONTEXT「视频输出」：跑出来那条视频的真实宽高以节点为准），
+         *     也不是用户直接填的尺寸——两条路线各有一份既有推导函数，这里只是把它们的结果
+         *     投影给概览页：
+         *
+         *     - ``film_aspect``（导演台）：``director.film_canvas.film_size_for`` 的成片画幅，
+         *       即向导唯一问一次的答案；旧会话没有这一问时（``film_size`` 整个为 ``None``，
+         *       不是这里）本行不出。
+         *     - ``video_output``（base／ref）：注入卡那份「声明优先、画布推导」定案
+         *       （``injection_card.resolve_video_output``）；``canvas`` 是推导源画布，显式声明
+         *       三元组时为空，``notes`` 是推导过程的说破行（比例档回退、面积夹档）。
+         *
+         *     ``source`` 让前端按路线换口径文案，而不是在前端再判一次路线；值本身**只由**
+         *     这两份函数算出来（票面 AC：用例直接调该函数比对，前端不另算一遍）。
+         */
+        FilmSizeOut: {
+            /** Canvas */
+            canvas?: number[] | null;
+            /** Height */
+            height: number;
+            /** Notes */
+            notes?: string[];
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "film_aspect" | "video_output";
             /** Width */
             width: number;
         };
@@ -1114,6 +1149,7 @@ export interface components {
             current_job?: components["schemas"]["JobSummary"] | null;
             /** Director Notes */
             director_notes?: string[];
+            film_size?: components["schemas"]["FilmSizeOut"] | null;
             /** Jobs */
             jobs?: components["schemas"]["JobSummary"][];
             /** Last Event Seq */

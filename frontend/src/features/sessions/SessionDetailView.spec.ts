@@ -1490,6 +1490,98 @@ describe('SessionDetailView 指路（2026-11-21 layout）', () => {
   })
 })
 
+// 工作台画布 T4（#367）：概览事实表回显画布与成片尺寸**声明值**。
+// 值来自服务端（`brief.canvas_lines` / `film_size`）；组件只渲染与措辞，
+// 推导逻辑一律不在前端（用例在 facts.spec.ts 直接对这些派生文案取值）。
+describe('SessionDetailView 概览事实表画布与成片尺寸（#367）', () => {
+  it('画布行照抄服务端显示行；没选时写明「未选，按各档默认」', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({
+            mode: 'ref',
+            brief: {
+              ...makeDetail().brief,
+              mode: 'ref',
+              canvas_lines: ['Z-Image Turbo：1080×1920'],
+            },
+          }),
+        ),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+    const facts = wrapper.find('.facts')
+    expect(facts.text()).toContain('画布')
+    expect(facts.text()).toContain('Z-Image Turbo：1080×1920')
+    wrapper.unmount()
+
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({
+            mode: 'ref',
+            brief: { ...makeDetail().brief, mode: 'ref' },
+            film_size: { width: 480, height: 864, source: 'video_output', canvas: null },
+          }),
+        ),
+      ),
+    )
+    const { wrapper: without } = await mountDetail(makeStreamFetch())
+    expect(without.find('.facts').text()).toContain('未选，按各档默认')
+    expect(without.find('.facts').text()).toContain('成片尺寸')
+  })
+
+  it('成片尺寸行标明是推导的声明值而非实测，并点名推导源画布', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({
+            mode: 'ref',
+            brief: { ...makeDetail().brief, mode: 'ref' },
+            film_size: {
+              width: 480,
+              height: 864,
+              source: 'video_output',
+              canvas: [1080, 1920],
+              notes: [],
+            },
+          }),
+        ),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    const facts = wrapper.find('.facts')
+    expect(facts.text()).toContain('成片尺寸')
+    expect(facts.text()).toContain('480 × 864')
+    expect(facts.text()).toContain('推导的声明值')
+    expect(facts.text()).toContain('不是实测')
+    expect(facts.text()).toContain('由画布 1080×1920 推导')
+  })
+
+  it('导演台用成片画幅口径，并说明实际执行值以节点为准', async () => {
+    server.use(
+      http.get(detailUrl, () =>
+        HttpResponse.json(
+          makeDetail({
+            mode: 'director',
+            brief: { ...makeDetail().brief, mode: 'director', director_mode: 'fl2v' },
+            film_size: { width: 1920, height: 1088, source: 'film_aspect' },
+          }),
+        ),
+      ),
+    )
+    const { wrapper } = await mountDetail(makeStreamFetch())
+
+    const facts = wrapper.find('.facts')
+    expect(facts.text()).toContain('成片画幅')
+    expect(facts.text()).toContain('1920 × 1088')
+    expect(facts.text()).toContain('成片画幅以节点 width/height 为准')
+    // 导演台不出现 base/ref 的口径标签。
+    expect(facts.text()).not.toContain('成片尺寸')
+  })
+})
+
 // 2026-11-21 critique：这个工具的核心循环是「跑十几分钟 → 停下 → 人接手」，最关键
 // 那一跳发生在用户切走标签页的时候。此前 document.title 全仓零写入。
 describe('SessionDetailView 页标题（2026-11-21 critique）', () => {

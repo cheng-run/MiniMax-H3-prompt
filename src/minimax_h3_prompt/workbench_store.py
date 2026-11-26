@@ -1350,6 +1350,31 @@ class VideoOutputOut(BaseModel):
     multiple: int
 
 
+class FilmSizeOut(BaseModel):
+    """成片尺寸的**推导声明值**（#367 / spec #363 US9）。
+
+    它**不是**实测值（CONTEXT「视频输出」：跑出来那条视频的真实宽高以节点为准），
+    也不是用户直接填的尺寸——两条路线各有一份既有推导函数，这里只是把它们的结果
+    投影给概览页：
+
+    - ``film_aspect``（导演台）：``director.film_canvas.film_size_for`` 的成片画幅，
+      即向导唯一问一次的答案；旧会话没有这一问时（``film_size`` 整个为 ``None``，
+      不是这里）本行不出。
+    - ``video_output``（base／ref）：注入卡那份「声明优先、画布推导」定案
+      （``injection_card.resolve_video_output``）；``canvas`` 是推导源画布，显式声明
+      三元组时为空，``notes`` 是推导过程的说破行（比例档回退、面积夹档）。
+
+    ``source`` 让前端按路线换口径文案，而不是在前端再判一次路线；值本身**只由**
+    这两份函数算出来（票面 AC：用例直接调该函数比对，前端不另算一遍）。
+    """
+
+    width: int
+    height: int
+    source: Literal["film_aspect", "video_output"]
+    canvas: list[int] | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
 class BriefOut(BaseModel):
     mode: str
     variant: str
@@ -1366,6 +1391,10 @@ class BriefOut(BaseModel):
     clarifications: str = ""
     draft: str = ""
     canvases: dict[str, list[int]] = Field(default_factory=dict)
+    # 画布行的**显示文本**（#367）：家族显示名只住 ``image_config`` 一份，前端不抄
+    # 第二张对照表（``RefOut.image_model_label`` 同款口径：显示名只由服务端渲染一次）。
+    # 空表＝没选画布——「未选，按各档默认」由前端照实说，这里不编一句假数据。
+    canvas_lines: list[str] = Field(default_factory=list)
     video_output: VideoOutputOut | None = None
     refs: list[RefOut] = Field(default_factory=list)
 
@@ -1605,6 +1634,12 @@ class SessionSummary(BaseModel):
 class SessionDetail(SessionSummary):
     brief: BriefOut
     last_event_seq: int
+    # 成片尺寸的推导声明值（#367）：放在详情而不是 brief 上——它不是 brief 的语义
+    # （brief 里已有两条路线的**原料**：``canvases`` 与 ``video_output``），而是
+    # 「这次会话按那些原料会跑出多大」的派生回显，且与 ``director_notes`` 一样是
+    # 读详情时现算的（不落快照、旧会话也能拿到）。``None`` ＝ 导演台旧会话没有成片
+    # 画幅答案，或…… 只有一种：拿不出声明值就不编，界面照实说。
+    film_size: FilmSizeOut | None = None
     current_job: JobSummary | None = None
     jobs: list[JobSummary] = Field(default_factory=list)
     action_items: list[ActionItemOut] = Field(default_factory=list)
@@ -2019,6 +2054,7 @@ def _brief_out(brief: Brief,
         draft=brief.draft,
         canvases={family: [width, height]
                   for family, (width, height) in brief.canvases.items()},
+        canvas_lines=_canvas_lines(brief.canvases),
         video_output=(
             VideoOutputOut(
                 ratio=brief.video_output.ratio,
@@ -2033,6 +2069,73 @@ def _brief_out(brief: Brief,
         # （与资产图词产物出口同一份 ``asset_image_models``）；取不到才是「未知」。
         refs=[_ref_out(entry, fallback_model=stage_models.get(str(entry["name"]), ""))
               for entry in _ledger_order(ledger)],
+    )
+
+
+def _canvas_lines(canvases: Mapping[str, tuple[int, int]]) -> list[str]:
+    """画布表 → 概览行（#367）：``Z-Image Turbo：640×1280``。
+
+    显示名取 ``generation.IMAGE_FAMILY_LABELS``——它与新建表单读的那份
+    ``canvas-presets.fallback_canvases[].label``、CLI 画布问答的标题**同一张表**
+    （``ui.wizard._choose_canvases`` 也取它）：用户在选择器上看到的名字与概览回显
+    的必须逐字相同，否则「我选的不是这个档」会变成一个新的误解。
+    （``image_config.IMAGE_MODEL_LABELS`` 是**出词横幅**那份称呼——Z-Image 那里多
+    一个 Turbo——不是画布选择器的口径，两张表都在用、不可互换。）
+    前端不抄任何一张对照表（同 ``RefOut.image_model_label`` 的口径：显示名只由
+    服务端渲染一次）。
+    """
+    from .generation import IMAGE_FAMILY_LABELS
+
+    return [f"{IMAGE_FAMILY_LABELS.get(family, family)}：{width}×{height}"
+            for family, (width, height) in canvases.items()]
+
+
+def _film_size(brief: Brief, *, mode: str) -> FilmSizeOut | None:
+    """详情里的成片尺寸声明值（#367）：按路线取**既有**推导函数，不新写算法。
+
+    - ``director``：成片画幅（``film_size_for``，向导唯一问一次的答案）；旧会话
+      没有这一问的答案时返回 ``None``——拿不出声明值就不编；
+    - ``base``／``ref``：注入卡那份「声明优先、画布推导」定案
+      （``resolve_video_output``）——工作台与 CLI 写卡走的是同一份接线（#257），
+      概览因此与卡上「最终 W×H」逐位一致。base 当前不产卡，但推导口径相同
+      （票面：base／ref 都用注入卡口径），所以它也能看到这个声明值。
+
+    纯派生、不落盘：旧会话与幂等缓存里都没有它，读详情时现算（同 ``director_notes``）。
+
+    **坏数据不 500**（同 ``_director_notes`` 的「详情端点不该因一张坏表崩」）：画布
+    非法（0 宽、家族拼错）或本机 ``config/image.yaml`` 读不了时，推导函数会抛
+    ``ValueError``／``ConfigError``——那是别的入口该大声报的病，概览这里降级成
+    「拿不出声明值」，日志留痕。冒泡成 500 会让整页打不开，用户连待办都处理不了。
+    """
+    try:
+        return _derive_film_size(brief, mode=mode)
+    except (ValueError, OSError) as exc:
+        logger.warning("成片尺寸声明值推导失败，详情按「没有」处理：%s（%s）", brief.plot, exc)
+        return None
+
+
+def _derive_film_size(brief: Brief, *, mode: str) -> FilmSizeOut | None:
+    """``_film_size`` 的本体：两条既有推导函数各取一处，纯函数、无降级。"""
+    from .brief_parser import is_director_mode
+
+    if is_director_mode(mode):
+        from .director.film_canvas import film_size_for
+
+        film = film_size_for(brief)
+        if film is None:
+            return None
+        return FilmSizeOut(width=film[0], height=film[1], source="film_aspect")
+
+    from .injection_card import resolve_video_output
+
+    derivation = resolve_video_output(brief.video_output, brief.canvases)
+    width, height = derivation.params.size
+    return FilmSizeOut(
+        width=width,
+        height=height,
+        source="video_output",
+        canvas=list(derivation.canvas) if derivation.canvas else None,
+        notes=list(derivation.notes),
     )
 
 
@@ -2640,6 +2743,7 @@ class WorkbenchSessionStore:
             artifacts=_artifacts(derived, directory, self.root.resolve()),
             assets=_assets_of(derived, directory, self.root.resolve()),
             segments=[SegmentOut.model_validate(item) for item in session.segments],
+            film_size=_film_size(session.brief, mode=session.brief.mode),
             director_notes=(
                 _director_notes(directory, session.brief.duration)
                 if session.brief.is_director else []),
