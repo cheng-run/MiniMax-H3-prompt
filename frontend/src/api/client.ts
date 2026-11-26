@@ -24,6 +24,10 @@ export type RevisionIn = components['schemas']['RevisionIn']
 export type Asset = components['schemas']['Asset']
 // 素材台账摘要（D7）：语义名 / 类型 / 编号 / 素材标识，形状来自契约。
 export type RefOut = components['schemas']['RefOut']
+// 画布比例档（#364 / spec #363）：形状同样来自契约，选择器不手写第二份模型。
+export type CanvasPresets = components['schemas']['CanvasPresetsOut']
+export type CanvasRatioPreset = components['schemas']['RatioPresetOut']
+export type CanvasSize = components['schemas']['CanvasSizeOut']
 
 /**
  * 统一 API 错误。组件只处理这一种错误，不各自识别 FastAPI 默认的 ``detail``。
@@ -255,6 +259,20 @@ export async function listClarificationQuestions(topic: string, limit?: number):
   const { data } = await apiClient.GET('/api/v1/clarification-questions', {
     params: { query },
   })
+  if (data === undefined) {
+    throw new ApiError(0, null)
+  }
+  return data
+}
+
+/**
+ * 取画布比例档与兜底画布（#364 / spec #363）：只读，不建会话。
+ *
+ * 表单渲染选择器只用这一份数据，不复制比例档表——否则以后加一档比例时界面与后端
+ * 推导就会分家（spec US19）。`canvas_choice_families` 说明哪几档会被问画布。
+ */
+export async function listCanvasPresets(): Promise<CanvasPresets> {
+  const { data } = await apiClient.GET('/api/v1/canvas-presets')
   if (data === undefined) {
     throw new ApiError(0, null)
   }

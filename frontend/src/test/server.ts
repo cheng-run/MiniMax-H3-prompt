@@ -36,11 +36,30 @@ const emptyClarificationsHandler = http.get('http://localhost/api/v1/clarificati
   HttpResponse.json([]),
 )
 
-// MSW 服务器：默认只放行引导端点、空会话列表、健康资源与空澄清问题，其余请求由测试用
-// server.use(...) 逐条注入。
+// 画布比例档（#366）：新建表单选 ref/director 时会拉一次。默认桩给最小一档，
+// 只为「不关心画布的用例」放行；选择器用例自己 server.use 覆盖成别的档表，以此
+// 证明界面渲染的是服务端数据而不是前端常量。
+const minimalCanvasPresetsHandler = http.get('http://localhost/api/v1/canvas-presets', () =>
+  HttpResponse.json({
+    presets: [
+      {
+        name: '16:9',
+        w_ratio: 16,
+        h_ratio: 9,
+        sizes: [{ width: 1920, height: 1080 }],
+      },
+    ],
+    canvas_choice_families: ['z_image'],
+    fallback_canvases: [{ model: 'z_image', label: 'Z-Image', width: 640, height: 1280 }],
+  }),
+)
+
+// MSW 服务器：默认只放行引导端点、空会话列表、健康资源、空澄清问题与最小画布档表，
+// 其余请求由测试用 server.use(...) 逐条注入。
 export const server = setupServer(
   tokenHandler,
   emptySessionsHandler,
   healthHandler,
   emptyClarificationsHandler,
+  minimalCanvasPresetsHandler,
 )

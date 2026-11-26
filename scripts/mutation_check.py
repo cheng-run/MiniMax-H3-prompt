@@ -202,6 +202,17 @@ MUTATIONS: tuple[Mutation, ...] = (
         runner="vitest",
     ),
     Mutation(
+        "frontend_canvas_snap_truncates_instead_of_rounding",
+        "frontend/src/features/sessions/canvas.ts",
+        "  const snapped = Math.floor((Math.trunc(value) + CANVAS_ALIGN / 2) / CANVAS_ALIGN) * CANVAS_ALIGN",
+        "  const snapped = Math.trunc(value / CANVAS_ALIGN) * CANVAS_ALIGN",
+        ("src/features/sessions/canvas.spec.ts"
+         "::snapCanvasSide 与后端 snap_film_size 同一组数字",),
+        "前端改成向下截断＝界面说「实际执行 1920×1056」，服务端落 1920×1088，"
+        "用户按界面看到的数字去核对节点永远对不上（spec #363 US4）",
+        runner="vitest",
+    ),
+    Mutation(
         "session_detail_leaks_stage_state",
         "src/minimax_h3_prompt/workbench_store.py",
         "    artifacts: list[ArtifactInfo] = Field(default_factory=list)\n"

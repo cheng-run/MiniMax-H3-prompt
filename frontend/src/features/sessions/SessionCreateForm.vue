@@ -1,11 +1,19 @@
 <script setup lang="ts">
+import { useQuery } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
-import { ApiError, createSession, listClarificationQuestions, startSessionJob } from '@/api/client'
+import {
+  ApiError,
+  createSession,
+  listCanvasPresets,
+  listClarificationQuestions,
+  startSessionJob,
+} from '@/api/client'
 import Button from '@/components/ui/Button.vue'
 import ErrorNotice from '@/components/ui/ErrorNotice.vue'
 
+import { snapCanvasSize } from './canvas'
 import { newIdempotencyKey } from './keys'
 
 // 新建会话表单（spec §5）：字段与默认值在这里显式给出——服务端 SessionCreate 的缺省
@@ -48,6 +56,23 @@ const form = reactive({
   directorNodeId: '',
   directorCacheName: '',
   directorContinuityMode: CONTINUITY_DEFAULT as ContinuityMode,
+  // 画布选择（#366）：三步是「比例 → 尺寸 → 自定义」。空串＝这一步还没选——
+  // 与 CLI 同一时点（选比例没有默认档，必须显式选）。提交体里 `canvas` 只在这两格
+  // 都有有效宽高时才带，省略即「没选」，沿用各档默认（spec US15）。
+  canvasRatio: '',
+  canvasSize: '',
+  canvasWidth: '' as string,
+  canvasHeight: '' as string,
+})
+
+// 比例档与兜底画布来自服务端只读端点（#364）：**不在前端复写比例档表**（spec US19）。
+// 拉取失败时选择器整块不出现——这是加法，不能因为它把表单挡住（提交照常不带 canvas）。
+// `enabled` 绑在路线判据上：base 路线不显示画布，也就不必替它拉一次档表。
+const { data: canvasPresets } = useQuery({
+  queryKey: ['canvas-presets'],
+  queryFn: listCanvasPresets,
+  enabled: computed(() => form.mode !== 'base'),
+  retry: false,
 })
 
 // ref 与 director 都不走帧链（ADR 0011 / 0024）：选它们时变体下拉整格隐藏。
@@ -55,6 +80,98 @@ const form = reactive({
 const isRef = computed(() => form.mode === 'ref')
 const isDirector = computed(() => form.mode === 'director')
 const hidesVariant = computed(() => isRef.value || isDirector.value)
+
+// 画布控件只在这两条路线出现（#366 / spec US7）：base 当前不读这个答案，摆出来就是
+// 空转控件。两条路线的标签与影响面说明不同——ref 问生图画布、director 问成片画幅
+// （CONTEXT「画布」「成片画幅」两节：三者不可在文案里混用）。
+const showsCanvas = computed(() => isRef.value || isDirector.value)
+const canvasHeadline = computed(() => (isDirector.value ? '成片画幅' : '生图画布'))
+
+// 比例档选项：服务端下发的档表原样渲染，末项是「自定义比例」（与 CLI 的菜单同构）。
+const ratioPresets = computed(() => canvasPresets.value?.presets ?? [])
+const selectedPreset = computed(() =>
+  ratioPresets.value.find((preset) => preset.name === form.canvasRatio),
+)
+// 尺寸档选项：当前比例下的预设尺寸；比例选了「自定义」就没有档位可给。
+const sizeOptions = computed(() => selectedPreset.value?.sizes ?? [])
+// 不选时会发生什么：端点已经给出「哪几档会被问画布」与它们的兜底尺寸，照抄一遍就
+// 行（显示名也来自服务端，前端不另抄一张家族对照表）。
+const fallbackSummary = computed(() => {
+  const data = canvasPresets.value
+  if (!data) {
+    return ''
+  }
+  return data.canvas_choice_families
+    .map((family) => {
+      const fallback = data.fallback_canvases.find((item) => item.model === family)
+      return fallback ? `${fallback.label} ${fallback.width}×${fallback.height}` : family
+    })
+    .join('、')
+})
+// 手填宽高格的出现条件：比例选了自定义，或尺寸选了自定义（spec US3：两处都能手填）。
+const showsCustomSize = computed(
+  () => form.canvasRatio === 'custom' || form.canvasSize === 'custom',
+)
+
+// 尺寸档的取值：预设档是一组宽高，`custom` 是「手填」那一项。
+function parseSizeOption(value: string): { width: number; height: number } | null {
+  const [width, height] = value.split('x').map(Number)
+  if (!Number.isInteger(width) || !Number.isInteger(height)) {
+    return null
+  }
+  return { width, height }
+}
+
+// 本次会提交的画布：手填格出现时以手填值为准，否则取尺寸档选中的预设。
+// 任何一步没选成（空串、非正整数）都视为「没选」——提交体不带该字段（spec US15）。
+const selectedCanvas = computed<{ width: number; height: number } | null>(() => {
+  if (showsCustomSize.value) {
+    const width = Number(form.canvasWidth)
+    const height = Number(form.canvasHeight)
+    if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
+      return null
+    }
+    return { width, height }
+  }
+  return parseSizeOption(form.canvasSize)
+})
+// 对齐算法与后端 `director.film_canvas.snap_film_size` 同源（见 `canvas.ts`）。
+const snappedCanvas = computed(() => {
+  const size = selectedCanvas.value
+  if (!isDirector.value || size === null) {
+    return null
+  }
+  const snapped = snapCanvasSize(size.width, size.height)
+  return snapped.width === size.width && snapped.height === size.height ? null : snapped
+})
+
+// 比例或尺寸一变就清掉手填值：上一档填的 700×1300 留在格里，用户改回预设时会被
+// 当成「自定义」提交上去——两种来源同时生效，等于没有选择。
+watch(
+  () => [form.canvasRatio, form.canvasSize],
+  () => {
+    form.canvasWidth = ''
+    form.canvasHeight = ''
+  },
+)
+// 选比例后尺寸随之复位：旧比例下的尺寸串（如 1920x1080）在新档里不存在。
+watch(
+  () => form.canvasRatio,
+  () => {
+    form.canvasSize = ''
+  },
+)
+// 路线切换时整格复位：ref 的生图画布与 director 的成片画幅不是同一个答案，原样
+// 带过去会让用户以为自己在导演台选了和刚才一样的尺寸——那正是两份口径分家的形态。
+watch(
+  () => form.mode,
+  () => {
+    form.canvasRatio = ''
+    form.canvasSize = ''
+    form.canvasWidth = ''
+    form.canvasHeight = ''
+  },
+)
 
 const submitting = ref(false)
 const plotMissing = ref(false)
@@ -317,6 +434,10 @@ async function createWithClarifications(
         // 结构化问答对（#338）：渲染成澄清块是**后端**的事，前端不拼「1. Q → A」——
         // 免得同一格式两处实现。没有问答对时整个键都不带（空表与省略同义）。
         ...(pairs.length > 0 ? { clarification_pairs: pairs } : {}),
+        // 画布（#366）：没选就整个键都不带——省略＝沿用各档默认（spec US15）。
+        // 服务端按路线解释这同一格（ref 落生图画布、director 落成片画幅），
+        // 所以这里只交宽高，不做任何对齐或家族展开。
+        ...(selectedCanvas.value !== null ? { canvas: selectedCanvas.value } : {}),
         // 非 director 路线一个导演台参数都不带：服务端会按 director_param_missing
         // 拒掉「带了却用不上」的那一份。
         ...(isDirector.value
@@ -447,6 +568,82 @@ async function createWithClarifications(
       </div>
 
       <p v-if="directorError" class="field-error">{{ directorError }}</p>
+    </div>
+
+    <!-- 画布选择器（#366）：base 不显示（该路线当前不读这个答案）；ref 问生图画布、
+         director 问成片画幅。三步与 CLI 同构：比例 → 尺寸 → 自定义。比例档表来自
+         服务端 `canvas-presets` 端点，前端不硬编码——拿不到就整块不出现。 -->
+    <div v-if="showsCanvas && canvasPresets" class="field" data-field="canvas">
+      <span class="field-label">{{ canvasHeadline }}</span>
+      <div class="field-row">
+        <div class="field">
+          <label for="session-canvas-ratio">第 1 步·比例</label>
+          <select id="session-canvas-ratio" v-model="form.canvasRatio" name="canvas_ratio">
+            <option value="" disabled>请选择比例</option>
+            <option v-for="preset in ratioPresets" :key="preset.name" :value="preset.name">
+              {{ preset.name }}
+            </option>
+            <option value="custom">自定义比例/尺寸（手填宽高）</option>
+          </select>
+        </div>
+
+        <!-- 比例选了自定义就没有尺寸档可给：手填格已覆盖这一步。 -->
+        <div v-if="form.canvasRatio !== '' && form.canvasRatio !== 'custom'" class="field">
+          <label for="session-canvas-size">第 2 步·尺寸</label>
+          <select id="session-canvas-size" v-model="form.canvasSize" name="canvas_size">
+            <option value="" disabled>请选择尺寸</option>
+            <option
+              v-for="size in sizeOptions"
+              :key="`${size.width}x${size.height}`"
+              :value="`${size.width}x${size.height}`"
+            >
+              {{ size.width }} × {{ size.height }}
+            </option>
+            <option value="custom">自定义尺寸（手填宽高）</option>
+          </select>
+        </div>
+      </div>
+
+      <div v-if="showsCustomSize" class="field-row">
+        <div class="field">
+          <label for="session-canvas-width">宽（像素）</label>
+          <input
+            id="session-canvas-width"
+            v-model="form.canvasWidth"
+            name="canvas_width"
+            type="number"
+            min="1"
+            step="1"
+            placeholder="如 700"
+          />
+        </div>
+        <div class="field">
+          <label for="session-canvas-height">高（像素）</label>
+          <input
+            id="session-canvas-height"
+            v-model="form.canvasHeight"
+            name="canvas_height"
+            type="number"
+            min="1"
+            step="1"
+            placeholder="如 1300"
+          />
+        </div>
+      </div>
+
+      <!-- 影响面说明（spec US5 / US6）：两条路线问的不是同一件事，文案按 CONTEXT 的
+           术语分开写——「画布」只指生图输出尺寸，「成片画幅」是导演台那一问。 -->
+      <p v-if="isRef" class="field-hint">影响道具与场景的参考图尺寸，不影响成片尺寸。</p>
+      <p v-if="isDirector && snappedCanvas" class="field-hint" data-notice="canvas-snapped">
+        实际执行 {{ snappedCanvas.width }}×{{ snappedCanvas.height }}（按插件 32
+        网格对齐；所选尺寸不是 32 的倍数）。
+      </p>
+      <p v-if="isDirector && !snappedCanvas" class="field-hint">
+        成片画幅按插件 32 网格对齐后才是实际执行尺寸；以导演台节点上的 width/height 为准。
+      </p>
+      <p v-if="isRef && !selectedCanvas" class="field-hint">
+        不选则沿用默认画布{{ fallbackSummary ? `（${fallbackSummary}）` : '' }}。
+      </p>
     </div>
 
     <div class="field-row">

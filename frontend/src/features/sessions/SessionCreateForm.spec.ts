@@ -11,6 +11,7 @@ import SessionCreateForm from './SessionCreateForm.vue'
 
 const createUrl = 'http://localhost/api/v1/sessions'
 const jobsUrl = 'http://localhost/api/v1/sessions/sess-1/jobs'
+const presetsUrl = 'http://localhost/api/v1/canvas-presets'
 
 // MSW + 组件状态跨几个微任务与一次宏任务，统一 flush（沿用 DiagnosticsView.spec）。
 async function settle() {
@@ -42,7 +43,7 @@ describe('SessionCreateForm 表单字段与默认值', () => {
     )
   })
 
-  it('补充说明与草稿在高级折叠区，不出现参考素材/画布/视频输出字段', () => {
+  it('补充说明与草稿在高级折叠区；base 路线不出现画布控件（#366 翻转为按路线判断）', () => {
     const { wrapper } = mountWithPlugins(SessionCreateForm, { withRouter: true })
 
     const details = wrapper.find('details')
@@ -50,10 +51,13 @@ describe('SessionCreateForm 表单字段与默认值', () => {
     expect(details.find('textarea[name="clarifications"]').exists()).toBe(true)
     expect(details.find('textarea[name="draft"]').exists()).toBe(true)
 
-    // V1 明确不出现这些输入（D4-AC1 / D4-AC17）。
+    // 仍然不出现的两个低层入口（只有高层 canvas 这一格）。
     expect(wrapper.find('[name="refs"]').exists()).toBe(false)
     expect(wrapper.find('[name="canvases"]').exists()).toBe(false)
     expect(wrapper.find('[name="video_output"]').exists()).toBe(false)
+    // base 路线当前不读画布答案（spec「Out of Scope」）：不摆空转控件。
+    expect(wrapper.find('[data-field="canvas"]').exists()).toBe(false)
+    expect(wrapper.find('select[name="canvas_ratio"]').exists()).toBe(false)
   })
 })
 
@@ -377,6 +381,226 @@ describe('SessionCreateForm 导演台路线（D8-1）', () => {
     await settle()
     expect(createCalls).toBe(0)
     expect(wrapper.text()).toContain('节点 id')
+  })
+})
+
+// 画布选择器（#366 / spec #363）：控件随路线切换，比例档来自 `canvas-presets` 端点。
+// 用例只断言界面上能看到的文字与控件、以及提交体里有没有 `canvas`，不读组件内部。
+describe('SessionCreateForm 画布选择器（#366）', () => {
+  // 一份**故意与前端常量不同**的档表：界面若渲染的是这一份，就证明确实来自服务端。
+  const presets = {
+    presets: [
+      { name: '9:21', w_ratio: 9, h_ratio: 21, sizes: [{ width: 540, height: 1260 }] },
+      {
+        name: '16:9',
+        w_ratio: 16,
+        h_ratio: 9,
+        sizes: [
+          { width: 1280, height: 720 },
+          { width: 1920, height: 1080 },
+        ],
+      },
+    ],
+    canvas_choice_families: ['z_image'],
+    fallback_canvases: [{ model: 'z_image', label: 'Z-Image', width: 640, height: 1280 }],
+  }
+
+  function stubCreate() {
+    let body: Record<string, unknown> | null = null
+    server.use(
+      http.post(createUrl, async ({ request }) => {
+        body = (await request.json()) as Record<string, unknown>
+        return HttpResponse.json(makeDetail({ session_id: 'sess-1', status: 'created' }), {
+          status: 201,
+        })
+      }),
+      http.post(jobsUrl, () => HttpResponse.json(makeJob(), { status: 202 })),
+    )
+    return () => body
+  }
+
+  function mountRef() {
+    server.use(http.get(presetsUrl, () => HttpResponse.json(presets)))
+    const { wrapper, router } = mountWithPlugins(SessionCreateForm, { withRouter: true })
+    return { wrapper, router }
+  }
+
+  // 计一次请求：base 路线不显示画布，也不该为它拉一次档表（空转请求同样是空转）。
+  function countPresetRequests() {
+    const calls = { presets: 0 }
+    server.use(
+      http.get(presetsUrl, () => {
+        calls.presets += 1
+        return HttpResponse.json(presets)
+      }),
+    )
+    return calls
+  }
+
+  async function pickRatio(wrapper: VueWrapper, name: string) {
+    await wrapper.find('select[name="canvas_ratio"]').setValue(name)
+  }
+
+  it('base 不显示画布控件；ref 显示生图画布三步选择与影响面说明', async () => {
+    const calls = countPresetRequests()
+    const { wrapper } = mountWithPlugins(SessionCreateForm, { withRouter: true })
+    await settle()
+
+    expect(wrapper.find('[data-field="canvas"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('影响道具与场景')
+    // 不显示的控件也不为空转拉一次档表。
+    expect(calls.presets).toBe(0)
+
+    await wrapper.find('input[name="mode"][value="ref"]').setValue()
+    await settle()
+
+    expect(wrapper.find('[data-field="canvas"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('影响道具与场景的参考图尺寸，不影响成片尺寸')
+    expect(calls.presets).toBe(1)
+    // 比例档来自服务端：桩里那一档 9:21 不是前端常量表里有的写法。
+    const ratioOptions = wrapper.findAll('select[name="canvas_ratio"] option')
+    expect(ratioOptions.map((option) => option.text())).toContain('9:21')
+    // 兜底画布也来自端点（显示名 + 尺寸），前端不另抄一张家族对照表。
+    expect(wrapper.text()).toContain('Z-Image 640×1280')
+  })
+
+  it('ref 一路选到具体尺寸，提交体带 canvas', async () => {
+    const created = stubCreate()
+    const { wrapper } = mountRef()
+    await wrapper.find('textarea[name="plot"]').setValue('雨夜旧信')
+    await wrapper.find('input[name="mode"][value="ref"]').setValue()
+    await settle()
+
+    await pickRatio(wrapper, '16:9')
+    await wrapper.find('select[name="canvas_size"]').setValue('1920x1080')
+
+    await wrapper.find('form').trigger('submit')
+    await settle()
+
+    expect(created()).toMatchObject({ mode: 'ref', canvas: { width: 1920, height: 1080 } })
+  })
+
+  it('director 显示成片画幅口径，选 1920×1080 当场说破实际执行 1920×1088', async () => {
+    const { wrapper } = mountRef()
+    await wrapper.find('input[name="mode"][value="director"]').setValue()
+    await settle()
+
+    // 两个入口问的不是同一件事：标签必须不同（spec US6）。
+    expect(wrapper.text()).toContain('成片画幅')
+    expect(wrapper.text()).not.toContain('影响道具与场景')
+
+    await pickRatio(wrapper, '16:9')
+    await wrapper.find('select[name="canvas_size"]').setValue('1920x1080')
+    expect(wrapper.text()).toContain('实际执行 1920×1088')
+  })
+
+  it('比例档与尺寸档都提供自定义入口，手填宽高后提交', async () => {
+    const created = stubCreate()
+    const { wrapper } = mountRef()
+    await wrapper.find('textarea[name="plot"]').setValue('雨夜旧信')
+    await wrapper.find('input[name="mode"][value="ref"]').setValue()
+    await settle()
+
+    // 比例档最后一项是自定义。
+    const ratioOptions = wrapper.findAll('select[name="canvas_ratio"] option')
+    expect(ratioOptions.at(-1)!.text()).toContain('自定义')
+    await pickRatio(wrapper, 'custom')
+    await wrapper.find('input[name="canvas_width"]').setValue('700')
+    await wrapper.find('input[name="canvas_height"]').setValue('1300')
+
+    await wrapper.find('form').trigger('submit')
+    await settle()
+
+    expect(created()).toMatchObject({ canvas: { width: 700, height: 1300 } })
+  })
+
+  it('尺寸档的自定义入口：选比例后也能手填宽高', async () => {
+    const created = stubCreate()
+    const { wrapper } = mountRef()
+    await wrapper.find('textarea[name="plot"]').setValue('雨夜旧信')
+    await wrapper.find('input[name="mode"][value="ref"]').setValue()
+    await settle()
+
+    await pickRatio(wrapper, '16:9')
+    const sizeOptions = wrapper.findAll('select[name="canvas_size"] option')
+    expect(sizeOptions.at(-1)!.text()).toContain('自定义')
+    await wrapper.find('select[name="canvas_size"]').setValue('custom')
+    await wrapper.find('input[name="canvas_width"]').setValue('960')
+    await wrapper.find('input[name="canvas_height"]').setValue('544')
+
+    await wrapper.find('form').trigger('submit')
+    await settle()
+
+    expect(created()).toMatchObject({ canvas: { width: 960, height: 544 } })
+  })
+
+  it('切换路线不带走上一路的画布答案：两种口径不是同一件事', async () => {
+    const created = stubCreate()
+    const { wrapper } = mountRef()
+    await wrapper.find('textarea[name="plot"]').setValue('雨夜旧信')
+    await wrapper.find('input[name="mode"][value="ref"]').setValue()
+    await settle()
+    await pickRatio(wrapper, '16:9')
+    await wrapper.find('select[name="canvas_size"]').setValue('1920x1080')
+
+    // 换到导演台：那一格问的是成片画幅，ref 的生图画布答案不能原样带过去。
+    await wrapper.find('input[name="mode"][value="director"]').setValue()
+    await settle()
+    expect((wrapper.find('select[name="canvas_ratio"]').element as HTMLSelectElement).value).toBe(
+      '',
+    )
+    expect(wrapper.find('[data-notice="canvas-snapped"]').exists()).toBe(false)
+
+    await wrapper.find('select[name="director_mode"]').setValue('fl2v')
+    await wrapper.find('input[name="director_node_id"]').setValue('node-42')
+    await wrapper.find('form').trigger('submit')
+    await settle()
+
+    expect(created()).not.toHaveProperty('canvas')
+  })
+
+  it('不选画布时提交体不带 canvas，创建照常成功', async () => {
+    const created = stubCreate()
+    const { wrapper, router } = mountRef()
+    await router!.isReady()
+    await wrapper.find('textarea[name="plot"]').setValue('雨夜旧信')
+    await wrapper.find('input[name="mode"][value="ref"]').setValue()
+    await settle()
+
+    await wrapper.find('form').trigger('submit')
+    await settle()
+
+    expect(created()).not.toBeNull()
+    expect(created()).not.toHaveProperty('canvas')
+    expect(router!.currentRoute.value.path).toBe('/sessions/sess-1')
+  })
+
+  it('比例档拉取失败时选择器整块不出现，创建照常可提交', async () => {
+    server.use(
+      http.get(presetsUrl, () =>
+        HttpResponse.json(
+          {
+            type: 'about:blank',
+            title: '服务器内部错误',
+            status: 500,
+            detail: 'boom',
+            instance: presetsUrl,
+          },
+          { status: 500, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const created = stubCreate()
+    const { wrapper } = mountWithPlugins(SessionCreateForm, { withRouter: true })
+    await wrapper.find('textarea[name="plot"]').setValue('雨夜旧信')
+    await wrapper.find('input[name="mode"][value="ref"]').setValue()
+    await settle()
+
+    expect(wrapper.find('[data-field="canvas"]').exists()).toBe(false)
+
+    await wrapper.find('form').trigger('submit')
+    await settle()
+    expect(created()).not.toHaveProperty('canvas')
   })
 })
 
