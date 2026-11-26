@@ -87,4 +87,23 @@ describe('FrameSubmissionReceipt 尺寸回执', () => {
     expect(text).toContain('1280×720')
     expect(text).not.toContain('320×240')
   })
+
+  it('后来换成交相符的一张：旧提示不该继续挂着（#363 复审 B5）', () => {
+    // 最新一次 reason 为空＝那一次没提示，整块不渲染；不能因为更早一次有提示就把
+    // 旧的留在页面上，否则「尺寸相符时界面上没有这条提示」就不成立。
+    const wrapper = mountReceipt([
+      makeItem({
+        item_id: 'older',
+        resolved_at: '2026-11-11T00:00:30Z',
+        reason: '关键帧尺寸提示：首帧图 320×240 与当前画布 640×1280 不一致。',
+      }),
+      makeItem({
+        item_id: 'newer',
+        resolved_at: '2026-11-11T00:05:30Z',
+        reason: '',
+      }),
+    ])
+
+    expect(wrapper.find('[data-frame-canvas-receipt]').exists()).toBe(false)
+  })
 })

@@ -135,13 +135,15 @@ const selectedCanvas = computed<{ width: number; height: number } | null>(() => 
   }
   return parseSizeOption(form.canvasSize)
 })
-// 对齐算法与后端 `director.film_canvas.snap_film_size` 同源（见 `canvas.ts`）。
+// 对齐算法与后端 `director.film_canvas.snap_film_size` 同源（见 `canvas.ts`）；
+// 网格值来自服务端档表的 `align`，前端不持有那个数。
 const snappedCanvas = computed(() => {
   const size = selectedCanvas.value
-  if (!isDirector.value || size === null) {
+  const align = canvasPresets.value?.align
+  if (!isDirector.value || size === null || !align) {
     return null
   }
-  const snapped = snapCanvasSize(size.width, size.height)
+  const snapped = snapCanvasSize(size.width, size.height, align)
   return snapped.width === size.width && snapped.height === size.height ? null : snapped
 })
 
@@ -641,6 +643,15 @@ async function createWithClarifications(
       <p v-if="isDirector && !snappedCanvas" class="field-hint">
         成片画幅按插件 32 网格对齐后才是实际执行尺寸；以导演台节点上的 width/height 为准。
       </p>
+      <!-- 不选也能创建（US15），但要把后果说在前面（#363 复审 B2）：交付核对要求
+           会话有成片画幅答案，缺了会在交付那一步停下，而不是创建时。 -->
+      <p
+        v-if="isDirector && !selectedCanvas"
+        class="field-hint field-hint--warn"
+        data-notice="canvas-missing"
+      >
+        不选可以创建，但这条会话会在「交付」核对时因缺成片画幅答案而停下——建议现在就选。
+      </p>
       <p v-if="isRef && !selectedCanvas" class="field-hint">
         不选则沿用默认画布{{ fallbackSummary ? `（${fallbackSummary}）` : '' }}。
       </p>
@@ -836,6 +847,11 @@ async function createWithClarifications(
   margin: 0;
   color: var(--color-ink-soft);
   font-size: var(--text-micro);
+}
+/* 后果提示（#363 复审 B2）：不是错误、不拦提交，但要让它在扫视时比普通说明更显眼。
+   沿用设计系统的信号色，与错误色区分开。 */
+.field-hint--warn {
+  color: var(--color-signal);
 }
 .advanced {
   border-top: 1px solid var(--color-rule);

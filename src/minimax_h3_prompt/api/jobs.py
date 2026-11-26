@@ -626,39 +626,27 @@ def _frame_canvas_hint(
 ) -> str:
     """交回的关键帧图逐张核一次尺寸，返回写进待办回执的提示（空串＝无提示）。
 
-    判据只有 ``segment_validation.frame_canvas_warning_text`` 一份（#365，CLI 阶段 2
-    打出来的就是它）；期望画布取 ``director.aspect_flow.frame_canvas``（与段规划预检、
-    回贴核对、CLI 同一份读法，按 ``Brief.canvases`` 的当前关键帧档算），不在这里另算。
+    判据与逐帧循环都只有一份：``segment_validation.frame_canvas_hints_for``（#363 复审
+    A3 把 CLI 与工作台的同一段形状收进去，降级口径不再分家）；期望画布取
+    ``director.aspect_flow.frame_canvas``（与段规划预检、回贴核对、CLI 同一份读法，
+    按 ``Brief.canvases`` 的当前关键帧档算），不在这里另算。
 
     **只提示、不阻断**（#363 spec「尺寸核对」）：用户有时会有意用小尺寸图做快速试跑，
-    不符与读不出都不许拦住交帧。所以判据读图失败一律降级成「没有提示」，而不是把
-    一次决议打成 500——提示是附言，不是闸门。
-
-    每张图一条、换行分隔：首尾两帧可能各自不符，合成一句就会丢掉另一张的数值。
+    不符与读不出都不许拦住交帧。所以取画布失败一律降级成「没有提示」，而不是把一次
+    决议打成 500——提示是附言，不是闸门。
     """
     from ..director.aspect_flow import frame_canvas
-    from ..segment_validation import frame_canvas_warning_text
+    from ..segment_validation import frame_canvas_hints_for
 
     if not frame_paths:
         return ""
     try:
-        expected = frame_canvas(getattr(brief, "canvases", None))
+        expected: tuple[int, int] | None = frame_canvas(
+            getattr(brief, "canvases", None))
     except Exception as exc:  # noqa: BLE001 - 画布读不出时没有可核的期望值
         logger.warning("交回帧图的期望画布取不到，跳过尺寸提示：%s", exc)
         return ""
-    notes: list[str] = []
-    for role, label in (("first", "首帧"), ("last", "尾帧")):
-        path = frame_paths.get(role)
-        if path is None:
-            continue
-        try:
-            note = frame_canvas_warning_text(path, expected, label=label)
-        except Exception as exc:  # noqa: BLE001 - 量不出尺寸不该拦住交图
-            logger.warning("交回 %s 图的尺寸提示读不出，跳过：%s", label, exc)
-            continue
-        if note:
-            notes.append(note)
-    return "\n".join(notes)
+    return frame_canvas_hints_for(frame_paths, expected)
 
 
 class JobCancelled(Exception):

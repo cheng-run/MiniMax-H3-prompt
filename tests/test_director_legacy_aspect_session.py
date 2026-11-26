@@ -14,6 +14,18 @@ OLD_SESSION = "2026-11-03T13:00:35.825912+00:00"
 NEW_SESSION = "2026-11-05T01:00:00+00:00"
 
 
+def _after_canvas_entry() -> str:
+    """晚于画布入口截止点的时刻，**从常量现算**（#363 复审 B1）。
+
+    截止点是占位值（用户裁定：上线后改回真实日期），用例若写死日期，常量一挪就
+    集体失效；这里加一天再转成会话文件那种 UTC 写法。
+    """
+    from minimax_h3_prompt.director.film_canvas import FILM_CANVAS_ENTRY_SINCE
+
+    return (FILM_CANVAS_ENTRY_SINCE + timedelta(days=1)).astimezone(
+        timezone.utc).isoformat()
+
+
 def _brief_with(canvases):
     """造一份导演台 r2v brief，画布表按用例给定。"""
     from minimax_h3_prompt.brief_parser import Brief
@@ -156,7 +168,7 @@ def test_session_after_the_canvas_entry_without_an_answer_fails(
     video = tmp_video("film.mp4", width=480, height=864, frames=2)
 
     ok, note = _verdict(
-        video, _brief_with({}), created_at="2026-11-27T00:00:00+00:00")
+        video, _brief_with({}), created_at=_after_canvas_entry())
 
     assert ok is False
     assert note is not None and "读不到" in note and "停止" in note
@@ -170,16 +182,17 @@ def test_session_with_an_answer_is_compared_exactly_as_before(
     防的是把整支判据改坏：新截止点只约束「缺答案」，答案在手时无论会话多新都照旧比。
     """
     _pin_frame_model(monkeypatch, "z_image")
+    later = _after_canvas_entry()
     matching = tmp_video("ok.mp4", width=1920, height=1080, frames=2)
     ok, note = _verdict(
         matching, _brief_with({"z_image": (1920, 1080)}),
-        created_at="2026-11-27T00:00:00+00:00")
+        created_at=later)
     assert (ok, note) == (True, None)
 
     mismatching = tmp_video("bad.mp4", width=480, height=864, frames=2)
     ok, note = _verdict(
         mismatching, _brief_with({"z_image": (1920, 1080)}),
-        created_at="2026-11-27T00:00:00+00:00")
+        created_at=later)
     assert ok is False
     assert note is not None and "1920×1080" in note and "480×864" in note
 

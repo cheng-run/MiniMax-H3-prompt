@@ -23,14 +23,13 @@ interface ReceiptView {
   text: string
 }
 
-// 多次提交取最新一次：`resolved_at` 比较口径是「人按下那一刻」，同刻取后出现的。
+// 多次提交取**最新一次**，而不是「最新一条有提示的」（#363 复审 B5）：先交了一张
+// 不符的、后来换成交相符的，前者那条提示不该继续挂在页面上——那会违反「相符时
+// 界面上没有这条提示」。`resolved_at` 比较口径是「人按下那一刻」，同刻取后出现的。
 const receipt = computed<ReceiptView | null>(() => {
   let latest: ActionItemOut | null = null
   for (const item of props.actionItems) {
     if (item.kind !== 'frame_submission' || item.status !== 'resolved') {
-      continue
-    }
-    if (!(item.reason ?? '').trim()) {
       continue
     }
     if (latest === null || (item.resolved_at ?? '') >= (latest.resolved_at ?? '')) {
@@ -40,7 +39,9 @@ const receipt = computed<ReceiptView | null>(() => {
   if (latest === null) {
     return null
   }
-  return { key: latest.item_id, text: (latest.reason ?? '').trim() }
+  const text = (latest.reason ?? '').trim()
+  // 最新那一次没有提示＝整块不渲染（不制造噪声）。
+  return text ? { key: latest.item_id, text } : null
 })
 </script>
 

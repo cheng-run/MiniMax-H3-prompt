@@ -204,8 +204,8 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "frontend_canvas_snap_truncates_instead_of_rounding",
         "frontend/src/features/sessions/canvas.ts",
-        "  const snapped = Math.floor((Math.trunc(value) + CANVAS_ALIGN / 2) / CANVAS_ALIGN) * CANVAS_ALIGN",
-        "  const snapped = Math.trunc(value / CANVAS_ALIGN) * CANVAS_ALIGN",
+        "  const snapped = Math.floor((Math.trunc(value) + align / 2) / align) * align",
+        "  const snapped = Math.trunc(value / align) * align",
         ("src/features/sessions/canvas.spec.ts"
          "::snapCanvasSide 与后端 snap_film_size 同一组数字",),
         "前端改成向下截断＝界面说「实际执行 1920×1056」，服务端落 1920×1088，"
@@ -2780,6 +2780,46 @@ MUTATIONS: tuple[Mutation, ...] = (
         ("tests/test_api_problems.py::test_client_error_domain_fault_stays_silent",
          "tests/test_api_problems.py::test_not_found_stays_silent"),
         "判据放宽到 ≥400＝正常客户端错误也记 error，日志被刷屏、真故障被淹没（#348）",
+    ),
+    # ------------------------------------------------------------------
+    # #363 复审（Standards 轴 A1）：交回帧图尺寸判据的两条新变异
+    # ------------------------------------------------------------------
+    Mutation(
+        "frame_canvas_hint_never_silent",
+        # 相符那一支改成永远返回提示：相符时也制造噪声，「没有差异就没有声音」当场失效。
+        "src/minimax_h3_prompt/segment_validation.py",
+        '    if (actual_width, actual_height) == (expected_width, expected_height):\n'
+        '        return ""\n',
+        '    if (actual_width, actual_height) == (expected_width, expected_height):\n'
+        '        return "尺寸相符"\n',
+        ("tests/test_frame_canvas_hint.py::test_matching_size_is_silent",),
+        "相符时不再沉默＝每次交图都冒出假提示，用户学会无视它，真不符也就跟着被忽略了"
+        "（#363 复审 A1）",
+    ),
+    Mutation(
+        "frame_canvas_unreadable_reported_as_mismatch",
+        # 「读不出宽高」改写成「尺寸不符」：把坏图说成尺寸错了，排查方向被带偏。
+        "src/minimax_h3_prompt/segment_validation.py",
+        '    if actual is None:\n'
+        '        return (f"{FRAME_CANVAS_HINT_PREFIX}：读不出{label}图的宽高"\n'
+        '                f"（文件损坏或不是图片），量不出来；{label}图照常收下。")\n',
+        '    if actual is None:\n'
+        '        return (f"{FRAME_CANVAS_HINT_PREFIX}：{label}图尺寸不符"\n'
+        '                f"（文件损坏或不是图片）；{label}图照常收下。")\n',
+        ("tests/test_frame_canvas_hint.py::test_unreadable_image_is_measured_not_mismatched",),
+        "读不出宽高被当成尺寸不符＝用户去改生成尺寸，实际要修的是那张坏图（#363 复审 A1）",
+    ),
+    Mutation(
+        "frame_canvas_hint_not_wired_into_the_receipt",
+        # 工作台接线整段短路：判据还在、CLI 还在打，但交帧回执永远空——用户读不到提示。
+        "src/minimax_h3_prompt/api/jobs.py",
+        '    if not frame_paths:\n'
+        '        return ""\n',
+        '    if True:\n'
+        '        return ""\n',
+        ("tests/test_api_frame_canvas_receipt.py"
+         "::test_mismatch_lands_in_the_receipt_and_stage2_still_runs",),
+        "回执恒空＝判据与 CLI 都还在，工作台上却一条尺寸提示都读不到（#363 复审 A1）",
     ),
 )
 

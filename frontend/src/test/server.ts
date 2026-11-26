@@ -51,6 +51,7 @@ const minimalCanvasPresetsHandler = http.get('http://localhost/api/v1/canvas-pre
     ],
     canvas_choice_families: ['z_image'],
     fallback_canvases: [{ model: 'z_image', label: 'Z-Image', width: 640, height: 1280 }],
+    align: 32,
   }),
 )
 

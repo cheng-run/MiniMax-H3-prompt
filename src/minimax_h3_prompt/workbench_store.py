@@ -1637,8 +1637,9 @@ class SessionDetail(SessionSummary):
     # 成片尺寸的推导声明值（#367）：放在详情而不是 brief 上——它不是 brief 的语义
     # （brief 里已有两条路线的**原料**：``canvases`` 与 ``video_output``），而是
     # 「这次会话按那些原料会跑出多大」的派生回显，且与 ``director_notes`` 一样是
-    # 读详情时现算的（不落快照、旧会话也能拿到）。``None`` ＝ 导演台旧会话没有成片
-    # 画幅答案，或…… 只有一种：拿不出声明值就不编，界面照实说。
+    # 读详情时现算的（不落快照、旧会话也能拿到）。``None`` 只有两种来由：导演台旧
+    # 会话没有成片画幅答案，或 base／ref 的推导读不出（降级，见 ``_film_size``）。
+    # 拿不出声明值就不编，界面照实说。
     film_size: FilmSizeOut | None = None
     current_job: JobSummary | None = None
     jobs: list[JobSummary] = Field(default_factory=list)

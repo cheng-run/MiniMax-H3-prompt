@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # 只用于注解（运行时经函数级导入取，防环）
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from ..asset_loop import QueueItem
     from ..brief_parser import Brief
@@ -314,7 +314,7 @@ def print_firstframe_prompt(text: str, *, index: int, path: Path,
 
 
 def announce_frame_canvas_hints(
-    frames: Sequence[tuple[str, Path | None]], brief: Brief,
+    frames: Mapping[str, Path | None], brief: Brief,
 ) -> None:
     """交回的关键帧图逐张核一次尺寸并打印提示（#365）：只提示、不阻断。
 
@@ -326,17 +326,22 @@ def announce_frame_canvas_hints(
 
     期望画布取**当前关键帧档**的生效画布（``aspect_flow.frame_canvas``，与段规划
     预检、回贴核对同一份读法），不在向导里另算一份。
+
+    逐帧算与降级都收在 ``segment_validation.frame_canvas_hints_for`` 一处（#363 复审
+    A3）：提示是附言，配置读坏（``ConfigError``）也只该一声不响，不该把阶段 2 带停。
     """
     from ..director.aspect_flow import frame_canvas
-    from ..segment_validation import frame_canvas_warning_text
+    from ..segment_validation import frame_canvas_hints_for
 
-    expected = frame_canvas(brief.canvases)
-    for label, path in frames:
-        if path is None:
-            continue
-        note = frame_canvas_warning_text(path, expected, label=label)
-        if note:
-            print(f"[提示] {note}")
+    try:
+        expected = frame_canvas(brief.canvases)
+    except Exception as exc:  # noqa: BLE001 - 画布读不出＝没有可核的期望值
+        print(f"[提示] 关键帧尺寸核对跳过（取不到当前画布：{exc}）")
+        return
+    hints = frame_canvas_hints_for(dict(frames), expected)
+    for line in hints.splitlines():
+        if line.strip():
+            print(f"[提示] {line}")
 
 
 def semantic_reference(previous_text: str | None) -> str | None:

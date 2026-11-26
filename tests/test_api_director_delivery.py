@@ -42,6 +42,19 @@ ENV = "MINIMAX_FAKE_PIPELINE"
 RUNTIME_TOLERANCE = 5
 
 
+def _after_canvas_entry() -> str:
+    """晚于画布入口截止点的时刻，从常量现算（#363 复审 B1）。
+
+    截止点是占位值，用例写死日期的话常量一挪就集体失效。
+    """
+    from datetime import timedelta, timezone
+
+    from minimax_h3_prompt.director.film_canvas import FILM_CANVAS_ENTRY_SINCE
+
+    return (FILM_CANVAS_ENTRY_SINCE + timedelta(days=1)).astimezone(
+        timezone.utc).isoformat()
+
+
 def _segment(index: int, segment_type: str, start: int, declared: int,
              export: int | None = None) -> DirectorSegment:
     guided = is_guided(segment_type)
@@ -482,7 +495,7 @@ def test_canvas_entry_session_without_the_answer_stops_before_archiving(director
     def _current_without_answer(mode: str):
         brief = SimpleNamespace(director_mode=mode, canvases={})
         return SimpleNamespace(
-            brief=brief, created_at="2026-11-27T00:00:00+00:00",
+            brief=brief, created_at=_after_canvas_entry(),
             stage_state_snapshot=lambda: {})
 
     with pytest.raises(FinalFilmMismatch) as excinfo:

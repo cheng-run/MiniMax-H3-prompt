@@ -104,4 +104,22 @@ describe('filmSizeFact 成片尺寸行', () => {
     expect(row.value).toBe('未声明（本会话没有成片画幅答案）')
     expect(row.note).toBe('成片画幅以节点 width/height 为准')
   })
+
+  it('口径听 `film_size.source`，不按 mode 自己再判一次路线（#363 复审）', () => {
+    // 服务端标了 film_aspect 就按成片画幅的口径说——即便 mode 是 ref，也不该被前端
+    // 改叫「成片尺寸」。这条钉住「source 有消费者」：删掉对 source 的读取、退回只看
+    // mode，本用例变红。
+    const detail = detailWith({ mode: 'ref' })
+    detail.film_size = {
+      width: 1920,
+      height: 1088,
+      source: 'film_aspect',
+      canvas: null,
+      notes: [],
+    }
+
+    const row = filmSizeFact(detail)!
+    expect(row.label).toBe('成片画幅')
+    expect(row.note).toBe('成片画幅以节点 width/height 为准')
+  })
 })

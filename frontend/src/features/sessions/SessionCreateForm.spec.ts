@@ -403,6 +403,7 @@ describe('SessionCreateForm 画布选择器（#366）', () => {
     ],
     canvas_choice_families: ['z_image'],
     fallback_canvases: [{ model: 'z_image', label: 'Z-Image', width: 640, height: 1280 }],
+    align: 32,
   }
 
   function stubCreate() {
@@ -492,6 +493,41 @@ describe('SessionCreateForm 画布选择器（#366）', () => {
     await pickRatio(wrapper, '16:9')
     await wrapper.find('select[name="canvas_size"]').setValue('1920x1080')
     expect(wrapper.text()).toContain('实际执行 1920×1088')
+  })
+
+  it('director 不选画布时提示「交付时会停」，但照样允许创建（#363 复审 B2）', async () => {
+    const created = stubCreate()
+    const { wrapper } = mountRef()
+    await wrapper.find('textarea[name="plot"]').setValue('雨夜旧信')
+    await wrapper.find('input[name="mode"][value="director"]').setValue()
+    await wrapper.find('select[name="director_mode"]').setValue('r2v')
+    await wrapper.find('input[name="director_node_id"]').setValue('node-1')
+    await settle()
+
+    // 后果说在前面：不选会在交付核对时停下。
+    const notice = wrapper.find('[data-notice="canvas-missing"]')
+    expect(notice.exists()).toBe(true)
+    expect(notice.text()).toContain('交付')
+
+    // 但不阻断创建（US15）：不选也能提交，且提交体不带 canvas。
+    await wrapper.find('form').trigger('submit')
+    await settle()
+    expect(created()).not.toBeNull()
+    expect(created()!.canvas).toBeUndefined()
+
+    // 一选就说明后果解除。
+    await wrapper.find('select[name="canvas_ratio"]').setValue('16:9')
+    await wrapper.find('select[name="canvas_size"]').setValue('1920x1080')
+    expect(wrapper.find('[data-notice="canvas-missing"]').exists()).toBe(false)
+  })
+
+  it('ref 不选画布时不出现「交付会停」那条提示（那是导演台的口径）', async () => {
+    const { wrapper } = mountRef()
+    await wrapper.find('input[name="mode"][value="ref"]').setValue()
+    await settle()
+
+    expect(wrapper.find('[data-notice="canvas-missing"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('影响道具与场景')
   })
 
   it('比例档与尺寸档都提供自定义入口，手填宽高后提交', async () => {

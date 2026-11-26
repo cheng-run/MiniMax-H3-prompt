@@ -61,7 +61,7 @@ def test_unreadable_image_is_measured_not_mismatched(tmp_path):
 # CLI 缝：阶段 2 收帧图时真的打出来，且流程照常推进
 # ---------------------------------------------------------------------------
 
-def _drive_phase2(tmp_path, monkeypatch, image):
+def _drive_phase2(tmp_path, monkeypatch, image, frame_canvas_fn=None):
     brief = Brief(mode="base", variant="I2VA", duration=8.0, style="写实", plot="便利店橘猫")
     generation_dir = tmp_path / "GEN001"
     session_store.save_session(
@@ -80,7 +80,9 @@ def _drive_phase2(tmp_path, monkeypatch, image):
         ],
     )
     # 期望画布由配置推导；这里钉成字面量，用例不随 config/image.yaml 的 frame: 档漂。
-    monkeypatch.setattr(aspect_flow, "frame_canvas", lambda canvases=None: (640, 1280))
+    monkeypatch.setattr(
+        aspect_flow, "frame_canvas",
+        frame_canvas_fn or (lambda canvases=None: (640, 1280)))
     monkeypatch.setattr(wizard, "_load_or_make_summary", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         wizard, "run_stage2",
@@ -108,3 +110,44 @@ def test_cli_is_quiet_when_the_size_matches(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "关键帧尺寸提示" not in out, "尺寸相符时不许制造噪声"
     assert result == 0
+
+
+def test_cli_survives_an_unreadable_canvas_config(tmp_path, monkeypatch, capsys):
+    """取期望画布时抛错只该一声不响，不该把阶段 2 带停（#363 复审 A3）。
+
+    提示是附言：``config/image.yaml`` 写坏（``ConfigError``）时主流程照常跑，
+    否则一条附言算不出来就会让整条生成停在收帧这一步。
+    """
+    from minimax_h3_prompt.errors import ConfigError
+
+    def _boom(_canvases=None):
+        raise ConfigError("image.yaml 读不了")
+
+    result, generation_dir = _drive_phase2(
+        tmp_path, monkeypatch, _png(tmp_path / "first.png", (320, 240)),
+        frame_canvas_fn=_boom)
+
+    out = capsys.readouterr().out
+    assert result == 0, "尺寸提示算不出来时阶段 2 被带停了"
+    assert (generation_dir / "video-prompt.md").is_file()
+    assert "关键帧尺寸提示" not in out
+    assert "尺寸核对跳过" in out, "跳过也要说一声，否则用户以为核过了"
+
+
+def test_shared_hint_helper_degrades_instead_of_raising(tmp_path):
+    """共享收口自己对坏输入降级：CLI 与工作台只调它，不必各写一份 try/except。"""
+    from minimax_h3_prompt.segment_validation import frame_canvas_hints_for
+
+    broken = tmp_path / "broken.png"
+    broken.write_bytes(b"\x89PNG\r\n\x1a\nnope")
+
+    assert frame_canvas_hints_for({"first": broken}, (640, 1280)).startswith(
+        "关键帧尺寸提示")
+    # 期望画布为 None（调用方取失败）＝没有可核的期望值，一声不响。
+    assert frame_canvas_hints_for({"first": broken}, None) == ""
+    assert frame_canvas_hints_for({}, (640, 1280)) == ""
+    # 不符与相符各一条，同一次调用里逐帧分开。
+    ok = _png(tmp_path / "ok.png", (640, 1280))
+    bad = _png(tmp_path / "bad.png", (320, 240))
+    lines = frame_canvas_hints_for({"first": ok, "last": bad}, (640, 1280)).splitlines()
+    assert len(lines) == 1 and "尾帧" in lines[0]

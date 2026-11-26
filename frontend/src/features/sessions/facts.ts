@@ -27,10 +27,15 @@ export function canvasFact(detail: SessionDetail): FactRow {
   }
 }
 
-/** 成片尺寸行：推导的声明值，不是实测值（CONTEXT「成片画幅」「视频输出」）。 */
+/** 成片尺寸行：推导的声明值，不是实测值（CONTEXT「成片尺寸」「视频输出」）。 */
 export function filmSizeFact(detail: SessionDetail): FactRow | null {
   const film = detail.film_size ?? null
-  if (detail.mode === 'director') {
+  // 口径由服务端的 `film_size.source` 决定，前端不自己再判一次路线：两份推导
+  // （导演台的成片画幅、base/ref 的注入卡视频输出）语义不同，由后端标注哪一份。
+  // 只有 `film_size` 缺席时才退回落 `mode`——那时没有 source 可读，只能按路线说清
+  // 「为什么这一行没有值」。
+  const source = film?.source ?? (detail.mode === 'director' ? 'film_aspect' : 'video_output')
+  if (source === 'film_aspect') {
     // 导演台：这一格是**成片画幅**（向导唯一问一次的答案），实际执行值以节点为准
     // （CONTEXT「视频输出」：包 output 与声明值都可能与节点不符）。
     return {
@@ -42,6 +47,7 @@ export function filmSizeFact(detail: SessionDetail): FactRow | null {
     }
   }
   if (detail.mode !== 'base' && detail.mode !== 'ref') {
+    // 未知路线的 `film_size` 本该为 null；万一后端给了值也不猜口径，整行不出。
     return null
   }
   if (!film) {

@@ -13,6 +13,7 @@
 | `api/jobs.py` | `JobRunner`：每会话 asyncio 锁、`to_thread` 跑 LangGraph、节点边界取消、`active-job.json`、启动对账、阶段 1/2 执行 |
 | `api/routes/sessions.py` | `/api/v1` 全部会话端点；**路由顺序即契约**：`{session_id:path}` 会吞斜杠，`/jobs`、`/events`、`/action-items` 必须注册在详情路由之前 |
 | `api/routes/clarification.py` | `GET /api/v1/clarification-questions`：建会话**之前**按主题现生成起步澄清问题（#338）。路径独立于会话资源——提问发生在会话还没有标识的时候；上限缺省取 `pipeline.max_clarification_rounds`，`<= 0` 直接返回空表且不建模型，生成失败回 502 `clarification_generation_failed` |
+| `api/routes/canvas.py` | `GET /api/v1/canvas-presets`：比例档表、会被问画布的家族、各生图模型的兜底画布与插件网格对齐（#364）。数据全部从 `generation` / `director.pack` 的常量现取，前端渲染选择器与算「实际执行尺寸」都只读这一份，不复制档表；只读、不建会话 |
 | `api/routes/assets.py` | 上传素材的收、列与删除（`POST/GET/DELETE /sessions/{id}/assets`）；整只路由器在 `create_app` 里排在 `sessions` 之前，顺序不靠人记 |
 | `api/routes/media.py` | 素材字节读取（`GET/HEAD /media/{asset_id:path}`）；同样排在 `sessions` 之前 |
 | `api/media.py` | 单段 Range 解析、416 与字节流响应；素材与成片的 content 端点**共用这一份** |

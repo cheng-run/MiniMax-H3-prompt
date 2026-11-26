@@ -19,9 +19,13 @@
 """
 from __future__ import annotations
 
+import logging
+from collections.abc import Mapping
 from pathlib import Path
 
 from .tools.preflight import check_segment_video
+
+_hint_logger = logging.getLogger(__name__)
 
 # 语义判据直调的角色名（ADR 0019：成本表与进度面板按角色分账）。与写段那几个角色
 # 并列，成本表上能看出钱花在「判段」而不是「写段」。
@@ -201,10 +205,49 @@ def frame_canvas_warning_text(
         f"图是别的尺寸通常意味着用的不是这一档的画布；不阻断，{label}图照常收下。")
 
 
+FRAME_CANVAS_LABELS: tuple[tuple[str, str], ...] = (("first", "首帧"), ("last", "尾帧"))
+"""帧槽角色 → 给人看的标签。CLI 与工作台共用同一份顺序与称呼（先首后尾）。"""
+
+
+def frame_canvas_hints_for(
+    frames: Mapping[str, Path | str | None],
+    expected: tuple[int, int] | None,
+) -> str:
+    """逐帧算尺寸提示，合成一段（空串＝无提示）；**降级只在这一处**（#363 复审 A3）。
+
+    为什么要有这个收口：CLI（``ui.wizard_display.announce_frame_canvas_hints``）与
+    工作台（``api.jobs._frame_canvas_hint``）都要「取期望画布 → 逐帧算 → 收非空」，
+    原先各写一遍，且降级口径分家——工作台两处 ``except`` 把失败吞成空提示，CLI
+    侧一处都没有，``frame_canvas`` 读坏 ``config/image.yaml``（``ConfigError``）会
+    炸穿阶段 2。提示是**附言**，附言算不出来就该一声不响，绝不能把主流程带停。
+
+    ``expected`` 为 ``None``（调用方自己取画布时出错）时直接返回空串——没有可核的
+    期望值，就没有提示。每张图一条、换行分隔：首尾两帧可能各自不符，合成一句会丢掉
+    另一张的数值。
+    """
+    if expected is None or not frames:
+        return ""
+    notes: list[str] = []
+    for role, label in FRAME_CANVAS_LABELS:
+        path = frames.get(role)
+        if path is None:
+            continue
+        try:
+            note = frame_canvas_warning_text(path, expected, label=label)
+        except Exception as exc:  # noqa: BLE001 - 量不出尺寸不该拦住交图
+            _hint_logger.warning("交回 %s 图的尺寸提示算不出来，跳过：%s", label, exc)
+            continue
+        if note:
+            notes.append(note)
+    return "\n".join(notes)
+
+
 __all__ = [
     "FRAME_CANVAS_HINT_PREFIX",
+    "FRAME_CANVAS_LABELS",
     "SEGMENT_END_HOOK_JUDGE_ROLE",
     "build_end_hook_prompt",
+    "frame_canvas_hints_for",
     "frame_canvas_warning_text",
     "judge_end_hook",
     "parse_end_hook_reply",

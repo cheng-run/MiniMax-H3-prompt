@@ -57,8 +57,8 @@ export interface paths {
          * List Canvas Presets
          * @description 比例档与兜底画布（只读：不建会话、不落盘）。
          *
-         *     数据**现取** ``generation`` 的常量：这张表是 CLI 向导与请求【画布】块的同一份
-         *     真源，投影一份字面量就等于开了第二处口径。
+         *     数据**现取** ``generation`` 与 ``director.pack`` 的常量：这张表是 CLI 向导与请求
+         *     【画布】块的同一份真源，投影一份字面量就等于开了第二处口径。
          */
         get: operations["list_canvas_presets_api_v1_canvas_presets_get"];
         put?: never;
@@ -664,13 +664,20 @@ export interface components {
         };
         /**
          * CanvasPresetsOut
-         * @description 比例档表 ＋ 向导会问的家族 ＋ 各生图模型的兜底画布。
+         * @description 比例档表 ＋ 向导会问的家族 ＋ 各生图模型的兜底画布 ＋ 插件网格对齐。
          *
          *     ``canvas_choice_families`` 是「哪几档会被问画布」（``CANVAS_CHOICE_FAMILIES``）：
          *     其余档没有选定值，直接回落 ``fallback_canvases`` 里自己那一行。前端用它决定
          *     选择器影响面，不在界面里硬编码家族名。
+         *
+         *     ``align`` 是导演台插件要求的画布网格（``director.pack.CANVAS_ALIGN``，32）：前端
+         *     要在表单里**当场**说破「1920×1080 实际会跑 1920×1088」，而创建响应在提交之前
+         *     拿不到。把这个数随档表下发，前端就不必自己写一份 32 的字面量（#363 复审 A4：
+         *     那个字面量是同一事实的第二处口径，后端改网格时它不会跟着变）。
          */
         CanvasPresetsOut: {
+            /** Align */
+            align: number;
             /** Canvas Choice Families */
             canvas_choice_families: string[];
             /** Fallback Canvases */

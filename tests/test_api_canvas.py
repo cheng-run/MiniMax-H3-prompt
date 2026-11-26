@@ -178,6 +178,19 @@ def test_canvas_presets_match_the_backend_constants(tmp_path):
     assert body["canvas_choice_families"] == list(CANVAS_CHOICE_FAMILIES)
 
 
+def test_canvas_presets_carry_the_plugin_grid_align(tmp_path):
+    """网格对齐值随档表下发，值取自 ``director.pack.CANVAS_ALIGN``（#363 复审 A4）。
+
+    前端拿它算「实际执行尺寸」，不再自己写一份 32 的字面量——这条比对常量，
+    端点若写死数这里就红。
+    """
+    from minimax_h3_prompt.director.pack import CANVAS_ALIGN
+
+    body = _client(tmp_path).get("/api/v1/canvas-presets").json()
+
+    assert body["align"] == CANVAS_ALIGN
+
+
 def test_canvas_presets_carry_each_models_fallback_canvas(tmp_path):
     """兜底画布与 ``IMAGE_PROFILE_DEFAULTS`` 一致（含显示名，前端不另抄一张对照表）。"""
     from minimax_h3_prompt.generation import IMAGE_FAMILY_LABELS, IMAGE_PROFILE_DEFAULTS
