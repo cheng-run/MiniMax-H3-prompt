@@ -2921,6 +2921,30 @@ MUTATIONS: tuple[Mutation, ...] = (
          "test_the_two_bare_timestamp_predicates_stay_distinct",),
         "剥前缀那条接受前导空白＝与「整行只有时间戳」那条合并同义，静默改掉剥段路径（P0-4）",
     ),
+    # ---- 新守卫补变异（retro 2026-11-27，#370/#371 的两条守卫原为零登记） ----
+    Mutation(
+        "module_guard_package_import_matches_every_module",
+        # 把「imported 是 target 或 target 的子模块」反过来：裸 ``import pkg`` 撞上
+        # 反方向匹配后，每个子模块都被算成「被引用」，宽口径层退化成噪声本身
+        # （实测 131/238 假命中）。导航工具算错 → 它给的两张清单就都不可信。
+        "scripts/module_guards.py",
+        '    return imported == target or imported.startswith(target + ".")\n',
+        '    return target.startswith(imported + ".") or imported == target\n',
+        ("tests/test_module_guards.py::"
+         "test_a_bare_package_import_does_not_match_every_module",),
+        "反方向匹配＝裸包 import 把每个子模块都算命中，宽口径层成噪声（131/238 假命中）",
+    ),
+    Mutation(
+        "fast_tier_guard_lets_every_new_file_through",
+        # 守卫的判定退化成「什么都不缺」：新增的无声明测试文件不再被要求表态，
+        # #370 要堵的形态（新守卫没挂快档、悄悄退化成全量才跑）就此复活。
+        "tests/test_fast_tier_coverage.py",
+        "        missing.append(relative)\n",
+        "        pass\n",
+        ("tests/test_fast_tier_coverage.py::"
+         "test_detects_new_files_and_requires_a_declaration",),
+        "守卫放行一切＝新增守卫不再被要求表态归属快档（#370 真事故形态）",
+    ),
 )
 
 

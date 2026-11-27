@@ -11,6 +11,7 @@
 uv run python scripts/module_guards.py src/minimax_h3_prompt/segment_planner.py
 uv run python scripts/module_guards.py minimax_h3_prompt.segment_planner
 uv run python scripts/module_guards.py segment_planner
+uv run python scripts/module_guards.py                 # 不给模块：列出全 src/ 的覆盖归属（#372）
 ```
 
 - **高置信层**：``MUTATIONS`` 里 ``path`` 指向它的条目（源文件 → 咬它的用例）。这是
@@ -291,21 +292,64 @@ def render(
     return "\n".join(lines)
 
 
+def coverage_gaps(root: Path = ROOT) -> dict[str, list[tuple[str, int, str]]]:
+    """全 ``src/`` 模块按目录分组的覆盖归属清单（#372 量化，只读、非门禁）。
+
+    返回 ``{目录: [(仓相对路径, 行数, 档), …]}``，``档`` 是 ``coverage_bucket`` 的
+    ``covered`` / ``exempt`` / ``zero``。这是 #372 step-1 要的「零变异模块清单」的机读
+    形态：一份可复现的产出，而不是只存在于某个实现代理的报告里。
+    """
+    mutations = load_mutations(root)
+    grouped: dict[str, list[tuple[str, int, str]]] = {}
+    for path in sorted((root / "src").rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        relative = path.relative_to(root).as_posix()
+        lines = path.read_text(encoding="utf-8", errors="replace").count("\n")
+        bucket = coverage_bucket([relative], mutations)
+        grouped.setdefault(relative.rsplit("/", 1)[0] or ".", []).append(
+            (relative, lines, bucket))
+    return grouped
+
+
+def render_coverage_gaps(root: Path = ROOT) -> str:
+    """把 ``coverage_gaps`` 渲染成「目录分组 + 路径/行数/档 + 合计」的文本。"""
+    grouped = coverage_gaps(root)
+    counts = {"covered": 0, "exempt": 0, "zero": 0}
+    lines: list[str] = ["src/ 模块覆盖归属（covered＝有机读变异证据 / exempt＝已判定不需要 / "
+                        "zero＝覆盖缺口；#372 量化，非门禁）", ""]
+    for directory in sorted(grouped):
+        lines.append(f"【{directory}】")
+        for relative, line_count, bucket in grouped[directory]:
+            counts[bucket] += 1
+            lines.append(f"  {relative}  {line_count} 行  [{bucket}]")
+        lines.append("")
+    lines.append("合计：" + " / ".join(f"{key} {value}" for key, value in counts.items()))
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     # Windows 控制台是 cp1252：中文一 print 就 UnicodeEncodeError，整支脚本会以
     # 「崩溃」而不是「查无结果」收场（同 mutation_check.py 的教训，2026-11-02 实测）。
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(
-        description="模块 → 守卫用例：高置信（MUTATIONS）+ 宽口径（import 它的测试）两层。")
-    parser.add_argument("module", help="模块路径或模块名，如 src/minimax_h3_prompt/x.py 或 x")
+        description="模块 → 守卫用例：高置信（MUTATIONS）+ 宽口径（import 它的测试）两层。"
+                    " 不给 module 时改为打印全 src/ 的覆盖归属清单（#372 量化）。")
+    parser.add_argument(
+        "module", nargs="?", default=None,
+        help="模块路径或模块名，如 src/minimax_h3_prompt/x.py 或 x；省略则列出覆盖清单")
     args = parser.parse_args(argv)
 
-    if not module_candidates(args.module):
-        print(render(args.module))
-        return 1
-    print(render(args.module))
-    return 0
+    if args.module is None:
+        print(render_coverage_gaps())
+        return 0
+
+    # 只归一一次：``render`` 内部会再调 ``module_candidates``，这里不再自己判空
+    # （否则一次查询跑两遍归一，裸词干那条含全 src rglob）。按首行判「找不到」。
+    text = render(args.module)
+    print(text)
+    return 1 if text.startswith("找不到模块") else 0
 
 
 if __name__ == "__main__":

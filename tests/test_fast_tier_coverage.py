@@ -19,9 +19,11 @@
 """
 from __future__ import annotations
 
+import io
 import os
 import re
 import subprocess
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -35,8 +37,31 @@ _ARRAY = re.compile(r"^FAST_TESTS=\(\n(.*?)^\)", re.S | re.M)
 
 # 显式声明：整行以 `#` 开头（纯注释行），标题后必须跟一个破折号与**非空**理由。
 # 破折号接受 em/en/hyphen 三种写法，避免因为记不住是哪一个而白红。
+# 只拿它去撞**真注释 token**（见 ``comment_lines``），不直接扫源码文本：行首正则
+# 会把三引号 docstring 里顶格的那行当成纯注释，于是「写在 docstring 里、本不起作用
+# 的声明」也能过门（#370 真事故形态：``test_module_guards.py`` 的声明就写在模块
+# docstring 里，正是靠这个漏洞蒙混过关的）。
 _DECLARED = re.compile(
-    r"^[ \t]*#[ \t]*fast-tier:[ \t]*excluded\b[ \t]*[—–-][ \t]*\S", re.M)
+    r"^[ \t]*#[ \t]*fast-tier:[ \t]*excluded\b[ \t]*[—–-][ \t]*\S")
+
+
+def comment_lines(text: str) -> list[str]:
+    """**真注释**行（``tokenize.COMMENT``）——docstring / 字符串字面量里的不算。
+
+    为什么用 tokenize 而不是 AST 取 docstring：docstring 恰恰是要排除的那类
+    （票面 #370 要求「纯注释行」），把它们单独挑出来再排除属于绕一圈。tokenize
+    直接把「这一行是注释」判定出来，字符串里的 ``#`` 根本不成 token。
+    """
+    lines: list[str] = []
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(text).readline):
+            if token.type == tokenize.COMMENT:
+                lines.append(token.string)
+    except (tokenize.TokenError, IndentationError):
+        # 解析不了的文件（极少：测试文件的语法错会让 pytest 自己先炸）退回按行看，
+        # 宁多勿漏——但这条退路同样只可能来自源码，不会把 docstring 当注释。
+        lines += [line for line in text.splitlines() if line.lstrip().startswith("#")]
+    return lines
 
 
 # 子进程里要摘掉的 git 环境变量：pre-commit 钩子跑本守卫时会导出 ``GIT_INDEX_FILE``
@@ -124,7 +149,9 @@ def missing_declarations(
         # HEAD 里新增、工作区已删掉的路径无从判断归属，跳过（它不是「新写的守卫」）。
         if not path.is_file():
             continue
-        if _DECLARED.search(path.read_text(encoding="utf-8", errors="replace")):
+        comments = comment_lines(
+            path.read_text(encoding="utf-8", errors="replace"))
+        if any(_DECLARED.search(comment) for comment in comments):
             continue
         missing.append(relative)
     return missing
@@ -227,12 +254,24 @@ def test_declaration_forms(repo: Path) -> None:
         "test_hyphen.py": "# fast-tier: excluded - 全量专用\n",
         "test_no_reason.py": "# fast-tier: excluded —\n",
         "test_in_string.py": "X = '# fast-tier: excluded — 字符串里的不算'\n",
+        # 顶格写在模块 docstring 里：行首正则曾把它误认成纯注释，于是「写进 docstring、
+        # 运行时不起任何注释作用」的声明也能过门（#370 真事故形态）。必须判 missing。
+        "test_in_docstring.py": (
+            '"""说明。\n\n# fast-tier: excluded — docstring 里的不算\n"""\n'),
     }
     for name, text in cases.items():
         (repo / "tests" / name).write_text(text, encoding="utf-8")
     added = sorted(f"tests/{name}" for name in cases)
     missing = missing_declarations(added, fast=set(), repo=repo)
-    assert missing == ["tests/test_in_string.py", "tests/test_no_reason.py"]
+    assert missing == [
+        "tests/test_in_docstring.py", "tests/test_in_string.py", "tests/test_no_reason.py"]
+
+    # 反向自检：同一句声明挪到真注释行（docstring 之外）就必须放行——否则上面的
+    # 「docstring 判红」可能只是检测器把一切都判红（永不为红＝没有的孪生形态）。
+    (repo / "tests/test_in_docstring.py").write_text(
+        '"""说明。"""\n# fast-tier: excluded — 真注释行\n', encoding="utf-8")
+    assert missing_declarations(
+        ["tests/test_in_docstring.py"], fast=set(), repo=repo) == []
 
 
 def test_fast_tests_parser_ignores_comments(tmp_path: Path) -> None:

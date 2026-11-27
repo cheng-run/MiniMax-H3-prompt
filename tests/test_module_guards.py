@@ -8,11 +8,9 @@
 2. 零变异模块的高置信层为空，宽口径层仍能列出 import 它的测试（或明说为空）。
 3. 宽口径层必须带「提到 ≠ 真在守」的噪声声明——两层不是同一份结论。
 
-不给脚本本身登记变异：它不是守卫，没有「改坏它守卫必须红」的那条不变式；要守的是
-它给出来的两张清单对不对，也就是这里的断言。
-
-# fast-tier: excluded — 一次查询要加载 3000 行的 ``MUTATIONS`` 并扫全 ``tests/``，约 3s；
-本文件是「导航工具的守卫」，不属于秒级结构性判据，放全量即可。
+脚本本身**不是门禁**，所以不给它的输出外观登记变异；但它的核心判据 ``_covers``
+（反向匹配曾让 131/238 模块假命中，宽口径层退化成噪声本身）登记了一条变异，由本文件
+的反例用例咬住——那是「脚本算错 → 清单就错」的真不变式，不是外观。
 """
 from __future__ import annotations
 
@@ -20,6 +18,10 @@ import functools
 import importlib.util
 import sys
 from pathlib import Path
+
+# 这行必须是**真注释**：早先它写在模块 docstring 里，行首正则把它当成纯注释，一条
+# 运行时不起作用的声明就过了 #370 的门（retro 2026-11-27 复审抓出，检测已改 tokenize）。
+# fast-tier: excluded — 一次查询要加载 3000 行 MUTATIONS 并扫全 tests/，约 3s；本文件是导航工具的守卫，不属于秒级结构性判据。
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "module_guards.py"
@@ -31,7 +33,7 @@ sys.modules[_SPEC.name] = module_guards
 _SPEC.loader.exec_module(module_guards)
 
 # 一次 render 要把 ``tests/`` 全扫一遍；同一份真仓输入在多条用例里复用，缓存住，
-# 别让导航工具的守卫自己变成慢测（本文件不进快档，见文末）。
+# 别让导航工具的守卫自己变成慢测（本文件不进快档，理由见文件开头的声明）。
 @functools.lru_cache(maxsize=8)
 def _render(query: str) -> str:
     return module_guards.render(query)
@@ -109,7 +111,7 @@ def test_zero_mutation_module_still_lists_importing_tests_in_the_wide_layer() ->
     assert "test_final_film.py" in _render(ZERO_MODULE)
 
 
-def test_wide_layer_warns_that_mentions_are_noise(tmp_path: Path) -> None:
+def test_wide_layer_warns_that_mentions_are_noise() -> None:
     """输出里必须有「提到 ≠ 真在守」——不写这句，宽口径清单会被当成结论。"""
     text = _render(ZERO_MODULE)
     assert module_guards.NOISE_WARNING in text
@@ -180,3 +182,47 @@ def test_every_exemption_carries_a_concrete_reason_and_nothing_else_is_forgiven(
     stripped = {path: reason for path, reason in exempt.items() if path != real}
     assert module_guards.coverage_bucket([real], mutations, exempt) == "exempt"
     assert module_guards.coverage_bucket([real], mutations, stripped) == "zero"
+
+
+# ---------------------------------------------------------------------------
+# 零变异清单可复现（#372 step-1 的落盘产出）
+# ---------------------------------------------------------------------------
+
+
+def test_coverage_gaps_lists_every_src_module_grouped_by_directory() -> None:
+    """#372 的量化清单：按目录分组、每条带行数与档，末尾给三个合计——可复现产出。
+
+    只钉结构与不变量（每个 ``src/*.py`` 都被收进去、档只取三种、合计等于逐条累加），
+    不钉具体数字（模块增删会让数字漂，那是清单的正常变化，不是守卫该红的事）。
+    """
+    grouped = module_guards.coverage_gaps()
+    assert grouped, "src/ 下应有模块，清单不该为空"
+
+    listed: dict[str, str] = {}
+    for directory, entries in grouped.items():
+        assert "/" not in directory.rsplit("/", 1)[-1], f"目录分组不该含文件名：{directory}"
+        for relative, line_count, bucket in entries:
+            # 分组键就是路径本身所在的目录。
+            assert relative.rsplit("/", 1)[0] == directory, relative
+            assert line_count > 0, f"{relative} 行数为 0，像读错文件了"
+            assert bucket in ("covered", "exempt", "zero"), bucket
+            listed[relative] = bucket
+
+    # 每一个 src/ 下的 .py 都在清单里（别静默漏掉某个子目录）。
+    on_disk = {
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "src").rglob("*.py")
+        if "__pycache__" not in path.parts
+    }
+    assert set(listed) == on_disk
+
+    # 渲染文本要带目录标题与三个合计，且三个合计与逐条累加一致。
+    text = module_guards.render_coverage_gaps()
+    counts = {
+        bucket: sum(1 for value in listed.values() if value == bucket)
+        for bucket in ("covered", "exempt", "zero")
+    }
+    for directory in grouped:
+        assert f"【{directory}】" in text
+    assert text.rstrip().endswith(
+        f"covered {counts['covered']} / exempt {counts['exempt']} / zero {counts['zero']}")
