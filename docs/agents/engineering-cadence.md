@@ -107,6 +107,20 @@ cd frontend && npx pnpm@11.7.0 install   # eslint / vue-tsc / 契约 TS 生成
   后来的票会让该票的提交必红，只能跳钩子（2026-11-19 #342 实测两处 `--no-verify`；
   收口票仍然负责其余变异与快档挂载，并在合入时吸收 `MUTATIONS` 的冲突）。
 
+## 工具的坑：本机的 grep 与 npx
+
+这两条都是**环境**问题，不是仓库代码的问题；写在这里是因为它们静默且磨损排查时间。
+
+- **`grep` / `rg` 在 Bash 里不可信**（`AGENTS.md` 的首要指针指向本节）。本机 shell 的
+  `rg` 是落到 `rtk` 的函数，真正调用报 not found（2026-11-17 实测）；`rtk` 会把多命中
+  结果摘要化成「N matches + 剩余见某个 log 文件」（2026-11-19 实测，单文件
+  `grep -n '^def '` 也被截断）；`grep -r` 另有中文路径或中文模式下静默 0 命中
+  （2026-11-15 实测）。**一律用 Grep 工具**——它不经过这层 shim。
+- **`npx vitest` 在本机跑不起来**：本机的 `npx` 先落到一个包 `pnpm` 的 shim，而 pnpm
+  不在 PATH 上，报 `Failed to run vitest: program not found`，看着像依赖没装
+  （2026-11-27 实测）。带 `--no-install` 即跳过解析、直接执行 `node_modules` 那份；
+  或在仓库根跑 `bash scripts/check.sh frontend`。
+
 ## 并行拆票前的对票
 
 `/implement-spec` 按文件簇分组是手工动作，手工分组会漏票：2026-11-03 实测 12 张子票
