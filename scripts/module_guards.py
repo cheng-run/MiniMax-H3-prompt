@@ -37,10 +37,32 @@ ROOT = Path(__file__).resolve().parents[1]
 # 零变异模块的显式豁免清单（#372 的扩展点）。
 #
 # 键是仓库相对的 posix 路径（如 ``src/minimax_h3_prompt/__init__.py``），值是理由。
-# #372 会把人工判为「本就不需要变异」的模块填进来——**不靠命名猜**（同 #370 的教训：
-# ``__init__.py`` 猜得对，但其它形态猜不准）。本票先留空：空清单＝「零变异一律算覆盖
-# 缺口」，不会静默放行任何模块。承载这层判定的函数是 ``coverage_bucket``。
-ZERO_MUTATION_EXEMPT: dict[str, str] = {}
+# #372 把人工判为「本就不需要变异」的模块填在这里——**不靠命名猜**（同 #370 的教训：
+# ``__init__.py`` 猜得对，但其它形态猜不准），每一条都读过代码确认过。
+#
+# 只收「看过了、确认没有值得登记变异的结构化不变式」的模块。判据是「改一行能不能
+# 让某条守卫从绿变红」：纯文档字符串的包标记、纯常量声明、纯 re-export 的 shim 都
+# 没有这条不变式——它们的逻辑要么在别处（re-export 的源模块已登记变异），要么值由
+# 上层用例逐个断言，登记「改了常量就该红」属凑数（#372 票面明令禁止）。
+#
+# **这不是永久勾销**：它表达「人已看过、判定不需要」。拿不准的模块宁可留在覆盖缺口
+# （不在此表），由覆盖清单继续照出来。承载这层判定的函数是 ``coverage_bucket``。
+ZERO_MUTATION_EXEMPT: dict[str, str] = {
+    "src/minimax_h3_prompt/__init__.py":
+        "2 行占位入口：main() 只 print 一句问候，没有任何分支或计算，无可守的不变式。",
+    "src/minimax_h3_prompt/api/__init__.py":
+        "只声明 SERVICE_NAME 一个字符串常量并导出；值由 API 层用例（test_api_spa）"
+        "逐字断言，登记「改常量就该红」属凑数（票面禁）。",
+    "src/minimax_h3_prompt/api/routes/__init__.py":
+        "整文件只有一个文档字符串的包标记，无任何代码。",
+    "src/minimax_h3_prompt/director/__init__.py":
+        "纯 re-export shim：把 director.frames 的公开名搬进包命名空间 + __all__，"
+        "没有自己的逻辑；真逻辑住在 frames.py（已有多条变异）。",
+    "src/minimax_h3_prompt/graph/__init__.py": "单行文档字符串的包标记，无代码。",
+    "src/minimax_h3_prompt/output/__init__.py": "单行文档字符串的包标记，无代码。",
+    "src/minimax_h3_prompt/tools/__init__.py": "单行文档字符串的包标记，无代码。",
+    "src/minimax_h3_prompt/ui/__init__.py": "单行文档字符串的包标记，无代码。",
+}
 
 # 输出里必须原样出现的噪声声明：宽口径层「提到」不等于「真在守」。测试断言这句在，
 # 免得以后有人把两层合并成一个看起来像结论的清单。

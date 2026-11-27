@@ -156,6 +156,27 @@ def test_exempt_list_moves_a_zero_module_out_of_the_coverage_gap() -> None:
     assert "覆盖缺口" not in text
 
 
-def test_default_exempt_list_is_empty_so_nothing_is_silently_forgiven() -> None:
-    """本票不改判定：默认豁免清单为空，零变异一律照成覆盖缺口。"""
-    assert module_guards.ZERO_MUTATION_EXEMPT == {}
+def test_every_exemption_carries_a_concrete_reason_and_nothing_else_is_forgiven() -> None:
+    """#372 把「本就不需要变异」的模块填进豁免表：每一条都要有具体理由，且只豁免这些。
+
+    #371 时该表是空的占位（空＝零变异一律算覆盖缺口）。#372 落地后它非空，于是守卫从
+    「为空」换成同样要防的形态：**不许静默豁免**——每个键都要指向真实 ``src/*.py``、
+    理由不能是空串或三个字了事；表里没登记的零变异模块仍照成覆盖缺口。
+    """
+    exempt = module_guards.ZERO_MUTATION_EXEMPT
+    assert exempt, "表里至少要有一条——若确无豁免模块，说明 #372 的分类结论需重议"
+    for path, reason in exempt.items():
+        assert path.startswith("src/") and path.endswith(".py"), path
+        assert (ROOT / path).is_file(), f"豁免清单指向不存在的文件：{path}"
+        assert len(reason.strip()) >= 12, f"{path} 的豁免理由太敷衍：{reason!r}"
+
+    # 没登记的零变异模块仍算覆盖缺口：豁免是白名单，不是「零变异都放过」。
+    mutations = module_guards.load_mutations()
+
+    # 反向跌落：真在表里的模块，摘掉它自己那条豁免后必须重新落回覆盖缺口。
+    # 用表里现有的键（前面已 assert 非空）而不是另一个从未豁免的模块——否则
+    # `== "zero"` 对「本来就不在表里」的模块恒真，这条测试什么也没咬住。
+    real = next(iter(exempt))
+    stripped = {path: reason for path, reason in exempt.items() if path != real}
+    assert module_guards.coverage_bucket([real], mutations, exempt) == "exempt"
+    assert module_guards.coverage_bucket([real], mutations, stripped) == "zero"

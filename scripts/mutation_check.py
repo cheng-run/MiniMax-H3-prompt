@@ -2840,6 +2840,87 @@ MUTATIONS: tuple[Mutation, ...] = (
          "::test_mismatch_lands_in_the_receipt_and_stage2_still_runs",),
         "回执恒空＝判据与 CLI 都还在，工作台上却一条尺寸提示都读不到（#363 复审 A1）",
     ),
+    # ---- 零变异模块补牙（#372）：挑「秒级、结构化、已有用例能咬住」的纯函数不变式 ----
+    Mutation(
+        "ref_capacity_counts_pictures_on_a_multi_segment_film",
+        # 去掉「>15 秒只判视频/音频、图留给每段」的过滤：整片库存的 24 张图被当单次
+        # 请求去判，合法片子被整片拦死（spec #84 D5 的正用法）。
+        "src/minimax_h3_prompt/ref_capacity.py",
+        '    if not single_request:\n'
+        '        items = [item for item in items if item.kind != KIND_PICTURE]\n',
+        '    if not single_request:\n'
+        '        items = list(items)\n',
+        ("tests/test_ref_capacity.py::"
+         "test_film_gate_leaves_pictures_to_the_per_segment_check_on_a_multi_segment_film",),
+        "多段整片按单次请求判图数＝24 张素材、每段 ≤9 的片子被整片拦死（spec #84 D5）",
+    ),
+    Mutation(
+        "resume_answer_value_type_check_dropped",
+        # 只查键、不查值：``{"k": 1}`` 这种错形账被放行，续跑读回一个非字符串答案冒充事实
+        # （本仓「falsy 错形不许洗成空表」的统一口径）。
+        "src/minimax_h3_prompt/resume_point.py",
+        '        if not isinstance(key, str) or not isinstance(value, str):\n',
+        '        if not isinstance(key, str):\n',
+        ("tests/test_resume_point.py::test_wrong_shaped_answers_are_loud",),
+        "答案账只查键不查值＝错形条目静默通过，续跑读回非字符串答案（#51 严格读回）",
+    ),
+    Mutation(
+        "workflow_slot_bool_guard_dropped",
+        # YAML 的 ``yes`` 解析成 True（bool 是 int 子类）：不单独挡 bool，``picture: yes``
+        # 会被当成 1 个合法端口，笔误被藏起来。
+        "src/minimax_h3_prompt/workflow_config.py",
+        '    if isinstance(value, bool) or not isinstance(value, int) or value < 1:\n',
+        '    if not isinstance(value, int) or value < 1:\n',
+        ("tests/test_workflow_config.py::test_invalid_slot_counts_are_loud",),
+        "bool 是 int 子类：不挡 True/False，``picture: yes`` 被当合法端口、笔误静默成 1（#65）",
+    ),
+    Mutation(
+        "library_config_unknown_key_check_dropped",
+        # 拼错的键（roooot）不报错＝用户以为改了库根、实际仍落默认目录，且不报错。
+        "src/minimax_h3_prompt/library_config.py",
+        '    unknown = set(raw) - {"root"}\n    if unknown:\n',
+        '    unknown = set(raw) - {"root"}\n    if False:\n',
+        ("tests/test_asset_library.py::test_written_but_broken_library_config_is_loud",),
+        "配置未知键静默略过＝库根拼错却回落默认，用户以为改了实际写进旧目录（#85 / spec #84 D1）",
+    ),
+    Mutation(
+        "theme_guard_qualifier_whitelist_emptied",
+        # 「窗外/透过/背景」这类限定词表清空：合理的远景背景（窗外森林）被误判成场景漂移，
+        # 有界修复循环去改一段本就没跑题的正文。
+        "src/minimax_h3_prompt/tools/theme_guard.py",
+        '        if not any(marker in context for marker in '
+        '("window", "through", "outside", "beyond", "seen from")):\n',
+        '        if not any(marker in context for marker in ()):\n',
+        ("tests/test_theme_guard.py::test_qualified_window_reference_is_allowed",),
+        "限定词表清空＝窗外远景被当成场景漂移，误触有界修复（主题忠实度守卫）",
+    ),
+    Mutation(
+        "assembler_director_branch_falls_through",
+        # 去掉导演台早返回：逐段方言的产物落进 base 分支被补上三节，产物形状当场错位
+        # （issue #103 的原形）。
+        "src/minimax_h3_prompt/output/assembler.py",
+        '    if mode == "director":\n'
+        '        notes.append("导演台路线不补段头：交付物是逐段方言（director/prompts.py）")\n'
+        '        return prompt, "；".join(notes)\n',
+        '    if mode == "director":\n'
+        '        notes.append("导演台路线不补段头：交付物是逐段方言（director/prompts.py）")\n',
+        ("tests/test_director_prompts.py::"
+         "test_assembler_does_not_append_base_sections_for_director",),
+        "导演台产物落进 base 分支被补三节＝逐段方言的产出被判缺段、产物形状错位（#103）",
+    ),
+    Mutation(
+        "leading_timestamp_accepts_indentation",
+        # 「剥前缀」那条允许了前导空白 → 与「判断整行只有时间戳」那条同名同义，正是
+        # ``text_patterns`` 头注释里记的「同名不同义被顺手统一」陷阱；剥前缀时空白行留痕。
+        "src/minimax_h3_prompt/text_patterns.py",
+        'LEADING_TIMESTAMP = re.compile(\n'
+        '    r"^At\\s+(\\d{2}):(\\d{2})\\.(\\d{3}),?\\s*", re.IGNORECASE)',
+        'LEADING_TIMESTAMP = re.compile(\n'
+        '    r"^\\s*At\\s+(\\d{2}):(\\d{2})\\.(\\d{3}),?\\s*", re.IGNORECASE)',
+        ("tests/test_text_patterns.py::"
+         "test_the_two_bare_timestamp_predicates_stay_distinct",),
+        "剥前缀那条接受前导空白＝与「整行只有时间戳」那条合并同义，静默改掉剥段路径（P0-4）",
+    ),
 )
 
 
