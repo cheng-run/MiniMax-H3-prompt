@@ -27,9 +27,10 @@ REPO = Path(__file__).parents[1]
 # 仓库根的路径引用。只认带目录的、有已知后缀的具体文件。
 # 文件名允许中文——本仓 `docs/research/` 下大量是中文名，`test_doc_references_tracked.py`
 # 已因此特意处理过；用纯 ASCII 字符类会让中文路径整个漏扫（2026-11-27 反例自检抓到）。
+# 前缀是**开放**的：白名单会让新目录整个漏扫——`lib/ref_images.py` 就是被老白名单漏掉的，
+# 而它引的模块根本不存在（2026-11-27 复核才发现）。要求至少一段两级路径，避免把单个名词当路径。
 _PATH = re.compile(
-    r"(?<![\w/])((?:docs|scripts|tests|src|prompts|contracts|frontend|tools)/"
-    r"[^\s`'\"<>|()（）]+?\.(?:md|py|sh|ts|vue|json|ya?ml))"
+    r"(?<![\w/.])((?:[\w.-]+/)+[\w.一-鿿-]+?\.(?:md|py|sh|ts|vue|json|ya?ml))"
 )
 # 记忆名可能是 ASCII 也可能含中文（`存储的目录名` 与 `wizard-new-step-breaks` 都出现过），
 # 所以取「反引号之间的一切」，不假设字符集——2026-11-27 反例自检用中文名时，
@@ -92,6 +93,11 @@ def _resolve(cited: str, tracked: set[str]) -> bool:
     )
 
 
+def _top_level_dirs(tracked: set[str]) -> set[str]:
+    """仓里真实存在的一级目录名。"""
+    return {item.split("/", 1)[0] for item in tracked if "/" in item}
+
+
 def scan(
     repo: Path,
     tracked: set[str],
@@ -114,22 +120,46 @@ def scan(
             continue
         bad.extend(_scan_text(relative, text, tracked, memory_names))
     # 记忆目录在仓外，由调用方按 ``{文件名: 内容}`` 传进来。
+    #
+    # 记忆文件的路径引用语义与活文档不同：它们常指向别的系统（ClaudeBrain 的
+    # `user/*.md`、ComfyUI 源码的 `comfy/ldm/...`），那些路径由各自的系统管，
+    # 本仓守卫不该判。所以记忆只查**本仓一级目录**开头的路径——`repo_roots` 之外的
+    # 一律跳过；记忆名（`[[...]]`、`auto memory`）仍然全查，那是本仓的事。
+    repo_roots = _top_level_dirs(tracked)
     for name, text in sorted(extra_files.items()):
         if name in _RETIRED_DOCS:
             continue
-        bad.extend(_scan_text(name, text, tracked, memory_names))
+        for line in _scan_text(name, text, tracked, memory_names):
+            if "路径不存在" in line:
+                cited = line.rsplit(": ", 1)[-1]
+                if cited.split("/", 1)[0] not in repo_roots:
+                    continue
+            bad.append(line)
     return bad
 
 
+# 会话产物的**一级目录名**。这些写在 `output/sessions/<name>/` 下，是产物的相对路径，
+# 不是仓内引用。用排除列表而不是「一级目录必须存在」的白名单——后者会把真断链
+# 一起放过：`lib/ref_images.py` 的一级目录 `lib/` 本来就不存在，那正是要抓的东西。
+_PRODUCT_DIRS = {
+    "segments", "director", "sessions", "assets", "frames", "logs", "output",
+    "tokens", "exports", "minimax_seg_export",
+}
+
+
 def _scan_text(
-    relative: str, text: str, tracked: set[str], memory_names: set[str]
+    relative: str,
+    text: str,
+    tracked: set[str],
+    memory_names: set[str],
 ) -> list[str]:
     bad: list[str] = []
     for match in _PATH.finditer(text):
         cited = match.group(1).rstrip(".,;:）)")
         if any(token in cited for token in _NON_CONCRETE):
             continue
-        if cited.startswith("output/"):
+        # 会话产物相对路径（`segments/plan.json`）不是仓内引用。
+        if cited.split("/", 1)[0] in _PRODUCT_DIRS:
             continue
         if not _resolve(cited, tracked):
             bad.append(f"{relative} -> 路径不存在: {cited}")
