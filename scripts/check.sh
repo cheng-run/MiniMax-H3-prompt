@@ -16,6 +16,8 @@
 #   scripts/check.sh frontend # 强制跑 eslint + prettier --check + vue-tsc + e2e 类型 + vitest
 #   scripts/check.sh lint     # 全量 src 的 ruff（装了才跑）
 #   scripts/check.sh mutate   # 守卫变异检验（不需要额外依赖）
+#   scripts/check.sh mutate --only <name>   # 只跑一条；`--` 可有可无
+#   scripts/check.sh full --only <name>     # 全量，但变异只跑一条（改守卫时最常用）
 #   scripts/check.sh types    # mypy（装了才跑；先只查叶子模块）
 #   scripts/check.sh coverage # 分支覆盖度量（装了才跑；不设门槛）
 #   scripts/check.sh clean    # 干净环境（无 .env）跑全量，模拟 CI
@@ -83,6 +85,9 @@ FAST_TESTS=(
   tests/test_start_web_freshness.py
   tests/test_adr_guard.py
   tests/test_doc_pointer_shape.py
+  # 模块地图：新端点漏登记 `docs/agents/workbench.md` 不报错，只是下一个人要多绕
+  # 一圈找它（retro 2026-11-27；#363 复审时 `routes/canvas.py` 就是这样漏的）。
+  tests/test_module_map_guard.py
   # 文档引用与根路径推导、向导体量：都是「读文件做断言」的秒级守卫，放全量等于让
   # `fast` 绿着过、全量才炸（2026-11-17 #297 实测：wizard.py 长过 6267 只在 full 露头，
   # 白跑一轮全量）。
@@ -161,6 +166,26 @@ lint_changed() {
   echo "[check] lint: ruff check（改动文件）"
   # shellcheck disable=SC2086 - 文件名按行拆分是刻意的（路径不含空格是本仓约定）
   "$PY" -m ruff check $files
+}
+
+# 跑长检查之前先确认工作区干净（retro 2026-11-27）：变异检验的做法是「改一行源码
+# → 跑用例 → 还原」，`finally` 只在进程能走完时成立。上一次会话进程被整体杀掉，
+# 一行变体就留在了 `director/prompts.py` 里，一个小时后才在下一次全量里炸出来，
+# 而且报的是另一条不相干的锚点失败——排查绕了一大圈。锁文件同理记下「上一档没跑完」。
+run_workspace_guard() {
+  local dirty lock
+  dirty=$(git status --porcelain -- src/ 2>/dev/null || true)
+  if [ -n "$dirty" ]; then
+    echo "[check] 工作区在 src/ 下有未提交改动——可能是上次变异检验被中断留下的" >&2
+    printf '  %s\n' $dirty >&2
+    echo "  确认这些改动是有意的（那就先提交/stash），或 \`git checkout -- <path>\` 还原后重跑。" >&2
+    return 1
+  fi
+  lock="$(git rev-parse --git-dir 2>/dev/null)/check-incomplete"
+  if [ -f "$lock" ]; then
+    echo "[check] 上一次长检查没有正常收尾（$(cat "$lock" 2>/dev/null)），先确认工作区干净。" >&2
+    rm -f "$lock"
+  fi
 }
 
 # f-string 冒充 docstring：ruff 的 F 规则不抓（2026-11-01 实测 All checks passed），
@@ -313,10 +338,24 @@ run_contract_guard() {
 # 后果实测：main 上 `cancel_ignored_at_node_boundary` 的锚点从 #219 起出现 3 次，
 # 变异静默失效、CI 连红数次，本地毫无感知。它慢（约 2 分钟），所以只进 full。
 run_mutations() {
-  echo "[check] mutate: 守卫变异检验"
+  echo "[check] mutate: 守卫变异检验${MUTATION_ARGS:+（参数：${MUTATION_ARGS[*]}）}"
+  # 变异会改源码再还原：跑之前确认工作区干净，并留一个「没跑完」的标记（retro
+  # 2026-11-27）。标记在正常收尾时删掉；进程被杀就留在那，下一次任何一档都会提醒。
+  run_workspace_guard
+  local lock
+  lock="$(git rev-parse --git-dir)/check-incomplete"
+  echo "mutate（pid $$，$(date '+%Y-%m-%d %H:%M:%S')）" > "$lock"
   # ``-u``：重定向到文件时 Python 默认块缓冲，等待期只能看到「开始」一行（2026-11-13
   # 实测：用户问「为什么 10 分钟」时没有任何进度可读）。脚本自己逐条打印耗时。
-  "$PY" -u scripts/mutation_check.py
+  #
+  # 参数必须透传（retro 2026-11-27）：``mutation_check.py`` 自带 ``--only <name>``，
+  # 但这一档原先把它吞了——想单验一条守卫却起了全套 238 条，占满十分钟、被当成长
+  # 检查后台化，随后与别的检查并行跑，两个进程同时改源码并各自还原，撞出假红与脏
+  # 工作区。``--`` 分隔符去掉后再传，``mutate --only x`` 与 ``mutate -- --only x`` 同义。
+  local rc=0
+  "$PY" -u scripts/mutation_check.py "${MUTATION_ARGS[@]}" || rc=$?
+  rm -f "$lock"
+  return "$rc"
 }
 
 run_fast() {
@@ -351,6 +390,14 @@ run_rehash() {
 # （2026-11-01 漏看一次 collection error，AGENTS.md 因此留了一段 PIPESTATUS 咒语）。
 # 结论行让「最后一行」自己就是判据，不用再让每个人记那串咒语。
 MODE="${1:-fast}"
+shift || true
+# 档位之后的多余参数只给变异那一档用（``--only <name>``）；``--`` 分隔符去掉，
+# 好让 ``mutate --only x`` 与 ``mutate -- --only x`` 同义（retro 2026-11-27）。
+MUTATION_ARGS=()
+for arg in "$@"; do
+  [ "$arg" = "--" ] && continue
+  MUTATION_ARGS+=("$arg")
+done
 trap 'rc=$?; echo "[check] ${MODE}: FAIL（退出码 ${rc}）" >&2; exit "$rc"' ERR
 
 case "$MODE" in
@@ -359,6 +406,7 @@ case "$MODE" in
     ;;
   full)
     echo "[check] full: 全量测试"
+    run_workspace_guard
     report_timeout_guard
     "$PY" -m pytest -q
     run_docstring_guard
@@ -389,6 +437,7 @@ case "$MODE" in
     # 这一档因此与 full 等价；保留它是因为推送前的习惯命令与 CI 口径都指向这里，
     # 也保留 H3_TEST_NO_ENV 这个兼容别名（现在与默认行为相同）。
     echo "[check] clean: 干净环境（无 .env / 无模型环境变量）下跑全量"
+    run_workspace_guard
     report_timeout_guard
     H3_TEST_NO_ENV=1 "$PY" -m pytest -q
     run_docstring_guard
@@ -396,8 +445,7 @@ case "$MODE" in
     ;;
   mutate)
     # 变异检验（体检 P6）：守卫测试必须真的会咬人。不需要额外依赖。
-    echo "[check] mutate: 守卫变异检验"
-    "$PY" -u scripts/mutation_check.py
+    run_mutations
     ;;
   types)
     run_types

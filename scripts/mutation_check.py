@@ -1238,6 +1238,16 @@ MUTATIONS: tuple[Mutation, ...] = (
         "本仓模块名的扫描式退化成永不命中＝活文档里的行号指针一路绿（#224 复审实测）",
     ),
     Mutation(
+        "module_map_guard_accepts_anything",
+        "tests/test_module_map_guard.py",
+        '        if path.stem not in text:\n            missing.append(path.name)',
+        '        if False:\n            missing.append(path.name)',
+        ("tests/test_module_map_guard.py::test_every_route_module_is_in_the_module_map",
+         "tests/test_module_map_guard.py::test_undocumented_routes_reports_a_new_module"),
+        "模块地图守卫退化成全放行＝新端点漏登记不会被发现，下一个人找它要多绕一圈"
+        "（#363 复审：`routes/canvas.py` 就是这样漏的）",
+    ),
+    Mutation(
         "adr_malformed_status_unchecked",
         "tests/test_adr_guard.py",
         "                 if _STATUS_LIKE.match(line) and not _STATUS_VALID.match(line)]",
