@@ -97,6 +97,35 @@ cat build-exe/selfcheck-data/selfcheck.log
   `unlink-venv` 摘掉；`remove` 会替你摘，但**不要 `rm -rf` 联接**（与 node_modules
   同坑）。
 
+## 视觉改动走 Impeccable（2026-11-25 用户裁定）
+
+前端界面的设计、评审与打磨用 `impeccable` skill，分三段走，**边界不越**：
+
+1. **研究、查原因、出方案：可以调。** `context` / `critique` / `audit` / `shot` 取证、
+   读 `PRODUCT.md` 与 `DESIGN.md` 都允许。产出是「**原因 + 办法**」，不是代码。
+2. **写代码：必须先有方案且用户同意。** 方案写入（贴对话或进 spec）→ 用户审 →
+   **用户手动** `/to-tickets` 拆票。
+3. **实现期：前端票可以调 impeccable 改代码。** 方案本身按 impeccable 的语汇定的，
+   此时 `/implement` 派出的票用 `polish` / `layout` / `clarify` / `adapt` 执行是合规的。
+
+判「是不是研究」：只读工具、不改任何文件、不建分支；允许产出文档级方案（贴对话里），
+不许落盘代码。2026-11-25 的教训——我用 impeccable 研究对了真因，转头就开分支改了
+6 个文件（后端契约、新端点、前端生成物、测试），被用户中断并要求回退。
+
+**命令用法**（2026-11-22 首次完整走 animate+polish 时总结）：
+
+- `impeccable context --target <path>` 每会话一次，报 `CONTEXT_STALE` 也**不要重跑**，
+  按它的指令走；报 `SURFACE_CONTEXT_AVAILABLE` 时用 `surface-brief read <源文件>` 读一次。
+- `impeccable shot <url> --viewport WxH[,WxH] --out <dir>` 取证，桌面+移动两档、浅色深色
+  两套主题都要看。**不靠印象判断字号与对比度**，用 `getComputedStyle` 量、WCAG 公式算。
+- `impeccable detect --json --changed` 是机械检查，只跑一次，别在概念阶段跑。
+- `impeccable motion-capture` **必须给 `--click` 或 `--steps`**，没有「纯页面加载」模式；
+  入站动效要自己用 Playwright 逐帧量（`a.pause()` + 手动设 `currentTime`）。
+- 详情页 `goto` 用 `waitUntil: "load"`，**不用 `networkidle`**——SSE 长连接让它永不触发。
+- `@playwright/test` 只在 `frontend/` 下可解析，从仓库根跑 `node -e` 会 ERR_MODULE_NOT_FOUND。
+
+设计**结论**（哪些动效形态不能做、令牌怎么定）记在根 `DESIGN.md`，别在这里重复。
+
 ## 本地跑前后端 + 关服务（Windows）
 
 - **E2E 与已运行服务撞数据根会起不来**：`serve-e2e.mjs` 默认拿仓库根当数据根；本机已有服务占着同一个根时，会因 Windows 命名互斥体报 `[启动失败] 同一个数据目录已经有一个服务在运行`（退出码 3，2026-11-15 #274 实测）。不要杀别人的服务，给 E2E 一个独立数据根：`H3_DATA_ROOT=<仓内 .scratch 下绝对路径> E2E_PORT=8134 PW_CHANNEL=chrome npx --no-install playwright test`，跑完删掉该目录。

@@ -501,3 +501,11 @@ D6 的分段闭环：CI 由 `frontend/e2e/longfilm.spec.ts`（桩管线的段列
 `output/accept-d6/`）。驱动器在**起被测程序之前**断言配置来源（绝对路径、`sha256`、
 端点/模型），并拒绝桩模式；`--submit-dir` 用服务端同一个技术档函数本地复核，把
 服务端不回的 `warning`（7–10 秒档 `unknown tier`）如实写进证据。
+
+- **验收服务进程不继承 CLI 的编码环境**：服务按用户真实启动方式起（`python -m
+  minimax_h3_prompt.api`），**不要**给它设 `PYTHONIOENCODING`——驱动脚本自己的环境变量
+  只影响脚本进程。stdio 编码由入口自己负责（`api/__main__.py` 的 `_force_utf8_stdio`）。
+  2026-11-10 #221 实测：阶段 1 打印 `▶` 横幅在 GBK 控制台会抛 `UnicodeEncodeError`，
+  把整个后台 job 炸成 failed；只有「不设变量」的真 HTTP 服务进程才暴露它，把服务起在
+  设了 UTF-8 的 shell 里会永久盖住这类缺陷。真实验收因此分两个终端，报告里分别写
+  服务启动命令与驱动命令。

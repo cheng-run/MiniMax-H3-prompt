@@ -377,6 +377,15 @@ MUTATIONS: tuple[Mutation, ...] = (
         "引用不存在的 ADR 号＝悬空指针，没有任何守卫会报（#143 抓到过三处）",
     ),
     Mutation(
+        "dangling_ref_ignores_missing_path",
+        "scripts/check_dangling_refs.py",
+        "        if not _resolve(cited, tracked):\n            bad.append(f\"{relative} -> 路径不存在: {cited}\")",
+        "        if False:\n            bad.append(f\"{relative} -> 路径不存在: {cited}\")",
+        ("tests/test_dangling_refs_guard.py::test_scan_catches_a_missing_path",),
+        "路径存在性判定恒真＝死规则守卫永不报红，"
+        "规范指着已删模块也不会有人知道（2026-11-27 手工查出 15 处即此形态）",
+    ),
+    Mutation(
         "adr_status_missing",
         "docs/adr/0001-stage2-checkpoint.md",
         "> **状态（2026-11-02 复核）**：",

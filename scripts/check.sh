@@ -92,6 +92,10 @@ FAST_TESTS=(
   # `fast` 绿着过、全量才炸（2026-11-17 #297 实测：wizard.py 长过 6267 只在 full 露头，
   # 白跑一轮全量）。
   tests/test_doc_references_tracked.py
+  # 死规则检测（2026-11-27 /evolve 首轮）：活文档引用的路径与记忆名必须存在。
+  # 手工扫查出 15 处——`ui/menu.py` 删了还被 6 处记忆引用、`tools/flicker_metric.py`
+  # 实际在 `scripts/`。这类规则不报错，只是悄悄变成噪音，所以做成秒级守卫。
+  tests/test_dangling_refs_guard.py
   tests/test_path_root_guard.py
   tests/test_wizard_size.py
   tests/test_spike_exe.py
