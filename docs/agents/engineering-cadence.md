@@ -221,6 +221,25 @@ docstring（tokenize + ast），不看普通字符串，因此提示词正文里
 它**不是门禁**：乱写票号照样能过。它解决的是「哪张票只有代码、没有测试」——
 这类条目以前只能靠人记。
 
+## 模块 → 守卫
+
+```bash
+uv run python scripts/module_guards.py src/minimax_h3_prompt/segment_planner.py
+uv run python scripts/module_guards.py segment_planner   # 路径 / 点分名 / 裸词干都认
+```
+
+改一个模块前想知道「谁在守它、该跑哪些用例」，用它现查，**不建静态表**（#371 的
+拷问结论：静态表会与 `MUTATIONS` / `FAST_TESTS` / 模块地图三处重复，且必过期）。
+脚本输出两层：
+
+- **高置信**：`scripts/mutation_check.py` 的 `MUTATIONS` 里 `path` 指向它的条目
+  （源文件 → 咬它的用例）。这是有机读证据的「守卫」。
+- **宽口径**：import 它的测试。**提到 ≠ 真在守**——import 过不代表用例咬得住某个
+  改动点，这一层有噪声。
+
+零变异模块的高置信层为空，脚本把它照成**覆盖缺口**；该不该补由 #372 量化，本脚本只
+导航、不评判。同 `ac_trace.py`，它**不是门禁**。
+
 ## 发布管理
 
 体检 §7 判本仓「发布管理 L1（无 tag / CHANGELOG / 回滚目标）」。补法是最小可用的一套：
