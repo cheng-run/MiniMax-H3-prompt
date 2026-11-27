@@ -126,6 +126,9 @@ FAST_TESTS=(
   # #348 的 5xx 日志守卫（约 0.9s）：原先只在全量跑，改坏 _log_server_fault 时
   # 提交仍然绿，要等 14 分钟才响——正是「新守卫没挂快档」的老毛病。
   tests/test_api_problems.py
+  # 新增测试文件必须当场表态归属快档（#370）：上面那几条漏挂都是事后逐个补的，
+  # 没有任何机制阻止下一条重犯。这条读 git 变更集＋check.sh 文本，秒级零白跑。
+  tests/test_fast_tier_coverage.py
 )
 
 # 变更集＝「工作区 ∪ 本分支相对 main 的已提交改动」（retro 2026-11-14）。
