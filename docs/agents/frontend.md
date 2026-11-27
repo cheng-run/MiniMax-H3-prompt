@@ -20,10 +20,17 @@ Vue 3 + TypeScript + Vite 单包，与 Python 后端同仓。这里记**环境�
 cd frontend
 npx pnpm@11.7.0 install        # 装依赖（下载由用户执行）
 npx --no-install vite build    # 或 npm script: build
-npx --no-install vitest run --coverage
+npx --no-install vitest run --coverage            # 全量前端用例
+npx --no-install vitest run src/path/to/x.spec.ts # 单个文件（改完先跑这个）
 PW_CHANNEL=chrome npx --no-install playwright test   # 本机免下载 chromium 跑 E2E
 E2E_PORT=8123 PW_CHANNEL=chrome npx --no-install playwright test   # 并行会话各用各的端口
 ```
+
+- **裸 `npx vitest` 在本机跑不起来**（retro 2026-11-27 实测）：本机的 `npx` 会先落到
+  一个包 `pnpm`/`vitest` 的 shim，而 pnpm 不在 PATH 上，结果是
+  `rtk: Failed to run vitest: program not found`——看起来像 vitest 没装，其实装了。
+  **一律带 `--no-install`**，它跳过解析、直接执行 `frontend/node_modules` 里的那份。
+  更省事的入口是仓库根的 `bash scripts/check.sh frontend`（它自己找 node_modules）。
 
 - **端口默认 8000、可用 `E2E_PORT` 覆盖**（retro 2026-11-14）：本仓常并行开多个会话，
   两个 E2E 同时默认 8000 时，后跑的那个会复用别人的服务（错的数据根/桩开关），
